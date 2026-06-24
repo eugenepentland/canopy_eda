@@ -212,17 +212,22 @@ fn chooseLayout(
     // page to the design's starred (★) layout if it has one — the user's blessed
     // reference, shown verbatim as the seed below.
     const want_default = !(refine_name != null or tune.regen or tune.tuned);
-    const starred_name: ?[]const u8 = if (sub == null and want_default)
-        defaultLayoutName(alloc, project_dir, name)
+    // A sub circuit seeds from its own per-sub sidecar (defaultLayoutName/
+    // readLayoutPosesFor are sub-aware), so a starred sub layout shows verbatim on
+    // reload just like a design's. Sub circuits have no auto-cache slot, so when
+    // nothing is starred they solve fresh (never the plain-grid placeholder).
+    const starred_name: ?[]const u8 = if (want_default)
+        defaultLayoutName(alloc, project_dir, name, sub)
     else
         null;
-    const cached = if (sub != null) null else if (refine_name) |rn|
-        readLayoutPosesFor(alloc, project_dir, name, rn, eff_block)
+    const cached = if (refine_name) |rn|
+        readLayoutPosesFor(alloc, project_dir, name, rn, eff_block, sub)
     else if (starred_name) |sn|
-        readLayoutPosesFor(alloc, project_dir, name, sn, eff_block)
-    else if (tune.regen) null else readAutoPoses(alloc, project_dir, name);
+        readLayoutPosesFor(alloc, project_dir, name, sn, eff_block, sub)
+    else if (tune.regen) null else if (sub == null) readAutoPoses(alloc, project_dir, name) else null;
     // No layout to show and nothing asked for one: place the parts on a plain grid
     // instead of running the (potentially expensive) optimizer on page open.
+    // (Sub circuits always solve fresh instead — there's no grid placeholder.)
     const grid_only = sub == null and refine_name == null and !tune.regen and cached == null;
     return .{ .spec_drives = spec_drives, .starred_name = starred_name, .cached = cached, .grid_only = grid_only };
 }
@@ -266,6 +271,14 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         null;
     const eff_block: *env_mod.DesignBlock = if (sub_block) |sb| sb.block else block;
     const embed = isEmbed(req);
+    // `?embed=1&edit=1` is the editable embed: trimmed chrome (no navbar / left
+    // properties sidebar / 3D), but the full action toolbar + saved-layouts panel
+    // and drag-to-edit enabled — the schematic page's per-sub-circuit "PCB Layout"
+    // toggle iframes this so a layout can be roughed / dragged / saved / starred in
+    // place. It applies both to a module's own page (no `?sub`) and to a `?sub=`
+    // scoped sub circuit; the latter persists its saved layouts to a per-sub
+    // sidecar (`<design>.<sub>.layouts.json`) via the `sub`-aware save endpoints.
+    const edit_embed = embed and queryFlag(req, "edit");
 
     // Tuning weights come from the query (?w_align=… etc) — any present (or
     // ?regen=1) forces a fresh solve; otherwise the cached layout is reused.
@@ -325,7 +338,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
 
-    try writeDocHead(w, eff_block.name, embed);
+    try writeDocHead(w, eff_block.name, embed, edit_embed);
     if (!embed) try pages_tmpl.Navbar.render(.{""}, w);
 
     try w.writeAll("<div class=\"pcb-layout\">");
@@ -334,8 +347,9 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const sch_base: []const u8 = if (module_res != null) "/modules/" else "/schematics/";
     if (!embed) try writeSidebar(w, placement, sch_base);
     try w.writeAll("<main class=\"pcb-main\">");
-    if (embed) {
-        // Compact, read-only chrome for the per-sub-block preview embedded in
+    const src_class = classifyLayoutSource(sub, grid_only, spec_drives, refine_name, starred_name, cached);
+    if (embed and !edit_embed) {
+        // Compact, read-only chrome for the per-sub-circuit preview embedded in
         // the schematic page: a score line plus the routed-status + show
         // clearance/DRC toggles (initial state mirrors the page's globals).
         const tg = parseToggles(req);
@@ -344,42 +358,25 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     } else {
         // Header row: title + the Schematic ⇄ PCB Layout switcher (PCB active).
         // `name` resolves as a design under src/ first, else a reusable module —
-        // so the Schematic link points at the matching viewer.
-        const schematic_path: []const u8 = if (module_res != null) "/modules/" else "/schematics/";
-        try w.writeAll("<div class=\"pcb-head\">");
-        try w.print("<h1>{s} <span class=\"pcb-sub\">PCB Layout · force-directed · drag to edit</span></h1>", .{eff_block.name});
-        try w.print(
-            "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
-                "<a href=\"{s}{s}\">Schematic</a>" ++
-                "<a class=\"active\" id=\"pcb-tab-2d\" href=\"/pcb-layout/{s}\">PCB Layout</a>" ++
-                "<a id=\"pcb-tab-3d\" href=\"#\">3D View</a></nav>",
-            .{ schematic_path, name, name },
-        );
-        try w.writeAll("</div>");
-        try writeScorebar(w, placement, name, classifyLayoutSource(sub, grid_only, spec_drives, refine_name, starred_name, cached));
-        // When showing the plain grid placeholder, say so — the score is the raw
-        // grid's, not an optimized layout, and Regenerate computes the real one.
-        if (grid_only) try w.writeAll(
-            "<div class=\"pcb-note\">Showing parts on a plain grid — no layout computed yet. " ++
-                "Drag parts to arrange, or hit <b>Regenerate</b> to auto-place.</div>",
-        );
-        // Secondary controls collapse behind a chip row (accordion: one panel
-        // open at a time) so the default view is just the toolbar + board. The
-        // Route panel auto-opens when the page loaded already routed, so its
-        // status is visible without a click.
-        const route_open = routed != null;
-        try writeTabsRow(w, route_open);
-        try w.writeAll("<div class=\"pcb-panels\">");
-        try writeTuning(w, shown);
-        try writeScoreView(w, shown, name);
-        const rp_warn = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0;
-        try writeRoutePanel(w, ro.params, routed, violations.len, rp_warn, route_open);
-        try w.writeAll("</div>");
-        try writeLegend(w, placement, true); // hidden; revealed by the Legend chip
-        try writeHeatLegend(w); // hidden; revealed by the Heatmap chip
-        try writeNetLegend(w); // hidden; revealed by the Net colours chip
+        // so the Schematic link points at the matching viewer. The editable embed
+        // skips this header (the parent card carries its own Schematic/PCB toggle)
+        // but keeps the full editing toolbar that follows.
+        if (!embed) {
+            const schematic_path: []const u8 = if (module_res != null) "/modules/" else "/schematics/";
+            try w.writeAll("<div class=\"pcb-head\">");
+            try w.print("<h1>{s} <span class=\"pcb-sub\">PCB Layout · force-directed · drag to edit</span></h1>", .{eff_block.name});
+            try w.print(
+                "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
+                    "<a href=\"{s}{s}\">Schematic</a>" ++
+                    "<a class=\"active\" id=\"pcb-tab-2d\" href=\"/pcb-layout/{s}\">PCB Layout</a>" ++
+                    "<a id=\"pcb-tab-3d\" href=\"#\">3D View</a></nav>",
+                .{ schematic_path, name, name },
+            );
+            try w.writeAll("</div>");
+        }
+        try writeEditControls(w, placement, name, src_class, grid_only, routed, shown, ro.params, violations.len);
     }
-    if (embed) try writeLegend(w, placement, false);
+    if (embed and !edit_embed) try writeLegend(w, placement, false);
     try w.print(
         "<svg id=\"pcb-svg\" class=\"pcb-svg\" viewBox=\"0 0 {d:.0} {d:.0}\" width=\"{d:.0}\" height=\"{d:.0}\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
         .{ view.width, view.height, view.width, view.height },
@@ -392,8 +389,9 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // Right sidebar: the saved-layouts history (manual snapshots + auto-recorded
     // optimizer runs). Lives in its own column so the board has the full centre
     // width. Emitted before the scripts so BOARD_JS can wire up its Load/Delete
-    // buttons. Omitted in the embedded per-sub-block preview.
-    if (!embed) {
+    // buttons. Shown on the full page and in the editable embed (so a module's
+    // layout can be loaded / starred there); omitted in the read-only preview.
+    if (!embed or edit_embed) {
         const auto_score = LayoutScore{
             .hpwl = placement.score.hpwl_mm,
             .loop = placement.score.loop_mm,
@@ -405,7 +403,20 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         try w.writeAll("</aside>");
     }
     try w.writeAll("</div>");
-    try writePcbData(w, ctx.allocator, ctx.project_dir, placement, shown, view, name, layouts, routed, ro.params.clearance, violations, embed);
+    try writePcbData(
+        w,
+        ctx.allocator,
+        ctx.project_dir,
+        placement,
+        shown,
+        view,
+        name,
+        layouts,
+        routed,
+        ro.params.clearance,
+        violations,
+        .{ .read_only = embed and !edit_embed, .embed = embed, .sub = sub },
+    );
     // Shared footprint engine (FP.padShape) must load before the board script
     // runs. Both scripts come after every column so the handlers find the
     // elements they wire, and after the inline `const PCB=…` data block so the
@@ -520,13 +531,13 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     // board the page shows.
     const want_default = !(refine_name != null or tune.regen or tune.tuned);
     const starred_name: ?[]const u8 = if (want_default)
-        defaultLayoutName(ctx.allocator, ctx.project_dir, name)
+        defaultLayoutName(ctx.allocator, ctx.project_dir, name, null)
     else
         null;
     const cached = if (refine_name) |rn|
-        readLayoutPosesFor(ctx.allocator, ctx.project_dir, name, rn, block)
+        readLayoutPosesFor(ctx.allocator, ctx.project_dir, name, rn, block, null)
     else if (starred_name) |sn|
-        readLayoutPosesFor(ctx.allocator, ctx.project_dir, name, sn, block)
+        readLayoutPosesFor(ctx.allocator, ctx.project_dir, name, sn, block, null)
     else if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
     const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
         res.status = 500;
@@ -651,7 +662,7 @@ pub fn solveForRequest(
         block;
 
     const cached = if (opts.sub != null) null else if (opts.layout) |ln|
-        readLayoutPosesFor(alloc, project_dir, name, ln, eff_block)
+        readLayoutPosesFor(alloc, project_dir, name, ln, eff_block, null)
     else if (opts.regen) null else readAutoPoses(alloc, project_dir, name);
     const grid_only = opts.sub == null and opts.layout == null and !opts.regen and cached == null;
     var params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
@@ -716,7 +727,7 @@ pub fn renderDesignPng(
     // Optional compare layout for the diff overlay (ghost + movement arrows).
     var cmp_placement: ?optimizer.Placement = null;
     if (opts.compare) |cn| {
-        if (readLayoutPosesFor(alloc, project_dir, name, cn, solved.block)) |cposes| {
+        if (readLayoutPosesFor(alloc, project_dir, name, cn, solved.block, opts.sub)) |cposes| {
             cmp_placement = optimizer.placeFromPoses(alloc, solved.block, project_dir, cposes, png_params) catch null;
         }
     }
@@ -1385,6 +1396,9 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         res.body = "no parts";
         return;
     };
+    // `?sub=` scopes the save to a sub circuit: score against that sub-block and
+    // persist to its own `<design>.<sub>.layouts.json` sidecar (see writeLayoutsSub).
+    const sub = subSlug(req);
 
     // Score the hand layout on the server with the optimizer's own objective —
     // the same code the live `/api/pcb-score` endpoint uses — so a saved layout
@@ -1400,17 +1414,25 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
             ctx.allocator.destroy(mr.eval);
         };
         if (resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res)) |block| {
-            const params = readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{};
-            const poses = try req.arena.alloc(optimizer.RefPose, parts.len);
-            for (parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
-            if (optimizer.scorePoses(ctx.allocator, block, ctx.project_dir, poses, params)) |bd| {
-                score = .{ .hpwl = bd.hpwl, .loop = bd.loop_raw, .caps = 0, .objective = bd.objective };
-            } else |_| {}
+            // For a sub circuit, score against the scoped sub-block (its parts),
+            // not the whole parent design — null when the slug no longer resolves.
+            const score_block: ?*env_mod.DesignBlock = if (sub) |s| blk: {
+                const sb = descendToSub(ctx.allocator, block, s) orelse break :blk null;
+                break :blk sb.block;
+            } else block;
+            if (score_block) |sblk| {
+                const params = readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{};
+                const poses = try req.arena.alloc(optimizer.RefPose, parts.len);
+                for (parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
+                if (optimizer.scorePoses(ctx.allocator, sblk, ctx.project_dir, poses, params)) |bd| {
+                    score = .{ .hpwl = bd.hpwl, .loop = bd.loop_raw, .caps = 0, .objective = bd.objective };
+                } else |_| {}
+            }
         }
     }
 
     var entry = SavedLayout{ .name = nm, .kind = KIND_MANUAL, .ts = clock.timestamp(), .score = score, .parts = parts };
-    const existing = readLayouts(req.arena, ctx.project_dir, name);
+    const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
     var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
     // `replaced` = wrote `entry` in place of a matching row (same name, or an
     // auto run of this exact arrangement, promoted to the named keeper).
@@ -1441,7 +1463,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         } else try out.append(req.arena, L);
     }
     if (!replaced and !dup) try out.insert(req.arena, 0, entry);
-    writeLayouts(req.arena, ctx.project_dir, name, out.items);
+    writeLayoutsSub(req.arena, ctx.project_dir, name, sub, out.items);
     res.content_type = .JSON;
     res.body = OK_JSON_TRUE;
 }
@@ -1461,13 +1483,14 @@ pub fn deleteNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
         res.status = 400;
         return;
     }
-    const existing = readLayouts(req.arena, ctx.project_dir, name);
+    const sub = subSlug(req);
+    const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
     var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
     for (existing) |L| {
         if (std.mem.eql(u8, L.name, nm_v.string)) continue;
         try out.append(req.arena, L);
     }
-    writeLayouts(req.arena, ctx.project_dir, name, out.items);
+    writeLayoutsSub(req.arena, ctx.project_dir, name, sub, out.items);
     res.content_type = .JSON;
     res.body = OK_JSON_TRUE;
 }
@@ -1492,14 +1515,15 @@ pub fn setDefaultLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
         return;
     }
     const want = std.mem.trim(u8, nm_v.string, " \t\n\r");
-    const existing = readLayouts(req.arena, ctx.project_dir, name);
+    const sub = subSlug(req);
+    const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
     var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
     for (existing) |L| {
         var e = L;
         e.default = want.len > 0 and std.mem.eql(u8, L.name, want);
         try out.append(req.arena, e);
     }
-    writeLayouts(req.arena, ctx.project_dir, name, out.items);
+    writeLayoutsSub(req.arena, ctx.project_dir, name, sub, out.items);
     res.content_type = .JSON;
     res.body = OK_JSON_TRUE;
 }
@@ -1520,8 +1544,16 @@ pub fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
         res.status = 404;
         return;
     };
-    const existing = readLayouts(req.arena, ctx.project_dir, name);
+    const sub = subSlug(req);
+    const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
     if (existing.len == 0) {
+        res.content_type = .JSON;
+        res.body = "{\"ok\":true,\"rescored\":0}";
+        return;
+    }
+    // Sub circuits keep their save-time scores — the bulk rescore resolves the
+    // whole parent design block, which doesn't match a sub-block's part set.
+    if (sub != null) {
         res.content_type = .JSON;
         res.body = "{\"ok\":true,\"rescored\":0}";
         return;
@@ -1581,7 +1613,8 @@ pub fn pcbScoreBatchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         res.status = 404;
         return;
     };
-    const layouts = readLayouts(req.arena, ctx.project_dir, name);
+    const sub = subSlug(req);
+    const layouts = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
@@ -1590,11 +1623,21 @@ pub fn pcbScoreBatchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         mr.eval.deinit();
         ctx.allocator.destroy(mr.eval);
     };
-    const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
+    const block_root: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
         res.body = NO_BLOCK_MSG;
         return;
     };
+    // Score against the scoped sub-block when `?sub=` is present, so the panel
+    // re-weigh matches the sub circuit's own parts.
+    const block: *env_mod.DesignBlock = if (sub) |s| blk: {
+        const sb = descendToSub(ctx.allocator, block_root, s) orelse {
+            res.status = 404;
+            res.body = NO_SUB_MSG;
+            return;
+        };
+        break :blk sb.block;
+    } else block_root;
     const tune = parseTuning(req);
 
     var aw: std.Io.Writer.Allocating = .init(req.arena);
@@ -1862,8 +1905,8 @@ fn rekeyPosesByOrigin(
 /// panel marks with a filled star and the KiCad sync seeds first-insertion
 /// placement from — or null when nothing is starred (or the starred entry has
 /// no poses). Lets the `/pcb-layout` page default to that blessed layout on open.
-fn defaultLayoutName(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?[]const u8 {
-    for (readLayouts(alloc, project_dir, name)) |lay| {
+fn defaultLayoutName(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) ?[]const u8 {
+    for (readLayoutsSub(alloc, project_dir, name, sub)) |lay| {
         if (lay.default and lay.parts.len > 0) return lay.name;
     }
     return null;
@@ -1880,8 +1923,9 @@ fn readLayoutPosesFor(
     name: []const u8,
     want: []const u8,
     block: *env_mod.DesignBlock,
+    sub: ?[]const u8,
 ) ?[]const optimizer.RefPose {
-    for (readLayouts(alloc, project_dir, name)) |lay| {
+    for (readLayoutsSub(alloc, project_dir, name, sub)) |lay| {
         if (!std.mem.eql(u8, lay.name, want)) continue;
         if (rekeyPosesByOrigin(alloc, block, lay.parts)) |poses| return poses;
         // Re-key failed (flatten error) — fall back to the raw stored refs.
@@ -1894,16 +1938,37 @@ fn readLayoutPosesFor(
     return null;
 }
 
+/// Sidecar path for a design's (or sub circuit's) layout store. `sub == null` →
+/// the design's own `<design>.layouts.json`, resolved next to the source via
+/// `designSiblingPath`. `sub` set → the per-sub-circuit store
+/// `<design>.<sub>.layouts.json` placed in the design's directory, so a
+/// path-/inline-sourced sub circuit (no module page of its own) still gets
+/// editable, persisted layouts — scoped to this design. The slug is filesystem
+/// safe (`review.slugify` output, `[a-z0-9-]`), so no escaping is needed.
+fn layoutsSidecar(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, ext: []const u8) ?[]u8 {
+    const s = sub orelse return (paths.designSiblingPath(alloc, project_dir, name, ext) catch null);
+    const src = paths.designSourcePath(alloc, project_dir, name) catch return null;
+    defer alloc.free(src);
+    const dir = std.fs.path.dirname(src) orelse ".";
+    return std.fmt.allocPrint(alloc, "{s}/{s}.{s}{s}", .{ dir, name, s, ext }) catch null;
+}
+
 /// Read every saved layout for `name` from its `.layouts.json` sidecar
 /// (newest first). Returns an empty slice when the file doesn't exist or on
 /// parse failure; allocations live on `alloc` (request lifetime).
 pub fn readLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const SavedLayout {
-    if (paths.designSiblingPath(alloc, project_dir, name, LAYOUTS_EXT)) |path| {
+    return readLayoutsSub(alloc, project_dir, name, null);
+}
+
+/// As `readLayouts`, but for a `?sub=` scoped sub circuit reads its per-sub
+/// sidecar (`layoutsSidecar`). `sub == null` is identical to `readLayouts`.
+fn readLayoutsSub(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) []const SavedLayout {
+    if (layoutsSidecar(alloc, project_dir, name, sub, LAYOUTS_EXT)) |path| {
         defer alloc.free(path);
         if (infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20)) |data| {
             if (parseLayouts(alloc, data)) |list| return list;
         } else |_| {}
-    } else |_| {}
+    }
     return &[_]SavedLayout{};
 }
 
@@ -2049,6 +2114,20 @@ fn writeLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const
     writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name));
 }
 
+/// As `writeLayouts`, but for a `?sub=` scoped sub circuit writes its per-sub
+/// sidecar. The sub store carries no auto-cache slot (sub previews always solve
+/// fresh), so only the layouts array is persisted. `sub == null` delegates to
+/// `writeLayouts` (design store, cache preserved).
+fn writeLayoutsSub(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, layouts: []const SavedLayout) void {
+    if (sub == null) return writeLayouts(alloc, project_dir, name, layouts);
+    const path = layoutsSidecar(alloc, project_dir, name, sub, LAYOUTS_EXT) orelse return;
+    defer alloc.free(path);
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    writeLayoutsFileJson(w, layouts, null) catch return;
+    writeFileAll(path, aw.written()) catch return;
+}
+
 /// Persist layouts + cache slot to `.layouts.json` (the whole sidecar).
 fn writeLayoutsFile(
     alloc: std.mem.Allocator,
@@ -2162,10 +2241,9 @@ fn dedupLayouts(alloc: std.mem.Allocator, layouts: []const SavedLayout) []const 
 /// (only this display copy is re-sorted), so recordAutoLayout keeps its
 /// "newest = entry 0" assumption. Empty for sub-scoped previews.
 fn displayLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) []const SavedLayout {
-    if (sub != null) return &.{};
-    const raw = readLayouts(alloc, project_dir, name);
+    const raw = readLayoutsSub(alloc, project_dir, name, sub);
     const deduped = dedupLayouts(alloc, raw);
-    if (deduped.len != raw.len) writeLayouts(alloc, project_dir, name, deduped);
+    if (deduped.len != raw.len) writeLayoutsSub(alloc, project_dir, name, sub, deduped);
     const sorted = alloc.dupe(SavedLayout, deduped) catch return deduped;
     std.mem.sort(SavedLayout, sorted, {}, layoutLessByScore);
     return sorted;
@@ -2655,6 +2733,47 @@ const View = struct {
 
 // ── Score bar + legend ───────────────────────────────────────────────────
 
+/// The editable control stack shared by the full page and the editable embed
+/// (`?embed=1&edit=1`): the action toolbar (Regenerate / Rough / Save as… /
+/// Update / Undo / Redo / Reset / zoom), the collapsible tuning/score/route
+/// panels, and the hidden legends (revealed by their chips). The full page
+/// prepends its own header (title + Schematic⇄PCB nav); the editable embed skips
+/// that — its parent schematic card carries the Schematic/PCB toggle instead.
+fn writeEditControls(
+    w: *std.Io.Writer,
+    placement: optimizer.Placement,
+    name: []const u8,
+    src: LayoutSource,
+    grid_only: bool,
+    routed: ?router.RouteResult,
+    shown: optimizer.Params,
+    ro_params: router.RouteParams,
+    n_drc: usize,
+) std.Io.Writer.Error!void {
+    try writeScorebar(w, placement, name, src);
+    // When showing the plain grid placeholder, say so — the score is the raw
+    // grid's, not an optimized layout, and Regenerate computes the real one.
+    if (grid_only) try w.writeAll(
+        "<div class=\"pcb-note\">Showing parts on a plain grid — no layout computed yet. " ++
+            "Drag parts to arrange, or hit <b>Regenerate</b> to auto-place.</div>",
+    );
+    // Secondary controls collapse behind a chip row (accordion: one panel open at
+    // a time) so the default view is just the toolbar + board. The Route panel
+    // auto-opens when the page loaded already routed, so its status is visible
+    // without a click.
+    const route_open = routed != null;
+    try writeTabsRow(w, route_open);
+    try w.writeAll("<div class=\"pcb-panels\">");
+    try writeTuning(w, shown);
+    try writeScoreView(w, shown, name);
+    const rp_warn = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0;
+    try writeRoutePanel(w, ro_params, routed, n_drc, rp_warn, route_open);
+    try w.writeAll("</div>");
+    try writeLegend(w, placement, true); // hidden; revealed by the Legend chip
+    try writeHeatLegend(w); // hidden; revealed by the Heatmap chip
+    try writeNetLegend(w); // hidden; revealed by the Net colours chip
+}
+
 // Action-bar group wrappers — small inline-flex clusters separated by thin rules
 // so the buttons read as grouped (place / save / edit) rather than one long row.
 // Extracted as consts (each used 3× in writeScorebar).
@@ -3006,7 +3125,7 @@ fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!
 /// The `<head>` + opening `<body>` of the layout page: charset/viewport metas,
 /// title, and the navbar + page styles (embeds add the chrome-trimming CSS and
 /// the `.embed` body class).
-fn writeDocHead(w: *std.Io.Writer, title: []const u8, embed: bool) std.Io.Writer.Error!void {
+fn writeDocHead(w: *std.Io.Writer, title: []const u8, embed: bool, edit_embed: bool) std.Io.Writer.Error!void {
     try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
     try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     try w.print("<title>{s} — PCB Layout</title>", .{title});
@@ -3015,7 +3134,13 @@ fn writeDocHead(w: *std.Io.Writer, title: []const u8, embed: bool) std.Io.Writer
     try w.writeAll(PAGE_CSS);
     if (embed) try w.writeAll(EMBED_CSS);
     try w.writeAll("</style></head><body");
-    if (embed) try w.writeAll(" class=\"embed\"");
+    // `.embed` trims chrome; `.embed-edit` re-enables drag (the read-only preview
+    // forces a default cursor) for the editable embed used by the sub-circuit toggle.
+    if (edit_embed) {
+        try w.writeAll(" class=\"embed embed-edit\"");
+    } else if (embed) {
+        try w.writeAll(" class=\"embed\"");
+    }
     try w.writeAll(">");
 }
 
@@ -3214,6 +3339,13 @@ fn writeSidebar(w: *std.Io.Writer, p: optimizer.Placement, sch_base: []const u8)
 
 const LocalPt = struct { x: f64, y: f64 };
 
+/// Page-mode flags for the embedded `PCB` object: `read_only` drives `PCB.ro`
+/// (BOARD_JS skips all edit wiring when set); `embed` is any embedded chrome
+/// (read-only preview *or* editable embed) — neither has the 3D toggle, so both
+/// skip the filesystem-scanning STEP-model resolution; `sub` is the `?sub=` slug
+/// a sub circuit's save/star POSTs append to target the per-sub layout sidecar.
+const PcbDataOpts = struct { read_only: bool, embed: bool, sub: ?[]const u8 };
+
 /// World position of the GND-plane via covering the pad centred at (`cx`,`cy`),
 /// or that pad centre itself when no via is near (big board / no route). The
 /// loop overlay drops its GND via here so the previewed via is the DRC-safe one
@@ -3308,7 +3440,7 @@ fn writePcbData(
     routed: ?router.RouteResult,
     clearance: f64,
     violations: []const drc.Violation,
-    embed: bool,
+    opts: PcbDataOpts,
 ) HandlerError!void {
     // ref → part index, and "ref|pin" → collapsed net (for pad tags).
     var idx = std.StringHashMap(usize).init(alloc);
@@ -3340,7 +3472,17 @@ fn writePcbData(
     }
     // Read-only flag for the embedded per-sub-block preview — BOARD_JS skips all
     // edit wiring (drag/rotate/route/save) when set, leaving a pan/zoom viewer.
-    try w.print("\"ro\":{s},", .{if (embed) "true" else "false"});
+    try w.print("\"ro\":{s},", .{if (opts.read_only) "true" else "false"});
+    // `sub` slug when this page is a `?sub=` scoped sub circuit — BOARD_JS appends
+    // it as `?sub=` to the save/delete/star/rescore POSTs so they persist to the
+    // per-sub layout sidecar instead of the parent design's.
+    if (opts.sub) |s| {
+        try w.writeAll("\"sub\":");
+        try writeJsonStr(w, s);
+        try w.writeAll(",");
+    } else {
+        try w.writeAll("\"sub\":null,");
+    }
     // Server-computed objective breakdown of the layout on screen — the baseline
     // the live score deltas against. Same shape the /api/pcb-score endpoint returns.
     try w.print("\"caps\":{d},\"auto\":", .{p.score.loop_caps});
@@ -3474,7 +3616,7 @@ fn writePcbData(
     // 3D-view tab. Only the full page needs it; the embedded preview has no 3D
     // toggle, so it skips the (filesystem-scanning) model resolution entirely.
     try w.writeAll(",\"models\":");
-    if (embed) {
+    if (opts.embed) {
         try w.writeAll("{}");
     } else {
         try writeModelsJson(w, alloc, project_dir, p.instances);
@@ -3957,7 +4099,8 @@ const EMBED_CSS =
     \\body.embed .pcb-bar{margin:4px 0}
     \\body.embed .pcb-route{margin:2px 0 6px}
     \\body.embed .pcb-svg{width:100%}
-    \\body.embed .part{cursor:default}
+    \\body.embed:not(.embed-edit) .part{cursor:default}
+    \\body.embed-edit .part{cursor:grab}
 ;
 
 /// The (hidden) WebGL stage for the 3D-view tab: a canvas, a status overlay,
