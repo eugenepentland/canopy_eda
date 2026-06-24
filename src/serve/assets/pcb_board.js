@@ -288,7 +288,9 @@ function setActiveLayout(nm){curLayout=(nm&&nm.length)?nm:null;
 els.forEach(function(g,i){
  g.addEventListener("mouseenter",function(){cur=i;});
  g.addEventListener("mouseleave",function(){if(cur===i)cur=-1;});
- g.addEventListener("pointerdown",function(ev){ev.preventDefault();var m=mm(ev);
+ g.addEventListener("pointerdown",function(ev){ev.preventDefault();
+   if(SPACE||ev.button===1){startPan(ev);return;}   // pan, don't grab the part
+   var m=mm(ev);
    if(sel.length>1&&sel.indexOf(i)>=0){gdrag=gdragStart(m,ev.target);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
    if(sel.length)selClear();
    drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target,snap:snapPoses()};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
@@ -315,7 +317,9 @@ els.forEach(function(g,i){
  if(pg){
   pg.addEventListener("mouseenter",function(){cur=i;});
   pg.addEventListener("mouseleave",function(){if(cur===i)cur=-1;});
-  pg.addEventListener("pointerdown",function(ev){ev.preventDefault();var m=mm(ev);
+  pg.addEventListener("pointerdown",function(ev){ev.preventDefault();
+    if(SPACE||ev.button===1){startPan(ev);return;}   // pan, don't grab the part
+    var m=mm(ev);
     if(sel.length>1&&sel.indexOf(i)>=0){gdrag=gdragStart(m,ev.target);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
     if(sel.length)selClear();
     drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target,snap:snapPoses()};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});}
@@ -567,9 +571,15 @@ var zf=document.getElementById("z-fit");if(zf)zf.addEventListener("click",functi
 // the selection. The rubber-band rect lives in the top layer (pointer-events
 // off) and is drawn in SVG coords via X()/Y() so it tracks pan/zoom.
 var pan=null,marq=null,marqEl=null;
+// Start a viewport pan from the current pointer. Shared by the empty-space
+// handler below AND the part/pad pointerdown handlers (defined earlier, this is
+// hoisted), so a middle-button or Space-held drag pans the board even when the
+// cursor is over a component instead of grabbing the part. Capture on svg so its
+// pointermove/up drive the pan regardless of which child was hit.
+function startPan(ev){pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:false};
+ svg.setPointerCapture(ev.pointerId);svg.style.cursor="grabbing";}
 svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.preventDefault();
- if(SPACE||ev.button===1){pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:false};
-  svg.setPointerCapture(ev.pointerId);svg.style.cursor="grabbing";return;}
+ if(SPACE||ev.button===1){startPan(ev);return;}
  var m=mm(ev);marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false};svg.setPointerCapture(ev.pointerId);
  marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);});
 svg.addEventListener("pointermove",function(ev){
