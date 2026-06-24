@@ -643,8 +643,10 @@ pub const SolvedRequest = struct {
 };
 
 /// Resolve `name` and apply the request's placement-selection rules: a named
-/// saved layout renders verbatim, `regen` forces a fresh solve, otherwise the
-/// auto cache is reused — falling back to a plain grid when nothing is cached so
+/// `?layout=` renders verbatim, `?regen` forces a fresh solve, `?rough` re-seeds
+/// the rough engine, otherwise the design's starred (★) saved layout is shown if
+/// it has one (so the PNG / describe / MCP views match the /pcb-layout page),
+/// else the auto cache — falling back to a plain grid when nothing is cached so
 /// an agent's first call stays cheap. A fresh solve uses the rough engine (the
 /// default top-level placer); the `?rough` flag is now redundant with that.
 pub fn solveForRequest(
@@ -661,8 +663,21 @@ pub fn solveForRequest(
     else
         block;
 
+    // With nothing more specific asked for (no ?layout=, no ?regen, no ?rough,
+    // not sub-scoped), default to the design's starred (★) saved layout — the
+    // same blessed board the /pcb-layout page and its JSON twin show — so the
+    // PNG / describe / MCP views describe what the user sees, not a stale auto
+    // cache. The layout_match rough/starred probes pass ?rough / ?layout and so
+    // skip this, keeping their own seeds.
+    const want_default = opts.sub == null and opts.layout == null and !opts.regen and !opts.rough;
+    const starred_name: ?[]const u8 = if (want_default)
+        defaultLayoutName(alloc, project_dir, name, null)
+    else
+        null;
     const cached = if (opts.sub != null) null else if (opts.layout) |ln|
         readLayoutPosesFor(alloc, project_dir, name, ln, eff_block, null)
+    else if (starred_name) |sn|
+        readLayoutPosesFor(alloc, project_dir, name, sn, eff_block, null)
     else if (opts.regen) null else readAutoPoses(alloc, project_dir, name);
     const grid_only = opts.sub == null and opts.layout == null and !opts.regen and cached == null;
     var params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
@@ -816,7 +831,8 @@ pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngReq
 ///   width=<px>            output width (clamped); height follows the board
 ///   nets=A,B  refs=U1,C3  focus mode — spotlight these nets/components, dim rest
 ///   route=1               run the router and draw copper + DRC markers
-///   layout=<name>         render a specific saved layout (else the auto cache)
+///   layout=<name>         render a specific saved layout (else the starred ★
+///                         default if set, else the auto cache)
 ///   regen=1               force a fresh solve instead of the cache
 ///   sub=<slug>            scope to one sub-block (per-sub-block preview)
 ///   names=ref|origin|both part labels: ref-des, spec origin name, or REF=ORIGIN
