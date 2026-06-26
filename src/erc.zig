@@ -42,6 +42,7 @@ pub const ViolationKind = enum {
     voltage_mismatch,
     missing_decoupling,
     decoupling_unbound,
+    strap_tied_to_rail,
     power_no_cap,
     concept_remaining,
     pin_multi_net,
@@ -85,6 +86,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkMissingFootprints(allocator, block, &violations);
     try checkMissingDecoupling(allocator, block, &violations);
     if (project_dir.len > 0) try checkDecouplingBinding(allocator, block, project_dir, &violations);
+    if (project_dir.len > 0) try checkStrapTies(allocator, block, project_dir, &violations);
     try checkVoltageMismatches(allocator, block, &violations);
     try checkUnconnectedPowerPins(allocator, block, project_dir, &violations);
     try checkConceptSections(allocator, block, &violations);
@@ -1063,6 +1065,256 @@ fn capFarads(s: []const u8) f64 {
         else => return 0,
     };
     return num * mult;
+}
+
+// ── config-strap direct-tie requirement ──────────────────────────────
+
+/// Verdict for whether a strap pad's direct tie to a rail is signed off.
+const StrapVerdict = enum { blessed, empty_reason, none };
+
+/// Flag any configuration / enable / reset strap pin tied **directly** to a
+/// power or ground rail net, unless the author blessed the tie with a
+/// `(strap-ok PIN "reason")`. The good default is a pull-up/pull-down: a strap
+/// pulled through a resistor lands on its own private net (e.g. "EN_PU"), never
+/// on the rail, so it is silently fine — only a strap pad sitting on the rail
+/// *itself* is flagged. The deliberate direct tie (an I²C address bit, a default
+/// current-limit, a MODE select) is legitimate, but easy to wire backwards and
+/// impossible to rework once fabbed, so it must carry an explicit "I checked
+/// this" reason.
+///
+/// Mirrors `checkDecouplingBinding`: runs **per block** and recurses sub-blocks,
+/// so a strap is judged against the rail names in *its own* module namespace (a
+/// module's EN→VIN tie is judged on "VIN", not on whatever the parent wires VIN
+/// to). Needs `project_dir` for `lib/pinouts` + `lib/components` strap
+/// classification; the caller guards `project_dir.len > 0`.
+fn checkStrapTies(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var straps_cache = std.StringHashMap(std.StringHashMapUnmanaged([]const u8)).init(arena);
+    try checkBlockStrapTies(allocator, arena, block, project_dir, &straps_cache, violations);
+}
+
+fn checkBlockStrapTies(
+    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    straps_cache: *std.StringHashMap(std.StringHashMapUnmanaged([]const u8)),
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    // Named rails (+ ferrite aliases) of THIS block, so a strap tied to a named
+    // rail like "3V3"/"VSYS" is caught alongside the VDD/GND name heuristics.
+    var rail_set: std.StringHashMapUnmanaged(void) = .empty;
+    for (block.rails) |r| {
+        try rail_set.put(arena, r.name, {});
+        for (r.aliases) |a| try rail_set.put(arena, a, {});
+    }
+
+    for (block.nets) |net| {
+        // Skip auto-generated `<rail>.<ic>.<pad>` bypass-stub sub-nets — a strap
+        // is always declared on a canonical rail name, never the dotted stub.
+        if (std.mem.indexOfScalar(u8, net.name, '.') != null) continue;
+        const base = na.baseNetName(net.name);
+        if (!isRailNet(base, &rail_set)) continue;
+
+        for (net.pins) |pin| {
+            if (pin.ref_des.len == 0) continue;
+            const comp = componentOf(block, pin.ref_des);
+            if (comp.len == 0) continue; // sub-block pin — handled in recursion
+            const straps = strapsFor(arena, project_dir, straps_cache, comp);
+            const fn_name = straps.get(pin.pin) orelse continue; // not a strap pad
+            const inst = instanceOf(block, pin.ref_des) orelse continue;
+            const msg = switch (strapBlessing(inst, pin.pin)) {
+                .blessed => continue,
+                .none => std.fmt.allocPrint(
+                    allocator,
+                    "Config strap \"{s}\" (pin {s}) on {s} is tied directly to rail \"{s}\" — " ++
+                        "drive it through a pull-up/pull-down resistor, or bless the direct tie " ++
+                        "with (strap-ok {s} \"why it's safe\") once you've checked it",
+                    .{ fn_name, pin.pin, pin.ref_des, base, pin.pin },
+                ) catch continue,
+                .empty_reason => std.fmt.allocPrint(
+                    allocator,
+                    "(strap-ok {s}) on {s} needs a reason — explain why strap \"{s}\" may tie " ++
+                        "straight to \"{s}\": (strap-ok {s} \"…\")",
+                    .{ pin.pin, pin.ref_des, fn_name, base, pin.pin },
+                ) catch continue,
+            };
+            try violations.append(allocator, .{
+                .kind = .strap_tied_to_rail,
+                .severity = .@"error",
+                .message = msg,
+                .ref_des = pin.ref_des,
+                .net = base,
+            });
+        }
+    }
+
+    for (block.sub_blocks) |sb| {
+        try checkBlockStrapTies(allocator, arena, sb.block, project_dir, straps_cache, violations);
+    }
+}
+
+/// True when net base name `base` denotes a power or ground rail — a strap on it
+/// is a direct tie. Combines the supply/ground name heuristics with this block's
+/// declared rail names and a voltage-literal fallback ("3V3", "1V8", "+5V").
+fn isRailNet(base: []const u8, rail_set: *const std.StringHashMapUnmanaged(void)) bool {
+    if (pin_roles.isGroundFn(base) or pin_roles.isSupplyFn(base)) return true;
+    if (rail_set.contains(base)) return true;
+    return looksLikeRailLiteral(base);
+}
+
+/// True when `base` looks like a voltage-literal rail name: an optional +/- sign,
+/// then only digits, '.', and 'V', with at least one digit and one 'V' ("3V3",
+/// "1V8", "5V", "+5V", "3.3V"). Catches rails whose names aren't VDD/GND-shaped
+/// and aren't in the derived rail graph.
+fn looksLikeRailLiteral(base: []const u8) bool {
+    var s = base;
+    if (s.len > 0 and (s[0] == '+' or s[0] == '-')) s = s[1..];
+    if (s.len < 2 or !std.ascii.isDigit(s[0])) return false; // must start with a digit
+    var has_digit = false;
+    var has_v = false;
+    for (s) |c| {
+        if (std.ascii.isDigit(c)) {
+            has_digit = true;
+        } else if (c == 'V' or c == 'v') {
+            has_v = true;
+        } else if (c != '.') {
+            return false;
+        }
+    }
+    return has_digit and has_v;
+}
+
+/// Instance with `ref_des` among `block`'s own instances (null if not found).
+fn instanceOf(block: *const DesignBlock, ref_des: []const u8) ?Instance {
+    for (block.instances) |inst| {
+        if (std.mem.eql(u8, inst.ref_des, ref_des)) return inst;
+    }
+    return null;
+}
+
+/// Whether instance `inst`'s direct tie of pad `pin` to a rail is signed off via
+/// a `(strap-ok …)` form: `.blessed` (a matching pad with a non-empty reason),
+/// `.empty_reason` (a matching pad whose reason is blank — still an error, but a
+/// more specific one), or `.none` (no blessing at all).
+fn strapBlessing(inst: Instance, pin: []const u8) StrapVerdict {
+    var saw_empty = false;
+    for (inst.strap_oks) |s| {
+        if (!std.mem.eql(u8, s.pin, pin)) continue;
+        if (s.reason.len > 0) return .blessed;
+        saw_empty = true;
+    }
+    return if (saw_empty) .empty_reason else .none;
+}
+
+/// Cached `pin_roles.strapPads` keyed by component name (pad-id → fn-name).
+fn strapsFor(
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    cache: *std.StringHashMap(std.StringHashMapUnmanaged([]const u8)),
+    component: []const u8,
+) std.StringHashMapUnmanaged([]const u8) {
+    const gop = cache.getOrPut(component) catch return .{};
+    if (!gop.found_existing) gop.value_ptr.* = pin_roles.strapPads(arena, project_dir, component);
+    return gop.value_ptr.*;
+}
+
+// ── config-strap direct-tie tests ────────────────────────────────────
+
+// spec: erc - a config strap tied directly to a rail is an error unless pulled through a resistor or blessed
+test "config strap tied directly to a rail requires a pull resistor or a blessing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // ic1: pin1 VDD (supply), pin2 EN (strap), pin3 GND, pin4 A0 (address strap).
+    const ic1_comp = "(component ic1 (pinout \"ic1\"))";
+    const ic1_pinout =
+        \\(pinout "ic1"
+        \\  (pin 1 "VDD") (pin 2 "EN") (pin 3 "GND") (pin 4 "A0"))
+    ;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("lib/pinouts");
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/ic1.sexp", .data = ic1_comp });
+    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/ic1.sexp", .data = ic1_pinout });
+    const path = try tmp.dir.realpathAlloc(alloc, ".");
+
+    const insts = try alloc.alloc(Instance, 3);
+    insts[0] = dcInst("U1", "ic1", ""); // EN→VDD unblessed (FLAG); A0→GND blessed (ok)
+    insts[0].strap_oks = &.{.{ .pin = "4", .reason = "I2C address bit0 = 0" }};
+    insts[1] = dcInst("U2", "ic1", ""); // EN on a private net via a pull resistor (ok)
+    insts[2] = dcInst("R1", "res-0402", "10k");
+
+    var vdd: std.ArrayListUnmanaged(env_mod.PinRef) = .empty;
+    try vdd.append(alloc, .{ .ref_des = "U1", .pin = "1" }); // real supply pin
+    try vdd.append(alloc, .{ .ref_des = "U1", .pin = "2" }); // EN strap tied straight to VDD
+    try vdd.append(alloc, .{ .ref_des = "R1", .pin = "2" }); // pull resistor top
+    var gnd: std.ArrayListUnmanaged(env_mod.PinRef) = .empty;
+    try gnd.append(alloc, .{ .ref_des = "U1", .pin = "3" }); // real ground pin
+    try gnd.append(alloc, .{ .ref_des = "U1", .pin = "4" }); // A0 strap, blessed
+    var en2: std.ArrayListUnmanaged(env_mod.PinRef) = .empty;
+    try en2.append(alloc, .{ .ref_des = "U2", .pin = "2" }); // EN on its own net
+    try en2.append(alloc, .{ .ref_des = "R1", .pin = "1" });
+
+    const nets = try alloc.alloc(env_mod.Net, 3);
+    nets[0] = .{ .name = "VDD", .pins = vdd.items };
+    nets[1] = .{ .name = "GND", .pins = gnd.items };
+    nets[2] = .{ .name = "U2_EN", .pins = en2.items };
+
+    const block: DesignBlock = .{
+        .name = "t",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .net_ties = &.{},
+    };
+
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkStrapTies(alloc, &block, path, &violations);
+
+    try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .strap_tied_to_rail));
+    for (violations.items) |v| {
+        if (v.kind != .strap_tied_to_rail) continue;
+        try std.testing.expectEqual(Severity.@"error", v.severity);
+        try std.testing.expectEqualStrings("U1", v.ref_des); // the EN→VDD tie
+        try std.testing.expectEqualStrings("VDD", v.net);
+    }
+}
+
+// spec: erc - strapBlessing distinguishes a reasoned blessing from a blank one and none
+test "strapBlessing reads reasoned, blank, and absent blessings" {
+    const blessed: Instance = .{
+        .ref_des = "U1",
+        .component = "ic1",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .strap_oks = &.{.{ .pin = "2", .reason = "default mode" }},
+    };
+    try std.testing.expectEqual(StrapVerdict.blessed, strapBlessing(blessed, "2"));
+    try std.testing.expectEqual(StrapVerdict.none, strapBlessing(blessed, "3"));
+
+    const blank: Instance = .{
+        .ref_des = "U1",
+        .component = "ic1",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .strap_oks = &.{.{ .pin = "2", .reason = "" }},
+    };
+    try std.testing.expectEqual(StrapVerdict.empty_reason, strapBlessing(blank, "2"));
 }
 
 // ── decoupling-binding requirement tests ─────────────────────────────
