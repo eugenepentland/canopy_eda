@@ -376,6 +376,52 @@ already bound via `(decouples …)` / `decouple_pin` / a `(decouple … per-pin)
 shorthand pad, and `(decouples rail)` opt-outs. Value sets only placement
 tightness, never *whether* a cap must declare its pin.
 
+### Config-strap ties: `(strap-ok PIN "reason")`
+
+A configuration / enable / reset strap (EN, CE, MODE, ILIM, SHDN, BOOT, ADDR,
+an I²C `A0`/`A1`/`A2` address bit, OE, …) tied **directly** to a power or ground
+rail is easy to wire backwards (`EN` high when it should be low) and impossible
+to rework once fabbed. The idiomatic default is therefore a **pull-up/pull-down
+resistor**: a strap pulled through a resistor lands on its own private net (e.g.
+`EN_PU`), never on the rail, so it is silently fine — only a strap pad sitting on
+the rail itself is flagged. A genuinely floating strap is still caught by the
+floating-net check.
+
+When the direct tie *is* correct (an I²C address bit, an LT3045 `ILIM`→GND
+default current limit, a `MODE`→GND select, an always-on `~SHDN`→VDD), bless it
+on the instance with a mandatory reason — the "I checked this, it's deliberate"
+sign-off:
+
+```scheme
+(instance "U1" lt3045edd
+  (pin 5 "GND")                                      ;; ILIM
+  (strap-ok 5 "ILIM->GND selects the default (max) current limit per datasheet"))
+;; PIN resolves like a (pin …) token — a number, a quoted/atom pad ("B1"),
+;; or a function name that maps through the pinout to its physical pad.
+```
+
+`PIN` is resolved the same way `(pin …)` and `(decouples …)` tokens are. An empty
+or missing reason does **not** suppress the error.
+
+- The **`strap_tied_to_rail` ERC check** (`src/erc.zig`, **error**) is the gate:
+  it fails `netlisp build` / `netlisp check`, lights the home-page health chip
+  red, and shows in the review doc + the `run_checks` MCP tool. It runs **per
+  block** (recursing sub-blocks), so a module's strap is judged against the rail
+  names in *its own* namespace (a module's `EN`→`VIN` tie is judged on `VIN`,
+  not on whatever the parent wires `VIN` to). Strap-class pins are detected by
+  pinout **function name** (`pin_roles.strapPads` / `isStrapFn`) **or** a library
+  `(electrical "FN" (type input|output|io))` decl — the name heuristic matters
+  because few parts carry electrical annotations. Connector / mechanical
+  **positional** pins (a mezzanine pad named `A01`/`A01_A01`, or a `fn == pad`
+  header pin) and two-digit `A`-bus / GPIO `P<x><n>` names are **not** straps, so
+  the check stays low-noise on board-to-board connectors and MCUs. Needs
+  `--project-dir` to read `lib/pinouts` + `lib/components`; the rail predicate is
+  the supply/ground name heuristics (`isSupplyFn`/`isGroundFn`) plus this block's
+  declared `(board …)`/derived rails and voltage-literal names (`3V3`, `+5V`).
+- The strap-detection path is **ERC-only**: `pin_roles.classify` (the placer's
+  loop-target path) is deliberately left on the electrical-type signal alone, so
+  recognising more straps here never shifts a PCB layout.
+
 ### Schematic diagram layout: `(diagram-layout …)`
 
 The free-floating block-diagram arrangement (the schematic page's Layout

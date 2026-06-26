@@ -688,6 +688,22 @@ pub const Instance = struct {
     /// lint must not require a pad binding for it. Distinct from "no form at
     /// all" (which IS flagged on a multi-supply-pad rail).
     decouple_rail: bool = false,
+    /// `(strap-ok PIN "reason")` blessings — explicit sign-offs that a config /
+    /// enable / reset strap on this part is *deliberately* tied straight to a
+    /// rail (rather than driven through a pull-up/down). Each entry pins a
+    /// physical pad (resolved like a `(pin …)` token) to a human reason. The
+    /// `strap_tied_to_rail` ERC error fires on any strap pad sitting on a rail
+    /// net that lacks a non-empty blessing here. Empty ⇒ no strap tie is blessed.
+    strap_oks: []const StrapOk = &.{},
+};
+
+/// One `(strap-ok PIN "reason")` blessing on an instance — see `Instance.strap_oks`.
+pub const StrapOk = struct {
+    /// Physical pad id the blessing covers (resolved from the form's PIN token).
+    pin: []const u8,
+    /// Why tying this strap straight to a rail is correct (datasheet rationale,
+    /// default-config note, …). Must be non-empty to actually suppress the error.
+    reason: []const u8 = "",
 };
 
 /// True when `component` names a test point (`testpoint` or `testpoint-*`).

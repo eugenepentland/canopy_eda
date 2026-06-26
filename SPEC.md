@@ -164,11 +164,14 @@ Public functions: lint, freeFindings
 
 ## placement/pin_roles
 
-Public functions: load, isGroundFn, isSupplyFn
+Public functions: load, isGroundFn, isSupplyFn, strapPads
 
 - groundy function names are recognised, straps are not
 - supply function names are recognised, grounds and signals are not
 - electrical type overrides the name heuristic; signal types demote to strap
+- config-strap function names are recognised, supplies grounds and GPIO are not
+- strapPads maps strap pads to their function name via name or electrical type
+- strapPads skips connector positional pins named after their pad
 
 ## placement/pad_shape
 
@@ -516,6 +519,8 @@ Public functions: renderSchematic
 - Accepts an MPN-identified fixed component as a valued passive (no missing_value)
 - Recognizes KiCad-style signed rails (+5V, -5.0V, +3V3, +5_0V) as power nets
 - Allows ignore-requirements support parts and passives to be instantiated directly in the design
+- a config strap tied directly to a rail is an error unless pulled through a resistor or blessed
+- strapBlessing distinguishes a reasoned blessing from a blank one and none
 - Allows an IC declared as a critical-ic to be instantiated directly in the design
 - Allows a directly-instantiated critical-ic regardless of its role (e.g. a flat RF board's ICs)
 - Does not flag main ICs that are wrapped in sub-blocks

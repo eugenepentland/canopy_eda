@@ -225,6 +225,7 @@ src/eval/env.zig::SectionPort struct_
 src/eval/env.zig::SectionStatus enum_
 src/eval/env.zig::SeriesKind enum_
 src/eval/env.zig::SignalType enum_
+src/eval/env.zig::StrapOk struct_
 src/eval/env.zig::SubBlock struct_
 src/eval/env.zig::TestPoint struct_
 src/eval/env.zig::TestPointTag enum_
@@ -497,6 +498,7 @@ src/placement/pin_roles.zig::PinClass enum_
 src/placement/pin_roles.zig::isGroundFn fn
 src/placement/pin_roles.zig::isSupplyFn fn
 src/placement/pin_roles.zig::load fn
+src/placement/pin_roles.zig::strapPads fn
 src/placement/router.zig::LoopRouter struct_
 src/placement/router.zig::PadObs struct_
 src/placement/router.zig::RETURN_PATH_RADIUS_MM value
