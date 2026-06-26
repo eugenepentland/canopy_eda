@@ -208,7 +208,6 @@ fn writeSummary(w: anytype, s: review.Summary) !void {
     try w.print("- **Sections**: {d} · **Instances**: {d} · **Nets**: {d}\n", .{ s.section_count, s.instance_count, s.net_count });
     try w.print("- **ERC**: {d} error(s), {d} warning(s), {d} info\n", .{ s.violation_error, s.violation_warning, s.violation_info });
     try w.print("- **Assertions**: {d} pass, {d} warn, {d} fail\n", .{ s.assertion_pass, s.assertion_warn, s.assertion_fail });
-    try w.print("- **Critical components**: {d}/{d} have requirements\n", .{ s.critical_with_requirements, s.critical_count });
     const oc = s.overall_coverage;
     try w.print(
         "- **Coverage**: {d}% complete ({d}/{d} components fully filled in, {d} missing)\n",
