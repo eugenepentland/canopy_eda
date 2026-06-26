@@ -352,9 +352,10 @@ fn writeHeader(
             .{ design_name, design_name },
         );
     }
-    // Deliberately minimal toolbar: Reload, Edit SRC, ERC, and a single
-    // PCB-sync control. Everything else (History, BOM/Netlist/Review exports,
-    // datasheet upload) was moved off this bar to keep it uncluttered.
+    // Deliberately minimal toolbar: Reload, Edit SRC, ERC, the design-review
+    // export, and a single PCB-sync control. Everything else (History,
+    // BOM/Netlist exports, datasheet upload) was moved off this bar to keep it
+    // uncluttered.
     try w.writeAll(
         "<button class=\"head-link head-btn\" id=\"reload-btn\" type=\"button\" " ++
             "title=\"Re-read the .sexp source from disk and rebuild\">\u{21BB} Reload</button>",
@@ -367,6 +368,15 @@ fn writeHeader(
             "title=\"Edit the raw .sexp source\">\u{270E} Edit SRC</button>",
     );
     try w.writeAll("<button class=\"head-link head-btn\" id=\"erc-btn\" type=\"button\">ERC</button>");
+    // Design-review export: downloads a .zip of `<name>-review.md` (the full
+    // markdown report) + `<name>-bom.csv` + the verbatim `.sexp` source for the
+    // design and every sub-module/component it imports. Plain <a download> —
+    // the endpoint builds the zip on demand, no JS needed.
+    try w.print(
+        "<a class=\"head-link head-btn\" id=\"review-export-btn\" href=\"/api/export-review/{s}\" download " ++
+            "title=\"Download the design-review package (review.md + BOM + all source .sexp) as a .zip\">\u{2B07} Review .zip</a>",
+        .{design_name},
+    );
     // Single file-based PCB-sync control — only for designs that declare a
     // (kicad-pcb "<path>") target. schematic_viewer.js dry-runs the sync on
     // page load and reflects the result in ONE button:

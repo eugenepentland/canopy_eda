@@ -8,11 +8,15 @@ const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const render_json = @import("../render_json.zig");
 const export_kicad = @import("../export_kicad.zig");
 const bom = @import("../bom.zig");
+const fp_mod = @import("../export_kicad_footprint.zig");
 const erc_mod = @import("../erc.zig");
 const env_mod = @import("../eval/env.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const bom_html = @import("bom_html.zig");
 const mcp_tools = @import("mcp_tools.zig");
+const review_mod = @import("../review.zig");
+const review_md_mod = @import("../review_md.zig");
+const req_checks = @import("../req_checks.zig");
 const edit_mod = @import("edit.zig");
 const diag_format = @import("diag_format.zig");
 const serve_root = @import("../serve.zig");
@@ -476,6 +480,142 @@ pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     res.header(HEADER_CONTENT_DISPOSITION, disposition);
     res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
     res.body = buf.items;
+}
+
+/// GET /api/export-review/:name — design-review package as a zip. Contains
+/// `<name>-review.md` (the full markdown report — system block diagram,
+/// per-hub schematics, power tables, ERC, per-IC checklist, embedded source),
+/// `<name>-bom.csv` (the parts list), and the verbatim `.sexp` source for the
+/// design plus every sub-module and component it imports — laid out under
+/// `src/` and `lib/` so the bundle mirrors a buildable project tree.
+pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = HTTP_NOT_FOUND;
+        return;
+    };
+
+    // Evaluate the design (or a standalone module) once and keep `eval` alive:
+    // its `loaded_files` read-set is the exact list of source files that fed
+    // this build — the design itself plus every imported lib/modules and
+    // lib/components file — which we bundle alongside the report.
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+
+    const nb = mcp_tools.evalNamedBlock(ctx.allocator, ctx.project_dir, name, &eval) catch {
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_BUILD;
+        return;
+    };
+    const block = nb.block;
+
+    // Merge persisted BOM identities (manual MPN/manufacturer/datasheet edits
+    // from the schematic page) so the report + CSV match the live page. A
+    // standalone module has no `.bom` sidecar, so skip it there.
+    if (!nb.is_module) {
+        const bom_path = paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom") catch null;
+        if (bom_path) |bp| {
+            defer ctx.allocator.free(bp);
+            bom.resolveIdentities(ctx.allocator, block, bp, ctx.project_dir) catch |e| {
+                log.warn("export-review resolveIdentities {s} failed: {s}", .{ name, @errorName(e) });
+            };
+        }
+    }
+
+    const violations = mcp_tools.runErcForNamedBlock(ctx.allocator, nb, ctx.project_dir) catch
+        &[_]erc_mod.Violation{};
+
+    var check_results = req_checks.runChecks(ctx.allocator, &eval, block) catch
+        std.StringHashMapUnmanaged([]req_checks.Result).empty;
+    req_checks.applyVerifications(&check_results, block, block.instances);
+
+    const doc = review_mod.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results, ctx.project_dir) catch {
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = ERR_BUILD;
+        return;
+    };
+
+    // The markdown report embeds the *design's own* source verbatim at the
+    // bottom; pass it explicitly (the bundled tree below carries every file).
+    const board_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch null;
+    defer if (board_path) |bp| ctx.allocator.free(bp);
+    const source: []const u8 = if (board_path) |bp|
+        infra_fs.cwd().readFileAlloc(ctx.allocator, bp, MAX_SOURCE_BYTES) catch &[_]u8{}
+    else
+        &[_]u8{};
+
+    const md = review_md_mod.renderToMarkdown(ctx.allocator, block, ctx.project_dir, name, doc, source, &check_results) catch {
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = "Markdown render error";
+        return;
+    };
+
+    var csv_buf: std.ArrayListUnmanaged(u8) = .empty;
+    bom_html.writeBomCsv(ctx.allocator, csv_buf.writer(ctx.allocator), block) catch {
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = "BOM CSV error";
+        return;
+    };
+
+    // Assemble the zip: report + CSV at the root, then every source `.sexp` the
+    // evaluator read, each under its path relative to the project dir so the
+    // bundle reads as a buildable project tree (src/<design>.sexp,
+    // lib/modules/*.sexp, lib/components/*.sexp).
+    const md_name = try std.fmt.allocPrint(ctx.allocator, "{s}-review.md", .{name});
+    const csv_name = try std.fmt.allocPrint(ctx.allocator, "{s}-bom.csv", .{name});
+
+    var entries: std.ArrayListUnmanaged(fp_mod.ZipEntry) = .empty;
+    try entries.append(ctx.allocator, .{ .name = md_name, .data = md });
+    try entries.append(ctx.allocator, .{ .name = csv_name, .data = csv_buf.items });
+
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+
+    // The design's own top-level source, added explicitly rather than via
+    // `loaded_files`: the evaluator keys the root file on a path slice its
+    // caller frees, so that one key can dangle by the time we iterate here.
+    // Every *imported* lib file is keyed on a stable dup and is read in the
+    // loop below. `source` is the verbatim file (already read for the report).
+    if (board_path) |bp| if (source.len > 0) {
+        const zn = zipNameForSource(ctx.project_dir, bp);
+        try seen.put(ctx.allocator, zn, {});
+        try entries.append(ctx.allocator, .{ .name = zn, .data = source });
+    };
+
+    var it = eval.loaded_files.keyIterator();
+    while (it.next()) |k| {
+        const path = k.*;
+        if (!std.mem.endsWith(u8, path, ".sexp")) continue;
+        const zip_name = zipNameForSource(ctx.project_dir, path);
+        if (seen.contains(zip_name)) continue;
+        const data = infra_fs.cwd().readFileAlloc(ctx.allocator, path, MAX_SOURCE_BYTES) catch continue;
+        try seen.put(ctx.allocator, zip_name, {});
+        try entries.append(ctx.allocator, .{ .name = zip_name, .data = data });
+    }
+
+    const zip = fp_mod.buildZip(ctx.allocator, entries.items) catch {
+        res.status = HTTP_INTERNAL_ERROR;
+        res.body = "Zip error";
+        return;
+    };
+
+    const disposition = try std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-review.zip\"", .{name});
+    res.header(HEADER_CONTENT_TYPE, CONTENT_TYPE_ZIP);
+    res.header(HEADER_CONTENT_DISPOSITION, disposition);
+    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.body = zip;
+}
+
+/// Map a loaded source path to its in-zip name: strip the project-dir prefix
+/// so the bundle keeps the `src/…` / `lib/…` layout. Falls back to the
+/// `lib/`/`src/` tail (for shared-lib paths outside the project dir), then the
+/// bare basename.
+fn zipNameForSource(project_dir: []const u8, path: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, path, project_dir)) {
+        const rem = std.mem.trimLeft(u8, path[project_dir.len..], "/");
+        if (rem.len > 0) return rem;
+    }
+    if (std.mem.lastIndexOf(u8, path, "/lib/")) |i| return path[i + 1 ..];
+    if (std.mem.lastIndexOf(u8, path, "/src/")) |i| return path[i + 1 ..];
+    return std.fs.path.basename(path);
 }
 
 /// GET /api/erc/:name — run electrical-rule checks (duplicate ref-des,

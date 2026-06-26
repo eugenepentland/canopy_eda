@@ -11,7 +11,6 @@ add: // spec: placement/optimizer - (no-refine) packs courtyards flush (touching
 add: // spec: placement/optimizer - a long manual side wraps into multiple depth lanes
 add: // spec: placement/optimizer - the manual floorplan docks sides around the anchor IC and stages unlisted parts
 add: // spec: placement/optimizer - the manual placement block keeps authored order and resolves rotations
-add: // spec: review_md - emits markdown header for design name
 add: // spec: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
 add: // spec: serve/notes - Rejects bodies larger than 1 MiB
 add: // spec: serve/notes - Returns an empty string when no notes file exists yet
@@ -74,7 +73,6 @@ unverified: placement/optimizer - (no-refine) packs courtyards flush (touching) 
 unverified: placement/optimizer - a long manual side wraps into multiple depth lanes
 unverified: placement/optimizer - the manual floorplan docks sides around the anchor IC and stages unlisted parts
 unverified: placement/optimizer - the manual placement block keeps authored order and resolves rotations
-unverified: review_md - emits markdown header for design name
 unverified: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
 unverified: serve/notes - Rejects bodies larger than 1 MiB
 unverified: serve/notes - Returns an empty string when no notes file exists yet
