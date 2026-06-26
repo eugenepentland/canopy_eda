@@ -709,6 +709,13 @@ fn padNumberText(arena: std.mem.Allocator, n: env_mod_node.Node) ?[]const u8 {
 
 const SyncSummary = struct {
     updated: u32 = 0,
+    /// Matched footprints whose ONLY emitted ops were metadata field writes —
+    /// refdes renames + canopy_*/BOM-field stamps. These are the "labels & BOM
+    /// fields only, nothing moves" changes the preview hides; counting them as
+    /// `updated` made a refdes-heavy refactor look like a big board change when
+    /// nothing actually moved. A footprint with any *material* op (value edit,
+    /// footprint swap, pad-net rewire) lands in `updated`/`swapped` instead.
+    relabeled: u32 = 0,
     added: u32 = 0,
     removed: u32 = 0,
     swapped: u32 = 0,
@@ -977,13 +984,13 @@ pub fn runSyncPlan(
     const version = serve_root.getLiveVersion(name);
     try rw.print(
         "{{\"design_version\":{d},\"summary\":{{" ++
-            "\"updated\":{d},\"added\":{d},\"removed\":{d}," ++
+            "\"updated\":{d},\"relabeled\":{d},\"added\":{d},\"removed\":{d}," ++
             "\"swapped\":{d},\"flagged_stale\":{d},\"suppressed\":{d},\"vias\":{d}" ++
             "}},\"sub_circuits\":",
         .{
-            version,            summary.updated, summary.added,
-            summary.removed,    summary.swapped, summary.flagged_stale,
-            summary.suppressed, summary.vias,
+            version,               summary.updated,    summary.relabeled,
+            summary.added,         summary.removed,    summary.swapped,
+            summary.flagged_stale, summary.suppressed, summary.vias,
         },
     );
     try rw.writeAll(sub_circuits_json);
@@ -2362,6 +2369,17 @@ fn lessByDesignRef(_: void, a: export_kicad.FlatInstance, b: export_kicad.FlatIn
     return std.mem.lessThan(u8, a.ref_des, b.ref_des);
 }
 
+/// Per-matched-footprint op tally, split by whether the op changes the board
+/// the user sees. `material` = value edits, footprint swaps, pad-net rewires
+/// (a real change → counts as `updated`). `meta` = refdes renames and
+/// canopy_*/BOM-field stamps ("nothing moves" → counts as `relabeled`, not an
+/// update). A footprint with any material op is `updated`; one with only meta
+/// ops is `relabeled`. See SyncSummary.relabeled.
+const MatchCounts = struct {
+    material: u32 = 0,
+    meta: u32 = 0,
+};
+
 fn handleMatched(
     d: *DiffContext,
     inst: export_kicad.FlatInstance,
@@ -2371,7 +2389,7 @@ fn handleMatched(
     section: []const u8,
     w: anytype,
     first: *bool,
-    ops_emitted: *u32,
+    counts: *MatchCounts,
 ) !void {
     // Track matches by KiCad-internal UUID — that field is always
     // populated, whereas canopy_uuid is empty for ref-des-fallback
@@ -2383,7 +2401,7 @@ fn handleMatched(
             const fp_def = loadFootprintDef(d.spc, fp_name_short);
             try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map, SWAP_REASON_GEOMETRY);
             d.summary.swapped += 1;
-            ops_emitted.* += 1;
+            counts.material += 1;
         }
     } else if (d.refresh or modelDrifted(d, inst, m, fp_name_short)) {
         // Same-name re-bake. Triggered by `?refresh=1` (re-bake every part's
@@ -2401,7 +2419,7 @@ fn handleMatched(
             const reason = if (d.refresh) SWAP_REASON_REFRESH else SWAP_REASON_MODEL;
             try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map, reason);
             d.summary.swapped += 1;
-            ops_emitted.* += 1;
+            counts.material += 1;
         }
     }
     // The "old" / "ref" keys on set_field ops are display metadata for the
@@ -2414,7 +2432,7 @@ fn handleMatched(
             .{ "value", inst.ref_des },
             .{ "old", m.ref },
         }, target, "reference", inst.ref_des)) {
-            ops_emitted.* += 1;
+            counts.meta += 1;
         }
     }
     // An empty design value means "no opinion", not "clear it": fixed
@@ -2429,7 +2447,7 @@ fn handleMatched(
             .{ "old", m.value },
             .{ "ref", inst.ref_des },
         }, target, "value", inst.value)) {
-            ops_emitted.* += 1;
+            counts.material += 1;
         }
     }
     // Stamp/realign canopy_uuid whenever it differs from the design's id —
@@ -2446,7 +2464,7 @@ fn handleMatched(
             .{ "value", inst.uuid },
             .{ "ref", inst.ref_des },
         }, target, FIELD_CANOPY_UUID, inst.uuid)) {
-            ops_emitted.* += 1;
+            counts.meta += 1;
         }
     }
     // Push every design property to KiCad as a custom Field, so adding a
@@ -2468,7 +2486,7 @@ fn handleMatched(
             .{ "value", p.value },
             .{ "ref", inst.ref_des },
         }, target, field_name, p.value)) {
-            ops_emitted.* += 1;
+            counts.meta += 1;
         }
     }
     // Passive routing hint: each pad's intended (device.pin.net) destination,
@@ -2482,7 +2500,7 @@ fn handleMatched(
                 .{ "value", cn },
                 .{ "ref", inst.ref_des },
             }, target, FIELD_CANOPY_NET, cn)) {
-                ops_emitted.* += 1;
+                counts.meta += 1;
             }
         }
     }
@@ -2496,11 +2514,11 @@ fn handleMatched(
                 .{ "value", section },
                 .{ "ref", inst.ref_des },
             }, target, FIELD_CANOPY_SECTION, section)) {
-                ops_emitted.* += 1;
+                counts.meta += 1;
             }
         }
     }
-    ops_emitted.* += try emitPadNetOps(d, w, first, target, inst.ref_des, d.pad_net_map, m.pads);
+    counts.material += try emitPadNetOps(d, w, first, target, inst.ref_des, d.pad_net_map, m.pads);
 }
 
 /// Property keys we deliberately don't push to KiCad as custom fields:
@@ -2658,13 +2676,20 @@ fn handleInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, 
     else
         null;
     const section = sectionForRef(inst.ref_des, d.ref_to_section);
-    var ops_emitted: u32 = 0;
+    var counts: MatchCounts = .{};
     if (matchInstance(d, inst)) |m| {
-        try handleMatched(d, inst, m, fp_name_short, canopy_net, section, w, first, &ops_emitted);
-        // Only count as "updated" when at least one op was actually
-        // emitted — otherwise every no-diff sync would still surface
-        // "Updated: N" to the user even though nothing changed.
-        if (ops_emitted > 0) d.summary.updated += 1;
+        try handleMatched(d, inst, m, fp_name_short, canopy_net, section, w, first, &counts);
+        // Count a matched footprint as "updated" only when a *material* op
+        // landed — a value edit, footprint swap, or pad-net rewire (something
+        // that actually changes the board). A match whose only ops were
+        // metadata field writes (refdes rename, canopy_*/BOM-field stamps —
+        // "nothing moves") is `relabeled` instead, so a refdes-heavy refactor
+        // no longer inflates the update count. A no-diff sync touches neither.
+        if (counts.material > 0) {
+            d.summary.updated += 1;
+        } else if (counts.meta > 0) {
+            d.summary.relabeled += 1;
+        }
         return;
     }
     // Defer the add — `emitStagedAdds` lays buffered adds out grouped by
