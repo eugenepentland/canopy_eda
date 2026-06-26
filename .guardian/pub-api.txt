@@ -645,6 +645,7 @@ src/review_html.zig::writeTestPoints fn
 src/review_html.zig::writeTraceability fn
 src/review_json.zig::renderToJson fn
 src/review_json.zig::writeTraceability fn
+src/review_md.zig::renderReadme fn
 src/review_md.zig::renderToMarkdown fn
 src/serve.zig::Handler struct_
 src/serve.zig::JobOutcome enum_

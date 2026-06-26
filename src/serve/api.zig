@@ -483,8 +483,8 @@ pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 }
 
 /// GET /api/export-review/:name — design-review package as a zip. Contains
-/// `<name>-review.md` (the full markdown report — system block diagram,
-/// per-hub schematics, power tables, ERC, per-IC checklist, embedded source),
+/// `README.md` (a map of the package), `<name>-review.md` (the full markdown
+/// report — block overview, validation, power tables, per-hub schematics),
 /// `<name>-bom.csv` (the parts list), and the verbatim `.sexp` source for the
 /// design plus every sub-module and component it imports — laid out under
 /// `src/` and `lib/` so the bundle mirrors a buildable project tree.
@@ -557,17 +557,10 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
         return;
     };
 
-    // Assemble the zip: report + CSV at the root, then every source `.sexp` the
-    // evaluator read, each under its path relative to the project dir so the
-    // bundle reads as a buildable project tree (src/<design>.sexp,
-    // lib/modules/*.sexp, lib/components/*.sexp).
-    const md_name = try std.fmt.allocPrint(ctx.allocator, "{s}-review.md", .{name});
-    const csv_name = try std.fmt.allocPrint(ctx.allocator, "{s}-bom.csv", .{name});
-
-    var entries: std.ArrayListUnmanaged(fp_mod.ZipEntry) = .empty;
-    try entries.append(ctx.allocator, .{ .name = md_name, .data = md });
-    try entries.append(ctx.allocator, .{ .name = csv_name, .data = csv_buf.items });
-
+    // Collect every source `.sexp` the evaluator read, each under its path
+    // relative to the project dir so the bundle reads as a buildable project
+    // tree (src/<design>.sexp, lib/modules/*.sexp, lib/components/*.sexp).
+    var sources: std.ArrayListUnmanaged(fp_mod.ZipEntry) = .empty;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
 
     // The design's own top-level source, added explicitly rather than via
@@ -578,7 +571,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     if (board_path) |bp| if (source.len > 0) {
         const zn = zipNameForSource(ctx.project_dir, bp);
         try seen.put(ctx.allocator, zn, {});
-        try entries.append(ctx.allocator, .{ .name = zn, .data = source });
+        try sources.append(ctx.allocator, .{ .name = zn, .data = source });
     };
 
     var it = eval.loaded_files.keyIterator();
@@ -589,8 +582,24 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
         if (seen.contains(zip_name)) continue;
         const data = infra_fs.cwd().readFileAlloc(ctx.allocator, path, MAX_SOURCE_BYTES) catch continue;
         try seen.put(ctx.allocator, zip_name, {});
-        try entries.append(ctx.allocator, .{ .name = zip_name, .data = data });
+        try sources.append(ctx.allocator, .{ .name = zip_name, .data = data });
     }
+
+    // A README mapping the package — what to open first + the source-tree
+    // layout — built from the just-collected source names. Non-fatal.
+    const source_names = try ctx.allocator.alloc([]const u8, sources.items.len);
+    for (sources.items, 0..) |s, i| source_names[i] = s.name;
+    const readme = review_md_mod.renderReadme(ctx.allocator, name, doc.generated_at, source_names) catch "";
+
+    // Assemble the zip: README, report, and CSV at the root, then the source tree.
+    const md_name = try std.fmt.allocPrint(ctx.allocator, "{s}-review.md", .{name});
+    const csv_name = try std.fmt.allocPrint(ctx.allocator, "{s}-bom.csv", .{name});
+
+    var entries: std.ArrayListUnmanaged(fp_mod.ZipEntry) = .empty;
+    if (readme.len > 0) try entries.append(ctx.allocator, .{ .name = "README.md", .data = readme });
+    try entries.append(ctx.allocator, .{ .name = md_name, .data = md });
+    try entries.append(ctx.allocator, .{ .name = csv_name, .data = csv_buf.items });
+    try entries.appendSlice(ctx.allocator, sources.items);
 
     const zip = fp_mod.buildZip(ctx.allocator, entries.items) catch {
         res.status = HTTP_INTERNAL_ERROR;

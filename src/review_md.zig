@@ -98,6 +98,98 @@ pub fn renderToMarkdown(
     return buf.toOwnedSlice(allocator);
 }
 
+/// Render the `README.md` that ships at the root of the review-export zip — a
+/// short map of the package so a reviewer (or agent) knows what to open first
+/// and how the bundled source tree is laid out. `source_names` are the in-zip
+/// paths of the `.sexp` files (e.g. `src/foo.sexp`, `lib/modules/bar.sexp`),
+/// which it partitions into design / sub-modules / library definitions.
+pub fn renderReadme(
+    allocator: Allocator,
+    design_name: []const u8,
+    generated_at: []const u8,
+    source_names: []const []const u8,
+) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(allocator);
+
+    try w.print("# Review package — {s}\n\n", .{design_name});
+    try w.print(
+        "Self-contained design-review snapshot of **{s}**, generated {s} by Netlisp. " ++
+            "Everything needed to review the design — the report, the BOM, and the full source — is in this zip.\n\n",
+        .{ design_name, generated_at },
+    );
+
+    try w.writeAll("## Start here\n\n");
+    try w.print(
+        "- **`{s}-review.md`** — the review report. Open it in any Markdown viewer " ++
+            "(GitHub, VS Code preview, Obsidian, …) so the schematics render inline. Top to bottom:\n",
+        .{design_name},
+    );
+    try w.writeAll(
+        "  - **Summary** — build status, instance / net counts, coverage\n" ++
+            "  - **Block Overview** — grouped-cards system diagram with a concept / schematic / done maturity legend\n" ++
+            "  - **Validation** — ERC violations, design assertions, and per-IC requirement checks " ++
+            "(pass / fail / verified / pending) with datasheet citations\n" ++
+            "  - **Power Budget / Power Sequencing / Test Points** — the engineering tables\n" ++
+            "  - **Schematic** — per-section hub schematics (collapsed — click each to expand)\n" ++
+            "  - **Bill of Materials** — part totals\n",
+    );
+    try w.print("- **`{s}-bom.csv`** — the bill of materials as a spreadsheet-ready CSV.\n\n", .{design_name});
+
+    try w.writeAll("## Source files\n\n");
+    try w.writeAll(
+        "A complete, buildable snapshot of the design's S-expression source — the exact files " ++
+            "that produced this report, laid out as a project tree (`netlisp build` rebuilds it):\n\n",
+    );
+
+    var design_n: usize = 0;
+    var module_n: usize = 0;
+    var lib_other_n: usize = 0;
+    for (source_names) |n| {
+        if (std.mem.startsWith(u8, n, "lib/modules/")) {
+            module_n += 1;
+        } else if (std.mem.startsWith(u8, n, "lib/")) {
+            lib_other_n += 1;
+        } else {
+            design_n += 1;
+        }
+    }
+
+    // Design source(s) — everything outside lib/ (the design `.sexp` + its
+    // `.checks.sexp` sidecar). A standalone module has none (its root file lives
+    // under lib/modules/ and is listed below), so skip the empty heading.
+    if (design_n > 0) {
+        try w.writeAll("**Design** — `src/`\n\n");
+        for (source_names) |n| {
+            if (std.mem.startsWith(u8, n, "lib/")) continue;
+            try w.print("- `{s}`\n", .{n});
+        }
+        try w.writeAll("\n");
+    }
+
+    if (module_n > 0) {
+        try w.print(
+            "**Sub-modules** ({d}) — `lib/modules/` — the reusable sub-circuits this design instantiates\n\n",
+            .{module_n},
+        );
+        for (source_names) |n| {
+            if (!std.mem.startsWith(u8, n, "lib/modules/")) continue;
+            try w.print("- `{s}`\n", .{n});
+        }
+        try w.writeAll("\n");
+    }
+
+    if (lib_other_n > 0) {
+        try w.print(
+            "**Library definitions** ({d}) — `lib/components/` (and any `lib/pinouts/`) — the part, " ++
+                "footprint, and pin-map definitions for every placed component.\n\n",
+            .{lib_other_n},
+        );
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
 // ── Sections ──────────────────────────────────────────────────────────
 
 fn writeSummary(w: anytype, s: review.Summary) !void {
