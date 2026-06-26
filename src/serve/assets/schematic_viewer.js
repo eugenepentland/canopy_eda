@@ -1601,7 +1601,7 @@
   }
 
   function kicadSummaryChips(s) {
-    var keys = ['updated', 'added', 'removed', 'swapped', 'flagged_stale', 'suppressed', 'vias'];
+    var keys = ['updated', 'relabeled', 'added', 'removed', 'swapped', 'flagged_stale', 'suppressed', 'vias'];
     return keys.map(function (k) {
       var n = (s && s[k]) || 0;
       return '<span class="kpv-chip' + (n > 0 ? ' hot' : '') + '">' + n + ' ' + k.replace('_', ' ') + '</span>';
@@ -1903,8 +1903,12 @@
       var s = (j && j.summary) || {};
       var pending = (s.added || 0) + (s.removed || 0) + (s.updated || 0) + (s.swapped || 0) + (s.vias || 0);
       var stale = s.flagged_stale || 0;
+      var relabeled = s.relabeled || 0;
+      // Headline count = material/structural changes only. Refdes renames and
+      // canopy_*/BOM-field stamps (`relabeled`) don't move anything, so they're
+      // a calm secondary note rather than inflating the "needs sync (N)" number.
       var total = pending + stale;
-      if (total === 0) {
+      if (total === 0 && relabeled === 0) {
         setSyncChip('sync-ok', '✓ PCB in sync', 'The .kicad_pcb matches the design netlist. Click to re-check.');
         return;
       }
@@ -1915,6 +1919,13 @@
       if (s.swapped) parts.push(s.swapped + ' footprint swap' + (s.swapped > 1 ? 's' : ''));
       if (s.vias) parts.push(s.vias + ' vias');
       if (stale) parts.push(stale + ' stale on board');
+      if (relabeled) parts.push(relabeled + ' relabeled');
+      if (total === 0) {
+        // Only refdes/field relabels pending — nothing moves, so stay calm.
+        setSyncChip('sync-ok', '✓ PCB in sync · ' + relabeled + ' relabel' + (relabeled === 1 ? '' : 's'),
+          'Pending: ' + parts.join(', ') + ' (labels & BOM fields only, nothing moves). Open KiCad ▾ → Push to KiCad PCB. Click to re-check.');
+        return;
+      }
       setSyncChip('sync-stale', '⚠ PCB needs sync (' + total + ')',
         'Pending: ' + parts.join(', ') + '. Open KiCad ▾ → Push to KiCad PCB. Click to re-check.');
     }).catch(function (e) {
