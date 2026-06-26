@@ -293,7 +293,15 @@ pub fn drawBlockIcon(w: anytype, icon_name: []const u8, cx: f64, cy: f64, color:
 /// that doesn't start with R/C/L/F/D — passives stay as bare symbols on
 /// the wires they bridge.
 pub fn isHub(inst: FlatInst) bool {
-    const rd = shortRef(inst.ref_des);
+    return isHubRef(inst.ref_des);
+}
+
+/// The hub/spoke split keyed on a ref-des alone (the part of `isHub` that
+/// doesn't need a full `FlatInst`). Passives — R/C/L/F/D — are spokes drawn
+/// inline on the hub they wire into; everything else (U/J/P/X/Q and any other
+/// prefix) is a hub box.
+pub fn isHubRef(ref_des: []const u8) bool {
+    const rd = shortRef(ref_des);
     if (rd.len == 0) return true;
     return switch (rd[0]) {
         'U', 'J', 'P', 'X', 'Q' => true,

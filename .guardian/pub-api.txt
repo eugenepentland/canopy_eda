@@ -588,6 +588,7 @@ src/render_svg/draw.zig::hub_width value
 src/render_svg/draw.zig::hub_x value
 src/render_svg/draw.zig::isGroundNet fn
 src/render_svg/draw.zig::isHub fn
+src/render_svg/draw.zig::isHubRef fn
 src/render_svg/draw.zig::net_label_gap value
 src/render_svg/draw.zig::passive_bh value
 src/render_svg/draw.zig::passive_bw value
