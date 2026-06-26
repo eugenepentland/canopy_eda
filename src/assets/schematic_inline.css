@@ -38,12 +38,8 @@ h3{color:#f0f6fc;font-size:0.95rem;margin:0;}
 .sync-chip.sync-ok{border-color:#2ea043;color:#3fb950;}
 .sync-chip.sync-stale{border-color:#d29922;color:#d29922;}
 .sync-chip.sync-unknown{border-color:#6e7681;color:#8b949e;}
-.kicad-menu{position:relative;}
-.kicad-panel{display:none;position:absolute;top:calc(100% + 6px);left:0;z-index:50;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;width:340px;box-shadow:0 8px 24px rgba(0,0,0,0.6);}
-.kicad-menu.open .kicad-panel{display:block;}
 .kicad-row-btn{display:block;width:100%;text-align:left;padding:6px 10px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;font-size:0.8rem;font-family:inherit;cursor:pointer;margin-bottom:6px;}
 .kicad-row-btn:hover{background:#30363d;border-color:#58a6ff;}
-.kicad-row-status{display:block;font-size:0.75rem;color:#8b949e;padding:4px 2px;line-height:1.3;word-wrap:break-word;}
 .sch-section{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:14px 16px;margin-bottom:16px;}
 .sch-subsection{margin-left:14px;margin-top:12px;background:#12161d;}
 .sch-attached-sub{margin:14px 0 4px;padding:10px 12px;background:#12161d;border:1px solid #21262d;border-radius:6px;}

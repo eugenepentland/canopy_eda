@@ -1484,16 +1484,12 @@
   }
 
   // ---- Push to KiCad PCB ----
-  // New flow: clicking Push (or Push + Delete Stale) first POSTs the sync
-  // with ?dry_run=1, shows the would-be op list + summary counts in a
-  // preview modal, and only on Confirm POSTs the real (writing) sync. The
-  // result — applied-op counts, lock-file warning, or the server's error
-  // body (e.g. "design has no (kicad-pcb …) form") — lands in a toast.
+  // Clicking Push first POSTs the sync with ?dry_run=1, shows the would-be op
+  // list + summary counts in a preview modal, and only on Confirm POSTs the
+  // real (writing) sync. The result — applied-op counts, lock-file warning, or
+  // the server's error body (e.g. "design has no (kicad-pcb …) form") — lands
+  // in a toast.
   var pushPcbBtn = document.getElementById('push-kicad-pcb-btn');
-  var pushPcbPruneBtn = document.getElementById('push-kicad-pcb-prune-btn');
-  var pushPcbDotBtn = document.getElementById('push-kicad-pcb-dotnets-btn');
-  var pushPcbRefreshBtn = document.getElementById('push-kicad-pcb-refresh-btn');
-  var pushPcbStatus = document.getElementById('push-kicad-pcb-status');
 
   // One-line label for a sync op in the preview list: kind + the most
   // identifying fields the op carries (ref / field / net / value).
@@ -1807,69 +1803,11 @@
     });
   }
 
-  // Shared click handler so the plain Push and Push + Delete Stale
-  // buttons stay in lock-step on busy-state, status text, error
-  // formatting, and the success summary. The only thing that varies
-  // is the URL query (`?prune=1`) and the running-label.
-  function wireKicadPushButton(btn, url, runningLabel) {
-    if (!btn) return;
-    btn.addEventListener('click', function () {
-      if (btn.dataset.busy === '1') return;
-      btn.dataset.busy = '1';
-      var original = btn.textContent;
-      btn.textContent = runningLabel;
-      if (pushPcbStatus) {
-        pushPcbStatus.textContent = '';
-        pushPcbStatus.style.color = '';
-      }
-      fetch(url, { method: 'POST' }).then(function (r) {
-        return r.text().then(function (body) { return { ok: r.ok, body: body }; });
-      }).then(function (resp) {
-        btn.textContent = original;
-        btn.dataset.busy = '';
-        if (!resp.ok) {
-          if (pushPcbStatus) {
-            pushPcbStatus.textContent = resp.body || 'Push failed.';
-            pushPcbStatus.style.color = '#f85149';
-          }
-          return;
-        }
-        var j = {};
-        try { j = JSON.parse(resp.body); } catch (_e) {}
-        var a = (j && j.applied) || {};
-        var msg = '✓ Wrote ' +
-          (a.added || 0) + ' added, ' +
-          (a.removed || 0) + ' removed, ' +
-          (a.swapped || 0) + ' swapped, ' +
-          (a.pad_nets_set || 0) + ' pad-nets, ' +
-          (a.fields_set || 0) + ' fields';
-        if (a.fields_hidden) msg += ', ' + a.fields_hidden + ' fields hidden';
-        if (a.fields_shown) msg += ', ' + a.fields_shown + ' fields shown';
-        if (j && j.warning) {
-          msg += ' — ⚠ ' + j.warning;
-          if (pushPcbStatus) pushPcbStatus.style.color = '#d29922';
-        } else if (pushPcbStatus) {
-          pushPcbStatus.style.color = '#3fb950';
-        }
-        if (pushPcbStatus) pushPcbStatus.textContent = msg;
-        if (typeof refreshKicadSyncChip === 'function') refreshKicadSyncChip();
-      }).catch(function (e) {
-        btn.textContent = original;
-        btn.dataset.busy = '';
-        if (pushPcbStatus) {
-          pushPcbStatus.textContent = 'Push failed: ' + e;
-          pushPcbStatus.style.color = '#f85149';
-        }
-      });
-    });
-  }
-  // Push + Prune go through the dry-run preview modal; the dot-nets and
-  // footprint-refresh variants keep the direct one-shot path (their op
-  // streams are huge and mechanical — a preview adds nothing).
-  wireKicadPreviewButton(pushPcbBtn, 'Push to KiCad PCB', '', 'Previewing…');
-  wireKicadPreviewButton(pushPcbPruneBtn, 'Push + Delete Stale', 'prune=1', 'Previewing…');
-  wireKicadPushButton(pushPcbDotBtn, '/api/sync-kicad-pcb/' + DESIGN_NAME + '?dot_nets=1', 'Pushing (per-pin nets)…');
-  wireKicadPushButton(pushPcbRefreshBtn, '/api/sync-kicad-pcb/' + DESIGN_NAME + '?refresh=1', 'Refreshing footprints…');
+  // The single Push button runs the full sync — prune stale footprints +
+  // refresh footprint geometry (prune=1&refresh=1) — through the dry-run
+  // preview modal so every change is shown and confirmed before the board is
+  // written. Results land in a toast (see wireKicadPreviewButton).
+  wireKicadPreviewButton(pushPcbBtn, 'Push to KiCad PCB', 'prune=1&refresh=1', 'Previewing…');
 
   // ---- KiCad PCB sync-freshness chip ----
   // For designs that declare a (kicad-pcb …) target the header carries a
@@ -2202,17 +2140,6 @@
         detailBox.querySelector('.sb-back').addEventListener('click', showHistory);
       });
   }
-
-  // ---- KiCad menu (dropdown toggle for the two download buttons) ----
-  (function () {
-    var menu = document.querySelector('.kicad-menu');
-    var btn = document.getElementById('kicad-btn');
-    var panel = document.getElementById('kicad-panel');
-    if (!menu || !btn || !panel) return;
-    btn.addEventListener('click', function (e) { e.stopPropagation(); menu.classList.toggle('open'); });
-    panel.addEventListener('click', function (e) { e.stopPropagation(); });
-    document.addEventListener('click', function () { menu.classList.remove('open'); });
-  })();
 
   // ---- Live reload ----
   var lastVersion = null;
