@@ -1484,12 +1484,12 @@
   }
 
   // ---- Push to KiCad PCB ----
-  // Clicking Push first POSTs the sync with ?dry_run=1, shows the would-be op
-  // list + summary counts in a preview modal, and only on Confirm POSTs the
-  // real (writing) sync. The result — applied-op counts, lock-file warning, or
-  // the server's error body (e.g. "design has no (kicad-pcb …) form") — lands
-  // in a toast.
-  var pushPcbBtn = document.getElementById('push-kicad-pcb-btn');
+  // The push flow is now triggered by the single merged #kicad-sync-chip
+  // button (below) when the board is out of sync — there's no separate Push
+  // button. Clicking the chip while pending POSTs the sync with ?dry_run=1,
+  // shows the would-be op list + summary counts in a preview modal, and only
+  // on Confirm POSTs the real (writing) sync. The result — applied-op counts,
+  // lock-file warning, or the server's error body — lands in a toast.
 
   // One-line label for a sync op in the preview list: kind + the most
   // identifying fields the op carries (ref / field / net / value).
@@ -1746,94 +1746,93 @@
     return msg;
   }
 
-  // Wire a Push button to the dry-run → modal → confirm flow. `extraQuery`
-  // (e.g. "prune=1") is retained on BOTH the dry-run and the real POST.
-  function wireKicadPreviewButton(btn, title, extraQuery, runningLabel) {
-    if (!btn) return;
+  // Run the dry-run → modal → confirm push flow once, using `btn` for the
+  // busy/label state. Called by the merged sync chip's click handler when the
+  // board is out of sync. `extraQuery` (e.g. "prune=1") is retained on BOTH
+  // the dry-run and the real POST.
+  function kicadPushPreview(btn, title, extraQuery, runningLabel) {
+    if (!btn || btn.dataset.busy === '1') return;
     var base = '/api/sync-kicad-pcb/' + DESIGN_NAME;
     var realUrl = base + (extraQuery ? '?' + extraQuery : '');
     var dryUrl = base + '?dry_run=1' + (extraQuery ? '&' + extraQuery : '');
-    btn.addEventListener('click', function () {
-      if (btn.dataset.busy === '1') return;
-      btn.dataset.busy = '1';
-      var original = btn.textContent;
-      btn.textContent = runningLabel;
-      fetch(dryUrl, { method: 'POST' }).then(function (r) {
-        return r.text().then(function (body) { return { ok: r.ok, body: body }; });
-      }).then(function (resp) {
-        btn.textContent = original;
-        btn.dataset.busy = '';
-        if (!resp.ok) {
-          // Missing (kicad-pcb …) form / unreachable board file → server's
-          // error text, never silence.
-          schToast(resp.body || 'Preview failed.', 'err', 9000);
-          return;
+    btn.dataset.busy = '1';
+    var original = btn.textContent;
+    btn.textContent = runningLabel;
+    fetch(dryUrl, { method: 'POST' }).then(function (r) {
+      return r.text().then(function (body) { return { ok: r.ok, body: body }; });
+    }).then(function (resp) {
+      btn.textContent = original;
+      btn.dataset.busy = '';
+      if (!resp.ok) {
+        // Missing (kicad-pcb …) form / unreachable board file → server's
+        // error text, never silence.
+        schToast(resp.body || 'Preview failed.', 'err', 9000);
+        return;
+      }
+      var dry = {};
+      try { dry = JSON.parse(resp.body); } catch (_e) {}
+      showKicadPreview(title, dry, function (closeModal, resetConfirm, seed) {
+        var opts = { method: 'POST' };
+        if (seed && seed.length) {
+          opts.headers = { 'Content-Type': 'application/json' };
+          opts.body = JSON.stringify({ seed: seed });
         }
-        var dry = {};
-        try { dry = JSON.parse(resp.body); } catch (_e) {}
-        showKicadPreview(title, dry, function (closeModal, resetConfirm, seed) {
-          var opts = { method: 'POST' };
-          if (seed && seed.length) {
-            opts.headers = { 'Content-Type': 'application/json' };
-            opts.body = JSON.stringify({ seed: seed });
-          }
-          fetch(realUrl, opts).then(function (r) {
-            return r.text().then(function (body) { return { ok: r.ok, body: body }; });
-          }).then(function (resp2) {
-            if (!resp2.ok) {
-              resetConfirm();
-              schToast(resp2.body || 'Push failed.', 'err', 9000);
-              return;
-            }
-            var j = {};
-            try { j = JSON.parse(resp2.body); } catch (_e) {}
-            closeModal();
-            schToast(kicadAppliedMessage(j), (j && j.warning) ? 'warn' : 'ok', 8000);
-            if (typeof refreshKicadSyncChip === 'function') refreshKicadSyncChip();
-          }).catch(function (e) {
+        fetch(realUrl, opts).then(function (r) {
+          return r.text().then(function (body) { return { ok: r.ok, body: body }; });
+        }).then(function (resp2) {
+          if (!resp2.ok) {
             resetConfirm();
-            schToast('Push failed: ' + e, 'err', 9000);
-          });
+            schToast(resp2.body || 'Push failed.', 'err', 9000);
+            return;
+          }
+          var j = {};
+          try { j = JSON.parse(resp2.body); } catch (_e) {}
+          closeModal();
+          schToast(kicadAppliedMessage(j), (j && j.warning) ? 'warn' : 'ok', 8000);
+          if (typeof refreshKicadSyncChip === 'function') refreshKicadSyncChip();
+        }).catch(function (e) {
+          resetConfirm();
+          schToast('Push failed: ' + e, 'err', 9000);
         });
-      }).catch(function (e) {
-        btn.textContent = original;
-        btn.dataset.busy = '';
-        schToast('Preview failed: ' + e, 'err', 9000);
       });
+    }).catch(function (e) {
+      btn.textContent = original;
+      btn.dataset.busy = '';
+      schToast('Preview failed: ' + e, 'err', 9000);
     });
   }
 
-  // The single Push button runs the full sync — prune stale footprints +
-  // refresh footprint geometry (prune=1&refresh=1) — through the dry-run
-  // preview modal so every change is shown and confirmed before the board is
-  // written. Results land in a toast (see wireKicadPreviewButton).
-  wireKicadPreviewButton(pushPcbBtn, 'Push to KiCad PCB', 'prune=1&refresh=1', 'Previewing…');
-
-  // ---- KiCad PCB sync-freshness chip ----
-  // For designs that declare a (kicad-pcb …) target the header carries a
-  // #kicad-sync-chip. On load (and on click to re-check, and after a Push) we
-  // dry-run the file-based sync and reflect the result: green when the board
-  // already matches the netlist, amber + a pending-change count when a Push
-  // would write the .kicad_pcb, grey when the board file can't be read. The
-  // count excludes `suppressed` (already-applied no-ops) so it tracks exactly
-  // what a Push would change.
+  // ---- KiCad PCB sync — single merged button ----
+  // For designs that declare a (kicad-pcb …) target the header carries ONE
+  // #kicad-sync-chip button that is both the freshness indicator and the push
+  // trigger. On load (and on re-check, and after a push) we dry-run the
+  // file-based sync and reflect the result:
+  //   • in sync       → a compact "✓ PCB" icon; clicking re-checks.
+  //   • out of sync    → "↑ Push to PCB (N)" with the pending-change count;
+  //                      clicking opens the dry-run preview modal and writes
+  //                      the .kicad_pcb on confirm.
+  //   • board unreadable → "⚠ PCB unreachable"; clicking re-checks.
+  // dataset.pending tracks which mode the next click is in. The count excludes
+  // `suppressed` (already-applied no-ops) so it tracks exactly what a push
+  // would change.
   var kicadSyncChip = document.getElementById('kicad-sync-chip');
-  function setSyncChip(state, text, title) {
+  function setSyncChip(state, pending, text, title) {
     if (!kicadSyncChip) return;
     kicadSyncChip.className = 'head-link head-btn sync-chip ' + state;
+    kicadSyncChip.dataset.pending = pending ? '1' : '';
     kicadSyncChip.textContent = text;
     kicadSyncChip.title = title;
   }
   function refreshKicadSyncChip() {
     if (!kicadSyncChip || kicadSyncChip.dataset.busy === '1') return;
     kicadSyncChip.dataset.busy = '1';
-    setSyncChip('sync-checking', '⟳ PCB sync…', 'Checking whether the .kicad_pcb matches the design…');
+    setSyncChip('sync-checking', false, '⟳ PCB sync…', 'Checking whether the .kicad_pcb matches the design…');
     fetch('/api/sync-kicad-pcb/' + DESIGN_NAME + '?dry_run=1', { method: 'POST' }).then(function (r) {
       return r.text().then(function (body) { return { ok: r.ok, body: body }; });
     }).then(function (resp) {
       kicadSyncChip.dataset.busy = '';
       if (!resp.ok) {
-        setSyncChip('sync-unknown', '⚠ PCB unreachable', resp.body || 'Could not read the .kicad_pcb board.');
+        setSyncChip('sync-unknown', false, '⚠ PCB unreachable', resp.body || 'Could not read the .kicad_pcb board.');
         return;
       }
       var j = {};
@@ -1847,7 +1846,7 @@
       // a calm secondary note rather than inflating the "needs sync (N)" number.
       var total = pending + stale;
       if (total === 0 && relabeled === 0) {
-        setSyncChip('sync-ok', '✓ PCB in sync', 'The .kicad_pcb matches the design netlist. Click to re-check.');
+        setSyncChip('sync-ok', false, '✓ PCB', 'The .kicad_pcb matches the design netlist. Click to re-check.');
         return;
       }
       var parts = [];
@@ -1859,65 +1858,125 @@
       if (stale) parts.push(stale + ' stale on board');
       if (relabeled) parts.push(relabeled + ' relabeled');
       if (total === 0) {
-        // Only refdes/field relabels pending — nothing moves, so stay calm.
-        setSyncChip('sync-ok', '✓ PCB in sync · ' + relabeled + ' relabel' + (relabeled === 1 ? '' : 's'),
-          'Pending: ' + parts.join(', ') + ' (labels & BOM fields only, nothing moves). Open KiCad ▾ → Push to KiCad PCB. Click to re-check.');
+        // Only refdes/field relabels pending — nothing moves, so keep the
+        // calm "in sync" icon, but a click still pushes the relabels.
+        setSyncChip('sync-ok', true, '✓ PCB · ' + relabeled + ' relabel' + (relabeled === 1 ? '' : 's'),
+          'Pending: ' + parts.join(', ') + ' (labels & BOM fields only, nothing moves). Click to push to KiCad.');
         return;
       }
-      setSyncChip('sync-stale', '⚠ PCB needs sync (' + total + ')',
-        'Pending: ' + parts.join(', ') + '. Open KiCad ▾ → Push to KiCad PCB. Click to re-check.');
+      setSyncChip('sync-stale', true, '↑ Push to PCB (' + total + ')',
+        'Pending: ' + parts.join(', ') + '. Click to preview & push to the .kicad_pcb.');
     }).catch(function (e) {
       kicadSyncChip.dataset.busy = '';
-      setSyncChip('sync-unknown', '⚠ PCB unreachable', 'Sync check failed: ' + e);
+      setSyncChip('sync-unknown', false, '⚠ PCB unreachable', 'Sync check failed: ' + e);
     });
   }
   if (kicadSyncChip) {
-    kicadSyncChip.addEventListener('click', refreshKicadSyncChip);
+    kicadSyncChip.addEventListener('click', function () {
+      if (kicadSyncChip.dataset.busy === '1') return;
+      if (kicadSyncChip.dataset.pending === '1') {
+        // Out of sync → run the full sync (prune stale footprints + refresh
+        // footprint geometry) through the dry-run preview/confirm modal.
+        kicadPushPreview(kicadSyncChip, 'Push to KiCad PCB', 'prune=1&refresh=1', 'Previewing…');
+      } else {
+        refreshKicadSyncChip();
+      }
+    });
     refreshKicadSyncChip();
   }
 
-  // ---- Export SRC ----
-  // Fetches the raw .sexp source via /api/source/:name and saves it as a
-  // <design>.sexp file download (Blob + a temporary <a download>).
-  var copySrcBtn = document.getElementById('copy-src-btn');
-  if (copySrcBtn) {
-    copySrcBtn.addEventListener('click', function () {
-      if (copySrcBtn.dataset.busy === '1') return;
-      copySrcBtn.dataset.busy = '1';
-      var original = copySrcBtn.textContent;
-      copySrcBtn.textContent = 'Exporting…';
+  // ---- Edit SRC ----
+  // Loads the raw .sexp via GET /api/source into a modal editor and saves via
+  // POST /api/source. The server validates syntax, rebuilds, and bumps the
+  // live version; on success we reload the page to pick the change up.
+  var editSrcBtn = document.getElementById('edit-src-btn');
+  if (editSrcBtn) {
+    editSrcBtn.addEventListener('click', function () {
+      if (editSrcBtn.dataset.busy === '1') return;
+      editSrcBtn.dataset.busy = '1';
+      var original = editSrcBtn.textContent;
+      editSrcBtn.textContent = 'Loading…';
       fetch('/api/source/' + DESIGN_NAME).then(function (r) {
         if (!r.ok) throw new Error('fetch failed: ' + r.status);
         return r.json();
       }).then(function (j) {
-        var src = (j && typeof j.source === 'string') ? j.source : '';
-        if (!src) throw new Error('empty source');
-        downloadText(DESIGN_NAME + '.sexp', src);
-        copySrcBtn.textContent = '✓ Exported';
-        setTimeout(function () {
-          copySrcBtn.textContent = original;
-          copySrcBtn.dataset.busy = '';
-        }, 1200);
+        editSrcBtn.textContent = original;
+        editSrcBtn.dataset.busy = '';
+        openSrcEditor((j && typeof j.source === 'string') ? j.source : '');
       }).catch(function (e) {
-        copySrcBtn.textContent = original;
-        copySrcBtn.dataset.busy = '';
-        alert('Export failed: ' + e);
+        editSrcBtn.textContent = original;
+        editSrcBtn.dataset.busy = '';
+        schToast('Could not load source: ' + e, 'err', 8000);
       });
     });
   }
 
-  // Trigger a browser download of `text` as `filename` via a transient
-  // object-URL anchor (revoked once the click is dispatched).
-  function downloadText(filename, text) {
-    var blob = new Blob([text], { type: 'application/octet-stream' });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+  // Modal .sexp editor: a centered overlay with a monospace textarea. Save
+  // POSTs the edited source; validation/rebuild errors from the server render
+  // inline (red) so the user can fix and retry without losing their edit.
+  function openSrcEditor(src) {
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;' +
+      'display:flex;align-items:center;justify-content:center;';
+    overlay.innerHTML =
+      '<div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;' +
+        'width:min(960px,92vw);height:min(82vh,860px);display:flex;flex-direction:column;' +
+        'box-shadow:0 8px 32px rgba(0,0,0,.5);overflow:hidden;">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;' +
+          'padding:10px 14px;border-bottom:1px solid #30363d;color:#c9d1d9;font-weight:600;">' +
+          '<span>Edit <code>' + escapeHtml(DESIGN_NAME) + '.sexp</code></span>' +
+          '<button type="button" class="se-x" title="Close" style="background:none;border:0;' +
+            'color:#8b949e;font-size:18px;cursor:pointer;line-height:1;">✕</button></div>' +
+        '<textarea class="se-ta" spellcheck="false" wrap="off" style="flex:1;margin:0;border:0;' +
+          'background:#0d1117;color:#c9d1d9;font-family:ui-monospace,Menlo,Consolas,monospace;' +
+          'font-size:12px;line-height:1.5;padding:12px 14px;resize:none;outline:none;overflow:auto;"></textarea>' +
+        '<div class="se-msg" style="padding:0 14px;color:#f85149;' +
+          'font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;"></div>' +
+        '<div style="display:flex;justify-content:flex-end;gap:8px;padding:10px 14px;' +
+          'border-top:1px solid #30363d;">' +
+          '<button type="button" class="se-cancel head-btn" style="cursor:pointer;">Cancel</button>' +
+          '<button type="button" class="se-save head-btn" style="cursor:pointer;' +
+            'border-color:#238636;color:#3fb950;">Save &amp; rebuild</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    var ta = overlay.querySelector('.se-ta');
+    ta.value = src;
+    var msg = overlay.querySelector('.se-msg');
+    function close() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
+    overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) close(); });
+    overlay.querySelector('.se-x').addEventListener('click', close);
+    overlay.querySelector('.se-cancel').addEventListener('click', close);
+    var saveBtn = overlay.querySelector('.se-save');
+    saveBtn.addEventListener('click', function () {
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      msg.textContent = '';
+      fetch('/api/source/' + DESIGN_NAME, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: ta.value })
+      }).then(function (r) {
+        return r.text().then(function (body) { return { ok: r.ok, body: body }; });
+      }).then(function (resp) {
+        var j = {};
+        try { j = JSON.parse(resp.body); } catch (_e) {}
+        if (!resp.ok || (j && j.ok === false)) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = 'Save & rebuild';
+          msg.textContent = (j && j.error) ? j.error : ('save failed: ' + (resp.body || resp.ok));
+          return;
+        }
+        close();
+        schToast('✓ Source saved — rebuilding', 'ok', 4000);
+        window.location.reload();
+      }).catch(function (e) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save & rebuild';
+        msg.textContent = 'save failed: ' + e;
+      });
+    });
+    ta.focus();
   }
 
   // ---- ERC panel ----
