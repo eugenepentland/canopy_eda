@@ -1,11 +1,15 @@
-//! Static markdown export of the design-review page. Produces a single
-//! self-contained `.md` document containing the system block diagram,
-//! per-section schematic SVGs, BOM stub, power budget/sequencing tables,
-//! test points, ERC violations, per-IC requirement checklist, and the
-//! verbatim source file. Intended companion to `<name>-bom.csv`.
+//! Static markdown export of the design-review page — the human/agent-readable
+//! twin of what the schematic page shows. One `.md` document with: a status
+//! summary, the block overview (the page's lead grouped-cards diagram), a
+//! validation block (ERC + assertions + per-IC requirement checks), the power
+//! budget/sequencing + test-point tables, and the per-section schematic SVGs.
+//! The verbatim `.sexp` source is NOT embedded — the export zip already ships
+//! every source file separately.
 //!
 //! The markdown embeds inline `<svg>` and a leading `<style>` block;
-//! GitHub, VSCode preview, Obsidian, mdBook, and pandoc all render it.
+//! GitHub, VSCode preview, Obsidian, mdBook, and pandoc all render it. Per-hub
+//! SVGs are compacted (dead interactive markup stripped, one line each) so the
+//! document stays scannable — see `writeCompactSvg`.
 
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
@@ -21,23 +25,28 @@ const render_html = @import("render_html.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
 const Allocator = std.mem.Allocator;
-const CheckResultMap = std.StringHashMapUnmanaged([]req_checks.Result);
 
-/// Render a full design-review markdown package.
+/// Render the design-review markdown document.
 ///
-/// `source` is the verbatim contents of the design's `.sexp` file (embedded
-/// at the bottom of the markdown as a fenced code block); pass empty to
-/// suppress that section. `check_results` is the same map produced by
-/// `req_checks.runChecks` + `applyVerifications` — drives the per-IC
-/// checklist's pass/fail/verified/pending classification.
+/// Mirrors the schematic page: a status summary, the system block diagram,
+/// the validation block (ERC + assertions + per-IC requirement checks), the
+/// power / test-point tables, and the per-section schematic SVGs. The verbatim
+/// `.sexp` source is NOT embedded — the export zip already carries every
+/// source file as a separate, diffable entry. `check_results` is the same map
+/// produced by `req_checks.runChecks` + `applyVerifications`, driving the
+/// requirement checks' pass/fail/verified/pending classification.
+///
+/// Validation (ERC, assertions, requirements) is placed up top, before the
+/// long visual schematic, so a reviewer — human or agent — reads the verdict
+/// first. The per-hub SVGs are compacted (dead interactive markup stripped,
+/// one line each) so the document stays scannable instead of ballooning into
+/// thousands of lines of pretty-printed SVG.
 pub fn renderToMarkdown(
     allocator: Allocator,
     block: *const DesignBlock,
     project_dir: []const u8,
     design_name: []const u8,
     doc: review.ReviewDoc,
-    source: []const u8,
-    check_results: *const CheckResultMap,
 ) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
     var ctx = try render_html.setupRenderCtx(allocator, block);
     ctx.project_dir = project_dir;
@@ -70,17 +79,21 @@ pub fn renderToMarkdown(
     try w.writeAll(block_diagram.DIAGRAM_CSS);
     try w.writeAll("\n</style>\n\n");
 
+    // Verdict first: summary, the system overview, then the validation block
+    // (ERC + assertions + per-IC requirement checks — everything that can
+    // pass/fail, grouped under one heading), then the engineering tables.
     try writeSummary(w, doc.summary);
-    try writeSystemDiagram(allocator, w, block);
+    try writeBlockOverview(allocator, w, block);
+    try w.writeAll("## Validation\n\n");
+    try writeErc(w, doc.unresolved);
+    try writeAssertions(w, doc.assertions);
+    try writeRequirementChecklist(allocator, w, doc);
     try writePowerBudget(w, doc.power_budget);
     try writePowerSequence(w, doc.power_sequence);
     try writeTestPoints(w, doc.test_points);
-    try writeErc(w, doc.unresolved);
-    try writeAssertions(w, doc.assertions);
-    try writeSchematicSections(allocator, &ctx, w, block, check_results);
-    try writeRequirementChecklist(w, doc.sections, check_results);
+    // The detailed visual schematic last — it's the longest part even compacted.
+    try writeSchematicSections(allocator, &ctx, w, block);
     try writeBomStub(w, design_name, doc.bom);
-    try writeSource(w, source);
 
     return buf.toOwnedSlice(allocator);
 }
@@ -107,17 +120,25 @@ fn writeSummary(w: anytype, s: review.Summary) !void {
     try w.writeAll("\n");
 }
 
-fn writeSystemDiagram(allocator: Allocator, w: anytype, block: *const DesignBlock) !void {
-    try w.writeAll("## System Block Diagram\n\n");
+/// The page's lead diagram: the **Block overview** (grouped-cards view of the
+/// authored `(group …)` clusters, with the concept/schematic/done maturity
+/// legend). A design with no groups has no block overview, so we fall back to
+/// the auto System block diagram so there's always one overview up top.
+fn writeBlockOverview(allocator: Allocator, w: anytype, block: *const DesignBlock) !void {
+    try w.writeAll("## Block Overview\n\n");
     const sub_attachments = try membership.computeSubBlockAttachments(allocator, block);
     defer allocator.free(sub_attachments);
     // The engine renderer writes to a `*std.Io.Writer`; bridge to this module's
-    // ArrayList writer through a scratch Allocating buffer.
+    // ArrayList writer through a scratch Allocating buffer. The markdown/zip
+    // export has no project root to read layout sidecars from, so chips cap at
+    // the `schematic` maturity stage (no starred-layout lookup).
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    // The markdown/zip export has no project root to read layout sidecars from,
-    // so chips cap at the `schematic` maturity stage (no starred-layout lookup).
-    try block_diagram.renderSystemSvg(allocator, block, sub_attachments, "", &aw.writer);
+    const rendered = block_diagram.renderBlockOverview(allocator, block, sub_attachments, "", &aw.writer) catch false;
+    if (!rendered) {
+        // No `(group …)` clusters → the auto System overview is the best we have.
+        try block_diagram.renderSystemSvg(allocator, block, sub_attachments, "", &aw.writer);
+    }
     try w.writeAll(aw.written());
     try w.writeAll("\n\n");
 }
@@ -178,7 +199,7 @@ fn writeTestPoints(w: anytype, tps: []const review.TestPointEntry) !void {
 }
 
 fn writeErc(w: anytype, violations: []const erc_mod.Violation) !void {
-    try w.writeAll("## ERC Check\n\n");
+    try w.writeAll("### ERC\n\n");
     if (violations.len == 0) {
         try w.writeAll("✓ 0 violations.\n\n");
         return;
@@ -199,8 +220,11 @@ fn writeErc(w: anytype, violations: []const erc_mod.Violation) !void {
 }
 
 fn writeAssertions(w: anytype, asserts: []const review.AssertionReport) !void {
-    if (asserts.len == 0) return;
-    try w.writeAll("## Assertions\n\n");
+    try w.writeAll("### Assertions\n\n");
+    if (asserts.len == 0) {
+        try w.writeAll("*No design assertions declared.*\n\n");
+        return;
+    }
     try w.writeAll("| Status | Message |\n");
     try w.writeAll("|--------|---------|\n");
     for (asserts) |a| {
@@ -216,13 +240,12 @@ fn writeSchematicSections(
     ctx: anytype,
     w: anytype,
     block: *const DesignBlock,
-    check_results: *const CheckResultMap,
 ) !void {
     try w.writeAll("## Schematic\n\n");
     for (block.sections) |sec| {
-        try writeSchematicSection(allocator, ctx, w, sec, 3, check_results);
+        try writeSchematicSection(allocator, ctx, w, sec, 3);
         for (sec.sub_sections) |sub| {
-            try writeSchematicSection(allocator, ctx, w, sub, 4, check_results);
+            try writeSchematicSection(allocator, ctx, w, sub, 4);
         }
     }
     for (block.sub_blocks) |sb| {
@@ -250,9 +273,7 @@ fn writeSchematicSection(
     w: anytype,
     sec: Section,
     heading_level: u8,
-    check_results: *const CheckResultMap,
 ) !void {
-    _ = check_results;
     try writeHeading(w, heading_level, sec.name);
     if (sec.description.len > 0) {
         try writeMdEscaped(w, sec.description);
@@ -312,107 +333,167 @@ fn writeHubBlock(
     const sw = sub_buf.writer(allocator);
     const rendered = render_html.renderHubSvg(ctx, sw, allocator, pin_groups, ref_des) catch false;
     if (rendered) {
-        try w.writeAll(sub_buf.items);
+        try writeCompactSvg(allocator, w, sub_buf.items);
+        try w.writeAll("\n");
     } else {
         try w.writeAll("*No schematic body — only passives or no pin groupings declared.*\n");
     }
     try w.writeAll("\n</details>\n\n");
 }
 
-fn writeRequirementChecklist(
-    w: anytype,
-    sections: []const review.SectionReport,
-    check_results: *const CheckResultMap,
-) !void {
-    try w.writeAll("## Per-IC Requirement Checklist\n\n");
-    var emitted = false;
-    for (sections) |sec| {
-        for (sec.component_requirements) |entry| {
-            if (entry.requirements.len == 0) continue;
-            emitted = true;
-            try w.print("### `{s}` — {s}\n\n", .{ entry.ref_des, entry.component });
-
-            // Worst → best ordering, mirrors the live page's hub-card sort.
-            // Build a [(req_idx, sort_key)] list and sort.
-            const SortItem = struct { idx: usize, key: u8 };
-            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            const sorted = a.alloc(SortItem, entry.requirements.len) catch continue;
-            for (entry.requirements, 0..) |_, i| {
-                const status: req_checks.Status = if (i < entry.req_results.len) entry.req_results[i].status else .na;
-                const has_v = (i < entry.req_results.len) and (entry.req_results[i].verification != null);
-                sorted[i] = .{ .idx = i, .key = sortKey(status, has_v) };
-            }
-            std.mem.sortUnstable(SortItem, sorted, {}, struct {
-                fn lt(_: void, x: SortItem, y: SortItem) bool {
-                    if (x.key != y.key) return x.key < y.key;
-                    return x.idx < y.idx;
-                }
-            }.lt);
-
-            for (sorted) |it| {
-                const i = it.idx;
-                const r = entry.requirements[i];
-                const status: req_checks.Status = if (i < entry.req_results.len) entry.req_results[i].status else .na;
-                const msg: []const u8 = if (i < entry.req_results.len) entry.req_results[i].message else "";
-                const verification: ?env_mod.Verification = if (i < entry.req_results.len) entry.req_results[i].verification else null;
-
-                const badge: []const u8 = switch (status) {
-                    .pass => "✓ **PASS**",
-                    .verified => "✓ **VERIFIED**",
-                    .na => "⚠ **PENDING**",
-                    .fail => if (verification != null) "✗ **FAIL** *(overridden)*" else "✗ **FAIL**",
-                };
-                try w.print("- {s} — ", .{badge});
-                try writeMdEscaped(w, r.text);
-                if (r.ref) |ref| {
-                    try w.print(" *({s}", .{ref.pdf});
-                    if (ref.page > 0) try w.print(" p.{d}", .{ref.page});
-                    try w.writeAll(")*");
-                }
-                if (msg.len > 0) {
-                    try w.writeAll("\n  - check: `");
-                    try writeMdEscaped(w, msg);
-                    try w.writeAll("`");
-                }
-                if (verification) |v| {
-                    try w.writeAll("\n  - sign-off: ");
-                    try writeMdEscaped(w, v.rationale);
-                    if (v.signed_by.len > 0) {
-                        try w.writeAll(" — *");
-                        try writeMdEscaped(w, v.signed_by);
-                        if (v.date.len > 0) {
-                            try w.print(", {s}", .{v.date});
-                        }
-                        try w.writeAll("*");
-                    }
-                }
-                try w.writeAll("\n");
-            }
-            try w.writeAll("\n");
+/// Emit a hub SVG slimmed for a static document. The shared schematic renderer
+/// targets the live, interactive page, so it pretty-prints one element per line
+/// and embeds click-only markup (transparent `hit-area` targets, hidden
+/// `debug-pin` markers, `cursor:pointer`) that does nothing in a `.md`. We
+/// excise those dead elements and collapse the result to a single line — the
+/// visual is byte-for-byte identical when rendered, but a board's schematic
+/// drops from thousands of lines to one line per hub. `data-net`/`data-ref`
+/// are kept: they carry net/part names an agent can actually read.
+fn writeCompactSvg(allocator: Allocator, w: anytype, svg: []const u8) !void {
+    // Pass 1 — drop dead interactive elements + the cursor:pointer style.
+    var clean: std.ArrayListUnmanaged(u8) = .empty;
+    defer clean.deinit(allocator);
+    var i: usize = 0;
+    while (i < svg.len) {
+        if (svg[i] == '<') {
+            const close = std.mem.indexOfScalarPos(u8, svg, i, '>') orelse svg.len - 1;
+            const tag = svg[i .. close + 1];
+            const dead = std.mem.indexOf(u8, tag, "class=\"hit-area\"") != null or
+                std.mem.indexOf(u8, tag, "class=\"debug-pin\"") != null;
+            if (!dead) try appendWithoutSubstr(&clean, allocator, tag, " style=\"cursor:pointer\"");
+            i = close + 1;
+        } else {
+            try clean.append(allocator, svg[i]);
+            i += 1;
         }
     }
+
+    // Pass 2 — collapse every run of whitespace that spans a newline (the
+    // pretty-print indentation) down to a single space. Text content (pin
+    // numbers, labels) has no newlines, so it is untouched.
+    var pending_break = false;
+    for (clean.items) |c| {
+        switch (c) {
+            '\n', '\r', '\t' => pending_break = true,
+            ' ' => if (!pending_break) try w.writeByte(' '),
+            else => {
+                if (pending_break) {
+                    try w.writeByte(' ');
+                    pending_break = false;
+                }
+                try w.writeByte(c);
+            },
+        }
+    }
+}
+
+/// Append `s` to `list`, removing every occurrence of `needle`.
+fn appendWithoutSubstr(list: *std.ArrayListUnmanaged(u8), allocator: Allocator, s: []const u8, needle: []const u8) !void {
+    var rest = s;
+    while (std.mem.indexOf(u8, rest, needle)) |at| {
+        try list.appendSlice(allocator, rest[0..at]);
+        rest = rest[at + needle.len ..];
+    }
+    try list.appendSlice(allocator, rest);
+}
+
+/// Per-IC requirement checks — every requirement-bearing component, whether
+/// declared in a top-level section OR inside a sub-block module (the latter is
+/// where most ICs live on a sub-block-heavy board, so omitting them — as the
+/// old checklist did — left the doc looking requirement-free).
+fn writeRequirementChecklist(allocator: Allocator, w: anytype, doc: review.ReviewDoc) !void {
+    try w.writeAll("### Requirement Checks (per IC)\n\n");
+    var emitted = false;
+    // A multi-section IC (the main MCU declares pins in several sections) shows
+    // up once per section in `component_requirements`; its requirements come
+    // from the library and are identical each time, so emit each ref-des once.
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+    for (doc.sections) |sec| {
+        for (sec.component_requirements) |entry| {
+            if (entry.requirements.len == 0 or seen.contains(entry.ref_des)) continue;
+            try seen.put(allocator, entry.ref_des, {});
+            if (try writeRequirementEntry(allocator, w, entry)) emitted = true;
+        }
+    }
+    for (doc.subblock_requirements) |entry| {
+        if (entry.requirements.len == 0 or seen.contains(entry.ref_des)) continue;
+        try seen.put(allocator, entry.ref_des, {});
+        if (try writeRequirementEntry(allocator, w, entry)) emitted = true;
+    }
     if (!emitted) try w.writeAll("*No requirement-bearing components in this design.*\n\n");
-    _ = check_results;
+}
+
+/// One component's requirement block. Returns false (emitting nothing) when the
+/// component declares no requirements.
+fn writeRequirementEntry(allocator: Allocator, w: anytype, entry: review.ComponentRequirementEntry) !bool {
+    if (entry.requirements.len == 0) return false;
+    try w.print("#### `{s}` — {s}\n\n", .{ entry.ref_des, entry.component });
+
+    // Worst → best ordering, mirrors the live page's hub-card sort.
+    // Build a [(req_idx, sort_key)] list and sort.
+    const SortItem = struct { idx: usize, key: u8 };
+    const sorted = allocator.alloc(SortItem, entry.requirements.len) catch return false;
+    defer allocator.free(sorted);
+    for (entry.requirements, 0..) |_, i| {
+        const status: req_checks.Status = if (i < entry.req_results.len) entry.req_results[i].status else .na;
+        const has_v = (i < entry.req_results.len) and (entry.req_results[i].verification != null);
+        sorted[i] = .{ .idx = i, .key = sortKey(status, has_v) };
+    }
+    std.mem.sortUnstable(SortItem, sorted, {}, struct {
+        fn lt(_: void, x: SortItem, y: SortItem) bool {
+            if (x.key != y.key) return x.key < y.key;
+            return x.idx < y.idx;
+        }
+    }.lt);
+
+    for (sorted) |it| {
+        const i = it.idx;
+        const r = entry.requirements[i];
+        const status: req_checks.Status = if (i < entry.req_results.len) entry.req_results[i].status else .na;
+        const msg: []const u8 = if (i < entry.req_results.len) entry.req_results[i].message else "";
+        const verification: ?env_mod.Verification = if (i < entry.req_results.len) entry.req_results[i].verification else null;
+
+        const badge: []const u8 = switch (status) {
+            .pass => "✓ **PASS**",
+            .verified => "✓ **VERIFIED**",
+            .na => "⚠ **PENDING**",
+            .fail => if (verification != null) "✗ **FAIL** *(overridden)*" else "✗ **FAIL**",
+        };
+        try w.print("- {s} — ", .{badge});
+        try writeMdEscaped(w, r.text);
+        if (r.ref) |ref| {
+            try w.print(" *({s}", .{ref.pdf});
+            if (ref.page > 0) try w.print(" p.{d}", .{ref.page});
+            try w.writeAll(")*");
+        }
+        if (msg.len > 0) {
+            try w.writeAll("\n  - check: `");
+            try writeMdEscaped(w, msg);
+            try w.writeAll("`");
+        }
+        if (verification) |v| {
+            try w.writeAll("\n  - sign-off: ");
+            try writeMdEscaped(w, v.rationale);
+            if (v.signed_by.len > 0) {
+                try w.writeAll(" — *");
+                try writeMdEscaped(w, v.signed_by);
+                if (v.date.len > 0) {
+                    try w.print(", {s}", .{v.date});
+                }
+                try w.writeAll("*");
+            }
+        }
+        try w.writeAll("\n");
+    }
+    try w.writeAll("\n");
+    return true;
 }
 
 fn writeBomStub(w: anytype, design_name: []const u8, bom: []const review.BomGroup) !void {
     var total: usize = 0;
     for (bom) |g| total += g.entries.len;
     try w.print("## Bill of Materials\n\nSee attached `{s}-bom.csv` ({d} parts in {d} groups).\n\n", .{ design_name, total, bom.len });
-}
-
-fn writeSource(w: anytype, source: []const u8) !void {
-    try w.writeAll("## Source\n\n");
-    if (source.len == 0) {
-        try w.writeAll("*Source file unavailable.*\n");
-        return;
-    }
-    try w.writeAll("```scheme\n");
-    try w.writeAll(source);
-    if (source.len > 0 and source[source.len - 1] != '\n') try w.writeAll("\n");
-    try w.writeAll("```\n");
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -503,10 +584,11 @@ test "renderToMarkdown header" {
         .assertions = &.{},
         .unresolved = &.{},
     };
-    var map: CheckResultMap = .empty;
-    const out = try renderToMarkdown(allocator, &block, "/tmp", "test", doc, "", &map);
+    const out = try renderToMarkdown(allocator, &block, "/tmp", "test", doc);
     defer allocator.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "# Design Review: test") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "## Summary") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "## Source") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "## Validation") != null);
+    // The verbatim source is shipped as separate zip files, never embedded.
+    try std.testing.expect(std.mem.indexOf(u8, out, "## Source") == null);
 }
