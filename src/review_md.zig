@@ -21,6 +21,7 @@ const power_sequencing = @import("eval/power_sequencing.zig");
 const block_diagram = @import("diagram/diagram.zig");
 const membership = @import("diagram/membership.zig");
 const render_html = @import("render_html.zig");
+const draw = @import("render_svg/draw.zig");
 
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
@@ -345,15 +346,8 @@ fn writeSchematicSections(
         if (sb.block.name.len > 0) {
             try w.print("*{s}*\n\n", .{sb.block.name});
         }
+        // writeHubBlock skips passives (drawn as spokes on each hub) itself.
         for (sb.block.instances) |inst| {
-            const fi = .{
-                .ref_des = inst.ref_des,
-                .component = inst.component,
-                .value = inst.value,
-                .symbol = inst.symbol,
-                .parts = inst.parts,
-            };
-            _ = fi;
             try writeHubBlock(allocator, ctx, w, &.{}, inst.ref_des, inst.component, inst.value);
         }
     }
@@ -408,6 +402,10 @@ fn writeSchematicSection(
 /// One IC's heading + inline SVG. SVG is wrapped in `<details>` collapsed
 /// by default so the markdown opens compact and reviewers expand only
 /// what they need to inspect. Comment out the `<details>` wrap to flatten.
+///
+/// Passives (R/C/L/F/D) are skipped entirely: they're already drawn inline as
+/// spokes on the hub SVGs they wire into, so a standalone block per passive
+/// just repeats that symbol. Mirrors the live schematic page's `isHub` filter.
 fn writeHubBlock(
     allocator: Allocator,
     ctx: anytype,
@@ -417,6 +415,7 @@ fn writeHubBlock(
     component: []const u8,
     value: []const u8,
 ) !void {
+    if (!draw.isHubRef(ref_des)) return;
     try w.print("<details><summary><strong><code>{s}</code></strong> · {s}", .{ ref_des, component });
     if (value.len > 0) try w.print(" · {s}", .{value});
     try w.writeAll("</summary>\n\n");
