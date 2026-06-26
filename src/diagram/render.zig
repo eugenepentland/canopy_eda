@@ -193,6 +193,14 @@ fn renderBlocksPanel(allocator: Allocator, graph: *const Graph, w: *Writer) (All
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     try writePanelOpen(w, blocks_key);
+    try writeBlocksBody(arena, graph, w);
+    try w.writeAll("</div>");
+}
+
+/// The Block-overview body — the maturity legend + the grouped-cards grid.
+/// Shared by the tabbed panel (`renderBlocksPanel`) and the standalone export
+/// (`renderBlocksStandalone`) so the two never drift.
+fn writeBlocksBody(arena: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!void {
     try w.writeAll(
         "<div class=\"dg-mleg\">" ++
             "<span><i style=\"background:#d29922\"></i>Concept — rough part ideas</span>" ++
@@ -222,7 +230,22 @@ fn renderBlocksPanel(allocator: Allocator, graph: *const Graph, w: *Writer) (All
         try other.append(arena, @intCast(i));
     }
     if (other.items.len > 0) try writeBlockGroup(arena, w, graph, "Other", other.items);
-    try w.writeAll("</div></div>");
+    try w.writeAll("</div>");
+}
+
+/// Render the Block-overview view on its own — no radio/tab chrome, just the
+/// grouped-cards grid in a visible `dg-wrap` — for the static review-doc export.
+/// Returns false (writing nothing) when the design declares no `(group …)`
+/// clusters, so the caller can fall back to the System overview.
+pub fn renderBlocksStandalone(allocator: Allocator, graph: *const Graph, w: *Writer) (Allocator.Error || Writer.Error)!bool {
+    if (graph.layout.groups.len == 0) return false;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try w.writeAll("<div class=\"dg-wrap\">");
+    try writeBlocksBody(arena, graph, w);
+    try w.writeAll("</div>");
+    return true;
 }
 
 /// One tinted cluster region + its member cards. The accent colour is the first

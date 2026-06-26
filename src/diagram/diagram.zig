@@ -33,6 +33,22 @@ pub fn renderBlockDiagramTabs(
     try render.renderTabs(allocator, &graph, w);
 }
 
+/// Render the **Block overview** (grouped-cards) view on its own — the lead
+/// view of the schematic page's diagram, extracted for the static review-doc
+/// export. Returns false (writing nothing) when the design declares no
+/// `(group …)` clusters, so the caller can fall back to `renderSystemSvg`.
+pub fn renderBlockOverview(
+    allocator: Allocator,
+    block: *const DesignBlock,
+    sub_attachments: []const ?usize,
+    project_dir: []const u8,
+    w: *Writer,
+) (Allocator.Error || Writer.Error)!bool {
+    var graph = try collect.collectGraph(allocator, block, sub_attachments, project_dir);
+    defer graph.deinit(allocator);
+    return render.renderBlocksStandalone(allocator, &graph, w);
+}
+
 /// Render the combined System block diagram as a standalone inline SVG — the
 /// static, non-interactive form used by the markdown/zip export (which can't
 /// host the page's tab toggles). Falls back to a single synthetic box for a

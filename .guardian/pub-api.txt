@@ -69,6 +69,7 @@ src/diagram/classify.zig::netClass fn
 src/diagram/collect.zig::collectGraph fn
 src/diagram/diagram.zig::DIAGRAM_CSS value
 src/diagram/diagram.zig::renderBlockDiagramTabs fn
+src/diagram/diagram.zig::renderBlockOverview fn
 src/diagram/diagram.zig::renderSystemSvg fn
 src/diagram/layout.zig::GroupBox struct_
 src/diagram/layout.zig::LNode struct_
@@ -106,6 +107,7 @@ src/diagram/membership.zig::Membership struct_
 src/diagram/membership.zig::build fn
 src/diagram/membership.zig::computeSubBlockAttachments fn
 src/diagram/render.zig::CSS value
+src/diagram/render.zig::renderBlocksStandalone fn
 src/diagram/render.zig::renderSystemStandalone fn
 src/diagram/render.zig::renderTabs fn
 src/diagram/render.zig::system_color value

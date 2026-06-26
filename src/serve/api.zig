@@ -534,8 +534,9 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
         return;
     };
 
-    // The markdown report embeds the *design's own* source verbatim at the
-    // bottom; pass it explicitly (the bundled tree below carries every file).
+    // The design's own top-level source — read once, used only for the zip
+    // entry below (the report no longer embeds it; every source file ships as
+    // its own zip entry instead).
     const board_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch null;
     defer if (board_path) |bp| ctx.allocator.free(bp);
     const source: []const u8 = if (board_path) |bp|
@@ -543,7 +544,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     else
         &[_]u8{};
 
-    const md = review_md_mod.renderToMarkdown(ctx.allocator, block, ctx.project_dir, name, doc, source, &check_results) catch {
+    const md = review_md_mod.renderToMarkdown(ctx.allocator, block, ctx.project_dir, name, doc) catch {
         res.status = HTTP_INTERNAL_ERROR;
         res.body = "Markdown render error";
         return;
