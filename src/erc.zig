@@ -86,7 +86,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkMissingDecoupling(allocator, block, &violations);
     if (project_dir.len > 0) try checkDecouplingBinding(allocator, block, project_dir, &violations);
     try checkVoltageMismatches(allocator, block, &violations);
-    try checkUnconnectedPowerPins(allocator, block, &violations);
+    try checkUnconnectedPowerPins(allocator, block, project_dir, &violations);
     try checkConceptSections(allocator, block, &violations);
     try checkPowerBudget(allocator, block, &violations);
     try checkTestPointCoverage(allocator, block, &violations);
@@ -1263,16 +1263,78 @@ fn collectSectionVoltages(
 
 /// Check ICs missing power/ground connections.
 /// Checks both this block's nets and recursively checks sub-block nets for their own instances.
+/// `project_dir` locates `lib/pinouts` so the check can tell a real IC (which has a
+/// supply/ground pin to connect) from a passive RF part or connector that carries a
+/// `U` ref-des but no power pins at all; pass "" to skip that refinement (every U
+/// part is then expected to have both, the original strict behaviour).
 fn checkUnconnectedPowerPins(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
+    project_dir: []const u8,
     violations: *std.ArrayListUnmanaged(Violation),
 ) !void {
-    try checkBlockPowerPins(allocator, block, violations);
+    try checkBlockPowerPins(allocator, block, project_dir, violations);
     // Also check sub-blocks with their own net namespace
     for (block.sub_blocks) |sb| {
-        try checkBlockPowerPins(allocator, sb.block, violations);
+        try checkBlockPowerPins(allocator, sb.block, project_dir, violations);
     }
+}
+
+/// Whether a part's pinout declares a real supply pin and/or a real ground pin.
+const PartPowerPins = struct { has_supply: bool, has_ground: bool };
+
+/// Decide whether `inst`'s component is even expected to have a supply pin and a
+/// ground pin, by reading its `lib/pinouts` function names. A passive RF
+/// filter/attenuator (RF-IN/RF-OUT/GND only) or an SMA connector (signal pins
+/// only) reports neither, so the no-power/no-ground checks skip it. When the
+/// pinout can't be inspected (no `project_dir`, no lookup key, missing/parse-fail
+/// file) both default to true, preserving the original strict behaviour. Results
+/// are cached per pinout-lookup key.
+fn partPowerPins(
+    allocator: std.mem.Allocator,
+    cache: *std.StringHashMapUnmanaged(PartPowerPins),
+    project_dir: []const u8,
+    inst: Instance,
+) PartPowerPins {
+    const fallback = PartPowerPins{ .has_supply = true, .has_ground = true };
+    if (project_dir.len == 0) return fallback;
+    // Mirror checkPinFunctions' lookup precedence: pinout, then symbol, then component.
+    const lookup = if (inst.pinout.len > 0) inst.pinout else if (inst.symbol.len > 0) inst.symbol else inst.component;
+    if (lookup.len == 0) return fallback;
+
+    const gop = cache.getOrPut(allocator, lookup) catch return fallback;
+    if (gop.found_existing) return gop.value_ptr.*;
+
+    const result = loadPinoutFunctionFlags(allocator, project_dir, lookup) orelse fallback;
+    gop.value_ptr.* = result;
+    return result;
+}
+
+/// Read `<project_dir>/lib/pinouts/<lookup>.sexp` and report whether any pin's
+/// function name reads as a supply / as a ground. Only the function name (the
+/// third element of each `(pin <id> "<fn>" …)`) is inspected — the pad id is
+/// ignored, so the bare-integer form `(pin 1 "VCC")` works the same as the
+/// alphanumeric `(pin A1 "VDD")` form (unlike `loadPinoutMap`, which keys on the
+/// pad id and drops integer pads). Null on any read/parse failure so the caller
+/// falls back to the strict "expect both" default.
+fn loadPinoutFunctionFlags(allocator: std.mem.Allocator, project_dir: []const u8, lookup: []const u8) ?PartPowerPins {
+    const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, lookup }) catch return null;
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 256) catch return null;
+    const nodes = parser_mod.parse(allocator, content) catch return null;
+    if (nodes.len == 0) return null;
+    const top = nodes[0].asList() orelse return null;
+    if (top.len < 2 or !std.mem.eql(u8, top[0].asAtom() orelse "", "pinout")) return null;
+
+    var flags = PartPowerPins{ .has_supply = false, .has_ground = false };
+    for (top[2..]) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len < 3) continue;
+        if (!std.mem.eql(u8, cl[0].asAtom() orelse "", "pin")) continue;
+        const fn_name = cl[2].asString() orelse (cl[2].asAtom() orelse continue);
+        if (pin_roles.isSupplyFn(fn_name)) flags.has_supply = true;
+        if (pin_roles.isGroundFn(fn_name)) flags.has_ground = true;
+    }
+    return flags;
 }
 
 /// True for the `V<int>P<frac>` board-rail naming convention — `V5P0`,
@@ -1314,10 +1376,13 @@ fn isSignedVoltRail(base: []const u8) bool {
 fn checkBlockPowerPins(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
+    project_dir: []const u8,
     violations: *std.ArrayListUnmanaged(Violation),
 ) !void {
     var has_gnd: std.StringHashMapUnmanaged(void) = .empty;
     var has_vdd: std.StringHashMapUnmanaged(void) = .empty;
+    // pinout-lookup key → whether the part has a supply / ground pin at all.
+    var part_pins: std.StringHashMapUnmanaged(PartPowerPins) = .empty;
 
     for (block.nets) |net| {
         const base = na.baseNetName(net.name);
@@ -1328,6 +1393,12 @@ fn checkBlockPowerPins(
             std.mem.endsWith(u8, base, "GND") or std.mem.endsWith(u8, base, "VSS");
         const is_vdd = std.mem.startsWith(u8, base, "VDD") or std.mem.startsWith(u8, base, "VCC") or
             std.mem.startsWith(u8, base, "VBAT") or
+            // Local post-filter supply nodes that *end* in a supply token — a
+            // chip's VDD/VCC pin fed from a board rail through a ferrite/LC
+            // filter sits on a renamed node like `SW_VDD` (PE42553 cal switch:
+            // V_3V3D → FB_VDD → SW_VDD) or `ANA_VCC`. Mirrors the `endsWith
+            // GND/VSS` rule the ground classifier already applies.
+            std.mem.endsWith(u8, base, "VDD") or std.mem.endsWith(u8, base, "VCC") or
             // `V<int>P<frac>` board-rail convention (V1P8, V3P3, V5P0, V0P9,
             // V12P0 …) — `P` is the decimal point. Generalises the old
             // V1P/V2P/V3P3 special-cases, which missed higher rails like the
@@ -1371,8 +1442,12 @@ fn checkBlockPowerPins(
         // Skip ICs that intentionally have no ground reference pin (float with
         // their input rail) — flagging them for "no ground" is a false positive.
         if (isGroundlessIc(inst.component)) continue;
+        // Passive RF parts (filters, attenuators) and connectors carry a `U`
+        // ref-des but their pinout has no supply/ground pin at all — only expect
+        // a power/ground connection on a part that actually has such a pin.
+        const pins = partPowerPins(allocator, &part_pins, project_dir, inst);
 
-        if (!has_gnd.contains(inst.ref_des)) {
+        if (pins.has_ground and !has_gnd.contains(inst.ref_des)) {
             const msg = std.fmt.allocPrint(allocator, "{s}: IC has no ground connection", .{inst.ref_des}) catch continue;
             try violations.append(allocator, .{
                 .kind = .unconnected_pin,
@@ -1381,7 +1456,7 @@ fn checkBlockPowerPins(
                 .ref_des = inst.ref_des,
             });
         }
-        if (!has_vdd.contains(inst.ref_des)) {
+        if (pins.has_supply and !has_vdd.contains(inst.ref_des)) {
             const msg = std.fmt.allocPrint(allocator, "{s}: IC has no power connection", .{inst.ref_des}) catch continue;
             try violations.append(allocator, .{
                 .kind = .unconnected_pin,
@@ -2341,7 +2416,7 @@ test "power pins VREF-supplied translator is not flagged" {
     // LSF0108 has no VDD/VCC pin — it is supplied through VREF_A/VREF_B.
     const block = try makePowerPinBlock(alloc, "lsf0108rksr", "VREF_A");
     var violations: std.ArrayListUnmanaged(Violation) = .empty;
-    try checkUnconnectedPowerPins(alloc, &block, &violations);
+    try checkUnconnectedPowerPins(alloc, &block, "", &violations);
     for (violations.items) |v| {
         try std.testing.expect(!std.mem.eql(u8, v.message, "U1: IC has no power connection"));
     }
@@ -2355,13 +2430,97 @@ test "power pins missing supply still flagged" {
     // "SIGNAL" is not a power-net name → the IC has ground but no power.
     const block = try makePowerPinBlock(alloc, "someic", "SIGNAL");
     var violations: std.ArrayListUnmanaged(Violation) = .empty;
-    try checkUnconnectedPowerPins(alloc, &block, &violations);
+    try checkUnconnectedPowerPins(alloc, &block, "", &violations);
     var hit = false;
     for (violations.items) |v| {
         if (v.kind == .unconnected_pin and std.mem.eql(u8, v.ref_des, "U1") and
             std.mem.indexOf(u8, v.message, "no power connection") != null) hit = true;
     }
     try std.testing.expect(hit);
+}
+
+// Build a temp project dir with a single lib/pinouts/<name>.sexp fixture so the
+// power-pin check can read a part's function names. Caller cleans up + frees path.
+fn makePowerPinoutTmp(alloc: std.mem.Allocator, name: []const u8, body: []const u8) !struct { tmp: std.testing.TmpDir, path: []const u8 } {
+    var tmp = std.testing.tmpDir(.{});
+    try tmp.dir.makePath("lib/pinouts");
+    const sub = try std.fmt.allocPrint(alloc, "lib/pinouts/{s}.sexp", .{name});
+    try tmp.dir.writeFile(.{ .sub_path = sub, .data = body });
+    const path = try tmp.dir.realpathAlloc(alloc, ".");
+    return .{ .tmp = tmp, .path = path };
+}
+
+// spec: erc - A passive RF part (no supply pin in its pinout) is not flagged for missing power
+test "power pins passive RF part with no supply pin is not flagged" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // A 2-port attenuator/filter: RF-IN / RF-OUT / GND only — no supply pin, so
+    // "IC has no power connection" must not fire even with a U ref-des.
+    const pinout =
+        \\(pinout "rfpad"
+        \\  (pin 1 "GND_1")
+        \\  (pin 2 "RF-IN")
+        \\  (pin 3 "GND_2")
+        \\  (pin 4 "RF-OUT")
+        \\)
+    ;
+    var fx = try makePowerPinoutTmp(alloc, "rfpad", pinout);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+    // The fixture wires a GND net + a non-power "RF_SIGNAL" net. Were rfpad
+    // treated as an IC the missing supply would fire; has_supply gating (its
+    // pinout has no supply pin) must suppress the "no power connection" warning.
+    const block = try makePowerPinBlock(alloc, "rfpad", "RF_SIGNAL");
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkUnconnectedPowerPins(alloc, &block, fx.path, &violations);
+    for (violations.items) |v| {
+        try std.testing.expect(std.mem.indexOf(u8, v.message, "no power connection") == null);
+        try std.testing.expect(std.mem.indexOf(u8, v.message, "no ground connection") == null);
+    }
+}
+
+// spec: erc - A real IC with a VCC pin in its pinout but no power net is still flagged
+test "power pins real IC with supply pin still flagged when unpowered" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // An EEPROM-shaped part: VCC + VSS in the pinout. Connected only to a signal
+    // net, so the missing supply must still be reported (no regression).
+    const pinout =
+        \\(pinout "eeprom"
+        \\  (pin 1 "SCL")
+        \\  (pin 2 "VSS")
+        \\  (pin 3 "SDA")
+        \\  (pin 4 "VCC")
+        \\)
+    ;
+    var fx = try makePowerPinoutTmp(alloc, "eeprom", pinout);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+    const block = try makePowerPinBlock(alloc, "eeprom", "SIGNAL");
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkUnconnectedPowerPins(alloc, &block, fx.path, &violations);
+    var hit = false;
+    for (violations.items) |v| {
+        if (std.mem.eql(u8, v.message, "U1: IC has no power connection")) hit = true;
+    }
+    try std.testing.expect(hit);
+}
+
+// spec: erc - Recognises a post-filter local supply node ending in VDD/VCC as power
+test "power pins SW_VDD local supply node is recognised as power" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // The PE42553 cal switch is powered through V_3V3D → FB_VDD → SW_VDD; its
+    // VDD pad sits on the renamed local node "SW_VDD", which must read as power.
+    const block = try makePowerPinBlock(alloc, "someic", "SW_VDD");
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkUnconnectedPowerPins(alloc, &block, "", &violations);
+    for (violations.items) |v| {
+        try std.testing.expect(!std.mem.eql(u8, v.message, "U1: IC has no power connection"));
+    }
 }
 
 // spec: erc - Recognises a V<int>P<frac> rail such as the 5V V5P0 as power
@@ -2373,7 +2532,7 @@ test "power pins V5P0 rail is recognised as power" {
     // The old V1P/V2P/V3P3 list missed it and falsely flagged "no power".
     const block = try makePowerPinBlock(alloc, "someic", "V5P0");
     var violations: std.ArrayListUnmanaged(Violation) = .empty;
-    try checkUnconnectedPowerPins(alloc, &block, &violations);
+    try checkUnconnectedPowerPins(alloc, &block, "", &violations);
     for (violations.items) |v| {
         try std.testing.expect(!std.mem.eql(u8, v.message, "U1: IC has no power connection"));
     }
@@ -2403,7 +2562,7 @@ test "test point is not flagged for missing ground/power" {
         .sub_blocks = &.{},
     };
     var violations: std.ArrayListUnmanaged(Violation) = .empty;
-    try checkUnconnectedPowerPins(alloc, &block, &violations);
+    try checkUnconnectedPowerPins(alloc, &block, "", &violations);
     for (violations.items) |v| {
         try std.testing.expect(std.mem.indexOf(u8, v.message, "no ground connection") == null);
         try std.testing.expect(std.mem.indexOf(u8, v.message, "no power connection") == null);

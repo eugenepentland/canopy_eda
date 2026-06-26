@@ -493,6 +493,7 @@ src/placement/pad_shape.zig::worldShape fn
 src/placement/pin_roles.zig::PartRoles struct_
 src/placement/pin_roles.zig::PinClass enum_
 src/placement/pin_roles.zig::isGroundFn fn
+src/placement/pin_roles.zig::isSupplyFn fn
 src/placement/pin_roles.zig::load fn
 src/placement/router.zig::LoopRouter struct_
 src/placement/router.zig::PadObs struct_

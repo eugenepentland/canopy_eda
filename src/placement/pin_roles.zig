@@ -151,6 +151,36 @@ pub fn isGroundFn(fn_name: []const u8) bool {
     return false;
 }
 
+/// True when `fn_name` (a pinout function name) denotes a real power-supply pin —
+/// VCC/VDD/AVDD/VBAT/VIN/VREF/… — and not a ground or a signal. Normalisation
+/// matches `isGroundFn` (separators stripped, case-insensitive). Ground names are
+/// rejected first so "VSS"/"VSSA" never read as a supply via the "VS" exact form.
+/// Used by the IC-power-presence ERC to decide whether a part is even expected to
+/// have a supply pin — a passive RF filter/attenuator or a connector has none, so
+/// "IC has no power connection" must not fire on it.
+pub fn isSupplyFn(fn_name: []const u8) bool {
+    var buf: [32]u8 = undefined;
+    var n: usize = 0;
+    for (fn_name) |c| switch (c) {
+        '_', '-', '/', '.', ' ', '#' => {},
+        else => {
+            if (n >= buf.len) break;
+            buf[n] = std.ascii.toUpper(c);
+            n += 1;
+        },
+    };
+    const s = buf[0..n];
+    if (isGroundFn(s)) return false;
+    const prefixes = [_][]const u8{
+        "VCC",  "VDD", "AVDD", "DVDD", "PVDD", "VBAT",
+        "VBUS", "VIN", "VOUT", "VEE",  "VPP",  "VREF",
+    };
+    for (prefixes) |p| if (std.mem.startsWith(u8, s, p)) return true;
+    const exact = [_][]const u8{ "V+", "VS" };
+    for (exact) |e| if (std.mem.eql(u8, s, e)) return true;
+    return false;
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -170,6 +200,27 @@ test "isGroundFn separates real grounds from config straps" {
     try testing.expect(!isGroundFn("PGFB"));
     try testing.expect(!isGroundFn("MODE"));
     try testing.expect(!isGroundFn("IN_1"));
+}
+
+// spec: placement/pin_roles - supply function names are recognised, grounds and signals are not
+test "isSupplyFn separates real supplies from grounds and signals" {
+    try testing.expect(isSupplyFn("VCC"));
+    try testing.expect(isSupplyFn("VDD"));
+    try testing.expect(isSupplyFn("VDD_1"));
+    try testing.expect(isSupplyFn("AVDD"));
+    try testing.expect(isSupplyFn("VBAT"));
+    try testing.expect(isSupplyFn("VIN"));
+    try testing.expect(isSupplyFn("VREF_A"));
+    try testing.expect(isSupplyFn("V+"));
+    // Grounds must NOT read as supply (the "VS" exact form is a prefix of VSS).
+    try testing.expect(!isSupplyFn("VSS"));
+    try testing.expect(!isSupplyFn("VSSA"));
+    try testing.expect(!isSupplyFn("GND"));
+    // Passive-part signal pins are not supplies.
+    try testing.expect(!isSupplyFn("RF-IN"));
+    try testing.expect(!isSupplyFn("RF_OUT"));
+    try testing.expect(!isSupplyFn("INPUT"));
+    try testing.expect(!isSupplyFn("OUTPUT"));
 }
 
 // spec: placement/pin_roles - electrical type overrides the name heuristic; signal types demote to strap
