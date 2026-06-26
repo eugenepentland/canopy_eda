@@ -386,62 +386,22 @@ fn writeHeader(
                 "title=\"Checking whether the .kicad_pcb matches the design\u{2026}\">\u{27F3} PCB sync\u{2026}</button>",
         );
     }
-    try w.writeAll("<div class=\"kicad-menu\">");
-    try w.writeAll("<button class=\"head-link head-btn\" id=\"kicad-btn\" type=\"button\">KiCad \u{25BE}</button>");
-    try w.writeAll("<div class=\"kicad-panel\" id=\"kicad-panel\">");
-    try w.print("<button class=\"kicad-row-btn\" onclick=\"window.location='/api/export-netlist/{s}'\">Download Netlist (.net)</button>", .{design_name});
-    try w.print(
-        "<button class=\"kicad-row-btn\" onclick=\"window.location='/api/export-kicad/{s}'\">" ++
-            "Download Netlist + Footprints (.zip)</button>",
-        .{design_name},
-    );
-    // File-based PCB sync — writes directly to the .kicad_pcb declared
-    // by the design's (kicad-pcb "<path>") form. pcbnew either auto-
-    // prompts to reload (KiCad 8+) or surfaces it via File → Revert
-    // (KiCad 7). The button is wired generically; if the design has no
-    // (kicad-pcb …) form the server returns a clear 400 + message
-    // which the JS handler surfaces in the status text.
+    // Single file-based PCB sync button — writes directly to the .kicad_pcb
+    // declared by the design's (kicad-pcb "<path>") form. It runs the full
+    // sync (prune stale footprints + refresh footprint geometry — ?prune=1
+    // &refresh=1) behind the dry-run preview modal, so the user sees and
+    // confirms every change before the board is written. pcbnew either auto-
+    // prompts to reload (KiCad 8+) or surfaces it via File → Revert (KiCad 7).
+    // The button is wired generically; if the design has no (kicad-pcb …) form
+    // the server returns a clear 400 + message which the JS handler surfaces
+    // as a toast.
     try w.writeAll(
-        "<button class=\"kicad-row-btn\" id=\"push-kicad-pcb-btn\" " ++
-            "title=\"Write updates to the .kicad_pcb declared by (kicad-pcb \u{2026}); " ++
+        "<button class=\"head-link head-btn\" id=\"push-kicad-pcb-btn\" type=\"button\" " ++
+            "title=\"Sync the design to the .kicad_pcb declared by (kicad-pcb \u{2026}): adds/updates parts, " ++
+            "deletes stale footprints, and refreshes footprint geometry. Shows a preview to confirm first; " ++
             "pcbnew will prompt to reload, or use File \u{2192} Revert\">" ++
             "\u{2192} Push to KiCad PCB</button>",
     );
-    // Prune variant: same as Push, plus convert every `flag_stale` op into
-    // a real `remove`. The server already supports this via the `prune=1`
-    // query param — exposed here so the user can clean up orphan
-    // footprints accumulated by past failed syncs in one click.
-    try w.writeAll(
-        "<button class=\"kicad-row-btn\" id=\"push-kicad-pcb-prune-btn\" " ++
-            "title=\"Same as Push, but ALSO deletes every footprint flagged stale " ++
-            "(no longer in the design). Use after the design and board have drifted apart.\">" ++
-            "\u{2192} Push + Delete Stale</button>",
-    );
-    // Dot-net variant: keeps each `(decouple …)` per-pin sub-net (VDD.U18.IN)
-    // as the pad net instead of collapsing to the bare rail (?dot_nets=1), so
-    // the board shows which bypass cap pairs with which pin. Those become
-    // electrically-distinct nets — the user rejoins them with copper/zone.
-    try w.writeAll(
-        "<button class=\"kicad-row-btn\" id=\"push-kicad-pcb-dotnets-btn\" " ++
-            "title=\"Same as Push, but keeps per-pin decoupling sub-nets (e.g. VDD.U18.IN) " ++
-            "as distinct pad nets so each bypass cap shows which pin it belongs to. " ++
-            "Rejoin them with copper/zone since the ratsnest won't tie them.\">" ++
-            "\u{2192} Push (per-pin nets)</button>",
-    );
-    // Refresh variant: re-bake every placed part's footprint geometry via a
-    // same-name swap (?refresh=1). Position, identity, and routing are
-    // preserved — only the silkscreen/fab/courtyard graphics update. Use after
-    // the footprint library gains new outlines (e.g. recovered silk/fab) to
-    // backfill them onto a board built before the fix.
-    try w.writeAll(
-        "<button class=\"kicad-row-btn\" id=\"push-kicad-pcb-refresh-btn\" " ++
-            "title=\"Re-bake every placed footprint's silkscreen/fab/courtyard geometry from the library " ++
-            "without moving anything (same-name swap; position, identity, and pad nets preserved). " ++
-            "Use to backfill recovered outlines onto an existing board.\">" ++
-            "\u{2192} Refresh Footprints</button>",
-    );
-    try w.writeAll("<span id=\"push-kicad-pcb-status\" class=\"kicad-row-status\"></span>");
-    try w.writeAll("</div></div>");
     try w.print("<a class=\"head-link\" href=\"/api/export-bom/{s}\">BOM</a>", .{design_name});
     try w.print("<a class=\"head-link\" href=\"/api/export-netlist/{s}\">Netlist</a>", .{design_name});
     try w.print(
