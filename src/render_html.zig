@@ -352,75 +352,35 @@ fn writeHeader(
             .{ design_name, design_name },
         );
     }
-    // For a full design the whole-design PCB layout is intentionally not linked
-    // from here: it places every component at once, which is too slow to be
-    // useful. Instead each sub circuit shows its own PCB layout on demand via the
-    // card's Schematic ⇄ PCB toggle — see the global "PCB Layout settings" bar
-    // (writePcbGlobals) and the per-sub-circuit PCB view (writeSubCircuitPcb).
+    // Deliberately minimal toolbar: Reload, Edit SRC, ERC, and a single
+    // PCB-sync control. Everything else (History, BOM/Netlist/Review exports,
+    // datasheet upload) was moved off this bar to keep it uncluttered.
     try w.writeAll(
         "<button class=\"head-link head-btn\" id=\"reload-btn\" type=\"button\" " ++
             "title=\"Re-read the .sexp source from disk and rebuild\">\u{21BB} Reload</button>",
     );
+    // Edit the raw .sexp source in-browser: loads GET /api/source into a modal
+    // editor and saves via POST /api/source (validates syntax, rebuilds, bumps
+    // the live version).
     try w.writeAll(
-        "<button class=\"head-link head-btn\" id=\"copy-src-btn\" type=\"button\" " ++
-            "title=\"Download the raw .sexp source file\">\u{2B07} Export SRC</button>",
+        "<button class=\"head-link head-btn\" id=\"edit-src-btn\" type=\"button\" " ++
+            "title=\"Edit the raw .sexp source\">\u{270E} Edit SRC</button>",
     );
     try w.writeAll("<button class=\"head-link head-btn\" id=\"erc-btn\" type=\"button\">ERC</button>");
-    // Version history (designs only — module sources aren't snapshotted):
-    // opens the sidebar History panel listing stored snapshots, each with a
-    // "Diff vs current" action backed by GET /api/diff/:name.
-    if (!is_module) {
-        try w.writeAll(
-            "<button class=\"head-link head-btn\" id=\"history-btn\" type=\"button\" " ++
-                "title=\"Stored versions (snapshotted on every save/build) with diff vs current\">History</button>",
-        );
-    }
-    // File-based KiCad-sync freshness chip — only for designs that declare a
-    // (kicad-pcb "<path>") target. The schematic_viewer.js dry-runs the sync
-    // on page load and recolours this: green when the .kicad_pcb already
-    // matches the netlist, amber + a pending-op count when a Push would write
-    // the board, grey when the board file can't be read. Click re-checks.
+    // Single file-based PCB-sync control — only for designs that declare a
+    // (kicad-pcb "<path>") target. schematic_viewer.js dry-runs the sync on
+    // page load and reflects the result in ONE button:
+    //   • in sync  → a compact "✓ PCB" icon (click re-checks);
+    //   • out of sync → "↑ Push to PCB (N)" with the pending-change count
+    //     (click opens the dry-run preview modal and writes the .kicad_pcb on
+    //     confirm);
+    //   • unreadable board → "⚠ PCB unreachable".
     if (has_kicad_pcb) {
         try w.writeAll(
             "<button class=\"head-link head-btn sync-chip\" id=\"kicad-sync-chip\" type=\"button\" " ++
                 "title=\"Checking whether the .kicad_pcb matches the design\u{2026}\">\u{27F3} PCB sync\u{2026}</button>",
         );
     }
-    // Single file-based PCB sync button — writes directly to the .kicad_pcb
-    // declared by the design's (kicad-pcb "<path>") form. It runs the full
-    // sync (prune stale footprints + refresh footprint geometry — ?prune=1
-    // &refresh=1) behind the dry-run preview modal, so the user sees and
-    // confirms every change before the board is written. pcbnew either auto-
-    // prompts to reload (KiCad 8+) or surfaces it via File → Revert (KiCad 7).
-    // The button is wired generically; if the design has no (kicad-pcb …) form
-    // the server returns a clear 400 + message which the JS handler surfaces
-    // as a toast.
-    try w.writeAll(
-        "<button class=\"head-link head-btn\" id=\"push-kicad-pcb-btn\" type=\"button\" " ++
-            "title=\"Sync the design to the .kicad_pcb declared by (kicad-pcb \u{2026}): adds/updates parts, " ++
-            "deletes stale footprints, and refreshes footprint geometry. Shows a preview to confirm first; " ++
-            "pcbnew will prompt to reload, or use File \u{2192} Revert\">" ++
-            "\u{2192} Push to KiCad PCB</button>",
-    );
-    try w.print("<a class=\"head-link\" href=\"/api/export-bom/{s}\">BOM</a>", .{design_name});
-    try w.print("<a class=\"head-link\" href=\"/api/export-netlist/{s}\">Netlist</a>", .{design_name});
-    try w.print(
-        "<a class=\"head-link head-btn\" href=\"/api/export-review/{s}\" " ++
-            "title=\"Download a self-contained design-review package (markdown + BOM CSV) as a zip\">" ++
-            "📦 Export Review</a>",
-        .{design_name},
-    );
-    // Global PDF upload: any datasheet, chosen by filename, lands in
-    // lib/datasheets/. Users then wire one up by editing a component file's
-    // `(datasheet "foo.pdf")` field. Keeps upload one-click without
-    // committing to a specific part.
-    try w.writeAll(
-        "<label class=\"head-link head-btn\" style=\"cursor:pointer\">" ++
-            "📄 Upload PDF" ++
-            "<input type=\"file\" accept=\"application/pdf\" id=\"global-ds-upload\" hidden>" ++
-            "</label>",
-    );
-    try w.writeAll("<span id=\"global-ds-status\" class=\"head-link\" style=\"color:#8b949e\"></span>");
     try w.writeAll("</div></header>");
 }
 
