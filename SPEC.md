@@ -164,9 +164,10 @@ Public functions: lint, freeFindings
 
 ## placement/pin_roles
 
-Public functions: load, isGroundFn
+Public functions: load, isGroundFn, isSupplyFn
 
 - groundy function names are recognised, straps are not
+- supply function names are recognised, grounds and signals are not
 - electrical type overrides the name heuristic; signal types demote to strap
 
 ## placement/pad_shape
@@ -502,6 +503,9 @@ Public functions: renderSchematic
 - Recognises a VREF-supplied level translator as powered (no false positive)
 - Recognises a V<int>P<frac> rail such as the 5V V5P0 as power
 - Test points are exempt from the IC-ground/power check
+- A passive RF part (no supply pin in its pinout) is not flagged for missing power
+- A real IC with a VCC pin in its pinout but no power net is still flagged
+- Recognises a post-filter local supply node ending in VDD/VCC as power
 - Still flags an IC with a ground pin but no recognised power net
 - Flags a sequencing cycle by emitting sequence_cycle per affected rail
 - Flags a net where the worst driver high level is below the worst receiver high threshold
