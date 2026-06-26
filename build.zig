@@ -15,6 +15,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Version stamp baked into the binary: the short git hash of the checkout
+    // at build time, used to version exported review packages. Falls back to
+    // "unknown" outside a git checkout (or if `git` isn't on PATH).
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "git_hash", gitShortHash(b));
+
     // Compile .zt → .zig (run before any module that imports them).
     const templates_step = zt.addTemplates(b, zt_dep, &.{
         b.path("src/serve/templates/pages.zt"),
@@ -34,6 +40,7 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addImport("httpz", httpz.module("httpz"));
     exe_mod.addImport("zt", zt_dep.module("zt"));
+    exe_mod.addOptions("build_options", build_options);
 
     const exe = b.addExecutable(.{
         .name = "netlisp",
@@ -77,6 +84,7 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.addImport("httpz", httpz.module("httpz"));
     test_mod.addImport("zt", zt_dep.module("zt"));
+    test_mod.addOptions("build_options", build_options);
 
     const tests = b.addTest(.{
         .root_module = test_mod,
@@ -153,4 +161,21 @@ pub fn build(b: *std.Build) void {
     spec_init_run.setCwd(b.path("."));
     const spec_init_step = b.step("spec-init", "Generate starter SPEC.md from pub fn signatures");
     spec_init_step.dependOn(&spec_init_run.step);
+}
+
+/// `git rev-parse --short HEAD` at build-config time, for the version stamp.
+/// Returns "unknown" if git isn't available or this isn't a checkout — never
+/// fails the build.
+fn gitShortHash(b: *std.Build) []const u8 {
+    const result = std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &.{ "git", "rev-parse", "--short", "HEAD" },
+        .cwd = b.build_root.path,
+    }) catch return "unknown";
+    switch (result.term) {
+        .Exited => |code| if (code != 0) return "unknown",
+        else => return "unknown",
+    }
+    const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
+    return if (trimmed.len == 0) "unknown" else b.dupe(trimmed);
 }

@@ -48,6 +48,9 @@ pub fn renderToMarkdown(
     project_dir: []const u8,
     design_name: []const u8,
     doc: review.ReviewDoc,
+    /// Short build/version stamp (the netlisp git hash) — printed in the header
+    /// so a saved report self-identifies which build produced it.
+    build_id: []const u8,
 ) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
     var ctx = try render_html.setupRenderCtx(allocator, block);
     ctx.project_dir = project_dir;
@@ -55,9 +58,9 @@ pub fn renderToMarkdown(
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
 
-    // Title + generation timestamp
+    // Title + generation timestamp + build stamp
     try w.print("# Design Review: {s}\n\n", .{design_name});
-    try w.print("*Generated {s} by Netlisp*\n\n", .{doc.generated_at});
+    try w.print("*Generated {s} by Netlisp · build `{s}`*\n\n", .{ doc.generated_at, build_id });
 
     // Declared board revision (omitted entirely for unversioned designs).
     if (doc.revision.present) {
@@ -108,6 +111,7 @@ pub fn renderReadme(
     allocator: Allocator,
     design_name: []const u8,
     generated_at: []const u8,
+    build_id: []const u8,
     source_names: []const []const u8,
 ) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -115,9 +119,9 @@ pub fn renderReadme(
 
     try w.print("# Review package — {s}\n\n", .{design_name});
     try w.print(
-        "Self-contained design-review snapshot of **{s}**, generated {s} by Netlisp. " ++
+        "Self-contained design-review snapshot of **{s}**, generated {s} by Netlisp (build `{s}`). " ++
             "Everything needed to review the design — the report, the BOM, and the full source — is in this zip.\n\n",
-        .{ design_name, generated_at },
+        .{ design_name, generated_at, build_id },
     );
 
     try w.writeAll("## Start here\n\n");
@@ -675,7 +679,7 @@ test "renderToMarkdown header" {
         .assertions = &.{},
         .unresolved = &.{},
     };
-    const out = try renderToMarkdown(allocator, &block, "/tmp", "test", doc);
+    const out = try renderToMarkdown(allocator, &block, "/tmp", "test", doc, "abc1234");
     defer allocator.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "# Design Review: test") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "## Summary") != null);

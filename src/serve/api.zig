@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const json_writer = @import("../json_writer.zig");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
@@ -544,7 +545,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     else
         &[_]u8{};
 
-    const md = review_md_mod.renderToMarkdown(ctx.allocator, block, ctx.project_dir, name, doc) catch {
+    const md = review_md_mod.renderToMarkdown(ctx.allocator, block, ctx.project_dir, name, doc, build_options.git_hash) catch {
         res.status = HTTP_INTERNAL_ERROR;
         res.body = "Markdown render error";
         return;
@@ -589,7 +590,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     // layout — built from the just-collected source names. Non-fatal.
     const source_names = try ctx.allocator.alloc([]const u8, sources.items.len);
     for (sources.items, 0..) |s, i| source_names[i] = s.name;
-    const readme = review_md_mod.renderReadme(ctx.allocator, name, doc.generated_at, source_names) catch "";
+    const readme = review_md_mod.renderReadme(ctx.allocator, name, doc.generated_at, build_options.git_hash, source_names) catch "";
 
     // Assemble the zip: README, report, and CSV at the root, then the source tree.
     const md_name = try std.fmt.allocPrint(ctx.allocator, "{s}-review.md", .{name});
@@ -607,7 +608,13 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
         return;
     };
 
-    const disposition = try std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-review.zip\"", .{name});
+    // Version the package filename with the build's git hash so successive
+    // exports are distinguishable and each review traces to a known build.
+    const disposition = try std.fmt.allocPrint(
+        ctx.allocator,
+        "attachment; filename=\"{s}-review-{s}.zip\"",
+        .{ name, build_options.git_hash },
+    );
     res.header(HEADER_CONTENT_TYPE, CONTENT_TYPE_ZIP);
     res.header(HEADER_CONTENT_DISPOSITION, disposition);
     res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
