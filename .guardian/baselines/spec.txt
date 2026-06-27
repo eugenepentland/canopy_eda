@@ -31,6 +31,7 @@ unlinked tag: erc - surfaces layout-critical net classes as info rows, staying s
 unlinked tag: eval/forms - diagram-layout is the sole name for the schematic layout form; the legacy layout/module aliases are gone in ./src/eval/forms.zig
 unlinked tag: eval/instance - (decouples "IC" PIN) binds a cap to a specific hub pad in ./src/eval/instance.zig
 unlinked tag: eval/instance - (decouples rail) opts a cap out of the per-pin-decoupling requirement in ./src/eval/instance.zig
+unlinked tag: eval/instance - (nc-ok PIN "reason") records a blessed no-connect pad in ./src/eval/instance.zig
 unlinked tag: eval/instance - (part …) on an instance wires its pins like top-level pins and records the part group in ./src/eval/instance.zig
 unlinked tag: eval/instance - (strap-ok PIN "reason") records a blessed direct strap tie in ./src/eval/instance.zig
 unlinked tag: eval/modules - A later parameter's default may reference an earlier parameter in ./src/eval/modules.zig

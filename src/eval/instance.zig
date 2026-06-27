@@ -169,8 +169,9 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     var decouple_pin: []const u8 = "";
     var decouple_rail = false;
     var strap_oks: std.ArrayListUnmanaged(env_mod.StrapOk) = .empty;
+    var nc_oks: std.ArrayListUnmanaged(env_mod.NcOk) = .empty;
 
-    const known_forms = [_][]const u8{ "pin", "part", "note", "bus", "id", "as", "dnp", "decouples", "strap-ok" };
+    const known_forms = [_][]const u8{ "pin", "part", "note", "bus", "id", "as", "dnp", "decouples", "strap-ok", "nc-ok" };
 
     for (args[2..]) |form| {
         if (form.isForm("note")) {
@@ -211,6 +212,8 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
             }
         } else if (form.isForm("strap-ok")) {
             try parseStrapOk(self, form, ref_des, env, reverse_pinout, &strap_oks);
+        } else if (form.isForm("nc-ok")) {
+            try parseNcOk(self, form, ref_des, env, reverse_pinout, &nc_oks);
         } else if (form.isForm("bus")) {
             // (bus "NET_PREFIX" "BUS_NAME") -- expand component bus definition
             const bc = form.asList().?;
@@ -267,6 +270,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     final_inst.decouple_pin = decouple_pin;
     final_inst.decouple_rail = decouple_rail;
     if (strap_oks.items.len > 0) final_inst.strap_oks = strap_oks.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+    if (nc_oks.items.len > 0) final_inst.nc_oks = nc_oks.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
     if (parts.items.len > 0) final_inst.parts = parts.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
 
     // Merge properties: start with component defaults, override with inline
@@ -338,6 +342,29 @@ fn parseStrapOk(
     const pad = if (reverse_pinout) |rp| (resolvePinName(self, rp, raw) orelse raw) else raw;
     const reason = (try self.evalNode(sc[2], env)).asString() orelse "";
     try strap_oks.append(self.allocator, .{ .pin = pad, .reason = reason });
+}
+
+/// Parse a `(nc-ok PIN "reason")` blessing into `nc_oks`. PIN resolves like a
+/// `(pin …)` token (a function name maps through the pinout to its physical
+/// pad); the reason is the author's sign-off the `no_connect` ERC requires to
+/// accept a deliberately-unconnected pad. A malformed form warns and is dropped.
+fn parseNcOk(
+    self: *Evaluator,
+    form: Node,
+    ref_des: []const u8,
+    env: *Env,
+    reverse_pinout: ?*const std.StringHashMapUnmanaged([]const u8),
+    nc_oks: *std.ArrayListUnmanaged(env_mod.NcOk),
+) EvalError!void {
+    const sc = form.asList().?;
+    if (sc.len < 3) {
+        self.warnFmt(form.span, "(nc-ok …) on \"{s}\" — expected (nc-ok PIN \"reason\")", .{ref_des});
+        return;
+    }
+    const raw = ids.pinId(self, sc[1]) orelse "";
+    const pad = if (reverse_pinout) |rp| (resolvePinName(self, rp, raw) orelse raw) else raw;
+    const reason = (try self.evalNode(sc[2], env)).asString() orelse "";
+    try nc_oks.append(self.allocator, .{ .pin = pad, .reason = reason });
 }
 
 /// Parsed trailing annotations of a `(pin …)` form: `tail` is the count of
@@ -805,6 +832,28 @@ test "strap-ok form records the pad and reason" {
     try testing.expectEqual(@as(usize, 1), res.instance.strap_oks.len);
     try testing.expectEqualStrings("5", res.instance.strap_oks[0].pin);
     try testing.expectEqualStrings("ILIM->GND = default current limit", res.instance.strap_oks[0].reason);
+}
+
+// spec: eval/instance - (nc-ok PIN "reason") records a blessed no-connect pad
+test "nc-ok form records the pad and reason" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    try eval.component_cache.put(alloc, "somechip", .{
+        .name = "somechip",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    const src = "(instance \"U1\" somechip (pin 1 \"VDD\") (nc-ok 7 \"NC per datasheet — leave floating\"))";
+    const nodes = try parser_mod.parse(alloc, src);
+    const res = try buildInstance(&eval, nodes[0].asList().?, &env);
+    try testing.expectEqual(@as(usize, 1), res.instance.nc_oks.len);
+    try testing.expectEqualStrings("7", res.instance.nc_oks[0].pin);
+    try testing.expectEqualStrings("NC per datasheet — leave floating", res.instance.nc_oks[0].reason);
 }
 
 // spec: eval/instance - (part …) on an instance wires its pins like top-level pins and records the part group

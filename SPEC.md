@@ -164,7 +164,7 @@ Public functions: lint, freeFindings
 
 ## placement/pin_roles
 
-Public functions: load, isGroundFn, isSupplyFn, strapPads
+Public functions: load, isGroundFn, isSupplyFn, strapPads, padRequirements
 
 - groundy function names are recognised, straps are not
 - supply function names are recognised, grounds and signals are not
@@ -172,6 +172,8 @@ Public functions: load, isGroundFn, isSupplyFn, strapPads
 - config-strap function names are recognised, supplies grounds and GPIO are not
 - strapPads maps strap pads to their function name via name or electrical type
 - strapPads skips connector positional pins named after their pad
+- connectionRequirement tiers an unconnected pad by confidence
+- padRequirements keeps only the flaggable pads of a part
 
 ## placement/pad_shape
 
@@ -521,6 +523,7 @@ Public functions: renderSchematic
 - Allows ignore-requirements support parts and passives to be instantiated directly in the design
 - a config strap tied directly to a rail is an error unless pulled through a resistor or blessed
 - strapBlessing distinguishes a reasoned blessing from a blank one and none
+- an unconnected pad the pinout wants connected is flagged by tier unless blessed
 - Allows an IC declared as a critical-ic to be instantiated directly in the design
 - Allows a directly-instantiated critical-ic regardless of its role (e.g. a flat RF board's ICs)
 - Does not flag main ICs that are wrapped in sub-blocks

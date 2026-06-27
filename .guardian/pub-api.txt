@@ -188,6 +188,7 @@ src/eval/env.zig::LayoutEdge struct_
 src/eval/env.zig::LayoutGroup struct_
 src/eval/env.zig::LayoutRow struct_
 src/eval/env.zig::LayoutSpec struct_
+src/eval/env.zig::NcOk struct_
 src/eval/env.zig::Net struct_
 src/eval/env.zig::NetLengthConstraint struct_
 src/eval/env.zig::NetTie struct_
@@ -493,11 +494,14 @@ src/placement/pad_shape.zig::Shape struct_
 src/placement/pad_shape.zig::pointDist fn
 src/placement/pad_shape.zig::shapeGap fn
 src/placement/pad_shape.zig::worldShape fn
+src/placement/pin_roles.zig::NcRequirement enum_
+src/placement/pin_roles.zig::PadReq struct_
 src/placement/pin_roles.zig::PartRoles struct_
 src/placement/pin_roles.zig::PinClass enum_
 src/placement/pin_roles.zig::isGroundFn fn
 src/placement/pin_roles.zig::isSupplyFn fn
 src/placement/pin_roles.zig::load fn
+src/placement/pin_roles.zig::padRequirements fn
 src/placement/pin_roles.zig::strapPads fn
 src/placement/router.zig::LoopRouter struct_
 src/placement/router.zig::PadObs struct_

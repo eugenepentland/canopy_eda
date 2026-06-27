@@ -181,6 +181,37 @@ pub fn isSupplyFn(fn_name: []const u8) bool {
     return false;
 }
 
+/// The component-file half of a part's library data: function-name → electrical
+/// type (from `(electrical "FN" (type …))` decls) plus the pinout file name
+/// (from `(pinout "name")`, defaulting to the component name). Shared by
+/// `strapPads` and `padRequirements`, which then load the pinout and run their
+/// own per-pad loop. (`load` keeps its own inline copy — it's on the placement
+/// hot path and predates this helper.) Allocated in `arena`.
+const ComponentElec = struct {
+    elec: std.StringHashMapUnmanaged(env.ElectricalType),
+    pinout_name: []const u8,
+};
+
+fn loadComponentElec(arena: std.mem.Allocator, project_dir: []const u8, component: []const u8) ComponentElec {
+    var elec: std.StringHashMapUnmanaged(env.ElectricalType) = .empty;
+    var pinout_name: []const u8 = component;
+    if (loadList(arena, project_dir, "components", component)) |children| {
+        for (children) |child| {
+            const cl = child.asList() orelse continue;
+            if (cl.len < 2) continue;
+            const head = cl[0].asAtom() orelse continue;
+            if (std.mem.eql(u8, head, "pinout")) {
+                if (cl[1].asText()) |p| pinout_name = p;
+            } else if (std.mem.eql(u8, head, "electrical")) {
+                const decl = electrical.parse(cl) orelse continue;
+                const t = decl.electrical_type orelse continue;
+                elec.put(arena, decl.pin, t) catch continue;
+            }
+        }
+    }
+    return .{ .elec = elec, .pinout_name = pinout_name };
+}
+
 /// Pads of `component` that are configuration/control straps — enable, mode,
 /// address, current-limit, boot, or reset pins a board sets by tying to a rail —
 /// mapped pad-id → primary function name. Empty when the library has no data.
@@ -201,26 +232,8 @@ pub fn strapPads(
     var out: std.StringHashMapUnmanaged([]const u8) = .empty;
     if (component.len == 0) return out;
 
-    // fn-name → electrical type, plus the pinout file name, from the component
-    // (identical to `load`'s first half).
-    var elec: std.StringHashMapUnmanaged(env.ElectricalType) = .empty;
-    var pinout_name: []const u8 = component;
-    if (loadList(arena, project_dir, "components", component)) |children| {
-        for (children) |child| {
-            const cl = child.asList() orelse continue;
-            if (cl.len < 2) continue;
-            const head = cl[0].asAtom() orelse continue;
-            if (std.mem.eql(u8, head, "pinout")) {
-                if (cl[1].asText()) |p| pinout_name = p;
-            } else if (std.mem.eql(u8, head, "electrical")) {
-                const decl = electrical.parse(cl) orelse continue;
-                const t = decl.electrical_type orelse continue;
-                elec.put(arena, decl.pin, t) catch continue;
-            }
-        }
-    }
-
-    const top = loadList(arena, project_dir, "pinouts", pinout_name) orelse return out;
+    const ce = loadComponentElec(arena, project_dir, component);
+    const top = loadList(arena, project_dir, "pinouts", ce.pinout_name) orelse return out;
     if (top.len < 2 or !std.mem.eql(u8, top[0].asAtom() orelse "", "pinout")) return out;
 
     for (top[2..]) |child| {
@@ -233,12 +246,143 @@ pub fn strapPads(
         // pad itself (apf6 mezzanine: pad "A01" → fn "A01_A01"; bare headers: pad
         // "5" → fn "5"). They carry no real function, so never a config strap.
         if (isPositionalPin(pad_id, fn_name)) continue;
-        const strap = classify(elec.get(fn_name), fn_name) == .strap or isStrapFn(fn_name);
+        const strap = classify(ce.elec.get(fn_name), fn_name) == .strap or isStrapFn(fn_name);
         if (strap) {
             out.put(arena, pad_id, fn_name) catch continue;
         }
     }
     return out;
+}
+
+/// How much leaving a pad *unconnected* should worry the `no_connect` ERC check.
+pub const NcRequirement = enum {
+    /// Deferred to another check — supply/ground pads belong to the power-pin
+    /// presence check, so a floating one is never double-reported here.
+    skip,
+    /// Fine to leave open: an unused output, a GPIO/IO, a passive pin, a
+    /// datasheet no-connect/reserved pad, or any name we can't confidently
+    /// classify. The check stays silent so it never flags every open pad.
+    fine,
+    /// Probably wants tying off — a config/enable/reset strap recognised only by
+    /// name, which is commonly internally pulled. Reported as a *warning*.
+    suspect,
+    /// Should be driven — a pad the library explicitly declares an `input`.
+    /// Reported as an *error*.
+    required,
+};
+
+/// One pinout pad's no-connect classification: its function name plus how much
+/// leaving it unconnected should worry ERC.
+pub const PadReq = struct {
+    fn_name: []const u8,
+    req: NcRequirement,
+};
+
+/// Decide how much an *unconnected* pad named `fn_name` (with optional library
+/// electrical `type`) should worry the no-connect ERC. ERC-only, exactly like
+/// `strapPads` — the placer's `classify`/`load` path never consults it, so
+/// recognising a requirement here can never shift a PCB layout.
+///
+/// Confidence drives severity. Supply/ground pads defer to the power-pin
+/// presence check (`.skip`). A library-declared `input` is a high-confidence
+/// "must be driven" (`.required` → error). A strap recognised only by *name*
+/// (EN/MODE/BOOT/RST/ADDR/…) is a lower-confidence nudge (`.suspect` → warning),
+/// since such pins are often internally pulled. Everything else — outputs,
+/// GPIO/IO, passives, datasheet NC/reserved names, and any unrecognised name —
+/// is `.fine`, so the check surfaces only the open pads worth a second look.
+fn connectionRequirement(elec_type: ?env.ElectricalType, fn_name: []const u8) NcRequirement {
+    if (isSupplyFn(fn_name) or isGroundFn(fn_name)) return .skip;
+    if (elec_type) |t| return switch (t) {
+        .input => .required,
+        .power_in => .skip,
+        .output, .power_out, .io, .passive, .nc => .fine,
+    };
+    if (isExplicitNcName(fn_name)) return .fine;
+    if (isStrapFn(fn_name)) return .suspect;
+    return .fine;
+}
+
+/// True when a pinout function name explicitly marks the pad a no-connect or
+/// reserved/do-not-use pad — "NC", "N/C", "DNC", "DNU", "NO_CONNECT",
+/// "RESERVED", "RSVD", "RSV", "RFU", and numbered forms "NC1"/"NC2"/…. Such a
+/// pad is *meant* to float, so it's never flagged. Separators are stripped and
+/// the match is case-insensitive (so "n/c" and "NC_1" both match).
+fn isExplicitNcName(fn_name: []const u8) bool {
+    var buf: [32]u8 = undefined;
+    const s = normalizeIdent(fn_name, &buf);
+    const exact = [_][]const u8{ "NC", "DNC", "DNU", "NOCONNECT", "RESERVED", "RSVD", "RSV", "RFU" };
+    for (exact) |e| if (std.mem.eql(u8, s, e)) return true;
+    // Numbered no-connects: "NC" followed by only digits ("NC1", "NC12").
+    if (s.len > 2 and s[0] == 'N' and s[1] == 'C') {
+        for (s[2..]) |c| if (!std.ascii.isDigit(c)) return false;
+        return true;
+    }
+    return false;
+}
+
+/// Every pinout pad of `component` that the no-connect ERC might flag — pad-id →
+/// `{fn_name, requirement}` for pads whose `connectionRequirement` is `.suspect`
+/// or `.required`. Pads that are fine to leave open (and supply/ground pads,
+/// owned by the power check) are omitted, so the map holds only what ERC acts
+/// on. Empty when the library has no readable data (safe degradation: nothing
+/// flagged). Mirrors `strapPads`' component+pinout load; allocated in `arena`.
+pub fn padRequirements(
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    component: []const u8,
+) std.StringHashMapUnmanaged(PadReq) {
+    var out: std.StringHashMapUnmanaged(PadReq) = .empty;
+    if (component.len == 0) return out;
+
+    const ce = loadComponentElec(arena, project_dir, component);
+    const top = loadList(arena, project_dir, "pinouts", ce.pinout_name) orelse return out;
+    if (top.len < 2 or !std.mem.eql(u8, top[0].asAtom() orelse "", "pinout")) return out;
+
+    // First pass: collect every function name so a level-translator / buffer
+    // *channel* ("A<n>" with a "B<n>" twin) can be told apart from a device-
+    // address strap ("A<n>" alone) — see isTranslatorChannel.
+    var fn_set: std.StringHashMapUnmanaged(void) = .empty;
+    for (top[2..]) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len < 3 or !std.mem.eql(u8, cl[0].asAtom() orelse "", "pin")) continue;
+        if (cl[2].asText()) |fnm| fn_set.put(arena, fnm, {}) catch continue;
+    }
+
+    for (top[2..]) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len < 3) continue;
+        if (!std.mem.eql(u8, cl[0].asAtom() orelse "", "pin")) continue;
+        const pad_id = nodeText(arena, cl[1]) orelse continue;
+        const fn_name = cl[2].asText() orelse continue;
+        const req = connectionRequirement(ce.elec.get(fn_name), fn_name);
+        if (req == .suspect or req == .required) {
+            // A buffer/level-translator channel (TXB0104 A1-A4/B1-B4, '245, …)
+            // is a data I/O, not a config strap — an unused one floats freely.
+            if (isTranslatorChannel(fn_name, &fn_set)) continue;
+            out.put(arena, pad_id, .{ .fn_name = fn_name, .req = req }) catch continue;
+        }
+    }
+    return out;
+}
+
+/// True when `fn_name` is a level-translator / buffer *channel* pin — an "A<n>"
+/// or "B<n>" name whose complementary "B<n>"/"A<n>" twin is also in the part's
+/// pinout (`fn_set`). Such a pad (TXB0104 A1-A4 / B1-B4, TXS0108, LSF0108, an
+/// SN74…245 buffer) is a data I/O, so an unused one is as benign as a spare
+/// GPIO and must not read as a device-address strap. Without the twin, an
+/// "A<n>" stays a candidate address strap (an INA228 A0/A1, an I²C ADDR bit).
+fn isTranslatorChannel(fn_name: []const u8, fn_set: *const std.StringHashMapUnmanaged(void)) bool {
+    if (fn_name.len < 2 or fn_name.len > 16) return false;
+    const twin: u8 = switch (fn_name[0]) {
+        'A' => 'B',
+        'B' => 'A',
+        else => return false,
+    };
+    for (fn_name[1..]) |c| if (!std.ascii.isDigit(c)) return false;
+    var buf: [16]u8 = undefined;
+    buf[0] = twin;
+    @memcpy(buf[1..fn_name.len], fn_name[1..]);
+    return fn_set.contains(buf[0..fn_name.len]);
 }
 
 /// True when `fn_name` names a configuration/control strap. The name is split
@@ -481,4 +625,70 @@ test "strapPads ignores connector positional pins" {
     try testing.expectEqualStrings("EN", straps.get("7").?);
     try testing.expect(straps.get("A01") == null); // doubled positional
     try testing.expect(straps.get("B2") == null); // plain positional, grid-like
+}
+
+// spec: placement/pin_roles - connectionRequirement tiers an unconnected pad by confidence
+test "connectionRequirement tiers floating pads by confidence" {
+    // Supply/ground defer to the power-pin presence check.
+    try testing.expectEqual(NcRequirement.skip, connectionRequirement(null, "VDD"));
+    try testing.expectEqual(NcRequirement.skip, connectionRequirement(null, "GND"));
+    try testing.expectEqual(NcRequirement.skip, connectionRequirement(.power_in, "IN"));
+    // A library-declared input must be driven → error tier.
+    try testing.expectEqual(NcRequirement.required, connectionRequirement(.input, "CTRL"));
+    // A config/enable/reset strap recognised by name → warning tier.
+    try testing.expectEqual(NcRequirement.suspect, connectionRequirement(null, "EN"));
+    try testing.expectEqual(NcRequirement.suspect, connectionRequirement(null, "BOOT0"));
+    try testing.expectEqual(NcRequirement.suspect, connectionRequirement(null, "NRST"));
+    try testing.expectEqual(NcRequirement.suspect, connectionRequirement(null, "A0"));
+    // Outputs, GPIO/IO, passives are fine to leave open.
+    try testing.expectEqual(NcRequirement.fine, connectionRequirement(.output, "DOUT"));
+    try testing.expectEqual(NcRequirement.fine, connectionRequirement(.io, "PA3"));
+    try testing.expectEqual(NcRequirement.fine, connectionRequirement(.passive, "FILT"));
+    // Datasheet no-connect / reserved names are meant to float.
+    try testing.expectEqual(NcRequirement.fine, connectionRequirement(.nc, "NC"));
+    try testing.expectEqual(NcRequirement.fine, connectionRequirement(null, "NC"));
+    try testing.expectEqual(NcRequirement.fine, connectionRequirement(null, "N/C"));
+    try testing.expectEqual(NcRequirement.fine, connectionRequirement(null, "NC3"));
+    try testing.expectEqual(NcRequirement.fine, connectionRequirement(null, "RESERVED"));
+    // A plain GPIO / unknown signal name is silent (noise control).
+    try testing.expectEqual(NcRequirement.fine, connectionRequirement(null, "PD15"));
+    try testing.expectEqual(NcRequirement.fine, connectionRequirement(null, "SOMESIG"));
+}
+
+// spec: placement/pin_roles - padRequirements keeps only the flaggable pads of a part
+test "padRequirements maps only the pads worth flagging" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // VDD/GND are skip; EN/A0 are suspect; CTRL is required (electrical input);
+    // DOUT/NC are fine. A8/B8 are a level-translator channel pair, so the "A8"
+    // pad is demoted to fine (not an address strap) — only 3 flaggable pads.
+    const comp = "(component reg (pinout \"reg\") (electrical \"CTRL\" (type input)))";
+    const pinout =
+        \\(pinout "reg"
+        \\  (pin 1 "VDD") (pin 2 "EN") (pin 3 "A0") (pin 4 "GND")
+        \\  (pin 5 "DOUT") (pin 6 "CTRL") (pin 7 "NC")
+        \\  (pin 8 "A8") (pin 9 "B8"))
+    ;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("lib/pinouts");
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/reg.sexp", .data = comp });
+    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/reg.sexp", .data = pinout });
+    const path = try tmp.dir.realpathAlloc(arena, ".");
+
+    const reqs = padRequirements(arena, path, "reg");
+    try testing.expectEqual(@as(usize, 3), reqs.count()); // pads 2, 3, 6
+    try testing.expectEqual(NcRequirement.suspect, reqs.get("2").?.req); // EN
+    try testing.expectEqual(NcRequirement.suspect, reqs.get("3").?.req); // A0
+    try testing.expectEqual(NcRequirement.required, reqs.get("6").?.req); // CTRL (input)
+    try testing.expectEqualStrings("CTRL", reqs.get("6").?.fn_name);
+    try testing.expect(reqs.get("1") == null); // VDD (skip)
+    try testing.expect(reqs.get("4") == null); // GND (skip)
+    try testing.expect(reqs.get("5") == null); // DOUT (fine)
+    try testing.expect(reqs.get("7") == null); // NC (fine)
+    try testing.expect(reqs.get("8") == null); // A8 — translator channel (B8 twin), not an address strap
+    try testing.expect(reqs.get("3").?.req == .suspect); // A0 — address strap (no B0 twin) stays
 }

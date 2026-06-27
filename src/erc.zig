@@ -36,6 +36,7 @@ pub const ViolationKind = enum {
     duplicate_refdes,
     floating_net,
     unconnected_pin,
+    no_connect,
     missing_value,
     missing_footprint,
     multiple_drivers,
@@ -87,6 +88,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkMissingDecoupling(allocator, block, &violations);
     if (project_dir.len > 0) try checkDecouplingBinding(allocator, block, project_dir, &violations);
     if (project_dir.len > 0) try checkStrapTies(allocator, block, project_dir, &violations);
+    if (project_dir.len > 0) try checkNoConnects(allocator, block, project_dir, &violations);
     try checkVoltageMismatches(allocator, block, &violations);
     try checkUnconnectedPowerPins(allocator, block, project_dir, &violations);
     try checkConceptSections(allocator, block, &violations);
@@ -1069,8 +1071,11 @@ fn capFarads(s: []const u8) f64 {
 
 // ── config-strap direct-tie requirement ──────────────────────────────
 
-/// Verdict for whether a strap pad's direct tie to a rail is signed off.
-const StrapVerdict = enum { blessed, empty_reason, none };
+/// Verdict for whether a per-pin sign-off (a `(strap-ok …)` direct-tie blessing
+/// or a `(nc-ok …)` no-connect blessing) covers a pad: `.blessed` (matching pad
+/// with a non-empty reason), `.empty_reason` (matching pad but blank reason —
+/// still flagged, more specifically), or `.none` (no blessing at all).
+const BlessingVerdict = enum { blessed, empty_reason, none };
 
 /// Flag any configuration / enable / reset strap pin tied **directly** to a
 /// power or ground rail net, unless the author blessed the tie with a
@@ -1204,7 +1209,7 @@ fn instanceOf(block: *const DesignBlock, ref_des: []const u8) ?Instance {
 /// a `(strap-ok …)` form: `.blessed` (a matching pad with a non-empty reason),
 /// `.empty_reason` (a matching pad whose reason is blank — still an error, but a
 /// more specific one), or `.none` (no blessing at all).
-fn strapBlessing(inst: Instance, pin: []const u8) StrapVerdict {
+fn strapBlessing(inst: Instance, pin: []const u8) BlessingVerdict {
     var saw_empty = false;
     for (inst.strap_oks) |s| {
         if (!std.mem.eql(u8, s.pin, pin)) continue;
@@ -1223,6 +1228,140 @@ fn strapsFor(
 ) std.StringHashMapUnmanaged([]const u8) {
     const gop = cache.getOrPut(component) catch return .{};
     if (!gop.found_existing) gop.value_ptr.* = pin_roles.strapPads(arena, project_dir, component);
+    return gop.value_ptr.*;
+}
+
+// ── no-connect requirement ───────────────────────────────────────────
+
+/// Flag pads left as no-connects that the part's pinout says want a connection.
+/// For every real IC instance (recursing sub-blocks), a pinout pad carrying no
+/// net connection is judged by `pin_roles.connectionRequirement`: a
+/// library-declared input left floating is an **error**, a config/enable/reset
+/// strap left floating is a **warning**, and everything else (outputs, GPIO/IO,
+/// passives, datasheet NC, unknown names) is silently fine — so the check
+/// surfaces the open pads worth a second look instead of flagging every one. A
+/// pad signed off with `(nc-ok PIN "reason")` is accepted.
+///
+/// Mirrors `checkStrapTies`: runs **per block** and recurses sub-blocks, so a
+/// pad is judged in its own module namespace. Needs `project_dir` for
+/// `lib/pinouts` + `lib/components`; the caller guards `project_dir.len > 0`.
+/// Supply/ground pads are deferred to `checkUnconnectedPowerPins`, so a floating
+/// rail pin is never double-reported here.
+fn checkNoConnects(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var reqs_cache = std.StringHashMap(std.StringHashMapUnmanaged(pin_roles.PadReq)).init(arena);
+    try checkBlockNoConnects(allocator, arena, block, project_dir, &reqs_cache, violations);
+}
+
+fn checkBlockNoConnects(
+    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    reqs_cache: *std.StringHashMap(std.StringHashMapUnmanaged(pin_roles.PadReq)),
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    // Pads carrying any net connection, per ref_des in THIS block's namespace.
+    var connected: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(void)) = .empty;
+    for (block.nets) |net| {
+        for (net.pins) |pin| {
+            if (pin.ref_des.len == 0) continue;
+            const gop = try connected.getOrPut(arena, pin.ref_des);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.*.put(arena, pin.pin, {});
+        }
+    }
+
+    for (block.instances) |inst| {
+        if (inst.ref_des.len == 0) continue;
+        // Only real ICs — same gating as the power-pin presence check.
+        if (na.refDesLocalPrefix(inst.ref_des) != 'U') continue;
+        if (env_mod.isTestPoint(inst.component)) continue;
+        if (isPassiveComponent(inst.component)) continue;
+        if (isGroundlessIc(inst.component)) continue;
+
+        const reqs = reqsFor(arena, project_dir, reqs_cache, inst.component);
+        if (reqs.count() == 0) continue; // no pinout data, or nothing flaggable
+        const conn = connected.get(inst.ref_des);
+
+        var it = reqs.iterator();
+        while (it.next()) |e| {
+            const pad = e.key_ptr.*;
+            const info = e.value_ptr.*;
+            if (conn) |c| if (c.contains(pad)) continue; // pad is wired — fine
+            const severity: Severity = if (info.req == .required) .@"error" else .warning;
+            const msg = switch (ncBlessing(inst, pad)) {
+                .blessed => continue,
+                .none => noConnectMsg(allocator, inst.ref_des, pad, info) orelse continue,
+                .empty_reason => std.fmt.allocPrint(
+                    allocator,
+                    "(nc-ok {s}) on {s} needs a reason — explain why pin \"{s}\" may be left " ++
+                        "unconnected: (nc-ok {s} \"…\")",
+                    .{ pad, inst.ref_des, info.fn_name, pad },
+                ) catch continue,
+            };
+            try violations.append(allocator, .{
+                .kind = .no_connect,
+                .severity = severity,
+                .message = msg,
+                .ref_des = inst.ref_des,
+            });
+        }
+    }
+
+    for (block.sub_blocks) |sb| {
+        try checkBlockNoConnects(allocator, arena, sb.block, project_dir, reqs_cache, violations);
+    }
+}
+
+/// The "this pad is an un-blessed no-connect" message, phrased per requirement
+/// tier. Null only on an allocation failure (caller drops the finding).
+fn noConnectMsg(allocator: std.mem.Allocator, ref_des: []const u8, pad: []const u8, info: pin_roles.PadReq) ?[]const u8 {
+    return switch (info.req) {
+        .required => std.fmt.allocPrint(
+            allocator,
+            "{s}: pin {s} (\"{s}\") is a declared input left unconnected — drive it, or " ++
+                "sign off the no-connect with (nc-ok {s} \"why it's safe\")",
+            .{ ref_des, pad, info.fn_name, pad },
+        ) catch null,
+        .suspect => std.fmt.allocPrint(
+            allocator,
+            "{s}: config strap \"{s}\" (pin {s}) is left unconnected (floating) — tie it off, or " ++
+                "sign off the no-connect with (nc-ok {s} \"why it's safe\")",
+            .{ ref_des, info.fn_name, pad, pad },
+        ) catch null,
+        .skip, .fine => null,
+    };
+}
+
+/// Whether instance `inst` signs off leaving pad `pin` unconnected via a
+/// `(nc-ok …)` form. Same three-state shape as `strapBlessing`.
+fn ncBlessing(inst: Instance, pin: []const u8) BlessingVerdict {
+    var saw_empty = false;
+    for (inst.nc_oks) |n| {
+        if (!std.mem.eql(u8, n.pin, pin)) continue;
+        if (n.reason.len > 0) return .blessed;
+        saw_empty = true;
+    }
+    return if (saw_empty) .empty_reason else .none;
+}
+
+/// Cached `pin_roles.padRequirements` keyed by component name (pad-id → PadReq).
+fn reqsFor(
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    cache: *std.StringHashMap(std.StringHashMapUnmanaged(pin_roles.PadReq)),
+    component: []const u8,
+) std.StringHashMapUnmanaged(pin_roles.PadReq) {
+    const gop = cache.getOrPut(component) catch return .{};
+    if (!gop.found_existing) gop.value_ptr.* = pin_roles.padRequirements(arena, project_dir, component);
     return gop.value_ptr.*;
 }
 
@@ -1303,8 +1442,8 @@ test "strapBlessing reads reasoned, blank, and absent blessings" {
         .symbol = "",
         .strap_oks = &.{.{ .pin = "2", .reason = "default mode" }},
     };
-    try std.testing.expectEqual(StrapVerdict.blessed, strapBlessing(blessed, "2"));
-    try std.testing.expectEqual(StrapVerdict.none, strapBlessing(blessed, "3"));
+    try std.testing.expectEqual(BlessingVerdict.blessed, strapBlessing(blessed, "2"));
+    try std.testing.expectEqual(BlessingVerdict.none, strapBlessing(blessed, "3"));
 
     const blank: Instance = .{
         .ref_des = "U1",
@@ -1314,7 +1453,77 @@ test "strapBlessing reads reasoned, blank, and absent blessings" {
         .symbol = "",
         .strap_oks = &.{.{ .pin = "2", .reason = "" }},
     };
-    try std.testing.expectEqual(StrapVerdict.empty_reason, strapBlessing(blank, "2"));
+    try std.testing.expectEqual(BlessingVerdict.empty_reason, strapBlessing(blank, "2"));
+}
+
+// ── no-connect requirement tests ─────────────────────────────────────
+
+// spec: erc - an unconnected pad the pinout wants connected is flagged by tier unless blessed
+test "no-connect check tiers floating pads and honours (nc-ok …)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // mcu: 1 VDD, 2 GND (skip); 3 EN (strap→warning); 4 CTRL (input→error);
+    // 5 DOUT (fine); 6 NRST (strap→warning); 7 PA0 (gpio→fine).
+    const comp = "(component mcu (pinout \"mcu\") (electrical \"CTRL\" (type input)))";
+    const pinout =
+        \\(pinout "mcu"
+        \\  (pin 1 "VDD") (pin 2 "GND") (pin 3 "EN") (pin 4 "CTRL")
+        \\  (pin 5 "DOUT") (pin 6 "NRST") (pin 7 "PA0"))
+    ;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("lib/pinouts");
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/mcu.sexp", .data = comp });
+    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/mcu.sexp", .data = pinout });
+    const path = try tmp.dir.realpathAlloc(alloc, ".");
+
+    const insts = try alloc.alloc(Instance, 1);
+    insts[0] = dcInst("U1", "mcu", "");
+    // NRST(6) signed off → suppressed; EN(3) + CTRL(4) left unblessed.
+    insts[0].nc_oks = &.{.{ .pin = "6", .reason = "internal pull-up per datasheet" }};
+
+    // Wire only VDD(1), GND(2), DOUT(5). Pads 3,4,6,7 carry no connection.
+    var vdd: std.ArrayListUnmanaged(env_mod.PinRef) = .empty;
+    try vdd.append(alloc, .{ .ref_des = "U1", .pin = "1" });
+    var gnd: std.ArrayListUnmanaged(env_mod.PinRef) = .empty;
+    try gnd.append(alloc, .{ .ref_des = "U1", .pin = "2" });
+    var sig: std.ArrayListUnmanaged(env_mod.PinRef) = .empty;
+    try sig.append(alloc, .{ .ref_des = "U1", .pin = "5" });
+
+    const nets = try alloc.alloc(env_mod.Net, 3);
+    nets[0] = .{ .name = "VDD", .pins = vdd.items };
+    nets[1] = .{ .name = "GND", .pins = gnd.items };
+    nets[2] = .{ .name = "SIGOUT", .pins = sig.items };
+
+    const block: DesignBlock = .{
+        .name = "t",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .net_ties = &.{},
+    };
+
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkNoConnects(alloc, &block, path, &violations);
+
+    // EN(3) → warning, CTRL(4) → error. NRST(6) blessed, PA0(7)/DOUT(5) fine.
+    try std.testing.expectEqual(@as(usize, 2), countKind(violations.items, .no_connect));
+    var errors: usize = 0;
+    var warnings: usize = 0;
+    for (violations.items) |v| {
+        if (v.kind != .no_connect) continue;
+        try std.testing.expectEqualStrings("U1", v.ref_des);
+        if (v.severity == .@"error") errors += 1;
+        if (v.severity == .warning) warnings += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), errors); // CTRL — declared input
+    try std.testing.expectEqual(@as(usize, 1), warnings); // EN — config strap
 }
 
 // ── decoupling-binding requirement tests ─────────────────────────────
