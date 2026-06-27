@@ -625,29 +625,21 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     };
     defer ctx.allocator.free(source);
 
-    // Find (instance "REF" ...) and remove the entire form
-    const needle = try std.fmt.allocPrint(ctx.allocator, INSTANCE_OPEN_TEMPLATE, .{ref_des});
-    defer ctx.allocator.free(needle);
-
-    const inst_pos = std.mem.indexOf(u8, source, needle) orelse {
+    // Locate the instance form. Prefer the scene-graph `srcOff` (robust to
+    // label-declared parts that auto-renumber — e.g. a wizard-added cap whose
+    // source ref-des is the component name, not the build-time C4), with the
+    // `(instance "REF"` needle as fallback.
+    const src_off = parseSrcOff(body);
+    const inst_pos = findInstanceOpen(source, ref_des, src_off) orelse {
         res.status = 404;
-        res.body = ERR_INSTANCE_NOT_FOUND;
+        res.body = if (src_off > 0) ERR_GENERATED_PART else ERR_INSTANCE_NOT_FOUND;
         return;
     };
-
-    // Find matching closing paren
-    var depth: u32 = 0;
-    var inst_end: usize = inst_pos;
-    for (source[inst_pos..], 0..) |ch, i| {
-        if (ch == '(') depth += 1;
-        if (ch == ')') {
-            depth -= 1;
-            if (depth == 0) {
-                inst_end = inst_pos + i + 1;
-                break;
-            }
-        }
-    }
+    var inst_end = findFormEnd(source, inst_pos) orelse {
+        res.status = 400;
+        res.body = "malformed instance form";
+        return;
+    };
 
     // Also eat trailing newline
     if (inst_end < source.len and source[inst_end] == '\n') inst_end += 1;
@@ -922,7 +914,23 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     var match_tokens: std.ArrayListUnmanaged([]const u8) = .empty;
     defer match_tokens.deinit(ctx.allocator);
     const p = (try findInstancePinForm(ctx.allocator, source, inst_open, inst_end, pin, &match_tokens)) orelse {
-        sendJsonError(ctx, res, 404, "pin not found — it may be wired via a (net …) form; edit the source directly");
+        // Pin not declared inline yet — add `(pin <pin> "<net>")` to the instance
+        // body. Lets a staged/unwired part (a freshly-added cap with no pins) be
+        // connected by dropping it on a net.
+        const close = inst_end - 1; // the instance form's closing ')'
+        var ins: std.ArrayListUnmanaged(u8) = .empty;
+        const iw = ins.writer(ctx.allocator);
+        try iw.writeAll(source[0..close]);
+        try iw.print("\n    (pin {s} \"{s}\")", .{ pin, new_net });
+        try iw.writeAll(source[close..]);
+        infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = ins.items }) catch {
+            sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
+            return;
+        };
+        rebuildAndPush(ctx, name, res) catch {
+            sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
+            return;
+        };
         return;
     };
 

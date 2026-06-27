@@ -17,6 +17,9 @@ const auth_login_js = @embedFile("assets/auth_login.js");
 const auth_setup_js = @embedFile("assets/auth_setup.js");
 const auth_invite_js = @embedFile("assets/auth_invite.js");
 const review_notes_js = @embedFile("assets/review_notes.js");
+// KiCad-style sheet editor (prototype) client — renders the scene-graph JSON
+// onto a pan/zoom canvas with section-as-sheet navigation + edit hotkeys.
+const editor_js = @embedFile("assets/editor.js");
 
 // Vendored CodeMirror 5 (MIT) — core + scheme mode + matchbrackets/
 // closebrackets addons concatenated into one bundle. Backs the full-file
@@ -73,6 +76,7 @@ const REGISTRY = [_]Asset{
     .{ .name = "auth_setup.js", .body = auth_setup_js, .content_type = .JS },
     .{ .name = "auth_invite.js", .body = auth_invite_js, .content_type = .JS },
     .{ .name = "review_notes.js", .body = review_notes_js, .content_type = .JS },
+    .{ .name = "editor.js", .body = editor_js, .content_type = .JS },
     .{ .name = "schematic_viewer.js", .body = schematic_viewer_js, .content_type = .JS },
     .{ .name = "schematic.css", .body = schematic_css, .content_type = .CSS },
     .{ .name = "codemirror.bundle.js", .body = codemirror_js, .content_type = .JS },

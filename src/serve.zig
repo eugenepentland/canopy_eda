@@ -25,6 +25,7 @@ const upload_datasheet = @import("serve/upload_datasheet.zig");
 const pdf_viewer = @import("serve/pdf_viewer.zig");
 const footprint_preview = @import("serve/footprint_preview.zig");
 const schematic_page = @import("serve/schematic_page.zig");
+const editor_page = @import("serve/editor_page.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
 const pcb_describe = @import("serve/pcb_describe.zig");
 const layout_match = @import("serve/layout_match.zig");
@@ -355,6 +356,9 @@ pub fn serve(
     router.get("/style.css", pages.cssPage, .{});
     router.get("/static/:name", static_assets.staticAsset, .{});
     router.get("/schematics/:name", schematic_page.schematicPage, .{});
+    // KiCad-style sheet editor (prototype): section-as-sheet canvas navigator.
+    router.get("/editor/:name", editor_page.editorPage, .{});
+    router.get("/api/editor-scene/:name", editor_page.editorSceneApi, .{});
     router.get("/pcb-layout/:name", pcb_layout_page.pcbLayoutPage, .{});
     router.get("/api/pcb-layout/:name", pcb_layout_page.pcbLayoutJsonApi, .{});
     router.get("/api/pcb-png/:name", pcb_layout_page.pcbPngApi, .{});

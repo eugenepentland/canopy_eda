@@ -817,6 +817,9 @@ src/serve/edit.zig::writeDesignCore fn
 src/serve/edit_assist.zig::libIndexApi fn
 src/serve/edit_assist.zig::saveDiagramLayoutApi fn
 src/serve/edit_assist.zig::validateSourceApi fn
+src/serve/editor_page.zig::HandlerError value
+src/serve/editor_page.zig::editorPage fn
+src/serve/editor_page.zig::editorSceneApi fn
 src/serve/footprint_preview.zig::HandlerError value
 src/serve/footprint_preview.zig::boardFootprintApi fn
 src/serve/footprint_preview.zig::footprintApi fn

@@ -95,6 +95,7 @@ const JsonHub = struct {
     w: f64,
     h: f64,
     icon: ?[]const u8,
+    src_offset: u32 = 0,
     left_pins: std.ArrayListUnmanaged(JsonPin),
     right_pins: std.ArrayListUnmanaged(JsonPin),
 };
@@ -157,6 +158,19 @@ const JsonPassive = struct {
     w: f64,
     h: f64,
     count: u32 = 1,
+    src_offset: u32 = 0,
+};
+
+/// An instance the hub/spoke layout did not place (a floating passive — e.g. a
+/// just-added cap with no hub-reaching net). Reported so the editor can stage it
+/// for the user to drag onto a pin. Identity is the source offset, stable across
+/// the build-time ref-des auto-renumber.
+const JsonStaged = struct {
+    ref: []const u8,
+    component: []const u8,
+    value: []const u8,
+    symbol: []const u8,
+    src_offset: u32 = 0,
 };
 
 const JsonLabel = struct {
@@ -178,6 +192,7 @@ const SceneGraph = struct {
     wires: std.ArrayListUnmanaged(JsonWire),
     passives: std.ArrayListUnmanaged(JsonPassive),
     labels: std.ArrayListUnmanaged(JsonLabel),
+    staged: std.ArrayListUnmanaged(JsonStaged),
 
     fn init(allocator: Allocator) SceneGraph {
         return .{
@@ -187,6 +202,7 @@ const SceneGraph = struct {
             .wires = .empty,
             .passives = .empty,
             .labels = .empty,
+            .staged = .empty,
         };
     }
 
@@ -230,6 +246,7 @@ const SceneGraph = struct {
             .y = y,
             .w = passive_bw,
             .h = 20.0,
+            .src_offset = inst.src_offset,
         });
     }
 
@@ -244,6 +261,7 @@ const SceneGraph = struct {
             .w = passive_bw,
             .h = 20.0,
             .count = count,
+            .src_offset = inst.src_offset,
         });
     }
 };
@@ -662,6 +680,22 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
 
     // Port blocks (skipped — interface ports not shown in schematic)
 
+    // Unplaced spokes: a passive the layout never drew or merged (a floating
+    // part — e.g. a just-added cap with no hub-reaching net). Hubs are always
+    // placed; a spoke is placed once it's drawn or merged into rendered_spokes.
+    // Reported so the editor can stage these for the user to wire by drag.
+    for (ctx.instances.items) |inst| {
+        if (!ctx.spoke_set.contains(inst.ref_des)) continue;
+        if (ctx.rendered_spokes.contains(inst.ref_des)) continue;
+        try scene.staged.append(allocator, .{
+            .ref = shortRef(inst.ref_des),
+            .component = inst.component,
+            .value = inst.value,
+            .symbol = inst.symbol,
+            .src_offset = inst.src_offset,
+        });
+    }
+
     // Set viewBox
     scene.vb_w = @max(total_width, MIN_VB_WIDTH);
     scene.vb_h = @max(y + VB_MARGIN, MIN_VB_HEIGHT);
@@ -750,6 +784,7 @@ fn collectHubData(
         .w = hub_width,
         .h = hub_height,
         .icon = icon,
+        .src_offset = hub.src_offset,
         .left_pins = .empty,
         .right_pins = .empty,
     };
@@ -865,28 +900,17 @@ fn collectHubConnections(
     defer pn_map.deinit(allocator);
 
     const all_groups = try hub_mod.groupHubPins(ctx, all_pins_list.items, adj_entries, &pn_map);
-    var left_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var right_groups_list: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var left_pc: usize = 0;
-    var right_pc: usize = 0;
-
-    for (all_groups) |group| {
-        var n: usize = 0;
-        var it = std.mem.splitScalar(u8, group.pin_numbers, ',');
-        while (it.next()) |_| n += 1;
-        if (left_pc <= right_pc) {
-            try left_groups_list.append(allocator, group);
-            left_pc += n;
-        } else {
-            try right_groups_list.append(allocator, group);
-            right_pc += n;
-        }
-    }
-
-    const left_groups = left_groups_list.toOwnedSlice(allocator) catch &[_]PinGroup{};
-    const right_groups = right_groups_list.toOwnedSlice(allocator) catch &[_]PinGroup{};
-    const left_heights = try mergeAwareGroupHeights(ctx, allocator, left_groups, hub.ref_des);
-    const right_heights = try mergeAwareGroupHeights(ctx, allocator, right_groups, hub.ref_des);
+    // Must mirror collectHubData's split exactly. That pass balances groups
+    // left/right by merge-aware *height* and places each pin by accumulating
+    // those heights; if this pass splits differently (it used to balance by pin
+    // *count*), a pin's connection wire is emitted on a different side / y than
+    // the pin is drawn at — so nets visibly miss the IC pads. Share the one
+    // split so every wire meets its pin.
+    const split = try splitGroupsByMergeAwareHeight(ctx, allocator, all_groups, hub.ref_des);
+    const left_groups = split.left;
+    const right_groups = split.right;
+    const left_heights = split.left_heights;
+    const right_heights = split.right_heights;
 
     // Collect left connections
     var py_left = y_start + HUB_VPAD;
@@ -1548,6 +1572,7 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         } else {
             try w.writeAll(",\"icon\":null");
         }
+        try w.print(",\"src\":{d}", .{h.src_offset});
 
         // Left pins
         try w.writeAll(",\"leftPins\":[");
@@ -1595,7 +1620,7 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         try writeJsonString(w, "value", p.value);
         try w.writeAll(",");
         try writeJsonString(w, "symbol", p.symbol);
-        try w.print(",\"x\":{d:.1},\"y\":{d:.1},\"w\":{d:.1},\"h\":{d:.1},\"count\":{d}", .{ p.x, p.y, p.w, p.h, p.count });
+        try w.print(",\"x\":{d:.1},\"y\":{d:.1},\"w\":{d:.1},\"h\":{d:.1},\"count\":{d},\"src\":{d}", .{ p.x, p.y, p.w, p.h, p.count, p.src_offset });
         try w.writeAll("}");
     }
     try w.writeAll("]");
@@ -1613,6 +1638,23 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
             if (l.is_port) "true" else "false",
             if (l.is_ground) "true" else "false",
         });
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+
+    // Staged (unplaced) instances
+    try w.writeAll(",\"staged\":[");
+    for (scene.staged.items, 0..) |st, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{");
+        try writeJsonString(w, "ref", st.ref);
+        try w.writeAll(",");
+        try writeJsonString(w, "component", st.component);
+        try w.writeAll(",");
+        try writeJsonString(w, "value", st.value);
+        try w.writeAll(",");
+        try writeJsonString(w, "symbol", st.symbol);
+        try w.print(",\"src\":{d}", .{st.src_offset});
         try w.writeAll("}");
     }
     try w.writeAll("]");

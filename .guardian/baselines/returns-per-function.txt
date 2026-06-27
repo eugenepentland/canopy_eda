@@ -7,5 +7,6 @@ src/serve/auth.zig:1283: fn 'loginCompletePage' has 26 return statements (cap 12
 src/serve/auth.zig:407: fn 'decodeCborArg' has 15 return statements (cap 12)
 src/serve/auth.zig:904: fn 'registerCompletePage' has 33 return statements (cap 12)
 src/serve/edit.zig:208: fn 'editFootprintApi' has 19 return statements (cap 12)
+src/serve/edit.zig:867: fn 'rewirePinApi' has 14 return statements (cap 12)
 src/serve/layout_match.zig:160: fn 'layoutMatchJson' has 18 return statements (cap 12)
 src/serve/upload_package.zig:27: fn 'uploadPackageApi' has 16 return statements (cap 12)
