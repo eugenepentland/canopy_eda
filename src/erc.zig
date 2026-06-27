@@ -156,15 +156,16 @@ fn collectMissingRequirements(
     for (block.sub_blocks) |sb| try collectMissingRequirements(allocator, sb.block, seen, violations);
 }
 
-/// Hub-class ref-des — the set the schematic renders as boxes (ICs, connectors,
-/// transistors). U/J/P/X/Q and any non-passive prefix count; R/C/L/F/D passives
-/// are excluded. Mirrors `render_svg.draw.isHub`.
+/// The requirements-warning scope: ICs (`U`) and discrete transistors (`Q`).
+/// Connectors (`J`/`P`/`X`), passives (`R`/`C`/`L`/`F`/`D`), and other
+/// electromechanical / mechanical parts (switches, encoders, crystals, relays,
+/// …) carry no datasheet requirement rules, so they are exempt — only active
+/// semiconductors are nagged to declare requirements.
 fn isActiveIcRefDes(ref_des: []const u8) bool {
     if (ref_des.len == 0) return false;
     return switch (ref_des[0]) {
-        'U', 'J', 'P', 'X', 'Q' => true,
-        'R', 'C', 'L', 'F', 'D' => false,
-        else => true,
+        'U', 'Q' => true,
+        else => false,
     };
 }
 
@@ -3300,10 +3301,19 @@ test "sequencing cycle detected" {
     try std.testing.expect(hit);
 }
 
-// spec: erc - Exempts ignore-requirements support parts and passive-class components from the requirements warning
-test "missing requirements exempts support parts and passive-class components" {
+// spec: erc - Exempts connectors, ignore-requirements support parts, and passive-class components from the requirements warning
+test "missing requirements exempts connectors, support parts, and passive-class components" {
     const instances = [_]Instance{
-        // Board-to-board connector that falls through to a hub prefix but
+        // Connector — exempt purely by ref-des prefix (J), no opt-out needed.
+        .{
+            .ref_des = "J1",
+            .component = "usb4510-03-1-a-gct",
+            .value = "",
+            .footprint = "",
+            .symbol = "",
+            .requirements = &.{},
+        },
+        // A board-to-board connector that lands on the IC `U` prefix but
         // declares (ignore-requirements).
         .{
             .ref_des = "U9",
