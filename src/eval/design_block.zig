@@ -90,6 +90,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var parts: std.ArrayListUnmanaged(env_mod.PlaceholderPart) = .empty;
     var layout_spec: env_mod.LayoutSpec = .{};
     var board_spec: env_mod.BoardSpec = .{};
+    var board_role: env_mod.BoardRole = .subcircuit;
     var revision_spec: env_mod.Revision = .{};
     var rough_spec: env_mod.RoughSpec = .{};
     var kicad_pcb_path: ?[]const u8 = null;
@@ -190,6 +191,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
             },
             .layout => layout_spec = try parseLayout(self, form_children),
             .board => board_spec = try parseBoard(self, form_children),
+            .board_role => board_role = parseBoardRole(self, form_children),
             .revision => revision_spec = try parseRevision(self, form_children),
             .rough => rough_spec = try parseRough(self, form_children),
             // Section-only forms are ignored at the top level — a
@@ -232,6 +234,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .parts = parts.toOwnedSlice(self.allocator) catch &.{},
         .layout = layout_spec,
         .board = board_spec,
+        .board_role = board_role,
         .revision = revision_spec,
         .rough = rough_spec,
     };
@@ -267,6 +270,25 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
 fn parseKicadPcbPath(form_children: []const Node) ?[]const u8 {
     if (form_children.len < 2) return null;
     return form_children[1].asString();
+}
+
+/// Parse `(board-role board|subcircuit)` into the explicit fabrication role.
+/// The role is opt-in: a malformed or missing keyword warns and leaves the
+/// default (`.subcircuit`) in place, so a typo can never silently promote a
+/// design to a fabricable board.
+fn parseBoardRole(self: *Evaluator, form_children: []const Node) env_mod.BoardRole {
+    if (form_children.len < 2) {
+        self.warnFmt(form_children[0].span, "(board-role …) needs a role word — expected (board-role board|subcircuit)", .{});
+        return .subcircuit;
+    }
+    const word = form_children[1].asAtom() orelse {
+        self.warnFmt(form_children[1].span, "(board-role …) role must be a bare word — expected board|subcircuit", .{});
+        return .subcircuit;
+    };
+    if (std.mem.eql(u8, word, "board")) return .board;
+    if (std.mem.eql(u8, word, "subcircuit")) return .subcircuit;
+    self.warnFmt(form_children[1].span, "unknown role '{s}' in (board-role …) — expected board|subcircuit", .{word});
+    return .subcircuit;
 }
 
 /// Parse `(revision "ID" (date "YYYY-MM-DD") (change "ID" "summary")…)` — the
@@ -806,6 +828,7 @@ fn evalSection(
             .stub,
             .layout,
             .board,
+            .board_role,
             .revision,
             .rough,
             => {
@@ -1618,6 +1641,41 @@ test "design-block parses a (board ...) form" {
     try testing.expectEqual(@as(f64, 90), block.board.sides[1].items[0].rot.?);
     try testing.expectEqual(@as(usize, 4), block.board.corners.len);
     try testing.expectEqualStrings("MK3", block.board.corners[2].ref);
+}
+
+// spec: eval/design_block - board-role form sets the explicit board/subcircuit role
+test "design-block (board-role board) sets the board role" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (board-role board))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expectEqual(env_mod.BoardRole.board, block.board_role);
+}
+
+// spec: eval/design_block - board-role defaults to subcircuit when the form is absent
+test "design-block without (board-role …) defaults to subcircuit" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (board (size 80 55)))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    // (board …) outline present, but no (board-role …) ⇒ still a subcircuit.
+    try testing.expectEqual(env_mod.BoardRole.subcircuit, block.board_role);
 }
 
 // spec: eval/design_block - revision form captures id, date, and newest-first changelog

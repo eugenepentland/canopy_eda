@@ -1128,6 +1128,12 @@ pub const RoughSpec = struct {
 /// is derived from declared content.
 pub const BlockOrigin = enum { design_root, embedded };
 
+/// Explicit board-vs-subcircuit role from a top-level `(board-role …)` form.
+/// Drives the home page's Board/Subcircuit tag + filter. Declared explicitly
+/// — there is no content auto-detection: a design with no `(board-role …)`
+/// form defaults to `.subcircuit`, so a fabricable board must say so.
+pub const BoardRole = enum { subcircuit, board };
+
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist
 /// (instances + nets + ports), the section/sub-block tree, and the design
 /// metadata (verifications, rails, functions) the review and diagram layers
@@ -1188,6 +1194,11 @@ pub const DesignBlock = struct {
     /// hardware from a top-level `(board …)` form. `present=false` ⇒ none
     /// authored — the layout stays an unbounded part cluster.
     board: BoardSpec = .{},
+    /// Explicit fabrication role from a top-level `(board-role board|subcircuit)`
+    /// form. `.subcircuit` is the default when no form is present — there is no
+    /// content auto-detection, so a fabricable board must declare
+    /// `(board-role board)`. Drives the home page's Board/Subcircuit role tag.
+    board_role: BoardRole = .subcircuit,
     /// Declared board revision from a top-level `(revision …)` form — the
     /// canonical human-meaningful spin id (+ optional date + in-file
     /// changelog). `present=false` ⇒ the design declares no revision.

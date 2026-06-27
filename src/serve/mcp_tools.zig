@@ -2170,11 +2170,11 @@ pub const DesignSummary = struct {
     /// home page's "grouping" tag so the layout workflow (author grouping →
     /// rough → star) is visible at a glance.
     has_groups: bool = false,
-    /// True when the evaluated design declares fabrication intent — a
-    /// top-level `(board …)` outline or a `(kicad-pcb …)` target. Such a block
-    /// is a fabricable *board*; otherwise it is a reusable *subcircuit*. Drives
-    /// the home page's Board/Subcircuit role tag + filter (the role is
-    /// content-derived, not folder-derived).
+    /// True when the design explicitly declares `(board-role board)`. The role
+    /// is explicit, not content-derived: a design with no `(board-role …)` form
+    /// defaults to subcircuit (`block.board_role == .subcircuit`), so a
+    /// fabricable board must say so. `(board …)` / `(kicad-pcb …)` no longer
+    /// influence this. Drives the home page's Board/Subcircuit role tag + filter.
     is_board: bool = false,
 };
 
@@ -2379,12 +2379,12 @@ pub fn listDesignSummaries(
                 summary.net_count = countNets(block);
                 summary.build_ok = true;
                 summary.has_groups = block.groups.len > 0;
-                // Content-derived board/subcircuit role: a block is a fabricable
-                // *board* iff it declares fabrication intent (a (board …) outline
-                // or a (kicad-pcb …) target); otherwise it is a reusable
-                // subcircuit. Folder is not consulted.
-                summary.is_board = block.board.present or
-                    block.kicad_pcb_path != null;
+                // Explicit board/subcircuit role: driven solely by the top-level
+                // (board-role board|subcircuit) form. No content auto-detection —
+                // a design with no (board-role …) defaults to subcircuit, so a
+                // fabricable board must declare (board-role board). (board …) and
+                // (kicad-pcb …) keep their own jobs and no longer set the role.
+                summary.is_board = block.board_role == .board;
 
                 // Status-chip roll-up for the home dashboard: ERC severities
                 // (same .bom-resolved path the review endpoint uses), failed

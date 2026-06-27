@@ -167,6 +167,7 @@ src/eval/env.zig::AssertionResult struct_
 src/eval/env.zig::BlockDef struct_
 src/eval/env.zig::BlockOrigin enum_
 src/eval/env.zig::BlockRole enum_
+src/eval/env.zig::BoardRole enum_
 src/eval/env.zig::BoardSpec struct_
 src/eval/env.zig::CalcBlock struct_
 src/eval/env.zig::CalcResult struct_
