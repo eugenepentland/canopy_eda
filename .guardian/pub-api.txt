@@ -172,7 +172,6 @@ src/eval/env.zig::CalcBlock struct_
 src/eval/env.zig::CalcResult struct_
 src/eval/env.zig::Check value
 src/eval/env.zig::ConstraintPriority enum_
-src/eval/env.zig::CriticalIc struct_
 src/eval/env.zig::DesignBlock struct_
 src/eval/env.zig::Drive enum_
 src/eval/env.zig::EdgeSide enum_
@@ -627,7 +626,6 @@ src/review.zig::BomEntry struct_
 src/review.zig::BomGroup struct_
 src/review.zig::ComponentRequirementEntry struct_
 src/review.zig::MissingMpn struct_
-src/review.zig::MissingRequirement struct_
 src/review.zig::PortSummary struct_
 src/review.zig::PowerTree struct_
 src/review.zig::PowerTreeEdge struct_
@@ -649,9 +647,7 @@ src/review_html.zig::writePowerBudget fn
 src/review_html.zig::writePowerSequence fn
 src/review_html.zig::writeSectionCoverage fn
 src/review_html.zig::writeTestPoints fn
-src/review_html.zig::writeTraceability fn
 src/review_json.zig::renderToJson fn
-src/review_json.zig::writeTraceability fn
 src/review_md.zig::renderReadme fn
 src/review_md.zig::renderToMarkdown fn
 src/serve.zig::Handler struct_
@@ -773,9 +769,6 @@ src/serve/design_diff.zig::diffApi fn
 src/serve/design_diff.zig::diffBlocks fn
 src/serve/design_diff.zig::historyApi fn
 src/serve/design_diff.zig::writeDiffJson fn
-src/serve/design_doc.zig::EditError value
-src/serve/design_doc.zig::addCriticalIc fn
-src/serve/design_doc.zig::removeCriticalIc fn
 src/serve/diag_format.zig::Diagnostic struct_
 src/serve/diag_format.zig::build fn
 src/serve/diag_format.zig::caretLine fn
@@ -1077,7 +1070,3 @@ src/sexpr/tokenizer.zig::TokenTag enum_
 src/sexpr/tokenizer.zig::Tokenizer struct_
 src/sexpr/tokenizer.zig::si_scales value
 src/sexpr/tokenizer.zig::si_unit_letters value
-src/traceability.zig::TraceRow struct_
-src/traceability.zig::TraceStage enum_
-src/traceability.zig::Traceability struct_
-src/traceability.zig::build fn

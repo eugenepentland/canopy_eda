@@ -86,7 +86,6 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var net_ties: std.ArrayListUnmanaged(NetTie) = .empty;
     var sub_blocks: std.ArrayListUnmanaged(SubBlock) = .empty;
     var verifications: std.ArrayListUnmanaged(env_mod.Verification) = .empty;
-    var critical_ics: std.ArrayListUnmanaged(env_mod.CriticalIc) = .empty;
     var test_points: std.ArrayListUnmanaged(env_mod.TestPoint) = .empty;
     var parts: std.ArrayListUnmanaged(env_mod.PlaceholderPart) = .empty;
     var layout_spec: env_mod.LayoutSpec = .{};
@@ -179,7 +178,6 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
             .decouple => try evalDecoupleForm(self, form_children, env, &instances, &all_pin_nets),
             .decouple_defaults => try parseDecoupleDefaults(self, form_children, env),
             .verifies => if (parseVerifies(self, form_children, env)) |v| try verifications.append(self.allocator, v),
-            .design_doc => try parseDesignDoc(self, form_children, env, &critical_ics),
             .test_point => if (try test_point_mod.parse(self.allocator, form_children)) |tp| try test_points.append(self.allocator, tp),
             .kicad_pcb => {
                 if (parseKicadPcbPath(form_children)) |p| kicad_pcb_path = p;
@@ -229,7 +227,6 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .sections = sections.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .net_ties = block_ties.toOwnedSlice(self.allocator) catch &.{},
         .verifications = verifications.toOwnedSlice(self.allocator) catch &.{},
-        .critical_ics = critical_ics.toOwnedSlice(self.allocator) catch &.{},
         .test_points = test_points.toOwnedSlice(self.allocator) catch &.{},
         .kicad_pcb_path = kicad_pcb_path,
         .parts = parts.toOwnedSlice(self.allocator) catch &.{},
@@ -803,7 +800,6 @@ fn evalSection(
             .group,
             .sub_block,
             .verifies,
-            .design_doc,
             .test_point,
             .decouple_defaults,
             .kicad_pcb,
@@ -1220,52 +1216,6 @@ fn parseVerifies(self: *Evaluator, form_children: []const Node, env: *Env) ?env_
         .signed_by = signed_by,
         .date = date_str,
     };
-}
-
-/// Parse a top-level `(design-doc (critical-ic <component> …) …)` form.
-/// Each `(critical-ic …)` child names a library component (atom or string)
-/// and may carry `(role "…")`, `(rationale "…")`, `(mpn "…")` sub-clauses in
-/// any order. Malformed children are skipped rather than failing the build —
-/// the design document is advisory, not load-bearing for the netlist.
-fn parseDesignDoc(
-    self: *Evaluator,
-    form_children: []const Node,
-    env: *Env,
-    out: *std.ArrayListUnmanaged(env_mod.CriticalIc),
-) EvalError!void {
-    _ = env;
-    // form_children[0] = "design-doc"; the rest are (critical-ic …) forms.
-    for (form_children[1..]) |child| {
-        const cic = child.asList() orelse continue;
-        if (cic.len < 2) continue;
-        const head = cic[0].asAtom() orelse continue;
-        if (!std.mem.eql(u8, head, "critical-ic")) continue;
-        const component = cic[1].asAtom() orelse cic[1].asString() orelse continue;
-
-        var role: []const u8 = "";
-        var rationale: []const u8 = "";
-        var mpn: []const u8 = "";
-        for (cic[2..]) |sub_node| {
-            const sub = sub_node.asList() orelse continue;
-            if (sub.len < 2) continue;
-            const sub_head = sub[0].asAtom() orelse continue;
-            const val = sub[1].asString() orelse sub[1].asAtom() orelse "";
-            if (std.mem.eql(u8, sub_head, "role")) {
-                role = val;
-            } else if (std.mem.eql(u8, sub_head, "rationale")) {
-                rationale = val;
-            } else if (std.mem.eql(u8, sub_head, "mpn")) {
-                mpn = val;
-            }
-        }
-
-        out.append(self.allocator, .{
-            .component = component,
-            .role = role,
-            .rationale = rationale,
-            .mpn = mpn,
-        }) catch return EvalError.OutOfMemory;
-    }
 }
 
 /// Parse a top-level `(rough …)` form into the design's rough-placement seed:

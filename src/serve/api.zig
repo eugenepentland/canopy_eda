@@ -529,7 +529,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
         std.StringHashMapUnmanaged([]req_checks.Result).empty;
     req_checks.applyVerifications(&check_results, block, block.instances);
 
-    const doc = review_mod.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results, ctx.project_dir) catch {
+    const doc = review_mod.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results) catch {
         res.status = HTTP_INTERNAL_ERROR;
         res.body = ERR_BUILD;
         return;

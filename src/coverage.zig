@@ -116,7 +116,7 @@ pub fn computeInstanceCoverage(
         try checks.append(allocator, .{ .category = .datasheet, .ok = inst.datasheets.len > 0 });
         // Only ask about requirements_verified when the library actually
         // declared rules to verify — ICs without any `(requirement …)`
-        // forms are already surfaced separately via `critical_missing_requirements`.
+        // forms are already surfaced separately by the `missing_requirements` ERC check.
         if (inst.requirements.len > 0) {
             try checks.append(allocator, .{
                 .category = .requirements_verified,
@@ -294,9 +294,9 @@ fn rollUpInstances(instances: []const InstanceCoverage) SectionCoverage {
     return sc;
 }
 
-/// Same classification as `review.zig`'s `isCriticalRefDes` (passives
-/// R/C/L/F/D versus everything else). Duplicated here so coverage.zig
-/// stays independent of review.zig's internals.
+/// Hub/passive classification by ref-des prefix (passives R/C/L/F/D versus
+/// everything else). Mirrors `render_svg.draw.isHub` and `erc.isActiveIcRefDes`;
+/// kept local so coverage.zig has no cross-module dependency.
 fn classifyByRefDes(ref_des: []const u8) ComponentClass {
     return switch (ref_des[0]) {
         'R', 'C', 'L', 'F', 'D' => .passive,

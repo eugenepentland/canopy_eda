@@ -55,7 +55,7 @@ pub const ViolationKind = enum {
     rail_voltage_unresolved,
     sequence_cycle,
     voltage_domain_incompatible,
-    main_ic_in_design,
+    missing_requirements,
     layout_class_inferred,
     components_not_grouped,
 };
@@ -97,7 +97,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkPowerTreeIntegrity(allocator, block, &violations);
     try checkSequencingCycles(allocator, block, &violations);
     try checkVoltageDomainCompat(allocator, block, &violations);
-    try checkMainIcsInDesign(allocator, block, &violations);
+    try checkMissingRequirements(allocator, block, &violations);
     try checkLayoutClasses(allocator, block, &violations);
     try checkComponentGrouping(allocator, block, &violations);
     if (project_dir.len > 0) try checkPinFunctions(allocator, block, project_dir, &violations);
@@ -105,48 +105,67 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     return violations.items;
 }
 
-/// Flag "main ICs" instantiated directly in the top-level design instead of
-/// being sealed inside a `(defmodule …)` and brought in via `(sub-block …)`.
-/// The design file should read as a wiring harness between modules: each
-/// functional IC's pin-level implementation belongs in `lib/modules/` so it
-/// can be reviewed, reused, and revised on its own. A "main IC" here is an
-/// instance whose ref-des prefix is `U` (the IC prefix from `ids.componentPrefix`)
-/// that is neither an `(ignore-requirements)` support part — debug headers,
-/// mounting hardware, and board-to-board connectors that fall through to the
-/// `U` prefix all set this — nor a passive-class part (ESD arrays, EMI
-/// filters). `block.instances` already excludes sub-block contents, so
-/// iterating it inspects only what the design file instantiates directly.
-fn checkMainIcsInDesign(
+/// Flag active ICs whose library component declares no `(requirement …)` rules.
+/// Component requirements are the design's record that a part was reviewed
+/// against its datasheet, so an undocumented functional IC is the most common
+/// review gap — a `warning` the schematic page and review doc surface so the
+/// author can fill it in. Scope is the hub class the schematic renders as boxes
+/// (ICs, connectors, transistors — `isActiveIcRefDes`); passive spokes
+/// (R/C/L/F/D), `(ignore-requirements)` support parts, test points, and
+/// passive-class components (ESD arrays, EMI filters) are exempt. Recurses
+/// sub-blocks so a module's ICs are judged too, and deduplicates by component
+/// so a part used N times warns once.
+fn checkMissingRequirements(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     violations: *std.ArrayListUnmanaged(Violation),
 ) !void {
-    for (collectBlockInstances(allocator, block)) |inst| {
-        if (inst.ref_des.len == 0) continue;
-        if (na.refDesLocalPrefix(inst.ref_des) != 'U') continue;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+    try collectMissingRequirements(allocator, block, &seen, violations);
+}
+
+fn collectMissingRequirements(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    seen: *std.StringHashMapUnmanaged(void),
+    violations: *std.ArrayListUnmanaged(Violation),
+) std.mem.Allocator.Error!void {
+    for (block.instances) |inst| {
+        if (!isActiveIcRefDes(inst.ref_des)) continue;
+        if (inst.component.len == 0) continue;
         if (inst.requirements_ignored) continue;
         if (isPassiveComponent(inst.component)) continue;
-        // An IC the author has catalogued as a (critical-ic …) is exempt: it is
-        // already reviewed "on its own" through the design-doc lifecycle
-        // (footprint → datasheet → requirements → placed+verified), which is the
-        // very thing sealing it in a (defmodule …) was meant to provide. This
-        // covers both a single anchor MCU and a flat RF/analog board whose every
-        // IC is a tracked critical part; un-catalogued ICs are still nagged to
-        // modularise.
-        if (isDeclaredCriticalIc(block, inst.component)) continue;
+        if (env_mod.isTestPoint(inst.component)) continue;
+        if (inst.requirements.len > 0) continue;
+        const gop = try seen.getOrPut(allocator, inst.component);
+        if (gop.found_existing) continue;
         const msg = std.fmt.allocPrint(
             allocator,
-            "Main IC \"{s}\" ({s}) is instantiated directly in the design — " ++
-                "seal it in a (defmodule …) under lib/modules/ and bring it in via (sub-block …)",
-            .{ inst.ref_des, inst.component },
+            "IC \"{s}\" ({s}) declares no component requirements — add (requirement …) " ++
+                "rules to lib/components/{s}.sexp so the part is documented against its datasheet",
+            .{ inst.ref_des, inst.component, inst.component },
         ) catch continue;
         try violations.append(allocator, .{
-            .kind = .main_ic_in_design,
-            .severity = .@"error",
+            .kind = .missing_requirements,
+            .severity = .warning,
             .message = msg,
             .ref_des = inst.ref_des,
         });
     }
+    for (block.sub_blocks) |sb| try collectMissingRequirements(allocator, sb.block, seen, violations);
+}
+
+/// Hub-class ref-des — the set the schematic renders as boxes (ICs, connectors,
+/// transistors). U/J/P/X/Q and any non-passive prefix count; R/C/L/F/D passives
+/// are excluded. Mirrors `render_svg.draw.isHub`.
+fn isActiveIcRefDes(ref_des: []const u8) bool {
+    if (ref_des.len == 0) return false;
+    return switch (ref_des[0]) {
+        'U', 'J', 'P', 'X', 'Q' => true,
+        'R', 'C', 'L', 'F', 'D' => false,
+        else => true,
+    };
 }
 
 /// Surface the heuristic net-criticality classification the PCB placer will use,
@@ -231,16 +250,6 @@ fn checkComponentGrouping(
         .severity = .@"error",
         .message = msg,
     });
-}
-
-/// True when `component` is declared as a board-defining `(critical-ic …)`
-/// whose role names a primary compute part. Such an IC is the design's anchor
-/// and legitimately lives at the top level (see `checkMainIcsInDesign`).
-fn isDeclaredCriticalIc(block: *const DesignBlock, component: []const u8) bool {
-    for (block.critical_ics) |ci| {
-        if (std.mem.eql(u8, ci.component, component)) return true;
-    }
-    return false;
 }
 
 /// For each net, gather pins whose component library declared electrical
@@ -3291,41 +3300,10 @@ test "sequencing cycle detected" {
     try std.testing.expect(hit);
 }
 
-// spec: erc - Flags a main IC instantiated directly in the design instead of via a sub-block
-test "main IC instantiated directly in design is flagged" {
-    const instances = [_]Instance{.{
-        .ref_des = "U8",
-        .component = "stm32n657l0h3q",
-        .value = "",
-        .footprint = "bga-223",
-        .symbol = "",
-    }};
-    const block: DesignBlock = .{
-        .name = "demo",
-        .instances = &instances,
-        .nets = &.{},
-        .ports = &.{},
-        .notes = &.{},
-        .groups = &.{},
-        .sub_blocks = &.{},
-    };
-    var violations: std.ArrayListUnmanaged(Violation) = .empty;
-    try checkMainIcsInDesign(std.testing.allocator, &block, &violations);
-    defer {
-        for (violations.items) |v| std.testing.allocator.free(v.message);
-        violations.deinit(std.testing.allocator);
-    }
-    var hit = false;
-    for (violations.items) |v| {
-        if (v.kind == .main_ic_in_design and std.mem.eql(u8, v.ref_des, "U8")) hit = true;
-    }
-    try std.testing.expect(hit);
-}
-
-// spec: erc - Allows ignore-requirements support parts and passives to be instantiated directly in the design
-test "support parts and passives instantiated directly in design are allowed" {
+// spec: erc - Exempts ignore-requirements support parts and passive-class components from the requirements warning
+test "missing requirements exempts support parts and passive-class components" {
     const instances = [_]Instance{
-        // Board-to-board connector that falls through to the `U` prefix but
+        // Board-to-board connector that falls through to a hub prefix but
         // declares (ignore-requirements).
         .{
             .ref_des = "U9",
@@ -3334,22 +3312,25 @@ test "support parts and passives instantiated directly in design are allowed" {
             .footprint = "2049280601",
             .symbol = "",
             .requirements_ignored = true,
+            .requirements = &.{},
         },
-        // ESD array — `U` prefix but passive-class.
+        // ESD array — hub prefix but passive-class component.
         .{
             .ref_des = "U10",
             .component = "ecmf04-4hsm10",
             .value = "",
             .footprint = "",
             .symbol = "",
+            .requirements = &.{},
         },
-        // Crystal — non-`U` prefix.
+        // Crystal — passive-class component (abm prefix).
         .{
             .ref_des = "Y1",
             .component = "abm8",
             .value = "",
             .footprint = "",
             .symbol = "",
+            .requirements = &.{},
         },
     };
     const block: DesignBlock = .{
@@ -3362,7 +3343,7 @@ test "support parts and passives instantiated directly in design are allowed" {
         .sub_blocks = &.{},
     };
     var violations: std.ArrayListUnmanaged(Violation) = .empty;
-    try checkMainIcsInDesign(std.testing.allocator, &block, &violations);
+    try checkMissingRequirements(std.testing.allocator, &block, &violations);
     defer {
         for (violations.items) |v| std.testing.allocator.free(v.message);
         violations.deinit(std.testing.allocator);
@@ -3423,18 +3404,15 @@ test "passive ref on an MPN-identified fixed component is not missing a value" {
     try std.testing.expectEqualStrings("R2", violations.items[0].ref_des);
 }
 
-// spec: erc - Allows an IC declared as a critical-ic to be instantiated directly in the design
-test "design's declared main MCU instantiated directly is allowed" {
+// spec: erc - Warns when an active IC's library component declares no requirements
+test "missing requirements warns for an undocumented IC" {
     const instances = [_]Instance{.{
         .ref_des = "U9",
-        .component = "stm32n657l0h3q",
+        .component = "pcal6416ahf,128",
         .value = "",
-        .footprint = "bga-223",
+        .footprint = "hwqfn-24",
         .symbol = "",
-    }};
-    const crit = [_]env_mod.CriticalIc{.{
-        .component = "stm32n657l0h3q",
-        .role = "Main MCU",
+        .requirements = &.{},
     }};
     const block: DesignBlock = .{
         .name = "demo",
@@ -3444,30 +3422,27 @@ test "design's declared main MCU instantiated directly is allowed" {
         .notes = &.{},
         .groups = &.{},
         .sub_blocks = &.{},
-        .critical_ics = &crit,
     };
     var violations: std.ArrayListUnmanaged(Violation) = .empty;
-    try checkMainIcsInDesign(std.testing.allocator, &block, &violations);
+    try checkMissingRequirements(std.testing.allocator, &block, &violations);
     defer {
         for (violations.items) |v| std.testing.allocator.free(v.message);
         violations.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqual(@as(usize, 0), violations.items.len);
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+    try std.testing.expectEqual(ViolationKind.missing_requirements, violations.items[0].kind);
+    try std.testing.expectEqual(Severity.warning, violations.items[0].severity);
+    try std.testing.expectEqualStrings("U9", violations.items[0].ref_des);
 }
 
-// spec: erc - Allows a directly-instantiated critical-ic regardless of its role (e.g. a flat RF board's ICs)
-test "critical IC with a peripheral role is also allowed when instantiated directly" {
-    const instances = [_]Instance{.{
-        .ref_des = "U8",
-        .component = "adf5901acpz-rl7",
-        .value = "",
-        .footprint = "lfcsp-32",
-        .symbol = "",
-    }};
-    const crit = [_]env_mod.CriticalIc{.{
-        .component = "adf5901acpz-rl7",
-        .role = "RF transmitter",
-    }};
+// spec: erc - Does not warn for an IC that declares at least one requirement, nor for passives
+test "missing requirements skips documented ICs and passives" {
+    const reqs = [_]env_mod.Requirement{.{ .text = "VDD 3V3", .id = "abc12345" }};
+    const instances = [_]Instance{
+        .{ .ref_des = "U1", .component = "stm32n657l0h3q", .value = "", .footprint = "bga-223", .symbol = "", .requirements = &reqs },
+        .{ .ref_des = "R1", .component = "res-0402", .value = "10k", .footprint = "0402", .symbol = "", .requirements = &.{} },
+        .{ .ref_des = "C1", .component = "cap-0402", .value = "100nF", .footprint = "0402", .symbol = "", .requirements = &.{} },
+    };
     const block: DesignBlock = .{
         .name = "demo",
         .instances = &instances,
@@ -3476,10 +3451,9 @@ test "critical IC with a peripheral role is also allowed when instantiated direc
         .notes = &.{},
         .groups = &.{},
         .sub_blocks = &.{},
-        .critical_ics = &crit,
     };
     var violations: std.ArrayListUnmanaged(Violation) = .empty;
-    try checkMainIcsInDesign(std.testing.allocator, &block, &violations);
+    try checkMissingRequirements(std.testing.allocator, &block, &violations);
     defer {
         for (violations.items) |v| std.testing.allocator.free(v.message);
         violations.deinit(std.testing.allocator);
@@ -3487,17 +3461,14 @@ test "critical IC with a peripheral role is also allowed when instantiated direc
     try std.testing.expectEqual(@as(usize, 0), violations.items.len);
 }
 
-// spec: erc - Does not flag main ICs that are wrapped in sub-blocks
-test "main IC wrapped in a sub-block is not flagged" {
-    const sub_instances = [_]Instance{.{
-        .ref_des = "U1",
-        .component = "stm32n657l0h3q",
-        .value = "",
-        .footprint = "bga-223",
-        .symbol = "",
-    }};
+// spec: erc - Recurses sub-blocks and warns once per undocumented component
+test "missing requirements recurses sub-blocks and dedups by component" {
+    const sub_instances = [_]Instance{
+        .{ .ref_des = "U1", .component = "txb0104rutr", .value = "", .footprint = "qfn-12", .symbol = "", .requirements = &.{} },
+        .{ .ref_des = "U2", .component = "txb0104rutr", .value = "", .footprint = "qfn-12", .symbol = "", .requirements = &.{} },
+    };
     var sub_block: DesignBlock = .{
-        .name = "stm32-core",
+        .name = "ls",
         .instances = &sub_instances,
         .nets = &.{},
         .ports = &.{},
@@ -3505,7 +3476,7 @@ test "main IC wrapped in a sub-block is not flagged" {
         .groups = &.{},
         .sub_blocks = &.{},
     };
-    const sbs = [_]env_mod.SubBlock{.{ .name = "core", .block = &sub_block }};
+    const sbs = [_]env_mod.SubBlock{.{ .name = "ls", .block = &sub_block }};
     const block: DesignBlock = .{
         .name = "demo",
         .instances = &.{},
@@ -3516,12 +3487,12 @@ test "main IC wrapped in a sub-block is not flagged" {
         .sub_blocks = &sbs,
     };
     var violations: std.ArrayListUnmanaged(Violation) = .empty;
-    try checkMainIcsInDesign(std.testing.allocator, &block, &violations);
+    try checkMissingRequirements(std.testing.allocator, &block, &violations);
     defer {
         for (violations.items) |v| std.testing.allocator.free(v.message);
         violations.deinit(std.testing.allocator);
     }
-    try std.testing.expectEqual(@as(usize, 0), violations.items.len);
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
 }
 
 // spec: erc - surfaces layout-critical net classes as info rows, staying silent on ground/power/plain-signal nets

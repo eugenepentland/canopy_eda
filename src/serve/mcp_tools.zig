@@ -18,9 +18,7 @@ const sexpr_parser = @import("../sexpr/parser.zig");
 const ids = @import("../eval/ids.zig");
 const review_json_mod = @import("../review_json.zig");
 const req_checks = @import("../req_checks.zig");
-const traceability_mod = @import("../traceability.zig");
 const component_info = @import("component_info.zig");
-const design_doc = @import("design_doc.zig");
 const notes = @import("notes.zig");
 const symbol_conv = @import("../convert/symbol.zig");
 const config = @import("../config.zig");
@@ -151,12 +149,6 @@ const tools = [_]ToolEntry{
     .{ .name = "add_component_requirement", .is_mutation = true },
     .{ .name = "remove_component_requirement", .is_mutation = true },
     .{ .name = "read_datasheet", .is_mutation = false },
-    // Design-document traceability — the up-front `(design-doc …)` list of
-    // critical ICs and each one's footprint/datasheet/requirements/placed
-    // lifecycle status. list is read-only; add/remove splice the design .sexp.
-    .{ .name = "list_critical_ics", .is_mutation = false },
-    .{ .name = "add_critical_ic", .is_mutation = true },
-    .{ .name = "remove_critical_ic", .is_mutation = true },
 };
 
 /// Tools that mutate .sexp files — gated to writer/admin roles.
@@ -227,7 +219,6 @@ fn callInner(
     if (try dispatchReview(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchNotes(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchRequirements(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
-    if (try dispatchCriticalIcs(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
 
     const w = out.writer(allocator);
     try w.print("error: unknown tool \"{s}\"", .{tool_name});
@@ -383,72 +374,6 @@ fn toolRemoveComponentRequirement(allocator: std.mem.Allocator, project_dir: []c
         optionalString(args_val, "text"),
         out,
     );
-}
-
-/// Design-document traceability — list the design's declared critical ICs
-/// with each one's lifecycle status, and add/remove `(critical-ic …)` entries
-/// in its `(design-doc …)` form (source-spliced via `design_doc`).
-fn dispatchCriticalIcs(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    tool_name: []const u8,
-    args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
-) !?bool {
-    if (std.mem.eql(u8, tool_name, "list_critical_ics")) return try toolListCriticalIcs(allocator, project_dir, args_val, out);
-    if (std.mem.eql(u8, tool_name, "add_critical_ic")) return try toolAddCriticalIc(allocator, project_dir, args_val, out);
-    if (std.mem.eql(u8, tool_name, "remove_critical_ic")) return try toolRemoveCriticalIc(allocator, project_dir, args_val, out);
-    return null;
-}
-
-fn toolListCriticalIcs(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const path = try paths.designSourcePath(allocator, project_dir, name);
-    defer allocator.free(path);
-
-    var eval = Evaluator.init(allocator, project_dir);
-    defer eval.deinit();
-    const result = eval.evalFile(path) catch {
-        try out.writer(allocator).writeAll(ERR_BUILD_FAILED);
-        return false;
-    };
-    const block: *const env_mod.DesignBlock = switch (result) {
-        .design_block => |b| b,
-        else => {
-            try out.writer(allocator).writeAll(ERR_NOT_DESIGN);
-            return false;
-        },
-    };
-
-    // Same checks the schematic page runs so "placed + verified" matches.
-    var check_results = req_checks.runChecks(allocator, &eval, block) catch
-        std.StringHashMapUnmanaged([]req_checks.Result).empty;
-    req_checks.applyVerifications(&check_results, block, block.instances);
-    const trace = try traceability_mod.build(allocator, block, project_dir, &check_results);
-
-    try review_json_mod.writeTraceability(out.writer(allocator), trace);
-    return true;
-}
-
-fn toolAddCriticalIc(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const component = requireString(args_val, "component") orelse return missingArg(out, allocator, "component");
-    return design_doc.addCriticalIc(
-        allocator,
-        project_dir,
-        name,
-        component,
-        optionalString(args_val, "role"),
-        optionalString(args_val, "rationale"),
-        optionalString(args_val, "mpn"),
-        out,
-    );
-}
-
-fn toolRemoveCriticalIc(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const component = requireString(args_val, "component") orelse return missingArg(out, allocator, "component");
-    return design_doc.removeCriticalIc(allocator, project_dir, name, component, out);
 }
 
 fn toolListDesignNotes(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
@@ -797,15 +722,8 @@ fn writeModuleSummary(
     }
     try w.writeAll("],\"erc\":[");
     const violations = try erc_mod.runErc(allocator, block, project_dir);
-    // The preview root IS the module (a subcircuit unless it declares board
-    // intent), so "main IC should be sealed in a module" is satisfied by
-    // construction — reporting it would tell the agent to do what it already
-    // did. Suppress by role (same rule as `runErcForNamedBlock`); a module
-    // that declared `(board …)`/`(critical-ic …)` would keep the check.
-    const suppress_main_ic = !isBoardBlock(block);
     var first = true;
     for (violations) |v| {
-        if (suppress_main_ic and v.kind == .main_ic_in_design) continue;
         if (!first) try w.writeAll(",");
         first = false;
         try writeErcViolationJson(w, v);
@@ -2235,13 +2153,6 @@ pub const DesignSummary = struct {
     mtime_sec: i64,
     /// Whether the file evaluated cleanly.
     build_ok: bool,
-    /// Number of `(critical-ic …)` entries declared in the design's
-    /// `(design-doc …)` form. 0 when the design declares none.
-    critical_declared: usize = 0,
-    /// Subset of `critical_declared` whose four lifecycle stages are all
-    /// satisfied (footprint + datasheet imported, requirements defined,
-    /// placed + verified). Feeds the home dashboard's "N/M ICs ready" chip.
-    critical_complete: usize = 0,
     /// ERC violation counts by severity (0 when the build failed). Drive the
     /// home dashboard's red/yellow status chips.
     erc_errors: usize = 0,
@@ -2260,10 +2171,10 @@ pub const DesignSummary = struct {
     /// rough → star) is visible at a glance.
     has_groups: bool = false,
     /// True when the evaluated design declares fabrication intent — a
-    /// top-level `(board …)` outline, a `(kicad-pcb …)` target, or any
-    /// `(critical-ic …)`. Such a block is a fabricable *board*; otherwise it
-    /// is a reusable *subcircuit*. Drives the home page's Board/Subcircuit
-    /// role tag + filter (the role is content-derived, not folder-derived).
+    /// top-level `(board …)` outline or a `(kicad-pcb …)` target. Such a block
+    /// is a fabricable *board*; otherwise it is a reusable *subcircuit*. Drives
+    /// the home page's Board/Subcircuit role tag + filter (the role is
+    /// content-derived, not folder-derived).
     is_board: bool = false,
 };
 
@@ -2287,7 +2198,7 @@ fn countNets(block: *const env_mod.DesignBlock) usize {
 //
 // The home page (GET /), /api/designs, and the MCP list_designs tool all call
 // listDesignSummaries, which fully evaluates every design and runs ERC +
-// requirement checks + traceability + BOM resolution + the notes scan — ~60 ms
+// BOM resolution + the notes scan — ~60 ms
 // for the current design set, recomputed identically on every load. We cache
 // each design's summary across requests, keyed by name and invalidated by the
 // evaluation's file read-set (page_cache.FileSet — design, checks, every
@@ -2322,8 +2233,6 @@ fn dupeSummary(alloc: std.mem.Allocator, s: DesignSummary) std.mem.Allocator.Err
         .net_count = s.net_count,
         .mtime_sec = s.mtime_sec,
         .build_ok = s.build_ok,
-        .critical_declared = s.critical_declared,
-        .critical_complete = s.critical_complete,
         .erc_errors = s.erc_errors,
         .erc_warnings = s.erc_warnings,
         .modules_used = mods,
@@ -2471,26 +2380,11 @@ pub fn listDesignSummaries(
                 summary.build_ok = true;
                 summary.has_groups = block.groups.len > 0;
                 // Content-derived board/subcircuit role: a block is a fabricable
-                // *board* iff it declares fabrication intent (a (board …) outline,
-                // a (kicad-pcb …) target, or any (critical-ic …)); otherwise it is
-                // a reusable subcircuit. Folder is not consulted.
+                // *board* iff it declares fabrication intent (a (board …) outline
+                // or a (kicad-pcb …) target); otherwise it is a reusable
+                // subcircuit. Folder is not consulted.
                 summary.is_board = block.board.present or
-                    block.kicad_pcb_path != null or
-                    block.critical_ics.len > 0;
-
-                // Traceability roll-up for the home dashboard. Run the same
-                // requirement checks the schematic page does so "placed +
-                // verified" matches — keyed by the in-memory block's ref-des,
-                // so no .bom resolution is needed. Degrade to an empty map on
-                // failure rather than dropping the whole summary.
-                if (block.critical_ics.len > 0) {
-                    var check_results = req_checks.runChecks(allocator, &eval, block) catch
-                        std.StringHashMapUnmanaged([]req_checks.Result).empty;
-                    req_checks.applyVerifications(&check_results, block, block.instances);
-                    const trace = traceability_mod.build(allocator, block, project_dir, &check_results) catch traceability_mod.Traceability{};
-                    summary.critical_declared = trace.declared;
-                    summary.critical_complete = trace.complete;
-                }
+                    block.kicad_pcb_path != null;
 
                 // Status-chip roll-up for the home dashboard: ERC severities
                 // (same .bom-resolved path the review endpoint uses), failed
@@ -2635,38 +2529,14 @@ pub fn evalNamedBlock(
     }
 }
 
-/// A block declares fabrication intent — i.e. it is a board, not a
-/// subcircuit — when it carries a `(board …)` outline, a `(kicad-pcb …)`
-/// handoff path, or any `(critical-ic …)` anchor. The `main_ic_in_design`
-/// ERC check (which demands the anchor IC be sealed in a module) only
-/// applies to boards; a subcircuit (a `lib/modules` module, or a flat
-/// design with none of those forms) is exempt. Mirrors
-/// `DesignSummary.is_board`.
-fn isBoardBlock(b: *const env_mod.DesignBlock) bool {
-    return b.board.present or b.kicad_pcb_path != null or b.critical_ics.len > 0;
-}
-
-/// Run ERC on a named block, dropping `main_ic_in_design` for any block that
-/// is NOT a board (a subcircuit). The check demands the anchor IC be sealed
-/// in a module and brought in as a sub-block; a board declares fab intent
-/// and keeps it, but a standalone module render — or a flat design with no
-/// board/kicad-pcb/critical-ics — IS the design root there, so the rule is
-/// satisfied by construction. Suppression keys on block content (the role
-/// `isBoardBlock` reports), never on how the name was resolved, so the same
-/// rule governs `preview_module`. This only ever removes violations.
+/// Run ERC on a named block. A standalone module render and a full design go
+/// through the same checks; nothing is suppressed by role.
 pub fn runErcForNamedBlock(
     allocator: std.mem.Allocator,
     nb: NamedBlock,
     project_dir: []const u8,
 ) std.mem.Allocator.Error![]const erc_mod.Violation {
-    const violations = try erc_mod.runErc(allocator, nb.block, project_dir);
-    if (isBoardBlock(nb.block)) return violations;
-    var keep: std.ArrayListUnmanaged(erc_mod.Violation) = .empty;
-    for (violations) |v| {
-        if (v.kind == .main_ic_in_design) continue;
-        try keep.append(allocator, v);
-    }
-    return keep.toOwnedSlice(allocator);
+    return erc_mod.runErc(allocator, nb.block, project_dir);
 }
 
 /// Evaluate a design (or module) and return the schematic scene-graph JSON

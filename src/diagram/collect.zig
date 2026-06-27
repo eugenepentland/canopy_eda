@@ -213,7 +213,7 @@ fn buildSectionNodes(
         if (sec_to_sub[sec_idx]) |sb_idx| {
             try collectSubBlockRails(scratch, block.sub_blocks[sb_idx], sub_port_to_net, &input_buf, &output_buf);
         }
-        const mp = try mainParts(allocator, scratch, sec.instances, block.critical_ics);
+        const mp = try mainParts(allocator, scratch, sec.instances);
         try nodes.append(allocator, .{
             .label = sec.name,
             .subtitle = sec.description,
@@ -253,7 +253,7 @@ fn buildSubBlockNodes(
         // The module title (label) names the part family; `mp.role` adds a
         // one-line "what it does" pulled from a matching top-level critical-IC
         // (e.g. "VPWR_IN → 5 V system buck"), and `mp.tokens` the part numbers.
-        const mp = try mainParts(allocator, scratch, sb.block.instances, block.critical_ics);
+        const mp = try mainParts(allocator, scratch, sb.block.instances);
         try nodes.append(allocator, .{
             .label = label,
             .subtitle = mp.role,
@@ -419,9 +419,9 @@ const MainParts = struct {
     /// Headline part tokens ("TPS62933DRLR", "3× LSF0108"), owned by the
     /// caller's allocator (each entry + the slice freed by `Graph.deinit`).
     tokens: []const []const u8 = &.{},
-    /// First matched critical-IC's role — a one-line "what it does" used as the
-    /// subtitle fallback for sub-blocks with no section description. Borrowed
-    /// from the source design (a `(critical-ic …)` role); never freed.
+    /// One-line "what it does" subtitle fallback for blocks with no section
+    /// description. Currently always empty (no per-part role source); kept so
+    /// callers needn't change shape if a role source returns.
     role: []const u8 = "",
 };
 
@@ -434,30 +434,21 @@ fn upperDup(scratch: Allocator, s: []const u8) Allocator.Error![]const u8 {
 }
 
 /// Representative part number(s) for a block: walk its hub instances (skip
-/// passives), map each to a manufacturer part number — the matching top-level
-/// `(critical-ic …)` mpn when declared, else the uppercased component basename —
-/// then collapse duplicates into "N× TOKEN" and cap at `max_parts` distinct
-/// tokens in first-seen order. `role` is the first matched critical-IC's role.
+/// passives), map each to the uppercased component basename, then collapse
+/// duplicates into "N× TOKEN" and cap at `max_parts` distinct tokens in
+/// first-seen order.
 fn mainParts(
     allocator: Allocator,
     scratch: Allocator,
     instances: []const env_mod.Instance,
-    critical_ics: []const env_mod.CriticalIc,
 ) Allocator.Error!MainParts {
     var order: std.ArrayListUnmanaged([]const u8) = .empty;
     var counts: std.StringHashMapUnmanaged(usize) = .empty;
-    var role: []const u8 = "";
+    const role: []const u8 = "";
     for (instances) |inst| {
         if (!isHubRef(inst.ref_des)) continue;
         if (inst.component.len == 0) continue;
-        var token: []const u8 = "";
-        for (critical_ics) |cic| {
-            if (!std.ascii.eqlIgnoreCase(cic.component, inst.component)) continue;
-            if (role.len == 0 and cic.role.len > 0) role = cic.role;
-            token = if (cic.mpn.len > 0) cic.mpn else cic.role;
-            break;
-        }
-        if (token.len == 0) token = try upperDup(scratch, inst.component);
+        const token: []const u8 = try upperDup(scratch, inst.component);
         if (token.len == 0) continue;
         const gop = try counts.getOrPut(scratch, token);
         if (!gop.found_existing) {
@@ -1314,8 +1305,8 @@ test "collectGraph adds an antenna node for a one-sided RF boundary net" {
     try testing.expectEqual(ant, g.edges[0].to);
 }
 
-// spec: diagram/collect - Resolves each block's headline part numbers from hub instances + critical-ICs
-test "mainParts maps hubs to critical-IC mpn with multiplicity" {
+// spec: diagram/collect - Resolves each block's headline part numbers from hub instances by uppercased component
+test "mainParts maps hubs to uppercased component with multiplicity" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const insts = [_]env_mod.Instance{
@@ -1325,18 +1316,14 @@ test "mainParts maps hubs to critical-IC mpn with multiplicity" {
         // A passive (C-prefix) is not a hub → excluded from the part list.
         .{ .ref_des = "C1", .component = "cap-0402", .value = "100nF", .footprint = "", .symbol = "" },
     };
-    const cics = [_]env_mod.CriticalIc{
-        .{ .component = "tps62933drlr", .role = "5 V \u{2192} 3.3 V buck", .mpn = "TPS62933DRLR" },
-    };
-    const mp = try mainParts(testing.allocator, arena.allocator(), &insts, &cics);
+    const mp = try mainParts(testing.allocator, arena.allocator(), &insts);
     defer {
         for (mp.tokens) |t| testing.allocator.free(t);
         testing.allocator.free(mp.tokens);
     }
     try testing.expectEqual(@as(usize, 2), mp.tokens.len);
-    try testing.expectEqualStrings("TPS62933DRLR", mp.tokens[0]); // declared critical-IC mpn
+    try testing.expectEqualStrings("TPS62933DRLR", mp.tokens[0]); // uppercased component basename
     try testing.expectEqualStrings("2\u{00d7} LSF0108RKSR", mp.tokens[1]); // upper fallback + ×2 multiplicity
-    try testing.expectEqualStrings("5 V \u{2192} 3.3 V buck", mp.role); // role for the subtitle fallback
 }
 
 // spec: diagram/collect - A (diagram hidden) host section lends its description + card anchor to the chip

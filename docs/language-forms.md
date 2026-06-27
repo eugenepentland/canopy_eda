@@ -114,7 +114,6 @@ where each is accepted: **D** = design-block top level,
 | `(group …)` | D·· | Visual group annotation rendered in the schematic. |
 | `(sub-block "name" (module-call args…))` | D·· | Instantiate a parameterised module inside the design. Its parts flatten into the netlist under the sub-block path prefix and the PCB solver places them with the rest of the board. |
 | `(verifies (req "REF" REQID) [rationale])` | D·· | Mark a requirement as satisfied by a specific instance. |
-| `(design-doc (critical-ic comp (role "…") (rationale "…") (mpn "…")) …)` | D·· | Up-front critical-IC lifecycle / traceability declaration for the design. |
 | `(test-point …)` | D·· | Declare a measurement / bring-up access point. |
 | `(decouple-defaults (ic "REF") (bypass (comp)))` | D·· | Set per-design decouple defaults: a fallback IC ref and bypass cap so (decouple …) can omit both. |
 | `(kicad-pcb "absolute/path/to/board.kicad_pcb")` | D·· | Declare the PCB file the file-based KiCad sync writes board updates to. |

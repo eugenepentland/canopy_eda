@@ -2,7 +2,6 @@
 src/import_kicad.zig: string literal {s}/lib/components/{s}.sexp appears 3 times — extract a const
 src/serve/bom_html.zig: string literal manufacturer appears 3 times — extract a const
 src/serve/edit.zig: string literal {{\"ok\":true,\"version\":{d}}} appears 3 times — extract a const
-src/serve/mcp_tools.zig: string literal component appears 4 times — extract a const
 src/serve/templates/account.zig: string literal </button> appears 6 times — extract a const
 src/serve/templates/account.zig: string literal </label> appears 3 times — extract a const
 src/serve/templates/account.zig: string literal </option> appears 4 times — extract a const
@@ -29,4 +28,3 @@ src/serve/templates/pages.zig: string literal  class=\"design-card-link\" appear
 src/serve/templates/pages.zig: string literal  href=\" appears 4 times — extract a const
 src/serve/templates/pages.zig: string literal <div class=\"design-card-title\"> appears 3 times — extract a const
 src/serve/templates/pages.zig: string literal <span class=\"section-chip-more\"> appears 3 times — extract a const
-src/serve/templates/pages.zig: string literal <span class=\"sep\"> appears 3 times — extract a const

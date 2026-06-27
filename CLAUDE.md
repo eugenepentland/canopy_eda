@@ -206,8 +206,7 @@ these four cases to decide whether something becomes a section:
    (pin …) …)`, plus `(role …)`, `(protocol …)`, and `(note …)` entries
    for firmware contracts and datasheet rationale. The peripheral's own
    pin-level implementation is sealed in a `(defmodule …)` under
-   `lib/modules/` and brought in as a `(sub-block …)` — see the ERC
-   `main_ic_in_design` check. **Structural constraint:** `(sub-block …)`
+   `lib/modules/` and brought in as a `(sub-block …)`. **Structural constraint:** `(sub-block …)`
    forms are *not* evaluated inside `(section …)`; place the sub-block at
    design-block top level immediately after its section (e.g. `(section
    "USB" …)` then `(sub-block "usb" (usb-c-hs))`).
@@ -300,8 +299,7 @@ parameters and the designs using them, `/schematics/<m>` 302s to
 `/modules/<m>`, and the MCP read tools (`get_schematic`,
 `run_checks`, `list_instances`, `get_net`, `list_free_pins`)
 resolve the module standalone via its parameter
-defaults (the `main_ic_in_design` ERC check is suppressed there — the
-module IS the root). The PCB tools already resolved module names (real
+defaults. The PCB tools already resolved module names (real
 instantiation first, else zero-arg); `POST /api/spec-save/<m>` now also
 splices a `(placement …)` form into the defmodule body, so a module's
 layout is authored once in the module file and every design instantiating
@@ -580,7 +578,7 @@ Local dev still uses `http://localhost:7050`.
 `netlisp serve` starts an HTTP server with the schematic viewer:
 
 - **Design list**: `GET /` — links to all .sexp designs, with per-card health chips (ERC errors/warnings, failed assertions, open notes, green PASS)
-- **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG. The page also embeds the design-review panels inline (traceability table, power-budget table, power-sequence, test-points, per-section coverage). There is no standalone review-report endpoint.
+- **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG. The page also embeds the design-review panels inline (power-budget table, power-sequence, test-points, per-section coverage). There is no standalone review-report endpoint.
 - **Scene graph**: `GET /api/scene-graph/:name` — JSON scene graph for schematic (used by the live-push pipeline)
 - **PCB layout PNG**: `GET /api/pcb-png/:name` — server-rendered PNG of the force-directed PCB layout, so an AI agent (or any HTTP client) can *see* the board, not just parse the placement JSON. Mirrors the browser viewer's colours/projection (`src/render_pcb_png.zig` rasterizes onto `src/raster.zig`'s software canvas, encoded by `src/png.zig` — pure-Zig, no image dependency). Query: `?nets=A,B` / `?refs=U1,C3` enter *focus mode* (spotlight those nets/components in amber, dim the rest — `refs` match the bare leaf of a sub-block-prefixed ref); `?route=1` overlays routed copper + DRC markers; `?names=ref|origin|both` picks part labels (default: `origin` — the module-local names a `(placement …)` spec is written in — whenever a spec drives the solve, `ref` otherwise); `?pins=U13,C5` (or `pins=hubs`) labels those parts' pads with net names; when a spec drives the solve, the header shows its coverage (`SPEC: ALL PLACED` / `N UNPLACED` / `FELL BACK TO AUTO`) and spec-unlisted parts are hatched red in the staging band; `?crop=U1&r=6` zooms on one part (matched by ref, leaf, or origin name — combine with `?pins=`); `?sheet=1` returns a contact sheet (whole board + per-hub pin-labeled closeups); `?critique=1` draws a numbered worst-problems overlay (hottest loops by nH, longest airwire, staged parts, DRC count); `?width=`, `?layout=<saved>`, `?regen=1`, `?sub=<slug>`. When the design declares a `(board (size W H) …)` form, the physical outline rectangle + dimensions are drawn under the parts (green). Read-only; reuses the design's auto-layout cache.
 - **PCB layout facts**: `GET /api/pcb-describe/:name` — structured spatial facts about the solved placement (`src/serve/pcb_describe.zig`), the textual twin of the PNG: built from the identical placement-selection logic and accepting the same query parameters, so the facts always describe the board the image shows. Returns JSON with the axes convention (y grows down; "top" = −y, matching `(placement …)` spec words), the anchor (largest hub IC), per-part `ref`/`origin`/side-of-anchor/`gap_mm`/nets/`unplaced`, per-decoupling-loop net + power-leg mm + nH + side, each hub's net→package-edge pad map, spec coverage (incl. `unresolved` spec names), per-part `want_side` (the part sits OPPOSITE the hub edge its net's pads are on), a `module_policy` block (Phase 0 of the module-placement ruleset — `src/placement/module_policy.zig`: the detected `ModuleClass` per hub IC (buck/ldo/mcu/rf_amp/generic, best-effort — integrated power modules with no discrete inductor read `generic`), the criticality `net_classes` (input_rail/switch_node/clock/rf/feedback/analog — the routing-order taxonomy), and the inferred passive `roles` (input_cap/decoupling_cap/bulk_cap/feedback_divider/matching_element)), a `lint` array (fell-back-to-auto / unresolved-name / unplaced errors; wrong-side / long-loop / outside-outline warns; plus the Phase-1 layout gates in `src/placement/layout_lint.zig` — `decap-far` (HF decap power-leg to its nearest supply pad >6 mm; bulk caps exempt), `hot-loop-not-tightest` (the switcher input loop is looser than a less-critical decoupling loop), `feedback-near-aggressor` (an FB/comp part within ~2 mm of a switch-node/clock/RF passive)), `board.outline` (the authored `(board (size W H) …)` rectangle when one exists), and (with `?route=1`) `routed:{trace_mm,tracks,vias,drc}`. The same facts flow through the MCP `describe_pcb_layout` tool. Agents should read measurements here and use the PNG for gestalt.
@@ -664,8 +662,7 @@ Tools exposed (defined in `src/serve/mcp_tools.zig`):
   returns one `## ` section). `preview_module` — evaluate a `lib/modules`
   defmodule standalone with caller-chosen args (request-local, nothing
   written): `view=summary` returns `{title,ports,instances,nets,sub_blocks,
-  erc,assertions}` (the `main_ic_in_design` ERC check is suppressed — the
-  preview root IS the module), `view=scene_graph` the full schematic JSON.
+  erc,assertions}`, `view=scene_graph` the full schematic JSON.
   For module-level *layout*, the PCB tools above accept a module name as
   `name` directly (resolved via a real instantiation in a design, else a
   zero-arg call).
