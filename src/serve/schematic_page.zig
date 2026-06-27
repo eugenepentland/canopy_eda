@@ -201,7 +201,7 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // (summary, power budget/sequencing, test points, ERC, assertions) below
     // the section cards so a single URL covers both "what it is" and
     // "whether it's correct."
-    const review_doc: ?review.ReviewDoc = review.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results, ctx.project_dir) catch null;
+    const review_doc: ?review.ReviewDoc = review.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results) catch null;
 
     const html = render_html.renderToHtml(
         ctx.allocator,

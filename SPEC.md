@@ -403,7 +403,7 @@ Public functions: collectGraph
 - Carries a programmable rail's rated span onto the producer node
 - Emits one diagram node per stub categorised by its declared category
 - Derives a 3-stage chip maturity (concept/schematic/done) from content
-- Resolves each block's headline part numbers from hub instances + critical-ICs
+- Resolves each block's headline part numbers from hub instances by uppercased component
 - A (diagram hidden) host section lends its description + card anchor to the chip
 
 ## diagram/layout
@@ -515,15 +515,14 @@ Public functions: renderSchematic
 - Emits no voltage-domain violation when driver and receiver levels are compatible
 - Treats a section port with electrical metadata as a virtual driver and receiver on its net
 - Treats a top-level design port with electrical metadata as a virtual driver and receiver on its net
-- Flags a main IC instantiated directly in the design instead of via a sub-block
+- Warns when an active IC's library component declares no requirements
 - Accepts an MPN-identified fixed component as a valued passive (no missing_value)
 - Recognizes KiCad-style signed rails (+5V, -5.0V, +3V3, +5_0V) as power nets
-- Allows ignore-requirements support parts and passives to be instantiated directly in the design
+- Exempts ignore-requirements support parts and passive-class components from the requirements warning
 - a config strap tied directly to a rail is an error unless pulled through a resistor or blessed
 - strapBlessing distinguishes a reasoned blessing from a blank one and none
-- Allows an IC declared as a critical-ic to be instantiated directly in the design
-- Allows a directly-instantiated critical-ic regardless of its role (e.g. a flat RF board's ICs)
-- Does not flag main ICs that are wrapped in sub-blocks
+- Does not warn for an IC that declares at least one requirement, nor for passives
+- Recurses sub-blocks and warns once per undocumented component
 - an unbound HF decoupling cap on a multi-supply-pad rail is an error, with bound/bulk/rail-optout/per-pin caps exempt
 - config straps tied to the rail are excluded from the supply-pad count, like the placer's hubTargets
 
@@ -630,16 +629,6 @@ Public functions: computeInstanceCoverage, computeSectionCoverage, computeOveral
 - computeOverallCoverage aggregates every section plus orphan sub-block instances
 - computeOverallCoverage returns 100% when the design has zero checkable instances
 
-## traceability
-
-Public functions: build
-
-- build marks all four stages green for a placed IC with footprint, datasheet, requirements, and passing checks
-- build leaves placed_verified false when a placed IC has an unverified (na) requirement
-- build reports a declared IC with no matching instance as not placed
-- build finds an instance placed inside a sub-block
-- build orders rows most-complete first
-
 ## review
 
 - buildPowerTree assigns each rail to a topological layer rooted at upstream sources
@@ -649,8 +638,6 @@ Public functions: build
 - buildSummary marks status=pass when no errors or warnings
 - buildSummary marks status=warn on warning-level violations
 - buildSummary marks status=fail on error-level violations
-- buildSummary counts critical hub instances and lists those missing requirements
-- buildSummary skips instances whose component sets ignore-requirements
 - buildTestPoints collects testpoint instances with pin 1 net
 - buildTestPoints ignores non-testpoints
 
@@ -743,15 +730,6 @@ Public functions: describeComponent, listRequirements, addRequirement, removeReq
 - removeRequirement deletes a requirement by id or exact text
 - formEnd skips parens inside string literals
 - add list and remove requirement round-trip on disk
-
-## serve/design_doc
-
-Public functions: addCriticalIc, removeCriticalIc
-
-- formatCriticalIc renders bare-atom component with optional quoted clauses
-- formatCriticalIc quotes a component name that isn't a bare atom
-- spliceIntoForm inserts a new child before the form's closing paren
-- removeFormSrc deletes a form and its preceding indentation
 
 ## serve/mcp_docs
 

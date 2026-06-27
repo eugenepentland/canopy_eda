@@ -222,27 +222,6 @@ pub const Verification = struct {
     date: []const u8 = "",
 };
 
-/// One critical IC declared up front in the design document, before (or
-/// independent of) being placed as an `(instance …)`. Stored at design-block
-/// top level via:
-///   `(design-doc (critical-ic <component> (role "…") (rationale "…") (mpn "…")) …)`
-///
-/// The `component` field is the intended `lib/components/<name>.sexp` basename
-/// — the same key an `(instance …)` references — so the traceability join can
-/// match a declaration to its placement by component name. A declared IC need
-/// not exist in the library yet: every lifecycle stage simply reads "unmet"
-/// until the part is imported, given requirements, and placed.
-pub const CriticalIc = struct {
-    /// Library component basename (and `(instance …)` component reference).
-    component: []const u8,
-    /// Short functional role, e.g. "Main MCU", "RF transmitter".
-    role: []const u8 = "",
-    /// Why this part was chosen — design rationale prose.
-    rationale: []const u8 = "",
-    /// Manufacturer part number, used as a fallback datasheet-match key.
-    mpn: []const u8 = "",
-};
-
 /// A named virtual pin on a placeholder `(stub …)`. A stub declares its
 /// interface by *signal* (a logical name on a net) rather than by physical
 /// pin number — the placeholder has no real pinout yet. `class` is a diagram
@@ -1131,9 +1110,9 @@ pub const RoughSpec = struct {
 pub const BlockOrigin = enum { design_root, embedded };
 
 /// The fully-evaluated result of a `(design-block …)`: the flattened netlist
-/// (instances + nets + ports), the section/sub-block tree, and the design-doc
-/// metadata (critical ICs, verifications, rails, functions) the review and
-/// diagram layers consume.
+/// (instances + nets + ports), the section/sub-block tree, and the design
+/// metadata (verifications, rails, functions) the review and diagram layers
+/// consume.
 pub const DesignBlock = struct {
     name: []const u8,
     instances: []const Instance,
@@ -1157,11 +1136,6 @@ pub const DesignBlock = struct {
     /// Design-side `(verifies …)` sign-offs that answer library requirements
     /// the netlist alone can't verify.
     verifications: []const Verification = &.{},
-    /// Critical ICs declared in the `(design-doc …)` form. The traceability
-    /// panel joins these against the library + placed instances + checks to
-    /// show each part's progress through its import → requirements → placed
-    /// lifecycle. Empty when the design has no `(design-doc …)` form.
-    critical_ics: []const CriticalIc = &.{},
     /// Derived power rails, populated by `eval/rails.build` at the tail of
     /// `evalDesignBlock`. Empty for blocks with no regulator sub-blocks or
     /// board-edge power ports.
@@ -1178,9 +1152,8 @@ pub const DesignBlock = struct {
     kicad_pcb_path: ?[]const u8 = null,
     /// Placeholder parts declared via top-level `(stub …)` forms — sketched
     /// components with a bounding box and named signals but no real library
-    /// footprint yet. They render as diagram nodes, export as pad-less KiCad
-    /// outlines, and appear in the traceability table as "needs real
-    /// footprint". Empty for designs with no `(stub …)` forms.
+    /// footprint yet. They render as diagram nodes and export as pad-less KiCad
+    /// outlines. Empty for designs with no `(stub …)` forms.
     parts: []const PlaceholderPart = &.{},
     /// Declarative Mermaid-style layout from a top-level `(layout …)` form. Its
     /// `(place …)` directives position diagram blocks relative to one another;

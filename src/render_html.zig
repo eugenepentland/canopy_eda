@@ -125,11 +125,6 @@ pub fn renderToHtml(
     try w.writeAll("</div>");
     if (review_doc) |doc| {
         try w.writeAll("<div class=\"review-embed review-wrap\">");
-        if (doc.traceability.rows.len > 0) {
-            try w.writeAll("<div id=\"page-traceability\" class=\"page-anchor\">");
-            try review_html.writeTraceability(w, doc.traceability);
-            try w.writeAll("</div>");
-        }
         if (doc.power_sequence.len > 0) {
             try w.writeAll("<div id=\"page-power-sequence\" class=\"page-anchor\">");
             try review_html.writePowerSequence(w, doc.power_sequence);
@@ -477,7 +472,6 @@ fn writeSidebar(w: anytype, review_doc: ?review.ReviewDoc, has_modules: bool) !v
     try w.writeAll("<nav class=\"sb-toc\" aria-label=\"Page contents\">");
     try writeTocChip(w, "page-block-diagram", "Block diagram");
     if (review_doc) |doc| {
-        if (doc.traceability.rows.len > 0) try writeTocChip(w, "page-traceability", "Traceability");
         if (doc.power_sequence.len > 0) try writeTocChip(w, "page-power-sequence", "Power sequencing");
         if (doc.test_points.len > 0) try writeTocChip(w, "page-test-points", "Test points");
         if (doc.power_budget.len > 0) try writeTocChip(w, "page-power-budget", "Power budget");

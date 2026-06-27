@@ -47,10 +47,6 @@ const HOME_STYLE_BLOCK: []const u8 = "<style>" ++ @embedFile("../assets/navbar.c
     \\.design-card-stats{display:flex;gap:8px;font-size:12px;color:#8b949e;align-items:center;flex-wrap:wrap}
     \\.design-card-stats .sep{color:#30363d}
     \\.design-card-stats .warn{color:#d29922}
-    \\.trace-chip{font-size:11px;padding:1px 8px;border-radius:10px;border:1px solid #30363d}
-    \\.trace-chip.pass{color:#3fb950;border-color:#238636}
-    \\.trace-chip.warn{color:#d29922;border-color:#9e6a03}
-    \\.trace-chip.fail{color:#f85149;border-color:#da3633}
     \\.status-chips{display:flex;flex-wrap:wrap;gap:5px}
     \\.st-chip{font-size:11px;padding:1px 8px;border-radius:10px;border:1px solid #30363d;color:#8b949e}
     \\.st-chip.err{color:#f85149;border-color:#da3633}
@@ -209,14 +205,6 @@ fn allClear(s: DesignSummary) bool {
     return s.erc_errors == 0 and s.erc_warnings == 0 and s.assert_fails == 0 and s.open_notes == 0;
 }
 
-/// CSS class for the "N/M ICs ready" traceability chip: green when every
-/// declared critical IC is fully traced, red when none are, amber otherwise.
-fn traceChipClass(s: DesignSummary) []const u8 {
-    if (s.critical_complete >= s.critical_declared) return "trace-chip pass";
-    if (s.critical_complete == 0) return "trace-chip fail";
-    return "trace-chip warn";
-}
-
 pub templ Navbar(active: []const u8) {
     <div class="navbar">
         <span class="brand">Netlisp</span>
@@ -261,10 +249,6 @@ pub templ DesignCard(s: DesignSummary, search: []const u8, has_starred: bool, no
             if (s.mtime_sec > 0) {
                 <span class="sep">·</span>
                 <span>{relTime(now_sec - s.mtime_sec)}</span>
-            }
-            if (s.build_ok and s.critical_declared > 0) {
-                <span class="sep">·</span>
-                <span class={traceChipClass(s)}>{s.critical_complete}/{s.critical_declared} ICs ready</span>
             }
         </div>
         if (s.build_ok) {

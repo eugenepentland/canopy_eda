@@ -4,7 +4,6 @@ const env_mod = @import("eval/env.zig");
 const erc_mod = @import("erc.zig");
 const req_checks = @import("req_checks.zig");
 const coverage = @import("coverage.zig");
-const traceability_mod = @import("traceability.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const DesignBlock = env_mod.DesignBlock;
@@ -21,9 +20,9 @@ pub const ReviewError = std.mem.Allocator.Error;
 pub const Status = enum { pass, warn, fail };
 
 /// Top-of-page review summary: overall pass/warn/fail status plus the
-/// roll-up counts (sections, instances, nets, ERC violations, assertions,
-/// critical-IC requirement coverage). Computed by `buildSummary` from the
-/// design's evaluator output and ERC results.
+/// roll-up counts (sections, instances, nets, ERC violations, assertions).
+/// Computed by `buildSummary` from the design's evaluator output and ERC
+/// results.
 pub const Summary = struct {
     status: Status,
     section_count: usize,
@@ -35,16 +34,6 @@ pub const Summary = struct {
     assertion_pass: usize,
     assertion_warn: usize,
     assertion_fail: usize,
-    /// Hub-prefix instances (U/J/P/X/Q and any non-passive prefix) — the
-    /// "main ICs" the user wants requirement coverage on. Mirrors the
-    /// classification used by the SVG renderer (`render_svg.draw.isHub`).
-    critical_count: usize = 0,
-    /// Subset of `critical_count` whose library component declares at least
-    /// one `(requirement ...)` form.
-    critical_with_requirements: usize = 0,
-    /// Path-qualified ref-deses of the critical components missing any
-    /// requirements, sorted naturally so the user can scan and act on them.
-    critical_missing_requirements: []const MissingRequirement = &.{},
     /// Total instances expected to have an MPN — every component except
     /// test points (which are board features, not parts a fab orders).
     bom_total: usize = 0,
@@ -67,18 +56,6 @@ pub const MissingMpn = struct {
     /// sub-blocks stay distinct.
     ref_des: []const u8,
     /// Library component family — useful context for picking an MPN.
-    component: []const u8,
-};
-
-/// One critical-IC instance that the library hasn't declared any
-/// `(requirement …)` rules for. Surfaced in the review summary so the
-/// designer knows which `lib/components/<name>.sexp` files to add rules to.
-pub const MissingRequirement = struct {
-    /// Sub-block-prefixed ref_des (e.g. "pwr/U1") so duplicates across
-    /// sub-blocks stay distinguishable.
-    ref_des: []const u8,
-    /// Library component name — points the user at the .sexp file under
-    /// `lib/components/` they need to add `(requirement ...)` to.
     component: []const u8,
 };
 
@@ -229,11 +206,6 @@ pub const ReviewDoc = struct {
     /// review JSON / HTML so power-chain ICs (charger, buck, LDO, ADCs in
     /// modules, …) get the same coverage as top-level parts.
     subblock_requirements: []const ComponentRequirementEntry = &.{},
-    /// Per-IC design-document traceability: each `(critical-ic …)` declared in
-    /// the design's `(design-doc …)` form joined against the library, the
-    /// placed instances, and the requirement checks. Empty when the design
-    /// declares no `(design-doc …)`.
-    traceability: traceability_mod.Traceability = .{},
 };
 
 /// Build a review document for a design block. `assertions` comes from the
@@ -250,7 +222,6 @@ pub fn buildReview(
     assertions: []const AssertionResult,
     violations: []const erc_mod.Violation,
     check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
-    project_dir: []const u8,
 ) ReviewError!ReviewDoc {
     const sections = try buildSectionReports(allocator, block, violations, check_results);
     const sub_reqs = try collectSubblockRequirements(allocator, block, check_results);
@@ -264,7 +235,6 @@ pub fn buildReview(
     const unresolved = try filterUnresolved(allocator, violations);
 
     const summary = try buildSummary(allocator, block, sections.len, violations, assertions, check_results);
-    const trace = try traceability_mod.build(allocator, block, project_dir, check_results);
     const generated_at = try isoTimestampNow(allocator);
 
     return .{
@@ -282,7 +252,6 @@ pub fn buildReview(
         .assertions = asserts,
         .unresolved = unresolved,
         .subblock_requirements = sub_reqs,
-        .traceability = trace,
     };
 }
 
@@ -416,12 +385,6 @@ fn buildSummary(
         break :blk .pass;
     };
 
-    var critical_total: usize = 0;
-    var critical_with_reqs: usize = 0;
-    var missing: std.ArrayListUnmanaged(MissingRequirement) = .empty;
-    try collectCriticalCoverage(allocator, block, "", &critical_total, &critical_with_reqs, &missing);
-    std.mem.sort(MissingRequirement, missing.items, {}, lessThanMissing);
-
     var bom_total: usize = 0;
     var bom_with_mpn: usize = 0;
     var bom_missing: std.ArrayListUnmanaged(MissingMpn) = .empty;
@@ -441,67 +404,11 @@ fn buildSummary(
         .assertion_pass = a_pass,
         .assertion_warn = a_warn,
         .assertion_fail = a_fail,
-        .critical_count = critical_total,
-        .critical_with_requirements = critical_with_reqs,
-        .critical_missing_requirements = missing.items,
         .bom_total = bom_total,
         .bom_with_mpn = bom_with_mpn,
         .bom_missing_mpn = bom_missing.items,
         .overall_coverage = overall,
     };
-}
-
-/// Walk the design (and every sub-block) and bucket every "critical" hub
-/// instance into total, with-reqs, and missing-list. `path_prefix` carries
-/// the sub-block path so a missing entry like "pwr/U1" stays distinct from
-/// a top-level "U1".
-fn collectCriticalCoverage(
-    allocator: std.mem.Allocator,
-    block: *const DesignBlock,
-    path_prefix: []const u8,
-    total: *usize,
-    with_reqs: *usize,
-    missing: *std.ArrayListUnmanaged(MissingRequirement),
-) !void {
-    for (block.instances) |inst| {
-        if (!isCriticalRefDes(inst.ref_des)) continue;
-        if (env_mod.isTestPoint(inst.component)) continue;
-        if (inst.requirements_ignored) continue;
-        total.* += 1;
-        if (inst.requirements.len > 0) {
-            with_reqs.* += 1;
-        } else {
-            const qualified = if (path_prefix.len == 0)
-                try allocator.dupe(u8, inst.ref_des)
-            else
-                try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path_prefix, inst.ref_des });
-            try missing.append(allocator, .{ .ref_des = qualified, .component = inst.component });
-        }
-    }
-    for (block.sub_blocks) |sb| {
-        const child_prefix = if (path_prefix.len == 0)
-            try allocator.dupe(u8, sb.name)
-        else
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path_prefix, sb.name });
-        try collectCriticalCoverage(allocator, sb.block, child_prefix, total, with_reqs, missing);
-    }
-}
-
-/// Mirror of `render_svg.draw.isHub`: U/J/P/X/Q and any non-passive prefix
-/// counts as a critical IC; R/C/L/F/D are passive spokes and excluded.
-/// Operates on the bare ref_des as it appears in source — the caller adds
-/// any sub-block path prefix separately.
-fn isCriticalRefDes(ref_des: []const u8) bool {
-    if (ref_des.len == 0) return false;
-    return switch (ref_des[0]) {
-        'U', 'J', 'P', 'X', 'Q' => true,
-        'R', 'C', 'L', 'F', 'D' => false,
-        else => true,
-    };
-}
-
-fn lessThanMissing(_: void, a: MissingRequirement, b: MissingRequirement) bool {
-    return lessThanNatural(a.ref_des, b.ref_des);
 }
 
 /// Walk the design (and every sub-block) bucketing every non-testpoint
@@ -1240,70 +1147,4 @@ test "buildSummary status fail" {
     };
     const summary = try buildSummary(alloc, &block, 0, &violations, &.{}, null);
     try std.testing.expectEqual(Status.fail, summary.status);
-}
-
-// spec: review - buildSummary counts critical hub instances and lists those missing requirements
-test "buildSummary tracks critical-component requirement coverage" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const reqs = [_]env_mod.Requirement{.{ .text = "VDD must be 3V3" }};
-    const insts = [_]Instance{
-        .{ .ref_des = "U1", .component = "stm32", .value = "", .footprint = "", .symbol = "", .requirements = &reqs },
-        .{ .ref_des = "U2", .component = "ltc6655", .value = "", .footprint = "", .symbol = "" },
-        .{ .ref_des = "C1", .component = "cap-0402", .value = "100nF", .footprint = "", .symbol = "" },
-        .{ .ref_des = "J1", .component = "usb-c", .value = "", .footprint = "", .symbol = "" },
-        // Test points have hub-style ref_des (TPx) but should be excluded —
-        // they get their own table elsewhere and don't need requirements.
-        .{ .ref_des = "TP1", .component = "testpoint", .value = "", .footprint = "", .symbol = "" },
-    };
-    const block: DesignBlock = .{
-        .name = "t",
-        .instances = &insts,
-        .nets = &.{},
-        .ports = &.{},
-        .notes = &.{},
-        .groups = &.{},
-        .sub_blocks = &.{},
-    };
-    const summary = try buildSummary(alloc, &block, 0, &.{}, &.{}, null);
-    defer {
-        for (summary.critical_missing_requirements) |m| alloc.free(m.ref_des);
-        alloc.free(summary.critical_missing_requirements);
-    }
-    try std.testing.expectEqual(@as(usize, 3), summary.critical_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.critical_with_requirements);
-    try std.testing.expectEqual(@as(usize, 2), summary.critical_missing_requirements.len);
-    try std.testing.expectEqualStrings("J1", summary.critical_missing_requirements[0].ref_des);
-    try std.testing.expectEqualStrings("U2", summary.critical_missing_requirements[1].ref_des);
-}
-
-// spec: review - buildSummary skips instances whose component sets ignore-requirements
-test "buildSummary respects requirements_ignored opt-out" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const insts = [_]Instance{
-        .{ .ref_des = "U1", .component = "stm32", .value = "", .footprint = "", .symbol = "" },
-        // Mounting hardware: shows up as a hub (H prefix → critical) but the
-        // library marked it `(ignore-requirements)`, so it must not count.
-        .{ .ref_des = "H1", .component = "screw-bushing", .value = "", .footprint = "", .symbol = "", .requirements_ignored = true },
-    };
-    const block: DesignBlock = .{
-        .name = "t",
-        .instances = &insts,
-        .nets = &.{},
-        .ports = &.{},
-        .notes = &.{},
-        .groups = &.{},
-        .sub_blocks = &.{},
-    };
-    const summary = try buildSummary(alloc, &block, 0, &.{}, &.{}, null);
-    defer {
-        for (summary.critical_missing_requirements) |m| alloc.free(m.ref_des);
-        alloc.free(summary.critical_missing_requirements);
-    }
-    try std.testing.expectEqual(@as(usize, 1), summary.critical_count);
-    try std.testing.expectEqual(@as(usize, 1), summary.critical_missing_requirements.len);
-    try std.testing.expectEqualStrings("U1", summary.critical_missing_requirements[0].ref_des);
 }

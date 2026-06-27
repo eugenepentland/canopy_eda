@@ -1,4 +1,4 @@
-//! Leak-regression tests for the review / BOM / coverage / traceability area.
+//! Leak-regression tests for the review / BOM / coverage area.
 //!
 //! Two idioms are used here:
 //!
@@ -25,7 +25,6 @@ const std = @import("std");
 const env = @import("../eval/env.zig");
 const review = @import("../review.zig");
 const coverage = @import("../coverage.zig");
-const traceability = @import("../traceability.zig");
 const bom = @import("../bom.zig");
 const bom_html = @import("../serve/bom_html.zig");
 const review_json = @import("../review_json.zig");
@@ -38,8 +37,8 @@ const Instance = env.Instance;
 // ── Fixture helpers ────────────────────────────────────────────────────
 //
 // Mirrors the minimal `DesignBlock` literal the existing in-file tests use
-// (review.zig / coverage.zig / traceability.zig): only the seven non-default
-// fields are set, everything else falls to its default.
+// (review.zig / coverage.zig): only the seven non-default fields are set,
+// everything else falls to its default.
 
 fn block(name: []const u8, instances: []const Instance, subs: []const env.SubBlock) DesignBlock {
     return .{
@@ -163,41 +162,6 @@ test "leak: coverage walkers over a sub-block hierarchy" {
     try std.testing.expectEqual(@as(usize, 1), sc.checked);
 }
 
-// leak-audit: traceability.build appends TraceRow per critical-ic, sorts, and
-// (for unplaced ICs) reads/parses library files — all via the passed allocator.
-// Uses a nonexistent project dir so the file reads fail gracefully (no IO leak).
-test "leak: traceability.build placed + unplaced rows" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const ds = [_][]const u8{"u1.pdf"};
-    const reqs = [_]env.Requirement{.{ .text = "r", .id = "id1" }};
-    const u1_inst = Instance{
-        .ref_des = "U1",
-        .component = "placed_ic",
-        .value = "v",
-        .footprint = "fp",
-        .symbol = "",
-        .datasheets = &ds,
-        .requirements = &reqs,
-    };
-    const insts = [_]Instance{u1_inst};
-    const cics = [_]env.CriticalIc{
-        .{ .component = "placed_ic", .role = "MCU" },
-        .{ .component = "unplaced_ic", .role = "RF" },
-    };
-    var top = block("t", &insts, &.{});
-    top.critical_ics = &cics;
-
-    var map: std.StringHashMapUnmanaged([]req_checks.Result) = .empty;
-    var results = [_]req_checks.Result{.{ .status = .pass, .message = "" }};
-    try map.put(alloc, "U1", &results);
-
-    const trace = try traceability.build(alloc, &top, "/nonexistent/path", &map);
-    try std.testing.expectEqual(@as(usize, 2), trace.declared);
-}
-
 // leak-audit: writeBomCsv collects instances hierarchically + builds dedup
 // BomLine list with per-line refs ArrayLists; all scratch is on the passed
 // allocator and the writer is an arena-backed ArrayList. Locks the ~1.3MB/req
@@ -281,7 +245,7 @@ test "leak: bom_html.writeSchematicBomHtml over a sub-block hierarchy" {
 
 // leak-audit: renderToJson returns `buf.items` (capacity may exceed len) so it
 // is NOT safe to free through testing.allocator — wrap in an arena instead.
-// This exercises every nested writer (summary, sections, bom, traceability)
+// This exercises every nested writer (summary, sections, bom)
 // and proves the path neither crashes nor escapes the arena.
 test "leak: review_json.renderToJson (arena-contract; buf.items return)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -294,7 +258,7 @@ test "leak: review_json.renderToJson (arena-contract; buf.items return)" {
     const top = block("doc-fixture", &insts, &.{});
 
     const violations = [_]erc_mod.Violation{};
-    const doc = try review.buildReview(alloc, "doc-fixture", &top, &.{}, &violations, null, "/nonexistent");
+    const doc = try review.buildReview(alloc, "doc-fixture", &top, &.{}, &violations, null);
 
     const json = try review_json.renderToJson(alloc, doc);
     try std.testing.expect(json.len > 0);
