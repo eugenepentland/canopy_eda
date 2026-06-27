@@ -422,6 +422,58 @@ or missing reason does **not** suppress the error.
   loop-target path) is deliberately left on the electrical-type signal alone, so
   recognising more straps here never shifts a PCB layout.
 
+### No-connect sign-off: `(nc-ok PIN "reason")`
+
+A pad left unconnected (a "no-connect", NC) is often deliberate — an unused
+GPIO, a datasheet "leave floating" pin, an internally-pulled enable — but it can
+also be a forgotten wire on a pin that genuinely needs driving. Rather than
+flagging *every* open pad (an MCU has dozens that are fine to float, which would
+be pure noise), the `no_connect` ERC tiers each unconnected pinout pad **by
+confidence** and only surfaces the ones worth a second look:
+
+- **error** — the pad's library `(electrical "FN" (type input))` decl marks it a
+  driven input, yet it's left floating. High-confidence "this must be wired".
+- **warning** — the pad's pinout function *name* is a config/enable/reset strap
+  (`EN`, `MODE`, `BOOT0`, `NRST`, `SHDN`, `CE`, `OE`, an I²C `A0`…`A9` address
+  bit, …) left floating. A floating enable/address pin is suspicious, but such
+  pins are commonly internally pulled, so it's a softer nudge than a declared
+  input.
+- **silent** — everything else: a real supply/ground pad (owned by the
+  IC-power-presence check, never double-reported), an unused output, a GPIO/IO
+  (`PA3`, `PD15`), a passive pin, a buffer/level-translator channel (an `A<n>`
+  pad with a `B<n>` twin in the same pinout — a TXB0104/TXS0108/`245 channel,
+  not a device-address strap), a datasheet no-connect/reserved name (`NC`,
+  `N/C`, `DNC`, `NC3`, `RESERVED`, `RFU`), and any unrecognised name. This is
+  what keeps the check quiet on a 100-pin MCU with unused peripherals.
+
+When an unconnected pad *is* deliberate, sign it off on the instance with a
+mandatory reason — the "I checked this, it's meant to float" acknowledgement,
+mirroring `(strap-ok …)`:
+
+```scheme
+(instance "U1" w5500
+  (pin 1 "VDD") …
+  (nc-ok 37 "3V3_EN — 3V3 LDO always enabled internally, no external strap"))
+;; PIN resolves like a (pin …) / (strap-ok …) token — a number, a quoted/atom
+;; pad, or a function name that maps through the pinout to its physical pad.
+;; An empty or missing reason does NOT suppress the finding.
+```
+
+- The **`no_connect` ERC check** (`src/erc.zig` `checkNoConnects`, error/warning
+  by tier) runs **per block** (recursing sub-blocks), so a pad is judged in *its
+  own* module namespace. It reads `lib/pinouts` + `lib/components` for the pad's
+  function name and electrical type (needs `--project-dir`), and only inspects
+  real IC instances (`U`-prefix, skipping test points, passives, and groundless
+  parts — the same gating as the power-pin presence check). The tiering lives in
+  `pin_roles.connectionRequirement` / `padRequirements` and, like the strap path,
+  is **ERC-only** — the placer never consults it, so it can't shift a layout.
+- **Sub-circuit ports** are the other half of the same idea, already built in:
+  `checkUnconnectedPorts` makes a `(sub-block …)`'s **required** port an error if
+  nothing connects to it, and the **`optional`** keyword on a `(port …)` is the
+  "connection isn't required" flag — declare a module's spare GPIO/feature ports
+  `(port "GPIO5" io optional)` and leaving them open is silently fine, the
+  module-level twin of a per-pad `(nc-ok …)`.
+
 ### Schematic diagram layout: `(diagram-layout …)`
 
 The free-floating block-diagram arrangement (the schematic page's Layout

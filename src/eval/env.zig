@@ -695,6 +695,13 @@ pub const Instance = struct {
     /// `strap_tied_to_rail` ERC error fires on any strap pad sitting on a rail
     /// net that lacks a non-empty blessing here. Empty ⇒ no strap tie is blessed.
     strap_oks: []const StrapOk = &.{},
+    /// `(nc-ok PIN "reason")` blessings — explicit sign-offs that a pad the part
+    /// would otherwise want connected is *deliberately* left a no-connect. Each
+    /// entry pins a physical pad (resolved like a `(pin …)` token) to a human
+    /// reason. The `no_connect` ERC finding fires on any unconnected pad the
+    /// pinout classifies as needing a connection (a declared input, a config
+    /// strap) that lacks a non-empty blessing here. Empty ⇒ nothing is blessed.
+    nc_oks: []const NcOk = &.{},
 };
 
 /// One `(strap-ok PIN "reason")` blessing on an instance — see `Instance.strap_oks`.
@@ -703,6 +710,18 @@ pub const StrapOk = struct {
     pin: []const u8,
     /// Why tying this strap straight to a rail is correct (datasheet rationale,
     /// default-config note, …). Must be non-empty to actually suppress the error.
+    reason: []const u8 = "",
+};
+
+/// One `(nc-ok PIN "reason")` blessing on an instance — see `Instance.nc_oks`.
+/// Same shape as `StrapOk`, but its semantics are "this pad is intentionally a
+/// no-connect" rather than "this strap is intentionally tied to a rail".
+pub const NcOk = struct {
+    /// Physical pad id the blessing covers (resolved from the form's PIN token).
+    pin: []const u8,
+    /// Why leaving this pad unconnected is correct (datasheet "leave floating"
+    /// note, internal pull-up, unused-channel rationale, …). Must be non-empty
+    /// to actually suppress the finding.
     reason: []const u8 = "",
 };
 
