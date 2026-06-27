@@ -520,7 +520,7 @@ Public functions: renderSchematic
 - Warns when an active IC's library component declares no requirements
 - Accepts an MPN-identified fixed component as a valued passive (no missing_value)
 - Recognizes KiCad-style signed rails (+5V, -5.0V, +3V3, +5_0V) as power nets
-- Exempts ignore-requirements support parts and passive-class components from the requirements warning
+- Exempts connectors, ignore-requirements support parts, and passive-class components from the requirements warning
 - a config strap tied directly to a rail is an error unless pulled through a resistor or blessed
 - strapBlessing distinguishes a reasoned blessing from a blank one and none
 - an unconnected pad the pinout wants connected is flagged by tier unless blessed
