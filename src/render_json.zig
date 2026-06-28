@@ -239,6 +239,9 @@ const SceneGraph = struct {
     passives: std.ArrayListUnmanaged(JsonPassive),
     labels: std.ArrayListUnmanaged(JsonLabel),
     staged: std.ArrayListUnmanaged(JsonStaged),
+    /// The design's `(group …)` member lists (name + refs), surfaced so the
+    /// editor's sheet navigator can page by authored group instead of per-IC.
+    groups: []const env_mod.Group = &.{},
 
     fn init(allocator: Allocator) SceneGraph {
         return .{
@@ -539,6 +542,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
 
     var scene = SceneGraph.init(allocator);
     scene.design_name = block.name;
+    scene.groups = block.groups;
 
     var alt_map: PinoutAltMap = .empty;
     var asserted_fns = try asserted_fns_mod.buildMap(allocator, block);
@@ -1745,6 +1749,21 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         try w.print(",\"src\":{d}", .{st.src_offset});
         try writePinNets(w, st.pin_nets);
         try w.writeAll("}");
+    }
+    try w.writeAll("]");
+
+    // Design groups (authored (group …) member lists) for the sheet navigator.
+    try w.writeAll(",\"groups\":[");
+    for (scene.groups, 0..) |g, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{");
+        try writeJsonString(w, "name", g.name);
+        try w.writeAll(",\"members\":[");
+        for (g.members, 0..) |mref, mi| {
+            if (mi > 0) try w.writeAll(",");
+            try json_writer.writeString(w, mref);
+        }
+        try w.writeAll("]}");
     }
     try w.writeAll("]");
 

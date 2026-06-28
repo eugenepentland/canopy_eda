@@ -35,7 +35,7 @@
     secStroke: "#2d3a4a", secLabel: "#6e7681",
     hub: "#1b2230", hubStroke: "#58708f", hubLabel: "#e6edf3", pinName: "#adbac7", pin: "#2d3a4a", pinStroke: "#58708f",
     pass: "#20262e", passStroke: "#8b949e", passText: "#c9d1d9",
-    wire: "#4d9375", bus: "#6fb38d", hot: "#f0c674",
+    wire: "#4d9375", bus: "#6fb38d", hot: "#f0c674", link: "#6ea8fe",
     labelNet: "#79c0ff", labelGnd: "#8b949e", labelPort: "#d2a8ff",
     sel: "#f0883e", snap: "#f0883e", band: "#f0c674",
   };
@@ -48,6 +48,8 @@
   let selection = null;          // {kind:'hub'|'pass', ref}
   let hotNet = null;
   let clip = null;               // copy/paste clipboard: {ref, src}
+  let showNets = true;           // draw device↔device net connections (vs name labels)
+  let sheets = [];               // navigable pages: design (group …) lists, else per-section
   let deleteArmed = false;       // inspector Delete needs a 2nd click to confirm
   let libIndex = null;
   let dirty = true, springBack = null;
@@ -165,6 +167,9 @@
       (h.rightPins || []).forEach((pn) => addPin(pins, h, pn, "right"));
       m.hubs.push({ ref: h.ref, src: h.src || 0, x: h.x, y: h.y, w: h.w, h: h.h, label: h.label || h.ref, cx: h.x + h.w / 2, cy: h.y + h.h / 2, pins });
     });
+    // Inter-device nets: re-side the two endpoint pins to face each other and
+    // draw one straight wire across the channel (instead of matching labels).
+    if (showNets) connectHubs(m);
     // Connection ports for snap (net-bearing): pins, labels, wire vertices.
     m.hubs.forEach((h) => h.pins.forEach((p) => { if (p.net) addPort(m, p.x, p.y, p.net, "pin", h.ref, p.pin); }));
     m.labels.forEach((l) => { if (l.net) addPort(m, l.x, l.y, l.net, "label"); });
@@ -271,8 +276,9 @@
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.setTransform(s * dpr, 0, 0, s * dpr, -cam.x * s * dpr, -cam.y * s * dpr);
     const sw = (px) => px / s;                       // screen-constant stroke width in world units
-    const iso = isoBox.checked && activeSheet >= 0 && M.secs[activeSheet];
-    const sec = iso ? M.secs[activeSheet] : null;
+    const aSheet = activeSheet >= 0 ? sheets[activeSheet] : null;
+    const iso = isoBox.checked && aSheet && aSheet.box;
+    const sec = iso ? aSheet.box : null;
     const pad = 8;
     const inBox = (x, y) => !iso || (x >= sec.x - pad && x <= sec.x + sec.w + pad && y >= sec.y - pad && y <= sec.y + sec.h + pad);
     const dimW = drag ? 0.12 : 1;                    // dim wires while dragging
@@ -286,11 +292,11 @@
     const boxVis = (x0, y0, x1, y1) => x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1;
     const ptVis = (x, y) => x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1;
 
-    // Sections
+    // Sections (dashed structure boxes) — dim those outside the active sheet.
     M.secs.forEach((sc) => {
       if (!boxVis(sc.x, sc.y, sc.x + sc.w, sc.y + sc.h)) return;
-      ctx.globalAlpha = (iso && sc.idx !== activeSheet) ? 0.12 : 1;
-      ctx.strokeStyle = sc.idx === activeSheet ? "#3a5878" : C.secStroke;
+      ctx.globalAlpha = (iso && !inBox(sc.cx, sc.cy)) ? 0.12 : 1;
+      ctx.strokeStyle = C.secStroke;
       ctx.lineWidth = sw(1.4); ctx.setLineDash([sw(6), sw(5)]);
       ctx.strokeRect(sc.x, sc.y, sc.w, sc.h);
       ctx.setLineDash([]);
@@ -302,9 +308,9 @@
       if (!boxVis(w.bb[0], w.bb[1], w.bb[2], w.bb[3])) return;
       const mid = w.pts[Math.floor(w.pts.length / 2)];
       const hot = hotNet && w.net === hotNet;
-      ctx.globalAlpha = drag ? dimW : (inBox(mid[0], mid[1]) ? 1 : 0.12);
-      ctx.strokeStyle = hot ? C.hot : (w.bus ? C.bus : C.wire);
-      ctx.lineWidth = sw(hot ? 2.4 : (w.bus ? 3 : 1.5));
+      ctx.globalAlpha = drag ? dimW : (w.link ? 1 : (inBox(mid[0], mid[1]) ? 1 : 0.12));
+      ctx.strokeStyle = hot ? C.hot : (w.link ? C.link : (w.bus ? C.bus : C.wire));
+      ctx.lineWidth = sw(hot ? 2.4 : (w.link ? 1.8 : (w.bus ? 3 : 1.5)));
       ctx.beginPath(); ctx.moveTo(w.pts[0][0], w.pts[0][1]);
       for (let i = 1; i < w.pts.length; i++) ctx.lineTo(w.pts[i][0], w.pts[i][1]);
       ctx.stroke();
@@ -319,11 +325,11 @@
       ctx.font = "11px sans-serif";
       M.labels.forEach((l) => {
         if (!ptVis(l.x, l.y)) return;
-        ctx.globalAlpha = inBox(l.x, l.y) ? 1 : 0.12;
+        ctx.globalAlpha = (l.link || inBox(l.x, l.y)) ? 1 : 0.12;
         const hot = hotNet && l.net === hotNet;
         if (l.ground) { drawGround(l.x, l.y, hot, sw, showText, l.text); return; }
         if (!showText) return;
-        ctx.fillStyle = hot ? C.hot : l.port ? C.labelPort : C.labelNet;
+        ctx.fillStyle = hot ? C.hot : l.link ? C.link : l.port ? C.labelPort : C.labelNet;
         ctx.textAlign = l.anchor === "start" ? "left" : l.anchor === "end" ? "right" : "center";
         ctx.textBaseline = "middle";
         ctx.fillText(l.text, l.x, l.y);
@@ -497,7 +503,7 @@
   function pick(x, y) {
     const s = scale(), tp = 7 / s, tw = 5 / s, tl = 9 / s;
     for (const h of M.hubs) for (const p of h.pins) if (Math.hypot(p.x - x, p.y - y) < tp) return { t: "pin", ref: h.ref, pin: p.pin, net: p.net, x: p.x, y: p.y };
-    for (const h of M.hubs) if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return { t: "part", ref: h.ref, kind: "hub" };
+    for (const h of M.hubs) { if (h.synthetic) continue; if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return { t: "part", ref: h.ref, kind: "hub" }; }
     for (const p of M.passes) if (x >= p.x && x <= p.x + p.w && y >= p.top && y <= p.top + p.h) return { t: "part", ref: p.ref, kind: "pass" };
     for (const w of M.wires) for (let i = 1; i < w.pts.length; i++) if (distToSeg(x, y, w.pts[i - 1], w.pts[i]) < tw) return { t: "net", net: w.net };
     for (const l of M.labels) if (Math.hypot(l.x - x, l.y - y) < tl) return { t: "net", net: l.net };
@@ -645,46 +651,171 @@
     } catch (e) { return null; }
   }
   function isGroundName(n) { return /^(?:[adpe]?gnd|gnd[adpe]?|vss|ground)\b/i.test(String(n || "").trim()); }
+  // A power rail (Vdd/Vcc/Vsys/3V3/+5V/AVDD…), excluded from device↔device line
+  // drawing along with grounds. A control net like V1/V2 (V + digit) is NOT a
+  // rail, so it still gets a connection line.
+  function isPowerName(n) { return /^(?:[ad]?v[a-z]|\+?\d+v)/i.test(String(n || "").trim()); }
+  // Inter-device nets: a net on exactly two hub pins of two different,
+  // side-by-side devices (no passive between, not power/ground) is a direct
+  // device-to-device connection. Rather than a name label at each end, pull
+  // those pins out of their main hub box and re-show them on a new per-device
+  // 'group' block (same ref + label, drawn by the normal hub renderer, just
+  // like a multi-part component splits into blocks). The two blocks list the
+  // shared nets at matching heights, so the wires between them stay level.
+  function connectHubs(m) {
+    const ends = new Map(), passiveNets = new Set();
+    m.passes.forEach((p) => p.term.forEach((t) => { if (t.net) passiveNets.add(t.net); }));
+    m.hubs.forEach((h) => h.pins.forEach((p) => {
+      if (!p.net || isGroundName(p.net) || isPowerName(p.net)) return;
+      let a = ends.get(p.net); if (!a) { a = []; ends.set(p.net, a); }
+      a.push({ hub: h, pin: p });
+    }));
+    const links = [];
+    ends.forEach((eps, net) => {
+      if (passiveNets.has(net) || eps.length !== 2) return;
+      const ah = eps[0].hub, bh = eps[1].hub;
+      if (ah === bh) return;
+      // Only side-by-side hubs (vertical extents overlap) get a straight channel
+      // line. Vertically stacked devices — e.g. an IC over a column of connectors
+      // sharing its x — would need fan-out routing to avoid stacking lines on top
+      // of each other, so those nets stay as name labels.
+      if (!(ah.y < bh.y + bh.h && bh.y < ah.y + ah.h)) return;
+      links.push({ net, a: eps[0], b: eps[1] });
+    });
+    if (!links.length) return;
+    const linkPins = new Set(); links.forEach((l) => { linkPins.add(l.a.pin); linkPins.add(l.b.pin); });
+    // Drop the per-end name labels + stub wires the layout drew for these nets.
+    const linkSet = new Set(links.map((l) => l.net));
+    m.wires = m.wires.filter((w) => !linkSet.has(w.net));
+    m.labels = m.labels.filter((l) => !linkSet.has(l.net));
+    // Pull the tied pins OUT of their main hub box (a multi-part style split):
+    // each becomes a pin on a new group block, so the original box no longer
+    // carries them.
+    m.hubs.forEach((h) => { h.pins = h.pins.filter((p) => !linkPins.has(p)); });
+    const PITCH = 26, GAP_Y = 36, LABEL_H = 24, BPAD = 6, SEC_PAD = 28, SEC_GAP = 36;
+    // Per hub-pair, build a matched pair of group blocks: one per device, same
+    // ref + label + width as the parent (a multi-part block stacked BELOW it with
+    // some breathing room), both at a shared y so the wires between them are level.
+    const pairs = new Map();
+    links.forEach((lk) => { const k = [lk.a.hub.ref, lk.b.hub.ref].sort().join(" "); let g = pairs.get(k); if (!g) { g = []; pairs.set(k, g); } g.push(lk); });
+    const placed = [];
+    pairs.forEach((group) => {
+      group.sort((x, y) => (x.a.pin.y + x.b.pin.y) - (y.a.pin.y + y.b.pin.y));
+      const aHub = group[0].a.hub, bHub = group[0].b.hub, aLeft = aHub.cx < bHub.cx;
+      const N = group.length, blkH = LABEL_H + N * PITCH + BPAD;
+      const bandTop = Math.max(aHub.y + aHub.h, bHub.y + bHub.h) + GAP_Y;
+      const aSide = aLeft ? "right" : "left", bSide = aLeft ? "left" : "right";
+      const mkBlock = (hub) => ({ ref: hub.ref, src: hub.src || 0, x: hub.x, y: bandTop, w: hub.w, h: blkH, label: hub.label, cx: hub.x + hub.w / 2, cy: bandTop + blkH / 2, pins: [], synthetic: true });
+      const ablk = mkBlock(aHub), bblk = mkBlock(bHub);
+      const aPinX = aSide === "right" ? aHub.x + aHub.w : aHub.x;
+      const bPinX = bSide === "right" ? bHub.x + bHub.w : bHub.x;
+      group.forEach((lk, i) => {
+        const y = bandTop + LABEL_H + i * PITCH + PITCH / 2;
+        ablk.pins.push({ pin: lk.a.pin.pin, name: lk.a.pin.name, side: aSide, x: aPinX, y, net: lk.net, vx: null, vy: null });
+        bblk.pins.push({ pin: lk.b.pin.pin, name: lk.b.pin.name, side: bSide, x: bPinX, y, net: lk.net, vx: null, vy: null });
+        const pts = [[aPinX, y], [bPinX, y]];
+        m.wires.push({ net: lk.net, bus: false, link: true, pts, bb: bbOf(pts) });
+        m.labels.push({ text: lk.net, x: (aPinX + bPinX) / 2, y: y - 8, anchor: "center", ground: false, port: false, net: lk.net, link: true });
+      });
+      m.hubs.push(ablk, bblk);
+      placed.push({ block: ablk, hub: aHub }, { block: bblk, hub: bHub });
+    });
+    if (placed.length) wrapSections(m, placed, SEC_PAD, SEC_GAP);
+  }
+  // Grow each parent's section box to wrap its group block (same padding the
+  // section boxes already use), then shove any lower section + its contents down
+  // so the extended box never overlaps the one beneath it.
+  function wrapSections(m, placed, SEC_PAD, SEC_GAP) {
+    const secOf = (hub) => m.secs.find((sc) => hub.cx >= sc.x && hub.cx <= sc.x + sc.w && hub.cy >= sc.y && hub.cy <= sc.y + sc.h);
+    placed.forEach(({ block, hub }) => {
+      const sc = secOf(hub); if (!sc) return;
+      const need = block.y + block.h + SEC_PAD;
+      if (need > sc.y + sc.h) sc.h = need - sc.y;
+    });
+    const ordered = m.secs.slice().sort((a, b) => a.y - b.y);
+    for (let i = 0; i < ordered.length; i++) for (let j = i + 1; j < ordered.length; j++) {
+      const A = ordered[i], B = ordered[j];
+      if (A.x < B.x + B.w && B.x < A.x + A.w && B.y < A.y + A.h) shiftSection(m, B, A.y + A.h + SEC_GAP - B.y);
+    }
+    m.secs.forEach((sc) => { if (scene.viewBox) scene.viewBox.h = Math.max(scene.viewBox.h, sc.y + sc.h + 60); });
+  }
+  // Move a section box + everything spatially inside its column (from its top
+  // down) by dy. Link wires/labels span the channel, so they fall outside the
+  // single-column x test and stay put.
+  function shiftSection(m, sec, dy) {
+    if (dy <= 0) return;
+    const x0 = sec.x - 1, x1 = sec.x + sec.w + 1, y0 = sec.y;
+    const inX = (x) => x >= x0 && x <= x1;
+    m.hubs.forEach((h) => { if (!h.synthetic && inX(h.cx) && h.cy >= y0) { h.y += dy; h.cy += dy; h.pins.forEach((p) => { p.y += dy; if (p.vy != null) p.vy += dy; }); } });
+    m.passes.forEach((p) => { if (inX(p.cx) && p.cy >= y0) { p.cy += dy; p.top += dy; p.term.forEach((t) => { t.y += dy; }); } });
+    m.wires.forEach((w) => { if (w.pts.every((pt) => inX(pt[0]) && pt[1] >= y0)) { w.pts.forEach((pt) => { pt[1] += dy; }); w.bb[1] += dy; w.bb[3] += dy; } });
+    m.labels.forEach((l) => { if (inX(l.x) && l.y >= y0) l.y += dy; });
+    sec.y += dy; sec.cy += dy;
+  }
+  function bbOf(pts) { let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; for (const p of pts) { if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0]; if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1]; } return [x0, y0, x1, y1]; }
 
   // ── Sheet navigator ──────────────────────────────────────────────────
+  // A "sheet" is a navigable page. Prefer the design's authored (group …) lists
+  // (one page per group, covering its members); fall back to the per-component
+  // sections when a design declares no groups. Built after the model so a group's
+  // box can be unioned from its members' real (post-layout) positions.
+  function refEq(a, b) { return a === b || String(a).split("/").pop() === b; }
+  function countInBox(x, y, w, h) {
+    const pad = 8; let c = 0;
+    const inside = (cx, cy) => cx >= x - pad && cx <= x + w + pad && cy >= y - pad && cy <= y + h + pad;
+    M.hubs.forEach((hh) => { if (!hh.synthetic && inside(hh.cx, hh.cy)) c++; });
+    M.passes.forEach((p) => { if (inside(p.cx, p.cy)) c++; });
+    return c;
+  }
+  function partBox(ref) {
+    const h = M.hubs.find((x) => !x.synthetic && refEq(x.ref, ref)); if (h) return [h.x, h.y, h.w, h.h];
+    const p = M.passes.find((x) => refEq(x.ref, ref)); if (p) return [p.x, p.top, p.w, p.h];
+    return null;
+  }
+  function buildSheets() {
+    sheets = [];
+    if (scene.groups && scene.groups.length) {
+      scene.groups.forEach((g) => {
+        let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, n = 0;
+        (g.members || []).forEach((ref) => { const b = partBox(ref); if (b) { n++; x0 = Math.min(x0, b[0]); y0 = Math.min(y0, b[1]); x1 = Math.max(x1, b[0] + b[2]); y1 = Math.max(y1, b[1] + b[3]); } });
+        const box = n ? { x: x0 - 24, y: y0 - 24, w: (x1 - x0) + 48, h: (y1 - y0) + 48 } : null;
+        sheets.push({ name: g.name, title: g.name + " — " + (g.members || []).length + " parts", box, count: n });
+      });
+    } else {
+      M.secs.forEach((sc) => sheets.push({ name: sc.name, title: sc.name, box: { x: sc.x, y: sc.y, w: sc.w, h: sc.h }, count: countInBox(sc.x, sc.y, sc.w, sc.h) }));
+    }
+  }
   function buildSheetList() {
     clear(sheetList);
     const whole = document.createElement("div");
     whole.className = "ed-sheet"; whole.dataset.idx = "-1";
     whole.innerHTML = '<span class="num">0</span><span class="nm">Whole board</span>';
     whole.onclick = () => fitAll(); sheetList.appendChild(whole);
-    scene.sections.forEach((s, i) => {
+    sheets.forEach((s, i) => {
       const row = document.createElement("div");
       row.className = "ed-sheet"; row.dataset.idx = String(i);
       const n = i + 1;
-      row.innerHTML = `<span class="num">${n <= 9 ? n : "·"}</span><span class="nm"></span><span class="ct">${countInSection(s)}</span>`;
+      row.innerHTML = `<span class="num">${n <= 9 ? n : "·"}</span><span class="nm"></span><span class="ct">${s.count}</span>`;
       row.querySelector(".nm").textContent = s.name;
-      row.title = s.description || s.name;
+      row.title = s.title;
       row.onclick = () => selectSheet(i);
       sheetList.appendChild(row);
     });
     syncSheetUI();
   }
-  function countInSection(s) {
-    const pad = 8; let c = 0;
-    const inside = (x, y) => x >= s.x - pad && x <= s.x + s.w + pad && y >= s.y - pad && y <= s.y + s.h + pad;
-    scene.hubs.forEach((h) => { if (inside(h.x + h.w / 2, h.y + h.h / 2)) c++; });
-    scene.passives.forEach((p) => { if (inside(p.x + p.w / 2, p.y + p.h / 2)) c++; });
-    return c;
-  }
   function selectSheet(i) {
-    if (!scene.sections[i]) return;
-    activeSheet = i; const s = scene.sections[i];
-    fitTo({ x: s.x, y: s.y, w: s.w, h: s.h }, 0.08);
+    const s = sheets[i]; if (!s || !s.box) return;
+    activeSheet = i;
+    fitTo(s.box, 0.08);
     syncSheetUI(); updateStatus();
   }
   function syncSheetUI() { [...sheetList.children].forEach((row) => row.classList.toggle("active", Number(row.dataset.idx) === activeSheet)); }
-  function stepSheet(d) { const n = scene.sections.length; if (!n) return; selectSheet(activeSheet < 0 ? (d > 0 ? 0 : n - 1) : (activeSheet + d + n) % n); }
+  function stepSheet(d) { const n = sheets.length; if (!n) return; selectSheet(activeSheet < 0 ? (d > 0 ? 0 : n - 1) : (activeSheet + d + n) % n); }
 
   // ── Status ───────────────────────────────────────────────────────────
   function updateStatus() {
     const parts = [];
-    parts.push(activeSheet >= 0 && scene.sections[activeSheet] ? "Sheet: " + scene.sections[activeSheet].name : "Whole board");
+    parts.push(activeSheet >= 0 && sheets[activeSheet] ? "Sheet: " + sheets[activeSheet].name : "Whole board");
     if (selection) parts.push('<span class="sel">' + selection.ref + "</span>");
     if (hotNet) parts.push("net: " + hotNet);
     if (M) { const u = M.passes.filter((p) => p.staged).length; if (u) parts.push('<span style="color:#f0883e">⚠ ' + u + ' unplaced — drag onto a pin to wire</span>'); }
@@ -824,7 +955,7 @@
   // ── Add component (A) ────────────────────────────────────────────────
   async function openAdd() {
     if (!libIndex) { try { libIndex = await api("GET", "/api/lib-index"); } catch (e) { libIndex = { components: [], modules: [] }; } }
-    const sheetName = activeSheet >= 0 && scene.sections[activeSheet] ? scene.sections[activeSheet].name : "";
+    const sheetName = activeSheet >= 0 && sheets[activeSheet] ? sheets[activeSheet].name : "";
     const ov = document.createElement("div");
     ov.className = "ed-overlay"; ov.id = "ed-add";
     ov.innerHTML = `
@@ -938,6 +1069,7 @@
       <tr><td><kbd>1</kbd>–<kbd>9</kbd></td><td>Jump to sheet · <kbd>0</kbd> whole board</td></tr>
       <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Previous / next sheet</td></tr>
       <tr><td><kbd>F</kbd></td><td>Fit current sheet / board</td></tr>
+      <tr><td><kbd>N</kbd></td><td>Toggle device-to-device net connections (straight lines across the channel vs a name label at each end)</td></tr>
       <tr><td><kbd>Esc</kbd></td><td>Deselect / close</td></tr>
       <tr><td>click part / net</td><td>Show its properties in the left inspector (edit value, rename net, rewire pins, copy, delete)</td></tr>
       <tr><td><b>double-click</b></td><td>Select it and jump straight to the first editable field in the inspector</td></tr>
@@ -947,6 +1079,9 @@
     ov.addEventListener("mousedown", (e) => { if (e.target === ov) ov.remove(); });
     ov.querySelector("#keys-close").onclick = () => ov.remove();
   }
+
+  // Toggle device↔device net lines (rebuilds the model so re-siding re-applies).
+  function toggleNets() { showNets = !showNets; syncNetsBtn(); buildModel(); scheduleDraw(); }
 
   // ── Keyboard ─────────────────────────────────────────────────────────
   document.addEventListener("keydown", (e) => {
@@ -963,27 +1098,31 @@
       case "e": case "E": editSelected(); break;
       case "Delete": case "Backspace": e.preventDefault(); deleteSelected(); break;
       case "f": case "F": if (activeSheet >= 0) selectSheet(activeSheet); else fitAll(); break;
+      case "n": case "N": toggleNets(); break;
       case "?": toggleKeys(); break;
       case "Escape": deselect(); break;
       case "[": stepSheet(-1); break;
       case "]": stepSheet(1); break;
       case "0": fitAll(); break;
-      default: if (e.key >= "1" && e.key <= "9") { const i = +e.key - 1; if (scene.sections[i]) selectSheet(i); }
+      default: if (e.key >= "1" && e.key <= "9") { const i = +e.key - 1; if (sheets[i]) selectSheet(i); }
     }
   });
 
   // ── Toolbar ──────────────────────────────────────────────────────────
   const tools = document.createElement("div");
   tools.id = "ed-tools";
-  tools.innerHTML = `<button id="tool-add" title="Add (A)">+ Add</button><button id="tool-fit" title="Fit (F)">Fit</button><button id="tool-keys" title="Keys (?)">?</button>`;
+  tools.innerHTML = `<button id="tool-add" title="Add (A)">+ Add</button><button id="tool-nets" title="Show device-to-device net connections (N)">Nets</button><button id="tool-fit" title="Fit (F)">Fit</button><button id="tool-keys" title="Keys (?)">?</button>`;
   wrap.appendChild(tools);
   tools.querySelector("#tool-add").onclick = openAdd;
+  tools.querySelector("#tool-nets").onclick = toggleNets;
   tools.querySelector("#tool-fit").onclick = () => { if (activeSheet >= 0) selectSheet(activeSheet); else fitAll(); };
   tools.querySelector("#tool-keys").onclick = toggleKeys;
+  function syncNetsBtn() { const b = document.getElementById("tool-nets"); if (b) b.classList.toggle("on", showNets); }
+  syncNetsBtn();
   isoBox.addEventListener("change", scheduleDraw);
 
   // ── Refetch / live reload ────────────────────────────────────────────
-  function rebuildScene() { buildModel(); buildSheetList(); renderInspector(); scheduleDraw(); }
+  function rebuildScene() { buildModel(); buildSheets(); buildSheetList(); renderInspector(); scheduleDraw(); }
   async function refetch() {
     try {
       const data = await api("GET", `/api/editor-scene/${DESIGN}`);
