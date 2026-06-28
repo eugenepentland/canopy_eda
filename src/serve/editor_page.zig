@@ -108,10 +108,11 @@ pub fn editorPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     try w.writeAll("<span class=\"ed-hint\">press <kbd>?</kbd> for keys</span>");
     try w.writeAll("</header>");
 
-    // App shell: left sheet navigator, center canvas, bottom status.
+    // App shell: left sheet navigator, left inspector, center canvas, bottom status.
     try w.writeAll("<div id=\"ed-app\">");
     try w.writeAll("<aside id=\"ed-sheets\"><div class=\"ed-sheets-h\">Sheets</div><div id=\"ed-sheet-list\"></div>");
     try w.writeAll("<label class=\"ed-iso\"><input type=\"checkbox\" id=\"ed-isolate\" checked> Isolate sheet</label></aside>");
+    try w.writeAll("<aside id=\"ed-inspector\"></aside>");
     try w.writeAll("<main id=\"ed-canvas-wrap\"><canvas id=\"ed-canvas\"></canvas>");
     try w.writeAll("<div id=\"ed-status\"></div></main>");
     try w.writeAll("</div>");

@@ -796,6 +796,8 @@ src/serve/edit.zig::MutationResult struct_
 src/serve/edit.zig::addComponentDatasheetCore fn
 src/serve/edit.zig::addInstanceApi fn
 src/serve/edit.zig::addSectionNoteCore fn
+src/serve/edit.zig::bindDecoupleApi fn
+src/serve/edit.zig::duplicateInstanceApi fn
 src/serve/edit.zig::editFootprintApi fn
 src/serve/edit.zig::editMpnApi fn
 src/serve/edit.zig::editMpnCore fn
@@ -807,6 +809,7 @@ src/serve/edit.zig::rebuildDesign fn
 src/serve/edit.zig::removeComponentDatasheetCore fn
 src/serve/edit.zig::removeInstanceApi fn
 src/serve/edit.zig::removeSectionNoteCore fn
+src/serve/edit.zig::renameNetApi fn
 src/serve/edit.zig::restoreDesignCore fn
 src/serve/edit.zig::rewirePinApi fn
 src/serve/edit.zig::saveSourceApi fn

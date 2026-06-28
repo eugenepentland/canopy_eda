@@ -142,11 +142,44 @@ fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const
     try map.put(allocator, symbol, by_pin);
 }
 
+/// Parse `lib/pinouts/<x>.sexp` into pad -> function-name (e.g. "15" -> "GP11").
+/// A hub pin should label by the component's own function, not the net it
+/// reaches: part-level `(part …)` names (`buildPinNameMap`) cover multi-part
+/// ICs, but flat `(pin …)` instances carry none, so we supplement from the
+/// pinout file — the same source the HTML schematic uses (which is why it
+/// already read "GP11" where the editor read the net "LED2_DRV").
+fn loadPinoutNames(allocator: Allocator, path: []const u8) ?std.StringHashMapUnmanaged([]const u8) {
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, 1 << 18) catch return null;
+    const parser_m = @import("sexpr/parser.zig");
+    const nodes = parser_m.parse(allocator, content) catch return null;
+    if (nodes.len == 0) return null;
+    const top = nodes[0].asList() orelse return null;
+    if (top.len < 2 or !std.mem.eql(u8, top[0].asAtom() orelse "", "pinout")) return null;
+    var map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    for (top[2..]) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len < 3 or !std.mem.eql(u8, cl[0].asAtom() orelse "", "pin")) continue;
+        const id: []const u8 = if (cl[1].asNumber()) |n|
+            (std.fmt.allocPrint(allocator, "{d}", .{@as(i64, @intFromFloat(n))}) catch continue)
+        else
+            (cl[1].asAtom() orelse cl[1].asString() orelse continue);
+        const name = cl[2].asString() orelse (cl[2].asAtom() orelse continue);
+        map.put(allocator, id, name) catch continue;
+    }
+    return map;
+}
+
 const JsonWire = struct {
     net: []const u8,
     points: std.ArrayListUnmanaged([2]f64),
     is_bus: bool,
 };
+
+/// A part's actual pin → net binding, read straight from the netlist. The editor
+/// inspector reads nets from this (authoritative) instead of inferring them from
+/// drawn wires — so a pin on a brand-new single-pin net (no wire rendered yet)
+/// still shows its real net instead of appearing blank.
+const PinNet = struct { pin: []const u8, net: []const u8 };
 
 const JsonPassive = struct {
     ref: []const u8,
@@ -159,6 +192,16 @@ const JsonPassive = struct {
     h: f64,
     count: u32 = 1,
     src_offset: u32 = 0,
+    /// True when the spoke sits on a left-going chain (its hub is to the right),
+    /// so the renderer mirrors directional symbols (diode/LED) — the body is
+    /// authored anode-toward-hub, so the cathode bar must face the far terminal
+    /// on either side. Symmetric passives ignore it.
+    flip: bool = false,
+    /// Full (un-shortened) ref_des — used only to match against the netlist when
+    /// filling `pin_nets`; not serialized.
+    ref_full: []const u8 = "",
+    /// Real pin→net bindings from the netlist (see `PinNet`).
+    pin_nets: []const PinNet = &.{},
 };
 
 /// An instance the hub/spoke layout did not place (a floating passive — e.g. a
@@ -171,6 +214,9 @@ const JsonStaged = struct {
     value: []const u8,
     symbol: []const u8,
     src_offset: u32 = 0,
+    /// Real pin→net bindings from the netlist (a staged part can still name a
+    /// net on a pin, e.g. one pin on "VDD2" with nothing else there yet).
+    pin_nets: []const PinNet = &.{},
 };
 
 const JsonLabel = struct {
@@ -236,7 +282,7 @@ const SceneGraph = struct {
         });
     }
 
-    fn addPassive(self: *SceneGraph, inst: FlatInst, x: f64, y: f64) !void {
+    fn addPassive(self: *SceneGraph, inst: FlatInst, x: f64, y: f64, flip: bool) !void {
         try self.passives.append(self.allocator, .{
             .ref = shortRef(inst.ref_des),
             .component = inst.component,
@@ -247,10 +293,12 @@ const SceneGraph = struct {
             .w = passive_bw,
             .h = 20.0,
             .src_offset = inst.src_offset,
+            .flip = flip,
+            .ref_full = inst.ref_des,
         });
     }
 
-    fn addPassiveWithCount(self: *SceneGraph, inst: FlatInst, x: f64, y: f64, count: u32) !void {
+    fn addPassiveWithCount(self: *SceneGraph, inst: FlatInst, x: f64, y: f64, count: u32, flip: bool) !void {
         try self.passives.append(self.allocator, .{
             .ref = shortRef(inst.ref_des),
             .component = inst.component,
@@ -262,6 +310,8 @@ const SceneGraph = struct {
             .h = 20.0,
             .count = count,
             .src_offset = inst.src_offset,
+            .flip = flip,
+            .ref_full = inst.ref_des,
         });
     }
 };
@@ -680,6 +730,23 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
 
     // Port blocks (skipped — interface ports not shown in schematic)
 
+    // Real pin → net bindings per instance, straight from the netlist. The
+    // editor reads these (authoritative) instead of inferring a pin's net from
+    // drawn wires, so a pin on a fresh single-pin net (no wire yet) still shows
+    // its name. Keyed by full ref_des (nets reference instances by full ref).
+    var pinnet_map: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(PinNet)) = .empty;
+    for (ctx.nets.items) |net| {
+        const bn = baseNetName(net.name);
+        for (net.pins) |pin| {
+            const gop = try pinnet_map.getOrPut(allocator, pin.ref_des);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(allocator, .{ .pin = pin.pin, .net = bn });
+        }
+    }
+    for (scene.passives.items) |*p| {
+        if (pinnet_map.get(p.ref_full)) |list| p.pin_nets = list.items;
+    }
+
     // Unplaced spokes: a passive the layout never drew or merged (a floating
     // part — e.g. a just-added cap with no hub-reaching net). Hubs are always
     // placed; a spoke is placed once it's drawn or merged into rendered_spokes.
@@ -693,6 +760,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
             .value = inst.value,
             .symbol = inst.symbol,
             .src_offset = inst.src_offset,
+            .pin_nets = if (pinnet_map.get(inst.ref_des)) |list| list.items else &.{},
         });
     }
 
@@ -754,6 +822,24 @@ fn collectHubData(
     const parts_for_names: []const env_mod.Part = if (part) |p| &[_]env_mod.Part{p} else hub.parts;
     var pn_map = hub_mod.buildPinNameMap(ctx, parts_for_names);
     defer pn_map.deinit(allocator);
+    // Flat `(pin …)` instances carry no part-level pin names, so supplement from
+    // the component's pinout file — hub pins then read by function ("GP11") like
+    // the HTML schematic, not by the net they reach ("LED2_DRV"). First existing
+    // file wins; existing part-level names are never overwritten. Grouping is
+    // net-based, so this only changes labels, never group membership/positions.
+    if (ctx.project_dir.len > 0) {
+        for ([_][]const u8{ hub.pinout, hub.symbol, hub.component }) |cand| {
+            if (cand.len == 0) continue;
+            const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ ctx.project_dir, cand }) catch continue;
+            defer allocator.free(path);
+            var pinmap = loadPinoutNames(allocator, path) orelse continue;
+            var it = pinmap.iterator();
+            while (it.next()) |kv| {
+                if (!pn_map.contains(kv.key_ptr.*)) pn_map.put(allocator, kv.key_ptr.*, kv.value_ptr.*) catch break;
+            }
+            if (pn_map.count() > 0) break;
+        }
+    }
 
     const all_groups = try hub_mod.groupHubPins(ctx, all_pins_list.items, adj_entries, &pn_map);
     const split = try splitGroupsByMergeAwareHeight(ctx, allocator, all_groups, hub.ref_des);
@@ -1223,7 +1309,7 @@ fn collectMergedPassive(
             switch (side) {
                 .left => {
                     try scene.addWire(net_name, stub_x, stub_y, stub_x - PIN_OFFSET, cy, false);
-                    try scene.addPassiveWithCount(inst, stub_x - PIN_OFFSET - passive_bw, cy, count);
+                    try scene.addPassiveWithCount(inst, stub_x - PIN_OFFSET - passive_bw, cy, count, true);
                     const chain_end_x = stub_x - PIN_OFFSET - passive_bw;
                     // Find the terminal
                     var visited: std.StringHashMapUnmanaged(void) = .empty;
@@ -1234,7 +1320,7 @@ fn collectMergedPassive(
                 },
                 .right => {
                     try scene.addWire(net_name, stub_x, stub_y, stub_x + PIN_OFFSET, cy, false);
-                    try scene.addPassiveWithCount(inst, stub_x + PIN_OFFSET, cy, count);
+                    try scene.addPassiveWithCount(inst, stub_x + PIN_OFFSET, cy, count, false);
                     const chain_end_x = stub_x + PIN_OFFSET + passive_bw;
                     var visited: std.StringHashMapUnmanaged(void) = .empty;
                     try visited.put(allocator, p.ref_des, {});
@@ -1328,7 +1414,7 @@ fn collectPassiveChainLeft(scene: *SceneGraph, _: Allocator, start_x: f64, cy: f
             try scene.addWire("", x, cy, x - PIN_OFFSET, cy, false);
             x -= PIN_OFFSET;
         }
-        try scene.addPassive(inst, x - passive_bw, cy);
+        try scene.addPassive(inst, x - passive_bw, cy, true); // left chain: hub on the right
         x -= passive_bw;
     }
     return x;
@@ -1343,7 +1429,7 @@ fn collectPassiveChainRight(scene: *SceneGraph, allocator: Allocator, start_x: f
             try scene.addWire("", x, cy, x + PIN_OFFSET, cy, false);
             x += PIN_OFFSET;
         }
-        try scene.addPassive(inst, x, cy);
+        try scene.addPassive(inst, x, cy, false); // right chain: hub on the left
         x += passive_bw;
     }
     return x;
@@ -1620,7 +1706,9 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         try writeJsonString(w, "value", p.value);
         try w.writeAll(",");
         try writeJsonString(w, "symbol", p.symbol);
-        try w.print(",\"x\":{d:.1},\"y\":{d:.1},\"w\":{d:.1},\"h\":{d:.1},\"count\":{d},\"src\":{d}", .{ p.x, p.y, p.w, p.h, p.count, p.src_offset });
+        try w.print(",\"x\":{d:.1},\"y\":{d:.1},\"w\":{d:.1},\"h\":{d:.1}", .{ p.x, p.y, p.w, p.h });
+        try w.print(",\"count\":{d},\"src\":{d},\"flip\":{s}", .{ p.count, p.src_offset, if (p.flip) "true" else "false" });
+        try writePinNets(w, p.pin_nets);
         try w.writeAll("}");
     }
     try w.writeAll("]");
@@ -1655,12 +1743,27 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         try w.writeAll(",");
         try writeJsonString(w, "symbol", st.symbol);
         try w.print(",\"src\":{d}", .{st.src_offset});
+        try writePinNets(w, st.pin_nets);
         try w.writeAll("}");
     }
     try w.writeAll("]");
 
     try w.writeAll("}");
     return buf.toOwnedSlice(allocator);
+}
+
+/// Emit `,"pins":[{"pin":"1","net":"VDD2"},…]` — a part's real pin→net bindings.
+fn writePinNets(w: anytype, pin_nets: []const PinNet) !void {
+    try w.writeAll(",\"pins\":[");
+    for (pin_nets, 0..) |pn, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{");
+        try writeJsonString(w, "pin", pn.pin);
+        try w.writeAll(",");
+        try writeJsonString(w, "net", pn.net);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
 }
 
 const writeJsonString = json_writer.writeField;

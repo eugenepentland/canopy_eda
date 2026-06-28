@@ -418,6 +418,9 @@ pub fn serve(
     router.post("/api/add-instance/:name", edit.addInstanceApi, .{});
     router.post("/api/remove-instance/:name", edit.removeInstanceApi, .{});
     router.post("/api/rewire-pin/:name", edit.rewirePinApi, .{});
+    router.post("/api/bind-decouple/:name", edit.bindDecoupleApi, .{});
+    router.post("/api/duplicate-instance/:name", edit.duplicateInstanceApi, .{});
+    router.post("/api/rename-net/:name", edit.renameNetApi, .{});
     router.post("/api/move-pin/:name", edit.movePinApi, .{});
     router.post("/api/swap-pins/:name", edit.swapPinsApi, .{});
     router.get("/api/free-pins/:name", api.freePinsApi, .{});

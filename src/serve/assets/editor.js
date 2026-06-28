@@ -29,6 +29,7 @@
   const sheetList = document.getElementById("ed-sheet-list");
   const statusBar = document.getElementById("ed-status");
   const isoBox = document.getElementById("ed-isolate");
+  const inspector = document.getElementById("ed-inspector");
 
   const C = {
     secStroke: "#2d3a4a", secLabel: "#6e7681",
@@ -46,6 +47,8 @@
   let activeSheet = -1;          // -1 = whole board
   let selection = null;          // {kind:'hub'|'pass', ref}
   let hotNet = null;
+  let clip = null;               // copy/paste clipboard: {ref, src}
+  let deleteArmed = false;       // inspector Delete needs a 2nd click to confirm
   let libIndex = null;
   let dirty = true, springBack = null;
   const stagePos = {};           // staged-part identity (src offset) -> {x,y} world position
@@ -106,6 +109,10 @@
     }
     return best;
   }
+  // A short net stub + hanging net label for a dangling pin (its net isn't drawn
+  // by the layout). Shaped like real wires/labels so they draw, pick, and snap.
+  function stubWire(net, x0, y, x1) { return { net, bus: false, pts: [[x0, y], [x1, y]], bb: [Math.min(x0, x1), y, Math.max(x0, x1), y] }; }
+  function stubLabel(net, x, y, anchor) { return { text: net, x, y, anchor, ground: isGroundName(net), port: false, net }; }
   function buildModel() {
     const m = { secs: [], wires: [], labels: [], passes: [], hubs: [], ports: [], grid: new Map() };
     scene.sections.forEach((s, i) => m.secs.push({ name: s.name, x: s.x, y: s.y, w: s.w, h: s.h, idx: i, cx: s.x + s.w / 2, cy: s.y + s.h / 2 }));
@@ -120,12 +127,37 @@
       // left/right edge midpoints — the terminals — sit exactly on the wire.
       const cyc = p.y, top = p.y - p.h / 2;
       const lp = nearestWireVertex(p.x, cyc), rp = nearestWireVertex(p.x + p.w, cyc);
+      let lnet = lp ? lp.net : "", rnet = rp ? rp.net : "", lDangle = false, rDangle = false;
+      // A pin assigned a net the layout never drew (a dangling / single-pin net):
+      // recover it from the real pin→net bindings and show it as a stub + label so
+      // the connection is visible and clickable. Gate on the *absence* of a wire
+      // (lp/rp null), NOT an empty net string: a wire that's present but unnamed is
+      // a deliberately unlabeled internal series node (e.g. an R→D link), and must
+      // stay label-free — resurrecting its net there draws a redundant label.
+      const real = (p.pins || []).map((x) => x.net).filter(Boolean);
+      if (!lp || !rp) {
+        const shown = [lnet, rnet].filter(Boolean);
+        const free = real.filter((n) => !shown.includes(n));
+        if (!lp && free.length) { lnet = free.shift(); lDangle = true; }
+        if (!rp && free.length) { rnet = free.shift(); rDangle = true; }
+      }
       m.passes.push({
-        ref: p.ref, src: p.src || 0, x: p.x, top, w: p.w, h: p.h, cx: p.x + p.w / 2, cy: cyc,
+        ref: p.ref, src: p.src || 0, x: p.x, top, w: p.w, h: p.h, cx: p.x + p.w / 2, cy: cyc, flip: !!p.flip,
         type: passType(p.ref, p.component, p.value, p.symbol),
         label: (p.count > 1 ? p.count + "× " : "") + (p.value || p.ref),
-        term: [{ pin: "1", x: p.x, y: cyc, net: lp ? lp.net : "" }, { pin: "2", x: p.x + p.w, y: cyc, net: rp ? rp.net : "" }],
+        term: [{ pin: "1", x: p.x, y: cyc, net: lnet }, { pin: "2", x: p.x + p.w, y: cyc, net: rnet }],
       });
+      // Match the auto terminal-label spacing exactly: a net label sits
+      // net_label_gap (18) past the wire end; a ground label sits right at it.
+      const STUB = 26, NLG = 18;
+      const dangle = (net, termX, dir) => {
+        const endX = termX + dir * STUB;
+        m.wires.push(stubWire(net, termX, cyc, endX));
+        const labelX = isGroundName(net) ? endX : endX + dir * NLG;
+        m.labels.push(stubLabel(net, labelX, cyc, dir < 0 ? "end" : "start"));
+      };
+      if (lDangle) dangle(lnet, p.x, -1);
+      if (rDangle) dangle(rnet, p.x + p.w, 1);
     });
     scene.hubs.forEach((h) => {
       const pins = [];
@@ -279,17 +311,25 @@
     });
     ctx.globalAlpha = 1;
 
-    // Labels
-    if (11 * s >= 7) {
+    // Labels — net-name stubs / ports as text; grounds as a real earth symbol
+    // (node dot on the wire, rake pointing down, caption below). The symbol
+    // draws at any zoom; only its caption obeys the LOD text cutoff.
+    {
+      const showText = 11 * s >= 7;
       ctx.font = "11px sans-serif";
       M.labels.forEach((l) => {
         if (!ptVis(l.x, l.y)) return;
         ctx.globalAlpha = inBox(l.x, l.y) ? 1 : 0.12;
-        ctx.fillStyle = (hotNet && l.net === hotNet) ? C.hot : l.ground ? C.labelGnd : l.port ? C.labelPort : C.labelNet;
+        const hot = hotNet && l.net === hotNet;
+        if (l.ground) { drawGround(l.x, l.y, hot, sw, showText, l.text); return; }
+        if (!showText) return;
+        ctx.fillStyle = hot ? C.hot : l.port ? C.labelPort : C.labelNet;
         ctx.textAlign = l.anchor === "start" ? "left" : l.anchor === "end" ? "right" : "center";
-        ctx.fillText(l.ground ? "⏚ " + l.text : l.text, l.x, l.y);
+        ctx.textBaseline = "middle";
+        ctx.fillText(l.text, l.x, l.y);
       });
       ctx.globalAlpha = 1;
+      ctx.textBaseline = "middle";                    // drawGround leaves it "top"
     }
 
     // Passives
@@ -303,6 +343,10 @@
       if (p.staged) { ctx.strokeStyle = C.snap; ctx.lineWidth = sw(1.2); ctx.setLineDash([sw(4), sw(3)]); roundRect(x0 - sw(5), cy - amp - sw(7), (x1 - x0) + sw(10), 2 * amp + sw(14), sw(4)); ctx.stroke(); ctx.setLineDash([]); }
       ctx.strokeStyle = seld ? C.sel : C.passStroke; ctx.lineWidth = sw(seld ? 2.2 : 1.5);
       if (p.type === "box") { ctx.fillStyle = C.pass; roundRect(x0, p.top + oy, p.w, p.h, sw(3)); ctx.fill(); ctx.stroke(); }
+      // Left-side spokes are mirrored about their centre so directional symbols
+      // (diode/LED) point the right way on both sides of the IC; symmetric ones
+      // look identical either way.
+      else if (p.flip) { ctx.save(); ctx.translate(2 * (p.cx + ox), 0); ctx.scale(-1, 1); symbol(p.type, x0, x1, cy, sw); ctx.restore(); }
       else symbol(p.type, x0, x1, cy, sw);
       for (const t of p.term) {                       // terminal nodes on the two sides
         const hot = hotNet && t.net === hotNet;
@@ -353,6 +397,23 @@
   }
   function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
   function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+
+  // Earth-ground symbol drawn at a terminal: the connection node sits ON the
+  // wire end (x,y) so it visibly touches the net, a short stub drops to the
+  // three-bar rake, and the net caption reads below the icon. (Replaces the old
+  // inline "⏚ GND" text that straddled the wire and never connected to it.)
+  // Geometry is world units (scales with zoom); strokes stay screen-constant.
+  function drawGround(x, y, hot, sw, showText, text) {
+    const col = hot ? C.hot : C.labelGnd;
+    const top = y + 6, gap = 3.2, half = [11, 7, 3.5];
+    ctx.strokeStyle = col; ctx.lineWidth = sw(1.6);
+    ctx.beginPath();
+    ctx.moveTo(x, y); ctx.lineTo(x, top);                          // stub from the net down
+    for (let i = 0; i < 3; i++) { const yy = top + i * gap; ctx.moveTo(x - half[i], yy); ctx.lineTo(x + half[i], yy); }
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(x, y, sw(3.2), 0, 7); ctx.fillStyle = col; ctx.fill();   // node on the net
+    if (showText) { ctx.fillStyle = col; ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(text, x, top + 2 * gap + 4); }
+  }
 
   // Draw a horizontal 2-terminal passive symbol on the axis x0→x1 at y=cy. The
   // current ctx.strokeStyle/lineWidth are honored; diode/LED triangles fill with
@@ -483,10 +544,32 @@
     cam.h = Math.min(Math.max(cam.h * f, 16), scene.viewBox.h * 4);
     cam.x = wx - mx * cam.w; cam.y = wy - my * cam.h; scheduleDraw();
   }, { passive: false });
+  // Double-click selects the subject and jumps focus into its first inspector
+  // field (net name / part value) for a quick edit. (The two single-clicks fire
+  // first — they just select it.)
+  canvas.addEventListener("dblclick", (e) => {
+    const w = worldFromEvent(e), h = pick(w[0], w[1]);
+    if (h.t === "net" || (h.t === "pin" && h.net)) { setHotNet(h.net); focusInspectorPrimary(); }
+    else if (h.t === "part") { select(h.kind, h.ref); focusInspectorPrimary(); }
+  });
 
-  function select(kind, ref) { selection = { kind, ref }; updateStatus(); scheduleDraw(); }
-  function deselect() { selection = null; hotNet = null; updateStatus(); scheduleDraw(); }
-  function highlightNetToggle(net) { if (!net) return; hotNet = hotNet === net ? null : net; updateStatus(); scheduleDraw(); }
+  // Part and net are mutually exclusive in the inspector: selecting one clears
+  // the other so the panel always reflects a single subject.
+  function select(kind, ref) { selection = { kind, ref }; hotNet = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
+  function deselect() { selection = null; hotNet = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
+  function highlightNetToggle(net) { if (!net) return; hotNet = hotNet === net ? null : net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
+  function setHotNet(net) { if (!net) return; hotNet = net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
+  // Rename a net everywhere it's used (all pins/ports/net-forms). Renaming onto an
+  // existing net name merges them. Driven by the inspector's Net name field.
+  async function renameNet(oldNet, to) {
+    if (!oldNet || !to || to === oldNet) return;
+    try {
+      await api("POST", `/api/rename-net/${DESIGN}`, { from: oldNet, to });
+      if (hotNet === oldNet) hotNet = to;
+      toast(`Renamed ${oldNet} → ${to}`);
+      await refetch();
+    } catch (err) { toast("Rename failed: " + err.message, true); }
+  }
 
   // ── Drag-to-connect ──────────────────────────────────────────────────
   function startDrag(kind, hit) {
@@ -539,10 +622,29 @@
     else { const n = prompt("New net name for this connection:", ""); if (!n) { if (d.kind === "part") springBack = { ref: d.ownerRef, dx: d.delta[0], dy: d.delta[1] }; return; } ref = b.term.ref; pin = b.term.pin; net = n; so = d.src; }
     try {
       await api("POST", `/api/rewire-pin/${DESIGN}`, { ref, pin, net, srcOff: so });
-      toast(`Connected ${ref}.${pin} → ${net}`);
+      const bound = await maybeBindDecouple(d, b);
+      toast(bound ? `Connected ${ref}.${pin} → ${net} · pinned near ${bound}` : `Connected ${ref}.${pin} → ${net}`);
       await refetch();
     } catch (err) { toast("Connect failed: " + err.message, true); if (d.kind === "part") springBack = { ref: d.ownerRef, dx: d.delta[0], dy: d.delta[1] }; }
   }
+  // A cap dropped on a hub pin records a (decouples "IC" PAD) binding so the
+  // renderer docks it on THAT hub (boundHubPin), not whichever hub on a shared
+  // net draws first — the DSL's "place this cap next to this pin" intent. Caps
+  // only (the form is cap-specific); skip ground pins (a cap decouples a signal/
+  // power pad referenced to ground, never the ground pad itself). Best-effort:
+  // the wire already landed, so a failed binding just leaves default placement.
+  async function maybeBindDecouple(d, b) {
+    if (!d || d.kind !== "part" || !b || !b.port || b.port.t !== "pin" || !b.port.ref) return null;
+    const tgtNet = b.port.net || (b.term && b.term.net) || "";
+    if (isGroundName(tgtNet)) return null;
+    const dp = M.passes.find((x) => x.ref === d.ownerRef);
+    if (!dp || dp.type !== "capacitor") return null;
+    try {
+      await api("POST", `/api/bind-decouple/${DESIGN}`, { ref: d.ownerRef, ic: b.port.ref, pin: b.port.pin, srcOff: d.src });
+      return b.port.ref + "." + b.port.pin;
+    } catch (e) { return null; }
+  }
+  function isGroundName(n) { return /^(?:[adpe]?gnd|gnd[adpe]?|vss|ground)\b/i.test(String(n || "").trim()); }
 
   // ── Sheet navigator ──────────────────────────────────────────────────
   function buildSheetList() {
@@ -590,24 +692,133 @@
     statusBar.innerHTML = parts.join('<span style="opacity:.4">|</span>');
   }
 
-  // ── Edit / delete ────────────────────────────────────────────────────
-  async function editSelected() {
-    if (!selection) { toast("Select a component first (click it).", true); return; }
-    const cur = findValue(selection.ref), val = prompt(`New value for ${selection.ref}:`, cur || "");
-    if (val === null) return;
-    try { await api("POST", `/api/edit-value/${DESIGN}`, { ref: selection.ref, value: val, srcOff: srcByRef(selection.ref) }); toast(`${selection.ref} = ${val}`); await refetch(); }
+  // ── Inspector (left properties panel — replaces the edit popups) ──────
+  function mkEl(tag, cls, txt) { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+  function partMeta(ref) {
+    return scene.hubs.find((x) => x.ref === ref) || scene.passives.find((x) => x.ref === ref) || (scene.staged || []).find((x) => x.ref === ref) || null;
+  }
+  function isHubRef(ref) { return !!(M && M.hubs.find((x) => x.ref === ref)); }
+  function partPins(ref) {
+    // Passives/staged carry authoritative pin→net from the netlist (so a pin on a
+    // brand-new single-pin net still shows its name instead of reading blank).
+    const sp = scene.passives.find((x) => x.ref === ref) || (scene.staged || []).find((x) => x.ref === ref);
+    if (sp && sp.pins && sp.pins.length) return sp.pins.map((pn) => ({ pin: pn.pin, label: "pin " + pn.pin, net: pn.net })).sort((a, b) => {
+      const na = parseInt(a.pin, 10), nb = parseInt(b.pin, 10);
+      return (!isNaN(na) && !isNaN(nb)) ? na - nb : String(a.pin).localeCompare(String(b.pin));
+    });
+    const h = M && M.hubs.find((x) => x.ref === ref);
+    if (h) return h.pins.map((p) => ({ pin: p.pin, label: p.name || p.pin, net: p.net }));
+    const p = M && M.passes.find((x) => x.ref === ref);
+    if (p) return p.term.map((t) => ({ pin: t.pin, label: "pin " + t.pin, net: t.net }));
+    return [];
+  }
+  function netConnections(net) {
+    const out = [];
+    (M ? M.hubs : []).forEach((h) => h.pins.forEach((p) => { if (p.net === net) out.push({ ref: h.ref, pin: p.name || p.pin }); }));
+    (M ? M.passes : []).forEach((p) => p.term.forEach((t) => { if (t.net === net) out.push({ ref: p.ref, pin: "pin " + t.pin }); }));
+    return out;
+  }
+  // A labeled field; read-only when onCommit is null, else commits on Enter/blur.
+  function fieldRow(label, value, onCommit) {
+    const row = mkEl("div", "ed-fld"); row.appendChild(mkEl("label", null, label));
+    if (!onCommit) { const d = mkEl("div", "ro"); d.textContent = value || "—"; row.appendChild(d); return row; }
+    const inp = document.createElement("input"); inp.value = value || "";
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); inp.blur(); } });
+    inp.addEventListener("change", () => { const v = inp.value.trim(); if (v !== (value || "")) onCommit(v); });
+    row.appendChild(inp); return row;
+  }
+  function renderInspector() {
+    clear(inspector);
+    if (selection) { renderPartInspector(selection.ref); return; }
+    if (hotNet) { renderNetInspector(hotNet); return; }
+    inspector.appendChild(mkEl("div", "ed-insp-empty", "Select a part or net to see and edit its properties — click on the canvas, or double-click to jump straight to editing."));
+  }
+  function renderPartInspector(ref) {
+    const meta = partMeta(ref);
+    if (!meta) { inspector.appendChild(mkEl("div", "ed-insp-empty", ref + " is no longer in the design.")); return; }
+    const hub = isHubRef(ref);
+    const head = mkEl("div", "ed-insp-head");
+    head.appendChild(mkEl("span", "t", "Part")); head.appendChild(mkEl("span", "r", ref));
+    head.appendChild(mkEl("span", "badge", hub ? "IC" : passType(ref, meta.component, meta.value, meta.symbol)));
+    inspector.appendChild(head);
+    const body = mkEl("div", "ed-insp-body");
+    body.appendChild(fieldRow("Ref-des", ref, null));
+    body.appendChild(fieldRow("Component", meta.component || "—", null));
+    body.appendChild(fieldRow("Value", meta.value || "", (v) => applyValue(ref, v)));
+    const pins = partPins(ref);
+    if (pins.length) {
+      body.appendChild(mkEl("div", "ed-insp-sec", "Pins → net"));
+      pins.forEach((p) => {
+        const row = mkEl("div", "ed-pinline");
+        const pl = mkEl("span", "pl", p.label); pl.title = "pad " + p.pin; row.appendChild(pl);
+        const inp = document.createElement("input"); inp.value = p.net || ""; inp.placeholder = "(unconnected)";
+        inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); inp.blur(); } });
+        inp.addEventListener("change", () => { const v = inp.value.trim(); if (v && v !== (p.net || "")) applyPinNet(ref, p.pin, v); });
+        row.appendChild(inp); body.appendChild(row);
+      });
+    }
+    const acts = mkEl("div", "ed-insp-actions");
+    const copyBtn = mkEl("button", "ed-btn", "Copy"); copyBtn.onclick = () => doCopy(ref); acts.appendChild(copyBtn);
+    const delBtn = mkEl("button", "ed-btn danger" + (deleteArmed ? " armed" : ""), deleteArmed ? "Confirm remove" : "Delete");
+    delBtn.onclick = () => deleteSelected(); acts.appendChild(delBtn);
+    body.appendChild(acts);
+    inspector.appendChild(body);
+  }
+  function renderNetInspector(net) {
+    const head = mkEl("div", "ed-insp-head");
+    head.appendChild(mkEl("span", "t", "Net")); head.appendChild(mkEl("span", "r", net));
+    inspector.appendChild(head);
+    const body = mkEl("div", "ed-insp-body");
+    body.appendChild(fieldRow("Net name", net, (v) => renameNet(net, v)));
+    const conns = netConnections(net);
+    body.appendChild(mkEl("div", "ed-insp-sec", "Connections (" + conns.length + ")"));
+    if (!conns.length) body.appendChild(mkEl("div", "ed-insp-empty", "No pins on this net."));
+    conns.forEach((c) => {
+      const row = mkEl("div", "ed-conn");
+      row.appendChild(mkEl("span", "cr", c.ref)); row.appendChild(mkEl("span", "cp", c.pin));
+      row.onclick = () => select(isHubRef(c.ref) ? "hub" : "pass", c.ref);
+      body.appendChild(row);
+    });
+    inspector.appendChild(body);
+  }
+  function focusInspectorPrimary() { const i = inspector.querySelector("input"); if (i) { i.focus(); i.select(); } }
+
+  // ── Edits (no popups — driven by inspector fields / actions) ─────────
+  async function applyValue(ref, value) {
+    try { await api("POST", `/api/edit-value/${DESIGN}`, { ref, value, srcOff: srcByRef(ref) }); toast(`${ref} = ${value}`); await refetch(); }
     catch (err) { toast("Edit failed: " + err.message, true); }
   }
-  function findValue(ref) {
-    const h = scene.hubs.find((x) => x.ref === ref); if (h) return h.value;
-    const p = scene.passives.find((x) => x.ref === ref); if (p) return p.value;
-    return "";
+  async function applyPinNet(ref, pin, net) {
+    try { await api("POST", `/api/rewire-pin/${DESIGN}`, { ref, pin, net, srcOff: srcByRef(ref) }); toast(`${ref}.${pin} → ${net}`); await refetch(); }
+    catch (err) { toast("Rewire failed: " + err.message, true); }
   }
+  async function doCopy(ref) {
+    try { await api("POST", `/api/duplicate-instance/${DESIGN}`, { ref, srcOff: srcByRef(ref) }); toast("Pasted a copy of " + ref); await refetch(); }
+    catch (err) { toast("Copy failed: " + err.message, true); }
+  }
+  function editSelected() { if (selection || hotNet) focusInspectorPrimary(); else toast("Click a part or net first.", true); }
   async function deleteSelected() {
     if (!selection) { toast("Select a component first (click it).", true); return; }
-    if (!confirm(`Remove ${selection.ref} from the design?`)) return;
-    try { await api("POST", `/api/remove-instance/${DESIGN}`, { ref: selection.ref, srcOff: srcByRef(selection.ref) }); toast(`Removed ${selection.ref}`); selection = null; await refetch(); }
-    catch (err) { toast("Remove failed: " + err.message, true); }
+    if (!deleteArmed) { deleteArmed = true; renderInspector(); toast("Press Del again (or click Confirm) to remove " + selection.ref); return; }
+    const ref = selection.ref;
+    try { await api("POST", `/api/remove-instance/${DESIGN}`, { ref, srcOff: srcByRef(ref) }); toast(`Removed ${ref}`); selection = null; deleteArmed = false; renderInspector(); await refetch(); }
+    catch (err) { toast("Remove failed: " + err.message, true); deleteArmed = false; renderInspector(); }
+  }
+
+  // ── Copy / paste ─────────────────────────────────────────────────────
+  // Copy remembers the selected part by its stable source offset; paste clones
+  // it server-side (exact duplicate — same value/pins/binding, fresh ref + id),
+  // so an identical cap on the same rail merges into "2× …", and a part on a
+  // shared net keeps its hub binding. Drag the copy elsewhere to rewire it.
+  function copySelected() {
+    if (!selection) { toast("Select a component first (click it).", true); return; }
+    clip = { ref: selection.ref, src: srcByRef(selection.ref) };
+    toast("Copied " + selection.ref + " — Ctrl+V to paste");
+  }
+  async function pasteClip() {
+    if (!clip) { toast("Nothing to paste (select a part, then Ctrl+C).", true); return; }
+    try { await api("POST", `/api/duplicate-instance/${DESIGN}`, { ref: clip.ref, srcOff: clip.src }); toast("Pasted a copy of " + clip.ref); await refetch(); }
+    catch (err) { toast("Paste failed: " + err.message, true); }
   }
 
   // ── Add component (A) ────────────────────────────────────────────────
@@ -619,7 +830,7 @@
     ov.innerHTML = `
       <div class="ed-modal" role="dialog">
         <h2>Add component</h2>
-        <p class="sub">Inserts an (instance …) into the source, then rebuilds.</p>
+        <p class="sub">Inserts an (instance …) into the source, then rebuilds. <span style="opacity:.7">↑↓ to navigate · Enter to select.</span></p>
         <input id="add-search" placeholder="Search library (cap-0402, res-0805, a module…)" autocomplete="off">
         <div class="ed-results" id="add-results"></div>
         <div id="add-form" hidden>
@@ -656,22 +867,50 @@
     addPinRow("1", ""); addPinRow("2", "GND");
     ov.querySelector("#add-pin-more").onclick = () => addPinRow();
 
-    let chosen = null;
+    let chosen = null, hiIdx = -1;
     const results = ov.querySelector("#add-results"), search = ov.querySelector("#add-search"), form = ov.querySelector("#add-form"), goBtn = ov.querySelector("#add-go");
+    const rows = () => [...results.children];
+    // Move the keyboard cursor (highlighted row) without committing a choice.
+    function setCursor(i) {
+      const rs = rows(); if (!rs.length) { hiIdx = -1; return; }
+      hiIdx = Math.max(0, Math.min(i, rs.length - 1));
+      rs.forEach((r, j) => r.classList.toggle("hi", j === hiIdx));
+      rs[hiIdx].scrollIntoView({ block: "nearest" });
+    }
+    // Commit a row → reveal the detail form (same as clicking it).
+    function selectResult(d) {
+      if (!d) return;
+      chosen = { name: d.dataset.name, kind: d.dataset.kind };
+      setCursor(rows().indexOf(d));
+      form.hidden = false; goBtn.disabled = false;
+      ov.querySelector("#add-chosen").textContent = (chosen.kind === "module" ? "module " : "") + chosen.name;
+    }
     function renderResults(q) {
       q = (q || "").toLowerCase();
       results.innerHTML = "";
       (libIndex.components || []).filter((c) => !q || c.name.toLowerCase().includes(q)).slice(0, 40).forEach((c) => addResult(c.name, c.family ? "family" : "part", c.footprint || "", "component"));
       (libIndex.modules || []).filter((m) => !q || m.name.toLowerCase().includes(q)).slice(0, 20).forEach((m) => addResult(m.name, "module", m.params || "", "module"));
+      setCursor(0);                                   // highlight the top match so Enter picks it
     }
     function addResult(name, badge, fp, kind) {
       const d = document.createElement("div"); d.className = "ed-result";
+      d.dataset.name = name; d.dataset.kind = kind;
       d.innerHTML = `<span class="badge ${badge === "module" ? "module" : ""}">${badge}</span><span class="nm"></span><span class="fp"></span>`;
       d.querySelector(".nm").textContent = name; d.querySelector(".fp").textContent = fp;
-      d.onclick = () => { chosen = { name, kind }; [...results.children].forEach((x) => x.classList.remove("hi")); d.classList.add("hi"); form.hidden = false; goBtn.disabled = false; ov.querySelector("#add-chosen").textContent = (kind === "module" ? "module " : "") + name; };
+      d.onclick = () => selectResult(d);
       results.appendChild(d);
     }
-    renderResults(""); search.addEventListener("input", () => renderResults(search.value)); search.focus();
+    renderResults("");
+    search.addEventListener("input", () => renderResults(search.value));
+    // Arrow keys move the cursor through results; Enter picks it and jumps to Value.
+    search.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown") { e.preventDefault(); setCursor(hiIdx + 1); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); setCursor(hiIdx - 1); }
+      else if (e.key === "Enter") { e.preventDefault(); const r = rows()[hiIdx]; if (r) { selectResult(r); ov.querySelector("#add-value").focus(); } }
+    });
+    // In the detail fields, Enter submits (so the whole flow is keyboard-only).
+    ["#add-value", "#add-ref"].forEach((sel) => ov.querySelector(sel).addEventListener("keydown", (e) => { if (e.key === "Enter" && chosen) { e.preventDefault(); goBtn.click(); } }));
+    search.focus();
 
     ov.querySelector("#add-cancel").onclick = () => ov.remove();
     goBtn.onclick = async () => {
@@ -691,15 +930,17 @@
     const ex = document.getElementById("ed-keys"); if (ex) { ex.remove(); return; }
     const ov = document.createElement("div"); ov.className = "ed-overlay"; ov.id = "ed-keys";
     ov.innerHTML = `<div class="ed-modal"><h2>Keyboard &amp; mouse</h2><table class="ed-keytable">
-      <tr><td><b>drag</b> a part/pin</td><td>Move it onto a net/pin to connect — drops onto a target write the wire, then the layout re-snaps. Drop on empty → springs back. No positions are stored.</td></tr>
+      <tr><td><b>drag</b> a part/pin</td><td>Move it onto a net/pin to connect — drops onto a target write the wire, then the layout re-snaps. Drop a cap on a hub pin and it's pinned to that pin (a <code>(decouples …)</code> binding) so it stays there. Drop on empty → springs back. No positions are stored.</td></tr>
       <tr><td><kbd>A</kbd></td><td>Add component (to the current sheet)</td></tr>
-      <tr><td><kbd>E</kbd></td><td>Edit selected component's value</td></tr>
+      <tr><td><kbd>E</kbd></td><td>Jump to the inspector's first field (edit value / net name)</td></tr>
+      <tr><td><kbd>Ctrl/⌘</kbd>+<kbd>C</kbd> / <kbd>V</kbd></td><td>Copy the selected component, then paste a duplicate (same value/pins, fresh ref). Drag the copy to rewire it.</td></tr>
       <tr><td><kbd>Del</kbd> / <kbd>⌫</kbd></td><td>Remove selected component</td></tr>
       <tr><td><kbd>1</kbd>–<kbd>9</kbd></td><td>Jump to sheet · <kbd>0</kbd> whole board</td></tr>
       <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Previous / next sheet</td></tr>
       <tr><td><kbd>F</kbd></td><td>Fit current sheet / board</td></tr>
       <tr><td><kbd>Esc</kbd></td><td>Deselect / close</td></tr>
-      <tr><td>click pin/wire</td><td>Highlight that net</td></tr>
+      <tr><td>click part / net</td><td>Show its properties in the left inspector (edit value, rename net, rewire pins, copy, delete)</td></tr>
+      <tr><td><b>double-click</b></td><td>Select it and jump straight to the first editable field in the inspector</td></tr>
       <tr><td>scroll · drag empty</td><td>Zoom · pan</td></tr>
       </table><div class="ed-actions"><button class="ed-btn" id="keys-close">Close</button></div></div>`;
     document.body.appendChild(ov);
@@ -712,6 +953,11 @@
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement && document.activeElement.tagName);
     if (typing) { if (e.key === "Escape") document.activeElement.blur(); return; }
     if (document.querySelector(".ed-overlay")) { if (e.key === "Escape") document.querySelector(".ed-overlay").remove(); return; }
+    if (e.ctrlKey || e.metaKey) {
+      if (e.key === "c" || e.key === "C") { copySelected(); return; }
+      if (e.key === "v" || e.key === "V") { e.preventDefault(); pasteClip(); return; }
+      return; // leave other shortcuts (Ctrl+R reload, devtools, …) to the browser
+    }
     switch (e.key) {
       case "a": case "A": e.preventDefault(); openAdd(); break;
       case "e": case "E": editSelected(); break;
@@ -737,7 +983,7 @@
   isoBox.addEventListener("change", scheduleDraw);
 
   // ── Refetch / live reload ────────────────────────────────────────────
-  function rebuildScene() { buildModel(); buildSheetList(); scheduleDraw(); }
+  function rebuildScene() { buildModel(); buildSheetList(); renderInspector(); scheduleDraw(); }
   async function refetch() {
     try {
       const data = await api("GET", `/api/editor-scene/${DESIGN}`);

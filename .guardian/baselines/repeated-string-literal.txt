@@ -2,7 +2,6 @@
 src/import_kicad.zig: string literal {s}/lib/components/{s}.sexp appears 3 times — extract a const
 src/render_json.zig: string literal component appears 3 times — extract a const
 src/serve/bom_html.zig: string literal manufacturer appears 3 times — extract a const
-src/serve/edit.zig: string literal malformed instance form appears 3 times — extract a const
 src/serve/edit.zig: string literal {{\"ok\":true,\"version\":{d}}} appears 3 times — extract a const
 src/serve/templates/account.zig: string literal </button> appears 6 times — extract a const
 src/serve/templates/account.zig: string literal </label> appears 3 times — extract a const
