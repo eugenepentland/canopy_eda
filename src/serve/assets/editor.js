@@ -249,7 +249,7 @@
     // `net` is the wire-geometry-derived net the base view already uses; `anet` is the
     // pin's authoritative net from the scene (present for label-rendered power/ground
     // pins that have no wire) — read by the power layer, leaves base-view logic alone.
-    pins.push({ pin: (pn.pins || "").split(",")[0], name: pn.name || pn.pins, side, x: ex, y: pn.y, net: v ? v.net : "", anet: pn.net || "", vx: v ? v.x : null, vy: v ? v.y : null });
+    pins.push({ pin: (pn.pins || "").split(",")[0], pins: pn.pins || "", name: pn.name || pn.pins, side, x: ex, y: pn.y, net: v ? v.net : "", anet: pn.net || "", vx: v ? v.x : null, vy: v ? v.y : null });
   }
   function addPort(m, x, y, net, t, ref, pin) {
     const port = { x, y, net, t, ref, pin };
@@ -395,7 +395,9 @@
       ctx.strokeStyle = C.passStroke; ctx.lineWidth = sw(1.4);
       line(x, p.y, x, y0); line(x, yb, x, yend);
       ctx.save(); ctx.translate(x, (y0 + yb) / 2); ctx.rotate(Math.PI / 2); symbol(type, -7, 7, 0, sw); ctx.restore();
-      if (txt) { ctx.fillStyle = C.pinName; ctx.font = "10px sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillText(p.ref + (p.value ? " " + p.value : ""), x + 8, (y0 + yb) / 2); }
+      // value-only caption (e.g. "100nF", "2× 10uF"), like the standard editor — the
+      // ref is one click away in the inspector. Truncated so it can't run into a neighbour.
+      if (txt) { const cap = p.value || p.ref || ""; ctx.fillStyle = C.passText; ctx.font = "10px sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillText(cap.length > 9 ? cap.slice(0, 8) + "…" : cap, x + 8, (y0 + yb) / 2); }
       if (term === "rail") {                                       // to a supply: rail bar + name
         ctx.strokeStyle = C.passStroke; ctx.lineWidth = sw(1.6); line(x - 5, yend, x + 5, yend);
         if (txt) { ctx.fillStyle = C.labelNet; ctx.font = "10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText("▲ " + p.rail, x, yend + 2); }
@@ -1288,20 +1290,43 @@
       };
       add(p.term[0].net, p.term[1].net); add(p.term[1].net, p.term[0].net);
     });
-    // EVERY 2-terminal passive (decoupling cap, bypass, series R/C, pull, …), keyed by
-    // its NON-ground terminal net(s) so it can be drawn as a branch on the pin that
-    // carries it — the way the normal view shows passives. The ground side isn't keyed,
-    // so a shared GND stub doesn't accrue every decoupling cap on the board. (Already-
-    // merged groups: m.passes carries one entry per "N× value" group, with a count.)
-    const passByNet = new Map();
-    m.passes.forEach((p) => {
-      if (!p.term || p.term.length !== 2) return;
-      const add = (net, other) => {
-        if (!net || isGroundName(net)) return;
-        let a = passByNet.get(net); if (!a) { a = []; passByNet.set(net, a); }
-        if (!a.some((x) => x.ref === p.ref)) a.push({ ref: p.ref, type: p.type, value: p.label || p.value || "", other });
-      };
-      add(p.term[0].net, p.term[1].net); add(p.term[1].net, p.term[0].net);
+    // Passives on the map mirror the normal view. A bypass cap with a `(decouples …
+    // PAD)` binding docks on the ONE pin it serves — resolved by pad+net the same way
+    // the schematic's boundHubPin does — NOT on every pin of its shared rail. Series
+    // elements and pulls (low-fanout, between specific nets) stay net-keyed. An UNBOUND
+    // cap whose only legs are a rail and ground is rail-level and isn't drawn per pin.
+    const isRailNet = (n) => isPowerName(n) || isGroundName(n) || /\d+v\d*/i.test(netLeaf(n));
+    // (pad \0 net) -> hub ref, to resolve a decouple binding to its owner hub on that net.
+    const padNetHub = new Map();
+    (scene.hubs || []).forEach((h) => [].concat(h.leftPins || [], h.rightPins || []).forEach((pin) => {
+      if (!pin.net) return;
+      String(pin.pins || "").split(",").forEach((pad) => { if (pad) padNetHub.set(pad + " " + pin.net, h.ref); });
+    }));
+    const decoupByPin = new Map();   // "ownerRef \0 pad" -> [{ref,type,value,other}]  (bound bypass caps)
+    const passByNet = new Map();     // signal net -> [{ref,type,value,other}]  (series + pulls)
+    (scene.passives || []).forEach((p) => {
+      const nets = (p.pins || []).map((x) => x.net).filter(Boolean);
+      if (nets.length !== 2) return;
+      const type = passType(p.ref, p.component, p.value, p.symbol);
+      const value = (p.count > 1 ? p.count + "× " : "") + (p.value || p.ref);
+      if (p.decouplePin) {                                   // bound bypass cap → its served pin only
+        let owner = null;
+        for (const net of nets) {
+          const r = padNetHub.get(p.decouplePin + " " + net);
+          if (r) { owner = { ref: r, net }; if (!p.decoupleIc || r === p.decoupleIc) break; }
+        }
+        if (owner) {
+          const other = nets.find((n) => n !== owner.net) || "";
+          const key = owner.ref + " " + p.decouplePin;
+          let a = decoupByPin.get(key); if (!a) { a = []; decoupByPin.set(key, a); }
+          if (!a.some((x) => x.ref === p.ref)) a.push({ ref: p.ref, type, value, other });
+          return;
+        }
+      }
+      // unbound: key by the SIGNAL leg(s) only — a pull's signal net, a series part's two
+      // nets — so a rail-only cap (rail + ground, no signal leg) isn't redrawn per rail pin.
+      const add = (net, other) => { if (!net || isRailNet(net)) return; let a = passByNet.get(net); if (!a) { a = []; passByNet.set(net, a); } if (!a.some((x) => x.ref === p.ref)) a.push({ ref: p.ref, type, value, other }); };
+      add(nets[0], nets[1]); add(nets[1], nets[0]);
     });
     const PITCH = 38, HEAD = 46, PAD = 18, LBL = 44, GROWGAP = 20, ICW = 168, GW = 146, OUT = 92, MX = 24, MY = 22;
     const SHEAD = 38, SHIFT_W = 122, LEAD = 92, PULLH = 30;       // pass-through shifter block + leads (wide enough for a ~14-char net label); pull-branch height
@@ -1428,7 +1453,7 @@
         const shown = new Set();
         cell.leftPins.forEach((p) => shown.add(p.net));
         cell.rightPins.forEach((p) => shown.add(p.net));
-        const EXTRA_TOP = 18, EXTRA_PITCH = 28, EXTRA_STUB = 64, PGAP = 34, PASSH = 32;
+        const EXTRA_TOP = 18, EXTRA_PITCH = 28, EXTRA_STUB = 64, PGAP = 64, PASSH = 32;
         const icRight = icX + ICW;
         const seen = new Set(); let ey = baseY + EXTRA_TOP, used = EXTRA_TOP, maxStub = EXTRA_STUB, n = 0;
         (rhub.pins || []).forEach((p) => {
@@ -1436,17 +1461,20 @@
           if (!net || shown.has(net) || seen.has(net)) return;
           if (showPower && isStub(net)) return;        // power/ground live in the rail band when that layer is on
           seen.add(net);
-          // Passives on this net — decoupling cap (→ ground), bypass (→ rail), series
-          // R/C (→ another net) — each drawn once per cell; the stub stretches to seat
-          // them in a row, then they hang as branches like a pull.
-          const ps = (passByNet.get(net) || []).filter((x) => !passDrawn.has(x.ref));
+          // Passives drawn on THIS pin: the bypass caps bound to one of its pads
+          // (decoupByPin) + the series R/C and pulls on its net (passByNet). Each drawn
+          // once per cell; the stub stretches to seat them in a row, hanging as branches.
+          const pads = String(p.pins || p.pin || "").split(",").filter(Boolean);
+          const ps = [], seenP = new Set();
+          pads.forEach((pad) => (decoupByPin.get(ref + " " + pad) || []).forEach((x) => { if (!seenP.has(x.ref)) { seenP.add(x.ref); ps.push(x); } }));
+          (passByNet.get(net) || []).forEach((x) => { if (!seenP.has(x.ref) && !passDrawn.has(x.ref)) { seenP.add(x.ref); ps.push(x); } });
           const stub = ps.length ? Math.max(EXTRA_STUB, 16 + ps.length * PGAP + 8) : EXTRA_STUB;
           cell.rightPins.push({ name: p.name, x: icRight, y: ey, net });
           cell.wires.push({ net, pts: [[icRight, ey], [icRight + stub, ey]] });
           cell.labels.push({ text: net, x: icRight + stub + 6, y: ey, anchor: "start" });
           ps.forEach((pp, k) => {
             passDrawn.add(pp.ref);
-            const og = isGroundName(pp.other), op = isPowerName(pp.other) && !og;
+            const og = isGroundName(pp.other), op = isRailNet(pp.other) && !og;
             cell.pulls.push({ x: icRight + 16 + k * PGAP, y: ey, ref: pp.ref, value: pp.value, type: pp.type || "resistor", term: og ? "gnd" : op ? "rail" : "net", rail: netLeaf(pp.other), up: op });
           });
           const rowH = EXTRA_PITCH + (ps.length ? PASSH : 0);
