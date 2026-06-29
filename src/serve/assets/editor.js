@@ -55,7 +55,7 @@
   let clip = null;               // copy/paste clipboard: {ref, src}
   let showNets = true;           // draw device↔device net connections (vs name labels)
   let ghostRef = null;           // IC focused for "ghost partner" fan-out (null = off)
-  let ghostAll = false;          // global fan-out: ghost every IC's direct links at once
+  let ghostAll = true;           // the connection map IS the editing surface — on by default, sticky
   let showPower = false;         // map power layer: overlay each IC cell's power/ground rail nodes
   let fullMap = false;           // full connection map: the whole netlist as one force-directed graph
   let sheets = [];               // navigable pages: design (group …) lists, else per-section
@@ -279,8 +279,30 @@
   }
   function fitAll() {
     activeSheet = -1;
-    fitTo({ x: 0, y: 0, w: scene.viewBox.w, h: scene.viewBox.h }, 0.03);
+    if ((ghostAll || fullMap) && M.mapBox) fitTo(M.mapBox, 0.03);
+    else fitTo({ x: 0, y: 0, w: scene.viewBox.w, h: scene.viewBox.h }, 0.03);
     syncSheetUI(); updateStatus();
+  }
+  // Frame a target from ?focus=<v> (or #<v>): a hub ref (U18), a net (LO1_DRIVE), or a
+  // chain key (LO1 → every hub the chain touches, so a whole chain fills the view). So a
+  // URL opens the editor pointed exactly where you want, no buttons or keys. Returns
+  // whether anything matched.
+  function focusTarget(val) {
+    const w = String(val || "").trim().toLowerCase(); if (!w) return false;
+    const reals = (M.hubs || []).filter((h) => !h.ghost);
+    let hit = reals.filter((h) => h.ref.toLowerCase() === w || (h.ref.split("/").pop() || "").toLowerCase() === w || String(h.label || "").toLowerCase() === w);
+    if (!hit.length) hit = reals.filter((h) => (h.pins || []).some((p) => p.net && (p.net.toLowerCase() === w || chainKey(p.net).toLowerCase() === w)));
+    if (!hit.length) return false;
+    // Frame each match's whole CELL (the sec box that holds its inline chain + ghost
+    // partners), not just the IC body — so a focused chain shows end to end.
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    hit.forEach((h) => {
+      const sec = (M.secs || []).find((s) => h.cx >= s.x && h.cx <= s.x + s.w && h.cy >= s.y && h.cy <= s.y + s.h);
+      const b = sec || h;
+      x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
+    });
+    fitTo({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, 0.08);
+    return true;
   }
   function worldFromEvent(e) {
     const r = rectOf();
@@ -780,7 +802,7 @@
   // Part and net are mutually exclusive in the inspector: selecting one clears
   // the other so the panel always reflects a single subject.
   function select(kind, ref) { selection = { kind, ref }; hotNet = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
-  function deselect() { selection = null; hotNet = null; deleteArmed = false; if (ghostRef || ghostAll || fullMap) { ghostRef = null; ghostAll = false; fullMap = false; buildModel(); syncGhostBtns(); syncFullBtn(); } renderInspector(); updateStatus(); scheduleDraw(); }
+  function deselect() { selection = null; hotNet = null; deleteArmed = false; if (ghostRef || fullMap) { ghostRef = null; fullMap = false; ghostAll = true; buildModel(); syncGhostBtns(); syncFullBtn(); } renderInspector(); updateStatus(); scheduleDraw(); }
   function highlightNetToggle(net) { if (!net) return; hotNet = hotNet === net ? null : net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
   function setHotNet(net) { if (!net) return; hotNet = net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
   // Rename a net everywhere it's used (all pins/ports/net-forms). Renaming onto an
@@ -1006,6 +1028,14 @@
   // labstation wires A1=DUT_FIX_A0_3V3, B1=DUT_FIX_A0_MCU (both carry a suffix, so
   // passBase can't pair them). Pad numbers / GPIO names (PA3) never match.
   function pinTwinId(p) { const m = /^([ab])(\d+)$/i.exec(String(p || "")); return m ? (m[1].toUpperCase() === "A" ? "B" : "A") + m[2] : null; }
+  // Signal-chain net-naming convention: a chain shares a net-name PREFIX (its "chain
+  // key") and each net suffixes a node — RF1_IN, RF1_LNA, RF1_ATT, RF1_OUT → key "RF1".
+  // A device bridging two nets of the SAME key is an inline link, so the map collapses
+  // the run (amp → att → filter …) into one chain regardless of the parts' pin names or
+  // type. The key is the leading token before the first "_" (≥2 chars, letter-led — so a
+  // single-letter signal like V_TUNE and digit-led rails like 3V3 don't qualify).
+  // Parallel chains take distinct keys (RF1, RF2, LO1). "" = not a chain net.
+  function chainKey(n) { const m = /^([A-Za-z][A-Za-z0-9]+)_/.exec(netLeaf(n)); return m ? m[1] : ""; }
   // Guard for the pin-id path: are two nets plausibly the SAME signal at two domains?
   // Either the voltage twin (X / X_1V8), or a shared base with differing trailing
   // tags where ≥1 tag is a voltage (DUT_FIX_A0_3V3 / DUT_FIX_A0_MCU). Stops a
@@ -1141,11 +1171,13 @@
       addPassEdge(c.ref, passType(c.ref, c.component, c.value, c.symbol), c.value || c.component || c.ref, c.pins[0].net, c.pins[1].net);
     });
     const isStub = (n) => !n || isGroundName(n) || isPowerName(n);
-    // The level-translation twin this device carries for `inNet` (its other channel
-    // leg) — the exit net of a pass-through hop, or null if it carries no twin. Two
-    // ways to recognise the channel: (1) the net-name voltage twin (X / X_1V8), or
-    // (2) the A<n>↔B<n> pin-id convention (guarded by chanNets, for designs whose
-    // channel nets don't twin by name — e.g. labstation's _3V3 / _MCU).
+    // The signal twin this device carries for `inNet` (its other leg) — the exit net of
+    // a pass-through hop, or null if it carries none. Three conventions, tried in order:
+    // (1) the net-name voltage twin (X / X_1V8), (2) the A<n>↔B<n> pin-id convention
+    // (guarded by chanNets, for level shifters whose nets don't twin by name — e.g.
+    // labstation's _3V3 / _MCU), and (3) the general chain-key prefix (RF1_IN / RF1_OUT
+    // …) — device-agnostic, so an RF amp, a pad, an ESD array or a level shifter all
+    // chain the same way once their two nets share a key.
     const passExit = (ref, inNet) => {
       const pins = pinsByRef.get(ref) || [];
       for (const pp of pins) if (!isStub(pp.net) && passChannel(inNet, pp.net)) return pp.net;
@@ -1153,6 +1185,14 @@
         if (pp.net !== inNet) continue;
         const tw = pinTwinId(pp.pin); if (!tw) continue;
         for (const q of pins) if (q.pin === tw && !isStub(q.net) && chanNets(inNet, q.net)) return q.net;
+      }
+      // (3) Chain-key: the exit is the UNIQUE other net sharing inNet's chain key. A
+      // junction (mixer: RF1 in, IF1 out, LO1) has no same-key sibling per leg → stays
+      // an endpoint; a splitter (≥2 same-key siblings) is ambiguous → not collapsed.
+      const ik = chainKey(inNet);
+      if (ik) {
+        const sib = [...new Set(pins.filter((pp) => !isStub(pp.net) && pp.net !== inNet && chainKey(pp.net) === ik).map((pp) => pp.net))];
+        if (sib.length === 1) return sib[0];
       }
       return null;
     };
@@ -1173,13 +1213,24 @@
       // standalone block on top of the inline chip.
       if (passExit(h.ref, p0.net)) return;
       let net = p0.net, viaPass = null; const chain = [], startNet = p0.net, seenNets = new Set(), excl = new Set([h.ref]);
-      let firstDev = null, recorded = false;
+      let firstDev = null, recorded = false, fannedOut = false;
       for (let step = 0; step < 12; step++) {
         if (isStub(net) || seenNets.has(net)) break;
         seenNets.add(net);
         const cs = conts(net, viaPass, excl);
-        if (cs.length !== 1) break;                          // dead end or fan-out → not point-to-point
-        const c = cs[0];
+        let c;
+        if (cs.length === 1) c = cs[0];
+        else {
+          // Fan-out: a real chain net can also carry high-Z taps — a VCO output that feeds
+          // the filter chain AND taps the PLL feedback, say. Follow the SINGLE chain-
+          // extending continuation (a series passive, or a passthrough IC whose exit
+          // continues on) and ignore terminal taps. 0 or ≥2 extensions = a true junction.
+          const extend = cs.filter((x) => x.t === "pass"
+            ? !isStub(x.otherNet)
+            : (function () { const ex = passExit(x.ref, net); return !!(ex && !seenNets.has(ex) && conts(ex, null, new Set([...excl, x.ref])).length === 1); })());
+          if (extend.length === 1) c = extend[0];
+          else { fannedOut = cs.some((x) => x.t === "ic"); break; }   // junction (has IC taps) ≠ dead end
+        }
         if (c.t === "ic") {
           // Pass-through device? It carries the channel twin of `net`, and that
           // exit continues to exactly one further endpoint (so a multi-drop bus
@@ -1205,7 +1256,7 @@
       // R/TVS net). Still surface the device inline with its in/out nets; the far
       // end becomes a terminal stub, grouped per device (ref + " ▸") so a shifter's
       // channels cluster into one run instead of scattering one block per net.
-      if (firstDev && !recorded) {
+      if (firstDev && !recorded && !fannedOut) {
         const key = h.ref + "." + p0.pin + "|term";
         if (!seen.has(key)) {
           seen.add(key);
@@ -2279,15 +2330,13 @@
     else { ghostRef = null; toast(selection.ref + " has no direct IC-to-IC nets.", true); }
     syncGhostBtns(); updateStatus(); scheduleDraw();
   }
-  // Global connection map: rebuild the board as a grid of per-IC cells (Shift+G).
+  // The connection map is the only view — the Map button just reframes the whole map
+  // (it never drops back to a base layout). Sub-modes (single-IC ghost, full graph) exit
+  // back here, not to a base page.
   function toggleGhostAll() {
-    ghostAll = !ghostAll;
-    if (ghostAll) { ghostRef = null; fullMap = false; selection = null; hotNet = null; activeSheet = -1; }
+    ghostAll = true; ghostRef = null; fullMap = false; selection = null; hotNet = null; activeSheet = -1;
     buildModel();
-    if (ghostAll) {
-      if (M.mapBox) { fitTo(M.mapBox, 0.03); toast("Connection map — the fewest anchor ICs that cover every connection (each drawn once); a low-degree IC appears as a proxy inside its busiest neighbour. Click any block to select/edit it, Esc exits"); }
-      else { ghostAll = false; toast("No direct IC-to-IC nets to map.", true); }
-    } else { fitAll(); }
+    if (M.mapBox) fitTo(M.mapBox, 0.03);
     syncGhostBtns(); syncFullBtn(); renderInspector(); updateStatus(); scheduleDraw();
   }
   // Full connection map (U): rebuild the ENTIRE netlist as one force-directed graph —
@@ -2295,11 +2344,12 @@
   function toggleFull() {
     fullMap = !fullMap;
     if (fullMap) { ghostAll = false; ghostRef = null; showPower = false; selection = null; hotNet = null; activeSheet = -1; }
+    else { ghostAll = true; }                                  // exit full → back to the connection map
     buildModel();
     if (fullMap) {
       if (M.mapBox) { fitTo(M.mapBox, 0.04); toast("Full map — the whole netlist as one connectivity graph: every part + every net. Click a net dot or a part to select/edit; Esc exits."); }
-      else { fullMap = false; toast("Nothing to lay out.", true); }
-    } else { fitAll(); }
+      else { fullMap = false; ghostAll = true; buildModel(); toast("Nothing to lay out.", true); }
+    } else if (M.mapBox) fitTo(M.mapBox, 0.03);
     syncGhostBtns(); syncPowerBtn(); syncFullBtn(); renderInspector(); updateStatus(); scheduleDraw();
   }
   // Power layer (P): overlay each IC cell's power/ground rail nodes. The layer only
@@ -2442,5 +2492,13 @@
   rebuildScene();
   fetchErc();
   ensureLib();
-  requestAnimationFrame(() => { fitAll(); updateStatus(); requestAnimationFrame(frame); });
+  // Open straight into the map (the default surface), framing ?focus=<ref|net|chain-key>
+  // — or #<focus> — when given, so a link lands exactly where you want with no clicks.
+  const bootFocus = (() => { try { return new URLSearchParams(location.search).get("focus") || (location.hash ? decodeURIComponent(location.hash.slice(1)) : ""); } catch (e) { return ""; } })();
+  requestAnimationFrame(() => {
+    if (ghostAll && bootFocus && focusTarget(bootFocus)) { /* framed the requested cell/chain */ }
+    else if (ghostAll && M.mapBox) fitTo(M.mapBox, 0.03);
+    else fitAll();
+    updateStatus(); requestAnimationFrame(frame);
+  });
 })();
