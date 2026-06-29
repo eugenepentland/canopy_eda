@@ -40,8 +40,10 @@
     sel: "#f0883e", snap: "#f0883e", band: "#f0c674",
     ghost: "#161c26", ghostStroke: "#3d5573", ghostLabel: "#7d9bc1",
     diff: "#c792ea",
+    rail: "#e3b341", railGnd: "#768390",   // power-layer rail nodes (power / ground)
   };
   const GRID = 60; // spatial-hash cell size (world units)
+  const NODE_W = 72; // power-layer rail-node pill width (shared by layout + draw)
 
   // ── State ────────────────────────────────────────────────────────────
   let cam = { x: 0, y: 0, w: 1000, h: 800 };
@@ -53,6 +55,7 @@
   let showNets = true;           // draw device↔device net connections (vs name labels)
   let ghostRef = null;           // IC focused for "ghost partner" fan-out (null = off)
   let ghostAll = false;          // global fan-out: ghost every IC's direct links at once
+  let showPower = false;         // map power layer: overlay each IC cell's power/ground rail nodes
   let sheets = [];               // navigable pages: design (group …) lists, else per-section
   let deleteArmed = false;       // inspector Delete needs a 2nd click to confirm
   let libIndex = null;
@@ -380,6 +383,24 @@
     });
     ctx.globalAlpha = 1; ctx.textBaseline = "middle";
 
+    // Power layer (Shift+P): each IC card's power/ground rail nodes, in a reserved
+    // strip along the card's lower edge. One pill per rail net — click selects the
+    // net so the inspector lists (and edits) its decoupling caps; ⎓N badges the
+    // cap count on that rail. Empty unless the layer is on (M.rails is map-only).
+    (M.rails || []).forEach((r) => {
+      if (!ptVis(r.x, r.y)) return;
+      const w = NODE_W, h = 20, x0 = r.x - w / 2, y0 = r.y - h / 2, txt = 11 * s >= 7;
+      const hot = hotNet && r.net === hotNet, col = hot ? C.hot : (r.up ? C.rail : C.railGnd);
+      ctx.globalAlpha = 0.14; ctx.fillStyle = col; roundRect(x0, y0, w, h, sw(4)); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.strokeStyle = col; ctx.lineWidth = sw(hot ? 2 : 1.2); roundRect(x0, y0, w, h, sw(4)); ctx.stroke();
+      if (txt) {
+        ctx.fillStyle = col; ctx.font = "600 11px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        const lbl = (r.up ? "▲ " : "⏚ ") + netLeaf(r.net) + (r.decoup ? "  ⎓" + r.decoup : "");
+        ctx.fillText(lbl.length > 15 ? lbl.slice(0, 14) + "…" : lbl, r.x, r.y);
+      }
+    });
+    ctx.globalAlpha = 1; ctx.textBaseline = "middle";
+
     // Labels — net-name stubs / ports as text; grounds as a real earth symbol
     // (node dot on the wire, rake pointing down, caption below). The symbol
     // draws at any zoom; only its caption obeys the LOD text cutoff.
@@ -613,6 +634,9 @@
     // before the big ghost-block areas. Each carries its ref → select + edit like any part.
     for (const w of M.wires) { if (!w.via || !w.via.ref) continue; const p0 = w.pts[0], p1 = w.pts[w.pts.length - 1], mx = (p0[0] + p1[0]) / 2, my = p0[1]; if (Math.abs(x - mx) < 16 + tw && Math.abs(y - my) < 11 + tw) return { t: "part", ref: w.via.ref, kind: "pass" }; }
     for (const p of (M.pulls || [])) { if (!p.ref) continue; if (Math.abs(x - p.x) < 10 + tw && y >= p.y - tw && y <= p.y + 26 + tw) return { t: "part", ref: p.ref, kind: "pass" }; }
+    // Power-layer rail pills sit inside the IC card's lower band, so test them before
+    // the card area below (which would otherwise swallow the click as the IC itself).
+    for (const r of (M.rails || [])) if (Math.abs(x - r.x) < NODE_W / 2 + tw && Math.abs(y - r.y) < 11 + tw) return { t: "net", net: r.net };
     // In the global map a proxy box is a first-class, selectable+editable copy of
     // the real component (click it → inspector, like any part); only the fan-out
     // overlay keeps proxies as click-to-jump links.
@@ -1214,6 +1238,33 @@
     });
     const PITCH = 38, HEAD = 46, PAD = 18, LBL = 44, GROWGAP = 20, ICW = 168, GW = 146, OUT = 92, MX = 24, MY = 22;
     const SHEAD = 38, SHIFT_W = 122, LEAD = 92, PULLH = 30;       // pass-through shifter block + leads (wide enough for a ~14-char net label); pull-branch height
+    // Power layer (Shift+P): a strip of each IC's power/ground rail nodes, folded
+    // into the bottom of its card so packing reserves room. Built only when the
+    // layer is on, so the default map is byte-identical (no nodes, no extra height).
+    // decoupByNet counts the decoupling caps on a rail so a node can badge "⎓N".
+    const NODEW = NODE_W, NODEGAP = 8, RAILTOP = 14, RAILROW = 28;
+    const decoupByNet = new Map();
+    if (showPower) m.passes.forEach((p) => {
+      if (p.type !== "capacitor" || !p.term || p.term.length !== 2) return;
+      p.term.forEach((t) => { if (t.net && isStub(t.net)) { let a = decoupByNet.get(t.net); if (!a) { a = []; decoupByNet.set(t.net, a); } a.push(p.ref); } });
+    });
+    const layoutRails = (cell, ref, coreH) => {
+      const rhub = real.find((h) => h.ref === ref);
+      if (!rhub) return 0;
+      const seen = new Set(), nets = [];
+      rhub.pins.forEach((p) => { if (p.net && isStub(p.net) && !seen.has(p.net)) { seen.add(p.net); nets.push(p.net); } });
+      if (!nets.length) return 0;
+      nets.sort((a, b) => ((isGroundName(a) ? 1 : 0) - (isGroundName(b) ? 1 : 0)) || (a < b ? -1 : a > b ? 1 : 0));   // power first, then ground
+      const perRow = Math.max(1, Math.floor((ICW - NODEGAP) / (NODEW + NODEGAP)));
+      const cx = cell.icX + ICW / 2;
+      cell.rails = [];
+      nets.forEach((net, i) => {
+        const row = Math.floor(i / perRow), col = i % perRow;
+        const count = Math.min(perRow, nets.length - row * perRow), rowW = count * NODEW + (count - 1) * NODEGAP;
+        cell.rails.push({ x: cx - rowW / 2 + col * (NODEW + NODEGAP) + NODEW / 2, y: coreH + RAILTOP + row * RAILROW + RAILROW / 2, net, up: isPowerName(net) && !isGroundName(net), decoup: (decoupByNet.get(net) || []).length });
+      });
+      return RAILTOP + Math.ceil(nets.length / perRow) * RAILROW;
+    };
     const cells = [];
     [...byIC.entries()].forEach(([ref, parts]) => {
       const groups = [...parts.entries()].map(([pref, items]) => ({ pref, label: labelOf.get(pref) || pref, items })).sort((a, b) => b.items.length - a.items.length);
@@ -1298,7 +1349,8 @@
         return lastBot;
       };
       const lh = layoutSide(side.left, false, leftPT), rh = layoutSide(side.right, true, rightPT);
-      cell.ch = Math.max(lh, rh, HEAD + PITCH) + PAD;
+      const coreH = Math.max(lh, rh, HEAD + PITCH) + PAD;
+      cell.ch = coreH + (showPower ? layoutRails(cell, ref, coreH) : 0);
       cell.h = 2 * MY + cell.ch;
       cells.push(cell);
     });
@@ -1310,7 +1362,7 @@
       c.x = cx; c.y = cy; cx += c.w + CGX; rowH = Math.max(rowH, c.h);
     });
     // Emit the synthesized model (replacing the real layout).
-    m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = [];
+    m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = []; m.rails = [];
     cells.forEach((c) => {
       const ox = c.x + c.ox, oy = c.y + c.oy;                      // content origin (inset by the cell margin)
       m.secs.push({ name: "", x: c.x, y: c.y, w: c.w, h: c.h, idx: 0, cx: c.x + c.w / 2, cy: c.y + c.h / 2 });   // each block self-labels (ref + part), so no region title
@@ -1324,6 +1376,7 @@
       c.wires.forEach((w) => { const pts = w.pts.map((pt) => [ox + pt[0], oy + pt[1]]); m.wires.push({ net: w.net, bus: false, link: true, diff: w.diff, via: w.via, pts, bb: bbOf(pts) }); });
       c.labels.forEach((l) => m.labels.push({ text: l.text, x: ox + l.x, y: oy + l.y, anchor: "center", ground: false, port: false, net: l.text, link: true, diff: l.diff }));
       c.pulls.forEach((p) => m.pulls.push({ x: ox + p.x, y: oy + p.y, ref: p.ref, value: p.value, rail: p.rail, up: p.up }));
+      if (c.rails) c.rails.forEach((r) => m.rails.push({ x: ox + r.x, y: oy + r.y, net: r.net, up: r.up, decoup: r.decoup }));
       bx1 = Math.max(bx1, c.x + c.w); by1 = Math.max(by1, c.y + c.h);
     });
     m.mapBox = { x: -40, y: -40, w: bx1 + 80, h: by1 + 80 };
@@ -1887,6 +1940,7 @@
       <tr><td><kbd>N</kbd></td><td>Toggle drawn connections vs. name labels: straight lines across the channel for device-to-device nets, and a passive stood up <b>vertically</b> between the two pads it bridges on one IC (e.g. an inductor across the SW pins)</td></tr>
       <tr><td><kbd>G</kbd></td><td>Fan out the selected IC — ring it with dashed <b>ghost</b> copies of every IC it connects to point-to-point, one straight wire each with the net name above it (the rest of the board dims). Differential pairs are drawn coupled in violet. Click a ghost to hop the focus to it; <kbd>Esc</kbd> exits.</td></tr>
       <tr><td><kbd>Shift</kbd>+<kbd>G</kbd></td><td>Connection map — rebuild the board as a grid of cells for the fewest anchor ICs that cover every point-to-point connection (each drawn once; low-degree ICs collapse into proxies inside a neighbour's cell, nothing overlaps). Every block — anchor or proxy — is selectable and editable in place.</td></tr>
+      <tr><td><kbd>P</kbd></td><td>Power layer — overlay each IC card's power/ground rail nodes (the connection map normally hides rails). One pill per rail, <b>▲</b> for a supply / <b>⏚</b> for ground, with a <b>⎓N</b> badge counting its decoupling caps. Click a node to select that net so the inspector lists and edits its decoupling. (Turns the map on if it isn't already.)</td></tr>
       <tr><td><kbd>Esc</kbd></td><td>Deselect / close</td></tr>
       <tr><td>click part / net</td><td>Show its properties in the left inspector (edit value, rename net, rewire pins, copy, delete). The pin→net fields suggest existing nets — <kbd>↑</kbd>/<kbd>↓</kbd> + <kbd>Enter</kbd> to pick one, or just type a new name.</td></tr>
       <tr><td><b>double-click</b></td><td>Select it and jump straight to the first editable field in the inspector</td></tr>
@@ -1921,6 +1975,15 @@
     } else { fitAll(); }
     syncGhostBtns(); renderInspector(); updateStatus(); scheduleDraw();
   }
+  // Power layer (P): overlay each IC cell's power/ground rail nodes. The layer only
+  // renders on the connection map, so turning it on enters the map if not already there.
+  function togglePower() {
+    showPower = !showPower;
+    if (showPower && !ghostAll) { toggleGhostAll(); }      // toggleGhostAll rebuilds with showPower now true
+    else { buildModel(); scheduleDraw(); }
+    syncPowerBtn();
+    if (ghostAll) toast(showPower ? "Power layer on — click a rail node to see/edit its decoupling." : "Power layer off.", true);
+  }
   // Click a ghost proxy → re-focus the fan-out on that real partner (walk the graph).
   function jumpToGhost(ref) {
     ghostAll = false; ghostRef = ref; selection = { kind: "hub", ref }; hotNet = null; deleteArmed = false;
@@ -1945,6 +2008,7 @@
       case "f": case "F": if (activeSheet >= 0) selectSheet(activeSheet); else fitAll(); break;
       case "n": case "N": toggleNets(); break;
       case "g": case "G": (e.shiftKey ? toggleGhostAll : toggleGhost)(); break;
+      case "p": case "P": togglePower(); break;
       case "?": toggleKeys(); break;
       case "Escape": deselect(); break;
       case "[": stepSheet(-1); break;
@@ -1957,17 +2021,19 @@
   // ── Toolbar ──────────────────────────────────────────────────────────
   const tools = document.createElement("div");
   tools.id = "ed-tools";
-  tools.innerHTML = `<button id="tool-add" title="Add (A)">+ Add</button><button id="tool-nets" title="Draw connections instead of name labels: device-to-device channel wires + a passive stood vertically between two pads it bridges on one IC (N)">Nets</button><button id="tool-ghost" title="Fan out the selected IC: ring it with dashed ghost copies of every IC it connects to point-to-point, one straight wire each. Click a ghost to hop to it. (G)">Fan-out</button><button id="tool-ghost-all" title="Connection map: the fewest anchor ICs that cover every point-to-point connection, each in its own region; low-degree ICs collapse into ghosts so nothing's drawn twice (Shift+G)">Map</button><button id="tool-fit" title="Fit (F)">Fit</button><button id="tool-keys" title="Keys (?)">?</button>`;
+  tools.innerHTML = `<button id="tool-add" title="Add (A)">+ Add</button><button id="tool-nets" title="Draw connections instead of name labels: device-to-device channel wires + a passive stood vertically between two pads it bridges on one IC (N)">Nets</button><button id="tool-ghost" title="Fan out the selected IC: ring it with dashed ghost copies of every IC it connects to point-to-point, one straight wire each. Click a ghost to hop to it. (G)">Fan-out</button><button id="tool-ghost-all" title="Connection map: the fewest anchor ICs that cover every point-to-point connection, each in its own region; low-degree ICs collapse into ghosts so nothing's drawn twice (Shift+G)">Map</button><button id="tool-power" title="Power layer: overlay each IC's power/ground rail nodes on the connection map; click a node to see/edit its decoupling caps (P)">Power</button><button id="tool-fit" title="Fit (F)">Fit</button><button id="tool-keys" title="Keys (?)">?</button>`;
   wrap.appendChild(tools);
   tools.querySelector("#tool-add").onclick = openAdd;
   tools.querySelector("#tool-nets").onclick = toggleNets;
   tools.querySelector("#tool-ghost").onclick = toggleGhost;
   tools.querySelector("#tool-ghost-all").onclick = toggleGhostAll;
+  tools.querySelector("#tool-power").onclick = togglePower;
   tools.querySelector("#tool-fit").onclick = () => { if (activeSheet >= 0) selectSheet(activeSheet); else fitAll(); };
   tools.querySelector("#tool-keys").onclick = toggleKeys;
   function syncNetsBtn() { const b = document.getElementById("tool-nets"); if (b) b.classList.toggle("on", showNets); }
   function syncGhostBtns() { const b = document.getElementById("tool-ghost"); if (b) b.classList.toggle("on", !!ghostRef); const a = document.getElementById("tool-ghost-all"); if (a) a.classList.toggle("on", ghostAll); }
-  syncNetsBtn(); syncGhostBtns();
+  function syncPowerBtn() { const b = document.getElementById("tool-power"); if (b) b.classList.toggle("on", showPower); }
+  syncNetsBtn(); syncGhostBtns(); syncPowerBtn();
   isoBox.addEventListener("change", scheduleDraw);
 
   // ── ERC / validation surface ─────────────────────────────────────────
