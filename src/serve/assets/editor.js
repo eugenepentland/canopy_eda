@@ -38,6 +38,8 @@
     wire: "#4d9375", bus: "#6fb38d", hot: "#f0c674", link: "#6ea8fe",
     labelNet: "#79c0ff", labelGnd: "#8b949e", labelPort: "#d2a8ff",
     sel: "#f0883e", snap: "#f0883e", band: "#f0c674",
+    ghost: "#161c26", ghostStroke: "#3d5573", ghostLabel: "#7d9bc1",
+    diff: "#c792ea",
   };
   const GRID = 60; // spatial-hash cell size (world units)
 
@@ -49,6 +51,8 @@
   let hotNet = null;
   let clip = null;               // copy/paste clipboard: {ref, src}
   let showNets = true;           // draw device↔device net connections (vs name labels)
+  let ghostRef = null;           // IC focused for "ghost partner" fan-out (null = off)
+  let ghostAll = false;          // global fan-out: ghost every IC's direct links at once
   let sheets = [];               // navigable pages: design (group …) lists, else per-section
   let deleteArmed = false;       // inspector Delete needs a 2nd click to confirm
   let libIndex = null;
@@ -167,11 +171,16 @@
       (h.rightPins || []).forEach((pn) => addPin(pins, h, pn, "right"));
       m.hubs.push({ ref: h.ref, src: h.src || 0, x: h.x, y: h.y, w: h.w, h: h.h, label: h.label || h.ref, cx: h.x + h.w / 2, cy: h.y + h.h / 2, pins });
     });
-    // Inter-device nets: re-side the two endpoint pins to face each other and
-    // draw one straight wire across the channel (instead of matching labels).
-    if (showNets) connectHubs(m);
+    // Draw real connections instead of a matching net label at each end:
+    // same-IC passive bridges first (so the now-local pads aren't then taken for
+    // a cross-device link), then inter-device channel wires.
+    if (showNets) { bridgeSamePins(m); connectHubs(m); }
+    // Ghost-partner fan-out: ring an IC (or every IC, when ghostAll) with dashed
+    // proxies of the ICs it connects point-to-point to, each a short straight wire.
+    if (ghostRef || ghostAll) ghostPartners(m);
     // Connection ports for snap (net-bearing): pins, labels, wire vertices.
-    m.hubs.forEach((h) => h.pins.forEach((p) => { if (p.net) addPort(m, p.x, p.y, p.net, "pin", h.ref, p.pin); }));
+    // Ghost proxies are view-only — exclude them from snap targets.
+    m.hubs.forEach((h) => { if (h.ghost) return; h.pins.forEach((p) => { if (p.net) addPort(m, p.x, p.y, p.net, "pin", h.ref, p.pin); }); });
     m.labels.forEach((l) => { if (l.net) addPort(m, l.x, l.y, l.net, "label"); });
     m.wires.forEach((w) => { if (w.net) w.pts.forEach((p) => addPort(m, p[0], p[1], w.net, "wire")); });
     addStaged(m);
@@ -277,8 +286,9 @@
     ctx.setTransform(s * dpr, 0, 0, s * dpr, -cam.x * s * dpr, -cam.y * s * dpr);
     const sw = (px) => px / s;                       // screen-constant stroke width in world units
     const aSheet = activeSheet >= 0 ? sheets[activeSheet] : null;
-    const iso = isoBox.checked && aSheet && aSheet.box;
-    const sec = iso ? aSheet.box : null;
+    const gbox = M.ghostBox;                          // ghost focus dims everything else
+    const iso = gbox ? true : (isoBox.checked && aSheet && aSheet.box);
+    const sec = gbox ? gbox : (iso ? aSheet.box : null);
     const pad = 8;
     const inBox = (x, y) => !iso || (x >= sec.x - pad && x <= sec.x + sec.w + pad && y >= sec.y - pad && y <= sec.y + sec.h + pad);
     const dimW = drag ? 0.12 : 1;                    // dim wires while dragging
@@ -309,6 +319,16 @@
       const mid = w.pts[Math.floor(w.pts.length / 2)];
       const hot = hotNet && w.net === hotNet;
       ctx.globalAlpha = drag ? dimW : (w.link ? 1 : (inBox(mid[0], mid[1]) ? 1 : 0.12));
+      if (w.diff && !hot) {                            // differential pair: coupled twin lines
+        ctx.strokeStyle = C.diff; ctx.lineWidth = sw(1.5);
+        const off = sw(1.9);
+        for (const d of [-off, off]) {
+          ctx.beginPath();
+          for (let i = 0; i < w.pts.length; i++) { const n = segNormal(w.pts, i); const x = w.pts[i][0] + n[0] * d, y = w.pts[i][1] + n[1] * d; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+          ctx.stroke();
+        }
+        return;
+      }
       ctx.strokeStyle = hot ? C.hot : (w.link ? C.link : (w.bus ? C.bus : C.wire));
       ctx.lineWidth = sw(hot ? 2.4 : (w.link ? 1.8 : (w.bus ? 3 : 1.5)));
       ctx.beginPath(); ctx.moveTo(w.pts[0][0], w.pts[0][1]);
@@ -329,7 +349,7 @@
         const hot = hotNet && l.net === hotNet;
         if (l.ground) { drawGround(l.x, l.y, hot, sw, showText, l.text); return; }
         if (!showText) return;
-        ctx.fillStyle = hot ? C.hot : l.link ? C.link : l.port ? C.labelPort : C.labelNet;
+        ctx.fillStyle = hot ? C.hot : l.diff ? C.diff : l.link ? C.link : l.port ? C.labelPort : C.labelNet;
         ctx.textAlign = l.anchor === "start" ? "left" : l.anchor === "end" ? "right" : "center";
         ctx.textBaseline = "middle";
         ctx.fillText(l.text, l.x, l.y);
@@ -342,6 +362,7 @@
     M.passes.forEach((p) => {
       const off = offsetFor(p.ref), ox = off ? off[0] : 0, oy = off ? off[1] : 0;
       if (!off && !boxVis(p.x, p.top, p.x + p.w, p.top + p.h)) return;
+      if (p.vertical) { drawVertPass(p, ox, oy, sw, s, inBox); return; }
       const seld = selection && selection.ref === p.ref;
       const x0 = p.x + ox, x1 = p.x + p.w + ox, cy = p.cy + oy;
       const amp = Math.min(6, p.w * 0.22);
@@ -371,11 +392,15 @@
       // pin connector stubs (close the gap to the wire)
       ctx.strokeStyle = C.wire; ctx.lineWidth = sw(1.4);
       h.pins.forEach((p) => { if (p.vx != null) { ctx.beginPath(); ctx.moveTo(p.x + ox, p.y + oy); ctx.lineTo(p.vx + (off ? ox : 0), p.vy + (off ? oy : 0)); ctx.stroke(); } });
-      // body
-      ctx.fillStyle = C.hub; ctx.strokeStyle = (selection && selection.ref === h.ref) ? C.sel : C.hubStroke;
-      ctx.lineWidth = sw(selection && selection.ref === h.ref ? 3 : 2);
+      // body — a ghost proxy is dashed + muted so it reads as a reference, not a real placement
+      const seldHub = selection && selection.ref === h.ref;
+      ctx.fillStyle = h.ghost ? C.ghost : C.hub;
+      ctx.strokeStyle = seldHub ? C.sel : (h.ghost ? C.ghostStroke : C.hubStroke);
+      ctx.lineWidth = sw(seldHub ? 3 : 2);
+      if (h.ghost) ctx.setLineDash([sw(6), sw(4)]);
       roundRect(h.x + ox, h.y + oy, h.w, h.h, sw(4)); ctx.fill(); ctx.stroke();
-      if (15 * s >= 8) { ctx.fillStyle = C.hubLabel; ctx.font = "600 15px sans-serif"; ctx.textAlign = "center"; ctx.fillText(h.label, h.cx + ox, h.y + oy + 16); }
+      ctx.setLineDash([]);
+      if (15 * s >= 8) { ctx.fillStyle = h.ghost ? C.ghostLabel : C.hubLabel; ctx.font = "600 15px sans-serif"; ctx.textAlign = "center"; ctx.fillText((h.ghost ? "↗ " : "") + h.label, h.cx + ox, h.y + oy + 16); }
       // pins
       h.pins.forEach((p) => {
         const hot = hotNet && p.net === hotNet;
@@ -487,6 +512,31 @@
     }
   }
 
+  // A bridged passive standing vertically between its two pads: rotate the
+  // horizontal symbol 90° about its centre, dot the two terminals, caption to
+  // the outboard side.
+  function drawVertPass(p, ox, oy, sw, s, inBox) {
+    const xl = p.xline + ox, len = (p.y1 - p.y0), cy = p.cy + oy;
+    const seld = selection && selection.ref === p.ref;
+    ctx.globalAlpha = inBox(p.cx, p.cy) ? 1 : 0.12;
+    ctx.strokeStyle = seld ? C.sel : C.passStroke; ctx.lineWidth = sw(seld ? 2.2 : 1.5);
+    ctx.save(); ctx.translate(xl, cy); ctx.rotate(Math.PI / 2);
+    if (p.type === "box") { const amp = Math.min(6, len * 0.22); ctx.fillStyle = C.pass; roundRect(-len / 2, -amp, len, 2 * amp, sw(3)); ctx.fill(); ctx.stroke(); }
+    else symbol(p.type, -len / 2, len / 2, 0, sw);
+    ctx.restore();
+    for (const t of p.term) {
+      const hot = hotNet && t.net === hotNet;
+      ctx.beginPath(); ctx.arc(t.x + ox, t.y + oy, sw(3.5), 0, 7);
+      ctx.fillStyle = hot ? C.hot : C.pin; ctx.strokeStyle = hot ? C.hot : C.pinStroke; ctx.lineWidth = sw(1); ctx.fill(); ctx.stroke();
+    }
+    if (11 * s >= 7) {
+      ctx.fillStyle = C.passText; ctx.font = "11px sans-serif";
+      ctx.textAlign = p.dir < 0 ? "end" : "start"; ctx.textBaseline = "middle";
+      ctx.fillText(p.label.length > 14 ? p.label.slice(0, 13) + "…" : p.label, xl + p.dir * 10, cy);
+    }
+    ctx.globalAlpha = 1;
+  }
+
   function frame() {
     if (springBack) { springBack.dx *= 0.72; springBack.dy *= 0.72; if (Math.abs(springBack.dx) + Math.abs(springBack.dy) < 0.6) springBack = null; dirty = true; }
     if (dirty) { dirty = false; draw(); }
@@ -502,7 +552,8 @@
   }
   function pick(x, y) {
     const s = scale(), tp = 7 / s, tw = 5 / s, tl = 9 / s;
-    for (const h of M.hubs) for (const p of h.pins) if (Math.hypot(p.x - x, p.y - y) < tp) return { t: "pin", ref: h.ref, pin: p.pin, net: p.net, x: p.x, y: p.y };
+    for (const h of M.hubs) { if (h.ghost) continue; for (const p of h.pins) if (Math.hypot(p.x - x, p.y - y) < tp) return { t: "pin", ref: h.ref, pin: p.pin, net: p.net, x: p.x, y: p.y }; }
+    for (const h of M.hubs) if (h.ghost && x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return { t: "ghost", ref: h.partnerRef };
     for (const h of M.hubs) { if (h.synthetic) continue; if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return { t: "part", ref: h.ref, kind: "hub" }; }
     for (const p of M.passes) if (x >= p.x && x <= p.x + p.w && y >= p.top && y <= p.top + p.h) return { t: "part", ref: p.ref, kind: "pass" };
     for (const w of M.wires) for (let i = 1; i < w.pts.length; i++) if (distToSeg(x, y, w.pts[i - 1], w.pts[i]) < tw) return { t: "net", net: w.net };
@@ -536,6 +587,7 @@
     else if (down) {                                   // click (no movement)
       const h = down.hit;
       if (h.t === "pin") highlightNetToggle(h.net);
+      else if (h.t === "ghost") jumpToGhost(h.ref);
       else if (h.t === "part") select(h.kind, h.ref);
       else if (h.t === "net") highlightNetToggle(h.net);
       else deselect();
@@ -562,7 +614,7 @@
   // Part and net are mutually exclusive in the inspector: selecting one clears
   // the other so the panel always reflects a single subject.
   function select(kind, ref) { selection = { kind, ref }; hotNet = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
-  function deselect() { selection = null; hotNet = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
+  function deselect() { selection = null; hotNet = null; deleteArmed = false; if (ghostRef || ghostAll) { ghostRef = null; ghostAll = false; buildModel(); syncGhostBtns(); } renderInspector(); updateStatus(); scheduleDraw(); }
   function highlightNetToggle(net) { if (!net) return; hotNet = hotNet === net ? null : net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
   function setHotNet(net) { if (!net) return; hotNet = net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
   // Rename a net everywhere it's used (all pins/ports/net-forms). Renaming onto an
@@ -753,13 +805,152 @@
     sec.y += dy; sec.cy += dy;
   }
   function bbOf(pts) { let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; for (const p of pts) { if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0]; if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1]; } return [x0, y0, x1, y1]; }
+  // Unit normal at vertex i of a polyline (for drawing offset twin lines).
+  function segNormal(pts, i) { const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)]; const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1; return [-dy / L, dx / L]; }
+
+  // Differential-pair twin of a net name (ADF_CH5P↔ADF_CH5N, FOO+↔FOO-), or null.
+  function diffTwin(n) {
+    let m = /^(.*[A-Za-z0-9])([+-])$/.exec(n); if (m) return m[1] + (m[2] === "+" ? "-" : "+");
+    m = /^(.*\d)([PN])$/.exec(n); if (m) return m[1] + (m[2] === "P" ? "N" : "P");
+    m = /^(.*_)([PN])$/.exec(n); if (m) return m[1] + (m[2] === "P" ? "N" : "P");
+    return null;
+  }
+  // "Ghost partners": ring an IC with lightweight dashed proxies of every OTHER IC
+  // it has a direct point-to-point net with (exactly 2 endpoints, both ICs, no
+  // passive, non-power/ground). Each shared pad is aligned to the focus IC's row,
+  // so the link is one short straight wire with the net name above it. Differential
+  // pairs (ADF_CH5P/N, FOO+/-) are drawn coupled in a distinct colour. The real
+  // partner lives elsewhere; clicking a ghost hops to it. ghostRef = one IC;
+  // ghostAll = every IC at once (the whole-board connection map).
+  function ghostPartners(m) {
+    const real = m.hubs.filter((h) => !h.ghost && !h.synthetic);
+    const refs = ghostAll ? [...new Set(real.map((h) => h.ref))] : (ghostRef ? [ghostRef] : []);
+    if (!refs.length) return;
+    const allNets = new Set(); real.forEach((h) => h.pins.forEach((p) => { if (p.net) allNets.add(p.net); }));
+    const isDiff = (n) => { const t = diffTwin(n); return !!(t && allNets.has(t)); };
+    let box = null;
+    refs.forEach((r) => { const b = ghostOneIC(m, r, isDiff); if (b && !ghostAll) box = b; });
+    if (box) m.ghostBox = box;
+  }
+  function ghostOneIC(m, focusRef, isDiff) {
+    const focusBlocks = m.hubs.filter((h) => !h.ghost && !h.synthetic && h.ref === focusRef);
+    if (!focusBlocks.length) return null;
+    const passiveNets = new Set();
+    m.passes.forEach((p) => p.term.forEach((t) => { if (t.net) passiveNets.add(t.net); }));
+    const ends = new Map();
+    m.hubs.forEach((h) => { if (h.ghost || h.synthetic) return; h.pins.forEach((p) => {
+      if (!p.net || isGroundName(p.net) || isPowerName(p.net)) return;
+      let a = ends.get(p.net); if (!a) { a = []; ends.set(p.net, a); } a.push({ hub: h, pin: p });
+    }); });
+    // Group the focus IC's direct links by (partner, side it leaves the IC on).
+    const byKey = new Map();
+    ends.forEach((eps, net) => {
+      if (passiveNets.has(net) || eps.length !== 2) return;
+      const fe = eps.find((e) => e.hub.ref === focusRef), pe = eps.find((e) => e.hub.ref !== focusRef);
+      if (!fe || !pe) return;                                   // not focus↔other
+      // Label the ghost pin with the partner's own function name when it's
+      // meaningful (a real IC pin), else the focus IC's name — never a bare pad
+      // number (a connector pad like J1.46 reads as nothing).
+      const pm = pe.pin.name && !/^[0-9]+$/.test(pe.pin.name) && pe.pin.name !== pe.pin.pin;
+      const pinName = pm ? pe.pin.name : (fe.pin.name || pe.pin.pin);
+      const key = pe.hub.ref + "|" + fe.pin.side;
+      let g = byKey.get(key); if (!g) { g = { ref: pe.hub.ref, label: pe.hub.label, side: fe.pin.side, items: [] }; byKey.set(key, g); }
+      g.items.push({ net, fx: fe.pin.x, fy: fe.pin.y, pinName, partnerPin: pe.pin.pin, diff: isDiff(net) });
+    });
+    if (!byKey.size) return null;
+    const PAD = 10, LABEL = 22, OUT = 70, LANE = 150, GW = 132;
+    const rightEdge = Math.max(...focusBlocks.map((h) => h.x + h.w));
+    const leftEdge = Math.min(...focusBlocks.map((h) => h.x));
+    const lanesBySide = { left: [], right: [] };
+    const ghostedNets = new Set();
+    let nx0 = leftEdge, ny0 = Math.min(...focusBlocks.map((h) => h.y));
+    let nx1 = rightEdge, ny1 = Math.max(...focusBlocks.map((h) => h.y + h.h));
+    [...byKey.values()].sort((a, b) => a.items[0].fy - b.items[0].fy).forEach((g) => {
+      g.items.sort((a, b) => a.fy - b.fy);
+      const top = g.items[0].fy - LABEL, bot = g.items[g.items.length - 1].fy + PAD;
+      const lanes = lanesBySide[g.side] || (lanesBySide[g.side] = []);
+      let lane = 0;
+      for (; lane < lanes.length; lane++) if (lanes[lane].every((iv) => bot < iv.top || top > iv.bot)) break;
+      if (lane === lanes.length) lanes.push([]);
+      lanes[lane].push({ top, bot });
+      const onRight = g.side === "right";
+      const gx = onRight ? rightEdge + OUT + lane * LANE : leftEdge - OUT - lane * LANE - GW;
+      const innerX = onRight ? gx : gx + GW;
+      const blk = { ref: g.ref, label: g.label, x: gx, y: top, w: GW, h: bot - top, cx: gx + GW / 2, cy: (top + bot) / 2, pins: [], synthetic: true, ghost: true, partnerRef: g.ref };
+      g.items.forEach((it) => {
+        ghostedNets.add(it.net);
+        blk.pins.push({ pin: it.partnerPin, name: it.pinName, side: onRight ? "left" : "right", x: innerX, y: it.fy, net: it.net, vx: null, vy: null });
+        const pts = [[it.fx, it.fy], [innerX, it.fy]];
+        m.wires.push({ net: it.net, bus: false, link: true, diff: it.diff, pts, bb: bbOf(pts) });
+        m.labels.push({ text: it.net, x: (it.fx + innerX) / 2, y: it.fy - 9, anchor: "center", ground: false, port: false, net: it.net, link: true, diff: it.diff });
+      });
+      m.hubs.push(blk);
+      nx0 = Math.min(nx0, gx); nx1 = Math.max(nx1, gx + GW); ny0 = Math.min(ny0, top); ny1 = Math.max(ny1, bot);
+    });
+    if (!ghostedNets.size) return null;
+    // Drop the original stub labels for ghosted nets (keep the new centered ones).
+    m.labels = m.labels.filter((l) => l.link || !ghostedNets.has(l.net));
+    return { x: nx0 - 40, y: ny0 - 40, w: (nx1 - nx0) + 80, h: (ny1 - ny0) + 80 };
+  }
+
+  // A passive whose two terminals land on two *private* pads of the SAME IC — an
+  // inductor across a buck-boost's SW nodes, a series R between two pins — is
+  // otherwise drawn floating off to one side with a matching net label at each
+  // pad, so the pad↔pad connection is only implied by the shared name. Instead,
+  // co-locate the two pads on one side and stand the passive up VERTICALLY
+  // between them, joined by two short level wires: the link is drawn, not labeled.
+  function bridgeSamePins(m) {
+    // net -> every consumer (hub pad or passive terminal). A clean private bridge
+    // is a net with exactly two: the IC pad and this passive.
+    const uses = new Map();
+    const bump = (net, w) => { if (!net) return; let a = uses.get(net); if (!a) { a = []; uses.set(net, a); } a.push(w); };
+    m.hubs.forEach((h) => h.pins.forEach((p) => bump(p.net, { hub: h, pin: p })));
+    m.passes.forEach((p) => p.term.forEach((t) => bump(t.net, { pass: p })));
+    const OUT = 48, PITCH = 40, MINSEP = 30;
+    const bridged = [];
+    m.passes.forEach((p) => {
+      if (p.staged || p.term.length !== 2) return;
+      const n0 = p.term[0].net, n1 = p.term[1].net;
+      if (!n0 || !n1 || n0 === n1) return;
+      if (isGroundName(n0) || isGroundName(n1) || isPowerName(n0) || isPowerName(n1)) return;
+      const u0 = uses.get(n0) || [], u1 = uses.get(n1) || [];
+      if (u0.length !== 2 || u1.length !== 2) return;       // not a private 2-point net
+      const a0 = u0.find((x) => x.hub), a1 = u1.find((x) => x.hub);
+      if (!a0 || !a1 || a0.hub !== a1.hub || a0.pin === a1.pin) return;   // both pads, one IC
+      bridged.push({ p, hub: a0.hub, pinA: a0.pin, pinB: a1.pin, n0, n1 });
+    });
+    if (!bridged.length) return;
+    const dropNets = new Set(), newWires = [];
+    bridged.forEach(({ p, hub, pinA, pinB, n0, n1 }) => {
+      dropNets.add(n0); dropNets.add(n1);
+      const side = pinA.side, dir = side === "left" ? -1 : 1;
+      const edgeX = side === "left" ? hub.x : hub.x + hub.w, center = (pinA.y + pinB.y) / 2;
+      // Two adjacent rows around the pads' shared centre, dodging this side's
+      // other pins (search a few offsets out; fall back to the centred pair).
+      const occ = hub.pins.filter((q) => q !== pinA && q !== pinB && q.side === side).map((q) => q.y);
+      let top = center - PITCH / 2;
+      for (const off of [0, PITCH, -PITCH, 2 * PITCH, -2 * PITCH]) {
+        const t = center - PITCH / 2 + off, b = t + PITCH;
+        if (occ.every((y) => Math.abs(y - t) >= MINSEP && Math.abs(y - b) >= MINSEP)) { top = t; break; }
+      }
+      const bot = top + PITCH, mid = (top + bot) / 2, xline = edgeX + dir * OUT;
+      pinA.side = side; pinA.x = edgeX; pinA.y = top; pinA.vx = null; pinA.vy = null;
+      pinB.side = side; pinB.x = edgeX; pinB.y = bot; pinB.vx = null; pinB.vy = null;
+      p.vertical = true; p.flip = false; p.dir = dir; p.xline = xline; p.y0 = top; p.y1 = bot;
+      p.cx = xline; p.cy = mid; p.x = xline - 8; p.w = 16; p.top = top - 4; p.h = PITCH + 8;
+      p.term = [{ pin: p.term[0].pin, x: xline, y: top, net: n0 }, { pin: p.term[1].pin, x: xline, y: bot, net: n1 }];
+      [[top, n0], [bot, n1]].forEach(([y, net]) => { const pts = [[edgeX, y], [xline, y]]; newWires.push({ net, bus: false, pts, bb: bbOf(pts) }); });
+    });
+    m.wires = m.wires.filter((w) => !dropNets.has(w.net)).concat(newWires);
+    m.labels = m.labels.filter((l) => !dropNets.has(l.net));
+  }
 
   // ── Sheet navigator ──────────────────────────────────────────────────
-  // A "sheet" is a navigable page. Prefer the design's authored (group …) lists
-  // (one page per group, covering its members); fall back to the per-component
-  // sections when a design declares no groups. Built after the model so a group's
-  // box can be unioned from its members' real (post-layout) positions.
-  function refEq(a, b) { return a === b || String(a).split("/").pop() === b; }
+  // A "sheet" is a navigable page = one authored (section …) of the design. A
+  // design with no explicit sections (just instances, maybe (group …) hints) is
+  // a single section: the navigator then shows one whole-design sheet rather than
+  // splitting per IC. Built after the model so each section box reflects the
+  // real, post-layout geometry.
   function countInBox(x, y, w, h) {
     const pad = 8; let c = 0;
     const inside = (cx, cy) => cx >= x - pad && cx <= x + w + pad && cy >= y - pad && cy <= y + h + pad;
@@ -767,29 +958,19 @@
     M.passes.forEach((p) => { if (inside(p.cx, p.cy)) c++; });
     return c;
   }
-  function partBox(ref) {
-    const h = M.hubs.find((x) => !x.synthetic && refEq(x.ref, ref)); if (h) return [h.x, h.y, h.w, h.h];
-    const p = M.passes.find((x) => refEq(x.ref, ref)); if (p) return [p.x, p.top, p.w, p.h];
-    return null;
-  }
   function buildSheets() {
     sheets = [];
-    if (scene.groups && scene.groups.length) {
-      scene.groups.forEach((g) => {
-        let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, n = 0;
-        (g.members || []).forEach((ref) => { const b = partBox(ref); if (b) { n++; x0 = Math.min(x0, b[0]); y0 = Math.min(y0, b[1]); x1 = Math.max(x1, b[0] + b[2]); y1 = Math.max(y1, b[1] + b[3]); } });
-        const box = n ? { x: x0 - 24, y: y0 - 24, w: (x1 - x0) + 48, h: (y1 - y0) + 48 } : null;
-        sheets.push({ name: g.name, title: g.name + " — " + (g.members || []).length + " parts", box, count: n });
-      });
-    } else {
-      M.secs.forEach((sc) => sheets.push({ name: sc.name, title: sc.name, box: { x: sc.x, y: sc.y, w: sc.w, h: sc.h }, count: countInBox(sc.x, sc.y, sc.w, sc.h) }));
-    }
+    const authored = new Set(scene.authored_sections || []);
+    if (!authored.size) return;   // no explicit sections → one whole-design sheet
+    M.secs.forEach((sc) => { if (authored.has(sc.name)) sheets.push({ name: sc.name, title: sc.name, box: { x: sc.x, y: sc.y, w: sc.w, h: sc.h }, count: countInBox(sc.x, sc.y, sc.w, sc.h) }); });
   }
   function buildSheetList() {
     clear(sheetList);
     const whole = document.createElement("div");
     whole.className = "ed-sheet"; whole.dataset.idx = "-1";
-    whole.innerHTML = '<span class="num">0</span><span class="nm">Whole board</span>';
+    whole.innerHTML = '<span class="num">0</span><span class="nm"></span>';
+    whole.querySelector(".nm").textContent = sheets.length ? "Whole board" : (scene.name || "Whole board");
+    whole.title = sheets.length ? "" : (scene.name || "");
     whole.onclick = () => fitAll(); sheetList.appendChild(whole);
     sheets.forEach((s, i) => {
       const row = document.createElement("div");
@@ -858,6 +1039,61 @@
     inp.addEventListener("change", () => { const v = inp.value.trim(); if (v !== (value || "")) onCommit(v); });
     row.appendChild(inp); return row;
   }
+  // Every net name currently in the design (sorted, de-duped) — the option set
+  // for the pin→net comboboxes.
+  function allNets() {
+    const s = new Set();
+    if (M) {
+      M.hubs.forEach((h) => h.pins.forEach((p) => { if (p.net) s.add(p.net); }));
+      M.passes.forEach((p) => (p.term || []).forEach((t) => { if (t.net) s.add(t.net); }));
+      M.wires.forEach((w) => { if (w.net) s.add(w.net); });
+      M.labels.forEach((l) => { if (l.net) s.add(l.net); });
+    }
+    return [...s].sort((a, b) => a.localeCompare(b));
+  }
+  // Attach a net-name combobox to an <input>: a filtered dropdown of existing
+  // nets (↑/↓ to move the highlight, Enter to take it) that still accepts a
+  // freely-typed new name. With onCommit, Enter/blur/pick writes the change;
+  // without it the field is only filled (the Add dialog reads it at submit).
+  function netCombo(inp, onCommit) {
+    let initial = inp.value || "", hi = -1, pop = null;
+    inp.setAttribute("autocomplete", "off");
+    const close = () => { if (pop) { pop.remove(); pop = null; } hi = -1; };
+    const commit = () => { if (!onCommit) return; const v = inp.value.trim(); if (v && v !== initial) { initial = v; onCommit(v); } };
+    function render() {
+      document.querySelectorAll(".ed-combo").forEach((e) => { if (e !== pop) e.remove(); });
+      const q = inp.value.trim().toLowerCase();
+      const list = allNets().filter((n) => n.toLowerCase().includes(q)).slice(0, 60);
+      if (!list.length) { close(); return; }
+      if (!pop) { pop = mkEl("div", "ed-combo"); document.body.appendChild(pop); }
+      pop.innerHTML = "";
+      list.forEach((n, i) => {
+        const r = mkEl("div", "ed-combo-opt" + (i === hi ? " hi" : ""), n);
+        r.addEventListener("mousedown", (e) => { e.preventDefault(); inp.value = n; close(); commit(); if (onCommit) inp.blur(); });
+        pop.appendChild(r);
+      });
+      const b = inp.getBoundingClientRect();
+      pop.style.left = b.left + "px"; pop.style.top = (b.bottom + 2) + "px"; pop.style.minWidth = b.width + "px";
+    }
+    function move(d) {
+      if (!pop) { render(); if (!pop) return; }
+      const n = pop.children.length; hi = hi < 0 ? (d > 0 ? 0 : n - 1) : (hi + d + n) % n;
+      [...pop.children].forEach((c, i) => c.classList.toggle("hi", i === hi));
+      pop.children[hi].scrollIntoView({ block: "nearest" });
+    }
+    inp.addEventListener("focus", render);
+    inp.addEventListener("input", () => { hi = -1; render(); });
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown") { e.preventDefault(); move(1); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); move(-1); }
+      else if (e.key === "Enter") {
+        if (pop && hi >= 0) { e.preventDefault(); inp.value = pop.children[hi].textContent; }
+        close(); commit(); if (onCommit) { e.preventDefault(); inp.blur(); }
+      } else if (e.key === "Escape") { if (pop) { e.stopPropagation(); close(); } }
+    });
+    inp.addEventListener("blur", () => setTimeout(() => { commit(); close(); }, 120));
+    return inp;
+  }
   function renderInspector() {
     clear(inspector);
     if (selection) { renderPartInspector(selection.ref); return; }
@@ -883,8 +1119,7 @@
         const row = mkEl("div", "ed-pinline");
         const pl = mkEl("span", "pl", p.label); pl.title = "pad " + p.pin; row.appendChild(pl);
         const inp = document.createElement("input"); inp.value = p.net || ""; inp.placeholder = "(unconnected)";
-        inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); inp.blur(); } });
-        inp.addEventListener("change", () => { const v = inp.value.trim(); if (v && v !== (p.net || "")) applyPinNet(ref, p.pin, v); });
+        netCombo(inp, (v) => applyPinNet(ref, p.pin, v));
         row.appendChild(inp); body.appendChild(row);
       });
     }
@@ -993,6 +1228,7 @@
       const row = document.createElement("div"); row.className = "ed-pinrow";
       row.innerHTML = '<input class="pn" placeholder="pin#"><input placeholder="net">';
       if (pn) row.children[0].value = pn; if (net) row.children[1].value = net;
+      netCombo(row.children[1]);
       pinsBox.appendChild(row);
     }
     addPinRow("1", ""); addPinRow("2", "GND");
@@ -1069,9 +1305,11 @@
       <tr><td><kbd>1</kbd>–<kbd>9</kbd></td><td>Jump to sheet · <kbd>0</kbd> whole board</td></tr>
       <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Previous / next sheet</td></tr>
       <tr><td><kbd>F</kbd></td><td>Fit current sheet / board</td></tr>
-      <tr><td><kbd>N</kbd></td><td>Toggle device-to-device net connections (straight lines across the channel vs a name label at each end)</td></tr>
+      <tr><td><kbd>N</kbd></td><td>Toggle drawn connections vs. name labels: straight lines across the channel for device-to-device nets, and a passive stood up <b>vertically</b> between the two pads it bridges on one IC (e.g. an inductor across the SW pins)</td></tr>
+      <tr><td><kbd>G</kbd></td><td>Fan out the selected IC — ring it with dashed <b>ghost</b> copies of every IC it connects to point-to-point, one straight wire each with the net name above it (the rest of the board dims). Differential pairs are drawn coupled in violet. Click a ghost to hop the focus to it; <kbd>Esc</kbd> exits.</td></tr>
+      <tr><td><kbd>Shift</kbd>+<kbd>G</kbd></td><td>Fan out <b>every</b> IC at once — the whole-board connection map.</td></tr>
       <tr><td><kbd>Esc</kbd></td><td>Deselect / close</td></tr>
-      <tr><td>click part / net</td><td>Show its properties in the left inspector (edit value, rename net, rewire pins, copy, delete)</td></tr>
+      <tr><td>click part / net</td><td>Show its properties in the left inspector (edit value, rename net, rewire pins, copy, delete). The pin→net fields suggest existing nets — <kbd>↑</kbd>/<kbd>↓</kbd> + <kbd>Enter</kbd> to pick one, or just type a new name.</td></tr>
       <tr><td><b>double-click</b></td><td>Select it and jump straight to the first editable field in the inspector</td></tr>
       <tr><td>scroll · drag empty</td><td>Zoom · pan</td></tr>
       </table><div class="ed-actions"><button class="ed-btn" id="keys-close">Close</button></div></div>`;
@@ -1082,6 +1320,31 @@
 
   // Toggle device↔device net lines (rebuilds the model so re-siding re-applies).
   function toggleNets() { showNets = !showNets; syncNetsBtn(); buildModel(); scheduleDraw(); }
+
+  // Ghost-partner fan-out: focus the selected IC and ring it with dashed proxies
+  // of every IC it connects to point-to-point. Toggles off if already on.
+  function toggleGhost() {
+    if (ghostRef) { ghostRef = null; buildModel(); syncGhostBtns(); scheduleDraw(); return; }
+    if (!selection || !isHubRef(selection.ref)) { toast("Select an IC first, then press G to fan out its direct connections.", true); return; }
+    ghostAll = false; ghostRef = selection.ref; buildModel();
+    if (M.ghostBox) { fitTo(M.ghostBox, 0.08); toast("Ghosting " + ghostRef + "'s direct connections — click a ghost to hop to it, Esc to exit"); }
+    else { ghostRef = null; toast(selection.ref + " has no direct IC-to-IC nets.", true); }
+    syncGhostBtns(); scheduleDraw();
+  }
+  // Global fan-out: ghost every IC's direct connections at once (whole-board map).
+  function toggleGhostAll() {
+    ghostAll = !ghostAll;
+    if (ghostAll) { ghostRef = null; selection = null; hotNet = null; }
+    buildModel();
+    if (ghostAll) { fitAll(); toast("Fan-out (all) — every IC ringed with its direct connections; Esc exits"); }
+    syncGhostBtns(); renderInspector(); scheduleDraw();
+  }
+  // Click a ghost proxy → re-focus the fan-out on that real partner (walk the graph).
+  function jumpToGhost(ref) {
+    ghostAll = false; ghostRef = ref; selection = { kind: "hub", ref }; hotNet = null; deleteArmed = false;
+    buildModel(); if (M.ghostBox) fitTo(M.ghostBox, 0.08);
+    syncGhostBtns(); renderInspector(); updateStatus(); scheduleDraw();
+  }
 
   // ── Keyboard ─────────────────────────────────────────────────────────
   document.addEventListener("keydown", (e) => {
@@ -1099,6 +1362,7 @@
       case "Delete": case "Backspace": e.preventDefault(); deleteSelected(); break;
       case "f": case "F": if (activeSheet >= 0) selectSheet(activeSheet); else fitAll(); break;
       case "n": case "N": toggleNets(); break;
+      case "g": case "G": (e.shiftKey ? toggleGhostAll : toggleGhost)(); break;
       case "?": toggleKeys(); break;
       case "Escape": deselect(); break;
       case "[": stepSheet(-1); break;
@@ -1111,14 +1375,17 @@
   // ── Toolbar ──────────────────────────────────────────────────────────
   const tools = document.createElement("div");
   tools.id = "ed-tools";
-  tools.innerHTML = `<button id="tool-add" title="Add (A)">+ Add</button><button id="tool-nets" title="Show device-to-device net connections (N)">Nets</button><button id="tool-fit" title="Fit (F)">Fit</button><button id="tool-keys" title="Keys (?)">?</button>`;
+  tools.innerHTML = `<button id="tool-add" title="Add (A)">+ Add</button><button id="tool-nets" title="Draw connections instead of name labels: device-to-device channel wires + a passive stood vertically between two pads it bridges on one IC (N)">Nets</button><button id="tool-ghost" title="Fan out the selected IC: ring it with dashed ghost copies of every IC it connects to point-to-point, one straight wire each. Click a ghost to hop to it. (G)">Fan-out</button><button id="tool-ghost-all" title="Fan out EVERY IC at once — the whole-board connection map (Shift+G)">All</button><button id="tool-fit" title="Fit (F)">Fit</button><button id="tool-keys" title="Keys (?)">?</button>`;
   wrap.appendChild(tools);
   tools.querySelector("#tool-add").onclick = openAdd;
   tools.querySelector("#tool-nets").onclick = toggleNets;
+  tools.querySelector("#tool-ghost").onclick = toggleGhost;
+  tools.querySelector("#tool-ghost-all").onclick = toggleGhostAll;
   tools.querySelector("#tool-fit").onclick = () => { if (activeSheet >= 0) selectSheet(activeSheet); else fitAll(); };
   tools.querySelector("#tool-keys").onclick = toggleKeys;
   function syncNetsBtn() { const b = document.getElementById("tool-nets"); if (b) b.classList.toggle("on", showNets); }
-  syncNetsBtn();
+  function syncGhostBtns() { const b = document.getElementById("tool-ghost"); if (b) b.classList.toggle("on", !!ghostRef); const a = document.getElementById("tool-ghost-all"); if (a) a.classList.toggle("on", ghostAll); }
+  syncNetsBtn(); syncGhostBtns();
   isoBox.addEventListener("change", scheduleDraw);
 
   // ── Refetch / live reload ────────────────────────────────────────────
