@@ -43,7 +43,9 @@ const ERR_CANNOT_READ_FILE = "cannot read file";
 const ERR_CANNOT_WRITE_FILE = "cannot write file";
 const ERR_REBUILD_FAILED = "rebuild failed";
 const ERR_INSTANCE_NOT_FOUND = "instance not found";
+const ERR_MALFORMED_INSTANCE = "malformed instance form";
 const ERR_GENERATED_PART = "this part is generated (decouple/series) or defined in a module — edit its source form directly";
+const ERR_NO_EDITABLE_VALUE = "this part has a fixed component with no editable value";
 const ERR_MISSING_REF = "missing ref";
 
 const ERR_JSON_NO_BODY = "{\"error\":\"no body\"}";
@@ -120,22 +122,35 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     };
     const inst_end = findFormEnd(source, inst_open) orelse {
-        sendJsonError(ctx, res, 400, "malformed instance form");
+        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
         return;
     };
 
-    // Locate the editable value string (first quoted string of the component
-    // family form). A bare/fixed component (e.g. `204928-0601`) has none.
-    const vr = findInstanceValueRange(source, inst_open, inst_end) orelse {
-        sendJsonError(ctx, res, 400, "this part has a fixed component with no editable value");
-        return;
-    };
-
+    // Patch the value. Three cases for the component slot inside the instance:
+    //  • a family form `(cap-0402 "100nF")` — replace the quoted value in place;
+    //  • a *bare* family atom `cap-0402` (what the Add wizard writes when a family
+    //    part is added with no value) — wrap it into `(cap-0402 "<value>")` so the
+    //    value becomes editable instead of permanently stuck;
+    //  • a genuinely fixed component (e.g. `204928-0601`) — nothing to edit.
     var new_source: std.ArrayListUnmanaged(u8) = .empty;
     const nw = new_source.writer(ctx.allocator);
-    try nw.writeAll(source[0..vr[0]]);
-    try nw.writeAll(new_value);
-    try nw.writeAll(source[vr[1]..]);
+    if (findInstanceValueRange(source, inst_open, inst_end)) |vr| {
+        try nw.writeAll(source[0..vr[0]]);
+        try nw.writeAll(new_value);
+        try nw.writeAll(source[vr[1]..]);
+    } else if (findBareComponentRange(source, inst_open, inst_end)) |br| {
+        const atom = source[br[0]..br[1]];
+        if (!componentIsFamily(ctx.allocator, ctx.project_dir, atom)) {
+            sendJsonError(ctx, res, 400, ERR_NO_EDITABLE_VALUE);
+            return;
+        }
+        try nw.writeAll(source[0..br[0]]);
+        try nw.print("({s} \"{s}\")", .{ atom, new_value });
+        try nw.writeAll(source[br[1]..]);
+    } else {
+        sendJsonError(ctx, res, 400, ERR_NO_EDITABLE_VALUE);
+        return;
+    }
 
     infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = new_source.items }) catch {
         sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
@@ -166,6 +181,38 @@ fn findInstanceValueRange(source: []const u8, inst_open: usize, inst_end: usize)
     const vs = vq + 1;
     const ve = std.mem.indexOfScalarPos(u8, source, vs, '"') orelse return null;
     return .{ vs, ve };
+}
+
+/// Locate the *bare* component atom inside an instance form — the
+/// unparenthesized component token right after the label, e.g. the `cap-0402`
+/// in `(instance "cap-0402" cap-0402 …)`. Returns `{start, end}` of the atom,
+/// or null when the component is a family form `(… "value")` (use
+/// findInstanceValueRange) or the form is malformed. Pairs with
+/// findInstanceValueRange to cover both spellings of the component slot.
+fn findBareComponentRange(source: []const u8, inst_open: usize, inst_end: usize) ?[2]usize {
+    var pos = inst_open + INSTANCE_HEAD.len;
+    while (pos < inst_end and isPinWs(source[pos])) : (pos += 1) {}
+    if (pos >= inst_end or source[pos] != '"') return null;
+    pos = (std.mem.indexOfScalarPos(u8, source, pos + 1, '"') orelse inst_end) + 1; // past label
+    while (pos < inst_end and isPinWs(source[pos])) : (pos += 1) {}
+    if (pos >= inst_end or source[pos] == '(') return null; // family form, not a bare atom
+    const start = pos;
+    while (pos < inst_end and !isPinTokenEnd(source[pos])) : (pos += 1) {}
+    if (pos == start) return null;
+    return .{ start, pos };
+}
+
+/// True when `lib/components/<name>.sexp` declares a `(component-family …)`, so a
+/// bare instance of it can be wrapped into `(<name> "<value>")` and given an
+/// editable value. False for a fixed `(component …)`, an unsafe name, or a
+/// missing/unreadable file (in which case the caller leaves the part uneditable).
+fn componentIsFamily(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) bool {
+    if (!safeLibName(name)) return false;
+    const path = libComponentPath(allocator, project_dir, name) catch return false;
+    defer allocator.free(path);
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, MAX_SOURCE_BYTES) catch return false;
+    defer allocator.free(content);
+    return std.mem.indexOf(u8, content, "(component-family ") != null;
 }
 
 /// POST /api/edit-footprint/:name — swap an instance's component family
@@ -595,6 +642,522 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     };
 }
 
+/// POST /api/new-design  Body: {"name":"my-board","title":"My Board"}
+/// Scaffold a fresh design file src/<name>.sexp = (design-block "<title>") so a
+/// design can be started from the home page / editor instead of hand-writing the
+/// stub. 409 if a design with that basename already exists; 400 on an unsafe name.
+pub fn newDesignApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const name = parseJsonString(body, "\"name\"") orelse {
+        res.status = 400;
+        res.body = "missing name";
+        return;
+    };
+    // The name becomes a filesystem basename (src/<name>.sexp) and a URL path, so
+    // restrict it to a safe charset — no traversal, no spaces, no quoting needed.
+    if (name.len == 0 or name.len > 64) {
+        res.status = 400;
+        res.body = "name must be 1-64 characters";
+        return;
+    }
+    for (name) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '-' or c == '_';
+        if (!ok) {
+            res.status = 400;
+            res.body = "name may contain only letters, digits, '-' and '_'";
+            return;
+        }
+    }
+    // Title is embedded inside a quoted s-expr string; if it carries a char that
+    // would need escaping, fall back to the (safe) name rather than risk bad source.
+    const raw_title = parseJsonString(body, "\"title\"") orelse "";
+    const title = blk: {
+        if (raw_title.len == 0) break :blk name;
+        if (std.mem.indexOfAny(u8, raw_title, "\"\\\n\r") != null) break :blk name;
+        break :blk raw_title;
+    };
+
+    const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
+    defer ctx.allocator.free(file_path);
+
+    // designSourcePath returns an existing match or the flat fallback; refuse only
+    // when something is actually there (don't clobber a design or a same-named module).
+    if (infra_fs.cwd().access(file_path, .{})) |_| {
+        res.status = 409;
+        res.body = "a design with that name already exists";
+        return;
+    } else |_| {}
+
+    const content = try std.fmt.allocPrint(ctx.allocator, "(design-block \"{s}\")\n", .{title});
+    defer ctx.allocator.free(content);
+    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = content }) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_WRITE_FILE;
+        return;
+    };
+
+    res.status = 200;
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"url\":\"/editor/{s}\"}}", .{name});
+}
+
+// ── Structural authoring (sections, ports, ref-des, DNP) ───────────────────
+// New surgical endpoints that let the editor build a conventional, organized
+// design (not just a flat instance pile). They mirror the existing splice +
+// findInstanceOpen/findFormEnd patterns and share the writeAndRebuild tail.
+
+/// Write `s` as a quoted s-expr string with the two chars that need escaping.
+fn writeSexprString(w: anytype, s: []const u8) std.mem.Allocator.Error!void {
+    try w.writeByte('"');
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        else => try w.writeByte(c),
+    };
+    try w.writeByte('"');
+}
+
+/// Byte index just before the `(design-block …)` closing paren — the splice
+/// point for a new top-level form. Null when the source has no design-block.
+fn designBlockInsertPos(source: []const u8) ?usize {
+    const db = std.mem.indexOf(u8, source, "(design-block") orelse return null;
+    const end = findFormEnd(source, db) orelse return null;
+    return end - 1;
+}
+
+/// Emit `{"ok":true,"version":N}` (or rebuild-failure 500) for a finished mutation.
+fn finishMutation(ctx: *Handler, name: []const u8, new_source: []const u8, desc: []const u8, res: *httpz.Response) HandlerError!void {
+    const result = writeAndRebuild(ctx.allocator, ctx.project_dir, name, new_source, desc) catch {
+        res.status = 500;
+        res.body = ERR_REBUILD_FAILED;
+        return;
+    };
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+}
+
+/// POST /api/add-section/:name  Body: {"section":"Power","subtitle":"3V3 buck"}
+/// Splice an empty `(section "Name" "subtitle"?)` into the design-block.
+pub fn addSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const section = parseJsonString(body, "\"section\"") orelse {
+        res.status = 400;
+        res.body = "missing section";
+        return;
+    };
+    if (section.len == 0) {
+        res.status = 400;
+        res.body = "section name is empty";
+        return;
+    }
+    const subtitle = parseJsonString(body, "\"subtitle\"") orelse "";
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(ctx.allocator, SECTION_OPEN_TEMPLATE, .{section});
+    defer ctx.allocator.free(needle);
+    if (std.mem.indexOf(u8, source, needle) != null) {
+        res.status = 409;
+        res.body = "a section with that name already exists";
+        return;
+    }
+    const insert_at = designBlockInsertPos(source) orelse {
+        res.status = 400;
+        res.body = "not a design-block";
+        return;
+    };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll(source[0..insert_at]);
+    try w.writeAll("\n  (section ");
+    try writeSexprString(w, section);
+    if (subtitle.len > 0) {
+        try w.writeByte(' ');
+        try writeSexprString(w, subtitle);
+    }
+    try w.writeAll(")\n");
+    try w.writeAll(source[insert_at..]);
+    try finishMutation(ctx, name, buf.items, "add_section", res);
+}
+
+/// POST /api/rename-section/:name  Body: {"from":"Power","to":"Power Rails"}
+pub fn renameSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const from = parseJsonString(body, "\"from\"") orelse {
+        res.status = 400;
+        res.body = "missing from";
+        return;
+    };
+    const to = parseJsonString(body, "\"to\"") orelse {
+        res.status = 400;
+        res.body = "missing to";
+        return;
+    };
+    if (to.len == 0) {
+        res.status = 400;
+        res.body = "new name is empty";
+        return;
+    }
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(ctx.allocator, SECTION_OPEN_TEMPLATE, .{from});
+    defer ctx.allocator.free(needle);
+    const at = std.mem.indexOf(u8, source, needle) orelse {
+        res.status = 404;
+        res.body = "section not found";
+        return;
+    };
+    // Replace just the quoted name token: `(section "` is needle minus the name+quote.
+    const name_start = at + "(section \"".len;
+    const name_end = name_start + from.len; // followed by the closing quote
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll(source[0..name_start]);
+    for (to) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        else => try w.writeByte(c),
+    };
+    try w.writeAll(source[name_end..]);
+    try finishMutation(ctx, name, buf.items, "rename_section", res);
+}
+
+/// POST /api/remove-section/:name  Body: {"section":"Power"}
+/// Deletes an EMPTY section (metadata only); refuses one holding parts (409).
+pub fn removeSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const section = parseJsonString(body, "\"section\"") orelse {
+        res.status = 400;
+        res.body = "missing section";
+        return;
+    };
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(ctx.allocator, SECTION_OPEN_TEMPLATE, .{section});
+    defer ctx.allocator.free(needle);
+    const sec_start = std.mem.indexOf(u8, source, needle) orelse {
+        res.status = 404;
+        res.body = "section not found";
+        return;
+    };
+    const sec_end = findFormEnd(source, sec_start) orelse {
+        res.status = 500;
+        res.body = ERR_MALFORMED_INSTANCE;
+        return;
+    };
+    // Only metadata (subtitle / row / col / role / protocol) may remain — refuse if
+    // the section still carries parts or wiring so we never silently orphan them.
+    const inner = source[sec_start..sec_end];
+    const content_forms = [_][]const u8{ "(instance", "(sub-block", "(pins ", "(note", "(group", "(port", "(bus", "(decouple", "(series", "(test-point" };
+    for (content_forms) |needle2| {
+        if (std.mem.indexOf(u8, inner, needle2) != null) {
+            res.status = 409;
+            res.body = "section is not empty — move or delete its parts first";
+            return;
+        }
+    }
+    // Excise the form plus a leading blank line / indentation.
+    var cut_start = sec_start;
+    while (cut_start > 0 and (source[cut_start - 1] == ' ' or source[cut_start - 1] == '\t')) cut_start -= 1;
+    if (cut_start > 0 and source[cut_start - 1] == '\n') cut_start -= 1;
+    var cut_end = sec_end;
+    if (cut_end < source.len and source[cut_end] == '\n') cut_end += 1;
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll(source[0..cut_start]);
+    try w.writeAll(source[cut_end..]);
+    try finishMutation(ctx, name, buf.items, "remove_section", res);
+}
+
+/// POST /api/add-port/:name  Body: {"net":"VDD","dir":"in"}  (dir: in|out|bidi)
+pub fn addPortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const net = parseJsonString(body, "\"net\"") orelse {
+        res.status = 400;
+        res.body = "missing net";
+        return;
+    };
+    const dir = parseJsonString(body, "\"dir\"") orelse "bidi";
+    const dir_ok = std.mem.eql(u8, dir, "in") or std.mem.eql(u8, dir, "out") or std.mem.eql(u8, dir, "bidi");
+    if (net.len == 0 or !dir_ok) {
+        res.status = 400;
+        res.body = "need net and dir in|out|bidi";
+        return;
+    }
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const dup = try std.fmt.allocPrint(ctx.allocator, "(port \"{s}\"", .{net});
+    defer ctx.allocator.free(dup);
+    if (std.mem.indexOf(u8, source, dup) != null) {
+        res.status = 409;
+        res.body = "a port for that net already exists";
+        return;
+    }
+    const insert_at = designBlockInsertPos(source) orelse {
+        res.status = 400;
+        res.body = "not a design-block";
+        return;
+    };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll(source[0..insert_at]);
+    try w.writeAll("\n  (port ");
+    try writeSexprString(w, net);
+    try w.writeByte(' ');
+    try w.writeAll(dir);
+    try w.writeAll(")\n");
+    try w.writeAll(source[insert_at..]);
+    try finishMutation(ctx, name, buf.items, "add_port", res);
+}
+
+/// POST /api/remove-port/:name  Body: {"net":"VDD"}
+pub fn removePortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const net = parseJsonString(body, "\"net\"") orelse {
+        res.status = 400;
+        res.body = "missing net";
+        return;
+    };
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const open_needle = try std.fmt.allocPrint(ctx.allocator, "(port \"{s}\"", .{net});
+    defer ctx.allocator.free(open_needle);
+    const p_start = std.mem.indexOf(u8, source, open_needle) orelse {
+        res.status = 404;
+        res.body = "port not found";
+        return;
+    };
+    const p_end = findFormEnd(source, p_start) orelse {
+        res.status = 500;
+        res.body = ERR_MALFORMED_INSTANCE;
+        return;
+    };
+    var cut_start = p_start;
+    while (cut_start > 0 and (source[cut_start - 1] == ' ' or source[cut_start - 1] == '\t')) cut_start -= 1;
+    if (cut_start > 0 and source[cut_start - 1] == '\n') cut_start -= 1;
+    var cut_end = p_end;
+    if (cut_end < source.len and source[cut_end] == '\n') cut_end += 1;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll(source[0..cut_start]);
+    try w.writeAll(source[cut_end..]);
+    try finishMutation(ctx, name, buf.items, "remove_port", res);
+}
+
+/// POST /api/rename-refdes/:name  Body: {"ref":"C3","to":"C10","srcOff":1234}
+pub fn renameRefdesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const ref = parseJsonString(body, "\"ref\"") orelse {
+        res.status = 400;
+        res.body = ERR_MISSING_REF;
+        return;
+    };
+    const to = parseJsonString(body, "\"to\"") orelse {
+        res.status = 400;
+        res.body = "missing to";
+        return;
+    };
+    if (to.len == 0) {
+        res.status = 400;
+        res.body = "new ref is empty";
+        return;
+    }
+    const src_off = parseSrcOff(body);
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    // Refuse a collision with an existing explicit instance label.
+    const collide = try std.fmt.allocPrint(ctx.allocator, "(instance \"{s}\"", .{to});
+    defer ctx.allocator.free(collide);
+    if (std.mem.indexOf(u8, source, collide) != null) {
+        res.status = 409;
+        res.body = "another instance already uses that ref";
+        return;
+    }
+    const open = findInstanceOpen(source, ref, src_off) orelse {
+        res.status = 404;
+        res.body = ERR_INSTANCE_NOT_FOUND;
+        return;
+    };
+    const lq = std.mem.indexOfScalarPos(u8, source, open, '"') orelse {
+        res.status = 500;
+        res.body = ERR_MALFORMED_INSTANCE;
+        return;
+    };
+    const rq = std.mem.indexOfScalarPos(u8, source, lq + 1, '"') orelse {
+        res.status = 500;
+        res.body = ERR_MALFORMED_INSTANCE;
+        return;
+    };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll(source[0 .. lq + 1]);
+    for (to) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        else => try w.writeByte(c),
+    };
+    try w.writeAll(source[rq..]);
+    try finishMutation(ctx, name, buf.items, "rename_refdes", res);
+}
+
+/// POST /api/set-dnp/:name  Body: {"ref":"R7","dnp":true,"srcOff":1234}
+/// Toggle a `(dnp)` marker inside an instance (Do-Not-Populate).
+pub fn setDnpApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const ref = parseJsonString(body, "\"ref\"") orelse {
+        res.status = 400;
+        res.body = ERR_MISSING_REF;
+        return;
+    };
+    const want_dnp = std.mem.indexOf(u8, body, "\"dnp\":true") != null or
+        std.mem.indexOf(u8, body, "\"dnp\": true") != null;
+    const src_off = parseSrcOff(body);
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const open = findInstanceOpen(source, ref, src_off) orelse {
+        res.status = 404;
+        res.body = ERR_INSTANCE_NOT_FOUND;
+        return;
+    };
+    const end = findFormEnd(source, open) orelse {
+        res.status = 500;
+        res.body = ERR_MALFORMED_INSTANCE;
+        return;
+    };
+    const dnp_rel = std.mem.indexOf(u8, source[open..end], "(dnp)");
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    if (want_dnp) {
+        if (dnp_rel != null) {
+            res.status = 200;
+            res.content_type = .JSON;
+            res.body = "{\"ok\":true,\"noop\":true}";
+            return;
+        }
+        try w.writeAll(source[0 .. end - 1]);
+        try w.writeAll(" (dnp)");
+        try w.writeAll(source[end - 1 ..]);
+    } else {
+        if (dnp_rel == null) {
+            res.status = 200;
+            res.content_type = .JSON;
+            res.body = "{\"ok\":true,\"noop\":true}";
+            return;
+        }
+        var d = open + dnp_rel.?;
+        var d_end = d + "(dnp)".len;
+        while (d > 0 and source[d - 1] == ' ') d -= 1; // eat one or more leading spaces
+        if (d_end < source.len and source[d_end] == '\n' and (d == 0 or source[d - 1] == '\n')) d_end += 1;
+        try w.writeAll(source[0..d]);
+        try w.writeAll(source[d_end..]);
+    }
+    try finishMutation(ctx, name, buf.items, "set_dnp", res);
+}
+
 /// POST /api/remove-instance/:name
 /// Body: {"ref":"C3"}
 pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
@@ -625,29 +1188,21 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     };
     defer ctx.allocator.free(source);
 
-    // Find (instance "REF" ...) and remove the entire form
-    const needle = try std.fmt.allocPrint(ctx.allocator, INSTANCE_OPEN_TEMPLATE, .{ref_des});
-    defer ctx.allocator.free(needle);
-
-    const inst_pos = std.mem.indexOf(u8, source, needle) orelse {
+    // Locate the instance form. Prefer the scene-graph `srcOff` (robust to
+    // label-declared parts that auto-renumber — e.g. a wizard-added cap whose
+    // source ref-des is the component name, not the build-time C4), with the
+    // `(instance "REF"` needle as fallback.
+    const src_off = parseSrcOff(body);
+    const inst_pos = findInstanceOpen(source, ref_des, src_off) orelse {
         res.status = 404;
-        res.body = ERR_INSTANCE_NOT_FOUND;
+        res.body = if (src_off > 0) ERR_GENERATED_PART else ERR_INSTANCE_NOT_FOUND;
         return;
     };
-
-    // Find matching closing paren
-    var depth: u32 = 0;
-    var inst_end: usize = inst_pos;
-    for (source[inst_pos..], 0..) |ch, i| {
-        if (ch == '(') depth += 1;
-        if (ch == ')') {
-            depth -= 1;
-            if (depth == 0) {
-                inst_end = inst_pos + i + 1;
-                break;
-            }
-        }
-    }
+    var inst_end = findFormEnd(source, inst_pos) orelse {
+        res.status = 400;
+        res.body = ERR_MALFORMED_INSTANCE;
+        return;
+    };
 
     // Also eat trailing newline
     if (inst_end < source.len and source[inst_end] == '\n') inst_end += 1;
@@ -912,7 +1467,7 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     };
     const inst_end = findFormEnd(source, inst_open) orelse {
-        sendJsonError(ctx, res, 400, "malformed instance form");
+        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
         return;
     };
 
@@ -922,7 +1477,23 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     var match_tokens: std.ArrayListUnmanaged([]const u8) = .empty;
     defer match_tokens.deinit(ctx.allocator);
     const p = (try findInstancePinForm(ctx.allocator, source, inst_open, inst_end, pin, &match_tokens)) orelse {
-        sendJsonError(ctx, res, 404, "pin not found — it may be wired via a (net …) form; edit the source directly");
+        // Pin not declared inline yet — add `(pin <pin> "<net>")` to the instance
+        // body. Lets a staged/unwired part (a freshly-added cap with no pins) be
+        // connected by dropping it on a net.
+        const close = inst_end - 1; // the instance form's closing ')'
+        var ins: std.ArrayListUnmanaged(u8) = .empty;
+        const iw = ins.writer(ctx.allocator);
+        try iw.writeAll(source[0..close]);
+        try iw.print("\n    (pin {s} \"{s}\")", .{ pin, new_net });
+        try iw.writeAll(source[close..]);
+        infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = ins.items }) catch {
+            sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
+            return;
+        };
+        rebuildAndPush(ctx, name, res) catch {
+            sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
+            return;
+        };
         return;
     };
 
@@ -960,6 +1531,263 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     };
 
+    rebuildAndPush(ctx, name, res) catch {
+        sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
+        return;
+    };
+}
+
+/// Bind a bypass/decoupling cap to a specific hub pad: insert (or replace) a
+/// `(decouples "IC" PAD)` form inside the instance. The editor calls this when a
+/// cap is dropped on a hub pin so the schematic docks it on that pin (via
+/// `boundHubPin` in render_svg/context.zig) — instead of whichever hub on a
+/// shared net renders first — and the PCB placer keeps it there too. Body:
+/// `{"ref":"C4","ic":"U2","pin":"6","srcOff":N}`.
+pub fn bindDecoupleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        sendJsonError(ctx, res, 400, "no body");
+        return;
+    };
+
+    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+        sendJsonError(ctx, res, 400, ERR_MISSING_REF);
+        return;
+    };
+    const ic = parseJsonString(body, "\"ic\"") orelse {
+        sendJsonError(ctx, res, 400, "missing ic");
+        return;
+    };
+    const pad = parseJsonString(body, "\"pin\"") orelse {
+        sendJsonError(ctx, res, 400, "missing pin");
+        return;
+    };
+    const src_off = parseSrcOff(body);
+
+    const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
+    defer ctx.allocator.free(file_path);
+
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
+        sendJsonError(ctx, res, 500, ERR_CANNOT_READ_FILE);
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const inst_open = findInstanceOpen(source, ref_des, src_off) orelse {
+        sendJsonError(ctx, res, 404, if (src_off > 0) ERR_GENERATED_PART else ERR_INSTANCE_NOT_FOUND);
+        return;
+    };
+    const inst_end = findFormEnd(source, inst_open) orelse {
+        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
+        return;
+    };
+
+    // Build the form. A numeric pad stays bare (the `(decouples "U1" 24)` idiom);
+    // a non-numeric pad ("B1") is quoted, the same as a `(pin …)` token.
+    var numeric = pad.len > 0;
+    for (pad) |c| {
+        if (c < '0' or c > '9') {
+            numeric = false;
+            break;
+        }
+    }
+    var form: std.ArrayListUnmanaged(u8) = .empty;
+    defer form.deinit(ctx.allocator);
+    if (numeric)
+        try form.writer(ctx.allocator).print("(decouples \"{s}\" {s})", .{ ic, pad })
+    else
+        try form.writer(ctx.allocator).print("(decouples \"{s}\" \"{s}\")", .{ ic, pad });
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    const ow = out.writer(ctx.allocator);
+
+    // Replace an existing (decouples …) in this instance (re-binding to a new
+    // pin), else insert one before the instance's closing ')'.
+    if (std.mem.indexOfPos(u8, source[0..inst_end], inst_open, "(decouples")) |dpos| {
+        const dend = findFormEnd(source, dpos) orelse {
+            sendJsonError(ctx, res, 400, "malformed decouples form");
+            return;
+        };
+        try ow.writeAll(source[0..dpos]);
+        try ow.writeAll(form.items);
+        try ow.writeAll(source[dend..]);
+    } else {
+        const close = inst_end - 1; // the instance form's closing ')'
+        try ow.writeAll(source[0..close]);
+        try ow.print("\n    {s}", .{form.items});
+        try ow.writeAll(source[close..]);
+    }
+
+    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = out.items }) catch {
+        sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
+        return;
+    };
+    rebuildAndPush(ctx, name, res) catch {
+        sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
+        return;
+    };
+}
+
+/// Duplicate an instance (copy/paste): clone its source form verbatim — same
+/// component, value, pins, and any `(decouples …)`/`(dnp)` — right after the
+/// original, with two edits: the `(id …)` is stripped (the clone mints a fresh
+/// id, never sharing the original's frozen one), and the ref-des is replaced
+/// with a unique non-standard placeholder ("C2-copy") so `autoAssignRefDes`
+/// gives it a brand-new ref instead of colliding with the original. Body:
+/// `{"ref":"C2","srcOff":N}`.
+pub fn duplicateInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        sendJsonError(ctx, res, 400, "no body");
+        return;
+    };
+    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+        sendJsonError(ctx, res, 400, ERR_MISSING_REF);
+        return;
+    };
+    const src_off = parseSrcOff(body);
+
+    const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
+    defer ctx.allocator.free(file_path);
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
+        sendJsonError(ctx, res, 500, ERR_CANNOT_READ_FILE);
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const inst_open = findInstanceOpen(source, ref_des, src_off) orelse {
+        sendJsonError(ctx, res, 404, if (src_off > 0) ERR_GENERATED_PART else ERR_INSTANCE_NOT_FOUND);
+        return;
+    };
+    const inst_end = findFormEnd(source, inst_open) orelse {
+        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
+        return;
+    };
+
+    // Ref string bounds: the first quoted token after "(instance".
+    const q1 = std.mem.indexOfScalarPos(u8, source, inst_open, '"') orelse {
+        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
+        return;
+    };
+    const q2 = std.mem.indexOfScalarPos(u8, source, q1 + 1, '"') orelse {
+        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
+        return;
+    };
+    if (q2 >= inst_end) {
+        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
+        return;
+    }
+
+    // (id …) bounds, if present — stripped from the clone (incl. a leading space).
+    var id_lo: usize = inst_end - 1; // default: empty split (nothing to strip)
+    var id_hi: usize = inst_end - 1;
+    if (std.mem.indexOfPos(u8, source[0..inst_end], inst_open, "(id ")) |idp| {
+        id_hi = findFormEnd(source, idp) orelse inst_end;
+        id_lo = if (idp > 0 and source[idp - 1] == ' ') idp - 1 else idp;
+    }
+
+    // Unique non-standard placeholder label so the clone renumbers to a fresh ref.
+    var label_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer label_buf.deinit(ctx.allocator);
+    var n: usize = 1;
+    while (n < 10000) : (n += 1) {
+        label_buf.clearRetainingCapacity();
+        const lw = label_buf.writer(ctx.allocator);
+        if (n == 1) try lw.print("{s}-copy", .{ref_des}) else try lw.print("{s}-copy{d}", .{ ref_des, n });
+        const quoted = std.fmt.allocPrint(ctx.allocator, "\"{s}\"", .{label_buf.items}) catch break;
+        defer ctx.allocator.free(quoted);
+        if (std.mem.indexOf(u8, source, quoted) == null) break;
+    }
+
+    // Assemble: source up to (and including) the original, a blank line, then the
+    // clone (ref swapped, id removed), then the rest of the file.
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    const ow = out.writer(ctx.allocator);
+    try ow.writeAll(source[0..inst_end]);
+    try ow.writeAll("\n\n  ");
+    try ow.writeAll(source[inst_open .. q1 + 1]); // "(instance \""
+    try ow.writeAll(label_buf.items); // new placeholder ref
+    try ow.writeAll(source[q2..id_lo]); // "\" <component> <pins> …" up to the id
+    try ow.writeAll(source[id_hi..inst_end]); // closing ")" (id removed)
+    try ow.writeAll(source[inst_end..]);
+
+    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = out.items }) catch {
+        sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
+        return;
+    };
+    rebuildAndPush(ctx, name, res) catch {
+        sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
+        return;
+    };
+}
+
+/// Rename a net everywhere it appears: replace every quoted `"from"` token with
+/// `"to"` across the source. A net name surfaces as a quoted token in `(pin …
+/// "NET")`, `(port "NET" …)`, `(net "NET" …)` and the like, so one exact-token
+/// (quote-delimited) pass renames all pins/ports/net-forms at once — and won't
+/// touch a longer string that merely contains the name (a note, a wider net like
+/// "VDD3V3"). Renaming onto an existing net merges them (intentional). Body:
+/// `{"from":"LED2_DRV","to":"GP11_NET"}`.
+pub fn renameNetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        sendJsonError(ctx, res, 400, "no body");
+        return;
+    };
+    const from = parseJsonString(body, "\"from\"") orelse {
+        sendJsonError(ctx, res, 400, "missing from");
+        return;
+    };
+    const to = parseJsonString(body, "\"to\"") orelse {
+        sendJsonError(ctx, res, 400, "missing to");
+        return;
+    };
+    if (from.len == 0 or to.len == 0) {
+        sendJsonError(ctx, res, 400, "empty net name");
+        return;
+    }
+    // `to` becomes a bare quoted token; quotes/parens/whitespace would corrupt it.
+    if (std.mem.indexOfAny(u8, to, "\"()\x20\t\r\n") != null) {
+        sendJsonError(ctx, res, 400, "invalid net name (no spaces, quotes or parens)");
+        return;
+    }
+
+    const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
+    defer ctx.allocator.free(file_path);
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
+        sendJsonError(ctx, res, 500, ERR_CANNOT_READ_FILE);
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(ctx.allocator, "\"{s}\"", .{from});
+    defer ctx.allocator.free(needle);
+    if (std.mem.count(u8, source, needle) == 0) {
+        sendJsonError(ctx, res, 404, "net not found");
+        return;
+    }
+    const repl = try std.fmt.allocPrint(ctx.allocator, "\"{s}\"", .{to});
+    defer ctx.allocator.free(repl);
+    const out = std.mem.replaceOwned(u8, ctx.allocator, source, needle, repl) catch {
+        sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
+        return;
+    };
+    defer ctx.allocator.free(out);
+
+    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = out }) catch {
+        sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
+        return;
+    };
     rebuildAndPush(ctx, name, res) catch {
         sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
         return;

@@ -90,9 +90,9 @@ src/query.zig:156: std.debug.print reference outside allowed paths
 src/query.zig:202: std.debug.print reference outside allowed paths
 src/query.zig:229: std.debug.print reference outside allowed paths
 src/query.zig:81: std.debug.print reference outside allowed paths
-src/serve.zig:484: std.debug.print reference outside allowed paths
-src/serve.zig:485: std.debug.print reference outside allowed paths
+src/serve.zig:499: std.debug.print reference outside allowed paths
+src/serve.zig:500: std.debug.print reference outside allowed paths
 src/serve/api.zig:104: std.debug.print reference outside allowed paths
-src/serve/edit.zig:360: std.debug.print reference outside allowed paths
-src/serve/edit.zig:675: std.debug.print reference outside allowed paths
+src/serve/edit.zig:1230: std.debug.print reference outside allowed paths
+src/serve/edit.zig:407: std.debug.print reference outside allowed paths
 src/serve/upload_package.zig:220: std.debug.print reference outside allowed paths
