@@ -1028,6 +1028,13 @@
   // labstation wires A1=DUT_FIX_A0_3V3, B1=DUT_FIX_A0_MCU (both carry a suffix, so
   // passBase can't pair them). Pad numbers / GPIO names (PA3) never match.
   function pinTwinId(p) { const m = /^([ab])(\d+)$/i.exec(String(p || "")); return m ? (m[1].toUpperCase() === "A" ? "B" : "A") + m[2] : null; }
+  // A 2-port device names its signal pins with an IN/OUT suffix (RFIN↔RFOUT,
+  // ATTNIN↔ATTNOUT, INPUT↔OUTPUT). Given one pin's function name, the twin's expected
+  // name (upper-case), or null. This is the ONLY way to hop THROUGH a sealed-module chip
+  // whose internal coupling lands its input on a module-local net the chain key can't
+  // see — so it's a fallback tried only after the net-name conventions. Requires a
+  // non-empty base (so a bare power "IN"/"OUT" never pairs) and the twin pin to exist.
+  function pinIoTwin(name) { const m = /^(.+?)(IN|OUT)$/i.exec(String(name || "")); return m ? (m[1] + (m[2].toUpperCase() === "IN" ? "OUT" : "IN")).toUpperCase() : null; }
   // Signal-chain net-naming convention: a chain shares a net-name PREFIX (its "chain
   // key") and each net suffixes a node — RF1_IN, RF1_LNA, RF1_ATT, RF1_OUT → key "RF1".
   // A device bridging two nets of the SAME key is an inline link, so the map collapses
@@ -1150,7 +1157,7 @@
     real.forEach((h) => { if (!compByRef.has(h.ref)) compByRef.set(h.ref, h.component || ""); h.pins.forEach((p) => {
       if (!p.net) return;
       let a = netIC.get(p.net); if (!a) { a = []; netIC.set(p.net, a); } a.push({ ref: h.ref, name: p.name, pin: p.pin });
-      let b = pinsByRef.get(h.ref); if (!b) { b = []; pinsByRef.set(h.ref, b); } b.push({ pin: p.pin, net: p.net });
+      let b = pinsByRef.get(h.ref); if (!b) { b = []; pinsByRef.set(h.ref, b); } b.push({ pin: p.pin, net: p.net, name: p.name });
     }); });
     // Series / in-line passives: a 2-pin part bridging two nets. Built from BOTH the
     // laid-out spokes (m.passes — terms carry resolved nets) AND the staged band
@@ -1193,6 +1200,14 @@
       if (ik) {
         const sib = [...new Set(pins.filter((pp) => !isStub(pp.net) && pp.net !== inNet && chainKey(pp.net) === ik).map((pp) => pp.net))];
         if (sib.length === 1) return sib[0];
+      }
+      // (4) Pin-name IN/OUT pairing — the pin feeding inNet is named <X>IN and the chip
+      // has a matching <X>OUT pin (or vice-versa). Reaches through a sealed module whose
+      // internal coupling cap puts the chip's RF leg on a module-local net.
+      for (const pp of pins) {
+        if (pp.net !== inNet) continue;
+        const tw = pinIoTwin(pp.name); if (!tw) continue;
+        for (const q of pins) if (q.name && String(q.name).toUpperCase() === tw && !isStub(q.net) && q.net !== inNet) return q.net;
       }
       return null;
     };
