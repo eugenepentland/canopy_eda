@@ -1396,9 +1396,19 @@
   }
   function buildSheets() {
     sheets = [];
-    const authored = new Set(scene.authored_sections || []);
-    if (!authored.size) return;   // no explicit sections → one whole-design sheet
-    M.secs.forEach((sc) => { if (authored.has(sc.name)) sheets.push({ name: sc.name, title: sc.name, box: { x: sc.x, y: sc.y, w: sc.w, h: sc.h }, count: countInBox(sc.x, sc.y, sc.w, sc.h) }); });
+    const authored = scene.authored_sections || [];
+    if (!authored.length) return;   // no explicit sections → one whole-design sheet
+    // List EVERY authored section (so a freshly-created, still-empty section shows up
+    // as a sheet). Attach its laid-out box/count when present — a grid-less section
+    // has no box, so it lists + renames/deletes but doesn't zoom-to on select.
+    const byName = new Map();
+    M.secs.forEach((sc) => byName.set(sc.name, sc));
+    authored.forEach((nm) => {
+      const sc = byName.get(nm);
+      sheets.push(sc
+        ? { name: nm, title: nm, box: { x: sc.x, y: sc.y, w: sc.w, h: sc.h }, count: countInBox(sc.x, sc.y, sc.w, sc.h) }
+        : { name: nm, title: nm, box: null, count: 0 });
+    });
   }
   function buildSheetList() {
     clear(sheetList);
@@ -1416,8 +1426,21 @@
       row.querySelector(".nm").textContent = s.name;
       row.title = s.title;
       row.onclick = () => selectSheet(i);
+      const tools = mkEl("span", "ed-sheet-tools");
+      const rn = mkEl("button", "ed-x", "✎"); rn.title = "Rename sheet";
+      rn.onclick = (e) => { e.stopPropagation(); const nm = (prompt("Rename sheet:", s.name) || "").trim(); if (nm) applyRenameSection(s.name, nm); };
+      const dl = mkEl("button", "ed-x", "✕"); dl.title = "Delete sheet (must be empty)";
+      dl.onclick = (e) => { e.stopPropagation(); applyRemoveSection(s.name); };
+      tools.appendChild(rn); tools.appendChild(dl); row.appendChild(tools);
       sheetList.appendChild(row);
     });
+    const addRow = mkEl("div", "ed-sheet ed-sheet-add", "+ New sheet");
+    addRow.onclick = () => {
+      const nm = (prompt("New sheet (section) name:") || "").trim(); if (!nm) return;
+      const sub = (prompt("Subtitle (optional):", "") || "").trim();
+      applyAddSection(nm, sub);
+    };
+    sheetList.appendChild(addRow);
     syncSheetUI();
   }
   function selectSheet(i) {
@@ -1558,6 +1581,29 @@
     if (selection) { renderPartInspector(selection.ref); return; }
     if (hotNet) { renderNetInspector(hotNet); return; }
     inspector.appendChild(mkEl("div", "ed-insp-empty", "Select a part or net to see and edit its properties — click on the canvas, or double-click to jump straight to editing."));
+    renderPortsPanel();   // design-level: declare/drop boundary ports
+  }
+  // The design's boundary ports (derived from the scene's port-flagged labels) with
+  // add/remove controls — shown when nothing is selected (the design-level view).
+  function renderPortsPanel() {
+    const ports = (scene.ports || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    const sec = mkEl("div", "ed-ports");
+    sec.appendChild(mkEl("div", "ed-insp-sec", "Ports (" + ports.length + ")"));
+    if (!ports.length) sec.appendChild(mkEl("div", "ed-insp-empty", "No boundary ports declared."));
+    ports.forEach((p) => {
+      const row = mkEl("div", "ed-portrow");
+      row.appendChild(mkEl("span", "pn", p.name));
+      if (p.dir) row.appendChild(mkEl("span", "ct", p.dir));
+      const del = mkEl("button", "ed-x", "✕"); del.title = "Remove port"; del.onclick = () => applyRemovePort(p.name);
+      row.appendChild(del); sec.appendChild(row);
+    });
+    const add = mkEl("button", "ed-btn", "+ Add port");
+    add.onclick = () => {
+      const net = (prompt("Port net name:") || "").trim(); if (!net) return;
+      const dir = ((prompt("Direction (in / out / bidi):", "bidi") || "").trim() || "bidi").toLowerCase();
+      applyAddPort(net, dir);
+    };
+    sec.appendChild(add); inspector.appendChild(sec);
   }
   function renderPartInspector(ref) {
     const meta = partMeta(ref);
@@ -1568,7 +1614,7 @@
     head.appendChild(mkEl("span", "badge", hub ? "IC" : passType(ref, meta.component, meta.value, meta.symbol)));
     inspector.appendChild(head);
     const body = mkEl("div", "ed-insp-body");
-    body.appendChild(fieldRow("Ref-des", ref, null));
+    body.appendChild(fieldRow("Ref-des", ref, (v) => applyRefdes(ref, v)));
     // Component / footprint is swappable: an autocompleted field over the library
     // index (POST /api/edit-footprint validates the new family server-side).
     {
@@ -1627,6 +1673,33 @@
     if (!comp || comp === oldComp) return;
     try { await api("POST", `/api/edit-footprint/${DESIGN}`, { ref, component: comp, oldComponent: oldComp, srcOff: srcByRef(ref) }); toast(`${ref} → ${comp}`); await refetch(); }
     catch (err) { toast("Swap failed: " + err.message, true); }
+  }
+  async function applyRefdes(ref, to) {
+    if (!to || to === ref) return;
+    try { await api("POST", `/api/rename-refdes/${DESIGN}`, { ref, to, srcOff: srcByRef(ref) }); toast(`${ref} → ${to}`); if (selection) selection.ref = to; await refetch(); }
+    catch (err) { toast("Rename failed: " + err.message, true); }
+  }
+  // Structural authoring (sheets/sections + ports) — each rebuilds via refetch.
+  async function applyAddSection(section, subtitle) {
+    try { await api("POST", `/api/add-section/${DESIGN}`, subtitle ? { section, subtitle } : { section }); toast("Added sheet " + section); await refetch(); }
+    catch (err) { toast("Add sheet failed: " + err.message, true); }
+  }
+  async function applyRenameSection(from, to) {
+    if (!to || to === from) return;
+    try { await api("POST", `/api/rename-section/${DESIGN}`, { from, to }); toast(`${from} → ${to}`); await refetch(); }
+    catch (err) { toast("Rename failed: " + err.message, true); }
+  }
+  async function applyRemoveSection(section) {
+    try { await api("POST", `/api/remove-section/${DESIGN}`, { section }); toast("Removed sheet " + section); await refetch(); }
+    catch (err) { toast("Remove failed: " + err.message, true); }
+  }
+  async function applyAddPort(net, dir) {
+    try { await api("POST", `/api/add-port/${DESIGN}`, { net, dir }); toast(`port ${net} ${dir}`); await refetch(); }
+    catch (err) { toast("Add port failed: " + err.message, true); }
+  }
+  async function applyRemovePort(net) {
+    try { await api("POST", `/api/remove-port/${DESIGN}`, { net }); toast("Removed port " + net); await refetch(); }
+    catch (err) { toast("Remove port failed: " + err.message, true); }
   }
   async function applyPinNet(ref, pin, net) {
     try { await api("POST", `/api/rewire-pin/${DESIGN}`, { ref, pin, net, srcOff: srcByRef(ref) }); toast(`${ref}.${pin} → ${net}`); await refetch(); }
@@ -1712,6 +1785,17 @@
     const sectionSel = ov.querySelector("#add-section");
     scene.sections.forEach((s) => { const o = document.createElement("option"); o.value = s.name; o.textContent = s.name; if (s.name === sheetName) o.selected = true; sectionSel.appendChild(o); });
     const rootOpt = document.createElement("option"); rootOpt.value = ""; rootOpt.textContent = "(design root)"; sectionSel.appendChild(rootOpt);
+    const newOpt = document.createElement("option"); newOpt.value = "__new__"; newOpt.textContent = "➕ New section…"; sectionSel.appendChild(newOpt);
+    // Picking "New section…" prompts for a name and inserts it as a selected option;
+    // the section itself is created (add-section) at submit if it doesn't exist yet.
+    sectionSel.addEventListener("change", () => {
+      if (sectionSel.value !== "__new__") return;
+      const nm = (prompt("New section name:") || "").trim();
+      if (!nm) { sectionSel.value = sheetName || ""; return; }
+      let opt = [...sectionSel.options].find((o) => o.value === nm);
+      if (!opt) { opt = document.createElement("option"); opt.value = nm; opt.textContent = nm + " (new)"; sectionSel.insertBefore(opt, sectionSel.firstChild); }
+      sectionSel.value = nm;
+    });
 
     const pinsBox = ov.querySelector("#add-pins");
     function addPinRow(pn, net) {
@@ -1772,13 +1856,18 @@
     ov.querySelector("#add-cancel").onclick = () => ov.remove();
     goBtn.onclick = async () => {
       if (!chosen) return;
-      const value = ov.querySelector("#add-value").value.trim(), ref = ov.querySelector("#add-ref").value.trim(), section = sectionSel.value;
+      const value = ov.querySelector("#add-value").value.trim(), ref = ov.querySelector("#add-ref").value.trim();
+      let section = sectionSel.value; if (section === "__new__") section = "";
       const pins = {};
       [...pinsBox.children].forEach((row) => { const pn = row.children[0].value.trim(), net = row.children[1].value.trim(); if (pn && net) pins[pn] = net; });
       const body = chosen.kind === "module" ? { kind: "module", component: chosen.name, name: chosen.name, args: value, import: true } : { component: chosen.name, value, section, ref: ref || undefined, pins, import: true };
       goBtn.disabled = true; goBtn.textContent = "Adding…";
-      try { await api("POST", `/api/add-instance/${DESIGN}`, body); toast("Added " + chosen.name); ov.remove(); await refetch(); }
-      catch (err) { toast("Add failed: " + err.message, true); goBtn.disabled = false; goBtn.textContent = "Add"; }
+      try {
+        // Create the target section first if it's a new one, so the part lands in it
+        // instead of falling back to the design root.
+        if (section && !(scene.authored_sections || []).includes(section)) await api("POST", `/api/add-section/${DESIGN}`, { section });
+        await api("POST", `/api/add-instance/${DESIGN}`, body); toast("Added " + chosen.name); ov.remove(); await refetch();
+      } catch (err) { toast("Add failed: " + err.message, true); goBtn.disabled = false; goBtn.textContent = "Add"; }
     };
   }
 

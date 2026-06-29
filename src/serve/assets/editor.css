@@ -58,6 +58,15 @@ kbd {
 .ed-sheet .nm { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ed-sheet.active .nm { color: #e6edf3; font-weight: 600; }
 .ed-sheet .ct { margin-left: auto; color: #6e7681; font: 10px monospace; }
+.ed-sheet-tools { display: none; gap: 1px; }
+.ed-sheet:hover .ed-sheet-tools { display: flex; }
+.ed-x { background: transparent; border: none; color: #6e7681; cursor: pointer; font-size: 12px; line-height: 1; padding: 1px 4px; border-radius: 4px; }
+.ed-x:hover { color: #e6edf3; background: #30363d; }
+.ed-sheet-add { color: #58a6ff; opacity: .85; }
+.ed-sheet-add:hover { opacity: 1; background: #161b22; }
+.ed-ports { margin-top: 12px; }
+.ed-portrow { display: flex; align-items: center; gap: 6px; padding: 3px 2px; font-size: 12px; }
+.ed-portrow .pn { flex: 1 1 auto; color: #d2a8ff; font-family: monospace; }
 .ed-iso {
   padding: 9px 12px; border-top: 1px solid #21262d; color: #8b949e;
   font-size: 12px; display: flex; align-items: center; gap: 7px; cursor: pointer;

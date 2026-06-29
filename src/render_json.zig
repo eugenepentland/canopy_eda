@@ -243,6 +243,9 @@ const SceneGraph = struct {
     /// editor's sheet navigator pages by authored section — and collapses to a
     /// single whole-design sheet when there are none — instead of auto per-IC.
     authored_sections: []const []const u8 = &.{},
+    /// The design's top-level boundary `(port …)` forms, so the editor can list /
+    /// add / remove them (the design-level interface view).
+    ports: []const env_mod.Port = &.{},
 
     fn init(allocator: Allocator) SceneGraph {
         return .{
@@ -560,6 +563,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     var scene = SceneGraph.init(allocator);
     scene.design_name = block.name;
     scene.authored_sections = try collectAuthoredSections(allocator, block);
+    scene.ports = block.ports;
 
     var alt_map: PinoutAltMap = .empty;
     var asserted_fns = try asserted_fns_mod.buildMap(allocator, block);
@@ -1774,6 +1778,20 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
     for (scene.authored_sections, 0..) |nm, i| {
         if (i > 0) try w.writeAll(",");
         try json_writer.writeString(w, nm);
+    }
+    try w.writeAll("]");
+
+    // Top-level boundary ports (the editor's design-interface list).
+    try w.writeAll(",\"ports\":[");
+    for (scene.ports, 0..) |p, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try json_writer.writeString(w, p.name);
+        try w.writeAll(",\"net\":");
+        try json_writer.writeString(w, p.net);
+        try w.writeAll(",\"dir\":");
+        try json_writer.writeString(w, p.direction);
+        try w.writeAll("}");
     }
     try w.writeAll("]");
 
