@@ -1569,7 +1569,17 @@
     inspector.appendChild(head);
     const body = mkEl("div", "ed-insp-body");
     body.appendChild(fieldRow("Ref-des", ref, null));
-    body.appendChild(fieldRow("Component", meta.component || "—", null));
+    // Component / footprint is swappable: an autocompleted field over the library
+    // index (POST /api/edit-footprint validates the new family server-side).
+    {
+      const row = mkEl("div", "ed-fld"); row.appendChild(mkEl("label", null, "Component"));
+      const cur = meta.component || "";
+      const inp = document.createElement("input"); inp.value = cur; inp.placeholder = "(component)";
+      inp.setAttribute("list", "ed-complist"); inp.setAttribute("autocomplete", "off");
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); inp.blur(); } });
+      inp.addEventListener("change", () => { const v = inp.value.trim(); if (v && v !== cur) applyFootprint(ref, v, cur); });
+      row.appendChild(inp); body.appendChild(row);
+    }
     body.appendChild(fieldRow("Value", meta.value || "", (v) => applyValue(ref, v)));
     const pins = partPins(ref);
     if (pins.length) {
@@ -1613,6 +1623,11 @@
     try { await api("POST", `/api/edit-value/${DESIGN}`, { ref, value, srcOff: srcByRef(ref) }); toast(`${ref} = ${value}`); await refetch(); }
     catch (err) { toast("Edit failed: " + err.message, true); }
   }
+  async function applyFootprint(ref, comp, oldComp) {
+    if (!comp || comp === oldComp) return;
+    try { await api("POST", `/api/edit-footprint/${DESIGN}`, { ref, component: comp, oldComponent: oldComp, srcOff: srcByRef(ref) }); toast(`${ref} → ${comp}`); await refetch(); }
+    catch (err) { toast("Swap failed: " + err.message, true); }
+  }
   async function applyPinNet(ref, pin, net) {
     try { await api("POST", `/api/rewire-pin/${DESIGN}`, { ref, pin, net, srcOff: srcByRef(ref) }); toast(`${ref}.${pin} → ${net}`); await refetch(); }
     catch (err) { toast("Rewire failed: " + err.message, true); }
@@ -1646,9 +1661,25 @@
     catch (err) { toast("Paste failed: " + err.message, true); }
   }
 
+  // Load the component/module library index once (shared by the Add dialog and
+  // the inspector's component-swap field) and fill the <datalist> that backs the
+  // component autocomplete.
+  async function ensureLib() {
+    if (!libIndex) {
+      try { libIndex = await api("GET", "/api/lib-index"); } catch (e) { libIndex = { components: [], modules: [] }; }
+      populateCompDatalist();
+    }
+    return libIndex;
+  }
+  function populateCompDatalist() {
+    let dl = document.getElementById("ed-complist");
+    if (!dl) { dl = mkEl("datalist"); dl.id = "ed-complist"; document.body.appendChild(dl); }
+    clear(dl);
+    (libIndex && libIndex.components || []).forEach((c) => { const o = document.createElement("option"); o.value = c.name; if (c.footprint) o.label = c.footprint; dl.appendChild(o); });
+  }
   // ── Add component (A) ────────────────────────────────────────────────
   async function openAdd() {
-    if (!libIndex) { try { libIndex = await api("GET", "/api/lib-index"); } catch (e) { libIndex = { components: [], modules: [] }; } }
+    await ensureLib();
     const sheetName = activeSheet >= 0 && sheets[activeSheet] ? sheets[activeSheet].name : "";
     const ov = document.createElement("div");
     ov.className = "ed-overlay"; ov.id = "ed-add";
@@ -1925,5 +1956,6 @@
   sizeCanvas();
   rebuildScene();
   fetchErc();
+  ensureLib();
   requestAnimationFrame(() => { fitAll(); updateStatus(); requestAnimationFrame(frame); });
 })();
