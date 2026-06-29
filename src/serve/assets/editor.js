@@ -1393,9 +1393,41 @@
         });
         return lastBot;
       };
+      // Show ALL of this component's remaining pins — the ones with no point-to-point
+      // partner (power/ground, multi-drop buses, board IO) — as labeled net stubs in a
+      // band BELOW the partner pins, extending the box downward. The existing
+      // point-to-point pins are left exactly as they are. One row per distinct net; a
+      // pull-up/down on the net hangs off its stub. (Power/ground move to the rail band
+      // instead when the power layer is on.)
+      const layoutExtras = (baseY) => {
+        const rhub = real.find((h) => h.ref === ref);
+        if (!rhub) return 0;
+        const shown = new Set();
+        cell.leftPins.forEach((p) => shown.add(p.net));
+        cell.rightPins.forEach((p) => shown.add(p.net));
+        const EXTRA_TOP = 18, EXTRA_PITCH = 28, EXTRA_STUB = 64, EXTRA_W = 210;
+        const icRight = icX + ICW;
+        const seen = new Set(); let ey = baseY + EXTRA_TOP, n = 0;
+        (rhub.pins || []).forEach((p) => {
+          const net = p.anet || p.net;
+          if (!net || shown.has(net) || seen.has(net)) return;
+          if (showPower && isStub(net)) return;        // power/ground live in the rail band when that layer is on
+          seen.add(net);
+          cell.rightPins.push({ name: p.name, x: icRight, y: ey, net });
+          cell.wires.push({ net, pts: [[icRight, ey], [icRight + EXTRA_STUB, ey]] });
+          cell.labels.push({ text: net, x: icRight + EXTRA_STUB + 6, y: ey, anchor: "start" });
+          pullsOn(net, icRight, icRight + EXTRA_STUB, ey);
+          ey += EXTRA_PITCH; n++;
+        });
+        if (!n) return 0;
+        const need = 2 * MX + icX + ICW + EXTRA_W;
+        if (cell.w < need) cell.w = need;
+        return EXTRA_TOP + n * EXTRA_PITCH;
+      };
       const lh = layoutSide(side.left, false, leftPT), rh = layoutSide(side.right, true, rightPT);
       const coreH = Math.max(lh, rh, HEAD + PITCH) + PAD;
-      cell.ch = coreH + (showPower ? layoutRails(cell, ref, coreH) : 0);
+      const extraH = layoutExtras(coreH);
+      cell.ch = coreH + extraH + (showPower ? layoutRails(cell, ref, coreH + extraH) : 0);
       cell.h = 2 * MY + cell.ch;
       cells.push(cell);
     });
@@ -1419,7 +1451,7 @@
         m.hubs.push({ ref: g.ref, label: g.label, part: g.part, x: ox + g.x, y: oy + g.y, w: g.w, h: g.h, cx: ox + g.x + g.w / 2, cy: oy + g.y + g.h / 2, pins: pins2, synthetic: true, ghost: true, terminal: !!g.terminal, partnerRef: g.terminal ? null : g.ref });
       });
       c.wires.forEach((w) => { const pts = w.pts.map((pt) => [ox + pt[0], oy + pt[1]]); m.wires.push({ net: w.net, bus: false, link: true, diff: w.diff, via: w.via, pts, bb: bbOf(pts) }); });
-      c.labels.forEach((l) => m.labels.push({ text: l.text, x: ox + l.x, y: oy + l.y, anchor: "center", ground: false, port: false, net: l.text, link: true, diff: l.diff }));
+      c.labels.forEach((l) => m.labels.push({ text: l.text, x: ox + l.x, y: oy + l.y, anchor: l.anchor || "center", ground: false, port: false, net: l.text, link: true, diff: l.diff }));
       c.pulls.forEach((p) => m.pulls.push({ x: ox + p.x, y: oy + p.y, ref: p.ref, value: p.value, rail: p.rail, up: p.up }));
       if (c.rails) c.rails.forEach((r) => m.rails.push({ x: ox + r.x, y: oy + r.y, net: r.net, up: r.up, decoup: r.decoup }));
       bx1 = Math.max(bx1, c.x + c.w); by1 = Math.max(by1, c.y + c.h);
