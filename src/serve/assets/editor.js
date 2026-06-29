@@ -366,8 +366,8 @@
       if (p.up) {                                                   // pull-up: rail bar + name
         ctx.strokeStyle = C.passStroke; ctx.lineWidth = sw(1.6); line(x - 5, yend, x + 5, yend);
         if (txt) { ctx.fillStyle = C.labelNet; ctx.font = "10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText("▲ " + p.rail, x, yend + 2); }
-      } else {
-        drawGround(x, yend, false, sw, txt, p.rail || "GND");      // pull-down: ground
+      } else {                                                    // pull-down: ground symbol (caption only for a named ground — the rake already says GND)
+        drawGround(x, yend, false, sw, txt && !/^gnd$/i.test(p.rail || ""), p.rail || "");
       }
     });
     ctx.globalAlpha = 1; ctx.textBaseline = "middle";
@@ -600,7 +600,7 @@
     // In the global map a proxy box is a first-class, selectable+editable copy of
     // the real component (click it → inspector, like any part); only the fan-out
     // overlay keeps proxies as click-to-jump links.
-    for (const h of M.hubs) if (h.ghost && x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return ghostAll ? { t: "part", ref: h.partnerRef || h.ref, kind: "hub" } : { t: "ghost", ref: h.partnerRef };
+    for (const h of M.hubs) if (h.ghost && !h.terminal && x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return ghostAll ? { t: "part", ref: h.partnerRef || h.ref, kind: "hub" } : { t: "ghost", ref: h.partnerRef };
     for (const h of M.hubs) { if (h.synthetic) continue; if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return { t: "part", ref: h.ref, kind: "hub" }; }
     for (const p of M.passes) if (x >= p.x && x <= p.x + p.w && y >= p.top && y <= p.top + p.h) return { t: "part", ref: p.ref, kind: "pass" };
     for (const w of M.wires) for (let i = 1; i < w.pts.length; i++) if (distToSeg(x, y, w.pts[i - 1], w.pts[i]) < tw) return { t: "net", net: w.net };
@@ -876,6 +876,33 @@
   // device carrying both ends of a channel translates that signal through itself.
   function passBase(n) { return n.replace(/_\d+V\d*$/i, ""); }
   function passChannel(a, b) { return a !== b && passBase(a) === passBase(b); }
+  // A level translator also names its channel pins A<n> / B<n> (TXB0104, TXS0108,
+  // SN74AXC8T245, LSF0108…). The A<n>↔B<n> twin pin id, or null. This recognises a
+  // channel even when the nets DON'T follow the voltage-twin convention — e.g. the
+  // labstation wires A1=DUT_FIX_A0_3V3, B1=DUT_FIX_A0_MCU (both carry a suffix, so
+  // passBase can't pair them). Pad numbers / GPIO names (PA3) never match.
+  function pinTwinId(p) { const m = /^([ab])(\d+)$/i.exec(String(p || "")); return m ? (m[1].toUpperCase() === "A" ? "B" : "A") + m[2] : null; }
+  // Guard for the pin-id path: are two nets plausibly the SAME signal at two domains?
+  // Either the voltage twin (X / X_1V8), or a shared base with differing trailing
+  // tags where ≥1 tag is a voltage (DUT_FIX_A0_3V3 / DUT_FIX_A0_MCU). Stops a
+  // board-to-board connector's unrelated A1/B1 pins (SPI_CLK / SPI_MISO) collapsing.
+  function chanNets(a, b) {
+    if (!a || !b || a === b) return false;
+    if (passChannel(a, b)) return true;
+    const i = a.lastIndexOf("_"), j = b.lastIndexOf("_");
+    if (i < 1 || j < 1 || a.slice(0, i) !== b.slice(0, j)) return false;
+    const ta = a.slice(i + 1), tb = b.slice(j + 1);
+    return ta !== tb && (/^\d+v\d*$/i.test(ta) || /^\d+v\d*$/i.test(tb));
+  }
+  // Longest common prefix of a set of net names, trimmed of trailing separators — a
+  // compact label for a terminal stub gathering a shifter's out-nets (DUT_FIX_A0_MCU
+  // … DUT_FIX_A7_MCU → "DUT_FIX_A"). Falls back to the first name.
+  function lcpLabel(names) {
+    const xs = names.filter(Boolean); if (!xs.length) return "";
+    let p = xs[0];
+    for (const s of xs) { let k = 0; while (k < p.length && k < s.length && p[k] === s[k]) k++; p = p.slice(0, k); if (!p) break; }
+    return p.replace(/[_\-]+$/, "") || xs[0];
+  }
   // "Ghost partners": ring an IC with lightweight dashed proxies of every OTHER IC
   // it has a direct point-to-point net with (exactly 2 endpoints, both ICs, no
   // passive, non-power/ground). Each shared pad is aligned to the focus IC's row,
@@ -969,17 +996,42 @@
     real.forEach((h) => { if (!compByRef.has(h.ref)) compByRef.set(h.ref, h.component || ""); h.pins.forEach((p) => {
       if (!p.net) return;
       let a = netIC.get(p.net); if (!a) { a = []; netIC.set(p.net, a); } a.push({ ref: h.ref, name: p.name, pin: p.pin });
-      let b = pinsByRef.get(h.ref); if (!b) { b = []; pinsByRef.set(h.ref, b); } b.push(p.net);
+      let b = pinsByRef.get(h.ref); if (!b) { b = []; pinsByRef.set(h.ref, b); } b.push({ pin: p.pin, net: p.net });
     }); });
-    m.passes.forEach((p) => {
-      if (!p.term || p.term.length !== 2) return;
-      const push = (net, other) => { if (!net) return; let a = netPass.get(net); if (!a) { a = []; netPass.set(net, a); } a.push({ ref: p.ref, value: p.label, type: p.type, otherNet: other }); };
-      push(p.term[0].net, p.term[1].net); push(p.term[1].net, p.term[0].net);
+    // Series / in-line passives: a 2-pin part bridging two nets. Built from BOTH the
+    // laid-out spokes (m.passes — terms carry resolved nets) AND the staged band
+    // (scene.staged — its pins carry nets, but addStaged renders them net-less and
+    // isn't even called in map mode). Without the staged half, a chain that runs
+    // through a staged R — e.g. the DUT protection resistors between a level shifter
+    // and the (not-yet-placed) connector — looks like an immediate dead-end, so the
+    // pass-through hop guard fails and the shifter never collapses inline.
+    const seenPass = new Set();
+    const addPassEdge = (ref, type, label, n0, n1) => {
+      if (!ref || (!n0 && !n1) || seenPass.has(ref)) return; seenPass.add(ref);
+      const push = (net, other) => { if (!net) return; let a = netPass.get(net); if (!a) { a = []; netPass.set(net, a); } a.push({ ref, value: label, type, otherNet: other }); };
+      push(n0, n1); push(n1, n0);
+    };
+    m.passes.forEach((p) => { if (p.term && p.term.length === 2) addPassEdge(p.ref, p.type, p.label, p.term[0].net, p.term[1].net); });
+    (scene.staged || []).forEach((c) => {
+      if (!c.pins || c.pins.length !== 2) return;
+      addPassEdge(c.ref, passType(c.ref, c.component, c.value, c.symbol), c.value || c.component || c.ref, c.pins[0].net, c.pins[1].net);
     });
     const isStub = (n) => !n || isGroundName(n) || isPowerName(n);
     // The level-translation twin this device carries for `inNet` (its other channel
-    // leg) — the exit net of a pass-through hop, or null if it carries no twin.
-    const passExit = (ref, inNet) => { for (const n of (pinsByRef.get(ref) || [])) if (!isStub(n) && passChannel(inNet, n)) return n; return null; };
+    // leg) — the exit net of a pass-through hop, or null if it carries no twin. Two
+    // ways to recognise the channel: (1) the net-name voltage twin (X / X_1V8), or
+    // (2) the A<n>↔B<n> pin-id convention (guarded by chanNets, for designs whose
+    // channel nets don't twin by name — e.g. labstation's _3V3 / _MCU).
+    const passExit = (ref, inNet) => {
+      const pins = pinsByRef.get(ref) || [];
+      for (const pp of pins) if (!isStub(pp.net) && passChannel(inNet, pp.net)) return pp.net;
+      for (const pp of pins) {
+        if (pp.net !== inNet) continue;
+        const tw = pinTwinId(pp.pin); if (!tw) continue;
+        for (const q of pins) if (q.pin === tw && !isStub(q.net) && chanNets(inNet, q.net)) return q.net;
+      }
+      return null;
+    };
     // Where a net continues, excluding refs already on the path (start IC + every
     // device hopped through), the passive we arrived through, and stub passives.
     const conts = (net, viaPass, excl) => {
@@ -997,6 +1049,7 @@
       // standalone block on top of the inline chip.
       if (passExit(h.ref, p0.net)) return;
       let net = p0.net, viaPass = null; const chain = [], startNet = p0.net, seenNets = new Set(), excl = new Set([h.ref]);
+      let firstDev = null, recorded = false;
       for (let step = 0; step < 12; step++) {
         if (isStub(net) || seenNets.has(net)) break;
         seenNets.add(net);
@@ -1011,15 +1064,33 @@
           const ex = passExit(c.ref, net);
           if (ex && !seenNets.has(ex) && conts(ex, null, new Set([...excl, c.ref])).length === 1) {
             chain.push({ ref: c.ref, value: "", type: "device", device: true, component: compByRef.get(c.ref) || "", inNet: net, outNet: ex });
+            if (!firstDev) firstDev = { ref: c.ref, inNet: net, outNet: ex, component: compByRef.get(c.ref) || "" };
             excl.add(c.ref); viaPass = null; net = ex; continue;
           }
           if (c.ref !== h.ref) {
             const key = [h.ref + "." + p0.pin, c.ref + "." + c.pin].sort().join("|");
             if (!seen.has(key)) { seen.add(key); links.push({ a: { ref: h.ref, name: p0.name, pin: p0.pin, net: startNet }, b: { ref: c.ref, name: c.name, pin: c.pin, net }, passives: chain.slice() }); }
+            recorded = true;
           }
           break;
         }
         chain.push({ ref: c.ref, value: c.value, type: c.type }); viaPass = c.ref; net = c.otherNet;
+      }
+      // A pass-through whose far side never reaches a second IC (e.g. the DUT
+      // connector isn't instantiated yet — the channel dies in the protection
+      // R/TVS net). Still surface the device inline with its in/out nets; the far
+      // end becomes a terminal stub, grouped per device (ref + " ▸") so a shifter's
+      // channels cluster into one run instead of scattering one block per net.
+      if (firstDev && !recorded) {
+        const key = h.ref + "." + p0.pin + "|term";
+        if (!seen.has(key)) {
+          seen.add(key);
+          links.push({
+            a: { ref: h.ref, name: p0.name, pin: p0.pin, net: startNet },
+            b: { ref: firstDev.ref + " ▸", terminal: true, name: "", pin: firstDev.outNet, net: firstDev.outNet },
+            passives: [{ ref: firstDev.ref, value: "", type: "device", device: true, component: firstDev.component, inNet: firstDev.inNet, outNet: firstDev.outNet }],
+          });
+        }
       }
     }));
     return links;
@@ -1045,16 +1116,24 @@
       let parts = byIC.get(a.ref); if (!parts) { parts = new Map(); byIC.set(a.ref, parts); }
       let arr = parts.get(b.ref); if (!arr) { arr = []; parts.set(b.ref, arr); }
       const pm = b.name && !/^[0-9]+$/.test(b.name) && b.name !== b.pin;   // partner name meaningful?
-      const item = { net: a.net, outNet: null, through: null, via: null, icPinName: a.name, ghostPinName: pm ? b.name : a.name, diff: isDiff(a.net) };
+      const item = { net: a.net, outNet: null, farNet: null, through: null, via: null, tail: null, icPinName: a.name, ghostPinName: pm ? b.name : a.name, diff: isDiff(a.net), terminal: !!b.terminal };
       const devs = link.passives.filter((x) => x.device);
-      if (link.passives.length === 1 && devs.length === 1) {
-        // A single pass-through device becomes a FULL inline block (ref + mpn +
-        // in/out pins) in a middle column — drawn like every other block, not a
-        // chip. It renames the signal, so the partner sits on the translated net.
-        item.through = { ref: devs[0].ref, component: devs[0].component || "" };
-        item.outNet = (b.net && b.net !== a.net) ? b.net : null;
+      if (devs.length === 1) {
+        // Exactly one pass-through device → a FULL inline block (ref + mpn + in/out
+        // pins) in a middle column, drawn like every other block. Any series passive
+        // AFTER it (the DUT protection R between the shifter and the connector /
+        // monitor mux) rides the OUTPUT leg as a small symbol; the partner ghost
+        // sits on the net past it. With no tail this is the plain shifter (cyclops).
+        const dev = devs[0], tail = link.passives.filter((x) => !x.device);
+        item.through = { ref: dev.ref, component: dev.component || "" };
+        const sOut = dev.outNet || b.net;                                   // shifter's own output net
+        item.outNet = (sOut && sOut !== a.net) ? sOut : null;
+        if (tail.length) {
+          item.tail = { type: tail.length === 1 ? tail[0].type : "box", label: tail.length === 1 ? (tail[0].ref + (tail[0].value ? " " + tail[0].value : "")) : tail.map((x) => x.ref).join("+") };
+          item.farNet = (b.net && b.net !== sOut && b.net !== a.net) ? b.net : null;   // net past the tail (ghost pin)
+        }
       } else if (link.passives.length) {
-        // A plain series passive (or a chain) stays a small inline symbol.
+        // A plain series passive (or a multi-device chain) stays a small inline symbol.
         const one = link.passives[0], refs = link.passives.map((x) => x.ref).join("+");
         item.via = { type: link.passives.length === 1 ? one.type : "box", label: link.passives.length === 1 ? (one.ref + (one.value ? " " + one.value : "")) : refs, device: devs.length > 0 };
         item.outNet = (devs.length > 0 && b.net && b.net !== a.net) ? b.net : null;
@@ -1071,15 +1150,18 @@
     const links = icLinks(m);
     if (!links.length) return;
     const byRef = new Map();                              // ref -> [link index…]
+    const terminalRefs = new Set();                       // synthetic "ref ▸" stubs — never anchor a cell
     links.forEach((lk, i) => [lk.a.ref, lk.b.ref].forEach((r) => {
       let a = byRef.get(r); if (!a) { a = []; byRef.set(r, a); } a.push(i);
     }));
+    links.forEach((lk) => { if (lk.b.terminal) terminalRefs.add(lk.b.ref); });
     const deg = (r) => byRef.get(r).length;               // total degree (tiebreak)
     const covered = new Array(links.length).fill(false);
     let remaining = links.length;
     while (remaining > 0) {
       let best = null, bestN = -1;
       byRef.forEach((idxs, ref) => {
+        if (terminalRefs.has(ref)) return;                // a terminal stub is only ever a partner, not an anchor
         let n = 0; for (const i of idxs) if (!covered[i]) n++;
         if (n <= 0) return;
         if (best === null || n > bestN ||
@@ -1109,8 +1191,8 @@
       };
       add(p.term[0].net, p.term[1].net); add(p.term[1].net, p.term[0].net);
     });
-    const PITCH = 38, HEAD = 46, PAD = 18, LBL = 44, GROWGAP = 22, ICW = 168, GW = 146, OUT = 92, MX = 24, MY = 22;
-    const SHEAD = 38, SHIFT_W = 122, LEAD = 66, PULLH = 30;       // pass-through shifter block + leads; pull-branch height
+    const PITCH = 38, HEAD = 46, PAD = 18, LBL = 44, GROWGAP = 20, ICW = 168, GW = 146, OUT = 92, MX = 24, MY = 22;
+    const SHEAD = 38, SHIFT_W = 122, LEAD = 92, PULLH = 30;       // pass-through shifter block + leads (wide enough for a ~14-char net label); pull-branch height
     const cells = [];
     [...byIC.entries()].forEach(([ref, parts]) => {
       const groups = [...parts.entries()].map(([pref, items]) => ({ pref, label: labelOf.get(pref) || pref, items })).sort((a, b) => b.items.length - a.items.length);
@@ -1136,7 +1218,7 @@
         const ghX = pt ? (onRight ? icEdge + LEAD + SHIFT_W + LEAD : icEdge - LEAD - SHIFT_W - LEAD - GW)
           : (onRight ? icEdge + OUT : icEdge - OUT - GW);
         const ghIn = onRight ? ghX : ghX + GW;
-        let y = HEAD + PITCH / 2;
+        let y = HEAD + PITCH / 2, lastBot = HEAD + PITCH;
         gs.forEach((g) => {
           // Order items so each shifter's channels are a contiguous run (direct first).
           const ordered = g.items.slice().sort((p, q) => {
@@ -1149,13 +1231,15 @@
             const s = it.through ? it.through.ref : null;
             if (s !== curS) { if (s) y += SHEAD; curS = s; }       // header room before a shifter run
             (onRight ? cell.rightPins : cell.leftPins).push({ name: it.icPinName, x: icEdge, y, net: it.net });
-            const gnet = it.outNet || it.net;
+            const gnet = it.farNet || it.outNet || it.net;
             gpins.push({ pin: gnet, name: it.ghostPinName === it.icPinName ? "" : it.ghostPinName, side: onRight ? "left" : "right", x: ghIn, y, net: gnet, vx: null, vy: null });
             rows.push({ it, y, s });
             y += PITCH;
             if (pullByNet.has(it.net) || (it.outNet && pullByNet.has(it.outNet))) y += PULLH;   // room for a pull branch
           });
-          const gTop = rows[0].y - LBL, gBot = rows[rows.length - 1].y + PITCH / 2;
+          const last = rows[rows.length - 1];
+          const lastPull = pullByNet.has(last.it.net) || (last.it.outNet && pullByNet.has(last.it.outNet));
+          const gTop = rows[0].y - LBL, gBot = last.y + (lastPull ? PULLH : PITCH / 2);   // box contains a trailing pull branch
           let i = 0;
           while (i < rows.length) {
             const r = rows[i];
@@ -1167,25 +1251,30 @@
             }
             let j = i; while (j < rows.length && rows[j].s === r.s) j++;
             const run = rows.slice(i, j), spins = [];
-            run.forEach((rr) => {                                  // anchor → shifter.in, shifter.out → ghost
-              const oNet = rr.it.outNet || rr.it.net;
+            run.forEach((rr) => {                                  // anchor → shifter.in, shifter.out → (tail R) → ghost
+              const oNet = rr.it.outNet || rr.it.net;              // shifter's own output net
+              const fNet = rr.it.farNet || oNet;                   // ghost-side net (past any series protection R)
               spins.push({ pin: rr.it.net, name: "", side: onRight ? "left" : "right", x: shIn, y: rr.y, net: rr.it.net, vx: null, vy: null });
               spins.push({ pin: oNet, name: "", side: onRight ? "right" : "left", x: shOut, y: rr.y, net: oNet, vx: null, vy: null });
               cell.wires.push({ net: rr.it.net, diff: rr.it.diff, pts: [[icEdge, rr.y], [shIn, rr.y]] });
-              cell.wires.push({ net: oNet, diff: rr.it.diff, pts: [[shOut, rr.y], [ghIn, rr.y]] });
+              cell.wires.push({ net: fNet, diff: rr.it.diff, via: rr.it.tail || null, pts: [[shOut, rr.y], [ghIn, rr.y]] });
               cell.labels.push({ text: rr.it.net, x: (icEdge + shIn) / 2, y: rr.y - 10, diff: rr.it.diff });
-              if (rr.it.outNet) cell.labels.push({ text: rr.it.outNet, x: (shOut + ghIn) / 2, y: rr.y - 10, diff: rr.it.diff });
+              // shifter output net: at the leg midpoint normally, else hugged to the shifter so it clears the tail symbol.
+              if (rr.it.outNet) cell.labels.push({ text: oNet, x: rr.it.tail ? shOut + (onRight ? 1 : -1) * (LEAD * 0.3) : (shOut + ghIn) / 2, y: rr.y - 10, diff: rr.it.diff });
               pullsOn(rr.it.net, icEdge, shIn, rr.y);
-              if (rr.it.outNet) pullsOn(rr.it.outNet, shOut, ghIn, rr.y);
+              if (rr.it.outNet && !rr.it.tail) pullsOn(rr.it.outNet, shOut, ghIn, rr.y);
             });
             const d = run[0].it.through;
             cell.ghosts.push({ ref: d.ref, label: d.ref, part: d.component || compOf.get(d.ref) || "", x: shiftX, y: run[0].y - SHEAD, w: SHIFT_W, h: (run[run.length - 1].y + PITCH / 2) - (run[0].y - SHEAD), pins: spins });
             i = j;
           }
-          cell.ghosts.push({ ref: g.pref, label: g.pref, part: compOf.get(g.pref) || "", x: ghX, y: gTop, w: GW, h: gBot - gTop, pins: gpins });
-          y += GROWGAP;
+          const isTerm = g.items.length > 0 && g.items.every((it) => it.terminal);
+          const gLabel = isTerm ? (lcpLabel(g.items.map((it) => it.outNet || it.net)) || "out") : g.pref;
+          cell.ghosts.push({ ref: g.pref, label: gLabel, part: isTerm ? "" : (compOf.get(g.pref) || ""), terminal: isTerm, x: ghX, y: gTop, w: GW, h: gBot - gTop, pins: gpins });
+          lastBot = gBot;
+          y = gBot + GROWGAP + LBL;   // next group's box sits a fixed GROWGAP below this one, regardless of pulls (LBL = its header headroom)
         });
-        return y;
+        return lastBot;
       };
       const lh = layoutSide(side.left, false, leftPT), rh = layoutSide(side.right, true, rightPT);
       cell.ch = Math.max(lh, rh, HEAD + PITCH) + PAD;
@@ -1209,7 +1298,7 @@
       m.hubs.push({ ref: c.ref, label: c.ref, part: compOf.get(c.ref) || "", x: ox + c.icX, y: oy, w: ICW, h: c.ch, cx: ox + c.icX + ICW / 2, cy: oy + c.ch / 2, pins });
       c.ghosts.forEach((g) => {
         const pins2 = g.pins.map((p) => ({ ...p, x: ox + p.x, y: oy + p.y }));
-        m.hubs.push({ ref: g.ref, label: g.label, part: g.part, x: ox + g.x, y: oy + g.y, w: g.w, h: g.h, cx: ox + g.x + g.w / 2, cy: oy + g.y + g.h / 2, pins: pins2, synthetic: true, ghost: true, partnerRef: g.ref });
+        m.hubs.push({ ref: g.ref, label: g.label, part: g.part, x: ox + g.x, y: oy + g.y, w: g.w, h: g.h, cx: ox + g.x + g.w / 2, cy: oy + g.y + g.h / 2, pins: pins2, synthetic: true, ghost: true, terminal: !!g.terminal, partnerRef: g.terminal ? null : g.ref });
       });
       c.wires.forEach((w) => { const pts = w.pts.map((pt) => [ox + pt[0], oy + pt[1]]); m.wires.push({ net: w.net, bus: false, link: true, diff: w.diff, via: w.via, pts, bb: bbOf(pts) }); });
       c.labels.forEach((l) => m.labels.push({ text: l.text, x: ox + l.x, y: oy + l.y, anchor: "center", ground: false, port: false, net: l.text, link: true, diff: l.diff }));
