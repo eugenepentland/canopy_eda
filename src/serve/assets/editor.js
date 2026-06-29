@@ -85,10 +85,14 @@
   // auto-renumbers at build), so edits locate it by the stable source offset the
   // scene graph stamps on every element/staged entry — not by ref.
   function srcByRef(ref) {
-    if (!M) return 0;
-    const p = M.passes.find((x) => x.ref === ref); if (p && p.src) return p.src;
-    const h = M.hubs.find((x) => x.ref === ref); if (h && h.src) return h.src;
-    return 0;
+    if (M) {
+      const p = M.passes.find((x) => x.ref === ref); if (p && p.src) return p.src;
+      const h = M.hubs.find((x) => x.ref === ref); if (h && h.src) return h.src;
+    }
+    // The global map clears M.passes and synthesises src-less hubs, so resolve the
+    // source offset straight from the scene (passives / staged / hubs all carry it).
+    const sp = scene.passives.find((x) => x.ref === ref) || (scene.staged || []).find((x) => x.ref === ref) || scene.hubs.find((x) => x.ref === ref);
+    return sp && sp.src ? sp.src : 0;
   }
 
   // ── Scene model (built once per load; drives draw + hit-test) ─────────
@@ -597,6 +601,11 @@
   function pick(x, y) {
     const s = scale(), tp = 7 / s, tw = 5 / s, tl = 9 / s;
     for (const h of M.hubs) { if (h.ghost) continue; for (const p of h.pins) if (Math.hypot(p.x - x, p.y - y) < tp) return { t: "pin", ref: h.ref, pin: p.pin, net: p.net, x: p.x, y: p.y }; }
+    // In-line passives on the map are small precise targets — a series symbol riding
+    // a link wire's midpoint, a pull resistor hanging just below it — so hit-test them
+    // before the big ghost-block areas. Each carries its ref → select + edit like any part.
+    for (const w of M.wires) { if (!w.via || !w.via.ref) continue; const p0 = w.pts[0], p1 = w.pts[w.pts.length - 1], mx = (p0[0] + p1[0]) / 2, my = p0[1]; if (Math.abs(x - mx) < 16 + tw && Math.abs(y - my) < 11 + tw) return { t: "part", ref: w.via.ref, kind: "pass" }; }
+    for (const p of (M.pulls || [])) { if (!p.ref) continue; if (Math.abs(x - p.x) < 10 + tw && y >= p.y - tw && y <= p.y + 26 + tw) return { t: "part", ref: p.ref, kind: "pass" }; }
     // In the global map a proxy box is a first-class, selectable+editable copy of
     // the real component (click it → inspector, like any part); only the fan-out
     // overlay keeps proxies as click-to-jump links.
@@ -621,7 +630,7 @@
     if (!down) return;
     if (!mode && (Math.abs(e.clientX - down.mx) + Math.abs(e.clientY - down.my) > 5)) {
       if (down.hit.t === "pin") { mode = "drag"; startDrag("pin", down.hit); }
-      else if (down.hit.t === "part") { mode = "drag"; startDrag("part", down.hit); }
+      else if (down.hit.t === "part" && startDrag("part", down.hit)) { mode = "drag"; }
       else { mode = "pan"; canvas.classList.add("panning"); }
     }
     if (mode === "pan") { const s = scale(); cam.x = down.camx - (e.clientX - down.mx) / s; cam.y = down.camy - (e.clientY - down.my) / s; scheduleDraw(); }
@@ -681,11 +690,16 @@
     if (kind === "pin") {
       drag = { kind: "pin", ownerRef: hit.ref, src: srcByRef(hit.ref), anchor: [hit.x, hit.y], cursor: [hit.x, hit.y], terminals: [{ ref: hit.ref, pin: hit.pin, net: hit.net, x: hit.x, y: hit.y }], best: null };
     } else {
+      // A map-only passive (a series/pull symbol) has no draggable item in the
+      // synthesized layout — report failure so the gesture falls back to a pan;
+      // a click (no movement) still selects it for the inspector.
       const item = M.hubs.find((h) => h.ref === hit.ref) || M.passes.find((p) => p.ref === hit.ref);
+      if (!item) return false;
       const terminals = item.pins ? item.pins.map((p) => ({ ref: hit.ref, pin: p.pin, net: p.net, x: p.x, y: p.y })) : item.term.map((t) => ({ ref: hit.ref, pin: t.pin, net: t.net, x: t.x, y: t.y }));
       drag = { kind: "part", ownerRef: hit.ref, src: item.src || 0, delta: [0, 0], terminals, best: null, staged: !!item.staged, stageKey: String(item.src || item.ref) };
     }
     updateStatus();
+    return true;
   }
   function terminalsForConnect() {
     if (drag.kind === "pin") return drag.terminals;
@@ -1129,13 +1143,13 @@
         const sOut = dev.outNet || b.net;                                   // shifter's own output net
         item.outNet = (sOut && sOut !== a.net) ? sOut : null;
         if (tail.length) {
-          item.tail = { type: tail.length === 1 ? tail[0].type : "box", label: tail.length === 1 ? (tail[0].ref + (tail[0].value ? " " + tail[0].value : "")) : tail.map((x) => x.ref).join("+") };
+          item.tail = { type: tail.length === 1 ? tail[0].type : "box", label: tail.length === 1 ? (tail[0].ref + (tail[0].value ? " " + tail[0].value : "")) : tail.map((x) => x.ref).join("+"), ref: tail[0].ref };
           item.farNet = (b.net && b.net !== sOut && b.net !== a.net) ? b.net : null;   // net past the tail (ghost pin)
         }
       } else if (link.passives.length) {
         // A plain series passive (or a multi-device chain) stays a small inline symbol.
         const one = link.passives[0], refs = link.passives.map((x) => x.ref).join("+");
-        item.via = { type: link.passives.length === 1 ? one.type : "box", label: link.passives.length === 1 ? (one.ref + (one.value ? " " + one.value : "")) : refs, device: devs.length > 0 };
+        item.via = { type: link.passives.length === 1 ? one.type : "box", label: link.passives.length === 1 ? (one.ref + (one.value ? " " + one.value : "")) : refs, device: devs.length > 0, ref: one.ref };
         item.outNet = (devs.length > 0 && b.net && b.net !== a.net) ? b.net : null;
       }
       arr.push(item);
