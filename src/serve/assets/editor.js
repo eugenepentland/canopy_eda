@@ -243,7 +243,10 @@
   function addPin(pins, h, pn, side) {
     const ex = side === "left" ? h.x : h.x + h.w;
     const v = pinWire(ex, pn.y, side);
-    pins.push({ pin: (pn.pins || "").split(",")[0], name: pn.name || pn.pins, side, x: ex, y: pn.y, net: v ? v.net : "", vx: v ? v.x : null, vy: v ? v.y : null });
+    // `net` is the wire-geometry-derived net the base view already uses; `anet` is the
+    // pin's authoritative net from the scene (present for label-rendered power/ground
+    // pins that have no wire) — read by the power layer, leaves base-view logic alone.
+    pins.push({ pin: (pn.pins || "").split(",")[0], name: pn.name || pn.pins, side, x: ex, y: pn.y, net: v ? v.net : "", anet: pn.net || "", vx: v ? v.x : null, vy: v ? v.y : null });
   }
   function addPort(m, x, y, net, t, ref, pin) {
     const port = { x, y, net, t, ref, pin };
@@ -383,24 +386,6 @@
     });
     ctx.globalAlpha = 1; ctx.textBaseline = "middle";
 
-    // Power layer (Shift+P): each IC card's power/ground rail nodes, in a reserved
-    // strip along the card's lower edge. One pill per rail net — click selects the
-    // net so the inspector lists (and edits) its decoupling caps; ⎓N badges the
-    // cap count on that rail. Empty unless the layer is on (M.rails is map-only).
-    (M.rails || []).forEach((r) => {
-      if (!ptVis(r.x, r.y)) return;
-      const w = NODE_W, h = 20, x0 = r.x - w / 2, y0 = r.y - h / 2, txt = 11 * s >= 7;
-      const hot = hotNet && r.net === hotNet, col = hot ? C.hot : (r.up ? C.rail : C.railGnd);
-      ctx.globalAlpha = 0.14; ctx.fillStyle = col; roundRect(x0, y0, w, h, sw(4)); ctx.fill(); ctx.globalAlpha = 1;
-      ctx.strokeStyle = col; ctx.lineWidth = sw(hot ? 2 : 1.2); roundRect(x0, y0, w, h, sw(4)); ctx.stroke();
-      if (txt) {
-        ctx.fillStyle = col; ctx.font = "600 11px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-        const lbl = (r.up ? "▲ " : "⏚ ") + netLeaf(r.net) + (r.decoup ? "  ⎓" + r.decoup : "");
-        ctx.fillText(lbl.length > 15 ? lbl.slice(0, 14) + "…" : lbl, r.x, r.y);
-      }
-    });
-    ctx.globalAlpha = 1; ctx.textBaseline = "middle";
-
     // Labels — net-name stubs / ports as text; grounds as a real earth symbol
     // (node dot on the wire, rake pointing down, caption below). The symbol
     // draws at any zoom; only its caption obeys the LOD text cutoff.
@@ -490,6 +475,25 @@
       });
     });
     ctx.globalAlpha = 1;
+
+    // Power layer (P): each IC card's power/ground rail nodes, in a reserved strip
+    // along the card's lower edge. Drawn AFTER the cards — they live in the card's
+    // lower band, which the opaque hub fill would otherwise paint over. One pill per
+    // rail (▲ supply / ⏚ ground), ⎓N badging its decoupling-cap count; click a node
+    // to select the net so the inspector lists/edits its decoupling. Map-only.
+    (M.rails || []).forEach((r) => {
+      if (!ptVis(r.x, r.y)) return;
+      const w = NODE_W, h = 20, x0 = r.x - w / 2, y0 = r.y - h / 2, txt = 11 * s >= 7;
+      const hot = hotNet && r.net === hotNet, col = hot ? C.hot : (r.up ? C.rail : C.railGnd);
+      ctx.globalAlpha = 0.16; ctx.fillStyle = col; roundRect(x0, y0, w, h, sw(4)); ctx.fill(); ctx.globalAlpha = 1;
+      ctx.strokeStyle = col; ctx.lineWidth = sw(hot ? 2 : 1.2); roundRect(x0, y0, w, h, sw(4)); ctx.stroke();
+      if (txt) {
+        ctx.fillStyle = col; ctx.font = "600 11px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        const lbl = (r.up ? "▲ " : "⏚ ") + netLeaf(r.net) + (r.decoup ? "  ⎓" + r.decoup : "");
+        ctx.fillText(lbl.length > 15 ? lbl.slice(0, 14) + "…" : lbl, r.x, r.y);
+      }
+    });
+    ctx.globalAlpha = 1; ctx.textBaseline = "middle";
 
     // Snap / rubber-band overlay
     if (drag) {
@@ -1252,7 +1256,7 @@
       const rhub = real.find((h) => h.ref === ref);
       if (!rhub) return 0;
       const seen = new Set(), nets = [];
-      rhub.pins.forEach((p) => { if (p.net && isStub(p.net) && !seen.has(p.net)) { seen.add(p.net); nets.push(p.net); } });
+      rhub.pins.forEach((p) => { const nn = p.anet || ""; if (nn && isStub(nn) && !seen.has(nn)) { seen.add(nn); nets.push(nn); } });
       if (!nets.length) return 0;
       nets.sort((a, b) => ((isGroundName(a) ? 1 : 0) - (isGroundName(b) ? 1 : 0)) || (a < b ? -1 : a > b ? 1 : 0));   // power first, then ground
       const perRow = Math.max(1, Math.floor((ICW - NODEGAP) / (NODEW + NODEGAP)));

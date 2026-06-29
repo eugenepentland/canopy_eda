@@ -81,6 +81,12 @@ const JsonPin = struct {
     alts: []const []const u8 = &.{},
     /// Asserted function if the user wrote `(pin X (as "FN") …)`, else empty.
     active_fn: []const u8 = "",
+    /// Canonical (base) net this pin group lands on. The client otherwise derives a
+    /// pin's net from the wire drawn to it, so label-rendered pins (power/ground, and
+    /// any pin shown as a net stub rather than a wire) carry no net — invisible to the
+    /// connection map. Emitting it lets the map see power/ground and each pin's true
+    /// net. Grouping is net-based, so one net covers the whole group.
+    net: []const u8 = "",
 };
 
 const JsonHub = struct {
@@ -802,6 +808,16 @@ const Classified = struct { conn: AdjEntry, terminal: []const u8 };
 
 // ── Hub data collection ──────────────────────────────────────────────
 
+/// The canonical (base) net a hub pin group lands on, via `ctx.pin_canonical_nets`
+/// (the same map `collectGroupConnections` uses). Grouping is net-based, so the
+/// first pad's net covers the whole group; "" when unknown. Arena-allocated key,
+/// freed with the render pass — matches the no-free convention next door.
+fn hubPinGroupNet(ctx: *RenderCtx, allocator: Allocator, ref: []const u8, group: anytype) []const u8 {
+    if (group.conns.len == 0) return "";
+    const key = std.fmt.allocPrint(allocator, "{s}.{s}", .{ ref, group.conns[0].pin }) catch return "";
+    return ctx.pin_canonical_nets.get(key) orelse "";
+}
+
 fn collectHubData(
     ctx: *RenderCtx,
     allocator: Allocator,
@@ -913,6 +929,7 @@ fn collectHubData(
             .side = "left",
             .alts = enrich.alts,
             .active_fn = enrich.active_fn,
+            .net = hubPinGroupNet(ctx, allocator, hub.ref_des, group),
         });
         py_left += height;
     }
@@ -930,6 +947,7 @@ fn collectHubData(
             .side = "right",
             .alts = enrich.alts,
             .active_fn = enrich.active_fn,
+            .net = hubPinGroupNet(ctx, allocator, hub.ref_des, group),
         });
         py_right += height;
     }
@@ -1821,6 +1839,10 @@ fn writeJsonPin(w: anytype, pin: JsonPin) !void {
     try w.writeAll(",");
     try writeJsonString(w, "name", pin.display_name);
     try w.print(",\"y\":{d:.1}", .{pin.y});
+    if (pin.net.len > 0) {
+        try w.writeAll(",");
+        try writeJsonString(w, "net", pin.net);
+    }
     if (pin.active_fn.len > 0) {
         try w.writeAll(",");
         try writeJsonString(w, "activeFn", pin.active_fn);
