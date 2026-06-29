@@ -382,20 +382,27 @@
       line(e.x1, e.y1, e.x2, e.y2);
     });
     ctx.globalAlpha = 1;
-    // Pull-up / pull-down resistors hanging off a mapped net: a short branch BELOW
-    // the wire — resistor symbol, then the rail (a bar + name for a pull-up, a
-    // ground symbol for a pull-down) — with the ref/value caption beside it.
+    // Passive branches hanging off a mapped net: a short branch BELOW the wire — the
+    // passive's symbol (resistor / capacitor / inductor / …), then its far terminal:
+    // a ground symbol (decoupling cap → GND), a rail bar + name (bypass / pull-up to a
+    // supply), or a short stub + net name (a series element to another signal). The
+    // ref/value caption sits beside the symbol. (Plain pull items carry no type/term,
+    // so they default to a resistor → rail-or-ground, preserving the old behavior.)
     (M.pulls || []).forEach((p) => {
       if (!ptVis(p.x, p.y)) return;
       const x = p.x, y0 = p.y + 4, yb = y0 + 14, yend = yb + 6, txt = 15 * s >= 7;
+      const type = p.type || "resistor", term = p.term || (p.up ? "rail" : "gnd");
       ctx.strokeStyle = C.passStroke; ctx.lineWidth = sw(1.4);
       line(x, p.y, x, y0); line(x, yb, x, yend);
-      ctx.save(); ctx.translate(x, (y0 + yb) / 2); ctx.rotate(Math.PI / 2); symbol("resistor", -7, 7, 0, sw); ctx.restore();
+      ctx.save(); ctx.translate(x, (y0 + yb) / 2); ctx.rotate(Math.PI / 2); symbol(type, -7, 7, 0, sw); ctx.restore();
       if (txt) { ctx.fillStyle = C.pinName; ctx.font = "10px sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillText(p.ref + (p.value ? " " + p.value : ""), x + 8, (y0 + yb) / 2); }
-      if (p.up) {                                                   // pull-up: rail bar + name
+      if (term === "rail") {                                       // to a supply: rail bar + name
         ctx.strokeStyle = C.passStroke; ctx.lineWidth = sw(1.6); line(x - 5, yend, x + 5, yend);
         if (txt) { ctx.fillStyle = C.labelNet; ctx.font = "10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText("▲ " + p.rail, x, yend + 2); }
-      } else {                                                    // pull-down: ground symbol (caption only for a named ground — the rake already says GND)
+      } else if (term === "net") {                                 // series to another signal net: stub + net name
+        ctx.strokeStyle = C.passStroke; ctx.lineWidth = sw(1.4); line(x, yend, x, yend + 5);
+        if (txt) { ctx.fillStyle = C.labelNet; ctx.font = "10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(p.rail, x, yend + 7); }
+      } else {                                                     // to ground (caption only for a named ground — the rake already says GND)
         drawGround(x, yend, false, sw, txt && !/^gnd$/i.test(p.rail || ""), p.rail || "");
       }
     });
@@ -1281,6 +1288,21 @@
       };
       add(p.term[0].net, p.term[1].net); add(p.term[1].net, p.term[0].net);
     });
+    // EVERY 2-terminal passive (decoupling cap, bypass, series R/C, pull, …), keyed by
+    // its NON-ground terminal net(s) so it can be drawn as a branch on the pin that
+    // carries it — the way the normal view shows passives. The ground side isn't keyed,
+    // so a shared GND stub doesn't accrue every decoupling cap on the board. (Already-
+    // merged groups: m.passes carries one entry per "N× value" group, with a count.)
+    const passByNet = new Map();
+    m.passes.forEach((p) => {
+      if (!p.term || p.term.length !== 2) return;
+      const add = (net, other) => {
+        if (!net || isGroundName(net)) return;
+        let a = passByNet.get(net); if (!a) { a = []; passByNet.set(net, a); }
+        if (!a.some((x) => x.ref === p.ref)) a.push({ ref: p.ref, type: p.type, value: p.label || p.value || "", other });
+      };
+      add(p.term[0].net, p.term[1].net); add(p.term[1].net, p.term[0].net);
+    });
     const PITCH = 38, HEAD = 46, PAD = 18, LBL = 44, GROWGAP = 20, ICW = 168, GW = 146, OUT = 92, MX = 24, MY = 22;
     const SHEAD = 38, SHIFT_W = 122, LEAD = 92, PULLH = 30;       // pass-through shifter block + leads (wide enough for a ~14-char net label); pull-branch height
     // Power layer (Shift+P): a strip of each IC's power/ground rail nodes, folded
@@ -1327,6 +1349,7 @@
         ps.forEach((pl, k) => cell.pulls.push({ x: (x0 + x1) / 2 + (k - (ps.length - 1) / 2) * 30, y, ref: pl.ref, value: pl.value, rail: netLeaf(pl.rail), up: pl.up }));
         return PULLH;
       };
+      const passDrawn = new Set();   // each passive is drawn on at most one pin of this cell
       const layoutSide = (gs, onRight, pt) => {
         if (!gs.length) return HEAD;
         const icEdge = onRight ? icX + ICW : icX;
@@ -1405,24 +1428,34 @@
         const shown = new Set();
         cell.leftPins.forEach((p) => shown.add(p.net));
         cell.rightPins.forEach((p) => shown.add(p.net));
-        const EXTRA_TOP = 18, EXTRA_PITCH = 28, EXTRA_STUB = 64, EXTRA_W = 210;
+        const EXTRA_TOP = 18, EXTRA_PITCH = 28, EXTRA_STUB = 64, PGAP = 34, PASSH = 32;
         const icRight = icX + ICW;
-        const seen = new Set(); let ey = baseY + EXTRA_TOP, n = 0;
+        const seen = new Set(); let ey = baseY + EXTRA_TOP, used = EXTRA_TOP, maxStub = EXTRA_STUB, n = 0;
         (rhub.pins || []).forEach((p) => {
           const net = p.anet || p.net;
           if (!net || shown.has(net) || seen.has(net)) return;
           if (showPower && isStub(net)) return;        // power/ground live in the rail band when that layer is on
           seen.add(net);
+          // Passives on this net — decoupling cap (→ ground), bypass (→ rail), series
+          // R/C (→ another net) — each drawn once per cell; the stub stretches to seat
+          // them in a row, then they hang as branches like a pull.
+          const ps = (passByNet.get(net) || []).filter((x) => !passDrawn.has(x.ref));
+          const stub = ps.length ? Math.max(EXTRA_STUB, 16 + ps.length * PGAP + 8) : EXTRA_STUB;
           cell.rightPins.push({ name: p.name, x: icRight, y: ey, net });
-          cell.wires.push({ net, pts: [[icRight, ey], [icRight + EXTRA_STUB, ey]] });
-          cell.labels.push({ text: net, x: icRight + EXTRA_STUB + 6, y: ey, anchor: "start" });
-          pullsOn(net, icRight, icRight + EXTRA_STUB, ey);
-          ey += EXTRA_PITCH; n++;
+          cell.wires.push({ net, pts: [[icRight, ey], [icRight + stub, ey]] });
+          cell.labels.push({ text: net, x: icRight + stub + 6, y: ey, anchor: "start" });
+          ps.forEach((pp, k) => {
+            passDrawn.add(pp.ref);
+            const og = isGroundName(pp.other), op = isPowerName(pp.other) && !og;
+            cell.pulls.push({ x: icRight + 16 + k * PGAP, y: ey, ref: pp.ref, value: pp.value, type: pp.type || "resistor", term: og ? "gnd" : op ? "rail" : "net", rail: netLeaf(pp.other), up: op });
+          });
+          const rowH = EXTRA_PITCH + (ps.length ? PASSH : 0);
+          ey += rowH; used += rowH; maxStub = Math.max(maxStub, stub); n++;
         });
         if (!n) return 0;
-        const need = 2 * MX + icX + ICW + EXTRA_W;
+        const need = 2 * MX + icX + ICW + maxStub + 140;
         if (cell.w < need) cell.w = need;
-        return EXTRA_TOP + n * EXTRA_PITCH;
+        return used;
       };
       const lh = layoutSide(side.left, false, leftPT), rh = layoutSide(side.right, true, rightPT);
       const coreH = Math.max(lh, rh, HEAD + PITCH) + PAD;
