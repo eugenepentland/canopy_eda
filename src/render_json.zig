@@ -239,9 +239,10 @@ const SceneGraph = struct {
     passives: std.ArrayListUnmanaged(JsonPassive),
     labels: std.ArrayListUnmanaged(JsonLabel),
     staged: std.ArrayListUnmanaged(JsonStaged),
-    /// The design's `(group …)` member lists (name + refs), surfaced so the
-    /// editor's sheet navigator can page by authored group instead of per-IC.
-    groups: []const env_mod.Group = &.{},
+    /// Names of the design's authored `(section …)` / sub-block structure, so the
+    /// editor's sheet navigator pages by authored section — and collapses to a
+    /// single whole-design sheet when there are none — instead of auto per-IC.
+    authored_sections: []const []const u8 = &.{},
 
     fn init(allocator: Allocator) SceneGraph {
         return .{
@@ -530,6 +531,22 @@ fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, par
 /// Pixi.js canvas viewer. Flattens sub-blocks, classifies each instance as
 /// hub or spoke (passive), groups pins, lays out sections in a grid, and
 /// emits hub boxes plus the wires/labels needed to render the schematic.
+/// Collect the names of the design's authored structural sections — `(section …)`
+/// forms (and their sub-sections) plus `(sub-block …)`s. These are what the
+/// editor pages by; when the list is empty the design has no explicit sections
+/// and the editor shows a single whole-design sheet.
+fn collectAuthoredSections(allocator: Allocator, block: *const DesignBlock) ![]const []const u8 {
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (block.sections) |sec| {
+        try list.append(allocator, sec.name);
+        for (sec.sub_sections) |sub| try list.append(allocator, sub.name);
+    }
+    for (block.sub_blocks) |sb| try list.append(allocator, sb.block.name);
+    return list.items;
+}
+
+/// Build the editor / live-push scene-graph JSON for `block`: flatten + classify,
+/// lay hubs out into section cells, collect spokes/wires/labels, and serialize.
 pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project_dir: []const u8) RenderError![]const u8 {
     var ctx = RenderCtx.init(allocator);
     ctx.project_dir = project_dir;
@@ -542,7 +559,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
 
     var scene = SceneGraph.init(allocator);
     scene.design_name = block.name;
-    scene.groups = block.groups;
+    scene.authored_sections = try collectAuthoredSections(allocator, block);
 
     var alt_map: PinoutAltMap = .empty;
     var asserted_fns = try asserted_fns_mod.buildMap(allocator, block);
@@ -1752,18 +1769,11 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
     }
     try w.writeAll("]");
 
-    // Design groups (authored (group …) member lists) for the sheet navigator.
-    try w.writeAll(",\"groups\":[");
-    for (scene.groups, 0..) |g, i| {
+    // Authored section names (the editor's sheet navigator pages by these).
+    try w.writeAll(",\"authored_sections\":[");
+    for (scene.authored_sections, 0..) |nm, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll("{");
-        try writeJsonString(w, "name", g.name);
-        try w.writeAll(",\"members\":[");
-        for (g.members, 0..) |mref, mi| {
-            if (mi > 0) try w.writeAll(",");
-            try json_writer.writeString(w, mref);
-        }
-        try w.writeAll("]}");
+        try json_writer.writeString(w, nm);
     }
     try w.writeAll("]");
 
