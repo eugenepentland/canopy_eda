@@ -642,6 +642,70 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     };
 }
 
+/// POST /api/new-design  Body: {"name":"my-board","title":"My Board"}
+/// Scaffold a fresh design file src/<name>.sexp = (design-block "<title>") so a
+/// design can be started from the home page / editor instead of hand-writing the
+/// stub. 409 if a design with that basename already exists; 400 on an unsafe name.
+pub fn newDesignApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const name = parseJsonString(body, "\"name\"") orelse {
+        res.status = 400;
+        res.body = "missing name";
+        return;
+    };
+    // The name becomes a filesystem basename (src/<name>.sexp) and a URL path, so
+    // restrict it to a safe charset — no traversal, no spaces, no quoting needed.
+    if (name.len == 0 or name.len > 64) {
+        res.status = 400;
+        res.body = "name must be 1-64 characters";
+        return;
+    }
+    for (name) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '-' or c == '_';
+        if (!ok) {
+            res.status = 400;
+            res.body = "name may contain only letters, digits, '-' and '_'";
+            return;
+        }
+    }
+    // Title is embedded inside a quoted s-expr string; if it carries a char that
+    // would need escaping, fall back to the (safe) name rather than risk bad source.
+    const raw_title = parseJsonString(body, "\"title\"") orelse "";
+    const title = blk: {
+        if (raw_title.len == 0) break :blk name;
+        if (std.mem.indexOfAny(u8, raw_title, "\"\\\n\r") != null) break :blk name;
+        break :blk raw_title;
+    };
+
+    const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
+    defer ctx.allocator.free(file_path);
+
+    // designSourcePath returns an existing match or the flat fallback; refuse only
+    // when something is actually there (don't clobber a design or a same-named module).
+    if (infra_fs.cwd().access(file_path, .{})) |_| {
+        res.status = 409;
+        res.body = "a design with that name already exists";
+        return;
+    } else |_| {}
+
+    const content = try std.fmt.allocPrint(ctx.allocator, "(design-block \"{s}\")\n", .{title});
+    defer ctx.allocator.free(content);
+    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = content }) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_WRITE_FILE;
+        return;
+    };
+
+    res.status = 200;
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"url\":\"/editor/{s}\"}}", .{name});
+}
+
 /// POST /api/remove-instance/:name
 /// Body: {"ref":"C3"}
 pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {

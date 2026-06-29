@@ -805,6 +805,7 @@ src/serve/edit.zig::editValueApi fn
 src/serve/edit.zig::getSourceApi fn
 src/serve/edit.zig::movePinApi fn
 src/serve/edit.zig::movePinCore fn
+src/serve/edit.zig::newDesignApi fn
 src/serve/edit.zig::rebuildDesign fn
 src/serve/edit.zig::removeComponentDatasheetCore fn
 src/serve/edit.zig::removeInstanceApi fn

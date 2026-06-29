@@ -415,6 +415,7 @@ pub fn serve(
     router.post("/api/edit-value/:name", edit.editValueApi, .{});
     router.post("/api/edit-mpn/:name", edit.editMpnApi, .{});
     router.post("/api/edit-footprint/:name", edit.editFootprintApi, .{});
+    router.post("/api/new-design", edit.newDesignApi, .{});
     router.post("/api/add-instance/:name", edit.addInstanceApi, .{});
     router.post("/api/remove-instance/:name", edit.removeInstanceApi, .{});
     router.post("/api/rewire-pin/:name", edit.rewirePinApi, .{});

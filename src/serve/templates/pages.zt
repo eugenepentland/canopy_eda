@@ -84,6 +84,11 @@ const HOME_STYLE_BLOCK: []const u8 = "<style>" ++ @embedFile("../assets/navbar.c
     \\.home-search:focus{outline:none;border-color:#58a6ff}
     \\.home-search::placeholder{color:#555}
     \\.home-count{color:#6e7681;font-size:12px;margin:0 16px 4px}
+    \\.home-newrow{display:flex;gap:8px;align-items:center;margin:8px 16px 4px}
+    \\.home-newrow .home-search{width:auto;flex:1 1 auto;margin:0}
+    \\.home-new{flex:0 0 auto;background:#238636;border:1px solid #2ea043;border-radius:6px;
+    \\color:#fff;font-size:13px;padding:.55rem .9rem;cursor:pointer;font-family:inherit;white-space:nowrap}
+    \\.home-new:hover{filter:brightness(1.1)}
     \\@media(max-width:600px){.designs-grid{grid-template-columns:1fr;padding:12px;gap:10px}.design-card{padding:16px}}
 ++ "</style>";
 
@@ -127,6 +132,28 @@ const HOME_SEARCH_SCRIPT: []const u8 =
     \\  apply();
     \\ });});
     \\ apply();
+    \\})();
+    \\</script>
+;
+
+// "+ New design" → prompt for a name/title, POST /api/new-design, then open the
+// editor on the fresh stub. Raw block so zt doesn't interpolate the JS.
+const HOME_NEW_SCRIPT: []const u8 =
+    \\<script>
+    \\(function(){
+    \\ var b=document.getElementById('home-new');
+    \\ if(!b)return;
+    \\ b.addEventListener('click',async function(){
+    \\  var name=prompt('New design name (letters, digits, - and _):');
+    \\  if(name===null)return; name=name.trim(); if(!name)return;
+    \\  var title=prompt('Title (optional):',name); if(title===null)return; title=title.trim()||name;
+    \\  try{
+    \\   var r=await fetch('/api/new-design',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,title:title})});
+    \\   if(!r.ok){var t=await r.text().catch(function(){return '';});alert(t||('HTTP '+r.status));return;}
+    \\   var d=await r.json().catch(function(){return {};});
+    \\   location.href=d.url||('/editor/'+name);
+    \\  }catch(e){alert('Failed: '+e.message);}
+    \\ });
     \\})();
     \\</script>
 ;
@@ -283,6 +310,7 @@ pub templ DesignCard(s: DesignSummary, search: []const u8, has_starred: bool, no
         }
         <div class="design-card-links">
             <a class="design-card-link" href="{SCHEMATIC_PREFIX}{s.name}">Schematic</a>
+            <a class="design-card-link" href="/editor/{s.name}">Editor</a>
         </div>
     </div>
 }
@@ -317,6 +345,7 @@ pub templ ModuleCard(m: ModuleHomeEntry, search: []const u8) {
         <div class="design-card-links">
             <a class="design-card-link" href="{SCHEMATIC_PREFIX}{m.name}">Schematic</a>
             <a class="design-card-link" href="/pcb-layout/{m.name}">PCB layout</a>
+            <a class="design-card-link" href="/editor/{m.name}">Editor</a>
         </div>
     </div>
 }
@@ -334,9 +363,12 @@ pub templ Home(design_cards: []const DesignCardVM, module_cards: []const ModuleC
             <div style="max-width:960px;margin:0 auto">
                 <h1 style="padding:16px 16px 0;color:#f0f6fc">Designs &amp; Modules</h1>
                 <p class="mod-sub-note">Every <code>.sexp</code> design and reusable <code>lib/modules/</code> block — tagged and searchable.</p>
-                <input
-                    type="text" id="home-search" class="home-search" autofocus
-                    placeholder="Search designs and modules…" />
+                <div class="home-newrow">
+                    <input
+                        type="text" id="home-search" class="home-search" autofocus
+                        placeholder="Search designs and modules…" />
+                    <button type="button" id="home-new" class="home-new">+ New design</button>
+                </div>
                 <div class="home-filters" id="home-filters">
                     for (HOME_FILTERS) |f| {
                         <button type="button" class={filterClass(f.id)} data-filter="{f.id}">{f.label}</button>
@@ -357,6 +389,7 @@ pub templ Home(design_cards: []const DesignCardVM, module_cards: []const ModuleC
                 <div class="empty-hint" id="home-empty" style="display:none">No designs or modules match your search.</div>
             </div>
             {!HOME_SEARCH_SCRIPT}
+            {!HOME_NEW_SCRIPT}
         </body>
     </html>
 }
