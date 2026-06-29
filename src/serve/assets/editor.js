@@ -1354,7 +1354,7 @@
       add(nets[0], nets[1]); add(nets[1], nets[0]);
     });
     const PITCH = 38, HEAD = 46, PAD = 18, LBL = 44, GROWGAP = 20, ICW = 168, GW = 146, OUT = 92, MX = 24, MY = 22;
-    const SHEAD = 38, SHIFT_W = 122, LEAD = 92, PULLH = 30;       // pass-through shifter block + leads (wide enough for a ~14-char net label); pull-branch height
+    const SHEAD = 38, SHIFT_W = 122, LEAD = 92, PULLH = 30, PULL_DROP = 11;       // pass-through shifter block + leads (wide enough for a ~14-char net label); pull-branch height; riser to the spoke below the wire
     // Extras band — the pins with no point-to-point partner (power/ground, multi-drop,
     // board IO) shown as horizontal SPOKES that fan out to BOTH sides of the IC, like
     // the original schematic (passives ride the spoke, terminal at the outboard end).
@@ -1423,11 +1423,20 @@
       const leftW = Math.max(sideW(side.left, leftPT), extraSideW(eLeft));
       const rightW = Math.max(sideW(side.right, rightPT), extraSideW(eRight)), icX = leftW;
       const cell = { ref, label: labelOf.get(ref) || ref, ox: MX, oy: MY, ch: 0, w: 2 * MX + leftW + ICW + rightW, h: 0, icX, ghosts: [], wires: [], labels: [], pulls: [], leftPins: [], rightPins: [] };
-      // Draw any pull-up/down on `net` as a branch hanging below the wire segment
-      // [x0,x1]@y. Returns the extra vertical room the branch needs.
-      const pullsOn = (net, x0, x1, y) => {
+      // A pull-up/down on `net` taps the wire segment [x0,x1]@y, drops a short riser
+      // into the band just below it, then runs HORIZONTALLY (compact, to fit the partner
+      // gap) out to its terminal — the same side-spoke idiom as the extra pins, so the
+      // whole map reads uniformly instead of one resistor hanging straight down. `dir`
+      // points the spoke toward open space (away from the IC). Returns the room used.
+      const pullsOn = (net, x0, x1, y, dir) => {
         const ps = pullByNet.get(net); if (!ps || !ps.length) return 0;
-        ps.forEach((pl, k) => cell.pulls.push({ x: (x0 + x1) / 2 + (k - (ps.length - 1) / 2) * 30, y, ref: pl.ref, value: pl.value, rail: netLeaf(pl.rail), up: pl.up }));
+        const mx0 = (x0 + x1) / 2, jy = y + PULL_DROP, d = dir || 1;
+        ps.forEach((pl, k) => {
+          const mx = mx0 + (k - (ps.length - 1) / 2) * 46;
+          cell.wires.push({ net, pts: [[mx, y], [mx, jy]] });                    // riser from the wire down to the spoke
+          cell.pulls.push({ axis: "h", dir: d, y: jy, jx: mx, x: mx + d * (6 + SPOKE_SYM / 2), tx: mx + d * (14 + SPOKE_SYM),
+            ref: pl.ref, value: pl.value, type: "resistor", term: pl.up ? "rail" : "gnd", rail: netLeaf(pl.rail) });
+        });
         return PULLH;
       };
       const layoutSide = (gs, onRight, pt) => {
@@ -1466,7 +1475,7 @@
             if (!r.s) {                                            // direct link: one straight wire + label
               cell.wires.push({ net: r.it.net, diff: r.it.diff, via: r.it.via, pts: [[icEdge, r.y], [ghIn, r.y]] });
               cell.labels.push({ text: r.it.net, x: (icEdge + ghIn) / 2, y: r.y - 10, diff: r.it.diff });
-              pullsOn(r.it.net, icEdge, ghIn, r.y);
+              pullsOn(r.it.net, icEdge, ghIn, r.y, onRight ? 1 : -1);
               i++; continue;
             }
             let j = i; while (j < rows.length && rows[j].s === r.s) j++;
@@ -1481,8 +1490,8 @@
               cell.labels.push({ text: rr.it.net, x: (icEdge + shIn) / 2, y: rr.y - 10, diff: rr.it.diff });
               // shifter output net: at the leg midpoint normally, else hugged to the shifter so it clears the tail symbol.
               if (rr.it.outNet) cell.labels.push({ text: oNet, x: rr.it.tail ? shOut + (onRight ? 1 : -1) * (LEAD * 0.3) : (shOut + ghIn) / 2, y: rr.y - 10, diff: rr.it.diff });
-              pullsOn(rr.it.net, icEdge, shIn, rr.y);
-              if (rr.it.outNet && !rr.it.tail) pullsOn(rr.it.outNet, shOut, ghIn, rr.y);
+              pullsOn(rr.it.net, icEdge, shIn, rr.y, onRight ? 1 : -1);
+              if (rr.it.outNet && !rr.it.tail) pullsOn(rr.it.outNet, shOut, ghIn, rr.y, onRight ? 1 : -1);
             });
             const d = run[0].it.through;
             cell.ghosts.push({ ref: d.ref, label: d.ref, part: d.component || compOf.get(d.ref) || "", x: shiftX, y: run[0].y - SHEAD, w: SHIFT_W, h: (run[run.length - 1].y + PITCH / 2) - (run[0].y - SHEAD), pins: spins });
