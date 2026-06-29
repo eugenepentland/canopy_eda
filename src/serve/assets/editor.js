@@ -56,6 +56,7 @@
   let ghostRef = null;           // IC focused for "ghost partner" fan-out (null = off)
   let ghostAll = false;          // global fan-out: ghost every IC's direct links at once
   let showPower = false;         // map power layer: overlay each IC cell's power/ground rail nodes
+  let fullMap = false;           // full connection map: the whole netlist as one force-directed graph
   let sheets = [];               // navigable pages: design (group …) lists, else per-section
   let deleteArmed = false;       // inspector Delete needs a 2nd click to confirm
   let libIndex = null;
@@ -186,18 +187,20 @@
     // same-IC passive bridges first (so the now-local pads aren't then taken for
     // a cross-device link), then inter-device channel wires. (Skipped in the
     // global map, which throws the real layout away for a fresh grid.)
-    if (showNets && !ghostAll) { bridgeSamePins(m); connectHubs(m); }
+    if (showNets && !ghostAll && !fullMap) { bridgeSamePins(m); connectHubs(m); }
     // Ghost-partner fan-out: ring one IC with dashed proxies of the ICs it
-    // connects point-to-point to (ghostRef), or rebuild the whole board as a
-    // grid of self-contained per-IC cells that can't overlap (ghostAll).
+    // connects point-to-point to (ghostRef), rebuild the board as a grid of
+    // self-contained per-IC cells (ghostAll), or rebuild the WHOLE netlist as one
+    // force-directed connectivity graph — every part + every net (fullMap).
     if (ghostAll) buildGlobalMap(m);
+    else if (fullMap) buildFullMap(m);
     else if (ghostRef) ghostPartners(m);
     // Connection ports for snap (net-bearing): pins, labels, wire vertices.
     // Ghost proxies are view-only — exclude them from snap targets.
     m.hubs.forEach((h) => { if (h.ghost) return; h.pins.forEach((p) => { if (p.net) addPort(m, p.x, p.y, p.net, "pin", h.ref, p.pin); }); });
     m.labels.forEach((l) => { if (l.net) addPort(m, l.x, l.y, l.net, "label"); });
     m.wires.forEach((w) => { if (w.net) w.pts.forEach((p) => addPort(m, p[0], p[1], w.net, "wire")); });
-    if (!ghostAll) addStaged(m);
+    if (!ghostAll && !fullMap) addStaged(m);
     firstBuild = false;
     M = m;
   }
@@ -367,6 +370,18 @@
       ctx.stroke();
     });
     ctx.globalAlpha = 1;
+    // Full-map edges: every pin-on-net as a thin line from its component to the net
+    // node. Power/ground edges are faded so the signal graph stays legible; the hot
+    // net (if any) is solid and on top.
+    (M.fullEdges || []).forEach((e) => {
+      if (!boxVis(Math.min(e.x1, e.x2), Math.min(e.y1, e.y2), Math.max(e.x1, e.x2), Math.max(e.y1, e.y2))) return;
+      const hot = hotNet && e.net === hotNet;
+      ctx.globalAlpha = hot ? 1 : (e.pwr ? 0.14 : 0.45);
+      ctx.strokeStyle = hot ? C.hot : (e.pwr ? C.rail : C.link);
+      ctx.lineWidth = sw(hot ? 1.8 : 0.9);
+      line(e.x1, e.y1, e.x2, e.y2);
+    });
+    ctx.globalAlpha = 1;
     // Pull-up / pull-down resistors hanging off a mapped net: a short branch BELOW
     // the wire — resistor symbol, then the rail (a bar + name for a pull-up, a
     // ground symbol for a pull-down) — with the ref/value caption beside it.
@@ -385,6 +400,28 @@
       }
     });
     ctx.globalAlpha = 1; ctx.textBaseline = "middle";
+
+    // Full-map net nodes: a dot per net (amber = power/ground, purple = boundary
+    // port, blue = signal). Its name is drawn just above by the labels pass.
+    (M.netNodes || []).forEach((n) => {
+      if (!ptVis(n.x, n.y)) return;
+      const hot = hotNet && n.net === hotNet;
+      const col = hot ? C.hot : n.port ? C.labelPort : n.pwr ? C.rail : C.labelNet;
+      const r = sw(n.pwr ? 4.5 : 3.2);
+      ctx.beginPath(); ctx.arc(n.x, n.y, hot ? r * 1.6 : r, 0, 7);
+      ctx.fillStyle = col; ctx.fill();
+    });
+    // Full-map local-net flags: power/ground/high-fanout net names tucked beneath each
+    // member part (these nets stay out of the wired graph). Hidden when far zoomed out.
+    if (11 * s >= 7) (M.flags || []).forEach((fl) => {
+      if (!ptVis(fl.x, fl.y)) return;
+      const hot = hotNet && fl.net === hotNet;
+      ctx.fillStyle = hot ? C.hot : fl.port ? C.labelPort : fl.pwr ? C.rail : C.labelNet;
+      ctx.font = "10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      const t = (fl.gnd ? "⏚ " : fl.pwr ? "▲ " : "") + netLeaf(fl.net);
+      ctx.fillText(t.length > 14 ? t.slice(0, 13) + "…" : t, fl.x, fl.y);
+    });
+    ctx.textBaseline = "middle";
 
     // Labels — net-name stubs / ports as text; grounds as a real earth symbol
     // (node dot on the wire, rake pointing down, caption below). The symbol
@@ -641,6 +678,10 @@
     // Power-layer rail pills sit inside the IC card's lower band, so test them before
     // the card area below (which would otherwise swallow the click as the IC itself).
     for (const r of (M.rails || [])) if (Math.abs(x - r.x) < NODE_W / 2 + tw && Math.abs(y - r.y) < 11 + tw) return { t: "net", net: r.net };
+    // Full-map net-node dots: select the net (→ inspector). Tested before the part
+    // boxes so a dot sitting under a box edge is still clickable.
+    for (const n of (M.netNodes || [])) if (Math.hypot(x - n.x, y - n.y) < (n.pwr ? 6 : 5) + tw) return { t: "net", net: n.net };
+    for (const fl of (M.flags || [])) if (Math.abs(x - fl.x) < 38 + tw && Math.abs(y - fl.y) < 7 + tw) return { t: "net", net: fl.net };
     // In the global map a proxy box is a first-class, selectable+editable copy of
     // the real component (click it → inspector, like any part); only the fan-out
     // overlay keeps proxies as click-to-jump links.
@@ -705,7 +746,7 @@
   // Part and net are mutually exclusive in the inspector: selecting one clears
   // the other so the panel always reflects a single subject.
   function select(kind, ref) { selection = { kind, ref }; hotNet = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
-  function deselect() { selection = null; hotNet = null; deleteArmed = false; if (ghostRef || ghostAll) { ghostRef = null; ghostAll = false; buildModel(); syncGhostBtns(); } renderInspector(); updateStatus(); scheduleDraw(); }
+  function deselect() { selection = null; hotNet = null; deleteArmed = false; if (ghostRef || ghostAll || fullMap) { ghostRef = null; ghostAll = false; fullMap = false; buildModel(); syncGhostBtns(); syncFullBtn(); } renderInspector(); updateStatus(); scheduleDraw(); }
   function highlightNetToggle(net) { if (!net) return; hotNet = hotNet === net ? null : net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
   function setHotNet(net) { if (!net) return; hotNet = net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
   // Rename a net everywhere it's used (all pins/ports/net-forms). Renaming onto an
@@ -1386,6 +1427,127 @@
     m.mapBox = { x: -40, y: -40, w: bx1 + 80, h: by1 + 80 };
   }
 
+  // ── Full connection map ──────────────────────────────────────────────
+  // The complete netlist as one auto-arranged graph: EVERY component (IC, passive,
+  // connector, staged part) is a node, EVERY net is a node, and each pin-on-net is
+  // an edge — laid out force-directed so connected parts cluster. Unlike the
+  // connection map (point-to-point IC↔IC only) nothing is dropped: power/ground,
+  // multi-drop buses, passives and ports all appear. Built straight from the raw
+  // scene (hub pins now carry their net — render_json JsonPin.net), so it needs no
+  // base-layout geometry.
+  function buildFullMap(m) {
+    const comps = [];                                   // {kind, ref, label, part, nets:[net]}
+    const addComp = (kind, ref, label, part, pinNets) => {
+      const nets = [...new Set(pinNets.filter(Boolean))];
+      if (!nets.length) return;                         // unplaceable by connectivity — no named net
+      comps.push({ kind, ref, label: label || ref, part: part || "", nets });
+    };
+    (scene.hubs || []).forEach((h) => addComp("ic", h.ref, h.label || h.ref, h.part || h.component,
+      [].concat(h.leftPins || [], h.rightPins || []).map((p) => p.net)));
+    (scene.passives || []).forEach((p) => addComp("pass", p.ref, p.value || p.ref, p.component, (p.pins || []).map((x) => x.net)));
+    (scene.staged || []).forEach((c) => addComp("pass", c.ref, c.value || c.ref, c.component, (c.pins || []).map((x) => x.net)));
+    if (!comps.length) { m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = []; m.rails = []; m.netNodes = []; m.fullEdges = []; m.mapBox = { x: 0, y: 0, w: 240, h: 200 }; return; }
+
+    // net -> comp indices.
+    const netComps = new Map();
+    comps.forEach((c, ci) => c.nets.forEach((n) => { let a = netComps.get(n); if (!a) { a = []; netComps.set(n, a); } a.push(ci); }));
+    const portNets = new Set((scene.ports || []).map((p) => p.net).filter(Boolean));
+
+    // Two net classes. A low-fanout SIGNAL net becomes a routed net-node (a dot wired
+    // to its pins, placed by the force sim — the readable connectivity graph). A
+    // power/ground net, or any net above FANOUT_CAP, would be a star of dozens of
+    // edges that collapses the layout into a hairball, so instead it's shown as a
+    // small LOCAL FLAG beneath each member (the way schematics use power symbols
+    // rather than one global wire) — present and clickable, but kept out of the sim.
+    const FANOUT_CAP = 18;
+    const isLocal = (net, deg) => deg > FANOUT_CAP || isPowerName(net) || isGroundName(net);
+    const nodes = [];
+    comps.forEach((c, ci) => nodes.push({ kind: "comp", ci, w: c.kind === "ic" ? 132 : 52, h: c.kind === "ic" ? 40 : 22 }));
+    const netIdx = new Map();
+    const localSet = new Set();
+    netComps.forEach((cis, net) => {
+      if (isLocal(net, cis.length)) { localSet.add(net); return; }
+      netIdx.set(net, nodes.length); nodes.push({ kind: "net", net, deg: cis.length, port: portNets.has(net) });
+    });
+    const edges = [];
+    comps.forEach((c, ci) => c.nets.forEach((n) => { const ni = netIdx.get(n); if (ni != null) edges.push({ a: ci, b: ni }); }));
+
+    forceLayout(nodes, edges);
+
+    let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
+    nodes.forEach((n) => { if (n.x < minx) minx = n.x; if (n.x > maxx) maxx = n.x; if (n.y < miny) miny = n.y; if (n.y > maxy) maxy = n.y; });
+    const offx = 80 - minx, offy = 80 - miny;
+    nodes.forEach((n) => { n.x += offx; n.y += offy; });
+
+    m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = []; m.rails = []; m.netNodes = []; m.fullEdges = []; m.flags = [];
+    const compNode = new Map();
+    nodes.forEach((n) => {
+      if (n.kind !== "comp") return;
+      compNode.set(n.ci, n);
+      const c = comps[n.ci];
+      m.hubs.push({ ref: c.ref, label: c.label, part: c.kind === "ic" ? c.part : "", x: n.x - n.w / 2, y: n.y - n.h / 2, w: n.w, h: n.h, cx: n.x, cy: n.y, pins: [], compKind: c.kind });
+    });
+    nodes.forEach((n) => {
+      if (n.kind !== "net") return;
+      const pwr = isPowerName(n.net) || isGroundName(n.net);
+      m.netNodes.push({ x: n.x, y: n.y, net: n.net, deg: n.deg, port: n.port, pwr, gnd: isGroundName(n.net) });
+      m.labels.push({ text: netLeaf(n.net), x: n.x, y: n.y - 11, anchor: "center", net: n.net, link: true, port: n.port });
+    });
+    edges.forEach((e) => {
+      const a = nodes[e.a], b = nodes[e.b];
+      m.fullEdges.push({ net: b.net, x1: a.x, y1: a.y, x2: b.x, y2: b.y, pwr: isPowerName(b.net) || isGroundName(b.net) });
+    });
+    // local (power/ground/high-fanout) nets → small labeled flags stacked beneath each member part.
+    comps.forEach((c, ci) => {
+      const ln = c.nets.filter((n) => localSet.has(n));
+      const node = compNode.get(ci);
+      if (!ln.length || !node) return;
+      ln.forEach((net, j) => m.flags.push({ x: node.x, y: node.y + node.h / 2 + 10 + j * 11, net, pwr: isPowerName(net) || isGroundName(net), gnd: isGroundName(net), port: portNets.has(net) }));
+    });
+    m.mapBox = { x: -20, y: -20, w: (maxx - minx) + 200, h: (maxy - miny) + 200 };
+  }
+
+  // Force-directed (Fruchterman–Reingold) layout with grid-bucketed repulsion so it
+  // stays ~O(n) per iteration on a whole-board graph. Deterministic seed (a jittered
+  // grid keyed on node index, no RNG) so the layout is stable across rebuilds.
+  function forceLayout(nodes, edges) {
+    const N = nodes.length; if (!N) return;
+    const k = 64, cell = k * 1.2;
+    const iters = N > 700 ? 150 : N > 250 ? 220 : 320;
+    const cols = Math.ceil(Math.sqrt(N));
+    nodes.forEach((n, i) => { n.x = (i % cols) * k * 1.5 + ((i * 37) % 23) - 11; n.y = Math.floor(i / cols) * k * 1.5 + ((i * 53) % 19) - 9; n.dx = 0; n.dy = 0; });
+    let temp = k * 8;
+    for (let it = 0; it < iters; it++) {
+      const grid = new Map();
+      for (let i = 0; i < N; i++) { const n = nodes[i]; n.dx = 0; n.dy = 0; const key = Math.floor(n.x / cell) + "," + Math.floor(n.y / cell); let a = grid.get(key); if (!a) { a = []; grid.set(key, a); } a.push(i); }
+      for (let i = 0; i < N; i++) {
+        const n = nodes[i], gx = Math.floor(n.x / cell), gy = Math.floor(n.y / cell);
+        for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+          const a = grid.get((gx + ox) + "," + (gy + oy)); if (!a) continue;
+          for (const j of a) {
+            if (j === i) continue;
+            let ddx = n.x - nodes[j].x, ddy = n.y - nodes[j].y, d2 = ddx * ddx + ddy * ddy;
+            if (d2 < 0.02) { ddx = (i - j) * 0.01 + 0.01; ddy = 0.013; d2 = ddx * ddx + ddy * ddy; }
+            const d = Math.sqrt(d2), f = k * k / d;
+            n.dx += ddx / d * f; n.dy += ddy / d * f;
+          }
+        }
+      }
+      for (const e of edges) {
+        const a = nodes[e.a], b = nodes[e.b];
+        let ddx = a.x - b.x, ddy = a.y - b.y; const d = Math.hypot(ddx, ddy) || 0.01, f = d * d / k;
+        const fx = ddx / d * f, fy = ddy / d * f;
+        a.dx -= fx; a.dy -= fy; b.dx += fx; b.dy += fy;
+      }
+      // Weak gravity toward the centroid keeps edge-less nodes (e.g. decoupling caps
+      // whose only nets are power/ground, so they have no routed edges) from drifting off.
+      let cx = 0, cy = 0; for (let i = 0; i < N; i++) { cx += nodes[i].x; cy += nodes[i].y; } cx /= N; cy /= N;
+      for (let i = 0; i < N; i++) { const n = nodes[i]; n.dx += (cx - n.x) * 0.03; n.dy += (cy - n.y) * 0.03; }
+      for (let i = 0; i < N; i++) { const n = nodes[i]; const d = Math.hypot(n.dx, n.dy) || 0.01, mv = Math.min(d, temp); n.x += n.dx / d * mv; n.y += n.dy / d * mv; }
+      temp = Math.max(temp * 0.95, k * 0.06);
+    }
+  }
+
   // A passive whose two terminals land on two *private* pads of the SAME IC — an
   // inductor across a buck-boost's SW nodes, a series R between two pins — is
   // otherwise drawn floating off to one side with a matching net label at each
@@ -1971,13 +2133,25 @@
   // Global connection map: rebuild the board as a grid of per-IC cells (Shift+G).
   function toggleGhostAll() {
     ghostAll = !ghostAll;
-    if (ghostAll) { ghostRef = null; selection = null; hotNet = null; activeSheet = -1; }
+    if (ghostAll) { ghostRef = null; fullMap = false; selection = null; hotNet = null; activeSheet = -1; }
     buildModel();
     if (ghostAll) {
       if (M.mapBox) { fitTo(M.mapBox, 0.03); toast("Connection map — the fewest anchor ICs that cover every connection (each drawn once); a low-degree IC appears as a proxy inside its busiest neighbour. Click any block to select/edit it, Esc exits"); }
       else { ghostAll = false; toast("No direct IC-to-IC nets to map.", true); }
     } else { fitAll(); }
-    syncGhostBtns(); renderInspector(); updateStatus(); scheduleDraw();
+    syncGhostBtns(); syncFullBtn(); renderInspector(); updateStatus(); scheduleDraw();
+  }
+  // Full connection map (U): rebuild the ENTIRE netlist as one force-directed graph —
+  // every part and every net, nothing hidden. Mutually exclusive with the other modes.
+  function toggleFull() {
+    fullMap = !fullMap;
+    if (fullMap) { ghostAll = false; ghostRef = null; showPower = false; selection = null; hotNet = null; activeSheet = -1; }
+    buildModel();
+    if (fullMap) {
+      if (M.mapBox) { fitTo(M.mapBox, 0.04); toast("Full map — the whole netlist as one connectivity graph: every part + every net. Click a net dot or a part to select/edit; Esc exits."); }
+      else { fullMap = false; toast("Nothing to lay out.", true); }
+    } else { fitAll(); }
+    syncGhostBtns(); syncPowerBtn(); syncFullBtn(); renderInspector(); updateStatus(); scheduleDraw();
   }
   // Power layer (P): overlay each IC cell's power/ground rail nodes. The layer only
   // renders on the connection map, so turning it on enters the map if not already there.
@@ -2013,6 +2187,7 @@
       case "n": case "N": toggleNets(); break;
       case "g": case "G": (e.shiftKey ? toggleGhostAll : toggleGhost)(); break;
       case "p": case "P": togglePower(); break;
+      case "u": case "U": toggleFull(); break;
       case "?": toggleKeys(); break;
       case "Escape": deselect(); break;
       case "[": stepSheet(-1); break;
@@ -2025,19 +2200,21 @@
   // ── Toolbar ──────────────────────────────────────────────────────────
   const tools = document.createElement("div");
   tools.id = "ed-tools";
-  tools.innerHTML = `<button id="tool-add" title="Add (A)">+ Add</button><button id="tool-nets" title="Draw connections instead of name labels: device-to-device channel wires + a passive stood vertically between two pads it bridges on one IC (N)">Nets</button><button id="tool-ghost" title="Fan out the selected IC: ring it with dashed ghost copies of every IC it connects to point-to-point, one straight wire each. Click a ghost to hop to it. (G)">Fan-out</button><button id="tool-ghost-all" title="Connection map: the fewest anchor ICs that cover every point-to-point connection, each in its own region; low-degree ICs collapse into ghosts so nothing's drawn twice (Shift+G)">Map</button><button id="tool-power" title="Power layer: overlay each IC's power/ground rail nodes on the connection map; click a node to see/edit its decoupling caps (P)">Power</button><button id="tool-fit" title="Fit (F)">Fit</button><button id="tool-keys" title="Keys (?)">?</button>`;
+  tools.innerHTML = `<button id="tool-add" title="Add (A)">+ Add</button><button id="tool-nets" title="Draw connections instead of name labels: device-to-device channel wires + a passive stood vertically between two pads it bridges on one IC (N)">Nets</button><button id="tool-ghost" title="Fan out the selected IC: ring it with dashed ghost copies of every IC it connects to point-to-point, one straight wire each. Click a ghost to hop to it. (G)">Fan-out</button><button id="tool-ghost-all" title="Connection map: the fewest anchor ICs that cover every point-to-point connection, each in its own region; low-degree ICs collapse into ghosts so nothing's drawn twice (Shift+G)">Map</button><button id="tool-power" title="Power layer: overlay each IC's power/ground rail nodes on the connection map; click a node to see/edit its decoupling caps (P)">Power</button><button id="tool-full" title="Full map: the entire netlist as one force-directed graph — every part and every net, nothing hidden. Click a net dot or part to select/edit (U)">Full</button><button id="tool-fit" title="Fit (F)">Fit</button><button id="tool-keys" title="Keys (?)">?</button>`;
   wrap.appendChild(tools);
   tools.querySelector("#tool-add").onclick = openAdd;
   tools.querySelector("#tool-nets").onclick = toggleNets;
   tools.querySelector("#tool-ghost").onclick = toggleGhost;
   tools.querySelector("#tool-ghost-all").onclick = toggleGhostAll;
   tools.querySelector("#tool-power").onclick = togglePower;
+  tools.querySelector("#tool-full").onclick = toggleFull;
   tools.querySelector("#tool-fit").onclick = () => { if (activeSheet >= 0) selectSheet(activeSheet); else fitAll(); };
   tools.querySelector("#tool-keys").onclick = toggleKeys;
   function syncNetsBtn() { const b = document.getElementById("tool-nets"); if (b) b.classList.toggle("on", showNets); }
   function syncGhostBtns() { const b = document.getElementById("tool-ghost"); if (b) b.classList.toggle("on", !!ghostRef); const a = document.getElementById("tool-ghost-all"); if (a) a.classList.toggle("on", ghostAll); }
   function syncPowerBtn() { const b = document.getElementById("tool-power"); if (b) b.classList.toggle("on", showPower); }
-  syncNetsBtn(); syncGhostBtns(); syncPowerBtn();
+  function syncFullBtn() { const b = document.getElementById("tool-full"); if (b) b.classList.toggle("on", fullMap); }
+  syncNetsBtn(); syncGhostBtns(); syncPowerBtn(); syncFullBtn();
   isoBox.addEventListener("change", scheduleDraw);
 
   // ── ERC / validation surface ─────────────────────────────────────────
