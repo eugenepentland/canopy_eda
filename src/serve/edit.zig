@@ -706,6 +706,458 @@ pub fn newDesignApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"url\":\"/editor/{s}\"}}", .{name});
 }
 
+// ── Structural authoring (sections, ports, ref-des, DNP) ───────────────────
+// New surgical endpoints that let the editor build a conventional, organized
+// design (not just a flat instance pile). They mirror the existing splice +
+// findInstanceOpen/findFormEnd patterns and share the writeAndRebuild tail.
+
+/// Write `s` as a quoted s-expr string with the two chars that need escaping.
+fn writeSexprString(w: anytype, s: []const u8) std.mem.Allocator.Error!void {
+    try w.writeByte('"');
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        else => try w.writeByte(c),
+    };
+    try w.writeByte('"');
+}
+
+/// Byte index just before the `(design-block …)` closing paren — the splice
+/// point for a new top-level form. Null when the source has no design-block.
+fn designBlockInsertPos(source: []const u8) ?usize {
+    const db = std.mem.indexOf(u8, source, "(design-block") orelse return null;
+    const end = findFormEnd(source, db) orelse return null;
+    return end - 1;
+}
+
+/// Emit `{"ok":true,"version":N}` (or rebuild-failure 500) for a finished mutation.
+fn finishMutation(ctx: *Handler, name: []const u8, new_source: []const u8, desc: []const u8, res: *httpz.Response) HandlerError!void {
+    const result = writeAndRebuild(ctx.allocator, ctx.project_dir, name, new_source, desc) catch {
+        res.status = 500;
+        res.body = ERR_REBUILD_FAILED;
+        return;
+    };
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+}
+
+/// POST /api/add-section/:name  Body: {"section":"Power","subtitle":"3V3 buck"}
+/// Splice an empty `(section "Name" "subtitle"?)` into the design-block.
+pub fn addSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const section = parseJsonString(body, "\"section\"") orelse {
+        res.status = 400;
+        res.body = "missing section";
+        return;
+    };
+    if (section.len == 0) {
+        res.status = 400;
+        res.body = "section name is empty";
+        return;
+    }
+    const subtitle = parseJsonString(body, "\"subtitle\"") orelse "";
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(ctx.allocator, SECTION_OPEN_TEMPLATE, .{section});
+    defer ctx.allocator.free(needle);
+    if (std.mem.indexOf(u8, source, needle) != null) {
+        res.status = 409;
+        res.body = "a section with that name already exists";
+        return;
+    }
+    const insert_at = designBlockInsertPos(source) orelse {
+        res.status = 400;
+        res.body = "not a design-block";
+        return;
+    };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll(source[0..insert_at]);
+    try w.writeAll("\n  (section ");
+    try writeSexprString(w, section);
+    if (subtitle.len > 0) {
+        try w.writeByte(' ');
+        try writeSexprString(w, subtitle);
+    }
+    try w.writeAll(")\n");
+    try w.writeAll(source[insert_at..]);
+    try finishMutation(ctx, name, buf.items, "add_section", res);
+}
+
+/// POST /api/rename-section/:name  Body: {"from":"Power","to":"Power Rails"}
+pub fn renameSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const from = parseJsonString(body, "\"from\"") orelse {
+        res.status = 400;
+        res.body = "missing from";
+        return;
+    };
+    const to = parseJsonString(body, "\"to\"") orelse {
+        res.status = 400;
+        res.body = "missing to";
+        return;
+    };
+    if (to.len == 0) {
+        res.status = 400;
+        res.body = "new name is empty";
+        return;
+    }
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(ctx.allocator, SECTION_OPEN_TEMPLATE, .{from});
+    defer ctx.allocator.free(needle);
+    const at = std.mem.indexOf(u8, source, needle) orelse {
+        res.status = 404;
+        res.body = "section not found";
+        return;
+    };
+    // Replace just the quoted name token: `(section "` is needle minus the name+quote.
+    const name_start = at + "(section \"".len;
+    const name_end = name_start + from.len; // followed by the closing quote
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll(source[0..name_start]);
+    for (to) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        else => try w.writeByte(c),
+    };
+    try w.writeAll(source[name_end..]);
+    try finishMutation(ctx, name, buf.items, "rename_section", res);
+}
+
+/// POST /api/remove-section/:name  Body: {"section":"Power"}
+/// Deletes an EMPTY section (metadata only); refuses one holding parts (409).
+pub fn removeSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const section = parseJsonString(body, "\"section\"") orelse {
+        res.status = 400;
+        res.body = "missing section";
+        return;
+    };
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const needle = try std.fmt.allocPrint(ctx.allocator, SECTION_OPEN_TEMPLATE, .{section});
+    defer ctx.allocator.free(needle);
+    const sec_start = std.mem.indexOf(u8, source, needle) orelse {
+        res.status = 404;
+        res.body = "section not found";
+        return;
+    };
+    const sec_end = findFormEnd(source, sec_start) orelse {
+        res.status = 500;
+        res.body = ERR_MALFORMED_INSTANCE;
+        return;
+    };
+    // Only metadata (subtitle / row / col / role / protocol) may remain — refuse if
+    // the section still carries parts or wiring so we never silently orphan them.
+    const inner = source[sec_start..sec_end];
+    const content_forms = [_][]const u8{ "(instance", "(sub-block", "(pins ", "(note", "(group", "(port", "(bus", "(decouple", "(series", "(test-point" };
+    for (content_forms) |needle2| {
+        if (std.mem.indexOf(u8, inner, needle2) != null) {
+            res.status = 409;
+            res.body = "section is not empty — move or delete its parts first";
+            return;
+        }
+    }
+    // Excise the form plus a leading blank line / indentation.
+    var cut_start = sec_start;
+    while (cut_start > 0 and (source[cut_start - 1] == ' ' or source[cut_start - 1] == '\t')) cut_start -= 1;
+    if (cut_start > 0 and source[cut_start - 1] == '\n') cut_start -= 1;
+    var cut_end = sec_end;
+    if (cut_end < source.len and source[cut_end] == '\n') cut_end += 1;
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll(source[0..cut_start]);
+    try w.writeAll(source[cut_end..]);
+    try finishMutation(ctx, name, buf.items, "remove_section", res);
+}
+
+/// POST /api/add-port/:name  Body: {"net":"VDD","dir":"in"}  (dir: in|out|bidi)
+pub fn addPortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const net = parseJsonString(body, "\"net\"") orelse {
+        res.status = 400;
+        res.body = "missing net";
+        return;
+    };
+    const dir = parseJsonString(body, "\"dir\"") orelse "bidi";
+    const dir_ok = std.mem.eql(u8, dir, "in") or std.mem.eql(u8, dir, "out") or std.mem.eql(u8, dir, "bidi");
+    if (net.len == 0 or !dir_ok) {
+        res.status = 400;
+        res.body = "need net and dir in|out|bidi";
+        return;
+    }
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const dup = try std.fmt.allocPrint(ctx.allocator, "(port \"{s}\"", .{net});
+    defer ctx.allocator.free(dup);
+    if (std.mem.indexOf(u8, source, dup) != null) {
+        res.status = 409;
+        res.body = "a port for that net already exists";
+        return;
+    }
+    const insert_at = designBlockInsertPos(source) orelse {
+        res.status = 400;
+        res.body = "not a design-block";
+        return;
+    };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll(source[0..insert_at]);
+    try w.writeAll("\n  (port ");
+    try writeSexprString(w, net);
+    try w.writeByte(' ');
+    try w.writeAll(dir);
+    try w.writeAll(")\n");
+    try w.writeAll(source[insert_at..]);
+    try finishMutation(ctx, name, buf.items, "add_port", res);
+}
+
+/// POST /api/remove-port/:name  Body: {"net":"VDD"}
+pub fn removePortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const net = parseJsonString(body, "\"net\"") orelse {
+        res.status = 400;
+        res.body = "missing net";
+        return;
+    };
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const open_needle = try std.fmt.allocPrint(ctx.allocator, "(port \"{s}\"", .{net});
+    defer ctx.allocator.free(open_needle);
+    const p_start = std.mem.indexOf(u8, source, open_needle) orelse {
+        res.status = 404;
+        res.body = "port not found";
+        return;
+    };
+    const p_end = findFormEnd(source, p_start) orelse {
+        res.status = 500;
+        res.body = ERR_MALFORMED_INSTANCE;
+        return;
+    };
+    var cut_start = p_start;
+    while (cut_start > 0 and (source[cut_start - 1] == ' ' or source[cut_start - 1] == '\t')) cut_start -= 1;
+    if (cut_start > 0 and source[cut_start - 1] == '\n') cut_start -= 1;
+    var cut_end = p_end;
+    if (cut_end < source.len and source[cut_end] == '\n') cut_end += 1;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll(source[0..cut_start]);
+    try w.writeAll(source[cut_end..]);
+    try finishMutation(ctx, name, buf.items, "remove_port", res);
+}
+
+/// POST /api/rename-refdes/:name  Body: {"ref":"C3","to":"C10","srcOff":1234}
+pub fn renameRefdesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const ref = parseJsonString(body, "\"ref\"") orelse {
+        res.status = 400;
+        res.body = ERR_MISSING_REF;
+        return;
+    };
+    const to = parseJsonString(body, "\"to\"") orelse {
+        res.status = 400;
+        res.body = "missing to";
+        return;
+    };
+    if (to.len == 0) {
+        res.status = 400;
+        res.body = "new ref is empty";
+        return;
+    }
+    const src_off = parseSrcOff(body);
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    // Refuse a collision with an existing explicit instance label.
+    const collide = try std.fmt.allocPrint(ctx.allocator, "(instance \"{s}\"", .{to});
+    defer ctx.allocator.free(collide);
+    if (std.mem.indexOf(u8, source, collide) != null) {
+        res.status = 409;
+        res.body = "another instance already uses that ref";
+        return;
+    }
+    const open = findInstanceOpen(source, ref, src_off) orelse {
+        res.status = 404;
+        res.body = ERR_INSTANCE_NOT_FOUND;
+        return;
+    };
+    const lq = std.mem.indexOfScalarPos(u8, source, open, '"') orelse {
+        res.status = 500;
+        res.body = ERR_MALFORMED_INSTANCE;
+        return;
+    };
+    const rq = std.mem.indexOfScalarPos(u8, source, lq + 1, '"') orelse {
+        res.status = 500;
+        res.body = ERR_MALFORMED_INSTANCE;
+        return;
+    };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    try w.writeAll(source[0 .. lq + 1]);
+    for (to) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        else => try w.writeByte(c),
+    };
+    try w.writeAll(source[rq..]);
+    try finishMutation(ctx, name, buf.items, "rename_refdes", res);
+}
+
+/// POST /api/set-dnp/:name  Body: {"ref":"R7","dnp":true,"srcOff":1234}
+/// Toggle a `(dnp)` marker inside an instance (Do-Not-Populate).
+pub fn setDnpApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const ref = parseJsonString(body, "\"ref\"") orelse {
+        res.status = 400;
+        res.body = ERR_MISSING_REF;
+        return;
+    };
+    const want_dnp = std.mem.indexOf(u8, body, "\"dnp\":true") != null or
+        std.mem.indexOf(u8, body, "\"dnp\": true") != null;
+    const src_off = parseSrcOff(body);
+    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = ERR_CANNOT_READ_FILE;
+        return;
+    };
+    defer ctx.allocator.free(source);
+
+    const open = findInstanceOpen(source, ref, src_off) orelse {
+        res.status = 404;
+        res.body = ERR_INSTANCE_NOT_FOUND;
+        return;
+    };
+    const end = findFormEnd(source, open) orelse {
+        res.status = 500;
+        res.body = ERR_MALFORMED_INSTANCE;
+        return;
+    };
+    const dnp_rel = std.mem.indexOf(u8, source[open..end], "(dnp)");
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
+    if (want_dnp) {
+        if (dnp_rel != null) {
+            res.status = 200;
+            res.content_type = .JSON;
+            res.body = "{\"ok\":true,\"noop\":true}";
+            return;
+        }
+        try w.writeAll(source[0 .. end - 1]);
+        try w.writeAll(" (dnp)");
+        try w.writeAll(source[end - 1 ..]);
+    } else {
+        if (dnp_rel == null) {
+            res.status = 200;
+            res.content_type = .JSON;
+            res.body = "{\"ok\":true,\"noop\":true}";
+            return;
+        }
+        var d = open + dnp_rel.?;
+        var d_end = d + "(dnp)".len;
+        while (d > 0 and source[d - 1] == ' ') d -= 1; // eat one or more leading spaces
+        if (d_end < source.len and source[d_end] == '\n' and (d == 0 or source[d - 1] == '\n')) d_end += 1;
+        try w.writeAll(source[0..d]);
+        try w.writeAll(source[d_end..]);
+    }
+    try finishMutation(ctx, name, buf.items, "set_dnp", res);
+}
+
 /// POST /api/remove-instance/:name
 /// Body: {"ref":"C3"}
 pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {

@@ -424,6 +424,13 @@ pub fn serve(
     router.post("/api/rename-net/:name", edit.renameNetApi, .{});
     router.post("/api/move-pin/:name", edit.movePinApi, .{});
     router.post("/api/swap-pins/:name", edit.swapPinsApi, .{});
+    router.post("/api/add-section/:name", edit.addSectionApi, .{});
+    router.post("/api/rename-section/:name", edit.renameSectionApi, .{});
+    router.post("/api/remove-section/:name", edit.removeSectionApi, .{});
+    router.post("/api/add-port/:name", edit.addPortApi, .{});
+    router.post("/api/remove-port/:name", edit.removePortApi, .{});
+    router.post("/api/rename-refdes/:name", edit.renameRefdesApi, .{});
+    router.post("/api/set-dnp/:name", edit.setDnpApi, .{});
     router.get("/api/free-pins/:name", api.freePinsApi, .{});
     router.get("/api/design-state/:name", api.designStateApi, .{});
     router.get("/api/source/:name", edit.getSourceApi, .{});
