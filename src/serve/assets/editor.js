@@ -59,6 +59,10 @@
   let dirty = true, springBack = null;
   const stagePos = {};           // staged-part identity (src offset) -> {x,y} world position
   let firstBuild = true;
+  let ercData = [];              // latest /api/erc violations
+  let ercByRef = new Map();     // ref  -> worst severity ("err"|"warning") for canvas highlight
+  let ercByNet = new Map();     // net  -> worst severity                    "
+  let ercOpen = false;          // violations panel visible
 
   // ── Helpers ──────────────────────────────────────────────────────────
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
@@ -388,7 +392,8 @@
         const hot = hotNet && l.net === hotNet;
         if (l.ground) { drawGround(l.x, l.y, hot, sw, showText, l.text); return; }
         if (!showText) return;
-        ctx.fillStyle = hot ? C.hot : l.diff ? C.diff : l.link ? C.link : l.port ? C.labelPort : C.labelNet;
+        const lev = ercByNet.get(l.net);                            // ERC-flagged net → tint its label
+        ctx.fillStyle = hot ? C.hot : lev ? ercColor(lev) : l.diff ? C.diff : l.link ? C.link : l.port ? C.labelPort : C.labelNet;
         ctx.textAlign = l.anchor === "start" ? "left" : l.anchor === "end" ? "right" : "center";
         ctx.textBaseline = "middle";
         ctx.fillText(l.text, l.x, l.y);
@@ -439,6 +444,8 @@
       if (h.ghost) ctx.setLineDash([sw(6), sw(4)]);
       roundRect(h.x + ox, h.y + oy, h.w, h.h, sw(4)); ctx.fill(); ctx.stroke();
       ctx.setLineDash([]);
+      const ev = h.terminal ? null : ercByRef.get(h.ref);            // ERC warning ring
+      if (ev) { ctx.strokeStyle = ercColor(ev); ctx.lineWidth = sw(2); ctx.setLineDash([sw(3), sw(3)]); roundRect(h.x + ox - 3, h.y + oy - 3, h.w + 6, h.h + 6, sw(5)); ctx.stroke(); ctx.setLineDash([]); }
       if (15 * s >= 8) {
         ctx.fillStyle = h.ghost ? C.ghostLabel : C.hubLabel; ctx.font = "600 15px sans-serif"; ctx.textAlign = "center";
         // The ↗ marks a click-to-jump link (fan-out only); map proxies edit in place.
@@ -1843,13 +1850,68 @@
   syncNetsBtn(); syncGhostBtns();
   isoBox.addEventListener("change", scheduleDraw);
 
+  // ── ERC / validation surface ─────────────────────────────────────────
+  // The design is saved after every surgical edit, so GET /api/erc reflects the
+  // live design. We show a health chip + a click-through violations panel, and
+  // paint a warning ring on offending parts / tint offending net labels.
+  const ercChip = document.getElementById("ed-erc-chip");
+  const ercPanel = document.getElementById("ed-erc-panel");
+  if (ercChip) ercChip.addEventListener("click", () => { ercOpen = !ercOpen; renderErcChip(); renderErcPanel(); });
+  const ercRank = { error: 3, warning: 2, info: 1 };
+  const ercTok = (s) => (s === "error" ? "err" : (s || "info"));   // css class / paint token
+  const ercColor = (t) => (t === "err" ? "#f85149" : "#e3b341");
+  async function fetchErc() {
+    try { const data = await api("GET", `/api/erc/${DESIGN}`); ercData = Array.isArray(data) ? data : []; }
+    catch (e) { ercData = []; }
+    ercByRef = new Map(); ercByNet = new Map();
+    const worse = (m, k, sev) => { const cur = m.get(k); if (!cur || ercRank[sev] > ercRank[cur]) m.set(k, ercTok(sev)); };
+    for (const v of ercData) {
+      if (v.severity !== "error" && v.severity !== "warning") continue;   // info → panel only, no canvas paint
+      if (v.ref) worse(ercByRef, v.ref, v.severity);
+      if (v.net) worse(ercByNet, v.net, v.severity);
+    }
+    renderErcChip(); renderErcPanel(); scheduleDraw();
+  }
+  function renderErcChip() {
+    if (!ercChip) return;
+    const errs = ercData.filter((v) => v.severity === "error").length;
+    const warns = ercData.filter((v) => v.severity === "warning").length;
+    ercChip.classList.remove("pass", "warn", "err");
+    ercChip.classList.toggle("on", ercOpen);
+    if (errs) { ercChip.classList.add("err"); ercChip.textContent = errs + (errs === 1 ? " error" : " errors") + (warns ? " · " + warns + " ⚠" : ""); }
+    else if (warns) { ercChip.classList.add("warn"); ercChip.textContent = warns + (warns === 1 ? " warning" : " warnings"); }
+    else { ercChip.classList.add("pass"); ercChip.textContent = "✓ ERC"; }
+  }
+  function renderErcPanel() {
+    if (!ercPanel) return;
+    ercPanel.hidden = !ercOpen;
+    if (!ercOpen) return;
+    clear(ercPanel);
+    if (!ercData.length) { ercPanel.appendChild(mkEl("div", "empty", "✓ No electrical-rule violations.")); return; }
+    const order = { error: 0, warning: 1, info: 2 };
+    const rows = ercData.slice().sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
+    let curSev = null;
+    rows.forEach((v) => {
+      if (v.severity !== curSev) { curSev = v.severity; ercPanel.appendChild(mkEl("div", "h", (v.severity || "info") + "s")); }
+      const row = mkEl("div", "ed-erc-row " + ercTok(v.severity));
+      row.appendChild(mkEl("span", "dot"));
+      const tgt = v.ref || v.net;
+      if (tgt) row.appendChild(mkEl("span", "tgt", tgt));
+      row.appendChild(mkEl("span", "msg", v.message || v.kind || ""));
+      if (v.kind) row.title = v.kind;
+      if (v.ref) row.onclick = () => { if (isHubRef(v.ref) || (M && M.passes.some((p) => p.ref === v.ref))) select(isHubRef(v.ref) ? "hub" : "pass", v.ref); };
+      else if (v.net) row.onclick = () => highlightNetToggle(v.net);
+      ercPanel.appendChild(row);
+    });
+  }
+
   // ── Refetch / live reload ────────────────────────────────────────────
   function rebuildScene() { buildModel(); buildSheets(); buildSheetList(); renderInspector(); scheduleDraw(); }
   async function refetch() {
     try {
       const data = await api("GET", `/api/editor-scene/${DESIGN}`);
       if (data && data.error) { toast("Reload: " + data.error, true); return; }
-      scene = data; rebuildScene();
+      scene = data; rebuildScene(); fetchErc();
       try { const v = await api("GET", `/api/version/${DESIGN}`); if (v && typeof v.version === "number") lastVersion = v.version; } catch (e) {}
       updateStatus();
     } catch (err) { toast("Reload failed: " + err.message, true); }
@@ -1862,5 +1924,6 @@
   new ResizeObserver(sizeCanvas).observe(wrap);
   sizeCanvas();
   rebuildScene();
+  fetchErc();
   requestAnimationFrame(() => { fitAll(); updateStatus(); requestAnimationFrame(frame); });
 })();

@@ -105,8 +105,13 @@ pub fn editorPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     try w.print("<a class=\"ed-link\" href=\"/schematics/{s}\">Schematic ↗</a>", .{name});
     try w.print("<a class=\"ed-link\" href=\"/pcb-layout/{s}\">PCB ↗</a>", .{name});
     try w.writeAll("<span class=\"ed-grow\"></span>");
+    // Electrical-rule-check health chip (populated by the client from /api/erc).
+    try w.writeAll("<button type=\"button\" id=\"ed-erc-chip\" class=\"ed-erc\" title=\"Electrical-rule checks — click for details\">ERC …</button>");
     try w.writeAll("<span class=\"ed-hint\">press <kbd>?</kbd> for keys</span>");
     try w.writeAll("</header>");
+
+    // Floating ERC violations panel (toggled by the chip).
+    try w.writeAll("<div id=\"ed-erc-panel\" class=\"ed-erc-panel\" hidden></div>");
 
     // App shell: left sheet navigator, left inspector, center canvas, bottom status.
     try w.writeAll("<div id=\"ed-app\">");
