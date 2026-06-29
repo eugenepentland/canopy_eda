@@ -1249,7 +1249,7 @@
           }
           break;
         }
-        chain.push({ ref: c.ref, value: c.value, type: c.type }); viaPass = c.ref; net = c.otherNet;
+        chain.push({ ref: c.ref, value: c.value, type: c.type, inNet: net, outNet: c.otherNet }); viaPass = c.ref; net = c.otherNet;
       }
       // A pass-through whose far side never reaches a second IC (e.g. the DUT
       // connector isn't instantiated yet — the channel dies in the protection
@@ -1307,10 +1307,18 @@
           item.tail = { type: tail.length === 1 ? tail[0].type : "box", label: tail.length === 1 ? (tail[0].ref + (tail[0].value ? " " + tail[0].value : "")) : tail.map((x) => x.ref).join("+"), ref: tail[0].ref };
           item.farNet = (b.net && b.net !== sOut && b.net !== a.net) ? b.net : null;   // net past the tail (ghost pin)
         }
+      } else if (link.passives.length >= 2) {
+        // A multi-element run (filters / pads / DC-blocks in series): draw EACH element
+        // as its own block in a row, so the signal path reads end to end instead of
+        // collapsing to one box. Orient elements anchor→ghost; carry the net AFTER each.
+        const fwd = a.ref === link.a.ref;
+        const els = fwd ? link.passives : link.passives.slice().reverse();
+        item.chain = els.map((x) => ({ ref: x.ref, value: x.value || "", type: x.type, device: !!x.device, component: x.component || compOf.get(x.ref) || "", net: (fwd ? x.outNet : x.inNet) || "" }));
+        item.outNet = (b.net && b.net !== a.net) ? b.net : null;
       } else if (link.passives.length) {
-        // A plain series passive (or a multi-device chain) stays a small inline symbol.
-        const one = link.passives[0], refs = link.passives.map((x) => x.ref).join("+");
-        item.via = { type: link.passives.length === 1 ? one.type : "box", label: link.passives.length === 1 ? (one.ref + (one.value ? " " + one.value : "")) : refs, device: devs.length > 0, ref: one.ref };
+        // A single series passive stays one small inline symbol on the wire.
+        const one = link.passives[0];
+        item.via = { type: one.type, label: one.ref + (one.value ? " " + one.value : ""), device: devs.length > 0, ref: one.ref };
         item.outNet = (devs.length > 0 && b.net && b.net !== a.net) ? b.net : null;
       }
       arr.push(item);
@@ -1406,6 +1414,7 @@
     });
     const PITCH = 38, HEAD = 46, PAD = 18, LBL = 44, GROWGAP = 20, ICW = 168, GW = 146, OUT = 92, MX = 24, MY = 22;
     const SHEAD = 38, SHIFT_W = 122, LEAD = 92, PULLH = 30, PULL_DROP = 11;       // pass-through shifter block + leads (wide enough for a ~14-char net label); pull-branch height; riser to the spoke below the wire
+    const CHAIN_SLOT = 80, CHAIN_DEV = 30;        // per-element slot in a multi-element chain row; device-block half-width (passive elements use a small symbol)
     // Extras band — the pins with no point-to-point partner (power/ground, multi-drop,
     // board IO) shown as horizontal SPOKES that fan out to BOTH sides of the IC, like
     // the original schematic (passives ride the spoke, terminal at the outboard end).
@@ -1444,9 +1453,12 @@
       const groups = [...parts.entries()].map(([pref, items]) => ({ pref, label: labelOf.get(pref) || pref, items })).sort((a, b) => b.items.length - a.items.length);
       const side = { left: [], right: [] }; let lc = 0, rc = 0;                  // balance pins across the two sides
       groups.forEach((g) => { if (lc <= rc) { side.left.push(g); lc += g.items.length; } else { side.right.push(g); rc += g.items.length; } });
-      const sidePT = (gs) => gs.some((g) => g.items.some((it) => it.through));
-      const leftPT = sidePT(side.left), rightPT = sidePT(side.right);
-      const sideW = (gs, pt) => gs.length ? (pt ? LEAD + SHIFT_W + LEAD + GW : OUT + GW) : 0;
+      // The middle column between IC and ghost holds inline blocks: a pass-through
+      // shifter (SHIFT_W) or a multi-element chain (one CHAIN_SLOT per element). Its
+      // width sets how far out the ghost partner sits.
+      const sideMid = (gs) => { let w = 0; gs.forEach((g) => g.items.forEach((it) => { if (it.through) w = Math.max(w, SHIFT_W); if (it.chain) w = Math.max(w, it.chain.length * CHAIN_SLOT); })); return w; };
+      const leftMid = sideMid(side.left), rightMid = sideMid(side.right);
+      const sideW = (gs, mid) => gs.length ? (mid > 0 ? LEAD + mid + LEAD + GW : OUT + GW) : 0;
       // Gather this IC's extra pins (no point-to-point partner) and split them across the
       // two sides, balanced by row height, so the band below the partner pins is ~half as
       // tall. Done BEFORE icX so each side reserves room for its outgoing spokes.
@@ -1471,8 +1483,8 @@
       const eLeft = [], eRight = []; let ehL = 0, ehR = 0;
       extras.forEach((e) => { if (ehL <= ehR) { eLeft.push(e); ehL += rowHt(e.ps); } else { eRight.push(e); ehR += rowHt(e.ps); } });
       const extraSideW = (es) => es.length ? EXTRA_SPAN : 0;
-      const leftW = Math.max(sideW(side.left, leftPT), extraSideW(eLeft));
-      const rightW = Math.max(sideW(side.right, rightPT), extraSideW(eRight)), icX = leftW;
+      const leftW = Math.max(sideW(side.left, leftMid), extraSideW(eLeft));
+      const rightW = Math.max(sideW(side.right, rightMid), extraSideW(eRight)), icX = leftW;
       const cell = { ref, label: labelOf.get(ref) || ref, ox: MX, oy: MY, ch: 0, w: 2 * MX + leftW + ICW + rightW, h: 0, icX, ghosts: [], wires: [], labels: [], pulls: [], leftPins: [], rightPins: [] };
       // A pull-up/down on `net` taps the wire segment [x0,x1]@y, drops a short riser
       // into the band just below it, then runs HORIZONTALLY (compact, to fit the partner
@@ -1490,14 +1502,16 @@
         });
         return PULLH;
       };
-      const layoutSide = (gs, onRight, pt) => {
+      const layoutSide = (gs, onRight, mid) => {
         if (!gs.length) return HEAD;
         const icEdge = onRight ? icX + ICW : icX;
+        const dir = onRight ? 1 : -1;
         const shiftX = onRight ? icEdge + LEAD : icEdge - LEAD - SHIFT_W;
         const shIn = onRight ? shiftX : shiftX + SHIFT_W, shOut = onRight ? shiftX + SHIFT_W : shiftX;
-        const ghX = pt ? (onRight ? icEdge + LEAD + SHIFT_W + LEAD : icEdge - LEAD - SHIFT_W - LEAD - GW)
+        const ghX = mid > 0 ? (onRight ? icEdge + LEAD + mid + LEAD : icEdge - LEAD - mid - LEAD - GW)
           : (onRight ? icEdge + OUT : icEdge - OUT - GW);
         const ghIn = onRight ? ghX : ghX + GW;
+        const colStart = onRight ? icEdge + LEAD : icEdge - LEAD;   // IC-side edge of the chain column
         let y = HEAD + PITCH / 2, lastBot = HEAD + PITCH;
         gs.forEach((g) => {
           // Order items so each shifter's channels are a contiguous run (direct first).
@@ -1523,6 +1537,28 @@
           let i = 0;
           while (i < rows.length) {
             const r = rows[i];
+            if (!r.s && r.it.chain) {                              // multi-element run: a row of blocks/symbols
+              const ch = r.it.chain;
+              let prevX = icEdge, prevNet = r.it.net;
+              ch.forEach((el, k) => {
+                const cx = colStart + dir * (k * CHAIN_SLOT + CHAIN_SLOT / 2);
+                const half = el.device ? CHAIN_DEV : 13;
+                cell.wires.push({ net: prevNet, pts: [[prevX, r.y], [cx - dir * half, r.y]] });
+                if (prevNet) cell.labels.push({ text: prevNet, x: (prevX + cx - dir * half) / 2, y: r.y - 9 });
+                if (el.device) {
+                  cell.ghosts.push({ ref: el.ref, label: el.ref, part: el.component || "", x: cx - half, y: r.y - SHEAD / 2, w: 2 * half, h: SHEAD, pins: [
+                    { pin: prevNet, name: "", side: onRight ? "left" : "right", x: cx - dir * half, y: r.y, net: prevNet, vx: null, vy: null },
+                    { pin: el.net, name: "", side: onRight ? "right" : "left", x: cx + dir * half, y: r.y, net: el.net, vx: null, vy: null },
+                  ] });
+                } else {
+                  cell.wires.push({ net: prevNet, via: { type: el.type, label: el.ref + (el.value ? " " + el.value : ""), ref: el.ref }, pts: [[cx - dir * half, r.y], [cx + dir * half, r.y]] });
+                }
+                prevX = cx + dir * half; prevNet = el.net;
+              });
+              cell.wires.push({ net: prevNet, pts: [[prevX, r.y], [ghIn, r.y]] });
+              if (prevNet) cell.labels.push({ text: prevNet, x: (prevX + ghIn) / 2, y: r.y - 9 });
+              i++; continue;
+            }
             if (!r.s) {                                            // direct link: one straight wire + label
               cell.wires.push({ net: r.it.net, diff: r.it.diff, via: r.it.via, pts: [[icEdge, r.y], [ghIn, r.y]] });
               cell.labels.push({ text: r.it.net, x: (icEdge + ghIn) / 2, y: r.y - 10, diff: r.it.diff });
@@ -1592,7 +1628,7 @@
         };
         return Math.max(drawSide(eLeft, false), drawSide(eRight, true));
       };
-      const lh = layoutSide(side.left, false, leftPT), rh = layoutSide(side.right, true, rightPT);
+      const lh = layoutSide(side.left, false, leftMid), rh = layoutSide(side.right, true, rightMid);
       const coreH = Math.max(lh, rh, HEAD + PITCH) + PAD;
       const extraH = layoutExtras(coreH);
       cell.ch = coreH + extraH + (showPower ? layoutRails(cell, ref, coreH + extraH) : 0);
