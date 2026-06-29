@@ -1243,7 +1243,12 @@
           const extend = cs.filter((x) => x.t === "pass"
             ? !isStub(x.otherNet)
             : (function () { const ex = passExit(x.ref, net); return !!(ex && !seenNets.has(ex) && conts(ex, null, new Set([...excl, x.ref])).length === 1); })());
-          if (extend.length === 1) c = extend[0];
+          // A directly-wired terminal IC at the fan-out is the chain's natural END — a VCO
+          // output that also taps the PLL feedback through a cap should end at the VCO, not
+          // chase the high-Z tap. Prefer ending there over following the extending element.
+          const endIC = cs.filter((x) => x.t === "ic" && !passExit(x.ref, net));
+          if (endIC.length === 1 && (firstDev || chain.length)) c = endIC[0];
+          else if (extend.length === 1) c = extend[0];
           else { fannedOut = cs.some((x) => x.t === "ic"); break; }   // junction (has IC taps) ≠ dead end
         }
         if (c.t === "ic") {
