@@ -44,6 +44,7 @@
   };
   const GRID = 60; // spatial-hash cell size (world units)
   const NODE_W = 72; // power-layer rail-node pill width (shared by layout + draw)
+  const SPOKE_SYM = 22; // side-spoke passive symbol length (shared by map layout + draw + hit-test)
 
   // ── State ────────────────────────────────────────────────────────────
   let cam = { x: 0, y: 0, w: 1000, h: 800 };
@@ -382,16 +383,36 @@
       line(e.x1, e.y1, e.x2, e.y2);
     });
     ctx.globalAlpha = 1;
-    // Passive branches hanging off a mapped net: a short branch BELOW the wire — the
-    // passive's symbol (resistor / capacitor / inductor / …), then its far terminal:
-    // a ground symbol (decoupling cap → GND), a rail bar + name (bypass / pull-up to a
-    // supply), or a short stub + net name (a series element to another signal). The
-    // ref/value caption sits beside the symbol. (Plain pull items carry no type/term,
-    // so they default to a resistor → rail-or-ground, preserving the old behavior.)
+    // Passive branches hanging off a mapped net: the passive's symbol (resistor /
+    // capacitor / inductor / …), then its far terminal — a ground symbol (decoupling
+    // cap → GND), a rail bar + name (bypass / pull-up to a supply), or a short stub +
+    // net name (a series element to another signal). A pull-up on a partner wire hangs
+    // BELOW it (vertical); an extra-pin spoke fans OUT to the IC's side (horizontal,
+    // axis "h") with the symbol inline and the terminal at the outboard end. (Plain pull
+    // items carry no type/term, so they default to a resistor → rail-or-ground.)
     (M.pulls || []).forEach((p) => {
       if (!ptVis(p.x, p.y)) return;
-      const x = p.x, y0 = p.y + 4, yb = y0 + 14, yend = yb + 6, txt = 15 * s >= 7;
+      const txt = 15 * s >= 7;
       const type = p.type || "resistor", term = p.term || (p.up ? "rail" : "gnd");
+      if (p.axis === "h") {                                          // side spoke: symbol inline on a horizontal wire
+        const dir = p.dir || 1, y = p.y;
+        const sA = p.x - SPOKE_SYM / 2, sB = p.x + SPOKE_SYM / 2;
+        const jx = p.jx != null ? p.jx : (dir > 0 ? sA - 8 : sB + 8), tx = p.tx != null ? p.tx : (dir > 0 ? sB + 14 : sA - 14);
+        ctx.strokeStyle = C.passStroke; ctx.lineWidth = sw(1.4);
+        line(jx, y, dir > 0 ? sA : sB, y); line(dir > 0 ? sB : sA, y, tx, y);   // lead-in + lead-out
+        symbol(type, sA, sB, y, sw);                                 // passive drawn ALONG the spoke
+        if (txt) { const cap = p.value || p.ref || ""; ctx.fillStyle = C.passText; ctx.font = "10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "bottom"; ctx.fillText(cap.length > 9 ? cap.slice(0, 8) + "…" : cap, p.x, y - 7); ctx.textBaseline = "middle"; }
+        if (term === "rail") {                                       // supply: a perpendicular rail bar + name
+          ctx.strokeStyle = C.passStroke; ctx.lineWidth = sw(1.6); line(tx, y - 5, tx, y + 5);
+          if (txt) { ctx.fillStyle = C.labelNet; ctx.font = "10px sans-serif"; ctx.textAlign = dir > 0 ? "left" : "right"; ctx.textBaseline = "middle"; ctx.fillText("▲ " + p.rail, tx + dir * 5, y); }
+        } else if (term === "net") {                                 // series to another signal net: name at the end
+          if (txt) { ctx.fillStyle = C.labelNet; ctx.font = "10px sans-serif"; ctx.textAlign = dir > 0 ? "left" : "right"; ctx.textBaseline = "middle"; ctx.fillText(p.rail, tx + dir * 4, y); }
+        } else {                                                     // ground rake at the spoke end (points down, as in the schematic)
+          drawGround(tx, y, false, sw, txt && !/^gnd$/i.test(p.rail || ""), p.rail || "");
+        }
+        return;
+      }
+      const x = p.x, y0 = p.y + 4, yb = y0 + 14, yend = yb + 6;
       ctx.strokeStyle = C.passStroke; ctx.lineWidth = sw(1.4);
       line(x, p.y, x, y0); line(x, yb, x, yend);
       ctx.save(); ctx.translate(x, (y0 + yb) / 2); ctx.rotate(Math.PI / 2); symbol(type, -7, 7, 0, sw); ctx.restore();
@@ -683,7 +704,11 @@
     // a link wire's midpoint, a pull resistor hanging just below it — so hit-test them
     // before the big ghost-block areas. Each carries its ref → select + edit like any part.
     for (const w of M.wires) { if (!w.via || !w.via.ref) continue; const p0 = w.pts[0], p1 = w.pts[w.pts.length - 1], mx = (p0[0] + p1[0]) / 2, my = p0[1]; if (Math.abs(x - mx) < 16 + tw && Math.abs(y - my) < 11 + tw) return { t: "part", ref: w.via.ref, kind: "pass" }; }
-    for (const p of (M.pulls || [])) { if (!p.ref) continue; if (Math.abs(x - p.x) < 10 + tw && y >= p.y - tw && y <= p.y + 26 + tw) return { t: "part", ref: p.ref, kind: "pass" }; }
+    for (const p of (M.pulls || [])) {
+      if (!p.ref) continue;
+      if (p.axis === "h") { if (Math.abs(x - p.x) < SPOKE_SYM / 2 + tw && Math.abs(y - p.y) < 8 + tw) return { t: "part", ref: p.ref, kind: "pass" }; continue; }
+      if (Math.abs(x - p.x) < 10 + tw && y >= p.y - tw && y <= p.y + 26 + tw) return { t: "part", ref: p.ref, kind: "pass" };
+    }
     // Power-layer rail pills sit inside the IC card's lower band, so test them before
     // the card area below (which would otherwise swallow the click as the IC itself).
     for (const r of (M.rails || [])) if (Math.abs(x - r.x) < NODE_W / 2 + tw && Math.abs(y - r.y) < 11 + tw) return { t: "net", net: r.net };
@@ -1330,6 +1355,12 @@
     });
     const PITCH = 38, HEAD = 46, PAD = 18, LBL = 44, GROWGAP = 20, ICW = 168, GW = 146, OUT = 92, MX = 24, MY = 22;
     const SHEAD = 38, SHIFT_W = 122, LEAD = 92, PULLH = 30;       // pass-through shifter block + leads (wide enough for a ~14-char net label); pull-branch height
+    // Extras band — the pins with no point-to-point partner (power/ground, multi-drop,
+    // board IO) shown as horizontal SPOKES that fan out to BOTH sides of the IC, like
+    // the original schematic (passives ride the spoke, terminal at the outboard end).
+    const EXTRA_TOP = 16, EXTRA_PITCH = 30, PASSROW = 30;          // band top inset; bare-pin row height; parallel-spoke pitch
+    const EXTRA_LEAD = 18, SYM_LEAD = 12, TERM_LEAD = 14, EXTRA_STUB = 56, EXTRA_LABELW = 90;
+    const EXTRA_SPAN = EXTRA_LEAD + SYM_LEAD + SPOKE_SYM + TERM_LEAD + EXTRA_LABELW;   // outboard room a spoke side needs
     // Power layer (Shift+P): a strip of each IC's power/ground rail nodes, folded
     // into the bottom of its card so packing reserves room. Built only when the
     // layer is on, so the default map is byte-identical (no nodes, no extra height).
@@ -1365,7 +1396,32 @@
       const sidePT = (gs) => gs.some((g) => g.items.some((it) => it.through));
       const leftPT = sidePT(side.left), rightPT = sidePT(side.right);
       const sideW = (gs, pt) => gs.length ? (pt ? LEAD + SHIFT_W + LEAD + GW : OUT + GW) : 0;
-      const leftW = sideW(side.left, leftPT), rightW = sideW(side.right, rightPT), icX = leftW;
+      // Gather this IC's extra pins (no point-to-point partner) and split them across the
+      // two sides, balanced by row height, so the band below the partner pins is ~half as
+      // tall. Done BEFORE icX so each side reserves room for its outgoing spokes.
+      const rhub = real.find((h) => h.ref === ref);
+      const partnerNets = new Set();
+      groups.forEach((g) => g.items.forEach((it) => { [it.net, it.outNet, it.farNet].forEach((n) => n && partnerNets.add(n)); }));
+      const passClaimed = new Set();                 // each passive lands on at most one pin of this cell
+      const rowHt = (ps) => Math.max(EXTRA_PITCH, ps.length * PASSROW);
+      const extras = [], seenE = new Set();
+      (rhub ? rhub.pins : []).forEach((p) => {
+        const net = p.anet || p.net;
+        if (!net || partnerNets.has(net) || seenE.has(net)) return;
+        if (showPower && isStub(net)) return;        // power/ground live in the rail band when that layer is on
+        seenE.add(net);
+        const pads = String(p.pins || p.pin || "").split(",").filter(Boolean);
+        const ps = [], seenP = new Set();            // bypass caps bound to a pad (decoupByPin) + series/pulls on the net
+        pads.forEach((pad) => (decoupByPin.get(ref + " " + pad) || []).forEach((x) => { if (!seenP.has(x.ref)) { seenP.add(x.ref); ps.push(x); } }));
+        (passByNet.get(net) || []).forEach((x) => { if (!seenP.has(x.ref) && !passClaimed.has(x.ref)) { seenP.add(x.ref); ps.push(x); } });
+        ps.forEach((x) => passClaimed.add(x.ref));
+        extras.push({ net, name: p.name, ps });
+      });
+      const eLeft = [], eRight = []; let ehL = 0, ehR = 0;
+      extras.forEach((e) => { if (ehL <= ehR) { eLeft.push(e); ehL += rowHt(e.ps); } else { eRight.push(e); ehR += rowHt(e.ps); } });
+      const extraSideW = (es) => es.length ? EXTRA_SPAN : 0;
+      const leftW = Math.max(sideW(side.left, leftPT), extraSideW(eLeft));
+      const rightW = Math.max(sideW(side.right, rightPT), extraSideW(eRight)), icX = leftW;
       const cell = { ref, label: labelOf.get(ref) || ref, ox: MX, oy: MY, ch: 0, w: 2 * MX + leftW + ICW + rightW, h: 0, icX, ghosts: [], wires: [], labels: [], pulls: [], leftPins: [], rightPins: [] };
       // Draw any pull-up/down on `net` as a branch hanging below the wire segment
       // [x0,x1]@y. Returns the extra vertical room the branch needs.
@@ -1374,7 +1430,6 @@
         ps.forEach((pl, k) => cell.pulls.push({ x: (x0 + x1) / 2 + (k - (ps.length - 1) / 2) * 30, y, ref: pl.ref, value: pl.value, rail: netLeaf(pl.rail), up: pl.up }));
         return PULLH;
       };
-      const passDrawn = new Set();   // each passive is drawn on at most one pin of this cell
       const layoutSide = (gs, onRight, pt) => {
         if (!gs.length) return HEAD;
         const icEdge = onRight ? icX + ICW : icX;
@@ -1441,49 +1496,41 @@
         });
         return lastBot;
       };
-      // Show ALL of this component's remaining pins — the ones with no point-to-point
-      // partner (power/ground, multi-drop buses, board IO) — as labeled net stubs in a
-      // band BELOW the partner pins, extending the box downward. The existing
-      // point-to-point pins are left exactly as they are. One row per distinct net; a
-      // pull-up/down on the net hangs off its stub. (Power/ground move to the rail band
-      // instead when the power layer is on.)
+      // Draw the pre-split extra pins (eLeft / eRight) as a band below the partner pins,
+      // fanning out to BOTH sides of the IC like the original schematic: each pin gets a
+      // horizontal SPOKE on its side (passive symbol inline, terminal — ground / rail /
+      // net — at the outboard end). Splitting across two sides keeps the band short. A
+      // bare pin is just a stub + net label. Returns the band height.
       const layoutExtras = (baseY) => {
-        const rhub = real.find((h) => h.ref === ref);
-        if (!rhub) return 0;
-        const shown = new Set();
-        cell.leftPins.forEach((p) => shown.add(p.net));
-        cell.rightPins.forEach((p) => shown.add(p.net));
-        const EXTRA_TOP = 18, EXTRA_PITCH = 28, EXTRA_STUB = 64, PGAP = 64, PASSH = 32;
-        const icRight = icX + ICW;
-        const seen = new Set(); let ey = baseY + EXTRA_TOP, used = EXTRA_TOP, maxStub = EXTRA_STUB, n = 0;
-        (rhub.pins || []).forEach((p) => {
-          const net = p.anet || p.net;
-          if (!net || shown.has(net) || seen.has(net)) return;
-          if (showPower && isStub(net)) return;        // power/ground live in the rail band when that layer is on
-          seen.add(net);
-          // Passives drawn on THIS pin: the bypass caps bound to one of its pads
-          // (decoupByPin) + the series R/C and pulls on its net (passByNet). Each drawn
-          // once per cell; the stub stretches to seat them in a row, hanging as branches.
-          const pads = String(p.pins || p.pin || "").split(",").filter(Boolean);
-          const ps = [], seenP = new Set();
-          pads.forEach((pad) => (decoupByPin.get(ref + " " + pad) || []).forEach((x) => { if (!seenP.has(x.ref)) { seenP.add(x.ref); ps.push(x); } }));
-          (passByNet.get(net) || []).forEach((x) => { if (!seenP.has(x.ref) && !passDrawn.has(x.ref)) { seenP.add(x.ref); ps.push(x); } });
-          const stub = ps.length ? Math.max(EXTRA_STUB, 16 + ps.length * PGAP + 8) : EXTRA_STUB;
-          cell.rightPins.push({ name: p.name, x: icRight, y: ey, net });
-          cell.wires.push({ net, pts: [[icRight, ey], [icRight + stub, ey]] });
-          cell.labels.push({ text: net, x: icRight + stub + 6, y: ey, anchor: "start" });
-          ps.forEach((pp, k) => {
-            passDrawn.add(pp.ref);
-            const og = isGroundName(pp.other), op = isRailNet(pp.other) && !og;
-            cell.pulls.push({ x: icRight + 16 + k * PGAP, y: ey, ref: pp.ref, value: pp.value, type: pp.type || "resistor", term: og ? "gnd" : op ? "rail" : "net", rail: netLeaf(pp.other), up: op });
+        if (!eLeft.length && !eRight.length) return 0;
+        const drawSide = (es, onRight) => {
+          if (!es.length) return 0;
+          const dir = onRight ? 1 : -1, edge = onRight ? icX + ICW : icX;
+          const dst = (k) => edge + dir * k;
+          let ey = baseY + EXTRA_TOP;
+          es.forEach((e) => {
+            const nP = e.ps.length, rowH = rowHt(e.ps), pinY = ey + rowH / 2;
+            (onRight ? cell.rightPins : cell.leftPins).push({ name: e.name, x: edge, y: pinY, net: e.net });
+            if (!nP) {                                   // bare pin → stub + net label
+              cell.wires.push({ net: e.net, pts: [[edge, pinY], [dst(EXTRA_STUB), pinY]] });
+              cell.labels.push({ text: e.net, x: dst(EXTRA_STUB + 6), y: pinY, anchor: onRight ? "start" : "end" });
+            } else {                                     // pin → junction → parallel horizontal spokes
+              const jx = dst(EXTRA_LEAD);
+              cell.wires.push({ net: e.net, pts: [[edge, pinY], [jx, pinY]] });
+              const y0 = pinY - (nP - 1) / 2 * PASSROW;
+              if (nP > 1) cell.wires.push({ net: e.net, pts: [[jx, y0], [jx, y0 + (nP - 1) * PASSROW]] });   // riser linking the spokes
+              e.ps.forEach((pp, k) => {
+                const og = isGroundName(pp.other), op = isRailNet(pp.other) && !og;
+                cell.pulls.push({ axis: "h", dir, y: y0 + k * PASSROW, jx,
+                  x: dst(EXTRA_LEAD + SYM_LEAD + SPOKE_SYM / 2), tx: dst(EXTRA_LEAD + SYM_LEAD + SPOKE_SYM + TERM_LEAD),
+                  ref: pp.ref, value: pp.value, type: pp.type || "resistor", term: og ? "gnd" : op ? "rail" : "net", rail: netLeaf(pp.other) });
+              });
+            }
+            ey += rowH;
           });
-          const rowH = EXTRA_PITCH + (ps.length ? PASSH : 0);
-          ey += rowH; used += rowH; maxStub = Math.max(maxStub, stub); n++;
-        });
-        if (!n) return 0;
-        const need = 2 * MX + icX + ICW + maxStub + 140;
-        if (cell.w < need) cell.w = need;
-        return used;
+          return ey - baseY;                             // band height (EXTRA_TOP + Σ rowH)
+        };
+        return Math.max(drawSide(eLeft, false), drawSide(eRight, true));
       };
       const lh = layoutSide(side.left, false, leftPT), rh = layoutSide(side.right, true, rightPT);
       const coreH = Math.max(lh, rh, HEAD + PITCH) + PAD;
@@ -1513,7 +1560,7 @@
       });
       c.wires.forEach((w) => { const pts = w.pts.map((pt) => [ox + pt[0], oy + pt[1]]); m.wires.push({ net: w.net, bus: false, link: true, diff: w.diff, via: w.via, pts, bb: bbOf(pts) }); });
       c.labels.forEach((l) => m.labels.push({ text: l.text, x: ox + l.x, y: oy + l.y, anchor: l.anchor || "center", ground: false, port: false, net: l.text, link: true, diff: l.diff }));
-      c.pulls.forEach((p) => m.pulls.push({ x: ox + p.x, y: oy + p.y, ref: p.ref, value: p.value, rail: p.rail, up: p.up }));
+      c.pulls.forEach((p) => m.pulls.push({ x: ox + p.x, y: oy + p.y, ref: p.ref, value: p.value, rail: p.rail, up: p.up, type: p.type, term: p.term, axis: p.axis, dir: p.dir, jx: p.jx != null ? ox + p.jx : null, tx: p.tx != null ? ox + p.tx : null }));
       if (c.rails) c.rails.forEach((r) => m.rails.push({ x: ox + r.x, y: oy + r.y, net: r.net, up: r.up, decoup: r.decoup }));
       bx1 = Math.max(bx1, c.x + c.w); by1 = Math.max(by1, c.y + c.h);
     });
