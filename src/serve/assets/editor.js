@@ -1178,6 +1178,9 @@
       addPassEdge(c.ref, passType(c.ref, c.component, c.value, c.symbol), c.value || c.component || c.ref, c.pins[0].net, c.pins[1].net);
     });
     const isStub = (n) => !n || isGroundName(n) || isPowerName(n);
+    // Every part (IC or passive) sitting on a net — used to tell a real chain (its exit
+    // reaches a NEW part) from a 2-wire bus that loops back between the same two devices.
+    const partsOn = (net) => new Set([...(netIC.get(net) || []).map((e) => e.ref), ...(netPass.get(net) || []).map((p) => p.ref)]);
     // The signal twin this device carries for `inNet` (its other leg) — the exit net of
     // a pass-through hop, or null if it carries none. Three conventions, tried in order:
     // (1) the net-name voltage twin (X / X_1V8), (2) the A<n>↔B<n> pin-id convention
@@ -1199,7 +1202,13 @@
       const ik = chainKey(inNet);
       if (ik) {
         const sib = [...new Set(pins.filter((pp) => !isStub(pp.net) && pp.net !== inNet && chainKey(pp.net) === ik).map((pp) => pp.net))];
-        if (sib.length === 1) return sib[0];
+        if (sib.length === 1) {
+          // Guard against a 2-wire BUS that merely shares a prefix (I2C_SCL / I2C_SDA
+          // between the same J1↔EEPROM pair): a real chain's exit reaches a part the
+          // in-net doesn't already touch; a bus loops back, adding none → not a hop.
+          const out = sib[0], inParts = partsOn(inNet);
+          if ([...partsOn(out)].some((r) => r !== ref && !inParts.has(r))) return out;
+        }
       }
       // (4) Pin-name IN/OUT pairing — the pin feeding inNet is named <X>IN and the chip
       // has a matching <X>OUT pin (or vice-versa). Reaches through a sealed module whose
