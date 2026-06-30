@@ -1314,6 +1314,12 @@
     real.forEach((h) => { if (!labelOf.has(h.ref)) { labelOf.set(h.ref, h.label); compOf.set(h.ref, h.component || ""); } });
     const allNets = new Set(); real.forEach((h) => h.pins.forEach((p) => { if (p.net) allNets.add(p.net); }));
     const isDiff = (n) => { const t = diffTwin(n); return !!(t && allNets.has(t)); };
+    // net -> the ICs that sit on it, so an extra pin carrying a multi-drop bus (SPI_SCK /
+    // SPI_MOSI on a connector) can name the devices it fans out to instead of dead-ending
+    // as a bare stub — those slaves aren't a single point-to-point partner, so the map
+    // otherwise drops them.
+    const netICs = new Map();
+    real.forEach((h) => h.pins.forEach((p) => { if (!p.net) return; let a = netICs.get(p.net); if (!a) { a = []; netICs.set(p.net, a); } if (!a.includes(h.ref)) a.push(h.ref); }));
     // byIC: ref -> (partnerRef -> [{net, outNet, through, via, icPinName, ghostPinName, diff}])
     const byIC = new Map();
     const addItem = (a, b, link) => {
@@ -1507,7 +1513,7 @@
         pads.forEach((pad) => (decoupByPin.get(ref + " " + pad) || []).forEach((x) => { if (!seenP.has(x.ref)) { seenP.add(x.ref); ps.push(x); } }));
         (passByNet.get(net) || []).forEach((x) => { if (!seenP.has(x.ref) && !passClaimed.has(x.ref)) { seenP.add(x.ref); ps.push(x); } });
         ps.forEach((x) => passClaimed.add(x.ref));
-        extras.push({ net, name: p.name, ps });
+        extras.push({ net, name: p.name, ps, targets: (netICs.get(net) || []).filter((r) => r !== ref) });
       });
       const eLeft = [], eRight = []; let ehL = 0, ehR = 0;
       extras.forEach((e) => { if (ehL <= ehR) { eLeft.push(e); ehL += rowHt(e.ps); } else { eRight.push(e); ehR += rowHt(e.ps); } });
@@ -1636,9 +1642,11 @@
           es.forEach((e) => {
             const nP = e.ps.length, rowH = rowHt(e.ps), pinY = ey + rowH / 2;
             (onRight ? cell.rightPins : cell.leftPins).push({ name: e.name, x: edge, y: pinY, net: e.net });
-            if (!nP) {                                   // bare pin → stub + net label
+            if (!nP) {                                   // bare pin → stub + net label (naming any bus fan-out)
               cell.wires.push({ net: e.net, pts: [[edge, pinY], [dst(EXTRA_STUB), pinY]] });
-              cell.labels.push({ text: e.net, x: dst(EXTRA_STUB + 6), y: pinY, anchor: onRight ? "start" : "end" });
+              const tg = (e.targets || []);
+              const lbl = tg.length ? e.net + " → " + tg.slice(0, 4).join(" ") + (tg.length > 4 ? " +" + (tg.length - 4) : "") : e.net;
+              cell.labels.push({ text: lbl, x: dst(EXTRA_STUB + 6), y: pinY, anchor: onRight ? "start" : "end" });
             } else {                                     // pin → junction → parallel horizontal spokes
               const jx = dst(EXTRA_LEAD);
               cell.wires.push({ net: e.net, pts: [[edge, pinY], [jx, pinY]] });
