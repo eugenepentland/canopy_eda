@@ -992,6 +992,7 @@ src/serve/schematic_page.zig::HandlerError value
 src/serve/schematic_page.zig::schematicPage fn
 src/serve/schematic_viewer_js.zig::SCHEMATIC_VIEWER_JS value
 src/serve/static_assets.zig::HandlerError value
+src/serve/static_assets.zig::editorJsVersion fn
 src/serve/static_assets.zig::staticAsset fn
 src/serve/sync.zig::BoardFp struct_
 src/serve/sync.zig::HandlerError value
