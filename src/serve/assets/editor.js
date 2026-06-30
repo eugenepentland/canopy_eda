@@ -57,8 +57,8 @@
   let ghostRef = null;           // IC focused for "ghost partner" fan-out (null = off)
   let ghostAll = true;           // the connection map IS the editing surface — on by default, sticky
   let showPower = false;         // map power layer: overlay each IC cell's power/ground rail nodes
-  let hoverChip = null;          // net-partner chip under the cursor (draws its reveal wire)
-  const pinnedChips = new Set(); // chips clicked to keep their reveal wire on
+  let hoverStub = null;          // net-edge stub under the cursor (reveals its connection lines)
+  const pinnedStubs = new Set(); // stubs clicked to keep their reveal lines on
   let fullMap = false;           // full connection map: the whole netlist as one force-directed graph
   let sheets = [];               // navigable pages: design (group …) lists, else per-section
   let deleteArmed = false;       // inspector Delete needs a 2nd click to confirm
@@ -205,7 +205,7 @@
     m.wires.forEach((w) => { if (w.net) w.pts.forEach((p) => addPort(m, p[0], p[1], w.net, "wire")); });
     if (!ghostAll && !fullMap) addStaged(m);
     firstBuild = false;
-    pinnedChips.clear(); hoverChip = null;          // chip objects are rebuilt → drop stale reveal pins
+    pinnedStubs.clear(); hoverStub = null;          // stub objects are rebuilt → drop stale reveal pins
     M = m;
   }
   // Parts in the design but absent from the derived hub/spoke layout (a
@@ -587,35 +587,25 @@
     });
     ctx.globalAlpha = 1; ctx.textBaseline = "middle";
 
-    // Net-partner chips: a high-fanout / multi-drop net's other devices, anchored to the
-    // pin as small ghost chips. Hover (hoverChip) or click-to-pin (pinnedChips) one and the
-    // real connection draws to that device + flashes it. The reveal wire draws first (under
-    // the chips, over the map); the chips draw last so they sit on top of the band.
-    if (M.chips && M.chips.length) {
-      const drawReveal = (c, strong) => {
-        const t = chipTargetHub(c); if (!t) return;
-        ctx.strokeStyle = C.hot; ctx.lineWidth = sw(strong ? 2.3 : 1.7);
-        line(c.hx, c.hy, t.px, t.py);
-        ctx.setLineDash([sw(5), sw(4)]); ctx.lineWidth = sw(2);
-        roundRect(t.hub.x, t.hub.y, t.hub.w, t.hub.h, sw(5)); ctx.stroke(); ctx.setLineDash([]);
+    // Net-edge reveal: a bare-pin net stub is unconnected at rest (the net name IS the
+    // connection). Hover it (hoverStub) or click-to-pin (pinnedStubs) and the real links
+    // draw to every other device on that net as straight orthogonal lines (schematic
+    // style — a horizontal-vertical-horizontal elbow), flashing each target cell. Drawn
+    // last so the lines sit over the map.
+    if (M.netStubs && M.netStubs.length) {
+      const elbow = (x1, y1, x2, y2) => { const mx = (x1 + x2) / 2; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(mx, y1); ctx.lineTo(mx, y2); ctx.lineTo(x2, y2); ctx.stroke(); };
+      const reveal = (st, strong) => {
+        ctx.strokeStyle = C.hot; ctx.lineWidth = sw(strong ? 2.2 : 1.6);
+        ctx.fillStyle = C.hot; ctx.beginPath(); ctx.arc(st.hx, st.hy, sw(3.5), 0, 7); ctx.fill();      // lit source pin
+        (st.targets || []).forEach((ref) => {
+          const t = netPinOf(ref, st.net, st.hx, st.hy); if (!t) return;
+          ctx.strokeStyle = C.hot; ctx.lineWidth = sw(strong ? 2.2 : 1.6); elbow(st.hx, st.hy, t.px, t.py);
+          ctx.setLineDash([sw(5), sw(4)]); ctx.lineWidth = sw(1.8);
+          roundRect(t.hub.x, t.hub.y, t.hub.w, t.hub.h, sw(5)); ctx.stroke(); ctx.setLineDash([]);
+        });
       };
-      pinnedChips.forEach((c) => { if (c !== hoverChip) drawReveal(c, false); });
-      if (hoverChip && !hoverChip.overflow) drawReveal(hoverChip, true);
-      const ctext = 10 * s >= 7;
-      M.chips.forEach((c) => {
-        if (!boxVis(c.x, c.y, c.x + c.w, c.y + c.h)) return;
-        const on = c === hoverChip || pinnedChips.has(c) || (hotNet && c.net === hotNet);
-        ctx.fillStyle = on ? "#26344a" : C.ghost;
-        ctx.strokeStyle = on ? C.hot : (c.overflow ? "#33414f" : C.ghostStroke);
-        ctx.lineWidth = sw(on ? 1.6 : 1);
-        roundRect(c.x, c.y, c.w, c.h, sw(4)); ctx.fill(); ctx.stroke();
-        if (ctext) {
-          ctx.fillStyle = on ? C.hot : C.ghostLabel;
-          ctx.font = "10px ui-monospace, monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-          ctx.fillText(c.text, c.x + c.w / 2, c.y + c.h / 2);
-        }
-      });
-      ctx.textBaseline = "middle";
+      pinnedStubs.forEach((st) => { if (st !== hoverStub) reveal(st, false); });
+      if (hoverStub) reveal(hoverStub, true);
     }
 
     // Snap / rubber-band overlay
@@ -777,27 +767,27 @@
     // overlay keeps proxies as click-to-jump links.
     for (const h of M.hubs) if (h.ghost && !h.terminal && x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return ghostAll ? { t: "part", ref: h.partnerRef || h.ref, kind: "hub" } : { t: "ghost", ref: h.partnerRef };
     for (const h of M.hubs) { if (h.synthetic) continue; if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return { t: "part", ref: h.ref, kind: "hub" }; }
-    for (const c of (M.chips || [])) if (x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h) return { t: "chip", chip: c };
+    for (const st of (M.netStubs || [])) if (x >= st.x && x <= st.x + st.w && y >= st.y && y <= st.y + st.h) return { t: "stub", stub: st };
     for (const p of M.passes) if (x >= p.x && x <= p.x + p.w && y >= p.top && y <= p.top + p.h) return { t: "part", ref: p.ref, kind: "pass" };
     for (const w of M.wires) for (let i = 1; i < w.pts.length; i++) if (distToSeg(x, y, w.pts[i - 1], w.pts[i]) < tw) return { t: "net", net: w.net };
     for (const l of M.labels) if (Math.hypot(l.x - x, l.y - y) < tl) return { t: "net", net: l.net };
     return { t: "empty" };
   }
-  // Resolve a chip's partner device → its hub box + the pin (on the chip's net) the reveal
-  // wire should land on. Prefers the real cell; falls back to a ghost proxy of that ref.
-  function chipTargetHub(c) {
-    if (!c || !c.target || !M) return null;
+  // Resolve a partner device on a net → its hub box + the pin (on that net) a reveal line
+  // should land on. Prefers the real cell; falls back to a ghost proxy of that ref.
+  function netPinOf(ref, net, fromX, fromY) {
+    if (!ref || !M) return null;
     let hub = null;
-    for (const h of M.hubs) { if (!h.synthetic && h.ref === c.target) { hub = h; break; } }
-    if (!hub) for (const h of M.hubs) { if (h.partnerRef === c.target || h.ref === c.target) { hub = h; break; } }
+    for (const h of M.hubs) { if (!h.synthetic && h.ref === ref) { hub = h; break; } }
+    if (!hub) for (const h of M.hubs) { if (h.partnerRef === ref || h.ref === ref) { hub = h; break; } }
     if (!hub) return null;
     let px = hub.cx, py = hub.cy, bd = Infinity;
-    for (const p of (hub.pins || [])) { if (p.net !== c.net) continue; const d = Math.hypot(p.x - c.hx, p.y - c.hy); if (d < bd) { bd = d; px = p.x; py = p.y; } }
+    for (const p of (hub.pins || [])) { if (p.net !== net) continue; const d = Math.hypot(p.x - fromX, p.y - fromY); if (d < bd) { bd = d; px = p.x; py = p.y; } }
     return { hub, px, py };
   }
-  function pickChip(x, y) {
-    const tw = 4 / scale();
-    for (const c of (M && M.chips ? M.chips : [])) if (x >= c.x - tw && x <= c.x + c.w + tw && y >= c.y - tw && y <= c.y + c.h + tw) return c;
+  function pickStub(x, y) {
+    const tw = 3 / scale();
+    for (const st of (M && M.netStubs ? M.netStubs : [])) if (x >= st.x - tw && x <= st.x + st.w + tw && y >= st.y - tw && y <= st.y + st.h + tw) return st;
     return null;
   }
 
@@ -829,21 +819,21 @@
       if (h.t === "pin") highlightNetToggle(h.net);
       else if (h.t === "ghost") jumpToGhost(h.ref);
       else if (h.t === "part") select(h.kind, h.ref);
-      else if (h.t === "chip") toggleChipPin(h.chip);
+      else if (h.t === "stub") toggleStubPin(h.stub);
       else if (h.t === "net") highlightNetToggle(h.net);
       else deselect();
     }
     mode = null; down = null;
   });
-  // Hover (no button down): light the net-partner chip under the cursor so its reveal
-  // wire draws. Cheap box-scan, only when the map has chips.
+  // Hover (no button down): light the net-edge stub under the cursor so its reveal lines
+  // draw. Cheap box-scan, only when the map has stubs.
   canvas.addEventListener("pointermove", (e) => {
     if (down) return;
-    const w = (M && M.chips && M.chips.length) ? worldFromEvent(e) : null;
-    const c = w ? pickChip(w[0], w[1]) : null;
-    if (c !== hoverChip) { hoverChip = c; canvas.style.cursor = c ? "pointer" : ""; scheduleDraw(); }
+    const w = (M && M.netStubs && M.netStubs.length) ? worldFromEvent(e) : null;
+    const st = w ? pickStub(w[0], w[1]) : null;
+    if (st !== hoverStub) { hoverStub = st; canvas.style.cursor = st ? "pointer" : ""; scheduleDraw(); }
   });
-  canvas.addEventListener("pointerleave", () => { if (hoverChip) { hoverChip = null; canvas.style.cursor = ""; scheduleDraw(); } });
+  canvas.addEventListener("pointerleave", () => { if (hoverStub) { hoverStub = null; canvas.style.cursor = ""; scheduleDraw(); } });
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     const r = rectOf(), mx = (e.clientX - r.left) / r.width, my = (e.clientY - r.top) / r.height;
@@ -864,14 +854,12 @@
   // Part and net are mutually exclusive in the inspector: selecting one clears
   // the other so the panel always reflects a single subject.
   function select(kind, ref) { selection = { kind, ref }; hotNet = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
-  function deselect() { selection = null; hotNet = null; deleteArmed = false; pinnedChips.clear(); if (ghostRef || fullMap) { ghostRef = null; fullMap = false; ghostAll = true; buildModel(); syncGhostBtns(); syncFullBtn(); } renderInspector(); updateStatus(); scheduleDraw(); }
+  function deselect() { selection = null; hotNet = null; deleteArmed = false; pinnedStubs.clear(); if (ghostRef || fullMap) { ghostRef = null; fullMap = false; ghostAll = true; buildModel(); syncGhostBtns(); syncFullBtn(); } renderInspector(); updateStatus(); scheduleDraw(); }
   function highlightNetToggle(net) { if (!net) return; hotNet = hotNet === net ? null : net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
-  // Click a net-partner chip → pin its reveal wire on (survives mouse-move); click again to
-  // unpin. The "+N" overflow chip has no single target, so it just highlights the whole net.
-  function toggleChipPin(c) {
-    if (!c) return;
-    if (c.overflow) { highlightNetToggle(c.net); return; }
-    if (pinnedChips.has(c)) pinnedChips.delete(c); else pinnedChips.add(c);
+  // Click a net-edge stub → pin its reveal lines on (survive mouse-move); click again to unpin.
+  function toggleStubPin(st) {
+    if (!st) return;
+    if (pinnedStubs.has(st)) pinnedStubs.delete(st); else pinnedStubs.add(st);
     scheduleDraw();
   }
   function setHotNet(net) { if (!net) return; hotNet = net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
@@ -1389,17 +1377,7 @@
     // as a bare stub — those slaves aren't a single point-to-point partner, so the map
     // otherwise drops them.
     const netICs = new Map();
-    const netRefPin = new Map();          // net -> (ref -> short pin label on that net) — for a chip's "ref·pin" text
-    const shortPin = (p) => {
-      const nm = p.name || "", pad = String(p.pins || p.pin || "").split(",").filter(Boolean)[0] || "";
-      if (nm && !/^[0-9]+$/.test(nm) && nm !== pad) return nm.length > 7 ? nm.slice(0, 7) : nm;
-      return pad;
-    };
-    real.forEach((h) => h.pins.forEach((p) => {
-      if (!p.net) return;
-      let a = netICs.get(p.net); if (!a) { a = []; netICs.set(p.net, a); } if (!a.includes(h.ref)) a.push(h.ref);
-      let mm = netRefPin.get(p.net); if (!mm) { mm = new Map(); netRefPin.set(p.net, mm); } if (!mm.has(h.ref)) mm.set(h.ref, shortPin(p));
-    }));
+    real.forEach((h) => h.pins.forEach((p) => { if (!p.net) return; let a = netICs.get(p.net); if (!a) { a = []; netICs.set(p.net, a); } if (!a.includes(h.ref)) a.push(h.ref); }));
     // byIC: ref -> (partnerRef -> [{net, outNet, through, via, icPinName, ghostPinName, diff}])
     const byIC = new Map();
     const addItem = (a, b, link) => {
@@ -1536,12 +1514,12 @@
     const EXTRA_TOP = 16, EXTRA_PITCH = 30, PASSROW = 30;          // band top inset; bare-pin row height; parallel-spoke pitch
     const EXTRA_LEAD = 18, SYM_LEAD = 12, TERM_LEAD = 14, EXTRA_STUB = 56, EXTRA_LABELW = 90;
     const EXTRA_SPAN = EXTRA_LEAD + SYM_LEAD + SPOKE_SYM + TERM_LEAD + EXTRA_LABELW;   // outboard room a spoke side needs
-    // Net-partner chips: for a bare pin on a high-fanout / multi-drop net, its OTHER devices
-    // are drawn as small hoverable ghost chips hanging off the pin (same side), capped at
-    // CHIP_CAP with a "+N" overflow. Hover / click-to-pin a chip → drawChips draws the real
-    // connection to that device. Replaces the old "NET → U16 U17 U20" dead text label.
-    const CHIP_CAP = 4, CHIP_H = 16, CHIP_GAP = 5, CHIP_LEADGAP = 9, CHIP_CHARW = 5.7, CHIP_PADX = 12, NETLBL_CHARW = 6.4;
-    const chipW = (t) => Math.max(24, Math.round(String(t).length * CHIP_CHARW + CHIP_PADX));
+    // Net-edge stubs: a bare pin on a high-fanout / multi-drop net (V_3V3_ID, SPI_MOSI, a
+    // supply rail) draws as a short stub + the net name, left UNCONNECTED — the schematic
+    // net-label idiom (same name = same net). Hovering the stub (or click-to-pin) draws the
+    // real orthogonal connection lines to every other device on that net + flashes them.
+    // Ground nets are excluded: every part touches GND, so a reveal would be pure noise.
+    const NETLBL_CHARW = 6.4;
     // Power layer (Shift+P): a strip of each IC's power/ground rail nodes, folded
     // into the bottom of its card so packing reserves room. Built only when the
     // layer is on, so the default map is byte-identical (no nodes, no extra height).
@@ -1601,35 +1579,15 @@
         ps.forEach((x) => passClaimed.add(x.ref));
         extras.push({ net, name: p.name, ps, targets: (netICs.get(net) || []).filter((r) => r !== ref) });
       });
-      // Build each bare pin's partner-chip model (skip pins that already spoke to passives).
-      const partnerPinLabel = (net, r) => { const mm = netRefPin.get(net); return mm ? (mm.get(r) || "") : ""; };
-      extras.forEach((e) => {
-        if (e.ps.length) return;
-        const tg = e.targets || [], showPin = tg.length > 0 && tg.length <= CHIP_CAP;
-        e.chips = tg.slice(0, CHIP_CAP).map((r) => {
-          let text = r;
-          if (showPin) { const pn = partnerPinLabel(e.net, r); if (pn) text = r + "·" + pn; }
-          return { text, target: r, w: chipW(text), overflow: false };
-        });
-        if (tg.length > CHIP_CAP) { const t = "+" + (tg.length - CHIP_CAP); e.chips.push({ text: t, target: null, w: chipW(t), overflow: true, hidden: tg.slice(CHIP_CAP) }); }
-      });
-      // Outboard room a side needs: a passive spoke is EXTRA_SPAN; a bare pin is its
-      // stub + net name + chip row (so wide bus pins don't collide with the next cell).
-      const extraOutboard = (e) => {
-        if (e.ps.length) return EXTRA_SPAN;
-        const base = EXTRA_STUB + 6 + netLeaf(e.net).length * NETLBL_CHARW;
-        const chips = e.chips || [];
-        if (!chips.length) return base + 8;
-        let w = base + CHIP_LEADGAP;
-        chips.forEach((c, i) => { w += c.w + (i ? CHIP_GAP : 0); });
-        return w + 8;
-      };
+      // Outboard room a side needs: a passive spoke is EXTRA_SPAN; a bare pin is its stub +
+      // the net name (partners aren't listed inline — they're revealed on hover).
+      const extraOutboard = (e) => e.ps.length ? EXTRA_SPAN : EXTRA_STUB + 12 + netLeaf(e.net).length * NETLBL_CHARW;
       const eLeft = [], eRight = []; let ehL = 0, ehR = 0;
       extras.forEach((e) => { if (ehL <= ehR) { eLeft.push(e); ehL += rowHt(e); } else { eRight.push(e); ehR += rowHt(e); } });
       const extraSideW = (es) => es.length ? Math.max.apply(null, es.map(extraOutboard)) : 0;
       const leftW = Math.max(sideW(side.left, leftMid), extraSideW(eLeft));
       const rightW = Math.max(sideW(side.right, rightMid), extraSideW(eRight)), icX = leftW;
-      const cell = { ref, label: labelOf.get(ref) || ref, ox: MX, oy: MY, ch: 0, w: 2 * MX + leftW + ICW + rightW, h: 0, icX, ghosts: [], wires: [], labels: [], pulls: [], chips: [], leftPins: [], rightPins: [] };
+      const cell = { ref, label: labelOf.get(ref) || ref, ox: MX, oy: MY, ch: 0, w: 2 * MX + leftW + ICW + rightW, h: 0, icX, ghosts: [], wires: [], labels: [], pulls: [], netStubs: [], leftPins: [], rightPins: [] };
       // A pull-up/down on `net` taps the wire segment [x0,x1]@y, drops a short riser
       // into the band just below it, then runs HORIZONTALLY (compact, to fit the partner
       // gap) out to its terminal — the same side-spoke idiom as the extra pins, so the
@@ -1751,16 +1709,14 @@
           es.forEach((e) => {
             const nP = e.ps.length, rowH = rowHt(e), pinY = ey + rowH / 2;
             (onRight ? cell.rightPins : cell.leftPins).push({ name: e.name, x: edge, y: pinY, net: e.net });
-            if (!nP) {                                   // bare pin → stub + net name + partner chips (wired on hover by drawChips)
+            if (!nP) {                                   // bare pin → stub + net name (unconnected edge); hover/pin reveals the line(s)
               cell.wires.push({ net: e.net, pts: [[edge, pinY], [dst(EXTRA_STUB), pinY]] });
               cell.labels.push({ text: netLeaf(e.net), x: dst(EXTRA_STUB + 6), y: pinY, anchor: onRight ? "start" : "end" });
-              let k = EXTRA_STUB + 6 + netLeaf(e.net).length * NETLBL_CHARW + CHIP_LEADGAP;
-              (e.chips || []).forEach((cm) => {
-                const x0 = dst(k), x1 = dst(k + cm.w);
-                cell.chips.push({ x: Math.min(x0, x1), y: pinY - CHIP_H / 2, w: cm.w, h: CHIP_H, text: cm.text, net: e.net,
-                  target: cm.target, overflow: cm.overflow, hidden: cm.hidden || null, side: onRight ? "right" : "left", hx: edge, hy: pinY });
-                k += cm.w + CHIP_GAP;
-              });
+              const tg = e.targets || [];
+              if (tg.length && !isGroundName(e.net)) {    // a fanout net (not GND) → register a hover/click reveal stub over the stub+label
+                const labW = netLeaf(e.net).length * NETLBL_CHARW, outX = dst(EXTRA_STUB + 10 + labW);
+                cell.netStubs.push({ x: Math.min(edge, outX), y: pinY - 10, w: Math.abs(outX - edge), h: 20, net: e.net, hx: edge, hy: pinY, targets: tg });
+              }
             } else {                                     // pin → junction → parallel horizontal spokes
               const jx = dst(EXTRA_LEAD);
               cell.wires.push({ net: e.net, pts: [[edge, pinY], [jx, pinY]] });
@@ -1794,7 +1750,7 @@
       c.x = cx; c.y = cy; cx += c.w + CGX; rowH = Math.max(rowH, c.h);
     });
     // Emit the synthesized model (replacing the real layout).
-    m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = []; m.rails = []; m.chips = [];
+    m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = []; m.rails = []; m.netStubs = [];
     cells.forEach((c) => {
       const ox = c.x + c.ox, oy = c.y + c.oy;                      // content origin (inset by the cell margin)
       m.secs.push({ name: "", x: c.x, y: c.y, w: c.w, h: c.h, idx: 0, cx: c.x + c.w / 2, cy: c.y + c.h / 2 });   // each block self-labels (ref + part), so no region title
@@ -1808,7 +1764,7 @@
       c.wires.forEach((w) => { const pts = w.pts.map((pt) => [ox + pt[0], oy + pt[1]]); m.wires.push({ net: w.net, bus: false, link: true, diff: w.diff, via: w.via, pts, bb: bbOf(pts) }); });
       c.labels.forEach((l) => m.labels.push({ text: l.text, x: ox + l.x, y: oy + l.y, anchor: l.anchor || "center", ground: false, port: false, net: l.text, link: true, diff: l.diff }));
       c.pulls.forEach((p) => m.pulls.push({ x: ox + p.x, y: oy + p.y, ref: p.ref, value: p.value, rail: p.rail, up: p.up, type: p.type, term: p.term, axis: p.axis, dir: p.dir, jx: p.jx != null ? ox + p.jx : null, tx: p.tx != null ? ox + p.tx : null }));
-      if (c.chips) c.chips.forEach((ch) => m.chips.push({ x: ox + ch.x, y: oy + ch.y, w: ch.w, h: ch.h, text: ch.text, net: ch.net, target: ch.target, overflow: ch.overflow, hidden: ch.hidden, side: ch.side, hx: ox + ch.hx, hy: oy + ch.hy, hostRef: c.ref }));
+      if (c.netStubs) c.netStubs.forEach((st) => m.netStubs.push({ x: ox + st.x, y: oy + st.y, w: st.w, h: st.h, net: st.net, hx: ox + st.hx, hy: oy + st.hy, targets: st.targets, hostRef: c.ref }));
       if (c.rails) c.rails.forEach((r) => m.rails.push({ x: ox + r.x, y: oy + r.y, net: r.net, up: r.up, decoup: r.decoup }));
       bx1 = Math.max(bx1, c.x + c.w); by1 = Math.max(by1, c.y + c.h);
     });
@@ -1834,7 +1790,7 @@
       [].concat(h.leftPins || [], h.rightPins || []).map((p) => p.net)));
     (scene.passives || []).forEach((p) => addComp("pass", p.ref, p.value || p.ref, p.component, (p.pins || []).map((x) => x.net)));
     (scene.staged || []).forEach((c) => addComp("pass", c.ref, c.value || c.ref, c.component, (c.pins || []).map((x) => x.net)));
-    if (!comps.length) { m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = []; m.rails = []; m.chips = []; m.netNodes = []; m.fullEdges = []; m.mapBox = { x: 0, y: 0, w: 240, h: 200 }; return; }
+    if (!comps.length) { m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = []; m.rails = []; m.netStubs = []; m.netNodes = []; m.fullEdges = []; m.mapBox = { x: 0, y: 0, w: 240, h: 200 }; return; }
 
     // net -> comp indices.
     const netComps = new Map();
@@ -1867,7 +1823,7 @@
     const offx = 80 - minx, offy = 80 - miny;
     nodes.forEach((n) => { n.x += offx; n.y += offy; });
 
-    m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = []; m.rails = []; m.chips = []; m.netNodes = []; m.fullEdges = []; m.flags = [];
+    m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = []; m.rails = []; m.netStubs = []; m.netNodes = []; m.fullEdges = []; m.flags = [];
     const compNode = new Map();
     nodes.forEach((n) => {
       if (n.kind !== "comp") return;
