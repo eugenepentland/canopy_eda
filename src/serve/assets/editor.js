@@ -1475,15 +1475,6 @@
         addItem(a, b, lk);
       }
     }
-    // Promote a ghost-only IC that carries a shared multi-drop BUS pin (a non-rail signal
-    // net on ≥3 ICs — SPI_MOSI/SCK, …) to its own cell. Otherwise a bus device whose
-    // point-to-point links were all absorbed by the connector (the LMX2595's SPI_MISO/CSN
-    // land on J1) lives only as a ghost and never shows its bus pins or support circuit.
-    const isBusNet = (n) => (netICs.get(n) || []).length >= 3 && !isGroundName(n) && !isPowerName(n) && !/\d+v\d*/i.test(netLeaf(n));
-    real.forEach((h) => {
-      if (byIC.has(h.ref)) return;
-      if (h.pins.some((p) => p.net && isBusNet(p.net))) byIC.set(h.ref, new Map());
-    });
     if (!byIC.size) return;
     // Pull-ups / pull-downs: a RESISTOR with one leg on a signal net and the other
     // on a rail (power/ground). Keyed by the signal net so a link carrying it can
