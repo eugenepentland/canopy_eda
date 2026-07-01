@@ -347,9 +347,9 @@ fn writeHeader(
             .{ design_name, design_name },
         );
     }
-    // Deliberately minimal toolbar: Reload, Edit SRC, ERC, the design-review
-    // export, and a single PCB-sync control. Everything else (History,
-    // BOM/Netlist exports, datasheet upload) was moved off this bar to keep it
+    // Deliberately minimal toolbar: Reload, Edit SRC, ERC, the BOM + design-review
+    // exports, and a single PCB-sync control. Everything else (History,
+    // Netlist export, datasheet upload) was moved off this bar to keep it
     // uncluttered.
     try w.writeAll(
         "<button class=\"head-link head-btn\" id=\"reload-btn\" type=\"button\" " ++
@@ -363,6 +363,15 @@ fn writeHeader(
             "title=\"Edit the raw .sexp source\">\u{270E} Edit SRC</button>",
     );
     try w.writeAll("<button class=\"head-link head-btn\" id=\"erc-btn\" type=\"button\">ERC</button>");
+    // BOM export: downloads `<name>-bom.csv` (the parts list — same columns as
+    // the BOM table on this page, with any manual MPN/manufacturer/datasheet
+    // edits merged in from the `.bom` sidecar). Plain <a download> — the
+    // endpoint streams the CSV on demand, no JS needed.
+    try w.print(
+        "<a class=\"head-link head-btn\" id=\"bom-export-btn\" href=\"/api/export-bom/{s}\" download " ++
+            "title=\"Download the bill of materials as <name>-bom.csv\">\u{2B07} BOM .csv</a>",
+        .{design_name},
+    );
     // Design-review export: downloads a .zip of `<name>-review.md` (the full
     // markdown report) + `<name>-bom.csv` + the verbatim `.sexp` source for the
     // design and every sub-module/component it imports. Plain <a download> —
