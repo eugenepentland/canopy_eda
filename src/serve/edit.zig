@@ -62,6 +62,7 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
     @import("../bom_resolve.zig").ResolveError ||
     @import("../sexpr/parser.zig").ParseError ||
+    error{InvalidName} ||
     error{
         FileTooBig,
         StreamTooLong,
@@ -2023,6 +2024,7 @@ pub const EditError = error{
     SnapshotNotFound,
     InvalidSnapshotId,
     AmbiguousMatch,
+    InvalidName,
 } || std.mem.Allocator.Error;
 
 /// Returned by every `…Core` mutation to tell the caller the new live
@@ -2281,7 +2283,7 @@ pub const MpnEditError = std.mem.Allocator.Error ||
     std.fs.File.OpenError ||
     std.fs.File.ReadError ||
     std.fs.File.WriteError ||
-    error{ FileTooBig, StreamTooLong, EndOfStream };
+    error{ InvalidName, FileTooBig, StreamTooLong, EndOfStream };
 
 /// Update MPN and/or manufacturer for `ref_des` in the `.bom` sidecar.
 /// Empty string for either field leaves that field untouched (so callers
@@ -2945,6 +2947,11 @@ pub fn saveSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         return;
     };
     defer parsed.deinit();
+    if (parsed.value != .object) {
+        res.status = 400;
+        res.body = "{\"ok\":false,\"error\":\"body must be a JSON object\"}";
+        return;
+    }
     const source_val = parsed.value.object.get("source") orelse {
         res.status = 400;
         res.body = "{\"ok\":false,\"error\":\"missing source\"}";

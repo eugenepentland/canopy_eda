@@ -73,6 +73,38 @@ pub fn uuidFromId(allocator: std.mem.Allocator, id: []const u8) std.mem.Allocato
     });
 }
 
+/// True when `name` is unsafe as a file/zip-entry basename — it contains a
+/// path separator or a `..` traversal segment. `kicad_name` is read from the
+/// *contents* of a `lib/footprints/*.sexp` file (which `import-kicad` and
+/// `POST /api/upload-footprint` generate from third-party input), so it is not
+/// trusted to be a bare filename: a declared name like `../../etc/x` would
+/// otherwise write outside `--output-dir` (or become a zip-slip entry).
+fn kicadNameIsUnsafe(name: []const u8) bool {
+    if (name.len == 0) return true;
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return true;
+    if (std.mem.indexOfScalar(u8, name, '\\') != null) return true;
+    if (std.mem.indexOf(u8, name, "..") != null) return true;
+    return false;
+}
+
+/// A filesystem-safe footprint basename derived from the declared `kicad_name`:
+/// returns it unchanged when already safe, else replaces every `/`, `\`, and
+/// `.` (so `..` can't survive) with `_` and warns. Never returns an empty
+/// string. The result is used both as a `.kicad_mod` filename and a zip entry.
+fn sanitizeKicadName(allocator: std.mem.Allocator, kicad_name: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (!kicadNameIsUnsafe(kicad_name)) return kicad_name;
+    const safe = try allocator.alloc(u8, @max(kicad_name.len, 1));
+    if (kicad_name.len == 0) {
+        safe[0] = '_';
+    } else {
+        for (kicad_name, 0..) |c, i| {
+            safe[i] = if (c == '/' or c == '\\' or c == '.') '_' else c;
+        }
+    }
+    log.warn("export-kicad: unsafe footprint name '{s}' sanitized to '{s}' (path-traversal guard)", .{ kicad_name, safe });
+    return safe;
+}
+
 /// One component flattened out of the design hierarchy for KiCad export:
 /// the joined `sub-block/REF` reference designator plus the value,
 /// footprint, properties, and stable UUID written into the `.net` file.
@@ -192,6 +224,12 @@ pub fn exportKicad(
     var fp_components = std.StringHashMap([]const u8).init(allocator);
     defer fp_components.deinit();
 
+    // Declared KiCad name → source footprint id, to warn when two distinct
+    // internal footprints declare the same name (the second .kicad_mod would
+    // silently overwrite the first, exporting one part with the other's geometry).
+    var seen_kicad_names = std.StringHashMap([]const u8).init(allocator);
+    defer seen_kicad_names.deinit();
+
     // Load 3D model config for offset/rotation
     var model_cfg = loadModelConfig(allocator, project_dir);
     defer model_cfg.deinit();
@@ -213,7 +251,15 @@ pub fn exportKicad(
         };
         defer allocator.free(fp_source);
 
-        const kicad_name = extractFootprintName(allocator, fp_source) catch inst.footprint;
+        // The declared name is spliced into a filesystem path + zip entry; sanitize
+        // it so a footprint declaring `../../x` can't escape --output-dir.
+        const kicad_name = try sanitizeKicadName(allocator, extractFootprintName(allocator, fp_source) catch inst.footprint);
+        if (seen_kicad_names.get(kicad_name)) |first| {
+            if (!std.mem.eql(u8, first, inst.footprint))
+                log.warn("export-kicad: footprints '{s}' and '{s}' both declare KiCad name '{s}' — the .kicad_mod will be overwritten", .{ first, inst.footprint, kicad_name });
+        } else {
+            try seen_kicad_names.put(kicad_name, inst.footprint);
+        }
         try fp_name_map.put(inst.footprint, kicad_name);
 
         // Check for matching STEP model (config override > auto-discovery)
@@ -344,6 +390,9 @@ pub fn exportKicadZip(
     defer fp_name_map.deinit();
     var processed_fps = std.StringHashMap(void).init(allocator);
     defer processed_fps.deinit();
+    // Same duplicate-name / zip-slip guard as exportFootprints (see there).
+    var seen_kicad_names = std.StringHashMap([]const u8).init(allocator);
+    defer seen_kicad_names.deinit();
 
     // Collect zip entries
     var zip_files: std.ArrayListUnmanaged(ZipEntry) = .empty;
@@ -366,7 +415,14 @@ pub fn exportKicadZip(
         };
         defer allocator.free(fp_source);
 
-        const kicad_name = extractFootprintName(allocator, fp_source) catch inst.footprint;
+        // Sanitize the declared name before it becomes a zip entry (zip-slip).
+        const kicad_name = try sanitizeKicadName(allocator, extractFootprintName(allocator, fp_source) catch inst.footprint);
+        if (seen_kicad_names.get(kicad_name)) |first| {
+            if (!std.mem.eql(u8, first, inst.footprint))
+                log.warn("export-kicad: footprints '{s}' and '{s}' both declare KiCad name '{s}' — the .kicad_mod will be overwritten in the zip", .{ first, inst.footprint, kicad_name });
+        } else {
+            try seen_kicad_names.put(kicad_name, inst.footprint);
+        }
         try fp_name_map.put(inst.footprint, kicad_name);
 
         const mcfg = model_cfg.get(inst.footprint);
@@ -494,4 +550,24 @@ test "footprint mod export" {
     try std.testing.expect(std.mem.indexOf(u8, output, "fp_rect") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "fp_line") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "(layer \"F.SilkS\")") != null);
+}
+
+// spec: export_kicad - Sanitizes a declared footprint name so a path-traversal component can't escape the output directory
+test "sanitizeKicadName neutralizes traversal and passes safe names through" {
+    const alloc = std.testing.allocator;
+    // Safe names return the input slice unchanged (no allocation).
+    try std.testing.expect(!kicadNameIsUnsafe("R_0402_1005Metric"));
+    try std.testing.expectEqualStrings("R_0402_1005Metric", try sanitizeKicadName(alloc, "R_0402_1005Metric"));
+
+    // Traversal / separators are unsafe and get scrubbed to a bare basename.
+    try std.testing.expect(kicadNameIsUnsafe("../../etc/passwd"));
+    const s1 = try sanitizeKicadName(alloc, "../../etc/passwd");
+    defer alloc.free(s1);
+    try std.testing.expect(std.mem.indexOfScalar(u8, s1, '/') == null);
+    try std.testing.expect(std.mem.indexOf(u8, s1, "..") == null);
+
+    try std.testing.expect(kicadNameIsUnsafe("a\\b"));
+    const s2 = try sanitizeKicadName(alloc, "a\\b");
+    defer alloc.free(s2);
+    try std.testing.expect(std.mem.indexOfScalar(u8, s2, '\\') == null);
 }

@@ -24,30 +24,60 @@
 //! The walk runs once per call. With a small project tree this is
 //! microseconds; introducing a cache would mean threading invalidation
 //! through every write site, which is a worse trade-off.
+//!
+//! Name contract (enforced): `name` is a bare design basename — no path
+//! separators (`/`, `\`), no parent-traversal `..`, and no leading `.`
+//! (dot-files / relative-current). These helpers are the shared chokepoint
+//! reached from server request paths keyed on a URL `:name`, so the
+//! sanitization lives here rather than at each call site: a name that would
+//! escape `src/` (or resolve a hidden sibling) is rejected with
+//! `error.InvalidName` before it can be spliced into a filesystem path.
+//! Callers propagate the error; a rejected name never touches disk.
 
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const log = @import("infra/log.zig");
+
+/// Error set for the path resolvers: allocation failures plus the
+/// design-name contract violation. See the module doc for the contract.
+pub const PathError = std.mem.Allocator.Error || error{InvalidName};
+
+/// Reject any `name` that is not a bare basename — a path separator, a
+/// parent-traversal `..`, or a leading `.` would let a URL-supplied name
+/// escape `src/` (traversal) or address a hidden sibling. This is the
+/// defense-in-depth chokepoint the module doc describes.
+fn validateName(name: []const u8) error{InvalidName}!void {
+    if (name.len == 0) return error.InvalidName;
+    if (name[0] == '.') return error.InvalidName;
+    for (name) |c| {
+        if (c == '/' or c == '\\') return error.InvalidName;
+    }
+    if (std.mem.indexOf(u8, name, "..") != null) return error.InvalidName;
+}
 
 /// Path to `<name>.sexp` under `<project_dir>/src/`. See module docs.
 pub fn designSourcePath(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
-) std.mem.Allocator.Error![]u8 {
+) PathError![]u8 {
     return designSiblingPath(allocator, project_dir, name, ".sexp");
 }
 
 /// Path to `<name><ext>` next to the design source file. `ext` includes
 /// the leading dot (`".bom"`, `".layout"`, `".ids"`, `".kicad.json"`,
 /// `".checks.sexp"`). Falls back to the flat-layout path when the file
-/// is not yet present (e.g. first-time write).
+/// is not yet present (e.g. first-time write). Rejects a `name` that
+/// violates the bare-basename contract (see module docs) with
+/// `error.InvalidName`.
 pub fn designSiblingPath(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     ext: []const u8,
-) std.mem.Allocator.Error![]u8 {
+) PathError![]u8 {
+    try validateName(name);
+
     const filename = try std.fmt.allocPrint(allocator, "{s}{s}", .{ name, ext });
     defer allocator.free(filename);
 
@@ -97,6 +127,15 @@ fn findUniqueInSrc(
     return found;
 }
 
+// Pull `commands.zig`'s CLI-arg-parsing tests (e.g. `parseBuildArgs`) into the
+// test tree. `commands.zig` is not referenced by `main.zig`'s root `test {}`
+// block, and it already depends on this module, so bridging here (test-scope
+// only) is the least-intrusive way to collect those tests without editing the
+// root file. The `@import` cycle is harmless — it is not comptime-recursive.
+test {
+    _ = @import("commands.zig");
+}
+
 // spec: paths - Resolves <name>.sexp via designSourcePath, falling back to flat layout when missing
 test "designSourcePath flat fallback" {
     const allocator = std.testing.allocator;
@@ -111,4 +150,21 @@ test "designSiblingPath flat fallback" {
     const path = try designSiblingPath(allocator, "/tmp/no-such-project", "stm32n6", ".bom");
     defer allocator.free(path);
     try std.testing.expectEqualStrings("/tmp/no-such-project/src/stm32n6.bom", path);
+}
+
+// spec: paths - Rejects design names that are not bare basenames (traversal defense)
+test "designSiblingPath rejects non-basename names" {
+    const allocator = std.testing.allocator;
+    // Path separators, parent traversal, and leading dots are all refused
+    // before any filesystem path is constructed.
+    try std.testing.expectError(error.InvalidName, designSiblingPath(allocator, "/p", "../secret", ".bom"));
+    try std.testing.expectError(error.InvalidName, designSiblingPath(allocator, "/p", "a/b", ".bom"));
+    try std.testing.expectError(error.InvalidName, designSiblingPath(allocator, "/p", "a\\b", ".bom"));
+    try std.testing.expectError(error.InvalidName, designSiblingPath(allocator, "/p", ".hidden", ".bom"));
+    try std.testing.expectError(error.InvalidName, designSiblingPath(allocator, "/p", "", ".bom"));
+    try std.testing.expectError(error.InvalidName, designSourcePath(allocator, "/p", "../../etc/passwd"));
+    // A legitimate bare basename still resolves.
+    const ok = try designSourcePath(allocator, "/tmp/no-such-project", "stm32n6");
+    defer allocator.free(ok);
+    try std.testing.expectEqualStrings("/tmp/no-such-project/src/stm32n6.sexp", ok);
 }

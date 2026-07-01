@@ -123,7 +123,12 @@ pub fn extractPadNames(allocator: std.mem.Allocator, source: []const u8) Netlist
         if (child.isForm("pad")) {
             const cl = child.asList() orelse continue;
             if (cl.len < 2) continue;
-            const name = cl[1].asAtom() orelse cl[1].asString() orelse continue;
+            // Project footprints write pad numbers as bare tokens (`(pad 1 …)`),
+            // which the tokenizer parses as `.int` — asAtom()/asString() both
+            // return null and the pad silently vanished from the NC inventory.
+            // tokenText renders the int, so numerically-padded footprints get a
+            // full pad list (the whole point of this map).
+            const name = cl[1].tokenText(allocator) orelse continue;
             try pads.append(allocator, try allocator.dupe(u8, name));
         }
     }
@@ -428,4 +433,25 @@ pub fn applyNetTies(
             .pins = try entry.value_ptr.toOwnedSlice(allocator),
         });
     }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+// spec: export_kicad_netlist - extractPadNames reads bare-integer pad numbers so numerically-padded footprints appear in the NC inventory
+test "extractPadNames reads bare-int, quoted, and atom pad numbers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Project footprints spell numeric pads bare; the fix must not drop them.
+    const src =
+        \\(footprint "MIX"
+        \\  (pad 1 smd rect (pos 0 0) (size 1 1))
+        \\  (pad "2" smd rect (pos 1 0) (size 1 1))
+        \\  (pad A1 thru circle (pos 2 0) (size 1 1) (drill 0.5)))
+    ;
+    const pads = try extractPadNames(a, src);
+    try std.testing.expectEqual(@as(usize, 3), pads.len);
+    try std.testing.expectEqualStrings("1", pads[0]);
+    try std.testing.expectEqualStrings("2", pads[1]);
+    try std.testing.expectEqualStrings("A1", pads[2]);
 }

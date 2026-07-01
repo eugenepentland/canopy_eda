@@ -70,7 +70,11 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem
     try w.writeAll("],\"edges\":[");
     for (doc.power_tree.edges, 0..) |e, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"from\":\"{s}\",\"to\":\"{s}\"}}", .{ e.from, e.to });
+        try w.writeAll("{\"from\":");
+        try json_writer.writeString(w, e.from);
+        try w.writeAll(",\"to\":");
+        try json_writer.writeString(w, e.to);
+        try w.writeAll("}");
     }
     try w.writeAll("]}");
 
@@ -347,9 +351,14 @@ fn writeBoundaryContracts(w: anytype, ports: []const review.PortSummary) !void {
 }
 
 fn writePowerTreeNode(w: anytype, n: review.PowerTreeNode) !void {
-    try w.print("{{\"rail\":\"{s}\",\"layer\":{d}", .{ n.rail, n.layer });
+    try w.writeAll("{\"rail\":");
+    try json_writer.writeString(w, n.rail);
+    try w.print(",\"layer\":{d}", .{n.layer});
     if (n.nominal) |v| try w.print(",\"nominal\":{d}", .{v});
-    if (n.source_ref_des.len > 0) try w.print(",\"source_ref_des\":\"{s}\"", .{n.source_ref_des});
+    if (n.source_ref_des.len > 0) {
+        try w.writeAll(",\"source_ref_des\":");
+        try json_writer.writeString(w, n.source_ref_des);
+    }
     try w.writeAll("}");
 }
 

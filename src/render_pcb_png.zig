@@ -17,6 +17,7 @@ const router = @import("placement/router.zig");
 const drc = @import("placement/drc.zig");
 const raster = @import("raster.zig");
 const png = @import("png.zig");
+const numeric = @import("numeric.zig");
 
 const Rgb = raster.Rgb;
 
@@ -157,9 +158,15 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
     if (board_h_f > MAX_H) {
         scale = @as(f64, @floatFromInt(MAX_H)) / ch_mm;
         board_h_f = @floatFromInt(MAX_H);
-        board_w = @intFromFloat(@round(cw_mm * scale));
+        // Guard the narrowing: a NaN/±inf or absurd coordinate leaking out of
+        // the placement optimizer would make a bare `@intFromFloat` UB in the
+        // runtime-safety-off ReleaseSmall prod build. Fall back to MIN_W, then
+        // re-clamp to the valid canvas-width band.
+        board_w = std.math.clamp(numeric.checkedInt(u32, @round(cw_mm * scale)) orelse MIN_W, MIN_W, MAX_W);
     }
-    const board_h: u32 = @intFromFloat(@round(board_h_f));
+    // Same guard; board_h is bounded above by MAX_H (board_h_f ≤ MAX_H here),
+    // and a non-finite result collapses to a 1px-tall board rather than UB.
+    const board_h: u32 = std.math.clamp(numeric.checkedInt(u32, @round(board_h_f)) orelse 1, 1, MAX_H);
 
     const focus = opts.highlight_nets.len > 0 or opts.highlight_refs.len > 0;
     const header_h: u32 = if (opts.bare) 0 else HEADER_H;
@@ -444,7 +451,12 @@ const Ctx = struct {
     }
 
     fn netOf(self: *Ctx, ref: []const u8, pad: []const u8) ?[]const u8 {
-        var buf: [128]u8 = undefined;
+        // `pad_net` keys are `ref|pad` built with an unbounded allocPrint, so
+        // this buffer must be wide enough to reconstruct any of them — a deep
+        // sub-block ref path plus a pad number. Sized to match the `upperInSet`
+        // fast path; a longer key would `bufPrint`-overflow → null (part shown
+        // dim/unlabeled), never a wrong net.
+        var buf: [256]u8 = undefined;
         const key = std.fmt.bufPrint(&buf, "{s}|{s}", .{ ref, pad }) catch return null;
         return self.pad_net.get(key);
     }
@@ -1096,12 +1108,22 @@ fn isQuarter(rot: f64) bool {
     const q = @mod(@mod(rot, 360.0) + 360.0, 360.0);
     return q == 90.0 or q == 270.0;
 }
-/// True if the uppercased `s` is a member of `set` (whose keys are uppercased).
+/// True if the uppercased `s` is a member of `set` (whose keys are uppercased,
+/// inserted via `upper` with no length cap). The stack buffer covers realistic
+/// refs (incl. deep sub-block paths); a pathologically long `s` falls back to a
+/// case-insensitive linear scan of the set so the lookup can never silently
+/// miss a key the insertion side accepted — the two paths agree on membership.
 fn upperInSet(set: *std.StringHashMap(void), s: []const u8) bool {
-    if (s.len > 64) return false;
-    var buf: [64]u8 = undefined;
-    for (s, 0..) |ch, i| buf[i] = std.ascii.toUpper(ch);
-    return set.contains(buf[0..s.len]);
+    var buf: [256]u8 = undefined;
+    if (s.len <= buf.len) {
+        for (s, 0..) |ch, i| buf[i] = std.ascii.toUpper(ch);
+        return set.contains(buf[0..s.len]);
+    }
+    var it = set.keyIterator();
+    while (it.next()) |k| {
+        if (eqUpper(s, k.*)) return true;
+    }
+    return false;
 }
 
 fn eqUpper(a: []const u8, b_upper: []const u8) bool {

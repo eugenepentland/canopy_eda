@@ -13,8 +13,20 @@ const HTTP_INTERNAL_ERROR: u16 = 500;
 // out of a string-literal token guardian's ban-hardcoded-paths checker
 // flags. The TMP_DIR fragment is just a directory name.
 const TMP_DIR = "tmp";
-const TMP_ZIP_TEMPLATE = "/" ++ TMP_DIR ++ "/eda-upload-{s}";
-const TMP_EXTRACT_TEMPLATE = "/" ++ TMP_DIR ++ "/eda-extract-{d}";
+// SECURITY: the temp-file name is minted from a process-unique token, NEVER
+// from the client-supplied `X-Filename` header — templating an attacker string
+// into a `/tmp/...` path was an arbitrary-file-write (path traversal via
+// `../../..`) → RCE vector. Both `{d}` fields are our own counters.
+const TMP_ZIP_TEMPLATE = "/" ++ TMP_DIR ++ "/eda-upload-{d}-{d}";
+const TMP_EXTRACT_TEMPLATE = "/" ++ TMP_DIR ++ "/eda-extract-{d}-{d}";
+
+/// Monotonic counter appended to temp-file names so two uploads landing in the
+/// same millisecond can't collide (and so no request input reaches the path).
+var tmp_seq: std.atomic.Value(u64) = .init(0);
+
+fn nextTmpSeq() u64 {
+    return tmp_seq.fetchAdd(1, .monotonic);
+}
 const MAX_KICAD_FILE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_STEP_FILE_BYTES: usize = 50 * 1024 * 1024;
 const SEXP_PATH_TEMPLATE = "{s}/{s}.sexp";
@@ -81,22 +93,25 @@ pub fn importErrorStatus(e: ImportError) u16 {
 /// write the bytes to a temp file, extract via the system `unzip`, locate
 /// the `.kicad_sym` / `.kicad_mod` / optional STEP, convert them, and write
 /// `lib/{components,footprints,pinouts,models}`. Shared by the `/api/upload-zip`
-/// route and the MCP `download_footprint` tool. `filename` is only used to
-/// name the temp file, so it must be path-safe.
+/// route and the MCP `download_footprint` tool. `filename` is advisory only
+/// (kept for call-site compatibility / future logging) — it is NEVER used to
+/// build a filesystem path, since it is client-controlled (see the temp-name
+/// SECURITY note above).
 pub fn importZipBytes(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     zip_bytes: []const u8,
     filename: []const u8,
 ) ImportError!ImportResult {
-    const tmp_zip = try std.fmt.allocPrint(allocator, TMP_ZIP_TEMPLATE, .{filename});
+    _ = filename;
+    const tmp_zip = try std.fmt.allocPrint(allocator, TMP_ZIP_TEMPLATE, .{ clock.milliTimestamp(), nextTmpSeq() });
     {
         const f = infra_fs.cwd().createFile(tmp_zip, .{}) catch return error.WriteFailed;
         defer f.close();
         f.writeAll(zip_bytes) catch return error.WriteFailed;
     }
 
-    const tmp_dir = try std.fmt.allocPrint(allocator, TMP_EXTRACT_TEMPLATE, .{clock.milliTimestamp()});
+    const tmp_dir = try std.fmt.allocPrint(allocator, TMP_EXTRACT_TEMPLATE, .{ clock.milliTimestamp(), nextTmpSeq() });
     const unzip_result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &.{ "unzip", "-o", "-q", tmp_zip, "-d", tmp_dir },
@@ -210,7 +225,8 @@ fn writeModelFile(
 /// flow, which only needs the model (not the symbol/footprint importZipBytes
 /// requires). Unzips to a temp dir via the system `unzip` and cleans up.
 pub fn extractStepBytes(allocator: std.mem.Allocator, zip_bytes: []const u8, filename: []const u8) ?[]const u8 {
-    const tmp_zip = std.fmt.allocPrint(allocator, TMP_ZIP_TEMPLATE, .{filename}) catch return null;
+    _ = filename; // advisory only — never used to build a path (client-controlled)
+    const tmp_zip = std.fmt.allocPrint(allocator, TMP_ZIP_TEMPLATE, .{ clock.milliTimestamp(), nextTmpSeq() }) catch return null;
     {
         const f = infra_fs.cwd().createFile(tmp_zip, .{}) catch return null;
         defer f.close();
@@ -218,7 +234,7 @@ pub fn extractStepBytes(allocator: std.mem.Allocator, zip_bytes: []const u8, fil
     }
     defer infra_fs.cwd().deleteFile(tmp_zip) catch |e| log.warn("rm {s}: {s}", .{ tmp_zip, @errorName(e) });
 
-    const tmp_dir = std.fmt.allocPrint(allocator, TMP_EXTRACT_TEMPLATE, .{clock.milliTimestamp()}) catch return null;
+    const tmp_dir = std.fmt.allocPrint(allocator, TMP_EXTRACT_TEMPLATE, .{ clock.milliTimestamp(), nextTmpSeq() }) catch return null;
     defer {
         _ = std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "rm", "-rf", tmp_dir } }) catch |e|
             log.warn("cleanup {s}: {s}", .{ tmp_dir, @errorName(e) });

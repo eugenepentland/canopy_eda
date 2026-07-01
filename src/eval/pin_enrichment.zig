@@ -40,9 +40,25 @@ pub fn enrichPinFunctions(
     var pinout_cache: std.StringHashMapUnmanaged(?std.StringHashMapUnmanaged(erc.PinoutEntry)) = .empty;
     defer pinout_cache.deinit(allocator);
 
-    try enrichNets(allocator, block, project_dir, &ref_to_symbol, &pinout_cache);
+    try enrichNetsRecursive(allocator, block, project_dir, &ref_to_symbol, &pinout_cache);
+}
+
+/// Enrich `block`'s nets then recurse into every nested sub-block. Module-in-
+/// module designs (adcarray/power chains) nest deeper than one level, so the
+/// walk must recurse — the header comment always promised "(and nested
+/// sub-blocks)", but the old code stopped at depth 1, leaving nested pins'
+/// `asserted_fns` empty (spurious `pin_function_required` ERC + lost render
+/// annotations).
+fn enrichNetsRecursive(
+    allocator: Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    ref_to_symbol: *const std.StringHashMapUnmanaged([]const u8),
+    pinout_cache: *std.StringHashMapUnmanaged(?std.StringHashMapUnmanaged(erc.PinoutEntry)),
+) Allocator.Error!void {
+    try enrichNets(allocator, block, project_dir, ref_to_symbol, pinout_cache);
     for (block.sub_blocks) |sb| {
-        try enrichNets(allocator, sb.block, project_dir, &ref_to_symbol, &pinout_cache);
+        try enrichNetsRecursive(allocator, sb.block, project_dir, ref_to_symbol, pinout_cache);
     }
 }
 
@@ -52,8 +68,10 @@ fn collectRefToSymbol(
     out: *std.StringHashMapUnmanaged([]const u8),
 ) Allocator.Error!void {
     for (block.instances) |inst| try putSymbol(allocator, inst, out);
+    // Recurse: nested modules contribute their own ref→symbol entries, which
+    // the enrichment pass needs to resolve pinouts for deeply-nested pins.
     for (block.sub_blocks) |sb| {
-        for (sb.block.instances) |inst| try putSymbol(allocator, inst, out);
+        try collectRefToSymbol(allocator, sb.block, out);
     }
 }
 

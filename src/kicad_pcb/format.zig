@@ -28,6 +28,89 @@ pub fn padNumberText(arena: std.mem.Allocator, n: ast.Node) ?[]const u8 {
     };
 }
 
+/// True when `s` needs escaping to sit safely inside a double-quoted
+/// S-expression token — i.e. it contains a raw `"` or `\`.
+pub fn needsSexprEscape(s: []const u8) bool {
+    return std.mem.indexOfScalar(u8, s, '"') != null or
+        std.mem.indexOfScalar(u8, s, '\\') != null;
+}
+
+/// Escape `s` so it can be the payload of a `Node.string` that the printer
+/// emits verbatim between quotes. The printer writes `Node.string` bytes
+/// unchanged (they are assumed to already be grammar-escaped tokenizer
+/// slices), so any value that reached the writer via a *different* route —
+/// a JSON-decoded sync op field, an HTTP-supplied BOM value — must be
+/// escaped here or a raw `"`/trailing `\` produces an unparseable
+/// `.kicad_pcb` / `.bom`. Mirrors the tokenizer's `\`-escape convention
+/// (`"` → `\"`, `\` → `\\`); no allocation when nothing needs escaping.
+pub fn sexprEscape(arena: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (!needsSexprEscape(s)) return s;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    for (s) |c| {
+        if (c == '"' or c == '\\') try out.append(arena, '\\');
+        try out.append(arena, c);
+    }
+    return out.toOwnedSlice(arena);
+}
+
+/// Inverse of `sexprEscape`: decode a tokenizer string slice (with `\x`
+/// escapes) back to its literal bytes. `sexprUnescape(sexprEscape(s)) == s`
+/// for any `s`, and it is a no-op on text with no backslash — so decoding a
+/// legacy, never-escaped value returns it unchanged. Callers that re-serialise
+/// loaded `.bom` values use this on read so the writer's escape-on-write can't
+/// double-escape across a load→edit→save cycle.
+pub fn sexprUnescape(arena: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (std.mem.indexOfScalar(u8, s, '\\') == null) return s;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '\\' and i + 1 < s.len) {
+            i += 1;
+        }
+        try out.append(arena, s[i]);
+    }
+    return out.toOwnedSlice(arena);
+}
+
+test "sexprUnescape inverts sexprEscape and is a no-op on clean text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // spec: kicad_pcb/format - sexprUnescape inverts sexprEscape so a load→save round-trip does not double-escape
+    try std.testing.expectEqualStrings("VIN", try sexprUnescape(a, "VIN"));
+    inline for (.{ "a\"b", "path\\", "he said \"hi\" \\", "plain" }) |raw| {
+        const round = try sexprUnescape(a, try sexprEscape(a, raw));
+        try std.testing.expectEqualStrings(raw, round);
+    }
+}
+
+test "sexprEscape escapes quotes and backslashes, passes clean text through" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // spec: kicad_pcb/format - sexprEscape escapes embedded quotes and trailing backslash so the printed token round-trips
+    try std.testing.expectEqualStrings("VIN", try sexprEscape(a, "VIN"));
+    try std.testing.expectEqualStrings("a\\\"b", try sexprEscape(a, "a\"b"));
+    try std.testing.expectEqualStrings("path\\\\", try sexprEscape(a, "path\\"));
+    // Escaped output re-tokenizes as the ORIGINAL bytes (round-trip proof).
+    const tok = @import("../sexpr/tokenizer.zig");
+    const raw = "he said \"hi\" \\";
+    const esc = try sexprEscape(a, raw);
+    const quoted = try std.fmt.allocPrint(a, "\"{s}\"", .{esc});
+    var tokenizer = tok.Tokenizer.init(quoted);
+    const t = try tokenizer.next();
+    try std.testing.expectEqual(tok.TokenTag.string, t.tag);
+    // The tokenizer captures the escaped bytes between the quotes; decoding
+    // `\x`→`x` must recover the raw input exactly.
+    var decoded: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < t.text.len) : (i += 1) {
+        if (t.text[i] == '\\' and i + 1 < t.text.len) i += 1;
+        try decoded.append(a, t.text[i]);
+    }
+    try std.testing.expectEqualStrings(raw, decoded.items);
+}
+
 test "padNumberText reads quoted, bare-atom, and bare-int pad numbers" {
     const parser = @import("../sexpr/parser.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

@@ -3,6 +3,7 @@ const infra_fs = @import("../infra/fs.zig");
 const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
 const auth_store = @import("auth_store.zig");
+const oauth_store = @import("oauth_store.zig");
 
 /// Permission tier assigned to a user. Drives the canWrite/canAdmin gates
 /// the auth middleware and MCP dispatcher consult before accepting a
@@ -92,8 +93,6 @@ fn saveUsers(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     ensureAuthDir(auth_dir);
     const path = usersPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
-    const file = infra_fs.cwd().createFile(path, .{}) catch return;
-    defer file.close();
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
@@ -103,7 +102,7 @@ fn saveUsers(allocator: std.mem.Allocator, auth_dir: []const u8) void {
         w.print("{{\"email\":\"{s}\",\"role\":\"{s}\",\"created_at\":{d}}}", .{ u.email, u.role.toString(), u.created_at }) catch return;
     }
     w.writeAll("]") catch return;
-    file.writeAll(buf.items) catch return;
+    oauth_store.writeFileAtomicWithBackup(allocator, path, buf.items);
 }
 
 /// On first migration (users.json doesn't exist yet but credentials do),

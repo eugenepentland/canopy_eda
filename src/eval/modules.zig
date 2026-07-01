@@ -5,6 +5,7 @@ const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
 const electrical_mod = @import("electrical.zig");
 const design_block_mod = @import("design_block.zig");
+const special_forms = @import("special_forms.zig");
 const forms_mod = @import("forms.zig");
 const Evaluator = @import("evaluator.zig").Evaluator;
 const EvalError = @import("evaluator.zig").EvalError;
@@ -18,6 +19,13 @@ const BlockDef = env_mod.BlockDef;
 
 // ── Constants ─────────────────────────────────────────────────────
 const FOOTPRINT_FORM = "footprint";
+
+/// Maximum module call nesting. A self-recursive module — an authoring typo
+/// like `(defmodule m () (m))`, or two modules calling each other — would
+/// otherwise recurse until the process stack overflows and takes down the
+/// shared server. Real module trees nest only a handful deep; this cap is
+/// generous but finite.
+const MAX_MODULE_DEPTH: usize = 64;
 
 /// Standard passive families auto-imported into every design and module
 /// before their body evaluates. The list mirrors the inventory in
@@ -52,8 +60,10 @@ pub fn loadPassivesPrelude(self: *Evaluator, env: *Env) void {
 /// lib_dir fallback) and registering the resulting component or module in
 /// the caller's environment.
 pub fn evalImport(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
-    // Support multi-import: (import a b c ...)
-    if (args.len < 1) return EvalError.ArityError;
+    // Support multi-import: (import a b c ...). Route through the shared
+    // arity checker so a bare `(import)` records a diagnostic instead of
+    // returning a bare ArityError that leaves a stale `last_error` behind.
+    try special_forms.checkArity(self, .import, args);
     for (args) |arg| {
         const name = arg.asAtom() orelse {
             self.setError(arg.span, "(import …) names must be bare atoms, e.g. (import cap-0402)");
@@ -77,6 +87,23 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
     if (self.component_cache.contains(name)) return;
     if (env.get(name) != null) return;
 
+    // Cycle guard: if `name` is already mid-resolution higher on the stack,
+    // a module file imports (transitively) itself. Without this, each hop
+    // re-reads + re-evaluates the other file in a fresh env forever until the
+    // process stack overflows. Diagnose it as a circular import instead.
+    if (self.imports_in_progress.contains(name)) {
+        self.setErrorFmt(.{ .line = 1, .col = 1, .offset = 0 }, "circular import of '{s}' — a module file imports itself (directly or through a cycle)", .{name});
+        return EvalError.ImportError;
+    }
+    const in_progress_key = self.allocator.dupe(u8, name) catch return EvalError.OutOfMemory;
+    self.imports_in_progress.put(self.allocator, in_progress_key, {}) catch {
+        self.allocator.free(in_progress_key);
+        return EvalError.OutOfMemory;
+    };
+    defer {
+        if (self.imports_in_progress.fetchRemove(name)) |kv| self.allocator.free(kv.key);
+    }
+
     // Search path: components first, then modules.
     // Search project_dir first, then lib_dir (shared library fallback).
     const search_prefixes = [_][]const u8{
@@ -88,6 +115,13 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
     else
         &[_][]const u8{ self.project_dir, self.lib_dir };
 
+    // A module-shaped file that parsed but didn't define `name` (a name ≠
+    // filename mismatch). Remembered so, if no other search location resolves,
+    // the tail emits a precise diagnostic instead of the misleading
+    // "no lib/... file". Buffers are `self.allocator`-owned and outlive eval.
+    var mismatch_path: ?[]const u8 = null;
+    var mismatch_actual: ?[]const u8 = null;
+
     for (search_roots) |root| {
         for (search_prefixes) |prefix| {
             const path = std.fmt.allocPrint(self.allocator, "{s}/{s}{s}.sexp", .{ root, prefix, name }) catch return EvalError.OutOfMemory;
@@ -96,7 +130,14 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
             // Note: don't free file_content — AST nodes reference slices into it
             const file_content = infra_fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch continue;
 
-            const nodes = parser_mod.parse(self.allocator, file_content) catch return EvalError.ImportError;
+            // A parse failure here means the library file EXISTS but is
+            // malformed — record a diagnostic naming the file so `evalImport`'s
+            // fallback doesn't misreport it as "no lib/... file" to the very
+            // user who needs to fix the syntax error.
+            const nodes = parser_mod.parse(self.allocator, file_content) catch |err| {
+                self.setErrorFmt(.{ .line = 1, .col = 1, .offset = 0 }, "syntax error in '{s}': {s}", .{ path, @errorName(err) });
+                return EvalError.ImportError;
+            };
 
             // Record this read in `loaded_files` so a caller can reconstruct the
             // evaluator's complete file read-set (design + checks + every
@@ -129,7 +170,26 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
                     try env.put(name, v);
                     return;
                 }
+                // The file exists and parses but defines no module named `name`
+                // (a name ≠ filename mismatch). Destroy the orphaned env
+                // (nothing references it now) and remember the mismatch so the
+                // search can still try the remaining roots/prefixes; if none
+                // resolve, the tail emits a precise diagnostic. `path` is freed
+                // on loop exit, so dup it into an eval-lifetime buffer.
+                mod_env.deinit();
+                self.allocator.destroy(mod_env);
+                if (mismatch_path == null) {
+                    mismatch_path = self.allocator.dupe(u8, path) catch null;
+                    mismatch_actual = firstDefmoduleName(nodes);
+                }
             }
+        }
+    }
+    if (mismatch_path) |mp| {
+        if (mismatch_actual) |actual| {
+            self.setErrorFmt(.{ .line = 1, .col = 1, .offset = 0 }, "'{s}' defines module '{s}', not '{s}' — rename the file or the (defmodule …)", .{ mp, actual, name });
+        } else {
+            self.setErrorFmt(.{ .line = 1, .col = 1, .offset = 0 }, "'{s}' defines no module named '{s}'", .{ mp, name });
         }
     }
     return EvalError.ImportError;
@@ -321,7 +381,7 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
 /// time when the caller omits that argument.
 pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     // (defmodule name (params...) docstring? body...)
-    if (args.len < 2) return EvalError.ArityError;
+    try special_forms.checkArity(self, .defmodule, args);
     const name = args[0].asAtom() orelse {
         self.setError(args[0].span, "(defmodule …) name must be a bare atom");
         return EvalError.InvalidForm;
@@ -372,6 +432,24 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
 
     try env.put(name, .{ .block_def = mod });
     return .nil;
+}
+
+/// The name declared by the first top-level `(defmodule <name> …)` /
+/// `(block <name-atom> …)` in `nodes`, or null if none is found. Used to make
+/// a name ≠ filename import mismatch diagnostic name the actual module.
+fn firstDefmoduleName(nodes: []const Node) ?[]const u8 {
+    for (nodes) |node| {
+        const children = node.asList() orelse continue;
+        if (children.len < 2) continue;
+        const head = children[0].asAtom() orelse continue;
+        const is_defmodule = std.mem.eql(u8, head, "defmodule");
+        // `(block <atom> …)` is the unified module-definition form.
+        const is_block_def = std.mem.eql(u8, head, "block") and children[1].asAtom() != null;
+        if (is_defmodule or is_block_def) {
+            if (children[1].asAtom()) |mod_name| return mod_name;
+        }
+    }
+    return null;
 }
 
 /// Index of the declared parameter a call arg names, when the arg uses the
@@ -458,6 +536,15 @@ pub fn callModule(self: *Evaluator, mod: BlockDef, call_args: []const Node, call
     }
 
     try checkMissingParams(self, mod, bound, call_span);
+
+    // Bound recursion: a module that (transitively) calls itself would spin
+    // `callModule` until the native stack overflows. The `module_stack` depth
+    // already tracks the active call chain, so cap it here with a diagnostic
+    // that still carries the frames leading in.
+    if (self.module_stack.items.len >= MAX_MODULE_DEPTH) {
+        self.setErrorFmt(call_span, "module recursion too deep (>{d}) calling '{s}' — check for a module that calls itself (directly or in a cycle)", .{ MAX_MODULE_DEPTH, mod.name });
+        return EvalError.InvalidForm;
+    }
 
     // Evaluate with a call-stack frame so any diagnostic recorded inside the
     // body — or inside a default expression — carries `in module 'x'

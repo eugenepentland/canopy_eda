@@ -23,6 +23,22 @@ const MAX_BODY_BYTES: usize = 16 * 1024;
 
 /// Route param name shared by all three handlers (`:footprint`).
 const PARAM_FOOTPRINT = "footprint";
+const escape = @import("../escape.zig");
+
+/// A footprint name is a library basename. Reject anything with path
+/// separators / traversal / markup so the decoded value is safe both as a file
+/// path (no `..`/`/`) and reflected into HTML/JS (no `<`/`"`). Allows the
+/// `,`/`#` reserved chars real footprint names round-trip through the URL.
+fn isSafeFootprint(name: []const u8) bool {
+    if (name.len == 0 or name.len > 128) return false;
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    for (name) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '.' or c == '-' or c == '_' or c == ',' or c == '#';
+        if (!ok) return false;
+    }
+    return true;
+}
 /// JSON tail emitted when the footprint has no parsable pads/courtyard:
 /// closes the (empty) `pads` array and sets `courtyard` null.
 const EMPTY_PADS_TAIL = "],\"courtyard\":null";
@@ -53,6 +69,7 @@ fn resolveModelName(allocator: std.mem.Allocator, project_dir: []const u8, footp
 pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const footprint_raw = req.param(PARAM_FOOTPRINT) orelse return notFound(res);
     const footprint = urlDecode(req.arena, footprint_raw) catch return notFound(res);
+    if (!isSafeFootprint(footprint)) return notFound(res);
     const model_name = resolveModelName(req.arena, ctx.project_dir, footprint) orelse return notFound(res);
     const path = std.fmt.allocPrint(req.arena, "{s}/lib/models/{s}", .{ ctx.project_dir, model_name }) catch return notFound(res);
     const bytes = infra_fs.cwd().readFileAlloc(req.arena, path, MAX_MODEL_BYTES) catch return notFound(res);
@@ -74,6 +91,7 @@ pub fn viewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     // config lookups, and pad parsing (so commas etc. resolve to the right file).
     const footprint_url = req.param(PARAM_FOOTPRINT) orelse return notFound(res);
     const footprint = urlDecode(req.arena, footprint_url) catch return notFound(res);
+    if (!isSafeFootprint(footprint)) return notFound(res);
 
     const model_name = resolveModelName(req.arena, ctx.project_dir, footprint);
 
@@ -86,15 +104,23 @@ pub fn viewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     const w = &aw.writer;
 
     try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
-    try w.print("<title>3D — {s}</title>", .{footprint});
+    // `footprint` is gated by isSafeFootprint (no `<`/`"`); `model_name` comes
+    // from model-config.json and is escaped defensively.
+    try w.writeAll("<title>3D — ");
+    try escape.writeXml(w, footprint);
+    try w.writeAll("</title>");
     try w.writeAll(PAGE_CSS);
     try w.writeAll("</head><body>");
 
     // Header / toolbar.
     try w.writeAll("<div id=\"topbar\"><a id=\"back\" href=\"/library\">‹ Library</a>");
-    try w.print("<span id=\"fp-name\">{s}</span>", .{footprint});
+    try w.writeAll("<span id=\"fp-name\">");
+    try escape.writeXml(w, footprint);
+    try w.writeAll("</span>");
     if (model_name) |m| {
-        try w.print("<span id=\"model-name\">{s}</span>", .{m});
+        try w.writeAll("<span id=\"model-name\">");
+        try escape.writeXml(w, m);
+        try w.writeAll("</span>");
     } else {
         try w.writeAll("<span id=\"model-name\" class=\"warn\">no STEP model found</span>");
     }
@@ -346,6 +372,7 @@ pub fn saveTransformApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     // Decode `%2C`-style escapes so the config key matches the footprint name
     // (e.g. `74ahct1g125gm,132`) the KiCad sync looks up.
     const footprint = urlDecode(aa, footprint_raw) catch return badRequest(res, "invalid footprint");
+    if (!isSafeFootprint(footprint)) return badRequest(res, "invalid footprint");
 
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, aa, body, .{}) catch return badRequest(res, "invalid JSON");
     const offset = parseVec3(parsed, "offset") orelse return badRequest(res, "missing offset[3]");
@@ -467,6 +494,9 @@ fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, content: []const 
 
 // ── helpers ────────────────────────────────────────────────────────
 
+/// The output is embedded inside `<script>window.VIEWER_DATA=…</script>`, so as
+/// well as JSON-escaping this also escapes `<` (→ `<`) to prevent a
+/// `</script>` breakout, and control chars (`\u00XX`).
 fn writeJsonString(w: anytype, s: []const u8) !void {
     try w.writeByte('"');
     for (s) |c| {
@@ -476,7 +506,8 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
             '\n' => try w.writeAll("\\n"),
             '\r' => try w.writeAll("\\r"),
             '\t' => try w.writeAll("\\t"),
-            else => try w.writeByte(c),
+            '<' => try w.writeAll("\\u003c"),
+            else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
         }
     }
     try w.writeByte('"');

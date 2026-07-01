@@ -156,7 +156,7 @@ pub fn writeGlanceLayer(
     ents: []const Entity,
 ) (Allocator.Error || Writer.Error)!void {
     if (ents.len == 0) return;
-    const ent_of = try entityOf(arena, graph, lay, ents);
+    const ent_of = try entityOf(arena, graph, lay);
     const aggs = try aggregateEdges(arena, graph, ent_of);
     try w.writeAll("<g class=\"dg-glance\">");
     for (aggs) |agg| try writeAggEdge(w, graph, aggGeometry(ents, aggs, agg), agg);
@@ -189,7 +189,7 @@ pub fn writeBaseAggLinks(
         base[i].w = e.zw;
         base[i].h = e.zh;
     }
-    const ent_of = try entityOf(arena, graph, lay, ents);
+    const ent_of = try entityOf(arena, graph, lay);
     const aggs = try aggregateEdges(arena, graph, ent_of);
     try w.writeAll("<g class=\"dg-agglinks\">");
     for (aggs) |agg| try writeAggEdge(w, graph, aggGeometry(base, aggs, agg), agg);
@@ -267,36 +267,44 @@ fn buildEntities(
 }
 
 /// Map every graph node id to the entity that owns it (group chip or its own
-/// solo chip); null for nodes that were never laid out.
+/// solo chip); null for nodes that were never laid out. Walks `lay.groups` then
+/// `lay.nodes` in the *identical* order and with the *identical* first-claim
+/// skip logic `buildEntities` uses, tracking the append counter so each node maps
+/// to the right chip *by id* — never by display label, which duplicates across
+/// two sub-blocks on one defmodule (`adc1..adc3`) or two `TX_EMVS`/`TXEMVS`
+/// antennas and would fold the twins onto the first chip.
 fn entityOf(
     arena: Allocator,
     graph: *const Graph,
     lay: layout.Layout,
-    ents: []const Entity,
 ) Allocator.Error![]?usize {
     const ent_of = try arena.alloc(?usize, graph.nodes.len);
     @memset(ent_of, null);
+    var grouped = try arena.alloc(bool, graph.nodes.len);
+    @memset(grouped, false);
+    var ei: usize = 0; // next entity index, in buildEntities' append order
     for (lay.groups) |gb| {
         const src = graph.layout.groups[gb.color_idx];
-        const ei = entityByLabel(ents, gb.label) orelse continue;
+        // Claim members first-come, exactly as buildEntities does, and count them
+        // so a zero-member group is skipped WITHOUT consuming an entity index —
+        // matching buildEntities' `if (count == 0) continue;`.
+        var claimed: std.ArrayListUnmanaged(u32) = .empty;
         for (src.members) |name| {
             const id = nodeByKey(graph, name) orelse continue;
-            if (ent_of[id] == null) ent_of[id] = ei;
+            if (grouped[id]) continue;
+            grouped[id] = true;
+            try claimed.append(arena, id);
         }
+        if (claimed.items.len == 0) continue;
+        for (claimed.items) |id| ent_of[id] = ei;
+        ei += 1;
     }
     for (lay.nodes) |ln| {
-        if (ent_of[ln.gid] != null) continue;
-        const nd = graph.nodes[ln.gid];
-        if (entityByLabel(ents, nd.label)) |ei| ent_of[ln.gid] = ei;
+        if (grouped[ln.gid]) continue;
+        ent_of[ln.gid] = ei;
+        ei += 1;
     }
     return ent_of;
-}
-
-fn entityByLabel(ents: []const Entity, label: []const u8) ?usize {
-    for (ents, 0..) |e, i| {
-        if (std.mem.eql(u8, e.label, label)) return i;
-    }
-    return null;
 }
 
 /// Same stable-key match `layout.zig` uses to resolve `(place …)`/`(group …)`
@@ -699,6 +707,35 @@ test "buildGlanceEntities pushes overlapping group chips apart" {
     try testing.expectApproxEqAbs(@as(f64, 0), a.zx, 0.5);
     try testing.expectApproxEqAbs(@as(f64, 400), b.zx, 0.5);
     try testing.expectApproxEqAbs(@as(f64, 20), b.zy, 0.5);
+}
+
+// spec: diagram/lod - Glance chips resolve nodes by id not label, so duplicate-labelled blocks stay distinct
+test "entityOf keeps duplicate-labelled solo blocks on separate chips" {
+    // Two blocks sharing the display label "ADC channel" (two sub-blocks on one
+    // defmodule) but distinct keys; an edge runs between them. Resolving by label
+    // would fold both onto the first chip and drop the edge as a self-loop.
+    var nodes = [_]types.Node{
+        .{ .label = "ADC channel", .subtitle = "", .category = .peripheral, .slug = "", .key = "adc1", .inputs = &.{}, .outputs = &.{} },
+        .{ .label = "ADC channel", .subtitle = "", .category = .peripheral, .slug = "", .key = "adc2", .inputs = &.{}, .outputs = &.{} },
+    };
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "DAISY" },
+    };
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var lnodes = [_]layout.LNode{
+        .{ .gid = 0, .x = 0, .y = 0 },
+        .{ .gid = 1, .x = 400, .y = 0 },
+    };
+    const lay = layout.Layout{ .nodes = &lnodes, .routes = &.{}, .width = 900, .height = 200 };
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const ent_of = try entityOf(arena_state.allocator(), &graph, lay);
+    // The two nodes map to DIFFERENT solo chips (0 and 1), not the same.
+    try testing.expect(ent_of[0] != null and ent_of[1] != null);
+    try testing.expect(ent_of[0].? != ent_of[1].?);
+    // …so the inter-chip edge survives aggregation instead of collapsing.
+    const aggs = try aggregateEdges(arena_state.allocator(), &graph, ent_of);
+    try testing.expectEqual(@as(usize, 1), aggs.len);
 }
 
 // spec: diagram/lod - Reports the block count and which blocks no group cluster claims

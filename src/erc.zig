@@ -6,6 +6,7 @@ const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const json_writer = @import("json_writer.zig");
+const numeric = @import("numeric.zig");
 const checks = @import("checks.zig");
 const module_policy = @import("placement/module_policy.zig");
 const pin_roles = @import("placement/pin_roles.zig");
@@ -58,6 +59,7 @@ pub const ViolationKind = enum {
     missing_requirements,
     layout_class_inferred,
     components_not_grouped,
+    verification_orphaned,
 };
 
 /// One electrical-rule-check finding. `kind` selects the rule, `severity`
@@ -100,6 +102,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkMissingRequirements(allocator, block, &violations);
     try checkLayoutClasses(allocator, block, &violations);
     try checkComponentGrouping(allocator, block, &violations);
+    try checkOrphanedVerifications(allocator, block, &violations);
     if (project_dir.len > 0) try checkPinFunctions(allocator, block, project_dir, &violations);
 
     return violations.items;
@@ -208,9 +211,13 @@ fn checkLayoutClasses(
 /// Flag a design whose functional blocks aren't split into `(group …)` cohesion
 /// clusters (the barracuda-base idiom). Builds the same diagram graph the
 /// schematic Block-overview view uses — so "ungrouped" means exactly what that
-/// view's "Other" bucket shows — and errors once a real board (≥ the block
+/// view's "Other" bucket shows — and warns once a real board (≥ the block
 /// floor) leaves any block out of every cluster. Tiny power/module designs stay
 /// exempt: grouping a buck + its handful of passives adds no legibility.
+///
+/// Severity is `warning`, not `error`: grouping is purely organizational (it
+/// only shapes the block-overview render), so it must not fail `build`/`check`
+/// or redden the home-page health chip the way an electrical fault does.
 fn checkComponentGrouping(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
@@ -248,9 +255,69 @@ fn checkComponentGrouping(
     ) catch return;
     try violations.append(allocator, .{
         .kind = .components_not_grouped,
-        .severity = .@"error",
+        .severity = .warning,
         .message = msg,
     });
+}
+
+/// Flag any `(verifies …)` sign-off that resolves to no live requirement — a
+/// dangling human sign-off. `req_checks.applyVerifications` silently drops one
+/// whose target ref-des/id matches no instance, or whose `req_id` matches no
+/// requirement on that instance, so a ref-des renumber (MEMORY: "ref-des drift
+/// orphans the whole `<design>.checks.sexp`") flips VERIFIED requirements back
+/// to PENDING with zero indication. This surfaces each unmatched sign-off as a
+/// `warning` (not an error — it never masks a real defect; a passing/failing
+/// requirement is judged by its own `(check …)`) so the drift is visible in the
+/// review doc and the home-page health chip.
+///
+/// Mirrors `req_checks.applyOneVerification`'s resolution exactly (by stable id
+/// when `target_id` is set, else by ref-des; then the `req_id` must match a
+/// requirement on that instance), recursing sub-blocks the same way, so a
+/// verification counts as matched iff `applyVerifications` would have applied it.
+fn checkOrphanedVerifications(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    for (block.verifications) |v| {
+        if (verificationResolves(block, v)) continue;
+        const target = if (v.target_id.len > 0) v.target_id else v.ref_des;
+        const msg = std.fmt.allocPrint(
+            allocator,
+            "Dangling (verifies …) sign-off: no live requirement \"{s}\" on \"{s}\" — " ++
+                "a ref-des renumber or a removed requirement orphaned it, so the sign-off " ++
+                "no longer marks anything VERIFIED. Re-target it (by (id …) to survive renumbers) or remove it",
+            .{ v.req_id, target },
+        ) catch continue;
+        try violations.append(allocator, .{
+            .kind = .verification_orphaned,
+            .severity = .warning,
+            .message = msg,
+            .ref_des = v.ref_des,
+        });
+    }
+}
+
+/// True iff verification `v` resolves to a live `(ref_des_or_id, req_id)` pair
+/// somewhere in `block` or its sub-blocks — the exact predicate
+/// `req_checks.applyOneVerification` uses to decide whether to apply it.
+fn verificationResolves(block: *const DesignBlock, v: env_mod.Verification) bool {
+    for (block.instances) |inst| {
+        const matched = if (v.target_id.len > 0)
+            std.mem.eql(u8, inst.id, v.target_id)
+        else
+            std.mem.eql(u8, inst.ref_des, v.ref_des);
+        if (!matched) continue;
+        for (inst.requirements) |r| {
+            if (std.mem.eql(u8, r.id, v.req_id)) return true;
+        }
+        // Instance matched but this req_id is stale — keep scanning other
+        // instances (a ref-des can repeat across module instantiations).
+    }
+    for (block.sub_blocks) |sb| {
+        if (verificationResolves(sb.block, v)) return true;
+    }
+    return false;
 }
 
 /// For each net, gather pins whose component library declared electrical
@@ -261,6 +328,17 @@ fn checkComponentGrouping(
 /// the check starts low-noise and grows useful as the library is
 /// annotated.
 fn checkVoltageDomainCompat(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    try checkBlockVoltageDomainCompat(allocator, block, violations);
+    // Recurse sub-blocks so a module's driver→receiver levels are judged in
+    // its own net namespace (its pins/ports, not the parent's).
+    for (block.sub_blocks) |sb| try checkVoltageDomainCompat(allocator, sb.block, violations);
+}
+
+fn checkBlockVoltageDomainCompat(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     violations: *std.ArrayListUnmanaged(Violation),
@@ -555,7 +633,11 @@ fn checkTestPointCoverage(
         try tp_nets.put(allocator, tp.net, {});
     }
     for (block.instances) |inst| {
-        if (!std.mem.eql(u8, inst.component, "testpoint")) continue;
+        // `env_mod.isTestPoint` also matches `testpoint-*` variants (e.g. an SMD
+        // test point), so a rail probed only by a `testpoint-smd` isn't falsely
+        // reported "has no test point" while the review table simultaneously
+        // lists it (that table is isTestPoint-based too).
+        if (!env_mod.isTestPoint(inst.component)) continue;
         for (block.nets) |net| {
             for (net.pins) |pin| {
                 if (!std.mem.eql(u8, pin.ref_des, inst.ref_des)) continue;
@@ -591,14 +673,20 @@ fn checkTestPointCoverage(
 }
 
 /// Check for duplicate reference designators across the full flattened design.
+/// Recurses sub-blocks (via `collectAllInstances`) so a module-local ref-des
+/// that collides with a top-level part — or with a part in another instantiation
+/// of the same module — is caught, matching the flattened-design contract the
+/// KiCad netlist export flattens to.
 fn checkDuplicateRefDes(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     violations: *std.ArrayListUnmanaged(Violation),
 ) !void {
     var counts: std.StringHashMapUnmanaged(u32) = .empty;
+    defer counts.deinit(allocator);
 
-    const all = collectBlockInstances(allocator, block);
+    const all = try collectAllInstances(allocator, block);
+    defer allocator.free(all);
     for (all) |inst| {
         if (inst.ref_des.len == 0) continue;
         const gop = counts.getOrPut(allocator, inst.ref_des) catch continue;
@@ -621,7 +709,19 @@ fn checkDuplicateRefDes(
 }
 
 /// Check for a single component pin attached to two or more distinct nets.
+/// Runs per block (recursing sub-blocks) so a module's pins are judged in
+/// their own net namespace — a pin repeated across a parent net and a module
+/// net after flattening isn't a genuine multi-net short.
 fn checkPinMultiNet(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    try checkBlockPinMultiNet(allocator, block, violations);
+    for (block.sub_blocks) |sb| try checkPinMultiNet(allocator, sb.block, violations);
+}
+
+fn checkBlockPinMultiNet(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     violations: *std.ArrayListUnmanaged(Violation),
@@ -718,8 +818,20 @@ fn checkFloatingNets(
 }
 
 /// Check that required ports on sub-blocks are connected, and that
-/// the parent design's own required ports have connections.
+/// the parent design's own required ports have connections. Runs per block
+/// (recursing sub-blocks) so a nested module's required port left unwired
+/// inside a level-1 module is caught, not just the top block's direct
+/// sub-block ports.
 fn checkUnconnectedPorts(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayListUnmanaged(Violation),
+) !void {
+    try checkBlockUnconnectedPorts(allocator, block, violations);
+    for (block.sub_blocks) |sb| try checkUnconnectedPorts(allocator, sb.block, violations);
+}
+
+fn checkBlockUnconnectedPorts(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     violations: *std.ArrayListUnmanaged(Violation),
@@ -791,13 +903,15 @@ fn checkUnconnectedPorts(
     }
 }
 
-/// Check for instances missing a value (passives need values).
+/// Check for instances missing a value (passives need values). Recurses
+/// sub-blocks so a module-internal value-less passive is flagged too.
 fn checkMissingValues(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     violations: *std.ArrayListUnmanaged(Violation),
 ) !void {
-    const all_instances = collectBlockInstances(allocator, block);
+    const all_instances = try collectAllInstances(allocator, block);
+    defer allocator.free(all_instances);
     for (all_instances) |inst| {
         if (inst.ref_des.len == 0) continue;
         // Passives (R, C, L) need values — unless the instance is a fixed
@@ -827,13 +941,15 @@ fn hasNonEmptyProperty(inst: Instance, key: []const u8) bool {
     return false;
 }
 
-/// Check for instances missing a footprint.
+/// Check for instances missing a footprint. Recurses sub-blocks so a
+/// module-internal footprint-less part is flagged too.
 fn checkMissingFootprints(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     violations: *std.ArrayListUnmanaged(Violation),
 ) !void {
-    const all_instances = collectBlockInstances(allocator, block);
+    const all_instances = try collectAllInstances(allocator, block);
+    defer allocator.free(all_instances);
     for (all_instances) |inst| {
         if (inst.ref_des.len == 0) continue;
         if (inst.footprint.len == 0) {
@@ -1060,15 +1176,20 @@ fn decouplePinFromOrigin(origin_key: []const u8) ?[]const u8 {
     return if (pin.len > 0) pin else null;
 }
 
-/// Parse a capacitance string ("100nF", "4.7uF") to farads; 0 if unrecognised.
-/// Copy of `module_policy.capValueFarads` (kept local to avoid an
-/// eval→placement pub-API dependency).
+/// Parse a capacitance string ("100nF", "4.7uF", "10µF") to farads; 0 if
+/// unrecognised. Copy of `module_policy.capValueFarads` (kept local to avoid an
+/// eval→placement pub-API dependency). Accepts the UTF-8 micro sign `µ`
+/// (0xC2 0xB5) as a `u`-equivalent so a hand-typed/imported "10µF" bulk cap
+/// keeps its `decoupling_unbound` bulk-reservoir exemption instead of reading
+/// 0 F (an HF cap) and producing a build-failing false positive.
 fn capFarads(s: []const u8) f64 {
     var i: usize = 0;
     while (i < s.len and (std.ascii.isDigit(s[i]) or s[i] == '.')) i += 1;
     if (i == 0) return 0;
     const num = std.fmt.parseFloat(f64, s[0..i]) catch return 0;
     if (i >= s.len) return 0;
+    // UTF-8 `µ` (U+00B5, bytes 0xC2 0xB5) — the micro sign — reads as `u`.
+    if (s[i] == 0xC2 and i + 1 < s.len and s[i + 1] == 0xB5) return num * 1e-6;
     const mult: f64 = switch (s[i]) {
         'p', 'P' => 1e-12,
         'n', 'N' => 1e-9,
@@ -1693,22 +1814,29 @@ fn checkVoltageMismatches(
     while (iter.next()) |entry| {
         const entries = entry.value_ptr.items;
         if (entries.len < 2) continue;
-        const first_v = entries[0].voltage;
+        // Compare the extremes across ALL declarations, not each against
+        // entries[0]: three decls 3.30 / 3.291 / 3.309 V each sit within
+        // tolerance of the first yet span 0.018 V, so an entries[0]-only compare
+        // misses it (and which pair reported depended on iteration order). The
+        // widest spread is the true mismatch and is order-independent.
+        var min_e = entries[0];
+        var max_e = entries[0];
         for (entries[1..]) |e| {
-            if (@abs(e.voltage - first_v) > VOLTAGE_MISMATCH_TOLERANCE_V) {
-                const msg = std.fmt.allocPrint(
-                    allocator,
-                    "Voltage mismatch on \"{s}\": {s} declares {d:.1}V vs {s} declares {d:.1}V",
-                    .{ entry.key_ptr.*, entries[0].section, first_v, e.section, e.voltage },
-                ) catch continue;
-                try violations.append(allocator, .{
-                    .kind = .voltage_mismatch,
-                    .severity = .@"error",
-                    .message = msg,
-                    .net = entry.key_ptr.*,
-                });
-                break;
-            }
+            if (e.voltage < min_e.voltage) min_e = e;
+            if (e.voltage > max_e.voltage) max_e = e;
+        }
+        if (max_e.voltage - min_e.voltage > VOLTAGE_MISMATCH_TOLERANCE_V) {
+            const msg = std.fmt.allocPrint(
+                allocator,
+                "Voltage mismatch on \"{s}\": {s} declares {d:.1}V vs {s} declares {d:.1}V",
+                .{ entry.key_ptr.*, min_e.section, min_e.voltage, max_e.section, max_e.voltage },
+            ) catch continue;
+            try violations.append(allocator, .{
+                .kind = .voltage_mismatch,
+                .severity = .@"error",
+                .message = msg,
+                .net = entry.key_ptr.*,
+            });
         }
     }
 }
@@ -1745,9 +1873,10 @@ fn checkUnconnectedPowerPins(
     violations: *std.ArrayListUnmanaged(Violation),
 ) !void {
     try checkBlockPowerPins(allocator, block, project_dir, violations);
-    // Also check sub-blocks with their own net namespace
+    // Recurse into every sub-block with its own net namespace — a
+    // module-inside-a-module IC with no ground is otherwise missed.
     for (block.sub_blocks) |sb| {
-        try checkBlockPowerPins(allocator, sb.block, project_dir, violations);
+        try checkUnconnectedPowerPins(allocator, sb.block, project_dir, violations);
     }
 }
 
@@ -1861,8 +1990,13 @@ fn checkBlockPowerPins(
             std.mem.eql(u8, base, "AGND") or std.mem.eql(u8, base, "DGND") or
             std.mem.eql(u8, base, "PGND") or std.mem.eql(u8, base, "EP") or
             std.mem.startsWith(u8, base, "GND") or
-            std.mem.endsWith(u8, base, "GND") or std.mem.endsWith(u8, base, "VSS");
-        const is_vdd = std.mem.startsWith(u8, base, "VDD") or std.mem.startsWith(u8, base, "VCC") or
+            std.mem.endsWith(u8, base, "GND") or std.mem.endsWith(u8, base, "VSS") or
+            pin_roles.isGroundFn(base);
+        // A net classified as ground is never also a supply — reject it first so
+        // "VSS"/"VSSA" don't read as power (the old inline `startsWith("VS")`
+        // heuristic marked VSS/VSYNC/VSW/VSENSE as power; delegate to
+        // `pin_roles.isSupplyFn` for the exact `VS`/`VSYS` form instead).
+        const is_vdd = !is_gnd and (std.mem.startsWith(u8, base, "VDD") or std.mem.startsWith(u8, base, "VCC") or
             std.mem.startsWith(u8, base, "VBAT") or
             // Local post-filter supply nodes that *end* in a supply token — a
             // chip's VDD/VCC pin fed from a board rail through a ferrite/LC
@@ -1881,7 +2015,14 @@ fn checkBlockPowerPins(
             // VREF: auto-direction level translators (LSF0108, TXS0108, …) have no
             // VDD/VCC pin — they are supplied through their VREF_A / VREF_B rails.
             std.mem.startsWith(u8, base, "VREF") or
-            std.mem.startsWith(u8, base, "VS") or
+            // System rail `VSYS` (+ derivatives) is a real supply — kept
+            // explicitly because `isSupplyFn` doesn't list it.
+            std.mem.startsWith(u8, base, "VSYS") or
+            // Real supply names (VS, VBUS, VIN, …) by `pin_roles.isSupplyFn`,
+            // which rejects ground first so VSS/VSSA never read as a supply —
+            // replacing the old `startsWith("VS")` that swallowed
+            // VSS/VSYNC/VSW/VSENSE as power.
+            pin_roles.isSupplyFn(base) or
             // `V_…` underscore board rails — both the digit-first form
             // (V_3V3D, V_12V, V_5V0) and the domain-tagged form
             // (V_RF_3P3, V_RX_2P5, V_NEG_3P3) RF/analog boards use. Without
@@ -1891,7 +2032,7 @@ fn checkBlockPowerPins(
             // KiCad-convention signed rails (+5V, +3V3, -5.0V, +12V — and
             // the dot-free +5_0V form imported modules use). Boards migrated
             // via import-kicad keep these names verbatim.
-            isSignedVoltRail(base);
+            isSignedVoltRail(base));
 
         for (net.pins) |pin| {
             if (pin.ref_des.len == 0) continue;
@@ -1985,11 +2126,22 @@ fn checkPowerBudget(
             },
             .tight => {
                 const styp = rail.source_typ_a orelse continue;
-                const pct: u32 = @intFromFloat(PERCENT_MULTIPLIER * rail.load_typ_a / styp);
-                const msg = std.fmt.allocPrint(
+                // A declared-zero source typ (`(current 0 …)`) still reads
+                // `.tight` upstream, so guard the divide: `100*load/0` is +inf
+                // and `@intFromFloat(inf)` is UB in ReleaseSmall. Emit the row
+                // without a percent rather than crash the whole ERC pass.
+                const pct: ?u32 = if (styp > 0)
+                    numeric.checkedInt(u32, PERCENT_MULTIPLIER * rail.load_typ_a / styp)
+                else
+                    null;
+                const msg = if (pct) |p| std.fmt.allocPrint(
                     allocator,
                     "Rail \"{s}\" typ load {d:.3}A is {d}% of {s} typ {d:.3}A — tight margin",
-                    .{ rail.net, rail.load_typ_a, pct, rail.source_label, styp },
+                    .{ rail.net, rail.load_typ_a, p, rail.source_label, styp },
+                ) catch continue else std.fmt.allocPrint(
+                    allocator,
+                    "Rail \"{s}\" typ load {d:.3}A against {s} typ {d:.3}A — tight margin",
+                    .{ rail.net, rail.load_typ_a, rail.source_label, styp },
                 ) catch continue;
                 try violations.append(allocator, .{
                     .kind = .power_budget,
@@ -2031,13 +2183,6 @@ fn checkConceptSections(
             });
         }
     }
-}
-
-/// Collect instances from this block only (not sub-blocks).
-/// Note: block.instances already includes section instances (they're added to both
-/// the parent instances list and the section.instances list during evaluation).
-fn collectBlockInstances(_: std.mem.Allocator, block: *const DesignBlock) []const Instance {
-    return block.instances;
 }
 
 /// Check if a component name indicates a passive (LED, inductor, filter, crystal, etc.)
@@ -2158,18 +2303,31 @@ fn checkPinFunctions(
     project_dir: []const u8,
     violations: *std.ArrayListUnmanaged(Violation),
 ) !void {
-    // Build ref_des -> pinout_lookup map so we know which pinout file to load per pin.
-    // Prefer `inst.pinout`, fall back to `inst.symbol`, then `inst.component`.
+    // Cache loaded pinouts by symbol so repeated lookups don't reparse — shared
+    // across every block in the recursion.
+    var pinout_cache: std.StringHashMapUnmanaged(?std.StringHashMapUnmanaged(PinoutEntry)) = .empty;
+    try checkBlockPinFunctions(allocator, block, project_dir, &pinout_cache, violations);
+}
+
+/// Runs per block (recursing sub-blocks): the `(as …)` assertions and the
+/// mandatory multi-alt `pin_function_required` rule apply to every module's
+/// pins in its own net namespace, not just the top-level block's nets.
+fn checkBlockPinFunctions(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    pinout_cache: *std.StringHashMapUnmanaged(?std.StringHashMapUnmanaged(PinoutEntry)),
+    violations: *std.ArrayListUnmanaged(Violation),
+) std.mem.Allocator.Error!void {
+    // Build ref_des -> pinout_lookup map for THIS block's own instances so we
+    // know which pinout file to load per pin. Prefer `inst.pinout`, fall back to
+    // `inst.symbol`, then `inst.component`.
     var ref_to_lookup: std.StringHashMapUnmanaged([]const u8) = .empty;
-    const all = try collectAllInstances(allocator, block);
-    for (all) |inst| {
+    for (block.instances) |inst| {
         const lookup = if (inst.pinout.len > 0) inst.pinout else if (inst.symbol.len > 0) inst.symbol else inst.component;
         if (lookup.len == 0) continue;
         try ref_to_lookup.put(allocator, inst.ref_des, lookup);
     }
-
-    // Cache loaded pinouts by symbol so repeated lookups don't reparse.
-    var pinout_cache: std.StringHashMapUnmanaged(?std.StringHashMapUnmanaged(PinoutEntry)) = .empty;
 
     // Track (ref_des|pin_id) pairs we've already emitted "required" errors for so
     // multiple net occurrences of the same physical pin don't produce duplicates.
@@ -2234,6 +2392,10 @@ fn checkPinFunctions(
             }
         }
     }
+
+    for (block.sub_blocks) |sb| {
+        try checkBlockPinFunctions(allocator, sb.block, project_dir, pinout_cache, violations);
+    }
 }
 
 fn formatFunctionMsg(
@@ -2271,10 +2433,15 @@ fn formatRequiredMsg(allocator: std.mem.Allocator, ref_des: []const u8, pin_id: 
     return buf.toOwnedSlice(allocator) catch null;
 }
 
+/// Flatten this block and all nested sub-blocks into one instance slice. The
+/// returned slice is owned by `allocator` — callers must free it (via
+/// `toOwnedSlice` it is shrunk to exact length, so a plain `allocator.free`
+/// is size-correct).
 fn collectAllInstances(allocator: std.mem.Allocator, block: *const DesignBlock) ![]const Instance {
     var list: std.ArrayListUnmanaged(Instance) = .empty;
+    errdefer list.deinit(allocator);
     try appendInstances(allocator, &list, block);
-    return list.items;
+    return list.toOwnedSlice(allocator);
 }
 
 fn appendInstances(
@@ -3565,7 +3732,8 @@ test "grouping check flags an ungrouped multi-block design" {
     try checkComponentGrouping(alloc, &block, &violations);
     var hit = false;
     for (violations.items) |v| {
-        if (v.kind == .components_not_grouped and v.severity == .@"error") hit = true;
+        // Organizational, not electrical → warning, so it never fails a build.
+        if (v.kind == .components_not_grouped and v.severity == .warning) hit = true;
     }
     try std.testing.expect(hit);
 }
@@ -3595,4 +3763,224 @@ test "grouping check ignores a small design" {
     for (violations.items) |v| {
         try std.testing.expect(v.kind != .components_not_grouped);
     }
+}
+
+// spec: erc - Duplicate ref-des inside a sub-block collides with a top-level part (flattened scope)
+test "duplicate ref-des across a sub-block boundary is flagged" {
+    const sub_insts = [_]Instance{dcInst("U1", "modchip", "")};
+    var sub_block: DesignBlock = .{
+        .name = "mod",
+        .instances = &sub_insts,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const sbs = [_]env_mod.SubBlock{.{ .name = "mod", .block = &sub_block }};
+    const top_insts = [_]Instance{dcInst("U1", "topchip", "")}; // same ref-des as the module's U1
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &top_insts,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &sbs,
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkDuplicateRefDes(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .duplicate_refdes));
+    for (violations.items) |v| {
+        if (v.kind != .duplicate_refdes) continue;
+        try std.testing.expectEqualStrings("U1", v.ref_des);
+    }
+}
+
+// spec: erc - A value-less passive inside a sub-block is flagged (recursion)
+test "missing value inside a sub-block is flagged" {
+    const sub_insts = [_]Instance{dcInst("R1", "res-0402", "")}; // no value, no MPN
+    var sub_block: DesignBlock = .{
+        .name = "mod",
+        .instances = &sub_insts,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const sbs = [_]env_mod.SubBlock{.{ .name = "mod", .block = &sub_block }};
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &sbs,
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkMissingValues(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .missing_value));
+    try std.testing.expectEqualStrings("R1", violations.items[0].ref_des);
+}
+
+// spec: erc - capFarads accepts the UTF-8 micro sign so a "10µF" bulk cap keeps its decoupling exemption
+test "capFarads parses the micro sign and exempts a bulk cap" {
+    // 0.00001 F = 10 µF — well above the 4.7 µF bulk-reservoir threshold.
+    try std.testing.expectApproxEqAbs(@as(f64, 1e-5), capFarads("10µF"), 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.7e-6), capFarads("4.7µF"), 1e-12);
+    try std.testing.expect(capFarads("10µF") >= DECOUPLE_BULK_FARADS);
+    // ASCII forms still parse (no regression).
+    try std.testing.expectApproxEqAbs(@as(f64, 1e-5), capFarads("10uF"), 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 1e-7), capFarads("100nF"), 1e-15);
+}
+
+// spec: erc - a "10µF" bulk cap on a multi-supply-pad rail is exempt from decoupling_unbound
+test "decoupling-binding exempts a micro-sign bulk reservoir" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const insts = try alloc.alloc(Instance, 2);
+    insts[0] = dcInst("U1", "somechip", "");
+    insts[1] = dcInst("C1", TEST_CAP, "10µF"); // bulk reservoir via the micro sign → exempt
+
+    var vdd: std.ArrayListUnmanaged(env_mod.PinRef) = .empty;
+    var gnd: std.ArrayListUnmanaged(env_mod.PinRef) = .empty;
+    try vdd.append(alloc, .{ .ref_des = "U1", .pin = "1" });
+    try vdd.append(alloc, .{ .ref_des = "U1", .pin = "2" });
+    try gnd.append(alloc, .{ .ref_des = "U1", .pin = "3" });
+    try vdd.append(alloc, .{ .ref_des = "C1", .pin = "1" });
+    try gnd.append(alloc, .{ .ref_des = "C1", .pin = "2" });
+    const nets = try alloc.alloc(env_mod.Net, 2);
+    nets[0] = .{ .name = "VDD", .pins = vdd.items };
+    nets[1] = .{ .name = "GND", .pins = gnd.items };
+
+    const block: DesignBlock = .{
+        .name = "t",
+        .instances = insts,
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .net_ties = &.{},
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkDecouplingBinding(alloc, &block, "/nonexistent-eda-test-dir", &violations);
+    try std.testing.expectEqual(@as(usize, 0), countKind(violations.items, .decoupling_unbound));
+}
+
+// spec: erc - a VSS-only IC is not counted as powered (the VS-prefix false positive)
+test "power pins VSS net does not count as a power connection" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // U1 connects to GND (pin1) and VSS (pin2). VSS is ground, not power — the old
+    // startsWith("VS") heuristic wrongly counted it as a supply, silencing the
+    // "IC has no power connection" warning.
+    const block = try makePowerPinBlock(alloc, "someic", "VSS");
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkUnconnectedPowerPins(alloc, &block, "", &violations);
+    var hit = false;
+    for (violations.items) |v| {
+        if (std.mem.eql(u8, v.message, "U1: IC has no power connection")) hit = true;
+    }
+    try std.testing.expect(hit);
+}
+
+// spec: erc - a VSYS rail still counts as a power connection (no VS regression)
+test "power pins VSYS rail still counts as power" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const block = try makePowerPinBlock(alloc, "someic", "VSYS");
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkUnconnectedPowerPins(alloc, &block, "", &violations);
+    for (violations.items) |v| {
+        try std.testing.expect(!std.mem.eql(u8, v.message, "U1: IC has no power connection"));
+    }
+}
+
+// spec: erc - a dangling (verifies …) sign-off whose target no longer exists is surfaced as a warning
+test "orphaned verification is flagged" {
+    const reqs = [_]env_mod.Requirement{.{ .text = "rule", .id = "r1" }};
+    const insts = [_]Instance{.{
+        .ref_des = "U6",
+        .component = "x",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .id = "b894897b",
+        .requirements = &reqs,
+    }};
+    // One verification resolves (U6/r1); one is orphaned (U9 doesn't exist).
+    const verifs = [_]env_mod.Verification{
+        .{ .ref_des = "U6", .req_id = "r1", .rationale = "ok" },
+        .{ .ref_des = "U9", .req_id = "r1", .rationale = "dangling" },
+    };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &insts,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .verifications = &verifs,
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkOrphanedVerifications(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .verification_orphaned));
+    for (violations.items) |v| {
+        if (v.kind != .verification_orphaned) continue;
+        try std.testing.expectEqual(Severity.warning, v.severity);
+        try std.testing.expectEqualStrings("U9", v.ref_des);
+    }
+}
+
+// spec: erc - a stale req_id on an existing target still counts as an orphaned verification
+test "orphaned verification flags a stale req id on a live instance" {
+    const reqs = [_]env_mod.Requirement{.{ .text = "rule", .id = "r1" }};
+    const insts = [_]Instance{.{
+        .ref_des = "U6",
+        .component = "x",
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+        .id = "b894897b",
+        .requirements = &reqs,
+    }};
+    // Target instance exists but the requirement id "rSTALE" does not.
+    const verifs = [_]env_mod.Verification{.{ .ref_des = "U6", .req_id = "rSTALE", .rationale = "drifted" }};
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &insts,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .verifications = &verifs,
+    };
+    var violations: std.ArrayListUnmanaged(Violation) = .empty;
+    try checkOrphanedVerifications(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .verification_orphaned));
 }

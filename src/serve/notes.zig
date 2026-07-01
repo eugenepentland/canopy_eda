@@ -44,6 +44,7 @@ const ERR_INVALID_JSON = "{\"error\":\"invalid json\"}";
 const ERR_RESOLVE_PATH = "{\"error\":\"cannot resolve notes path\"}";
 const ERR_READ_NOTES = "{\"error\":\"cannot read notes\"}";
 const ERR_WRITE_NOTES = "{\"error\":\"cannot write notes\"}";
+const ERR_NOT_OBJECT = "{\"error\":\"body must be a JSON object\"}";
 const OK_JSON = "{\"ok\":true}";
 
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
@@ -317,6 +318,7 @@ pub fn saveNotesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch
         return jsonError(res, HTTP_BAD_REQUEST, ERR_INVALID_JSON);
     defer parsed.deinit();
+    if (parsed.value != .object) return jsonError(res, HTTP_BAD_REQUEST, ERR_NOT_OBJECT);
     const text_val = parsed.value.object.get("text") orelse return jsonError(res, HTTP_BAD_REQUEST, "{\"error\":\"missing text\"}");
     if (text_val != .string) return jsonError(res, HTTP_BAD_REQUEST, "{\"error\":\"text must be a string\"}");
     if (text_val.string.len > MAX_NOTES_BYTES) return jsonError(res, HTTP_PAYLOAD_TOO_LARGE, "{\"error\":\"notes too large\"}");
@@ -357,6 +359,7 @@ pub fn addTaskApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch
         return jsonError(res, HTTP_BAD_REQUEST, ERR_INVALID_JSON);
     defer parsed.deinit();
+    if (parsed.value != .object) return jsonError(res, HTTP_BAD_REQUEST, ERR_NOT_OBJECT);
     const text_val = parsed.value.object.get("text") orelse return jsonError(res, HTTP_BAD_REQUEST, "{\"error\":\"missing text\"}");
     if (text_val != .string or text_val.string.len == 0)
         return jsonError(res, HTTP_BAD_REQUEST, "{\"error\":\"text must be a non-empty string\"}");
@@ -400,6 +403,7 @@ fn mutateTaskByIdApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, m
     const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch
         return jsonError(res, HTTP_BAD_REQUEST, ERR_INVALID_JSON);
     defer parsed.deinit();
+    if (parsed.value != .object) return jsonError(res, HTTP_BAD_REQUEST, ERR_NOT_OBJECT);
     const id_val = parsed.value.object.get("id") orelse return jsonError(res, HTTP_BAD_REQUEST, "{\"error\":\"missing id\"}");
     if (id_val != .string or id_val.string.len == 0)
         return jsonError(res, HTTP_BAD_REQUEST, "{\"error\":\"id must be a non-empty string\"}");

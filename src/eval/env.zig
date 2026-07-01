@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
+const numeric = @import("../numeric.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const PULLUP_RANGE_MIN_CHILDREN: usize = 5;
@@ -465,7 +466,10 @@ pub fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check {
 
         const min_uf = namedNumberArg(body_children[3], "min-uf") orelse return null;
         const count_f = namedNumberArg(body_children[4], "count") orelse return null;
-        const count: u32 = if (count_f < 0) 0 else @intFromFloat(count_f);
+        // Reject NaN/negative/out-of-range before narrowing (bare @intFromFloat
+        // is UB in the safety-off prod build; the old `< 0 ? 0` guard missed
+        // NaN and overflow). A non-representable count clamps to 0.
+        const count: u32 = numeric.checkedInt(u32, count_f) orelse 0;
         return .{ .decoupling_per_pin = .{
             .return_pin = return_pin,
             .pins = list.toOwnedSlice(allocator) catch return null,

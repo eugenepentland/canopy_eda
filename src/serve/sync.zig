@@ -88,7 +88,7 @@ const BOARD_ITEM_OP_OPEN = "{\"op\":\"" ++ OP_CREATE_BOARD_ITEM ++ "\",\"item\":
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
     std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
-    error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, NotOpenForReading, ReadOnlyFileSystem, LinkQuotaExceeded };
+    error{ InvalidName, FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, NotOpenForReading, ReadOnlyFileSystem, LinkQuotaExceeded };
 
 fn warnResolveIdentities(name: []const u8, err: anyerror) void {
     log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });

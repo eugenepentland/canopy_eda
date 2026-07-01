@@ -1,1 +1,2 @@
 # guardian-snapshot v1
+src/bom.zig::applyBomUuids: unused public declaration

@@ -36,6 +36,12 @@
             .url = "git+https://github.com/karlseguin/http.zig#86ec1ae5fca398a58dfb06ae7fd8395b8ab2ab76",
             .hash = "httpz-0.0.0-PNVzrOlMBwDf2xnpIPCRXuFtO-qK6h2Vrl8n7_UjXZI1",
         },
+        // Guardian (code-quality gate) is an unpinned *relative-path* dep: it
+        // requires a sibling `../guardian-zig` checkout next to this repo. There
+        // is no published URL+hash yet, so a fresh clone must also clone
+        // guardian-zig alongside it for `zig build` to succeed (Guardian gates
+        // every build). Repin this to a `.url`+`.hash` once guardian-zig ships a
+        // tagged release artifact.
         .guardian = .{
             .path = "../guardian-zig",
         },
@@ -48,6 +54,12 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        // Needed by the `gen-language-docs --check` build step (compares the
+        // committed reference against the dispatch tables) and by Guardian,
+        // both of which run on a packaged build — omitting them makes a fetched
+        // package fail its own checks.
+        "docs",
+        "guardian.toml",
         // For example...
         //"LICENSE",
         //"README.md",

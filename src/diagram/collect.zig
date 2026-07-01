@@ -99,10 +99,12 @@ pub fn collectGraph(
     try buildStubNodes(allocator, block, &nodes, stub_node);
 
     var mem = try membership.build(allocator, block, sec_node, sub_node, dg_attach);
+    // Register the cleanup *before* the put loop — an OOM in `put` would otherwise
+    // leak both of mem's hash maps (the defer wasn't yet registered).
+    defer mem.deinit(allocator);
     for (block.parts, 0..) |p, i| {
         if (stub_node[i]) |nid| try mem.ref_to_node.put(allocator, p.ref_des, nid);
     }
-    defer mem.deinit(allocator);
     const registry = try classify.buildRegistry(allocator, block);
     errdefer allocator.free(registry);
     var port_map = try classify.buildPortClassMap(allocator, block, registry);
@@ -133,7 +135,16 @@ pub fn collectGraph(
     // the authored prose is orphaned when the section is suppressed.
     try applyHiddenSectionText(allocator, block, nodes.items);
 
-    return .{ .nodes = try nodes.toOwnedSlice(allocator), .edges = try edge_list.toOwnedSlice(allocator), .classes = registry, .layout = block.layout };
+    // Take the node slice first, then the edge slice. If the second `toOwnedSlice`
+    // OOMs, the `nodes` errdefer no longer covers the transferred slice (the list
+    // is now empty), so free it explicitly here.
+    const node_slice = try nodes.toOwnedSlice(allocator);
+    errdefer {
+        for (node_slice) |n| freeNode(allocator, n);
+        allocator.free(node_slice);
+    }
+    const edge_slice = try edge_list.toOwnedSlice(allocator);
+    return .{ .nodes = node_slice, .edges = edge_slice, .classes = registry, .layout = block.layout };
 }
 
 const RailCount = struct { v: f64, c: u32 };
@@ -721,11 +732,17 @@ fn boundaryChip(
                 }
                 continue;
             }
-            // Transparent passive: enqueue its other (non-power) nets.
+            // Transparent passive: enqueue its other (non-power, non-ground) nets.
+            // GND must be excluded too (the doc contract: never cross a power/GND
+            // net) — else a shunt-to-ground match element enqueues the whole GND
+            // plane, whose pins reach every IC → count ≥ 2 → the antenna is never
+            // synthesised. An L-network / shunt-C match is common, so this silently
+            // dropped those feeds' Layout-tab antennas.
             const others = part_nets.get(p.ref_des) orelse continue;
             for (others.items) |oni| {
                 if (visited.contains(oni)) continue;
-                if (classify.netClass(cleanNetName(flat[oni].name), port_map) == types.CLASS_POWER) continue;
+                const cls = classify.netClass(cleanNetName(flat[oni].name), port_map);
+                if (cls == types.CLASS_POWER or cls == types.CLASS_GROUND) continue;
                 try visited.put(scratch, oni, {});
                 try queue.append(scratch, oni);
             }

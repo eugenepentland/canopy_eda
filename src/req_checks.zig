@@ -472,8 +472,12 @@ fn evalNotConnected(
     const phys = phys_pin orelse
         return fail(allocator, "pin '{s}' not found in pinout '{s}'", .{ pin, pinout_key });
 
-    // A "connected" pin is one that appears in any net with at least one OTHER pin.
-    // Per-pin stub nets (NET.REFDES.PIN) with only this pin count as disconnected.
+    // A "connected" pin is one that appears in any net with at least one OTHER
+    // pin, OR whose (single-pin) net is exposed as a block port and therefore
+    // wired externally by the parent design. Per-pin stub nets (NET.REFDES.PIN)
+    // with only this pin and no port exposure count as disconnected. This is the
+    // symmetric twin of `evalPinNotFloating`, which credits block ports the same
+    // way — otherwise a "must float" pin the parent ties via a port passes here.
     for (block.nets) |net| {
         for (net.pins) |pr| {
             if (!std.mem.eql(u8, pr.ref_des, inst.ref_des)) continue;
@@ -481,6 +485,13 @@ fn evalNotConnected(
             // Found this physical pin on a net. If the net has co-pins, it's connected.
             if (net.pins.len > 1) {
                 return fail(allocator, "pin '{s}' is connected to {s} (must be left floating per datasheet)", .{ pin, net.name });
+            }
+            // Single-pin net exposed as a block port → the parent wires it
+            // externally via a net-tie, so it is NOT floating.
+            for (block.ports) |p| {
+                if (netsAlias(p.net, net.name) or std.mem.eql(u8, p.name, netBase(net.name))) {
+                    return fail(allocator, "pin '{s}' on net {s} is exposed as block port {s} (wired externally; must be left floating per datasheet)", .{ pin, net.name, p.name });
+                }
             }
         }
     }
@@ -778,17 +789,44 @@ pub fn parseMicroFarads(s: []const u8) ?f64 {
     return num * scale;
 }
 
-/// Parse "10k" / "220" / "4.7M" / "2k2" → Ω. "2k2" shorthand isn't
-/// supported; accepts `<number><optional SI><optional Ω/ohm>`.
+/// Parse "10k" / "220" / "4.7M" / "10m" / "4R7" / "0R05" → Ω. Accepts
+/// `<number><optional SI/R-notation>`. `R`-notation (`4R7` = 4.7 Ω, where `R`
+/// stands in for the decimal point) and a milliohm `m` suffix (`10m` = 0.01 Ω)
+/// are both supported so a current-sense shunt isn't misread 1000× high. An
+/// unrecognized suffix yields `null` (the value just doesn't qualify) rather
+/// than being silently taken as ohms ×1.0.
 pub fn parseOhms(s: []const u8) ?f64 {
     if (s.len == 0) return null;
+    // R-notation: `4R7`/`0R05`/`4R` — split on the first 'R'/'r' and treat it as
+    // the decimal point. Only when no '.' is present, so "4.7" stays numeric.
+    if (std.mem.indexOfScalar(u8, s, '.') == null) {
+        if (std.mem.indexOfAny(u8, s, "Rr")) |r| {
+            const int_part = s[0..r];
+            const frac_part = s[r + 1 ..];
+            // Whole thing must be digits either side of the R.
+            if (allDigits(int_part) and allDigits(frac_part) and (int_part.len > 0 or frac_part.len > 0)) {
+                var buf: [32]u8 = undefined;
+                const joined = std.fmt.bufPrint(&buf, "{s}.{s}", .{
+                    if (int_part.len > 0) int_part else "0",
+                    if (frac_part.len > 0) frac_part else "0",
+                }) catch return null;
+                return std.fmt.parseFloat(f64, joined) catch null;
+            }
+        }
+    }
     var i: usize = 0;
     while (i < s.len and (isDigit(s[i]) or s[i] == '.')) : (i += 1) {}
     if (i == 0) return null;
     const num = std.fmt.parseFloat(f64, s[0..i]) catch return null;
     while (i < s.len and (s[i] == ' ' or s[i] == '\t')) : (i += 1) {}
     if (i >= s.len) return num;
-    return num * suffixToOhms(s[i..]);
+    const scale = suffixToOhms(s[i..]) orelse return null;
+    return num * scale;
+}
+
+fn allDigits(s: []const u8) bool {
+    for (s) |c| if (!isDigit(c)) return false;
+    return true;
 }
 
 fn suffixToMicroFarads(s: []const u8) ?f64 {
@@ -800,11 +838,22 @@ fn suffixToMicroFarads(s: []const u8) ?f64 {
     return null;
 }
 
-fn suffixToOhms(s: []const u8) f64 {
+/// Scale factor for an ohms suffix, or `null` when the suffix is unrecognized
+/// so `parseOhms` can reject the value rather than silently taking garbage as
+/// ohms. `m` is milliohms (not mega — that is `M`), so a `10m` shunt reads
+/// 0.01 Ω, not 10 Ω. A bare `Ω`/`ohm`/`R`/`r` suffix (or an empty suffix) is
+/// ×1.0.
+fn suffixToOhms(s: []const u8) ?f64 {
+    if (s.len == 0) return 1.0;
+    if (ieql(s, "R") or ieql(s, "Ω") or ieql(s, "ohm") or ieql(s, "ohms")) return 1.0;
+    // `m` (milli) vs `M` (mega) MUST be case-sensitive — case-insensitive
+    // matching collapsed both onto whichever was tested first, so `1M` read as
+    // 1 mΩ instead of 1 MΩ. `k`/`G` have no such collision.
+    if (std.mem.eql(u8, s, "m") or std.mem.eql(u8, s, "mΩ") or std.mem.eql(u8, s, "mohm")) return 1e-3;
+    if (std.mem.eql(u8, s, "M") or std.mem.eql(u8, s, "MΩ") or std.mem.eql(u8, s, "Mohm")) return 1e6;
     if (ieql(s, "k") or ieql(s, "kΩ") or ieql(s, "kohm")) return 1e3;
-    if (ieql(s, "M") or ieql(s, "MΩ")) return 1e6;
     if (ieql(s, "G") or ieql(s, "GΩ")) return 1e9;
-    return 1.0;
+    return null;
 }
 
 fn ieql(a: []const u8, b: []const u8) bool {
@@ -840,6 +889,22 @@ test "parseOhms" {
     try std.testing.expectApproxEqAbs(@as(f64, 2200), parseOhms("2.2k").?, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f64, 470), parseOhms("470").?, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f64, 1000000), parseOhms("1M").?, 1e-6);
+}
+
+// spec: req_checks - parseOhms reads a milliohm suffix and R-notation, not 1000x high
+test "parseOhms milliohm and R-notation" {
+    // "m" is milliohms, not mega — a current-sense shunt must not read 1000× high.
+    try std.testing.expectApproxEqAbs(@as(f64, 0.01), parseOhms("10m").?, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.05), parseOhms("50mohm").?, 1e-9);
+    // R-notation: R stands in for the decimal point.
+    try std.testing.expectApproxEqAbs(@as(f64, 4.7), parseOhms("4R7").?, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.05), parseOhms("0R05").?, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.0), parseOhms("4R").?, 1e-9);
+    // A bare ohm marker is ×1.
+    try std.testing.expectApproxEqAbs(@as(f64, 100), parseOhms("100R").?, 1e-9);
+    // An unrecognized suffix no longer passes as ohms ×1.0.
+    try std.testing.expect(parseOhms("100kHz") == null);
+    try std.testing.expect(parseOhms("10xyz") == null);
 }
 
 // spec: req_checks - parseMicroHenries handles SI-suffixed inductor values

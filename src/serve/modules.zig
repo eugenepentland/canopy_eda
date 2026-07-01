@@ -89,11 +89,16 @@ const COPY_SCRIPT =
 
 // ── Source resolution ─────────────────────────────────────────────────
 
-/// Reject absolute paths and `..` traversal in a sub-block `source` value.
+/// Reject absolute paths, `..` traversal, and NUL/backslash in a sub-block
+/// `source` value. A path-shaped `source` is additionally confined to the
+/// `lib/` and `src/` source roots and to the `.sexp` extension by
+/// `resolveSourcePath` — this predicate is only the first, coarse gate.
 fn sourceIsSafe(src: []const u8) bool {
     if (src.len == 0) return false;
     if (src[0] == '/') return false;
     if (std.mem.indexOf(u8, src, "..") != null) return false;
+    if (std.mem.indexOfScalar(u8, src, 0) != null) return false;
+    if (std.mem.indexOfScalar(u8, src, '\\') != null) return false;
     return true;
 }
 
@@ -102,6 +107,11 @@ fn sourceIsSafe(src: []const u8) bool {
 /// project-relative path; otherwise it is a module name resolved against
 /// `lib/modules/` then `lib/components/`. Caller frees. Null when unsafe or
 /// no candidate exists.
+///
+/// SECURITY: a path-shaped `source` is confined to the design/library source
+/// roots (`lib/` or `src/`) AND must end in `.sexp`. Without this, `?src=
+/// auth/sessions.json` (has `/`, no `..`) resolved to `{project_dir}/auth/
+/// sessions.json` and leaked raw session tokens — full account takeover.
 fn resolveSourcePath(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -110,6 +120,9 @@ fn resolveSourcePath(
     if (!sourceIsSafe(src)) return null;
 
     if (std.mem.indexOfScalar(u8, src, '/') != null or std.mem.endsWith(u8, src, ".sexp")) {
+        // Confine path-shaped sources to source-file roots + the .sexp extension.
+        const in_src_root = std.mem.startsWith(u8, src, "lib/") or std.mem.startsWith(u8, src, "src/");
+        if (!in_src_root or !std.mem.endsWith(u8, src, ".sexp")) return null;
         const p = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ project_dir, src });
         if (fileExists(p)) return p;
         allocator.free(p);

@@ -17,10 +17,18 @@ const Env = env_mod.Env;
 /// stashes a diagnostic on the evaluator pointing at the first arg
 /// (or the form itself, when there are no args) so the caller can
 /// render `let takes 2 args at sexp:42:7`.
-fn checkArity(self: *Evaluator, sf: forms.SpecialForm, args: []const Node) EvalError!void {
+pub fn checkArity(self: *Evaluator, sf: forms.SpecialForm, args: []const Node) EvalError!void {
+    return checkAritySpan(self, sf, args, ast.Span.zero);
+}
+
+/// `checkArity` with an explicit head span used for the zero-args case, so a
+/// diagnostic like `(import …) expects at least 1 argument` points at the
+/// form's opening paren instead of file position 1:1. Handlers that hold the
+/// form head node (import/defmodule/design-block) pass its span here.
+pub fn checkAritySpan(self: *Evaluator, sf: forms.SpecialForm, args: []const Node, head_span: ast.Span) EvalError!void {
     const schema = forms.schemaFor(sf) orelse return;
     if (forms.validateArity(schema, args.len) == null) return;
-    const span = if (args.len > 0) args[0].span else ast.Span.zero;
+    const span = if (args.len > 0) args[0].span else head_span;
     const name = sf.sourceName();
     if (schema.max_args) |max| {
         if (max == schema.min_args) {

@@ -118,13 +118,17 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     // Each placed via's clearance halo is stamped into the routing grid on *both*
     // signal layers, so the maze pass routes foreign copper around it.
     for (placement.nets, 0..) |net, net_i| {
+        // Hoisted above netPoints so we don't allocate + look up pads for every
+        // non-ground net just to skip it.
+        if (!isGroundName(shortName(net.name))) continue;
         const pts = try netPoints(arena, placement, &idx_of, net);
         if (pts.len < 2) continue;
-        if (!isGroundName(shortName(net.name))) continue;
         total += 1;
         const ni: i32 = @intCast(net_i);
+        var placed_any = false;
         for (pts) |c| {
             const pos = findGroundVia(&ctx, vias.items, c, ni) orelse continue;
+            placed_any = true;
             try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = params.via_dia, .net = ni });
             if (@abs(pos[0] - c[0]) > 1e-6 or @abs(pos[1] - c[1]) > 1e-6) {
                 try tracks.append(arena, .{ .x1 = c[0], .y1 = c[1], .x2 = pos[0], .y2 = pos[1], .layer = 0, .width = params.track_width, .net = ni });
@@ -132,7 +136,10 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
             }
             stampViaOcc(&ctx, pos[0], pos[1], ni);
         }
-        routed += 1;
+        // Only count the net routed if at least one plane via actually dropped —
+        // a fully hemmed-in ground net must not inflate routed/total and hide the
+        // hand-fix from fullRouteCost's unrouted term.
+        if (placed_any) routed += 1;
     }
 
     // Pass 2: every other multi-pad net, maze-routed on the two signal layers,
@@ -282,9 +289,10 @@ pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, para
     var ctx = Ctx{ .arena = arena, .grid = grid, .obs = obs, .reach = reach, .occ = occ, .params = params };
 
     for (placement.nets, 0..) |net, net_i| {
+        // Ground filter hoisted above netPoints, in lockstep with `route`.
+        if (!isGroundName(shortName(net.name))) continue;
         const pts = try netPoints(arena, placement, &idx_of, net);
         if (pts.len < 2) continue;
-        if (!isGroundName(shortName(net.name))) continue;
         const ni: i32 = @intCast(net_i);
         for (pts) |c| {
             const pos = findGroundVia(&ctx, vias.items, c, ni) orelse continue;
@@ -1210,15 +1218,13 @@ pub fn returnPathViolations(placement: optimizer.Placement, routed: RouteResult,
     return count;
 }
 
-// ── Small helpers (mirror optimizer.zig) ───────────────────────────────────
+// ── Small helpers ──────────────────────────────────────────────────────────
 
-fn isGroundName(name: []const u8) bool {
-    const grounds = [_][]const u8{ "GND", "GNDA", "AGND", "PGND", "DGND", "GNDD", "VSS", "VSSA" };
-    for (grounds) |gg| {
-        if (std.mem.eql(u8, name, gg)) return true;
-    }
-    return false;
-}
+/// Ground-net predicate — the router shares the optimizer's exact one so a
+/// split/numbered ground (GND1, AGND2, PGND_2) is treated as a plane here just
+/// as it is in placement. A previous hand-copied exact-match list drifted and
+/// routed those nets as signal copper.
+const isGroundName = optimizer.isGroundName;
 
 fn shortName(s: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];

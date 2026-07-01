@@ -43,8 +43,8 @@ fn resolveRole(ctx: *server_mod.Handler, req: *httpz.Request) users.Role {
     if (auth.getSessionToken(req)) |tok| {
         if (auth.validateSession(ctx.allocator, ctx.auth_dir, tok)) |em| return users.getRole(ctx.allocator, ctx.auth_dir, em);
     }
-    // Localhost dev bypass — auth middleware already let us through.
-    if (auth.isLocalhostRequest(req)) return .admin;
+    // Localhost dev bypass (opt-in NETLISP_DEV + loopback + not proxied).
+    if (auth.isLocalhostRequest(ctx, req)) return .admin;
     return .reader;
 }
 
@@ -294,7 +294,9 @@ pub const Client = struct {
             .allocator = std.heap.page_allocator,
             .project_dir = ctx.handler.project_dir,
             .auth_dir = ctx.handler.auth_dir,
-            .email = ctx.email,
+            // Dupe into the process allocator: `ctx.email` may be borrowed from
+            // the upgrade request's arena, which is reset once upgrade returns.
+            .email = try std.heap.page_allocator.dupe(u8, ctx.email),
         };
     }
 
@@ -303,12 +305,15 @@ pub const Client = struct {
         defer arena.deinit();
         const aa = arena.allocator();
         // WebSocket sessions are authenticated at upgrade time; role is fixed
-        // for the duration of the connection. Fall back to admin on the dev
-        // localhost path (same policy as resolveRole above).
+        // for the duration of the connection. An empty email means we could not
+        // identify the user (no session cookie AND no bearer token) — default
+        // to the least-privileged role, NEVER admin. (Previously an empty email
+        // fell through to admin, so any bearer-authenticated client — which has
+        // no session cookie — became admin over the WebSocket transport.)
         const role = if (self.email.len > 0)
             users.getRole(self.allocator, self.auth_dir, self.email)
         else
-            users.Role.admin;
+            users.Role.reader;
         const reply_opt = dispatchFrame(aa, self.project_dir, data, role) catch |err| blk: {
             log.warn("mcp dispatch error: {s}", .{@errorName(err)});
             break :blk @as(?[]const u8, null);
@@ -322,6 +327,9 @@ pub const Client = struct {
 /// `Client` instance carries it for the lifetime of the connection.
 pub fn upgrade(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = blk: {
+        // Bearer token first (remote MCP clients authenticate with one and
+        // carry no session cookie), then the session cookie for local browsers.
+        if (auth.getBearerEmail(ctx, req)) |em| break :blk em;
         if (auth.getSessionToken(req)) |tok| {
             if (auth.validateSession(ctx.allocator, ctx.auth_dir, tok)) |em| break :blk em;
         }

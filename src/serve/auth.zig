@@ -72,6 +72,7 @@ const ERR_INVALID_EMAIL_JSON = "{\"error\":\"invalid email\"}";
 const ERR_INVALID_JSON_JSON = "{\"error\":\"invalid json\"}";
 const ERR_MISSING_BODY_JSON = "{\"error\":\"missing body\"}";
 const ERR_MISSING_ID_JSON = "{\"error\":\"missing id\"}";
+const ERR_INVALID_CLIENT_DATA = "{\"error\":\"invalid clientDataJSON\"}";
 const OK_JSON_TRUE = "{\"ok\":true}";
 
 /// Error set for HTTP handlers in this module. Wide enough to cover
@@ -148,14 +149,27 @@ fn persistSessions(allocator: std.mem.Allocator) void {
         first = false;
     }
     w.writeAll("]") catch return;
-    const file = infra_fs.cwd().createFile(path, .{}) catch return;
-    defer file.close();
-    file.writeAll(buf.items) catch return;
+    oauth_store.writeFileAtomicWithBackup(allocator, path, buf.items);
 }
 
 /// Mint a new 7-day session for `email` (32-byte hex random token), persist
 /// it to `projects/.../auth/sessions.json`, and return the cookie value the
 /// caller should send back as `eda_session`.
+/// Evict every expired entry from the session map. Called on each new login so
+/// abandoned sessions don't accumulate in memory for the life of the process
+/// (they were previously evicted only when that exact token was looked up
+/// again). Caller must hold `sessions_mutex`.
+fn sweepExpiredSessions(allocator: std.mem.Allocator, map: *std.StringHashMap(SessionData)) void {
+    const now = clock.timestamp();
+    var expired: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer expired.deinit(allocator);
+    var it = map.iterator();
+    while (it.next()) |e| {
+        if (now > e.value_ptr.expiry) expired.append(allocator, e.key_ptr.*) catch break;
+    }
+    for (expired.items) |k| _ = map.fetchRemove(k);
+}
+
 pub fn createSession(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) std.mem.Allocator.Error![]const u8 {
     var rand_bytes: [32]u8 = undefined;
     infra_random.bytes(&rand_bytes);
@@ -169,6 +183,7 @@ pub fn createSession(allocator: std.mem.Allocator, auth_dir: []const u8, email: 
     sessions_mutex.lock();
     defer sessions_mutex.unlock();
     const map = getSessionMap(allocator, auth_dir);
+    sweepExpiredSessions(allocator, map);
     try map.put(token, .{ .email = email_dup, .expiry = expiry });
     persistSessions(allocator);
     return token;
@@ -274,9 +289,7 @@ fn saveCredentials(allocator: std.mem.Allocator, auth_dir: []const u8, creds: []
     }
     try bw.writeAll("]");
 
-    const file = try infra_fs.cwd().createFile(path, .{});
-    defer file.close();
-    try file.writeAll(buf.items);
+    oauth_store.writeFileAtomicWithBackup(allocator, path, buf.items);
 }
 
 // ── Invite storage ───────────────────────────────────────────────────
@@ -323,9 +336,7 @@ fn saveInvites(allocator: std.mem.Allocator, auth_dir: []const u8, invites: []co
     }
     try bw.writeAll("]");
 
-    const file = try infra_fs.cwd().createFile(path, .{});
-    defer file.close();
-    try file.writeAll(buf.items);
+    oauth_store.writeFileAtomicWithBackup(allocator, path, buf.items);
 }
 
 /// Mint a single-use invite token tied to `created_by`. The token is a
@@ -578,18 +589,48 @@ fn base64urlDecode(allocator: std.mem.Allocator, encoded: []const u8) ![]const u
 
 // ── Auth middleware ──────────────────────────────────────────────────
 
-fn isLocalhost(req: *httpz.Request) bool {
-    // Check peer address via the host header for loopback detection
-    const host = req.header("host") orelse return false;
-    // Strip port if present
-    var hostname = host;
-    if (std.mem.indexOfScalar(u8, host, ':')) |idx| {
-        hostname = host[0..idx];
-    }
-    if (std.mem.eql(u8, hostname, "127.0.0.1")) return true;
-    if (std.mem.eql(u8, hostname, "::1")) return true;
-    if (std.mem.eql(u8, hostname, HOST_LOCALHOST)) return true;
-    return false;
+/// True when the request's *actual TCP peer* is a loopback address
+/// (127.0.0.0/8 or ::1). Reads `req.address` (the connected socket), NEVER a
+/// request header — a header is fully attacker-controlled.
+fn peerIsLoopback(req: *httpz.Request) bool {
+    return switch (req.address.any.family) {
+        std.posix.AF.INET => (std.mem.bigToNative(u32, req.address.in.sa.addr) >> 24) == 127,
+        std.posix.AF.INET6 => blk: {
+            const a = req.address.in6.sa.addr;
+            // ::1
+            var all_zero_hi = true;
+            for (a[0..15]) |b| {
+                if (b != 0) {
+                    all_zero_hi = false;
+                    break;
+                }
+            }
+            break :blk all_zero_hi and a[15] == 1;
+        },
+        else => false,
+    };
+}
+
+/// True when the request was relayed by a reverse proxy (carries a
+/// `Forwarded`/`X-Forwarded-*`/`X-Real-IP` header). The prod server sits behind
+/// a same-host proxy, so such requests reach us over loopback even though they
+/// originated on the internet — they must NOT be treated as local.
+fn viaProxy(req: *httpz.Request) bool {
+    return req.header("x-forwarded-for") != null or
+        req.header("x-forwarded-host") != null or
+        req.header("x-real-ip") != null or
+        req.header("forwarded") != null;
+}
+
+/// The local-development auth bypass. Requires ALL of: the operator opted in
+/// (`ctx.dev_mode`, from the `NETLISP_DEV` env var), the TCP peer is genuinely
+/// loopback, and the request did not come through a reverse proxy. Deriving
+/// "local" from the `Host` header — the previous behaviour — let any remote
+/// client send `Host: localhost` and obtain unauthenticated admin.
+fn isLocalhost(ctx: *Handler, req: *httpz.Request) bool {
+    if (!ctx.dev_mode) return false;
+    if (viaProxy(req)) return false;
+    return peerIsLoopback(req);
 }
 
 /// Pull the `session=<token>` value out of the request's `Cookie` header.
@@ -664,11 +705,10 @@ pub fn getBearerEmail(ctx: *Handler, req: *httpz.Request) ?[]const u8 {
     return if (tok) |t| t.email else null;
 }
 
-/// True when the `Host` header refers to 127.0.0.1, ::1, or `localhost`.
-/// Used by the auth middleware to bypass passkey enforcement during local
-/// development so the dev server is usable without an account setup.
-pub fn isLocalhostRequest(req: *httpz.Request) bool {
-    return isLocalhost(req);
+/// True when the request qualifies for the local-development auth bypass
+/// (`ctx.dev_mode` + loopback peer + not proxied). See `isLocalhost`.
+pub fn isLocalhostRequest(ctx: *Handler, req: *httpz.Request) bool {
+    return isLocalhost(ctx, req);
 }
 
 /// Remove all stored passkey credentials for an email, and drop any live
@@ -708,7 +748,7 @@ pub fn currentEmail(ctx: *Handler, req: *httpz.Request) ?[]const u8 {
     if (getSessionToken(req)) |tok| {
         if (validateSession(ctx.allocator, ctx.auth_dir, tok)) |em| return em;
     }
-    if (isLocalhost(req)) return "dev@localhost";
+    if (isLocalhost(ctx, req)) return "dev@localhost";
     return null;
 }
 
@@ -716,13 +756,48 @@ fn isApiPath(path: []const u8) bool {
     return std.mem.startsWith(u8, path, "/api/");
 }
 
+/// True when a request mutates server/design/library/board state and therefore
+/// requires at least the `writer` role. Safe methods (GET/HEAD/OPTIONS) and a
+/// small allowlist of pure-computation POSTs (scoring, routing overlay, dry
+/// validation) are open to any authenticated role. Everything else that is
+/// POST/PUT/PATCH/DELETE is a mutation. Route registration and this predicate
+/// must stay in sync — when in doubt a route is treated as a mutation (deny by
+/// default), so a new endpoint is write-gated until explicitly allowlisted.
+fn requiresWrite(req: *httpz.Request) bool {
+    switch (req.method) {
+        .GET, .HEAD, .OPTIONS => return false,
+        else => {},
+    }
+    const read_only_posts = [_][]const u8{
+        "/api/pcb-score", // also covers /api/pcb-score-batch
+        "/api/pcb-route",
+        "/api/validate/",
+    };
+    for (read_only_posts) |p| {
+        if (std.mem.startsWith(u8, req.url.path, p)) return false;
+    }
+    return true;
+}
+
+/// Reject a mutating request from a non-writer session with 403. Returns true
+/// when the caller should stop (response written), false to continue dispatch.
+fn denyIfInsufficientRole(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, email: []const u8) bool {
+    if (!requiresWrite(req)) return false;
+    const role = users.getRole(ctx.allocator, ctx.auth_dir, email);
+    if (role.canWrite()) return false;
+    res.status = 403;
+    res.content_type = .JSON;
+    res.body = "{\"error\":\"forbidden\",\"error_description\":\"writer role required\"}";
+    return true;
+}
+
 /// Gate every incoming request: allow localhost, auth routes, and
 /// requests carrying a valid session cookie or bearer token; redirect
 /// others to `/auth/login`. Returns `true` to continue dispatch, `false`
 /// when the response has already been written by the middleware.
 pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!bool {
-    // Allow localhost without auth
-    if (isLocalhost(req)) return true;
+    // Local-dev bypass (opt-in via NETLISP_DEV; loopback + not proxied only).
+    if (isLocalhost(ctx, req)) return true;
 
     // Exempt auth paths
     if (std.mem.startsWith(u8, req.url.path, "/auth/")) return true;
@@ -767,7 +842,14 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
     // Check for valid session
     if (getSessionToken(req)) |token| {
-        if (validateSession(ctx.allocator, ctx.auth_dir, token) != null) return true;
+        if (validateSession(ctx.allocator, ctx.auth_dir, token)) |email| {
+            // A valid session proves identity; mutating routes additionally
+            // require the writer role. Read + pure-computation routes are open
+            // to any authenticated role (incl. reader). Admin-only routes
+            // (user/invite/client management) self-check `canAdmin` in-handler.
+            if (denyIfInsufficientRole(ctx, req, res, email)) return false;
+            return true;
+        }
     }
 
     // Check if credentials exist; if not, redirect to setup
@@ -964,11 +1046,17 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     const client_data_parsed = std.json.parseFromSlice(std.json.Value, req.arena, client_data_raw, .{}) catch {
         res.status = HTTP_BAD_REQUEST;
-        res.body = "{\"error\":\"invalid clientDataJSON\"}";
+        res.body = ERR_INVALID_CLIENT_DATA;
         res.content_type = .JSON;
         return;
     };
 
+    if (client_data_parsed.value != .object) {
+        res.status = HTTP_BAD_REQUEST;
+        res.body = ERR_INVALID_CLIENT_DATA;
+        res.content_type = .JSON;
+        return;
+    }
     // Verify type
     const cd_type = (client_data_parsed.value.object.get("type") orelse {
         res.status = HTTP_BAD_REQUEST;
@@ -1356,11 +1444,17 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     // Parse and verify clientDataJSON
     const client_data_parsed = std.json.parseFromSlice(std.json.Value, req.arena, client_data_raw, .{}) catch {
         res.status = HTTP_BAD_REQUEST;
-        res.body = "{\"error\":\"invalid clientDataJSON\"}";
+        res.body = ERR_INVALID_CLIENT_DATA;
         res.content_type = .JSON;
         return;
     };
 
+    if (client_data_parsed.value != .object) {
+        res.status = HTTP_BAD_REQUEST;
+        res.body = ERR_INVALID_CLIENT_DATA;
+        res.content_type = .JSON;
+        return;
+    }
     // Verify type
     const cd_type = (client_data_parsed.value.object.get("type") orelse {
         res.status = HTTP_BAD_REQUEST;
@@ -1652,6 +1746,12 @@ pub fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
         res.body = ERR_INVALID_JSON_JSON;
         return;
     };
+    if (parsed.value != .object) {
+        res.status = HTTP_BAD_REQUEST;
+        res.content_type = .JSON;
+        res.body = ERR_INVALID_JSON_JSON;
+        return;
+    }
     const id_val = parsed.value.object.get("id") orelse {
         res.status = HTTP_BAD_REQUEST;
         res.content_type = .JSON;

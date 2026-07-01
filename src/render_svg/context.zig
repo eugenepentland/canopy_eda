@@ -542,29 +542,26 @@ pub const RenderCtx = struct {
                 break :blk rest[0..second_dot];
             };
 
-            var hub_pins_buf: [64]PinRef = undefined;
-            var hub_count: usize = 0;
-            var spoke_pins_buf: [64]PinRef = undefined;
-            var spoke_count: usize = 0;
+            // Grow-as-needed rather than a fixed 64-slot buffer: a wide MCU
+            // power rail can land on well over 64 pads or carry more than 64
+            // per-pin bypass caps, and dropping the overflow silently produced
+            // a wrong schematic (missing spokes reported as floating). All of
+            // this is arena-backed, freed when the render context is torn down.
+            var hub_pins: std.ArrayListUnmanaged(PinRef) = .empty;
+            var spoke_pins: std.ArrayListUnmanaged(PinRef) = .empty;
 
             for (net.pins) |pin| {
                 if (self.spoke_set.contains(pin.ref_des)) {
                     const is_ground_pin = self.isSpokeGroundPin(pin.ref_des, pin.pin);
                     if (!is_ground_pin) {
-                        if (spoke_count < spoke_pins_buf.len) {
-                            spoke_pins_buf[spoke_count] = pin;
-                            spoke_count += 1;
-                        }
+                        try spoke_pins.append(self.allocator, pin);
                     }
                 } else {
-                    if (hub_count < hub_pins_buf.len) {
-                        hub_pins_buf[hub_count] = pin;
-                        hub_count += 1;
-                    }
+                    try hub_pins.append(self.allocator, pin);
                 }
             }
 
-            if (hub_target != null and hub_count == 0) {
+            if (hub_target != null and hub_pins.items.len == 0) {
                 for (self.nets.items) |other_net| {
                     if (std.mem.eql(u8, other_net.name, net.name)) continue;
                     if (!std.mem.eql(u8, baseNetName(other_net.name), bn)) continue;
@@ -572,16 +569,13 @@ pub const RenderCtx = struct {
                         if (!self.spoke_set.contains(pin.ref_des) and
                             std.mem.eql(u8, pin.ref_des, hub_target.?))
                         {
-                            if (hub_count < hub_pins_buf.len) {
-                                hub_pins_buf[hub_count] = pin;
-                                hub_count += 1;
-                            }
+                            try hub_pins.append(self.allocator, pin);
                         }
                     }
                 }
             }
 
-            for (spoke_pins_buf[0..spoke_count]) |sp| {
+            for (spoke_pins.items) |sp| {
                 // Anchored spoke (single-pin-side passive): attach only on its
                 // anchor net so it renders off the lone pin, not the busy rail.
                 if (self.spoke_anchor_net.get(sp.ref_des)) |anchor| {
@@ -598,7 +592,7 @@ pub const RenderCtx = struct {
                 // shorthand) is handled separately via `hub_target` above;
                 // this covers the explicit (decouples …) form, which keeps the
                 // cap on the plain rail net.
-                if (self.boundHubPin(sp.ref_des, hub_pins_buf[0..hub_count])) |bp| {
+                if (self.boundHubPin(sp.ref_des, hub_pins.items)) |bp| {
                     try self.adjAppend(bp.ref_des, .{
                         .pin = bp.pin,
                         .endpoint = .{ .pin = .{ .ref_des = sp.ref_des, .pin = sp.pin } },
@@ -616,7 +610,7 @@ pub const RenderCtx = struct {
                 // Only fall back to hubs without a section if no same-section hub exists.
                 if (spoke_section) |ss| {
                     var has_same_section_hub = false;
-                    for (hub_pins_buf[0..hub_count]) |hp| {
+                    for (hub_pins.items) |hp| {
                         if (hub_target) |target| {
                             if (!std.mem.eql(u8, hp.ref_des, target)) continue;
                         }
@@ -627,7 +621,7 @@ pub const RenderCtx = struct {
                         }
                     }
 
-                    for (hub_pins_buf[0..hub_count]) |hp| {
+                    for (hub_pins.items) |hp| {
                         if (hub_target) |target| {
                             if (!std.mem.eql(u8, hp.ref_des, target)) continue;
                         }
@@ -648,7 +642,7 @@ pub const RenderCtx = struct {
                         });
                     }
                 } else {
-                    for (hub_pins_buf[0..hub_count]) |hp| {
+                    for (hub_pins.items) |hp| {
                         if (hub_target) |target| {
                             if (!std.mem.eql(u8, hp.ref_des, target)) continue;
                         }
@@ -688,9 +682,9 @@ pub const RenderCtx = struct {
         for (self.nets.items) |net| {
             const bn = baseNetName(net.name);
             for (net.pins) |pin| {
-                var list = self.net_index.get(bn) orelse std.ArrayListUnmanaged(PinRef){};
-                try list.append(self.allocator, pin);
-                try self.net_index.put(self.allocator, bn, list);
+                const gop = try self.net_index.getOrPut(self.allocator, bn);
+                if (!gop.found_existing) gop.value_ptr.* = .empty;
+                try gop.value_ptr.append(self.allocator, pin);
             }
         }
     }
@@ -844,9 +838,9 @@ pub const RenderCtx = struct {
     }
 
     pub fn adjAppend(self: *RenderCtx, ref_des: []const u8, entry: AdjEntry) !void {
-        var list = self.adjacency.get(ref_des) orelse std.ArrayListUnmanaged(AdjEntry){};
-        try list.append(self.allocator, entry);
-        try self.adjacency.put(self.allocator, ref_des, list);
+        const gop = try self.adjacency.getOrPut(self.allocator, ref_des);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        try gop.value_ptr.append(self.allocator, entry);
     }
 };
 

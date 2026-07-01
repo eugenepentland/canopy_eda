@@ -228,6 +228,15 @@ pub const Handler = struct {
     /// worktree keeps working in the others.
     auth_dir: []const u8,
 
+    /// When true, requests arriving directly from the loopback interface (and
+    /// NOT forwarded by a reverse proxy) bypass passkey/session auth and act as
+    /// a `dev@localhost` admin — the local-development convenience. Default
+    /// FALSE: it is opt-in via the `NETLISP_DEV` env var. This must never be
+    /// derived from a request header — the prod server sits behind a same-host
+    /// reverse proxy, so every internet request also arrives from loopback, and
+    /// a `Host: localhost` header used to grant unauthenticated admin remotely.
+    dev_mode: bool = false,
+
     pub const WebsocketHandler = mcp.Client;
 
     pub fn dispatch(
@@ -249,6 +258,7 @@ pub const Handler = struct {
             .allocator = res.arena,
             .project_dir = self.project_dir,
             .auth_dir = self.auth_dir,
+            .dev_mode = self.dev_mode,
         };
         // Auth middleware: check before dispatching to route handler
         if (!try auth.authMiddleware(&req_handler, req, res)) return;
@@ -317,7 +327,12 @@ pub fn serve(
     // thread can touch the limiters.
     rate_limiter.configureFromEnv(allocator);
     const effective_auth: []const u8 = if (auth_dir) |d| d else try std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
-    var handler = Handler{ .allocator = allocator, .project_dir = project_dir, .auth_dir = effective_auth };
+    // Opt-in local-dev auth bypass. Off in production (no env var) → every
+    // request must authenticate. See Handler.dev_mode. Read via config.zig so
+    // the ban-env policy holds (only config.zig touches the environment).
+    const dev_mode = @import("config.zig").devMode(allocator);
+    if (dev_mode) std.debug.print("netlisp: NETLISP_DEV set — loopback requests bypass auth as dev@localhost\n", .{});
+    var handler = Handler{ .allocator = allocator, .project_dir = project_dir, .auth_dir = effective_auth, .dev_mode = dev_mode };
     var server = try httpz.Server(*Handler).init(allocator, .{
         .address = .all(port),
         .request = .{

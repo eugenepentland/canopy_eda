@@ -367,23 +367,91 @@ pub fn classifyNet(ctx: *Ctx, net: []const u8, chan: u64) NetClass {
     return .internal;
 }
 
-fn partSignature(ctx: *Ctx, i: usize, chan: u64) FoldError![]const u8 {
-    const part = ctx.parts[i];
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    const w = buf.writer(ctx.arena);
+/// Emit the head of a part's signature (component/family + value + DNP) —
+/// shared by the base and full signatures so the two agree on everything
+/// except how internal nets are labelled.
+fn writePartHead(ctx: *Ctx, w: anytype, part: ik.Part) FoldError!void {
     if (part.family) |fam| {
         w.print("{s}|{s}|", .{ fam, part.value }) catch return error.OutOfMemory;
     } else {
         w.print("{s}|", .{part.comp_name orelse "?"}) catch return error.OutOfMemory;
     }
     if (part.dnp) w.writeAll("dnp|") catch return error.OutOfMemory;
+    _ = ctx;
+}
+
+/// A part's *base* signature: like `partSignature`, but every internal net
+/// collapses to a bare `I` marker (no per-net identity). Self-contained —
+/// used to fingerprint a part's role independently of *which* internal net
+/// each pad lands on, which is what `internalNetKey` then measures.
+fn partBaseSignature(ctx: *Ctx, i: usize, chan: u64) FoldError![]const u8 {
+    const part = ctx.parts[i];
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(ctx.arena);
+    try writePartHead(ctx, w, part);
 
     var binds: std.ArrayListUnmanaged([]const u8) = .empty;
     for (part.pads) |pad| {
         if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.UNCONNECTED_PREFIX)) continue;
         const label = switch (classifyNet(ctx, pad.net, chan)) {
             .indexed => try std.fmt.allocPrint(ctx.arena, "{s}=T:{s}", .{ pad.number, ctx.seed_template.get(pad.net).? }),
-            .internal => try std.fmt.allocPrint(ctx.arena, "{s}=I:{s}", .{ pad.number, try netTemplate(ctx.arena, pad.net) }),
+            .internal => try std.fmt.allocPrint(ctx.arena, "{s}=I", .{pad.number}),
+            .shared => try std.fmt.allocPrint(ctx.arena, "{s}=S:{s}", .{ pad.number, pad.net }),
+        };
+        try binds.append(ctx.arena, label);
+    }
+    std.mem.sort([]const u8, binds.items, {}, strLess);
+    for (binds.items) |b| {
+        w.writeAll(b) catch return error.OutOfMemory;
+        w.writeAll(";") catch return error.OutOfMemory;
+    }
+    return buf.items;
+}
+
+/// A canonical, name-free fingerprint of an internal net `net` within channel
+/// `chan`: the sorted multiset of `<base-part-signature>@<pad>` over every pad
+/// sitting on it. Two internal nets are given the same key only when they play
+/// structurally identical roles; a passive swapped from IC pad-3's private net
+/// to pad-7's changes the membership of both nets, so their keys — and hence the
+/// swapped part's binding in `partSignature` — differ. That closes the hole
+/// where two same-template auto-nets (`Net-(IC4-Pad3)` / `Net-(IC4-Pad7)`) were
+/// indistinguishable and a rewired channel could fold silently.
+fn internalNetKey(ctx: *Ctx, net: []const u8, chan: u64) FoldError![]const u8 {
+    const members = (ctx.net_parts.getPtr(net) orelse return ctx.arena.dupe(u8, "?")).items;
+    var terms: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (members) |mi| {
+        const base = try partBaseSignature(ctx, mi, chan);
+        // Which of this member's pads land on `net` (a part can touch one
+        // internal net on several pads — a thermal-pad split).
+        for (ctx.parts[mi].pads) |pad| {
+            if (!std.mem.eql(u8, pad.net, net)) continue;
+            try terms.append(ctx.arena, try std.fmt.allocPrint(ctx.arena, "{s}@{s}", .{ base, pad.number }));
+        }
+    }
+    std.mem.sort([]const u8, terms.items, {}, strLess);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (terms.items) |t| {
+        buf.appendSlice(ctx.arena, t) catch return error.OutOfMemory;
+        buf.append(ctx.arena, ',') catch return error.OutOfMemory;
+    }
+    return buf.items;
+}
+
+fn partSignature(ctx: *Ctx, i: usize, chan: u64) FoldError![]const u8 {
+    const part = ctx.parts[i];
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(ctx.arena);
+    try writePartHead(ctx, w, part);
+
+    var binds: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (part.pads) |pad| {
+        if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.UNCONNECTED_PREFIX)) continue;
+        const label = switch (classifyNet(ctx, pad.net, chan)) {
+            .indexed => try std.fmt.allocPrint(ctx.arena, "{s}=T:{s}", .{ pad.number, ctx.seed_template.get(pad.net).? }),
+            // Was `I:<netTemplate>` — same for every auto-net off one IC, so a
+            // passive swapped between two of them read identically. The
+            // membership-derived key disambiguates them (see internalNetKey).
+            .internal => try std.fmt.allocPrint(ctx.arena, "{s}=I:{s}", .{ pad.number, try internalNetKey(ctx, pad.net, chan) }),
             .shared => try std.fmt.allocPrint(ctx.arena, "{s}=S:{s}", .{ pad.number, pad.net }),
         };
         try binds.append(ctx.arena, label);
@@ -575,6 +643,91 @@ fn countFolded(folded: []const bool) usize {
         if (f) n += 1;
     }
     return n;
+}
+
+/// Board exercising the same-template internal-net hazard: each channel's IC
+/// has two private auto-nets that differ only in a digit run
+/// (`Net-ICk-3` / `Net-ICk-7` → both template to `Net-IC~-~`). A resistor of
+/// the SAME value sits on the pad-4 net in the honest channels but is moved to
+/// the pad-5 net in the last channel — a genuinely different netlist that the
+/// old template-only signature could not see. `rewire_last` picks whether to
+/// introduce that deviation.
+fn ambiguousInternalParts(arena: std.mem.Allocator, comptime n: usize, rewire_last: bool) ![]ik.Part {
+    var parts: std.ArrayListUnmanaged(ik.Part) = .empty;
+    inline for (0..n) |ci| {
+        const k = ci + 1;
+        const ks = std.fmt.comptimePrint("{d}", .{k});
+        const na = "Net-IC" ++ ks ++ "-3"; // IC pad 4's private net
+        const nb = "Net-IC" ++ ks ++ "-7"; // IC pad 5's private net
+        var ic_pads: std.ArrayListUnmanaged(ik.Pad) = .empty;
+        try ic_pads.append(arena, .{ .number = "1", .net = "CH" ++ ks ++ "_IN", .func = "IN" });
+        try ic_pads.append(arena, .{ .number = "2", .net = "CH" ++ ks ++ "_OUT", .func = "OUT" });
+        try ic_pads.append(arena, .{ .number = "3", .net = "GND", .func = "GND" });
+        try ic_pads.append(arena, .{ .number = "4", .net = na, .func = "A" });
+        try ic_pads.append(arena, .{ .number = "5", .net = nb, .func = "B" });
+        try parts.append(arena, .{
+            .ref = "IC" ++ ks,
+            .value = "SW",
+            .lib_id = "X:SW",
+            .descr = "",
+            .mpn = "",
+            .manufacturer = "",
+            .dnp = false,
+            .rot = 0,
+            .pads = ic_pads.items,
+            .node = undefined,
+            .comp_name = "sw-part",
+        });
+        // The resistor: honest channels wire it to `na`; the deviant last
+        // channel wires it to `nb` (same value, different net).
+        const r_net = if (rewire_last and ci == n - 1) nb else na;
+        var r_pads: std.ArrayListUnmanaged(ik.Pad) = .empty;
+        try r_pads.append(arena, .{ .number = "1", .net = r_net, .func = "" });
+        try r_pads.append(arena, .{ .number = "2", .net = "GND", .func = "" });
+        try parts.append(arena, .{
+            .ref = "R" ++ ks,
+            .value = "10K",
+            .lib_id = "X:R_0402_1005Metric",
+            .descr = "",
+            .mpn = "",
+            .manufacturer = "",
+            .dnp = false,
+            .rot = 0,
+            .pads = r_pads.items,
+            .node = undefined,
+            .family = "res-0402",
+        });
+    }
+    return parts.items;
+}
+
+// spec: import_fold - A channel with a passive rewired between two same-template internal nets deviates instead of folding silently
+test "same-template internal-net rewire is caught (never folds silently)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Control: three genuinely identical channels fold cleanly, all three.
+    {
+        const parts = try ambiguousInternalParts(arena, 3, false);
+        const res = try foldChannels(arena, parts, "amb", null);
+        try testing.expect(res.active);
+        try testing.expectEqual(@as(usize, 3), res.channels.len);
+        try testing.expectEqual(@as(usize, 0), res.skipped_indices.len);
+    }
+
+    // Hazard: the last channel's resistor moved to the sibling same-template
+    // auto-net. The membership-derived internal-net key must expose that, so
+    // channel 3 deviates and stays flat rather than folding with the exemplar's
+    // (wrong-for-it) wiring.
+    {
+        const parts = try ambiguousInternalParts(arena, 3, true);
+        const res = try foldChannels(arena, parts, "amb", null);
+        try testing.expect(res.active);
+        try testing.expectEqual(@as(usize, 2), res.channels.len); // ch1+ch2 fold
+        try testing.expectEqual(@as(usize, 1), res.skipped_indices.len);
+        try testing.expectEqual(@as(u64, 3), res.skipped_indices[0]);
+    }
 }
 
 // spec: import_fold - Picks the varying digit run as the channel index when other runs are constant
