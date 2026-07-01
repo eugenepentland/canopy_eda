@@ -776,7 +776,7 @@
     // In the global map a proxy box is a first-class, selectable+editable copy of
     // the real component (click it → inspector, like any part); only the fan-out
     // overlay keeps proxies as click-to-jump links.
-    for (const h of M.hubs) if (h.ghost && !h.terminal && x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return ghostAll ? { t: "part", ref: h.partnerRef || h.ref, kind: "hub" } : { t: "ghost", ref: h.partnerRef };
+    for (const h of M.hubs) if (h.ghost && !h.terminal && x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return ghostAll ? { t: "part", ref: h.partnerRef || h.ref, kind: "hub", ghost: true } : { t: "ghost", ref: h.partnerRef };
     for (const h of M.hubs) { if (h.synthetic) continue; if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return { t: "part", ref: h.ref, kind: "hub" }; }
     for (const c of (M.chips || [])) if (x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h) return { t: "chip", chip: c };
     for (const p of M.passes) if (x >= p.x && x <= p.x + p.w && y >= p.top && y <= p.top + p.h) return { t: "part", ref: p.ref, kind: "pass" };
@@ -793,7 +793,7 @@
     if (!hub) for (const h of M.hubs) { if (h.partnerRef === c.target || h.ref === c.target) { hub = h; break; } }
     if (!hub) return null;
     let px = hub.cx, py = hub.cy, bd = Infinity;
-    for (const p of (hub.pins || [])) { if (p.net !== c.net) continue; const d = Math.hypot(p.x - c.hx, p.y - c.hy); if (d < bd) { bd = d; px = p.x; py = p.y; } }
+    for (const p of (hub.pins || [])) { if (p.net !== c.net) continue; const d = Math.hypot(p.x - c.hx, p.y - c.hy); if (d < bd) { bd = d; px = p.vx != null ? p.vx : p.x; py = p.vy != null ? p.vy : p.y; } }   // bus pins carry a lead (vx/vy) — connect the reveal to the lead END so it's continuous
     return { hub, px, py };
   }
   function pickChip(x, y) {
@@ -829,7 +829,7 @@
       const h = down.hit;
       if (h.t === "pin") highlightNetToggle(h.net);
       else if (h.t === "ghost") jumpToGhost(h.ref);
-      else if (h.t === "part") select(h.kind, h.ref);
+      else if (h.t === "part") { if (h.ghost) revealGhostBus(h.ref); select(h.kind, h.ref); }
       else if (h.t === "chip") toggleChipPin(h.chip);
       else if (h.t === "net") highlightNetToggle(h.net);
       else deselect();
@@ -873,6 +873,15 @@
     if (!c) return;
     if (c.overflow) { highlightNetToggle(c.net); return; }
     if (pinnedChips.has(c)) pinnedChips.delete(c); else pinnedChips.add(c);
+    scheduleDraw();
+  }
+  // Click a ghost → pin (reveal) every bus line landing on it, so all its yellow connections
+  // (e.g. the LMX2595 ghost's SPI_MOSI + SPI_SCK) draw at once. Toggles: a second click clears them.
+  function revealGhostBus(ref) {
+    const cs = (M.chips || []).filter((c) => c.target === ref && !c.overflow);
+    if (!cs.length) return;
+    const allOn = cs.every((c) => pinnedChips.has(c));
+    cs.forEach((c) => { if (allOn) pinnedChips.delete(c); else pinnedChips.add(c); });
     scheduleDraw();
   }
   function setHotNet(net) { if (!net) return; hotNet = net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
@@ -1248,7 +1257,7 @@
       if (!c.pins || c.pins.length !== 2) return;
       addPassEdge(c.ref, passType(c.ref, c.component, c.value, c.symbol), c.value || c.component || c.ref, c.pins[0].net, c.pins[1].net);
     });
-    const isStub = (n) => !n || isGroundName(n) || isPowerName(n);
+    const isStub = (n) => !n || isGroundName(n) || isPowerName(n) || /\d+v\d*/i.test(netLeaf(n));   // incl. V_3V3_LMX/V_3V3A rails (a pull-up to them must TERMINATE the walk, not fork it)
     // Every part (IC or passive) sitting on a net — used to tell a real chain (its exit
     // reaches a NEW part) from a 2-wire bus that loops back between the same two devices.
     const partsOn = (net) => new Set([...(netIC.get(net) || []).map((e) => e.ref), ...(netPass.get(net) || []).map((p) => p.ref)]);
@@ -1475,6 +1484,26 @@
         addItem(a, b, lk);
       }
     }
+    // For a fanout net whose target is ALREADY a ghost in an anchor's cell (e.g. the LMX2595
+    // is a ghost in J1's cell via its SPI_MISO/CSN links), add a "bus pin" to that ghost so it
+    // shows the net as a dot + stub + label at rest — the connecting line is drawn on hover
+    // (the chip reveal lands on this pin). Multi-drop only (deg-2 is a normal link); GND skipped.
+    byIC.forEach((parts, anchorRef) => {
+      const anchor = real.find((h) => h.ref === anchorRef); if (!anchor) return;
+      const seen = new Set();
+      anchor.pins.forEach((p) => {
+        const net = p.anet || p.net;
+        if (!net || seen.has(net) || isGroundName(net)) return;
+        seen.add(net);
+        if ((netICs.get(net) || []).length < 3) return;
+        (netICs.get(net) || []).forEach((tgt) => {
+          if (tgt === anchorRef) return;
+          const arr = parts.get(tgt); if (!arr) return;                 // target must already be a ghost here
+          if (arr.some((it) => it.net === net)) return;                 // a link/pin already carries this net
+          arr.push({ net, outNet: null, farNet: null, through: null, via: null, tail: null, icPinName: "", ghostPinName: "", diff: false, terminal: false, busPin: true });
+        });
+      });
+    });
     if (!byIC.size) return;
     // Pull-ups / pull-downs: a RESISTOR with one leg on a signal net and the other
     // on a rail (power/ground). Keyed by the signal net so a link carrying it can
@@ -1531,6 +1560,7 @@
     const PITCH = 38, HEAD = 46, PAD = 18, LBL = 44, GROWGAP = 20, ICW = 168, GW = 146, OUT = 92, MX = 24, MY = 22;
     const SHEAD = 38, SHIFT_W = 122, LEAD = 92, PULLH = 30, PULL_DROP = 11;       // pass-through shifter block + leads (wide enough for a ~14-char net label); pull-branch height; riser to the spoke below the wire
     const CHAIN_SLOT = 80, CHAIN_DEV = 30;        // per-element slot in a multi-element chain row; device-block half-width (passive elements use a small symbol)
+    const BUS_LEAD = 46;                          // length of a ghost bus-pin's lead (dot → lead end where the hover reveal connects)
     // Extras band — the pins with no point-to-point partner (power/ground, multi-drop,
     // board IO) shown as horizontal SPOKES that fan out to BOTH sides of the IC, like
     // the original schematic (passives ride the spoke, terminal at the outboard end).
@@ -1586,7 +1616,7 @@
       // tall. Done BEFORE icX so each side reserves room for its outgoing spokes.
       const rhub = real.find((h) => h.ref === ref);
       const partnerNets = new Set();
-      groups.forEach((g) => g.items.forEach((it) => { [it.net, it.outNet, it.farNet].forEach((n) => n && partnerNets.add(n)); }));
+      groups.forEach((g) => g.items.forEach((it) => { if (it.busPin) return; [it.net, it.outNet, it.farNet].forEach((n) => n && partnerNets.add(n)); }));
       const passClaimed = new Set();                 // each passive lands on at most one pin of this cell
       const rowHt = (e) => Math.max(EXTRA_PITCH, (e.ps || []).length * PASSROW);
       const extras = [], seenE = new Set();
@@ -1669,9 +1699,9 @@
           ordered.forEach((it) => {
             const s = it.through ? it.through.ref : null;
             if (s !== curS) { if (s) y += SHEAD; curS = s; }       // header room before a shifter run
-            (onRight ? cell.rightPins : cell.leftPins).push({ name: it.icPinName, x: icEdge, y, net: it.net });
+            if (!it.busPin) (onRight ? cell.rightPins : cell.leftPins).push({ name: it.icPinName, x: icEdge, y, net: it.net });
             const gnet = it.farNet || it.outNet || it.net;
-            gpins.push({ pin: gnet, name: it.ghostPinName === it.icPinName ? "" : it.ghostPinName, side: onRight ? "left" : "right", x: ghIn, y, net: gnet, vx: null, vy: null });
+            gpins.push({ pin: gnet, name: it.busPin ? "" : (it.ghostPinName === it.icPinName ? "" : it.ghostPinName), side: onRight ? "left" : "right", x: ghIn, y, net: gnet, vx: it.busPin ? ghIn - dir * BUS_LEAD : null, vy: it.busPin ? y : null });
             rows.push({ it, y, s });
             y += PITCH;
             if (pullByNet.has(it.net) || (it.outNet && pullByNet.has(it.outNet))) y += PULLH;   // room for a pull branch
@@ -1702,6 +1732,12 @@
               });
               cell.wires.push({ net: prevNet, pts: [[prevX, r.y], [ghIn, r.y]] });
               if (prevNet) cell.labels.push({ text: prevNet, x: (prevX + ghIn) / 2, y: r.y - 9 });
+              i++; continue;
+            }
+            if (r.it.busPin) {                                     // bus pin ON the ghost: dot + a lead (the gpin's vx/vy stub) + net label ABOVE the lead; the yellow reveal connects to the lead end
+              // Align the label to the ghost edge, reading outward along the lead: left-aligned
+              // when the pin is on the ghost's RIGHT edge (dir<0), right-aligned on the LEFT edge.
+              cell.labels.push({ text: netLeaf(r.it.net), x: ghIn - dir * 7, y: r.y - 10, anchor: dir < 0 ? "start" : "end" });
               i++; continue;
             }
             if (!r.s) {                                            // direct link: one straight wire + label
@@ -1803,7 +1839,7 @@
       const pins = c.leftPins.map((p) => mk(p, "left")).concat(c.rightPins.map((p) => mk(p, "right")));
       m.hubs.push({ ref: c.ref, label: c.ref, part: compOf.get(c.ref) || "", x: ox + c.icX, y: oy, w: ICW, h: c.ch, cx: ox + c.icX + ICW / 2, cy: oy + c.ch / 2, pins });
       c.ghosts.forEach((g) => {
-        const pins2 = g.pins.map((p) => ({ ...p, x: ox + p.x, y: oy + p.y }));
+        const pins2 = g.pins.map((p) => ({ ...p, x: ox + p.x, y: oy + p.y, vx: p.vx != null ? ox + p.vx : null, vy: p.vy != null ? oy + p.vy : null }));
         m.hubs.push({ ref: g.ref, label: g.label, part: g.part, x: ox + g.x, y: oy + g.y, w: g.w, h: g.h, cx: ox + g.x + g.w / 2, cy: oy + g.y + g.h / 2, pins: pins2, synthetic: true, ghost: true, terminal: !!g.terminal, partnerRef: g.terminal ? null : g.ref });
       });
       c.wires.forEach((w) => { const pts = w.pts.map((pt) => [ox + pt[0], oy + pt[1]]); m.wires.push({ net: w.net, bus: false, link: true, diff: w.diff, via: w.via, pts, bb: bbOf(pts) }); });
