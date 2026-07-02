@@ -23,15 +23,23 @@ svg.appendChild(gP); svg.appendChild(gR); svg.appendChild(gPads); svg.appendChil
 gT.style.pointerEvents="none"; gR.style.pointerEvents="none"; gC.style.pointerEvents="none"; gD.style.pointerEvents="none"; gU.style.pointerEvents="none";
 const els=[], bodies=[], padEls=[];
 function el(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e;}
-// (board (size W H) …) physical outline, under everything (read-only).
-if(PCB.board){
- var br=PCB.board,gB=document.createElementNS(NS,"g");
- svg.insertBefore(gB,gP); gB.style.pointerEvents="none";
+// Physical outline, under everything: the layout's user-DRAWN outline when
+// one exists (PCB.outline, editable via the ▭ Outline tool and saved with
+// the layout), else the authored (board (size W H) …) rectangle.
+var gB=document.createElementNS(NS,"g");
+svg.insertBefore(gB,gP); gB.style.pointerEvents="none";
+PCB.outline=(PCB.outline_drawn&&PCB.board)?{x:PCB.board.x,y:PCB.board.y,w:PCB.board.w,h:PCB.board.h}:null;
+function drawBoardRect(tmp){
+ while(gB.firstChild)gB.removeChild(gB.firstChild);
+ var br=tmp||PCB.outline||PCB.board;if(!br||!(br.w>0)||!(br.h>0))return;
+ var drawn=!!(tmp||PCB.outline);
  gB.appendChild(el("rect",{x:X(br.x).toFixed(1),y:Y(br.y).toFixed(1),width:(br.w*S).toFixed(1),
-   height:(br.h*S).toFixed(1),fill:"none",stroke:"#7ee787","stroke-width":1.6,opacity:0.85}));
+   height:(br.h*S).toFixed(1),fill:"none",stroke:"#7ee787","stroke-width":1.6,opacity:0.85,
+   "stroke-dasharray":tmp?"6 4":"0"}));
  var bt=el("text",{x:(X(br.x)+6).toFixed(1),y:(Y(br.y)+14).toFixed(1),fill:"#7ee787","font-size":"11",opacity:0.85});
- bt.textContent=br.w.toFixed(0)+"×"+br.h.toFixed(0)+" mm"; gB.appendChild(bt);
+ bt.textContent=br.w.toFixed(1)+"×"+br.h.toFixed(1)+" mm"+(drawn?" (drawn)":""); gB.appendChild(bt);
 }
+drawBoardRect();
 function wpt(i,lx,ly){var p=P[i],a=(p.rot||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a);
  if(p.side==="bottom")lx=-lx; // bottom parts mirror about their own axis (matches worldPt)
  return {x:p.x+lx*c-ly*s,y:p.y+lx*s+ly*c};}
@@ -39,15 +47,24 @@ function moved(i){return P[i].x!==orig[i].x||P[i].y!==orig[i].y||(P[i].rot||0)!=
 function wrect(i,pad){var p=P[i],c=wpt(i,pad.x,pad.y),q=(((p.rot||0)%360)+360)%360;
  var hw=(q==90||q==270)?pad.h/2:pad.w/2, hh=(q==90||q==270)?pad.w/2:pad.h/2;
  return {x0:c.x-hw,y0:c.y-hh,x1:c.x+hw,y1:c.y+hh};}
+var lastOrient=[];
 function setT(i){var p=P[i],tx=X(p.x).toFixed(1),ty=Y(p.y).toFixed(1),rot=(p.rot||0);
  var bot=(p.side==="bottom"),mir=bot?" scale(-1,1)":"";
  els[i].setAttribute("transform","translate("+tx+","+ty+")");
+ // Pads live in the top gPads layer (above the ratsnest), so they carry the
+ // part's full translate+rotate themselves rather than inheriting it.
+ if(padEls[i])padEls[i].setAttribute("transform","translate("+tx+","+ty+") rotate("+rot+")"+mir);
+ // Everything below depends only on orientation (rot/side/locked), not
+ // position — skip it during plain drags. A hub's pad-label counter-
+ // transform pass (querySelectorAll over 100+ <text>) per pointermove was
+ // a real chunk of the big-board drag cost.
+ var okey=rot+"|"+bot+"|"+(!!p.locked);
+ if(lastOrient[i]===okey)return;
+ lastOrient[i]=okey;
  els[i].classList.toggle("botside",bot);
  els[i].classList.toggle("plocked",!!p.locked);
  bodies[i].setAttribute("transform","rotate("+rot+")"+mir);
- // Pads live in the top gPads layer (above the ratsnest), so they carry the
- // part's full translate+rotate themselves rather than inheriting it.
- if(padEls[i]){padEls[i].setAttribute("transform","translate("+tx+","+ty+") rotate("+rot+")"+mir);
+ if(padEls[i]){
   padEls[i].classList.toggle("botside",bot);
   // Keep pad numbers reading horizontally (and unmirrored on the bottom side)
   // at any orientation: counter-transform each label about its own centre
@@ -99,6 +116,9 @@ function markUnplaced(refs){
  P.forEach(function(p,i){if(els[i])els[i].classList.toggle("unplaced",!!unplacedSet[p.ref]);});
  refreshUnplaced();}
 function refreshUnplaced(){
+ // Nothing staged and nothing drawn — the common case — costs nothing.
+ var have=false;for(var k in unplacedSet){have=true;break;}
+ if(!have&&!gU.firstChild)return;
  while(gU.firstChild)gU.removeChild(gU.firstChild);
  var n=0,x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
  P.forEach(function(p,i){if(!unplacedSet[p.ref])return;n++;
@@ -113,39 +133,69 @@ function refreshUnplaced(){
  var lbl=el("text",{"class":"unplaced-lbl",x:(x0+6).toFixed(1),y:ly.toFixed(1)});
  lbl.textContent="⚠ "+n+" part"+(n==1?"":"s")+" not in placement spec";
  gU.appendChild(lbl);}
-function aw(a,b,col,sw,op){gR.appendChild(el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),
- x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),stroke:col,"stroke-width":sw,opacity:op}));}
-function rats(){
- while(gR.firstChild)gR.removeChild(gR.firstChild);
- if(!ratsOn)return;
- PCB.links.forEach(function(l){
-   var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
-   var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#22b8cf":"#9aa7b4");
-   if(netColOn){var nc=netColorOf(l.net);if(nc)col=nc;}
-   aw(a,b,col,l.k=="signal"?0.7:1.3,l.k=="signal"?0.55:0.9);});
+// ── Ratsnest: built once, updated incrementally ─────────────────────────
+// The old rats() recreated EVERY airwire + loop overlay element on every
+// pointermove — thousands of DOM allocations per frame on a big board, which
+// is what made barracuda drags crawl. Now gR holds one <line> per link
+// (ratLines, index-aligned with PCB.links) and one <g> per decoupling loop
+// (loopGs); a drag rewrites only the moved parts' line endpoints and rebuilds
+// their few loop groups (ratsUpdate). Full rats() rebuilds remain for
+// toggles (ratsnest on/off, net colours, route arrival, load/undo).
+var gRL=document.createElementNS(NS,"g"),gRP=document.createElementNS(NS,"g");
+gR.appendChild(gRL);gR.appendChild(gRP);
+var ratLines=[],loopGs=[],partLinks={},partLoops={};
+(PCB.links||[]).forEach(function(l,li){(partLinks[l.a]=partLinks[l.a]||[]).push(li);
+ (partLinks[l.b]=partLinks[l.b]||[]).push(li);});
+(PCB.loops||[]).forEach(function(L,k){(partLoops[L.hub]=partLoops[L.hub]||[]).push(k);
+ (partLoops[L.cap]=partLoops[L.cap]||[]).push(k);});
+function linkCol(l){var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#22b8cf":"#9aa7b4");
+ if(netColOn){var nc=netColorOf(l.net);if(nc)col=nc;}return col;}
+// Redraw ONE loop overlay group. Uses the server's DRC-safe GND-via drop
+// (cgv/gpv) only while the cap/hub is at its emitted pose; once dragged that
+// world point is stale (and cgv/gpv come back null when the router can't fan
+// a via there at all), so draw the return *path* to the raw pad centre but
+// DON'T invent a via dot — Route re-derives the exact DRC-safe fan.
+function drawLoop(k){var L=PCB.loops[k],g=loopGs[k];if(!L||!g)return;
+ while(g.firstChild)g.removeChild(g.firstChild);
  var routedNow=((PCB.tracks||[]).length>0);
- // Use the server's DRC-safe GND-via drop (cgv/gpv) only while the cap/hub is
- // at its emitted pose; once dragged that world point is stale, so recompute
- // the via at the live GND pad centre so it follows the part (the prior via is
- // already cleared with gR above; Route re-derives the exact DRC-safe fan).
- PCB.loops.forEach(function(L){
-   // cgv/gpv are the server's DRC-safe via drops, valid only at the emitted
-   // pose. Once a part is dragged that point is stale, and cgv/gpv come back
-   // null when the router can't fan a via there at all (a fat thermal/EP GND
-   // pad next to a small pad). In both cases draw the return *path* to the raw
-   // pad centre but DON'T draw a via dot — an invented dot would land on the
-   // neighbouring pad (the FB tap) and never match what Route actually drops.
-   var cReal=(L.cgv&&!moved(L.cap)), dReal=(L.gpv&&!moved(L.hub));
-   var A=wpt(L.hub,L.pp.x,L.pp.y), B=wpt(L.cap,L.cp.x,L.cp.y),
-       C=cReal?L.cgv:wpt(L.cap,L.cg.x,L.cg.y),
-       D=dReal?L.gpv:wpt(L.hub,L.gp.x,L.gp.y);
-   aw(B,A,"#ea580c",1.3,0.95);
-   var rp=[C,B,A,D].map(function(q){return X(q.x).toFixed(1)+","+Y(q.y).toFixed(1);}).join(" ");
-   var pl=el("polyline",{points:rp,fill:"none",stroke:"#58a6ff","stroke-width":1.3,opacity:0.85,"stroke-dasharray":"4 2"});
-   var gt=el("title",{}); gt.textContent="GND return images under the power trace on the L2 plane (drops at the DRC-safe GND vias)"; pl.appendChild(gt);
-   gR.appendChild(pl);
-   if(!routedNow){ if(cReal)drawVia(gR,C.x,C.y,viaGeo().dia,viaGeo().drill);
-                   if(dReal)drawVia(gR,D.x,D.y,viaGeo().dia,viaGeo().drill); }});
+ var cReal=(L.cgv&&!moved(L.cap)), dReal=(L.gpv&&!moved(L.hub));
+ var A=wpt(L.hub,L.pp.x,L.pp.y), B=wpt(L.cap,L.cp.x,L.cp.y),
+     C=cReal?L.cgv:wpt(L.cap,L.cg.x,L.cg.y),
+     D=dReal?L.gpv:wpt(L.hub,L.gp.x,L.gp.y);
+ g.appendChild(el("line",{x1:X(B.x).toFixed(1),y1:Y(B.y).toFixed(1),
+  x2:X(A.x).toFixed(1),y2:Y(A.y).toFixed(1),stroke:"#ea580c","stroke-width":1.3,opacity:0.95}));
+ var rp=[C,B,A,D].map(function(q){return X(q.x).toFixed(1)+","+Y(q.y).toFixed(1);}).join(" ");
+ var pl=el("polyline",{points:rp,fill:"none",stroke:"#58a6ff","stroke-width":1.3,opacity:0.85,"stroke-dasharray":"4 2"});
+ var gt=el("title",{}); gt.textContent="GND return images under the power trace on the L2 plane (drops at the DRC-safe GND vias)"; pl.appendChild(gt);
+ g.appendChild(pl);
+ if(!routedNow){ if(cReal)drawVia(g,C.x,C.y,viaGeo().dia,viaGeo().drill);
+                 if(dReal)drawVia(g,D.x,D.y,viaGeo().dia,viaGeo().drill); }}
+function rats(){
+ while(gRL.firstChild)gRL.removeChild(gRL.firstChild);
+ while(gRP.firstChild)gRP.removeChild(gRP.firstChild);
+ ratLines=[];loopGs=[];
+ if(!ratsOn)return;
+ (PCB.links||[]).forEach(function(l){
+   var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
+   var e=el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),
+     stroke:linkCol(l),"stroke-width":l.k=="signal"?0.7:1.3,opacity:l.k=="signal"?0.55:0.9});
+   gRL.appendChild(e);ratLines.push(e);});
+ (PCB.loops||[]).forEach(function(L,k){var g=document.createElementNS(NS,"g");
+   gRP.appendChild(g);loopGs.push(g);drawLoop(k);});
+}
+// Update only the airwires + loop overlays touching the given part indices —
+// the per-pointermove path. O(links-on-moved-parts), not O(board).
+function ratsUpdate(idxs){
+ if(!ratsOn||!ratLines.length)return;
+ var seenL={},seenK={};
+ idxs.forEach(function(i){
+  (partLinks[i]||[]).forEach(function(li){
+    if(seenL[li])return;seenL[li]=1;
+    var l=PCB.links[li],e=ratLines[li];if(!e)return;
+    var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
+    e.setAttribute("x1",X(a.x).toFixed(1));e.setAttribute("y1",Y(a.y).toFixed(1));
+    e.setAttribute("x2",X(b.x).toFixed(1));e.setAttribute("y2",Y(b.y).toFixed(1));});
+  (partLoops[i]||[]).forEach(function(k){if(seenK[k])return;seenK[k]=1;drawLoop(k);});});
 }
 function delta(id,cur,base){
  var e=document.getElementById(id);if(!e)return;var d=cur-base;
@@ -307,7 +357,7 @@ function rotateGroup(idxs,sign){recordUndo();
   if(sign>0){P[i].x=cx-dy;P[i].y=cy+dx;}else{P[i].x=cx+dy;P[i].y=cy-dx;}
   P[i].x=Math.round(P[i].x/G)*G;P[i].y=Math.round(P[i].y/G)*G;
   P[i].rot=((((P[i].rot||0)+(sign>0?90:-90))%360)+360)%360;setT(i);});
- clearRouteFor(mv);rats();drawClr();fetchScore();refreshUnplaced();}
+ clearRouteFor(mv);ratsUpdate(mv);drawClr();fetchScore();refreshUnplaced();}
 // Stamp a group from its module ★ layout (PCB.subseeds): normalize the seed
 // cluster to its own bbox, drop it just right of everything currently placed.
 function stampGroup(g){var seeds=PCB.subseeds||{},idxs=GRPS[g]||[],hit=[];
@@ -352,11 +402,12 @@ els.forEach(function(g,i){
  g.addEventListener("pointermove",function(ev){
    if(gdrag){var gm=mm(ev),dx=Math.round((gm.x-gdrag.sx)/G)*G,dy=Math.round((gm.y-gdrag.sy)/G)*G,any=false;
      gdrag.orig.forEach(function(o){var nx=o.x+dx,ny=o.y+dy;if(P[o.i].x!==nx||P[o.i].y!==ny){P[o.i].x=nx;P[o.i].y=ny;setT(o.i);any=true;}});
-     if(any){if(!gdrag.moved){gdrag.moved=true;clearRouteFor(gdrag.orig.map(function(o){return o.i;}));}rats();drawClr();refreshUnplaced();}return;}
+     if(any){var gidx=gdrag.orig.map(function(o){return o.i;});
+      if(!gdrag.moved){gdrag.moved=true;clearRouteFor(gidx);}ratsUpdate(gidx);drawClr();refreshUnplaced();}return;}
    if(!drag||drag.i!==i)return;var m=mm(ev);
    var nx=Math.round((m.x+drag.ox)/G)*G,ny=Math.round((m.y+drag.oy)/G)*G;
    if(nx===P[i].x&&ny===P[i].y)return;P[i].x=nx;P[i].y=ny;
-   if(!drag.moved){drag.moved=true;clearRouteFor([i]);}setT(i);rats();drawClr();refreshUnplaced();
+   if(!drag.moved){drag.moved=true;clearRouteFor([i]);}setT(i);ratsUpdate([i]);drawClr();refreshUnplaced();
    if(selRef===P[i].ref)updatePropLive();});
  g.addEventListener("pointerup",function(ev){
    if(gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap;gdrag=null;g.style.cursor="grab";
@@ -397,6 +448,7 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Lock / unlock hovered part</span><kbd>L</kbd></div>'+
   '<div class="kbd-row"><span>Explode / re-cohere hovered sub-circuit</span><kbd>G</kbd></div>'+
   '<div class="kbd-row"><span>Move whole sub-circuit</span><kbd>drag any of its parts</kbd></div>'+
+  '<div class="kbd-row"><span>Draw board outline (click = clear)</span><kbd>▭ Outline, then drag</kbd></div>'+
   '<div class="kbd-row"><span>Move part (snaps to grid)</span><kbd>drag part</kbd></div>'+
   '<div class="kbd-row"><span>Select box (multi-select)</span><kbd>drag empty space</kbd></div>'+
   '<div class="kbd-row"><span>Move all selected together</span><kbd>drag a selected part</kbd></div>'+
@@ -421,7 +473,7 @@ var SPACE=false;
 document.addEventListener("keydown",function(ev){if((ev.key===" "||ev.code==="Space")&&!kbTyping(ev.target)){SPACE=true;ev.preventDefault();}});
 document.addEventListener("keyup",function(ev){if(ev.key===" "||ev.code==="Space")SPACE=false;});
 document.addEventListener("keydown",function(ev){
- if(ev.key=="Escape"){if(kbdOv){kbdClose();}else{selClear();clearSel();}return;}
+ if(ev.key=="Escape"){if(kbdOv){kbdClose();}else if(outlineMode){outDraw=null;outlineArm(false);drawBoardRect();}else{selClear();clearSel();}return;}
  var typing=kbTyping(ev.target);
  if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
  if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;
@@ -429,12 +481,12 @@ document.addEventListener("keydown",function(ev){
    if(rgi){rotateGroup(rgi,ev.shiftKey?-1:1);return;}
    recordUndo();
    P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
-   setT(cur);clearRouteFor([cur]);rats();fetchScore();refreshUnplaced();if(selRef===P[cur].ref)updatePropLive();return;}
+   setT(cur);clearRouteFor([cur]);ratsUpdate([cur]);fetchScore();refreshUnplaced();if(selRef===P[cur].ref)updatePropLive();return;}
  if((ev.key=="g"||ev.key=="G")&&cur>=0&&!typing){ev.preventDefault();
    var gg=grpOf(P[cur].ref);if(gg&&GRPS[gg]){grpToggle(gg);grpHl(gg,grpRigid(gg));}return;}
  if((ev.key=="f"||ev.key=="F")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;recordUndo();
    P[cur].side=(P[cur].side==="bottom")?"top":"bottom";
-   setT(cur);clearRouteFor([cur]);rats();drawClr();fetchScore();refreshUnplaced();
+   setT(cur);clearRouteFor([cur]);ratsUpdate([cur]);drawClr();fetchScore();refreshUnplaced();
    if(selRef===P[cur].ref)renderProps();return;}
  if((ev.key=="l"||ev.key=="L")&&cur>=0&&!typing){ev.preventDefault();
    P[cur].locked=!P[cur].locked;setT(cur);if(selRef===P[cur].ref)renderProps();return;}});
@@ -462,6 +514,8 @@ document.addEventListener("keydown",function(ev){if(!(ev.ctrlKey||ev.metaKey)||k
  if(k==="z"&&!ev.shiftKey){ev.preventDefault();doUndo();}
  else if((k==="z"&&ev.shiftKey)||k==="y"){ev.preventDefault();doRedo();}});
 undoBtns();
+var outBtn=document.getElementById("pcb-outline");
+if(outBtn)outBtn.addEventListener("click",function(){outlineArm(!outlineMode);});
 document.getElementById("pcb-reset").addEventListener("click",function(){recordUndo();
  selClear();P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;p.side=orig[i].side;});applyAll();});
 document.getElementById("pcb-score").addEventListener("click",fetchScore);
@@ -505,6 +559,7 @@ function bindLayLoad(b){b.addEventListener("click",function(){var nm=b.getAttrib
  P.forEach(function(p){var s=(p.origin&&byOrigin[p.origin])||L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;p.side=s.side||"top";if(s.locked!==undefined)p.locked=!!s.locked;}});applyAll();
  if(L.routes&&((L.routes.tracks||[]).length||(L.routes.vias||[]).length)){
   PCB.tracks=L.routes.tracks||[];PCB.vias=L.routes.vias||[];PCB.drc=[];drawRoute();drawDrc();}
+ PCB.outline=L.outline||null;drawBoardRect();
  setActiveLayout(nm);});}
 function bindLayDel(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-del");
  if(!window.confirm("Delete layout \""+nm+"\"?"))return;
@@ -572,18 +627,19 @@ function loadLayoutScores(){if(!((PCB.layouts||[]).length))return;
 // page reload, so the camera and view toggles you set while editing stay put.
 function persistLayout(nm,verb){var msg=document.getElementById("pcb-savemsg");
  var parts=P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,origin:p.origin||"",side:p.side||"top",locked:!!p.locked};});
- // Persist the on-screen copper with the poses so routing survives reloads.
+ // Persist the on-screen copper + drawn outline with the poses so both
+ // survive reloads.
  var routes=((PCB.tracks||[]).length||(PCB.vias||[]).length)?{tracks:PCB.tracks||[],vias:PCB.vias||[]}:null;
  if(msg){msg.style.color="#8b949e";msg.textContent=verb+"\u{2026}";}
  return fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",
-   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts,routes:routes})})
+   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts,routes:routes,outline:PCB.outline||null})})
   .then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(){
     var pmap={};parts.forEach(function(p){pmap[p.ref]={x:p.x,y:p.y,rot:p.rot,origin:p.origin||"",side:p.side,locked:p.locked};});
     var Ls=PCB.layouts||(PCB.layouts=[]),found=null;
     for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm){found=Ls[i];break;}
-    if(found){found.parts=pmap;found.kind="manual";found.routes=routes;}
-    else Ls.push({name:nm,kind:"manual",parts:pmap,score:null,routes:routes});
+    if(found){found.parts=pmap;found.kind="manual";found.routes=routes;found.outline=PCB.outline||null;}
+    else Ls.push({name:nm,kind:"manual",parts:pmap,score:null,routes:routes,outline:PCB.outline||null});
     upsertLayoutPanel(nm);setActiveLayout(nm);loadLayoutScores();
     if(msg){msg.style.color="#3fb950";msg.textContent=(verb==="updating"?"updated":"saved")+" \u{2713}";}})
   .catch(function(){if(msg){msg.style.color="#f85149";
@@ -675,6 +731,14 @@ var zf=document.getElementById("z-fit");if(zf)zf.addEventListener("click",functi
 // the selection. The rubber-band rect lives in the top layer (pointer-events
 // off) and is drawn in SVG coords via X()/Y() so it tracks pan/zoom.
 var pan=null,marq=null,marqEl=null;
+// ▭ Outline tool: while armed, a drag on empty board draws the PCB outline
+// rectangle (grid-snapped); a plain click clears it. The rectangle is saved
+// with the layout (SavedLayout.outline) and becomes the board edge every
+// renderer draws and the board-edge DRC checks. RO pages never arm it.
+var outlineMode=false,outDraw=null;
+function outlineArm(on){outlineMode=on;
+ var b=document.getElementById("pcb-outline");if(b)b.classList.toggle("on",on);
+ svg.classList.toggle("outline-mode",on);}
 // Start a viewport pan from the current pointer. Shared by the empty-space
 // handler below AND the part/pad pointerdown handlers (defined earlier, this is
 // hoisted), so a middle-button or Space-held drag pans the board even when the
@@ -683,10 +747,15 @@ var pan=null,marq=null,marqEl=null;
 function startPan(ev){pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:false};
  svg.setPointerCapture(ev.pointerId);svg.style.cursor="grabbing";}
 svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.preventDefault();
+ if(outlineMode){var om=mm(ev);outDraw={x0:om.x,y0:om.y,x1:om.x,y1:om.y};
+  svg.setPointerCapture(ev.pointerId);return;}
  if(SPACE||ev.button===1){startPan(ev);return;}
  var m=mm(ev);marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false};svg.setPointerCapture(ev.pointerId);
  marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);});
 svg.addEventListener("pointermove",function(ev){
+ if(outDraw){var om=mm(ev);outDraw.x1=om.x;outDraw.y1=om.y;
+  drawBoardRect({x:Math.min(outDraw.x0,outDraw.x1),y:Math.min(outDraw.y0,outDraw.y1),
+   w:Math.abs(outDraw.x1-outDraw.x0),h:Math.abs(outDraw.y1-outDraw.y0)});return;}
  if(pan){var r=svg.getBoundingClientRect();
   if(Math.abs(ev.clientX-pan.cx)>3||Math.abs(ev.clientY-pan.cy)>3)pan.moved=true;
   vb.x=pan.vx-(ev.clientX-pan.cx)*(vb.w/r.width);vb.y=pan.vy-(ev.clientY-pan.cy)*(vb.h/r.height);setVB();return;}
@@ -696,6 +765,15 @@ svg.addEventListener("pointermove",function(ev){
   marqEl.setAttribute("x",X(ax).toFixed(1));marqEl.setAttribute("y",Y(ay).toFixed(1));
   marqEl.setAttribute("width",((bx-ax)*S).toFixed(1));marqEl.setAttribute("height",((by-ay)*S).toFixed(1));return;}});
 svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.pointerId);}catch(e){}
+ if(outDraw){var d=outDraw;outDraw=null;outlineArm(false);
+  var ax=Math.round(Math.min(d.x0,d.x1)/G)*G,ay=Math.round(Math.min(d.y0,d.y1)/G)*G;
+  var bx=Math.round(Math.max(d.x0,d.x1)/G)*G,by=Math.round(Math.max(d.y0,d.y1)/G)*G;
+  PCB.outline=(bx-ax>=2&&by-ay>=2)?{x:ax,y:ay,w:bx-ax,h:by-ay}:null;
+  drawBoardRect();
+  var msg=document.getElementById("pcb-savemsg");
+  if(msg){msg.style.color="#8b949e";
+   msg.textContent=PCB.outline?"outline set — Save/Update to keep":"outline cleared — Save/Update to keep";}
+  return;}
  if(pan){var click=!pan.moved;pan=null;svg.style.cursor="";if(click){selClear();clearSel();selNet(null);}return;}
  if(marq){var box=marq,mv=marq.moved;if(marqEl&&marqEl.parentNode)marqEl.parentNode.removeChild(marqEl);marqEl=null;marq=null;
   if(mv){var ax=Math.min(box.x0,box.x1),ay=Math.min(box.y0,box.y1),bx=Math.max(box.x0,box.x1),by=Math.max(box.y0,box.y1);
