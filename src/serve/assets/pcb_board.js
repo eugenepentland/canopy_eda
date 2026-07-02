@@ -618,7 +618,7 @@ function upsertLayoutPanel(nm){var saved=document.querySelector(".pcb-saved");if
 // Fetch each saved layout's raw breakdown, then re-weigh the panel so its
 // scores/deltas track the Score-view weights alongside the live bar. Re-run
 // after a Save/Update so the affected row's score refreshes in place.
-function loadLayoutScores(){if(!((PCB.layouts||[]).length))return;
+function loadLayoutScores(){if(PCB.single)return;if(!((PCB.layouts||[]).length))return;
  fetch("/api/pcb-score-batch/"+encodeURIComponent(PCB.name)+subq(),{method:"POST"})
   .then(function(r){return r.json();})
   .then(function(j){(j.results||[]).forEach(function(it){layBreaks[it.name]=it.breakdown;});reweighLayouts();})
@@ -645,6 +645,7 @@ function persistLayout(nm,verb){var msg=document.getElementById("pcb-savemsg");
   .catch(function(){if(msg){msg.style.color="#f85149";
     msg.textContent=(verb==="updating"?"update":"save")+" failed";}});}
 document.getElementById("pcb-saveas").addEventListener("click",function(){
+ if(PCB.single){persistLayout("layout","saving");return;} // designs keep ONE layout
  var nm=window.prompt("Name this layout:","layout "+stamp());
  if(nm===null)return; nm=nm.trim(); if(!nm)return; persistLayout(nm,"saving");});
 // Update: overwrite the loaded layout in place (no prompt) — save progress on
@@ -738,7 +739,11 @@ var pan=null,marq=null,marqEl=null;
 var outlineMode=false,outDraw=null;
 function outlineArm(on){outlineMode=on;
  var b=document.getElementById("pcb-outline");if(b)b.classList.toggle("on",on);
- svg.classList.toggle("outline-mode",on);}
+ svg.classList.toggle("outline-mode",on);
+ var msg=document.getElementById("pcb-savemsg");
+ if(msg&&on){msg.style.color="#7ee787";
+  msg.textContent="outline: drag a rectangle on the board (plain click clears, Esc cancels)";}
+ else if(msg&&!outDraw){msg.textContent="";}}
 // Start a viewport pan from the current pointer. Shared by the empty-space
 // handler below AND the part/pad pointerdown handlers (defined earlier, this is
 // hoisted), so a middle-button or Space-held drag pans the board even when the
@@ -967,7 +972,10 @@ function livePoll(gen,lastSeq,misses){
    if(j.done){if(j.err){liveMsg("Optimizer error — falling back…","","err");
        setTimeout(function(){liveFallback("");},700);}
      else{liveMsg("Converged — loading final layout…","","done");
-       setTimeout(function(){window.location.reload();},400);}
+       // Land on ?show=cache so the fresh result is what you SEE — a plain
+       // reload would snap back to the starred/saved layout and make the run
+       // look like a no-op. Save then commits it as the layout.
+       setTimeout(function(){window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?show=cache";},400);}
      return;}
    setTimeout(function(){livePoll(gen,lastSeq,0);},350);})
   .catch(function(){if(misses>20){liveHide();return;}
