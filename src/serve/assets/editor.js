@@ -1277,6 +1277,48 @@
     const inlineDevs = new Set();
     links.forEach((lk) => lk.passives.forEach((x) => { if (x.device) inlineDevs.add(x.ref); }));
     const inlinePart = (r) => inlineDevs.has(r) && twoPortPassive(r);
+    // Power tree. scene.rails (server-derived from sub-block output ports) maps
+    // each rail — and its ferrite-bridged aliases — to the IC that produces it.
+    // A top-level input `(port … in)` on a rail-named net synthesizes an entry
+    // for the board input, anchored to the connector carrying the most pads on
+    // it, so the chain starts at the power inlet.
+    const railByNet = new Map();          // net or alias -> {net, producer}
+    (scene.rails || []).forEach((r) => {
+      if (!r.source_hub) return;
+      const entry = { net: r.net, producer: r.source_hub };
+      railByNet.set(r.net, entry);
+      (r.aliases || []).forEach((a) => railByNet.set(a, entry));
+    });
+    (scene.ports || []).forEach((p) => {
+      if (!p.net || railByNet.has(p.net) || String(p.dir) !== "in") return;
+      if (!(isPowerName(p.net) || /\d+v\d*/i.test(netLeaf(p.net)))) return;
+      let best = null, bestN = 0;
+      real.forEach((h) => {
+        const pre = ((h.ref.split("/").pop() || "").match(/^[A-Za-z]+/) || [""])[0].toUpperCase();
+        if (pre !== "J" && pre !== "P" && pre !== "X") return;
+        let n = 0; h.pins.forEach((pp) => { if ((pp.anet || pp.net) === p.net) n++; });
+        if (n > bestN) { bestN = n; best = h.ref; }
+      });
+      if (best) railByNet.set(p.net, { net: p.net, producer: best });
+    });
+    const producerRefs = new Set([...railByNet.values()].map((e) => e.producer));
+    const railsOf = (ref) => {
+      const out = [], seen = new Set();
+      real.forEach((h) => { if (h.ref === ref) h.pins.forEach((p) => { const n = p.anet || p.net; if (n && !seen.has(n)) { seen.add(n); out.push({ net: n, name: p.name }); } }); });
+      return out;
+    };
+    // Unbound rail-level caps (both legs rail + ground — invisible before) dock
+    // as spokes on their rail's PRODUCER row: the regulator's output bank.
+    const railCapsByNet = new Map();
+    (scene.passives || []).forEach((p) => {
+      const nets = (p.pins || []).map((x) => x.net).filter(Boolean);
+      if (nets.length !== 2 || p.decouplePin) return;
+      if (passType(p.ref, p.component, p.value, p.symbol) !== "capacitor") return;
+      const g = nets.find((n) => isGroundName(n)), r = nets.find((n) => !isGroundName(n));
+      if (!g || !r || !railByNet.has(r)) return;
+      let a = railCapsByNet.get(r); if (!a) { a = []; railCapsByNet.set(r, a); }
+      if (!a.some((x) => x.ref === p.ref)) a.push({ ref: p.ref, type: "capacitor", value: (p.count > 1 ? p.count + "× " : "") + (p.value || p.ref), other: g });
+    });
     const byRef = new Map();                              // ref -> [link index…]
     links.forEach((lk, i) => [lk.a.ref, lk.b.ref].forEach((r) => {
       let a = byRef.get(r); if (!a) { a = []; byRef.set(r, a); } a.push(i);
@@ -1290,6 +1332,21 @@
       addItem(owner, other, lk);
       if (!other.terminal) linkPartner.set(other.ref + "\0" + other.pin, owner.ref);
       lk.passives.forEach((x) => { if (!x.device) inlinePass.add(x.ref); });
+    });
+    // Each regulator's INPUT rail becomes a real partner row — one wire to a
+    // ghost of the upstream producer — so a power cell reads "fed from X" and
+    // the chain J1 → buck → LDO is walkable. Owned by the consumer: the
+    // producer's own cell keeps the rail as a plain output stub + chips.
+    producerRefs.forEach((ref) => {
+      if (isTPRef(ref) || inlinePart(ref)) return;
+      railsOf(ref).forEach((pn) => {
+        const rail = railByNet.get(pn.net);
+        if (!rail || rail.producer === ref || isGroundName(pn.net)) return;
+        let parts = byIC.get(ref); if (!parts) { parts = new Map(); byIC.set(ref, parts); }
+        let arr = parts.get(rail.producer); if (!arr) { arr = []; parts.set(rail.producer, arr); }
+        if (arr.some((it) => it.net === pn.net)) return;
+        arr.push({ net: pn.net, outNet: null, farNet: null, through: null, via: null, tail: null, icPinName: pn.name, ghostPinName: "", diff: false, terminal: false });
+      });
     });
     // For a fanout net whose target is ALREADY a ghost in an anchor's cell (e.g. the LMX2595
     // is a ghost in J1's cell via its SPI_MISO/CSN links), add a "bus pin" to that ghost so it
@@ -1381,6 +1438,25 @@
     const cells = [];
     const cellRefs = [], seenCellRef = new Set();          // every real IC (test points + inline two-ports aside), in scene order
     real.forEach((h) => { if (!isTPRef(h.ref) && !inlinePart(h.ref) && !seenCellRef.has(h.ref)) { seenCellRef.add(h.ref); cellRefs.push(h.ref); } });
+    // Power-first ordering: rail producers sort by depth in the rail flow
+    // (board input 0, buck off it 1, LDO off the buck 2 …) ahead of everything
+    // else (which keeps scene order) — the map opens on the power tree, page-1
+    // style, flowing left to right.
+    const prodDepth = new Map();
+    const depthOf = (ref, guard) => {
+      if (prodDepth.has(ref)) return prodDepth.get(ref);
+      if (guard.has(ref)) return 0;
+      guard.add(ref);
+      let d = 0;
+      railsOf(ref).forEach((pn) => {
+        const rail = railByNet.get(pn.net);
+        if (rail && rail.producer !== ref) d = Math.max(d, 1 + depthOf(rail.producer, guard));
+      });
+      prodDepth.set(ref, d);
+      return d;
+    };
+    const depthGuard = new Set();
+    cellRefs.sort((a, b) => (producerRefs.has(a) ? depthOf(a, depthGuard) : 1e9) - (producerRefs.has(b) ? depthOf(b, depthGuard) : 1e9));
     cellRefs.forEach((ref) => {
       const parts = byIC.get(ref) || new Map();
       const groups = [...parts.entries()].map(([pref, items]) => ({ pref, label: labelOf.get(pref) || pref, items })).sort((a, b) => b.items.length - a.items.length);
@@ -1409,6 +1485,8 @@
         const ps = [], seenP = new Set();            // bypass caps bound to a pad (decoupByPin) + series/pulls on the net
         pads.forEach((pad) => (decoupByPin.get(ref + " " + pad) || []).forEach((x) => { if (!seenP.has(x.ref)) { seenP.add(x.ref); ps.push(x); } }));
         (passByNet.get(net) || []).forEach((x) => { if (!seenP.has(x.ref) && !passClaimed.has(x.ref) && !inlinePass.has(x.ref)) { seenP.add(x.ref); ps.push(x); } });
+        const rr = railByNet.get(net);               // rail-level cap bank rides its producer's rail row
+        if (rr && rr.producer === ref) (railCapsByNet.get(net) || []).forEach((x) => { if (!seenP.has(x.ref) && !passClaimed.has(x.ref)) { seenP.add(x.ref); ps.push(x); } });
         ps.forEach((x) => passClaimed.add(x.ref));
         // A chain-connected pin has no IC directly on its own net (the partner sits
         // past the series parts, drawn in the owner's cell) — chip the owner instead.
