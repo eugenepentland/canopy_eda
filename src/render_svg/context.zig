@@ -148,6 +148,17 @@ pub const PinGroup = struct {
     group: []const u8 = "",
 };
 
+/// Result of splitting a hub's pin groups across the two columns, merge-aware
+/// (identical single-passive spokes collapse to one slot). Lives here so
+/// `RenderCtx` can memoize it — the scene-graph renderer computes it three
+/// times per hub otherwise.
+pub const MergeAwareSplit = struct {
+    left: []const PinGroup,
+    right: []const PinGroup,
+    left_heights: []f64,
+    right_heights: []f64,
+};
+
 // ── Render Context ────────────────────────────────────────────────────
 
 /// All the pre-computed lookup tables the SVG schematic renderer needs:
@@ -184,10 +195,17 @@ pub const RenderCtx = struct {
     /// single-pin side (e.g. a BOOT pull-up at the MCU's lone BOOT pin) instead
     /// of being buried among the busy rail's pins. See `computeSpokeAnchors`.
     spoke_anchor_net: std.StringHashMapUnmanaged([]const u8),
+    /// Memoized merge-aware hub splits, keyed by hub_ref + the groups' pin ids
+    /// (see `render_json.splitGroupsByMergeAwareHeight`). The three per-hub
+    /// render passes recompute an identical split otherwise; a hit is only ever
+    /// returned for byte-identical inputs, so it's result-identical. Arena-
+    /// backed like the rest of the render state (no explicit deinit).
+    hub_split_cache: std.StringHashMapUnmanaged(MergeAwareSplit) = .empty,
 
     pub fn init(allocator: Allocator) RenderCtx {
         return .{
             .allocator = allocator,
+            .hub_split_cache = .empty,
             .instances = .empty,
             .nets = .empty,
             .hub_order = .empty,

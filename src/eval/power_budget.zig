@@ -91,21 +91,7 @@ pub fn analyze(
     // Step 1: union-find on ferrite-bead-bridged nets. A ferrite is a DC
     // conductor, so loads on its downstream side must attribute back to the
     // upstream regulator's budget.
-    var net_parent: std.StringHashMapUnmanaged([]const u8) = .empty;
-    for (block.instances) |inst| {
-        if (!std.mem.startsWith(u8, inst.component, "ferrite")) continue;
-        var net_a: ?[]const u8 = null;
-        var net_b: ?[]const u8 = null;
-        for (block.nets) |net| {
-            const base = na.baseNetName(net.name);
-            for (net.pins) |p| {
-                if (!std.mem.eql(u8, p.ref_des, inst.ref_des)) continue;
-                if (std.mem.eql(u8, p.pin, "1")) net_a = base;
-                if (std.mem.eql(u8, p.pin, "2")) net_b = base;
-            }
-        }
-        if (net_a != null and net_b != null) try unionNets(allocator, &net_parent, net_a.?, net_b.?);
-    }
+    var net_parent = try na.buildFerriteBridges(allocator, block);
 
     // Step 2: collect source declarations from sub-block output ports.
     const SourceInfo = struct {
@@ -125,7 +111,7 @@ pub fn analyze(
                 if (!matched) continue;
                 const top_net = if (std.mem.eql(u8, nt.a, path)) nt.b else nt.a;
                 const base = na.baseNetName(top_net);
-                const root = findRoot(&net_parent, base);
+                const root = na.findRoot(&net_parent, base);
                 // Multiple sources on the same rail (e.g. battery + charger
                 // both on VBATT): keep the highest-capacity one for the
                 // budget check. Picking by current_max makes the result
@@ -179,7 +165,7 @@ pub fn analyze(
 
     for (block.nets) |net| {
         const base = na.baseNetName(net.name);
-        const root = findRoot(&net_parent, base);
+        const root = na.findRoot(&net_parent, base);
         var load = loads.get(root) orelse RailLoad{ .first_name = base };
         for (net.pins) |pin| {
             if (pin.i_typ) |v| {
@@ -458,7 +444,7 @@ fn findRailForSubPath(
         if (!matched) continue;
         const top_net = if (std.mem.eql(u8, nt.a, path)) nt.b else nt.a;
         const base = na.baseNetName(top_net);
-        return findRoot(net_parent, base);
+        return na.findRoot(net_parent, base);
     }
     return null;
 }
@@ -523,25 +509,4 @@ fn sectionVoltage(sec: env_mod.Section, rail_name: []const u8) ?f64 {
     }
     for (sec.sub_sections) |sub| if (sectionVoltage(sub, rail_name)) |v| return v;
     return null;
-}
-
-fn findRoot(parent: *std.StringHashMapUnmanaged([]const u8), name: []const u8) []const u8 {
-    var cur = name;
-    while (parent.get(cur)) |p| {
-        if (std.mem.eql(u8, p, cur)) return cur;
-        cur = p;
-    }
-    return cur;
-}
-
-fn unionNets(
-    allocator: std.mem.Allocator,
-    parent: *std.StringHashMapUnmanaged([]const u8),
-    a: []const u8,
-    b: []const u8,
-) std.mem.Allocator.Error!void {
-    const ra = findRoot(parent, a);
-    const rb = findRoot(parent, b);
-    if (std.mem.eql(u8, ra, rb)) return;
-    try parent.put(allocator, rb, ra);
 }
