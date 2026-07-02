@@ -20,6 +20,7 @@ const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env_mod = @import("../eval/env.zig");
 const render_json = @import("../render_json.zig");
 const assets_css = @import("assets_css.zig");
+const static_assets = @import("static_assets.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
@@ -165,7 +166,10 @@ pub fn editorPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     try w.writeAll("window.SCENE=");
     try writeScriptJson(w, scene);
     try w.writeAll(";</script>");
-    try w.writeAll("<script src=\"/static/editor.js\"></script>");
+    var ver_buf: [20]u8 = undefined;
+    try w.writeAll("<script src=\"/static/editor.js?v=");
+    try w.writeAll(static_assets.editorJsVersion(&ver_buf));
+    try w.writeAll("\"></script>");
     try w.writeAll("</body></html>");
 
     res.content_type = .HTML;

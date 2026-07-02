@@ -21,6 +21,15 @@ const review_notes_js = @embedFile("assets/review_notes.js");
 // onto a pan/zoom canvas with section-as-sheet navigation + edit hotkeys.
 const editor_js = @embedFile("assets/editor.js");
 
+/// Content-hash of editor.js as a hex string, appended as `?v=` to its
+/// <script> URL so a rebuilt client is never served stale from the browser
+/// cache (the URL changes iff the bytes change — standard cache-busting).
+/// Computed at runtime (hashing 150 KB at comptime blows the eval-branch
+/// quota); writes into the caller's buffer, so no shared state / no races.
+pub fn editorJsVersion(buf: []u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{x}", .{std.hash.Wyhash.hash(0, editor_js)}) catch "0";
+}
+
 // Vendored CodeMirror 5 (MIT) — core + scheme mode + matchbrackets/
 // closebrackets addons concatenated into one bundle. Backs the full-file
 // `.sexp` source editor on the schematic page. Self-hosted so the editor
