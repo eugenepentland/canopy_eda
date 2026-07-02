@@ -5,6 +5,7 @@ const env_mod = @import("eval/env.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const parts_mod = @import("parts.zig");
 const infra_random = @import("infra/random.zig");
+const kicad_format = @import("kicad_pcb/format.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Property = env_mod.Property;
@@ -43,6 +44,32 @@ pub const BomEntry = struct {
     id: []const u8 = "",
     nets: []const []const u8 = &.{},
 };
+
+/// Decode a `.bom` string token (undoing the writer's `sexprEscape`) into a
+/// freshly-owned copy that outlives the parse buffer. A no-op decode (no
+/// backslash) still returns an owned dupe, so every returned field is owned by
+/// `allocator` exactly once — no transient-allocation leak, and the writers'
+/// escape-on-write round-trips without double-escaping.
+fn decodeOwned(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (std.mem.indexOfScalar(u8, raw, '\\') == null) return allocator.dupe(u8, raw);
+    // Count decoded length first so the returned buffer is exactly sized (a
+    // realloc'd sub-slice would mismatch the allocation length on free).
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        if (raw[i] == '\\' and i + 1 < raw.len) i += 1;
+        n += 1;
+    }
+    const out = try allocator.alloc(u8, n);
+    var w: usize = 0;
+    i = 0;
+    while (i < raw.len) : (i += 1) {
+        if (raw[i] == '\\' and i + 1 < raw.len) i += 1;
+        out[w] = raw[i];
+        w += 1;
+    }
+    return out;
+}
 
 /// Load a .bom sidecar file and return the entries.
 /// Returns empty slice if file does not exist.
@@ -83,7 +110,7 @@ pub fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) BomError![]co
                 if (std.mem.eql(u8, key, "nets")) {
                     for (prop_children[1..]) |net_node| {
                         const net_str = net_node.asString() orelse continue;
-                        try entry_nets.append(allocator, try allocator.dupe(u8, net_str));
+                        try entry_nets.append(allocator, try decodeOwned(allocator, net_str));
                     }
                     continue;
                 }
@@ -97,16 +124,16 @@ pub fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) BomError![]co
                 } else {
                     try props.append(allocator, .{
                         .key = try allocator.dupe(u8, key),
-                        .value = try allocator.dupe(u8, value),
+                        .value = try decodeOwned(allocator, value),
                     });
                 }
             }
         }
 
         try entries.append(allocator, .{
-            .ref_des = try allocator.dupe(u8, ref_des),
+            .ref_des = try decodeOwned(allocator, ref_des),
             .uuid = try allocator.dupe(u8, uuid),
-            .component = if (component.len > 0) try allocator.dupe(u8, component) else "",
+            .component = if (component.len > 0) try decodeOwned(allocator, component) else "",
             .properties = props.toOwnedSlice(allocator) catch &.{},
             .id = entry_id,
             .nets = entry_nets.toOwnedSlice(allocator) catch &.{},
@@ -241,7 +268,10 @@ pub fn applyBomUuids(
     const entries = try loadBom(allocator, bom_path);
     if (entries.len == 0) return;
 
-    // Build ref_des → uuid map
+    // Build ref_des → uuid map. `.bom` keys for sub-block parts are
+    // hierarchical (`buck/C3`), so uuids must be matched against the same
+    // prefixed key — matching on the child's bare ref_des applied a top-level
+    // `C3`'s uuid to every same-named sub-block twin (duplicate identities).
     var uuid_map = std.StringHashMap([]const u8).init(allocator);
     defer uuid_map.deinit();
     for (entries) |entry| {
@@ -250,15 +280,37 @@ pub fn applyBomUuids(
         }
     }
 
+    applyBomUuidsRec(block, &uuid_map, allocator, "");
+}
+
+/// Apply the ref_des→uuid map through the block hierarchy, threading the
+/// `sub-block/…` prefix so hierarchical `.bom` keys line up (mirrors
+/// `bom_resolve.applyBom`'s prefix threading).
+fn applyBomUuidsRec(
+    block: *const DesignBlock,
+    uuid_map: *const std.StringHashMap([]const u8),
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+) void {
     // Apply to instances (uses @constCast — safe because block was just allocated)
     const instances: []Instance = @constCast(block.instances);
     for (instances) |*inst| {
-        if (uuid_map.get(inst.ref_des)) |uuid| {
+        const key = if (prefix.len > 0)
+            (std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, inst.ref_des }) catch continue)
+        else
+            inst.ref_des;
+        defer if (prefix.len > 0) allocator.free(key);
+        if (uuid_map.get(key)) |uuid| {
             inst.uuid = uuid;
         }
     }
     for (block.sub_blocks) |sb| {
-        try applyBomUuids(allocator, sb.block, project_dir, design_name);
+        const child_prefix = if (prefix.len > 0)
+            (std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name }) catch continue)
+        else
+            sb.name;
+        defer if (prefix.len > 0) allocator.free(child_prefix);
+        applyBomUuidsRec(sb.block, uuid_map, allocator, child_prefix);
     }
 }
 

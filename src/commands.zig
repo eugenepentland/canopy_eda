@@ -134,9 +134,11 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     var w_buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = w_buf.writer(allocator);
     var shown: usize = 0;
+    var errors: usize = 0;
     for (violations) |v| {
         if (severity_filter) |sf| if (!std.mem.eql(u8, @tagName(v.severity), sf)) continue;
         shown += 1;
+        if (v.severity == .@"error") errors += 1;
         try w.print("{s:<9} {s:<26} ", .{ @tagName(v.severity), @tagName(v.kind) });
         if (v.ref_des.len > 0) try w.print("{s} ", .{v.ref_des});
         if (v.net.len > 0) try w.print("[{s}] ", .{v.net});
@@ -144,43 +146,76 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     }
     try w.print("\n{d} violation(s)\n", .{shown});
     try stdout.writeAll(w_buf.items);
+
+    // Gate: `netlisp check` exits non-zero when any error-severity violation
+    // survives the (optional) `--severity` filter, so CI / agents can rely on
+    // the exit code. Warnings and info alone still exit 0.
+    if (errors > 0) std.process.exit(1);
 }
 
-/// CLI entry point for `netlisp build`. Evaluates `<design>.sexp`, runs assertions,
-/// resolves identities into the `.bom`, and either prints the resolved design
-/// to stdout, writes it to `--output-dir`, or pushes it to a running server
-/// via `--push` so the browser viewer updates live.
-/// `netlisp build [--project-dir <d>] [--output-dir <out>] [--push] <design>` —
-/// evaluate a design, persist any newly generated `(id …)`/`(ids …)` tokens
-/// back into source, and optionally push the rebuilt scene to a running server.
-pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
-    var project_dir: []const u8 = ".";
-    var push_name: ?[]const u8 = null;
-    var output_dir: ?[]const u8 = null;
-    var server_url: []const u8 = "http://localhost:7050";
+/// Parsed argument vector for `netlisp build`. Kept as a pure struct so the
+/// (process-exiting) `cmdBuild` handler can delegate its parsing to a testable
+/// helper. `design` is the resolved design name (positional, or the value that
+/// followed a `--push <name>`); `want_push` records whether `--push` was passed
+/// at all (a bare positional name does *not* imply a push).
+const BuildArgs = struct {
+    project_dir: []const u8 = ".",
+    output_dir: ?[]const u8 = null,
+    server_url: []const u8 = "http://localhost:7050",
+    design: ?[]const u8 = null,
+    want_push: bool = false,
+};
+
+/// Parse `netlisp build` arguments. `--push` may be a bare flag (push the
+/// positional design) or take an explicit `--push <name>`; either way it is the
+/// *only* thing that requests a network push — a lone positional design name is
+/// built to stdout / `--output-dir` without touching a server.
+fn parseBuildArgs(args: []const []const u8) BuildArgs {
+    var out: BuildArgs = .{};
     var positional_name: ?[]const u8 = null;
+    var push_name: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
-            project_dir = args[i + 1];
+            out.project_dir = args[i + 1];
             i += 1;
-        } else if (std.mem.eql(u8, args[i], "--push") and i + 1 < args.len) {
-            push_name = args[i + 1];
-            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--push")) {
+            out.want_push = true;
+            // `--push <name>` gives the design explicitly; a bare `--push`
+            // pushes whatever positional name is supplied.
+            if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "--")) {
+                push_name = args[i + 1];
+                i += 1;
+            }
         } else if (std.mem.eql(u8, args[i], OUTPUT_DIR_FLAG) and i + 1 < args.len) {
-            output_dir = args[i + 1];
+            out.output_dir = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--server") and i + 1 < args.len) {
-            server_url = args[i + 1];
+            out.server_url = args[i + 1];
             i += 1;
         } else if (!std.mem.startsWith(u8, args[i], "--")) {
             positional_name = args[i];
         }
     }
+    out.design = push_name orelse positional_name;
+    return out;
+}
 
-    if (push_name == null and positional_name != null) push_name = positional_name;
+/// CLI entry point for `netlisp build`. Evaluates `<design>.sexp`, runs assertions,
+/// resolves identities into the `.bom`, and either prints the resolved design
+/// to stdout, writes it to `--output-dir`, or (only with `--push`) pushes it to a
+/// running server so the browser viewer updates live.
+/// `netlisp build [--project-dir <d>] [--output-dir <out>] [--push] <design>` —
+/// evaluate a design, persist any newly generated `(id …)`/`(ids …)` tokens
+/// back into source, and optionally push the rebuilt scene to a running server.
+pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
+    const parsed = parseBuildArgs(args);
+    const project_dir = parsed.project_dir;
+    const output_dir = parsed.output_dir;
+    const server_url = parsed.server_url;
+    const want_push = parsed.want_push;
 
-    const design = push_name orelse {
+    const design = parsed.design orelse {
         std.debug.print("Usage: netlisp build [--project-dir <d>] [--output-dir <out>] [--push] <design-name>\n", .{});
         std.process.exit(1);
     };
@@ -248,8 +283,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
 
     {
         {
-            const design_name = push_name orelse "board";
-            const ids_path = paths.designSiblingPath(allocator, project_dir, design_name, ".bom") catch {
+            const ids_path = paths.designSiblingPath(allocator, project_dir, design, ".bom") catch {
                 std.debug.print(OUT_OF_MEMORY_MSG, .{});
                 std.process.exit(1);
             };
@@ -266,8 +300,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
             defer allocator.free(output);
 
             if (output_dir) |dir| {
-                const name = push_name orelse "design";
-                const out_path = std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, name }) catch {
+                const out_path = std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, design }) catch {
                     std.debug.print(OUT_OF_MEMORY_MSG, .{});
                     std.process.exit(1);
                 };
@@ -284,20 +317,28 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
                 std.debug.print("Wrote {s}\n", .{out_path});
             }
 
-            if (push_name) |name| {
-                const url = std.fmt.allocPrint(allocator, "{s}/api/push/{s}", .{ server_url, name }) catch {
+            // A push is requested only by `--push`; a bare positional design
+            // name builds without touching a server. A failed push after a
+            // successful `--output-dir` write is reported but does not
+            // discard the file that was already written — the write is the
+            // durable artifact, the push is a live-view convenience.
+            if (want_push) {
+                const url = std.fmt.allocPrint(allocator, "{s}/api/push/{s}", .{ server_url, design }) catch {
                     std.debug.print(OUT_OF_MEMORY_MSG, .{});
                     std.process.exit(1);
                 };
                 defer allocator.free(url);
                 pushToServer(allocator, url, output) catch {
                     std.debug.print("Push failed\n", .{});
-                    std.process.exit(1);
+                    // If we already wrote the file, the run's primary artifact
+                    // succeeded; still signal the push failure via exit code
+                    // but only exit here when there was no other output path.
+                    if (output_dir == null) std.process.exit(1);
                 };
                 std.debug.print("Pushed to {s}\n", .{url});
             }
 
-            if (push_name == null and output_dir == null) {
+            if (!want_push and output_dir == null) {
                 const file = std.fs.File.stdout();
                 try file.writeAll(output);
                 try file.writeAll("\n");
@@ -321,7 +362,7 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
         } else if (std.mem.eql(u8, args[i], OUTPUT_DIR_FLAG) and i + 1 < args.len) {
             output_dir = args[i + 1];
             i += 1;
-        } else {
+        } else if (!std.mem.startsWith(u8, args[i], "--")) {
             design_name = args[i];
         }
     }
@@ -402,9 +443,11 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
 }
 
 /// `netlisp import-kicad <board.kicad_pcb> [--project-dir <d>] [--name <n>]
-/// [--title <t>] [--dry-run]` — migrate an existing KiCad board into the
-/// project: family-map standard passives, generate library files for the
-/// rest, and write `src/<name>.sexp` mirroring the board's netlist.
+/// [--title <t>] [--dry-run] [--fold-channels] [--fold-prefix <P>]` — migrate an
+/// existing KiCad board into the project: family-map standard passives, generate
+/// library files for the rest, and write `src/<name>.sexp` mirroring the board's
+/// netlist. `--fold-channels` (optionally seeded by `--fold-prefix`) de-dups a
+/// channelized board into one defmodule + per-channel sub-blocks.
 pub fn cmdImportKicad(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -442,7 +485,7 @@ pub fn cmdImportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     }
 
     const board = board_path orelse {
-        std.debug.print("Usage: netlisp import-kicad <board.kicad_pcb> [--project-dir <d>] [--name <n>] [--title <t>] [--dry-run]\n", .{});
+        std.debug.print("Usage: netlisp import-kicad <board.kicad_pcb> [--project-dir <d>] [--name <n>] [--title <t>] [--dry-run] [--fold-channels] [--fold-prefix <P>]\n", .{});
         std.process.exit(1);
     };
 
@@ -503,5 +546,46 @@ fn pushToServer(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
     }
 
     const term = try child.wait();
-    if (term.Exited != 0) return error.PushFailed;
+    // A signal-terminated curl yields `.Signal`, not `.Exited`; read the
+    // `Exited` field only after confirming the tag, otherwise the field access
+    // is illegal behaviour (panic in Debug, UB in the ReleaseSmall prod build).
+    if (term != .Exited or term.Exited != 0) return error.PushFailed;
+}
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+test "parseBuildArgs: bare positional does not imply push" {
+    // spec: commands - a lone positional design name builds without pushing
+    const args = [_][]const u8{ PROJECT_DIR_FLAG, "projects/designs", "stm32n6" };
+    const got = parseBuildArgs(&args);
+    try std.testing.expectEqualStrings("projects/designs", got.project_dir);
+    try std.testing.expectEqualStrings("stm32n6", got.design.?);
+    try std.testing.expect(!got.want_push);
+    try std.testing.expect(got.output_dir == null);
+}
+
+test "parseBuildArgs: --push <name> requests a push of that design" {
+    // spec: commands - --push with an explicit name pushes that design
+    const args = [_][]const u8{ "--push", "stm32n6" };
+    const got = parseBuildArgs(&args);
+    try std.testing.expect(got.want_push);
+    try std.testing.expectEqualStrings("stm32n6", got.design.?);
+}
+
+test "parseBuildArgs: bare --push pushes the positional design" {
+    // spec: commands - a bare --push flag pushes the positional design
+    const args = [_][]const u8{ "--push", PROJECT_DIR_FLAG, "d", "adf5901" };
+    const got = parseBuildArgs(&args);
+    try std.testing.expect(got.want_push);
+    try std.testing.expectEqualStrings("d", got.project_dir);
+    try std.testing.expectEqualStrings("adf5901", got.design.?);
+}
+
+test "parseBuildArgs: --output-dir without --push does not push" {
+    // spec: commands - --output-dir writes a file without a network push
+    const args = [_][]const u8{ OUTPUT_DIR_FLAG, "/tmp/out", "lt3045" };
+    const got = parseBuildArgs(&args);
+    try std.testing.expect(!got.want_push);
+    try std.testing.expectEqualStrings("/tmp/out", got.output_dir.?);
+    try std.testing.expectEqualStrings("lt3045", got.design.?);
 }

@@ -27,7 +27,29 @@ unlinked tag: Web Server - The /pcb-layout page defaults to the design's starred
 unlinked tag: Web Server - The layouts sidecar round-trips snapshots and the optimizer cache slot through one file in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - layout-match counts a wrong-edge proportion as a partial area mismatch in ./src/serve/layout_match.zig
 unlinked tag: Web Server - layout-match credits interchangeable parts by per-edge count, ignoring which fungible part is where in ./src/serve/layout_match.zig
+unlinked tag: bom-resolve - A property value containing a quote/backslash round-trips through the .bom without corrupting it in ./src/bom_resolve.zig
+unlinked tag: commands - --output-dir writes a file without a network push in ./src/commands.zig
+unlinked tag: commands - --push with an explicit name pushes that design in ./src/commands.zig
+unlinked tag: commands - a bare --push flag pushes the positional design in ./src/commands.zig
+unlinked tag: commands - a lone positional design name builds without pushing in ./src/commands.zig
+unlinked tag: convert/footprint - Bare-integer pad numbers survive the conversion (no dangling num_buf slice) in ./src/convert/footprint.zig
+unlinked tag: diagram/layout - two same-side (edge …) directives stack in distinct cells instead of overlapping in ./src/diagram/layout.zig
+unlinked tag: diagram/lod - Glance chips resolve nodes by id not label, so duplicate-labelled blocks stay distinct in ./src/diagram/lod.zig
+unlinked tag: erc - A value-less passive inside a sub-block is flagged (recursion) in ./src/erc.zig
+unlinked tag: erc - Duplicate ref-des inside a sub-block collides with a top-level part (flattened scope) in ./src/erc.zig
+unlinked tag: erc - a "10µF" bulk cap on a multi-supply-pad rail is exempt from decoupling_unbound in ./src/erc.zig
+unlinked tag: erc - a VSS-only IC is not counted as powered (the VS-prefix false positive) in ./src/erc.zig
+unlinked tag: erc - a VSYS rail still counts as a power connection (no VS regression) in ./src/erc.zig
+unlinked tag: erc - a dangling (verifies …) sign-off whose target no longer exists is surfaced as a warning in ./src/erc.zig
+unlinked tag: erc - a stale req_id on an existing target still counts as an orphaned verification in ./src/erc.zig
+unlinked tag: erc - capFarads accepts the UTF-8 micro sign so a "10µF" bulk cap keeps its decoupling exemption in ./src/erc.zig
 unlinked tag: erc - surfaces layout-critical net classes as info rows, staying silent on ground/power/plain-signal nets in ./src/erc.zig
+unlinked tag: eval/builtins - E-series snapping terminates on non-finite input instead of looping forever in ./src/eval/builtins.zig
+unlinked tag: eval/builtins - Modulo rejects a non-positive divisor instead of triggering UB in ./src/eval/builtins.zig
+unlinked tag: eval/design_block - a reverse-order chained tie also collapses all nets onto the canonical root in ./src/eval/design_block.zig
+unlinked tag: eval/design_block - a self-tie is a harmless no-op, never deleting the net in ./src/eval/design_block.zig
+unlinked tag: eval/design_block - a tie renames per-pin bypass stubs onto the canonical root prefix in ./src/eval/design_block.zig
+unlinked tag: eval/design_block - net ties merge transitively so a chained tie collapses all three nets into one in ./src/eval/design_block.zig
 unlinked tag: eval/forms - diagram-layout is the sole name for the schematic layout form; the legacy layout/module aliases are gone in ./src/eval/forms.zig
 unlinked tag: eval/instance - (decouples "IC" PIN) binds a cap to a specific hub pad in ./src/eval/instance.zig
 unlinked tag: eval/instance - (decouples rail) opts a cap out of the per-pin-decoupling requirement in ./src/eval/instance.zig
@@ -38,7 +60,16 @@ unlinked tag: eval/modules - A later parameter's default may reference an earlie
 unlinked tag: eval/modules - A supplied argument overrides the parameter's declared default in ./src/eval/modules.zig
 unlinked tag: eval/modules - Omitted parameters fall back to their declared (param default) value in ./src/eval/modules.zig
 unlinked tag: eval/modules - Required parameters are still diagnosed when only defaulted ones are unbound in ./src/eval/modules.zig
+unlinked tag: export_kicad - Sanitizes a declared footprint name so a path-traversal component can't escape the output directory in ./src/export_kicad.zig
+unlinked tag: export_kicad_netlist - extractPadNames reads bare-integer pad numbers so numerically-padded footprints appear in the NC inventory in ./src/export_kicad_netlist.zig
+unlinked tag: import_fold - A channel with a passive rewired between two same-template internal nets deviates instead of folding silently in ./src/import_fold.zig
+unlinked tag: kicad_pcb/format - sexprEscape escapes embedded quotes and trailing backslash so the printed token round-trips in ./src/kicad_pcb/format.zig
+unlinked tag: kicad_pcb/format - sexprUnescape inverts sexprEscape so a load→save round-trip does not double-escape in ./src/kicad_pcb/format.zig
+unlinked tag: kicad_pcb/writer - Escapes JSON-supplied op values so a raw quote/backslash cannot corrupt the board file in ./src/kicad_pcb/writer.zig
+unlinked tag: kicad_pcb/writer - swap_footprint preserves the board footprint's (attr …) assembly flags in ./src/kicad_pcb/writer.zig
+unlinked tag: paths - Rejects design names that are not bare basenames (traversal defense) in ./src/paths.zig
 unlinked tag: placement/layout_lint - flags an HF decoupling cap on a multi-supply-pad rail with no pin binding, exempting (decouples rail) opt-outs in ./src/placement/layout_lint.zig
+unlinked tag: placement/module_policy - parses capacitance with ASCII and UTF-8 micro prefixes in ./src/placement/module_policy.zig
 unlinked tag: placement/optimizer - (rough …) anchor/group tokens match by ref-des or origin name in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - (rough …) priority is the fill order; lower tiers spill to outer lanes in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - an explicit (decouples …) binding still loops to its hub on a rail shared by >=2 ICs in ./src/placement/optimizer.zig
@@ -54,6 +85,9 @@ unlinked tag: placement/optimizer - refineSidesByPull moves a part to the IC sid
 unlinked tag: placement/optimizer - segsCross flags interior airwire crossings, not shared endpoints in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - servedPadLocal resolves a decoupling cap's bound hub pad on-net and rejects a cross-hub binding in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - the crossing polish never swaps a part onto its wrong anchor side in ./src/placement/optimizer.zig
+unlinked tag: render_svg - Design name is JSON-escaped in the scene graph output in ./src/render_json.zig
+unlinked tag: render_svg - Net names are XML-escaped in the emitted SVG markup in ./src/render_svg/draw.zig
+unlinked tag: req_checks - parseOhms reads a milliohm suffix and R-notation, not 1000x high in ./src/req_checks.zig
 unlinked tag: serve/datasheet_attach - spliceDatasheet dedupes on the normalised stem (re-download counters ignored) in ./src/serve/datasheet_attach.zig
 unlinked tag: serve/datasheet_attach - spliceDatasheet inserts the (datasheet …) form before the component's closing paren with matching indent in ./src/serve/datasheet_attach.zig
 unlinked tag: serve/datasheet_attach - spliceDatasheet rejects sources without a component form in ./src/serve/datasheet_attach.zig
@@ -63,6 +97,7 @@ unlinked tag: serve/diag_format - build blanks the source line when the span doe
 unlinked tag: serve/diag_format - build extracts the offending source line from the buffer at the span in ./src/serve/diag_format.zig
 unlinked tag: serve/diag_format - caretLine pads to the 1-based column (preserving tabs) and ends with a caret in ./src/serve/diag_format.zig
 unlinked tag: serve/users - The user/role store persists to and resolves from auth_dir, not the project dir (users.json lives at <auth_dir>/users.json) in ./src/serve/users.zig
+unlinked tag: sexpr/parser - Rejects input nested past MAX_PARSE_DEPTH with TooDeep instead of overflowing the stack in ./src/sexpr/parser.zig
 unverified: eval/design_block - placement-group expands into a placement-order (pins) and a group (cohesion)
 unverified: lint - flags a duplicate id token within one design
 unverified: lint - flags a nested (id (id …)) residue form

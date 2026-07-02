@@ -62,6 +62,16 @@ fn lookupU64(allocator: std.mem.Allocator, key: []const u8, default: u64) u64 {
     return std.fmt.parseInt(u64, std.mem.trim(u8, v, WHITESPACE), 10) catch default;
 }
 
+/// True when `NETLISP_DEV` is set (env or `.env`) to a non-empty value. Gates
+/// the serve layer's local-development auth bypass. The env read lives here so
+/// the `ban-env` policy holds (config.zig is the one module that touches the
+/// environment; callers receive a plain bool).
+pub fn devMode(allocator: std.mem.Allocator) bool {
+    const v = lookup(allocator, "NETLISP_DEV") orelse return false;
+    allocator.free(v);
+    return true;
+}
+
 /// Resolve `key` from the real environment first, then from `.env`. Returns
 /// null when unset or empty. Caller owns the slice.
 fn lookup(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {

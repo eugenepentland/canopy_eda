@@ -12,6 +12,7 @@ const NOTE_MAX_BYTES: usize = 4096;
 // Timestamp format: YYYY-MM-DDTHH-MM-SS (filesystem-safe, sorts lexicographically).
 
 pub const HistoryError = error{
+    InvalidName,
     InvalidSnapshotId,
     SnapshotNotFound,
 } ||

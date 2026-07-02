@@ -35,22 +35,8 @@ pub fn build(
 ) std.mem.Allocator.Error![]const PowerRail {
     // Step 1: union-find on ferrite-bead-bridged nets. A ferrite is a DC
     // conductor: loads on its downstream side belong to the upstream rail.
-    var net_parent: std.StringHashMapUnmanaged([]const u8) = .empty;
+    var net_parent = try na.buildFerriteBridges(allocator, block);
     defer net_parent.deinit(allocator);
-    for (block.instances) |inst| {
-        if (!std.mem.startsWith(u8, inst.component, "ferrite")) continue;
-        var net_a: ?[]const u8 = null;
-        var net_b: ?[]const u8 = null;
-        for (block.nets) |net| {
-            const base = na.baseNetName(net.name);
-            for (net.pins) |p| {
-                if (!std.mem.eql(u8, p.ref_des, inst.ref_des)) continue;
-                if (std.mem.eql(u8, p.pin, "1")) net_a = base;
-                if (std.mem.eql(u8, p.pin, "2")) net_b = base;
-            }
-        }
-        if (net_a != null and net_b != null) try unionNets(allocator, &net_parent, net_a.?, net_b.?);
-    }
 
     // Step 2: derive one rail per sub-block output port marked as a power
     // source (direction=out + has declared current capacity). On a multi-
@@ -68,7 +54,7 @@ pub fn build(
             const top_net = findTopNet(block, path_temp) orelse continue;
             const base = na.baseNetName(top_net);
             if (std.mem.eql(u8, base, GND_NAME)) continue;
-            const root = findRoot(&net_parent, base);
+            const root = na.findRoot(&net_parent, base);
             if (std.mem.eql(u8, root, GND_NAME)) continue;
 
             // A rail source is an output port that either declares power specs
@@ -122,7 +108,7 @@ pub fn build(
     var np_it = net_parent.iterator();
     while (np_it.next()) |entry| {
         const child = entry.key_ptr.*;
-        const root = findRoot(&net_parent, child);
+        const root = na.findRoot(&net_parent, child);
         if (std.mem.eql(u8, child, root)) continue;
         const gop = try aliases_by_root.getOrPut(allocator, root);
         if (!gop.found_existing) gop.value_ptr.* = .empty;
@@ -173,27 +159,6 @@ fn findTopNet(block: *const DesignBlock, path: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, nt.b, path)) return nt.a;
     }
     return null;
-}
-
-fn findRoot(parent: *std.StringHashMapUnmanaged([]const u8), name: []const u8) []const u8 {
-    var cur = name;
-    while (parent.get(cur)) |p| {
-        if (std.mem.eql(u8, p, cur)) return cur;
-        cur = p;
-    }
-    return cur;
-}
-
-fn unionNets(
-    allocator: std.mem.Allocator,
-    parent: *std.StringHashMapUnmanaged([]const u8),
-    a: []const u8,
-    b: []const u8,
-) std.mem.Allocator.Error!void {
-    const ra = findRoot(parent, a);
-    const rb = findRoot(parent, b);
-    if (std.mem.eql(u8, ra, rb)) return;
-    try parent.put(allocator, rb, ra);
 }
 
 /// Three-tier voltage resolution for a rail name. Mirrors the cascade in

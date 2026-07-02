@@ -322,6 +322,9 @@ fn renderInstance(ctx: *fold.FoldCtx, w: anytype, pi: usize, ref: []const u8, na
         for (pins.items) |p| w.print(" {s}", .{p}) catch return error.OutOfMemory;
         w.print(" \"{s}\")", .{local}) catch return error.OutOfMemory;
     }
+    // First-class DNP (the `;; DNP on the source board` comment above stays for
+    // provenance) so a folded channel's option part re-exports as DNP too.
+    if (part.dnp) w.writeAll("\n      (dnp)") catch return error.OutOfMemory;
     w.writeAll(")\n") catch return error.OutOfMemory;
 }
 

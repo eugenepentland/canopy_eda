@@ -26,6 +26,30 @@ const Handler = serve_root.Handler;
 
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
+/// A design `:name` is a bare filesystem basename. Reject anything else so the
+/// value is safe to reflect into HTML/JS/URL contexts (it is interpolated raw
+/// into the page shell) and can never traverse the design directory. Without
+/// this, `/editor/%3Cscript%3E…` reflected an executable payload.
+fn isSafeName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 128) return false;
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    for (name) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// Stream already-serialized JSON into a `<script>` element safely: `<` only
+/// occurs inside JSON string values, so escaping it to `<` keeps the JSON
+/// valid while preventing a `</script>` breakout from any embedded string.
+fn writeScriptJson(w: *std.Io.Writer, json: []const u8) std.Io.Writer.Error!void {
+    for (json) |c| {
+        if (c == '<') try w.writeAll("\\u003c") else try w.writeByte(c);
+    }
+}
+
 /// Evaluate `name`'s design source and return its scene-graph JSON, or null
 /// with a reason written into `err`. Mirrors the eval path in `api.pushApi`.
 fn sceneFor(ctx: *Handler, name: []const u8, err: *[]const u8) ?[]const u8 {
@@ -61,6 +85,10 @@ pub fn editorSceneApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
         res.status = 404;
         return;
     };
+    if (!isSafeName(name)) {
+        res.status = 404;
+        return;
+    }
     var err: []const u8 = "";
     const scene = sceneFor(ctx, name, &err);
     res.content_type = .JSON;
@@ -80,6 +108,10 @@ pub fn editorPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         res.status = 404;
         return;
     };
+    if (!isSafeName(name)) {
+        res.status = 404;
+        return;
+    }
     var err: []const u8 = "";
     const scene = sceneFor(ctx, name, &err) orelse {
         res.status = 500;
@@ -124,13 +156,15 @@ pub fn editorPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     try w.writeAll("</div>");
 
     // Data block (consumed by the classic external script below, DOM order).
-    // `name` is a filesystem basename (alphanumerics, `-`, `_`) so it needs no
-    // JSON escaping; quote it directly.
+    // `name` is validated by `isSafeName` above (alphanumerics, `-`, `_`, `.`),
+    // so it needs no JSON escaping; quote it directly. `scene` is design-derived
+    // JSON and must be made `<script>`-safe (a net name could contain
+    // `</script>`) — `writeScriptJson` escapes `<`.
     try w.writeAll("<script>");
     try w.print("window.DESIGN=\"{s}\";", .{name});
     try w.print("window.START_VERSION={d};", .{v});
     try w.writeAll("window.SCENE=");
-    try w.writeAll(scene);
+    try writeScriptJson(w, scene);
     try w.writeAll(";</script>");
     var ver_buf: [20]u8 = undefined;
     try w.writeAll("<script src=\"/static/editor.js?v=");

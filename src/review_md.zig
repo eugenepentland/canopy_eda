@@ -22,6 +22,7 @@ const block_diagram = @import("diagram/diagram.zig");
 const membership = @import("diagram/membership.zig");
 const render_html = @import("render_html.zig");
 const draw = @import("render_svg/draw.zig");
+const escape = @import("escape.zig");
 
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
@@ -345,9 +346,15 @@ fn writeSchematicSections(
         }
     }
     for (block.sub_blocks) |sb| {
-        try w.print("### {s} *(sub-block)*\n\n", .{sb.name});
+        // HTML-escape the names — markdown renderers pass inline HTML through, so
+        // a `<`/`&` in a sub-block name would inject markup into the document.
+        try w.writeAll("### ");
+        try escape.writeXml(w, sb.name);
+        try w.writeAll(" *(sub-block)*\n\n");
         if (sb.block.name.len > 0) {
-            try w.print("*{s}*\n\n", .{sb.block.name});
+            try w.writeAll("*");
+            try escape.writeXml(w, sb.block.name);
+            try w.writeAll("*\n\n");
         }
         // writeHubBlock skips passives (drawn as spokes on each hub) itself.
         for (sb.block.instances) |inst| {
@@ -419,8 +426,17 @@ fn writeHubBlock(
     value: []const u8,
 ) !void {
     if (!draw.isHubRef(ref_des)) return;
-    try w.print("<details><summary><strong><code>{s}</code></strong> · {s}", .{ ref_des, component });
-    if (value.len > 0) try w.print(" · {s}", .{value});
+    // These land inside inline `<details><summary>…</summary>` HTML, which every
+    // markdown renderer passes through verbatim — a `<`/`&` in a component name
+    // would break the collapsible structure (or inject markup), so HTML-escape.
+    try w.writeAll("<details><summary><strong><code>");
+    try escape.writeXml(w, ref_des);
+    try w.writeAll("</code></strong> · ");
+    try escape.writeXml(w, component);
+    if (value.len > 0) {
+        try w.writeAll(" · ");
+        try escape.writeXml(w, value);
+    }
     try w.writeAll("</summary>\n\n");
     var sub_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer sub_buf.deinit(allocator);

@@ -81,7 +81,7 @@ fn stampOf(path: []const u8) std.mem.Allocator.Error!FileStamp {
 /// (`<sexp-dir>/<name>.notes.md`) so the stamp tracks the exact file the
 /// open-task count reads.
 fn notesSibling(scratch: std.mem.Allocator, project_dir: []const u8, name: []const u8) std.mem.Allocator.Error![]u8 {
-    const src = try paths.designSourcePath(scratch, project_dir, name);
+    const src = paths.designSourcePath(scratch, project_dir, name) catch return std.fmt.allocPrint(scratch, "{s}.notes.md", .{name});
     defer scratch.free(src);
     const dir = std.fs.path.dirname(src) orelse "";
     if (dir.len == 0) return std.fmt.allocPrint(scratch, "{s}.notes.md", .{name});

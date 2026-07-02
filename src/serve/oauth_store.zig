@@ -265,7 +265,14 @@ fn saveTokens(allocator: std.mem.Allocator, auth_dir: []const u8) void {
 /// one `cp` away. Step 2 means a crash mid-write can't truncate the live
 /// file: the rename either succeeds atomically or the live file stays as
 /// whichever side completed last.
-fn writeFileAtomicWithBackup(allocator: std.mem.Allocator, path: []const u8, data: []const u8) void {
+/// Write `data` to `path` durably: first copy any existing file to `<path>.bak`
+/// (a one-`cp` recovery point), then write via a tmp-file + atomic rename so a
+/// crash mid-write can't truncate the live file. Shared by every auth-state
+/// store (oauth clients/tokens, sessions, credentials, invites, users, plugin
+/// tokens) — the alternative (`createFile(truncate)` + `writeAll`) leaves a
+/// truncated/empty file on a crash, which for `credentials.json` means total
+/// passkey lockout with no recovery point.
+pub fn writeFileAtomicWithBackup(allocator: std.mem.Allocator, path: []const u8, data: []const u8) void {
     // Backup: copy current file (if any) to <path>.bak. We don't fail the
     // save when backup fails — a missing source on first save is normal
     // and we don't want to block saves on FS quirks.
@@ -275,25 +282,25 @@ fn writeFileAtomicWithBackup(allocator: std.mem.Allocator, path: []const u8, dat
         defer allocator.free(existing);
         if (infra_fs.cwd().createFile(bak_path, .{ .truncate = true })) |bf| {
             defer bf.close();
-            bf.writeAll(existing) catch |e| log.warn("oauth: backup write {s} failed: {s}", .{ bak_path, @errorName(e) });
+            bf.writeAll(existing) catch |e| log.warn("atomic-write: backup write {s} failed: {s}", .{ bak_path, @errorName(e) });
         } else |e| {
-            log.warn("oauth: backup create {s} failed: {s}", .{ bak_path, @errorName(e) });
+            log.warn("atomic-write: backup create {s} failed: {s}", .{ bak_path, @errorName(e) });
         }
     } else |_| {} // no prior file; nothing to back up
 
     // Atomic write: tmp → rename. Same pattern vfs.zig uses for user files.
     var write_buf: [4096]u8 = undefined;
     var atomic = infra_fs.cwd().atomicFile(path, .{ .write_buffer = &write_buf }) catch |e| {
-        log.warn("oauth: atomicFile {s} failed: {s}", .{ path, @errorName(e) });
+        log.warn("atomic-write: atomicFile {s} failed: {s}", .{ path, @errorName(e) });
         return;
     };
     defer atomic.deinit();
     atomic.file_writer.interface.writeAll(data) catch |e| {
-        log.warn("oauth: atomic write {s} failed: {s}", .{ path, @errorName(e) });
+        log.warn("atomic-write: write {s} failed: {s}", .{ path, @errorName(e) });
         return;
     };
     atomic.finish() catch |e| {
-        log.warn("oauth: atomic finish {s} failed: {s}", .{ path, @errorName(e) });
+        log.warn("atomic-write: finish {s} failed: {s}", .{ path, @errorName(e) });
         return;
     };
 }

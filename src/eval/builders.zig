@@ -2,6 +2,7 @@ const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const ast = @import("../sexpr/ast.zig");
+const numeric = @import("../numeric.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
 const evaluator_mod = @import("evaluator.zig");
@@ -24,6 +25,11 @@ const SubBlock = env_mod.SubBlock;
 
 // ── Constants ─────────────────────────────────────────────────────
 const ASSERT_RANGE_ARITY: usize = 5;
+/// Sanity cap on the index count a single `(bus-port …)` form may expand to —
+/// mirrors `design_block.MAX_BUS_EXPANSION`. Guards against a design-file typo
+/// (or hostile input) turning a huge index range into a runaway allocation the
+/// HTTP server evaluates on every push/page-load.
+const MAX_BUS_PORT_EXPANSION: i64 = 4096;
 
 /// The head atom of a list form, for warning messages — `"?"` when the
 /// node isn't a list or its head isn't an atom.
@@ -228,6 +234,13 @@ fn parseBusPortHeader(self: *Evaluator, bp_children: []const Node, env: *Env) Ev
     const start_f = start_val.asNumber() orelse return null;
     const end_f = end_val.asNumber() orelse return null;
     if (end_f < start_f) return null;
+    // Reject NaN/±inf/out-of-range before narrowing (UB in ReleaseSmall).
+    const start_i = numeric.checkedInt(i64, start_f) orelse return null;
+    const end_i = numeric.checkedInt(i64, end_f) orelse return null;
+    if (end_i - start_i >= MAX_BUS_PORT_EXPANSION) {
+        self.warnFmt(bp_children[0].span, "(bus-port …) index range {d}..{d} exceeds the {d}-lane cap — ignored", .{ start_i, end_i, MAX_BUS_PORT_EXPANSION });
+        return null;
+    }
 
     var rest_start: usize = 4;
     var suffixes: []const []const u8 = &.{""};
@@ -245,8 +258,8 @@ fn parseBusPortHeader(self: *Evaluator, bp_children: []const Node, env: *Env) Ev
     }
     return .{
         .prefix = prefix,
-        .start = @intFromFloat(start_f),
-        .end = @intFromFloat(end_f),
+        .start = start_i,
+        .end = end_i,
         .suffixes = suffixes,
         .rest = bp_children[rest_start..],
     };
@@ -402,52 +415,62 @@ pub fn processPinForm(
                 }
             }
         }
+        // Grouped pin lists `((A B) (C D))` and bare lane tokens `A B` share
+        // one emitter so the function-name auto-tie (which must carry
+        // `is_auto = true` — a non-auto tie bypasses the both-sides-populated
+        // guard in buildNets and can hard-merge two user-declared nets across
+        // a series element) can't drift between the two shapes.
         var bus_idx: u32 = 0;
         for (bus_children[2..]) |bus_node| {
             if (bus_node.isForm("as-prefix")) continue;
             if (bus_node.asList()) |bus_list| {
                 for (bus_list) |bp| {
-                    const raw = ids.pinId(self, bp) orelse continue;
-                    const pn = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw) orelse raw) else raw;
-                    const bus_net = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ bus_prefix, bus_idx }) catch continue;
-                    const asserted: []const []const u8 = if (as_prefix.len > 0) blk: {
-                        const name = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ as_prefix, bus_idx }) catch break :blk &.{};
-                        const slot = self.allocator.alloc([]const u8, 1) catch break :blk &.{};
-                        slot[0] = name;
-                        break :blk slot;
-                    } else &.{};
-                    try all_pin_nets.append(self.allocator, .{ .ref_des = pins_ref, .pin = pn, .net = bus_net, .asserted_fns = asserted });
-                    try pg_pins.append(self.allocator, .{ .pin = pn, .net = bus_net, .pin_name = if (pin_func_map) |m| (m.get(pn) orelse "") else "" });
-                    if (pin_func_map) |m| {
-                        if (m.get(pn)) |func_name| {
-                            if (bus_net.len > 0 and !std.mem.eql(u8, bus_net, func_name))
-                                try net_ties.append(self.allocator, .{ .a = bus_net, .b = func_name, .is_auto = true });
-                        }
-                    }
-                    bus_idx += 1;
+                    try emitBusLane(self, bp, pins_ref, bus_prefix, as_prefix, &bus_idx, pin_func_map, all_pin_nets, pg_pins, net_ties);
                 }
             } else {
-                const raw = ids.pinId(self, bus_node) orelse continue;
-                const pn = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw) orelse raw) else raw;
-                const bus_net = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ bus_prefix, bus_idx }) catch continue;
-                const asserted: []const []const u8 = if (as_prefix.len > 0) blk: {
-                    const name = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ as_prefix, bus_idx }) catch break :blk &.{};
-                    const slot = self.allocator.alloc([]const u8, 1) catch break :blk &.{};
-                    slot[0] = name;
-                    break :blk slot;
-                } else &.{};
-                try all_pin_nets.append(self.allocator, .{ .ref_des = pins_ref, .pin = pn, .net = bus_net, .asserted_fns = asserted });
-                try pg_pins.append(self.allocator, .{ .pin = pn, .net = bus_net, .pin_name = if (pin_func_map) |m| (m.get(pn) orelse "") else "" });
-                if (pin_func_map) |m| {
-                    if (m.get(pn)) |func_name| {
-                        if (bus_net.len > 0 and !std.mem.eql(u8, bus_net, func_name))
-                            try net_ties.append(self.allocator, .{ .a = bus_net, .b = func_name });
-                    }
-                }
-                bus_idx += 1;
+                try emitBusLane(self, bus_node, pins_ref, bus_prefix, as_prefix, &bus_idx, pin_func_map, all_pin_nets, pg_pins, net_ties);
             }
         }
     }
+}
+
+/// Emit one bus lane: resolve the pin token, add its `<prefix><idx>` net
+/// membership + part-pin, optionally auto-assert `<as_prefix><idx>`, and add
+/// the pin-function-name auto-alias tie. `bus_idx` is advanced by one on
+/// success (and left unchanged when the token doesn't resolve to a pin). The
+/// single emitter used by both the grouped and bare-token branches — folding
+/// them here is what keeps `.is_auto = true` from silently going missing on
+/// one path (the exact drift that let a bare bus token hard-merge two nets).
+fn emitBusLane(
+    self: *Evaluator,
+    node: Node,
+    pins_ref: []const u8,
+    bus_prefix: []const u8,
+    as_prefix: []const u8,
+    bus_idx: *u32,
+    pin_func_map: ?*const std.StringHashMapUnmanaged([]const u8),
+    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
+    pg_pins: *std.ArrayListUnmanaged(env_mod.PartPin),
+    net_ties: *std.ArrayListUnmanaged(NetTie),
+) EvalError!void {
+    const raw = ids.pinId(self, node) orelse return;
+    const pn = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw) orelse raw) else raw;
+    const bus_net = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ bus_prefix, bus_idx.* }) catch return;
+    const asserted: []const []const u8 = if (as_prefix.len > 0) blk: {
+        const name = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ as_prefix, bus_idx.* }) catch break :blk &.{};
+        const slot = self.allocator.alloc([]const u8, 1) catch break :blk &.{};
+        slot[0] = name;
+        break :blk slot;
+    } else &.{};
+    try all_pin_nets.append(self.allocator, .{ .ref_des = pins_ref, .pin = pn, .net = bus_net, .asserted_fns = asserted });
+    try pg_pins.append(self.allocator, .{ .pin = pn, .net = bus_net, .pin_name = if (pin_func_map) |m| (m.get(pn) orelse "") else "" });
+    if (pin_func_map) |m| {
+        if (m.get(pn)) |func_name| {
+            if (bus_net.len > 0 and !std.mem.eql(u8, bus_net, func_name))
+                try net_ties.append(self.allocator, .{ .a = bus_net, .b = func_name, .is_auto = true });
+        }
+    }
+    bus_idx.* += 1;
 }
 
 /// True when a child of a `(pins …)` block is one of the recognised forms
@@ -515,7 +538,13 @@ pub fn emitDecoupleItems(
             log.warn("  Use: (decouple \"{s}\" (comp \"val\") COUNT per-pin REF)", .{net_name});
             return EvalError.InvalidForm;
         };
-        const count: u32 = @intFromFloat(count_val);
+        // Reject NaN/negative/out-of-range COUNT before narrowing (a bare
+        // `@intFromFloat` on those is UB in the safety-off prod build) — e.g.
+        // `(decouple "VDD" (comp) -1 per-pin U1 7)`.
+        const count: u32 = numeric.checkedInt(u32, count_val) orelse {
+            self.warnFmt(items[c].span, "decouple count '{d}' is not a valid non-negative integer (net: {s}) — skipped", .{ count_val, net_name });
+            return EvalError.InvalidForm;
+        };
         c += 1;
 
         // ── per-pin keyword (required) ──
@@ -636,15 +665,26 @@ pub fn emitDecoupleItems(
                 try all_pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "2", .net = "GND" });
             }
 
-            // Reassign the target component's pin to sub-net
+            // Reassign the target component's pin to the split sub-net. If no
+            // `(ref_str, target_pin, net_name)` entry exists — the host pin
+            // wasn't declared on this net (pins declared after the decouple, a
+            // typo'd pin, or a pad/function-name mismatch) — the caps end up on
+            // a stub net with no IC pad, silently disconnecting them from the
+            // pin they "serve". Warn instead of splitting the net silently
+            // (the `auto` path already errors loudly on zero matches).
+            var reassigned = false;
             for (all_pin_nets.items) |*pn| {
                 if (std.mem.eql(u8, pn.ref_des, ref_str) and
                     std.mem.eql(u8, pn.pin, target_pin) and
                     std.mem.eql(u8, pn.net, net_name))
                 {
                     pn.net = sub_net;
+                    reassigned = true;
                     break;
                 }
+            }
+            if (!reassigned) {
+                self.warnFmt(items[idx].span, "(decouple \"{s}\" … per-pin {s} …) pin '{s}' is not on net \"{s}\" — the cap is on a stub net with no IC pad (declare the pin first, or check the pad/function name)", .{ net_name, ref_str, target_pin, net_name });
             }
         }
         idx = pin_idx;

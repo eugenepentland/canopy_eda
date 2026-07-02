@@ -23,6 +23,7 @@ const PinGroup = ctx_mod.PinGroup;
 
 const hub_mod = @import("render_svg/hub.zig");
 const draw = @import("render_svg/draw.zig");
+const escape = @import("escape.zig");
 const section_inset = @import("render_svg/section_inset.zig");
 const block_diagram = @import("diagram/diagram.zig");
 const membership = @import("diagram/membership.zig");
@@ -86,7 +87,9 @@ pub fn renderToHtml(
 
     try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
     try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-    try w.print("<title>{s} — Schematic</title>", .{block.name});
+    try w.writeAll("<title>");
+    try writeHtmlEscaped(w, block.name);
+    try w.writeAll(" — Schematic</title>");
     try w.writeAll("<link rel=\"stylesheet\" href=\"/static/codemirror.css\">");
     try w.writeAll("<link rel=\"stylesheet\" href=\"/static/schematic.css\">");
     try w.writeAll("<style>");
@@ -340,16 +343,15 @@ fn writeHeader(
     // A module gets the Schematic ⇄ PCB Layout switcher (the PCB layout page
     // links back here), so the two views toggle symmetrically.
     if (is_module) {
-        try w.print(
-            "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
-                "<a class=\"active\" href=\"/modules/{s}\">Schematic</a>" ++
-                "<a href=\"/pcb-layout/{s}\">PCB Layout</a></nav>",
-            .{ design_name, design_name },
-        );
+        try w.writeAll("<nav class=\"viewtoggle\" aria-label=\"View\"><a class=\"active\" href=\"/modules/");
+        try writeUrlEncoded(w, design_name);
+        try w.writeAll("\">Schematic</a><a href=\"/pcb-layout/");
+        try writeUrlEncoded(w, design_name);
+        try w.writeAll("\">PCB Layout</a></nav>");
     }
-    // Deliberately minimal toolbar: Reload, Edit SRC, ERC, the design-review
-    // export, and a single PCB-sync control. Everything else (History,
-    // BOM/Netlist exports, datasheet upload) was moved off this bar to keep it
+    // Deliberately minimal toolbar: Reload, Edit SRC, ERC, the BOM + design-review
+    // exports, and a single PCB-sync control. Everything else (History,
+    // Netlist export, datasheet upload) was moved off this bar to keep it
     // uncluttered.
     try w.writeAll(
         "<button class=\"head-link head-btn\" id=\"reload-btn\" type=\"button\" " ++
@@ -363,14 +365,23 @@ fn writeHeader(
             "title=\"Edit the raw .sexp source\">\u{270E} Edit SRC</button>",
     );
     try w.writeAll("<button class=\"head-link head-btn\" id=\"erc-btn\" type=\"button\">ERC</button>");
+    // BOM export: downloads `<name>-bom.csv` (the parts list — same columns as
+    // the BOM table on this page, with any manual MPN/manufacturer/datasheet
+    // edits merged in from the `.bom` sidecar). Plain <a download> — the
+    // endpoint streams the CSV on demand, no JS needed.
+    try w.writeAll("<a class=\"head-link head-btn\" id=\"bom-export-btn\" href=\"/api/export-bom/");
+    try writeUrlEncoded(w, design_name);
+    try w.writeAll(
+        "\" download title=\"Download the bill of materials as <name>-bom.csv\">\u{2B07} BOM .csv</a>",
+    );
     // Design-review export: downloads a .zip of `<name>-review.md` (the full
     // markdown report) + `<name>-bom.csv` + the verbatim `.sexp` source for the
     // design and every sub-module/component it imports. Plain <a download> —
     // the endpoint builds the zip on demand, no JS needed.
-    try w.print(
-        "<a class=\"head-link head-btn\" id=\"review-export-btn\" href=\"/api/export-review/{s}\" download " ++
-            "title=\"Download the design-review package (review.md + BOM + all source .sexp) as a .zip\">\u{2B07} Review .zip</a>",
-        .{design_name},
+    try w.writeAll("<a class=\"head-link head-btn\" id=\"review-export-btn\" href=\"/api/export-review/");
+    try writeUrlEncoded(w, design_name);
+    try w.writeAll(
+        "\" download title=\"Download the design-review package (review.md + BOM + all source .sexp) as a .zip\">\u{2B07} Review .zip</a>",
     );
     // Single file-based PCB-sync control — only for designs that declare a
     // (kicad-pcb "<path>") target. schematic_viewer.js dry-runs the sync on
@@ -652,7 +663,9 @@ fn writeSectionRequirements(
     for (hub_refs) |hub_ref| {
         if (try analyzeHub(ctx, allocator, pin_groups, hub_ref)) |a| {
             if (a.inst.requirements.len > 0) {
-                try w.print("<div class=\"sec-hub-reqs\" data-ref=\"{s}\"><h4 class=\"sec-hub-reqs-head\"><code>", .{a.inst.ref_des});
+                try w.writeAll("<div class=\"sec-hub-reqs\" data-ref=\"");
+                try writeHtmlEscaped(w, a.inst.ref_des);
+                try w.writeAll("\"><h4 class=\"sec-hub-reqs-head\"><code>");
                 try writeHtmlEscaped(w, a.inst.ref_des);
                 try w.writeAll("</code> · ");
                 try writeHtmlEscaped(w, a.inst.component);
@@ -695,7 +708,9 @@ fn writeSectionHubs(
 }
 
 fn writeHubCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, h: HubAnalysis, check_results: *const CheckResultMap) !void {
-    try w.print("<div class=\"sch-hub\" data-ref=\"{s}\">", .{h.inst.ref_des});
+    try w.writeAll("<div class=\"sch-hub\" data-ref=\"");
+    try writeHtmlEscaped(w, h.inst.ref_des);
+    try w.writeAll("\">");
     try w.writeAll("<div class=\"hub-head\"><h3><code>");
     try writeHtmlEscaped(w, h.inst.ref_des);
     try w.writeAll("</code></h3><span class=\"hub-comp\">");
@@ -2070,14 +2085,11 @@ fn writeJsString(w: anytype, s: []const u8) !void {
     try w.writeByte('"');
 }
 
+/// Escape `s` for an HTML text node or a single/double-quoted attribute value.
+/// Delegates to the shared `escape.writeXml`, which also escapes `'` — so this
+/// helper is safe in every attribute context, not just double-quoted ones.
 fn writeHtmlEscaped(w: anytype, s: []const u8) !void {
-    for (s) |c| switch (c) {
-        '<' => try w.writeAll("&lt;"),
-        '>' => try w.writeAll("&gt;"),
-        '&' => try w.writeAll("&amp;"),
-        '"' => try w.writeAll("&quot;"),
-        else => try w.writeByte(c),
-    };
+    try escape.writeXml(w, s);
 }
 
 /// Percent-encode a UTF-8 string for use as a query-parameter *value*.

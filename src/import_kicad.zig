@@ -581,7 +581,9 @@ fn emitBoardPad(
     var sx: f64 = 0;
     var sy: f64 = 0;
     var drill: f64 = 0;
+    var drill_y: f64 = 0;
     var has_drill = false;
+    var is_oval_drill = false;
     for (cl[4..]) |sub| {
         if (sub.isForm("at")) {
             const al = sub.asList().?;
@@ -598,9 +600,20 @@ fn emitBoardPad(
             }
         } else if (sub.isForm("drill")) {
             const dl = sub.asList().?;
+            // (drill D) or (drill oval DX DY). Oval drills are standard for
+            // connector / Micro-USB shield pads; dropping them left the
+            // thru-hole pad with no hole at all.
             if (dl.len >= 2) {
-                if (dl[1].asNumber()) |d| {
+                if (dl[1].asAtom()) |a| {
+                    if (std.mem.eql(u8, a, "oval") and dl.len >= 4) {
+                        is_oval_drill = true;
+                        has_drill = true;
+                        drill = dl[2].asNumber() orelse 0;
+                        drill_y = dl[3].asNumber() orelse 0;
+                    }
+                } else if (dl[1].asNumber()) |d| {
                     drill = d;
+                    drill_y = d;
                     has_drill = true;
                 }
             }
@@ -619,7 +632,10 @@ fn emitBoardPad(
     max_x.* = @max(max_x.*, x + out_sx / 2);
     max_y.* = @max(max_y.*, y + out_sy / 2);
 
-    try w.print("  (pad {s} {s} {s} (pos {d:.2} {d:.2}) (size {d:.2} {d:.2})", .{
+    // {d:.4} matches KiCad's own metric precision (0402 pads at ±0.485, fine-
+    // pitch BGAs at 0.1625 steps) — quantising to 0.01 mm shifts coordinates by
+    // up to 5 µm and compounds across an import→export round-trip.
+    try w.print("  (pad {s} {s} {s} (pos {d:.4} {d:.4}) (size {d:.4} {d:.4})", .{
         num,
         footprint_conv.mapPadType(pad_type),
         footprint_conv.mapPadShape(shape),
@@ -628,7 +644,13 @@ fn emitBoardPad(
         out_sx,
         out_sy,
     });
-    if (has_drill) try w.print(" (drill {d:.2})", .{drill});
+    if (has_drill) {
+        if (is_oval_drill) {
+            try w.print(" (drill oval {d:.4} {d:.4})", .{ drill, drill_y });
+        } else {
+            try w.print(" (drill {d:.4})", .{drill});
+        }
+    }
     try w.writeAll(")\n");
 }
 
@@ -782,6 +804,10 @@ fn emitInstance(arena: std.mem.Allocator, w: anytype, part: Part, nets: *NetName
         for (group.pins.items) |pin| try w.print(" {s}", .{pin});
         try w.print(" \"{s}\")", .{group.net});
     }
+    // First-class DNP so the BOM/CSV, populated-qty merges, and KiCad netlist
+    // re-export all honour the source board's (attr dnp). The comment above
+    // stays for provenance.
+    if (part.dnp) try w.writeAll("\n    (dnp)");
     try w.writeAll(")\n");
 }
 
@@ -1071,7 +1097,8 @@ test "footprint geometry subtracts footprint rotation" {
     // C1's footprint is placed at 90° and its pads carry (at … 90): the
     // local pad angle is 0, so width/height must NOT swap.
     const text = try renderFootprint(arena, parts[0]);
-    try testing.expect(std.mem.indexOf(u8, text, "(size 0.56 0.62)") != null);
+    // Pad geometry now prints at KiCad's own 4-decimal precision.
+    try testing.expect(std.mem.indexOf(u8, text, "(size 0.5600 0.6200)") != null);
 }
 
 // spec: import_kicad - Renames pure-numeric and family-clashing component names so they stay referenceable atoms

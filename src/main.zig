@@ -436,6 +436,9 @@ test {
     _ = @import("render_json.zig");
     _ = @import("json_writer.zig");
     _ = @import("checks.zig");
+    _ = @import("escape.zig");
+    _ = @import("numeric.zig");
+    _ = @import("paths.zig");
     _ = @import("placement/geometry.zig");
     _ = @import("placement/pin_roles.zig");
     _ = @import("placement/pad_shape.zig");

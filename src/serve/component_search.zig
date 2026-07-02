@@ -444,7 +444,9 @@ fn httpGet(
         const cookie_arg = std.fmt.allocPrint(allocator, "{s}{s}", .{ COOKIE_NAME, c }) catch return null;
         argv.appendSlice(allocator, &.{ "-b", cookie_arg }) catch return null;
     }
-    argv.append(allocator, url) catch return null;
+    // `--` terminates option parsing so a vendor-supplied URL beginning with
+    // `-` can't be reinterpreted as a curl flag (arg-injection / SSRF hardening).
+    argv.appendSlice(allocator, &.{ "--", url }) catch return null;
 
     const res = std.process.Child.run(.{
         .allocator = allocator,

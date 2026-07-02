@@ -16,6 +16,7 @@ const per_conn_spacing = draw.per_conn_spacing;
 const shortRef = draw.shortRef;
 const displayValue = draw.displayValue;
 const RenderError = draw.RenderError;
+const escape = @import("../escape.zig");
 
 // ── Layout constants ──────────────────────────────────────────────
 const HALF_DIVISOR: f64 = 2.0;
@@ -168,28 +169,31 @@ pub fn renderHubAllPins(
     const svg_h: f64 = hub_height + y_start + SVG_BOTTOM_PAD;
 
     try w.print(
-        \\<svg class="hub-inset" viewBox="0 0 {d:.0} {d:.0}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" data-ref="{s}">
-        \\
-    , .{ svg_w, svg_h, hub.ref_des });
+        \\<svg class="hub-inset" viewBox="0 0 {d:.0} {d:.0}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" data-ref="
+    , .{ svg_w, svg_h });
+    try escape.writeXml(w, hub.ref_des);
+    try w.writeAll("\">\n");
 
+    try w.writeAll("<g data-ref=\"");
+    try escape.writeXml(w, hub.ref_des);
     try w.print(
-        \\<g data-ref="{s}" class="component">
+        \\" class="component">
         \\<rect x="{d:.1}" y="{d:.1}" width="{d:.0}" height="{d:.1}"
         \\  fill="#16213e" stroke="#4a9eff" stroke-width="2" rx="6"/>
         \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle"
-        \\  font-size="12" font-weight="bold" fill="#4a9eff">{s} {s}</text></g>
-        \\
+        \\  font-size="12" font-weight="bold" fill="#4a9eff">
     , .{
-        hub.ref_des,
         hub_x,
         y_start,
         hub_width,
         hub_height,
         hub_x + hub_width / HALF_DIVISOR,
         y_start + HUB_TITLE_Y,
-        shortRef(hub.ref_des),
-        displayValue(hub),
     });
+    try escape.writeXml(w, shortRef(hub.ref_des));
+    try w.writeAll(" ");
+    try escape.writeXml(w, displayValue(hub));
+    try w.writeAll("</text></g>\n");
 
     var py_left: f64 = y_start + HUB_VPAD;
     for (left_groups, 0..) |group, gi| {
@@ -277,33 +281,44 @@ fn renderOneStub(
     data_pin: []const u8,
     hub_ref: []const u8,
 ) !void {
-    try w.print(
-        \\<g class="pin-stub" data-ref="{s}" data-pin="{s}">
-        \\
-    , .{ hub_ref, data_pin });
+    try w.writeAll("<g class=\"pin-stub\" data-ref=\"");
+    try escape.writeXml(w, hub_ref);
+    try w.writeAll("\" data-pin=\"");
+    try escape.writeXml(w, data_pin);
+    try w.writeAll("\">\n");
     switch (side) {
-        .left => try w.print(
-            \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#666" stroke-width="1.5"/>
-            \\<text x="{d:.1}" y="{d:.1}" font-size="12" fill="#aaa">{s}</text>
-            \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="10" fill="#666">{s}</text>
-            \\
-        , .{
-            stub_x,   y,                              px,
-            y,        px + PIN_LABEL_PAD_X,           y + PIN_LABEL_PAD_Y,
-            label,    stub_x + PIN_NUMBER_INSET_LEFT, y - PIN_NUMBER_BASELINE,
-            num_text,
-        }),
-        .right => try w.print(
-            \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#666" stroke-width="1.5"/>
-            \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="12" fill="#aaa">{s}</text>
-            \\<text x="{d:.1}" y="{d:.1}" font-size="10" fill="#666">{s}</text>
-            \\
-        , .{
-            px,       y,                               stub_x,
-            y,        px - PIN_LABEL_PAD_X,            y + PIN_LABEL_PAD_Y,
-            label,    stub_x - PIN_NUMBER_INSET_RIGHT, y - PIN_NUMBER_BASELINE,
-            num_text,
-        }),
+        .left => {
+            try w.print(
+                \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#666" stroke-width="1.5"/>
+                \\<text x="{d:.1}" y="{d:.1}" font-size="12" fill="#aaa">
+            , .{
+                stub_x, y,                    px,
+                y,      px + PIN_LABEL_PAD_X, y + PIN_LABEL_PAD_Y,
+            });
+            try escape.writeXml(w, label);
+            try w.print(
+                \\</text>
+                \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="10" fill="#666">
+            , .{ stub_x + PIN_NUMBER_INSET_LEFT, y - PIN_NUMBER_BASELINE });
+            try escape.writeXml(w, num_text);
+            try w.writeAll("</text>\n");
+        },
+        .right => {
+            try w.print(
+                \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#666" stroke-width="1.5"/>
+                \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="12" fill="#aaa">
+            , .{
+                px, y,                    stub_x,
+                y,  px - PIN_LABEL_PAD_X, y + PIN_LABEL_PAD_Y,
+            });
+            try escape.writeXml(w, label);
+            try w.print(
+                \\</text>
+                \\<text x="{d:.1}" y="{d:.1}" font-size="10" fill="#666">
+            , .{ stub_x - PIN_NUMBER_INSET_RIGHT, y - PIN_NUMBER_BASELINE });
+            try escape.writeXml(w, num_text);
+            try w.writeAll("</text>\n");
+        },
     }
     try w.writeAll("</g>\n");
 }

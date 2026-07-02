@@ -641,13 +641,17 @@ fn writeNode(arena: Allocator, w: *Writer, gid: u32, node: types.Node, x: f64, y
     const color = rb.categoryColor(node.category);
     const has_link = try openNodeLink(w, node.slug);
     // `data-gid` lets the hover-focus JS find the edges (`data-a`/`data-b`)
-    // touching this block; `data-name` carries the full (untruncated) block
-    // name so the Layout-tab drag writeback can regenerate `(place "name" …)`
-    // (the visible label is truncated and the link only carries the slug).
+    // touching this block; `data-name` carries the *authoring key* so the
+    // Layout-tab drag writeback regenerates a `(place "key" …)` that resolves —
+    // placements match on `Node.key` (the section name / sub-block handle / stub
+    // name), which differs from the display `label` for a power sub-block (label
+    // = module title, key = handle) or a role-titled stub. Fall back to the label
+    // only for synthesised nodes (antennas) that carry no key and can't be placed.
+    const drag_name = if (node.key.len > 0) node.key else node.label;
     try w.writeAll("<g class=\"dg-node\" data-gid=\"");
     try w.print("{d}", .{gid});
     try w.writeAll("\" data-name=\"");
-    try writeEscaped(w, node.label);
+    try writeEscaped(w, drag_name);
     try w.writeAll("\">");
     // Board-edge endpoints (antennas / EMVS cells) get a dashed border.
     const rect_class = if (node.is_boundary) "dg-rect dg-boundary" else "dg-rect";

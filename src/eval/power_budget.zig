@@ -91,21 +91,7 @@ pub fn analyze(
     // Step 1: union-find on ferrite-bead-bridged nets. A ferrite is a DC
     // conductor, so loads on its downstream side must attribute back to the
     // upstream regulator's budget.
-    var net_parent: std.StringHashMapUnmanaged([]const u8) = .empty;
-    for (block.instances) |inst| {
-        if (!std.mem.startsWith(u8, inst.component, "ferrite")) continue;
-        var net_a: ?[]const u8 = null;
-        var net_b: ?[]const u8 = null;
-        for (block.nets) |net| {
-            const base = na.baseNetName(net.name);
-            for (net.pins) |p| {
-                if (!std.mem.eql(u8, p.ref_des, inst.ref_des)) continue;
-                if (std.mem.eql(u8, p.pin, "1")) net_a = base;
-                if (std.mem.eql(u8, p.pin, "2")) net_b = base;
-            }
-        }
-        if (net_a != null and net_b != null) try unionNets(allocator, &net_parent, net_a.?, net_b.?);
-    }
+    var net_parent = try na.buildFerriteBridges(allocator, block);
 
     // Step 2: collect source declarations from sub-block output ports.
     const SourceInfo = struct {
@@ -125,7 +111,7 @@ pub fn analyze(
                 if (!matched) continue;
                 const top_net = if (std.mem.eql(u8, nt.a, path)) nt.b else nt.a;
                 const base = na.baseNetName(top_net);
-                const root = findRoot(&net_parent, base);
+                const root = na.findRoot(&net_parent, base);
                 // Multiple sources on the same rail (e.g. battery + charger
                 // both on VBATT): keep the highest-capacity one for the
                 // budget check. Picking by current_max makes the result
@@ -179,7 +165,7 @@ pub fn analyze(
 
     for (block.nets) |net| {
         const base = na.baseNetName(net.name);
-        const root = findRoot(&net_parent, base);
+        const root = na.findRoot(&net_parent, base);
         var load = loads.get(root) orelse RailLoad{ .first_name = base };
         for (net.pins) |pin| {
             if (pin.i_typ) |v| {
@@ -239,6 +225,14 @@ pub fn analyze(
                 if (!has_scalar and !out_port.efficiency_linear) continue;
                 const vout = out_port.nominal orelse continue;
 
+                // Convergence + consumer state is keyed per (sub-block, OUTPUT
+                // port), not per sub-block: a dual-output module (a PMIC with
+                // two efficiency-declared outputs) must charge its input rail
+                // for the SUM of both outputs' back-computed draw. Keying on
+                // sb.name alone made output B's delta cancel A's and the upsert
+                // overwrite it, so the rail saw only the last-visited output.
+                const contrib_key = std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ sb.name, out_port.name }) catch continue;
+
                 const out_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, out_port.name }) catch continue;
                 const out_rail_root = findRailForSubPath(block, &net_parent, out_path) orelse continue;
                 const out_load = loads.get(out_rail_root) orelse RailLoad{};
@@ -252,7 +246,7 @@ pub fn analyze(
                     const in_display = loads.get(in_rail_root) orelse RailLoad{
                         .first_name = findDisplayForSubPath(block, in_path) orelse in_rail_root,
                     };
-                    const vin = in_port.nominal orelse resolveRailVoltage(block, in_display.first_name) orelse continue;
+                    const vin = in_port.nominal orelse resolveRailVoltage(allocator, block, in_display.first_name) orelse continue;
                     if (vin <= ZERO_VOLTAGE) continue;
 
                     // For linear regulators, η = Vout/Vin (drops out of the ratio below so
@@ -266,7 +260,7 @@ pub fn analyze(
                     const iin_typ = out_load.sum_typ * ratio;
                     const iin_max = out_load.sum_max * ratio;
 
-                    const prev = sb_contrib.get(sb.name) orelse SubContribution{ .iin_typ = 0, .iin_max = 0 };
+                    const prev = sb_contrib.get(contrib_key) orelse SubContribution{ .iin_typ = 0, .iin_max = 0 };
                     const delta_typ = iin_typ - prev.iin_typ;
                     const delta_max = iin_max - prev.iin_max;
                     if (@abs(delta_typ) < CURRENT_CONVERGENCE_A and @abs(delta_max) < CURRENT_CONVERGENCE_A) break;
@@ -274,8 +268,10 @@ pub fn analyze(
 
                     // Upsert the consumer group. Pin list + any_* flags only
                     // set on first touch; sums are always replaced with the
-                    // latest absolute value.
-                    const group_key = std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ sb.name, in_display.first_name }) catch break;
+                    // latest absolute value. Keyed on the OUTPUT port too so a
+                    // dual-output module's two outputs land in distinct groups
+                    // instead of colliding on the shared input rail.
+                    const group_key = std.fmt.allocPrint(allocator, "{s}\x00{s}\x00{s}", .{ sb.name, out_port.name, in_display.first_name }) catch break;
                     const gop = consumer_groups.getOrPut(allocator, group_key) catch break;
                     if (!gop.found_existing) {
                         gop.value_ptr.* = .{ .ref_des = sb.name, .net = in_display.first_name, .root = in_rail_root };
@@ -296,7 +292,7 @@ pub fn analyze(
                     if (out_load.any_max) in_load.any_max = true;
                     try loads.put(allocator, in_rail_root, in_load);
 
-                    try sb_contrib.put(allocator, sb.name, SubContribution{ .iin_typ = iin_typ, .iin_max = iin_max });
+                    try sb_contrib.put(allocator, contrib_key, SubContribution{ .iin_typ = iin_typ, .iin_max = iin_max });
                     break;
                 }
             }
@@ -344,7 +340,10 @@ pub fn analyze(
         try rails.append(allocator, rail);
     }
 
-    return rails.items;
+    // Ownership contract (see doc comment): hand back an exact-length owned
+    // slice, not `.items` (a sub-slice of a capacity-padded allocation whose
+    // slack a non-arena caller's `free` can't return).
+    return rails.toOwnedSlice(allocator);
 }
 
 fn buildConsumers(
@@ -370,7 +369,7 @@ fn buildConsumers(
         });
     }
     std.mem.sort(RailConsumer, out.items, {}, lessThanConsumer);
-    return out.items;
+    return out.toOwnedSlice(allocator);
 }
 
 /// Highest typ draw first (annotated groups above unannotated); ties broken
@@ -445,7 +444,7 @@ fn findRailForSubPath(
         if (!matched) continue;
         const top_net = if (std.mem.eql(u8, nt.a, path)) nt.b else nt.a;
         const base = na.baseNetName(top_net);
-        return findRoot(net_parent, base);
+        return na.findRoot(net_parent, base);
     }
     return null;
 }
@@ -468,14 +467,17 @@ fn findDisplayForSubPath(block: *const DesignBlock, path: []const u8) ?[]const u
 ///   3. A top-level design-block port's `nominal` or midpoint of `rated`.
 /// Returns null when nothing resolves — the analyzer skips the
 /// back-computation so the user can see which rail needs a voltage hint.
-fn resolveRailVoltage(block: *const DesignBlock, rail_name: []const u8) ?f64 {
+fn resolveRailVoltage(allocator: std.mem.Allocator, block: *const DesignBlock, rail_name: []const u8) ?f64 {
     // 1. Sub-block output port → look for a net-tie tying its path to the rail.
     for (block.sub_blocks) |sb| {
         for (sb.block.ports) |p| {
             if (!std.mem.eql(u8, p.direction, "out")) continue;
             const v = p.nominal orelse continue;
-            const path = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ sb.name, p.name }) catch continue;
-            defer std.heap.page_allocator.free(path);
+            // Use the caller's allocator for the scratch path rather than
+            // punching a fresh page_allocator allocation through a request
+            // arena. Freed immediately either way.
+            const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, p.name }) catch continue;
+            defer allocator.free(path);
             for (block.net_ties) |nt| {
                 const matched = std.mem.eql(u8, nt.a, path) or std.mem.eql(u8, nt.b, path);
                 if (!matched) continue;
@@ -507,25 +509,4 @@ fn sectionVoltage(sec: env_mod.Section, rail_name: []const u8) ?f64 {
     }
     for (sec.sub_sections) |sub| if (sectionVoltage(sub, rail_name)) |v| return v;
     return null;
-}
-
-fn findRoot(parent: *std.StringHashMapUnmanaged([]const u8), name: []const u8) []const u8 {
-    var cur = name;
-    while (parent.get(cur)) |p| {
-        if (std.mem.eql(u8, p, cur)) return cur;
-        cur = p;
-    }
-    return cur;
-}
-
-fn unionNets(
-    allocator: std.mem.Allocator,
-    parent: *std.StringHashMapUnmanaged([]const u8),
-    a: []const u8,
-    b: []const u8,
-) std.mem.Allocator.Error!void {
-    const ra = findRoot(parent, a);
-    const rb = findRoot(parent, b);
-    if (std.mem.eql(u8, ra, rb)) return;
-    try parent.put(allocator, rb, ra);
 }

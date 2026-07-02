@@ -311,21 +311,29 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
     const emit_shape = if (std.mem.eql(u8, kicad_shape, "custom")) "rect" else kicad_shape;
     try w.print("  (pad \"{s}\" {s} {s}\n", .{ pad_name, kicad_type, emit_shape });
 
-    try w.print("    (at {d:.2} {d:.2})\n", .{ x, y });
-    try w.print("    (size {d:.2} {d:.2})\n", .{ sx, sy });
+    // {d:.4} = KiCad's own metric precision; {d:.2} lost up to 5 µm per pass.
+    try w.print("    (at {d:.4} {d:.4})\n", .{ x, y });
+    try w.print("    (size {d:.4} {d:.4})\n", .{ sx, sy });
 
     // Drill for through-hole pads
     if (std.mem.eql(u8, pad_type_internal, "thru") or std.mem.eql(u8, pad_type_internal, "npth")) {
         if (has_drill) {
             if (is_oval_drill) {
-                try w.print("    (drill oval {d:.2} {d:.2})\n", .{ drill_x, drill_y });
+                try w.print("    (drill oval {d:.4} {d:.4})\n", .{ drill_x, drill_y });
             } else {
-                try w.print("    (drill {d:.2})\n", .{drill_x});
+                try w.print("    (drill {d:.4})\n", .{drill_x});
             }
         } else {
-            // Fallback: guess drill as min dimension
+            // Fallback: no drill declared on a thru-hole/npth pad. Guessing the
+            // hole as the pad's min dimension yields a pad-sized hole (zero
+            // annular ring) — an unmanufacturable footprint. Warn loudly so the
+            // omission is fixed at the source .sexp rather than shipped silently.
             const drill = @min(sx, sy);
-            try w.print("    (drill {d:.2})\n", .{drill});
+            std.log.warn(
+                "export-kicad: thru-hole pad \"{s}\" has no (drill …) — guessing {d:.4} mm (pad min dimension, zero annular ring); add an explicit drill to the footprint",
+                .{ pad_name, drill },
+            );
+            try w.print("    (drill {d:.4})\n", .{drill});
         }
     }
 

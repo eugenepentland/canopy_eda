@@ -7,7 +7,11 @@ const FALLBACK_INT_WIDTH: usize = 12;
 const FALLBACK_FLOAT_WIDTH: usize = 12;
 const FALLBACK_UNIT_VAL_WIDTH: usize = 14;
 const SHORT_LIST_MAX_WIDTH: usize = 72;
-const NODE_EQ_FLOAT_TOLERANCE: f64 = 0.0001;
+/// Round-trip float comparison tolerance. `printFloat` uses Zig's
+/// shortest-round-trip `{d}` decimal, so a print → parse cycle reproduces the
+/// exact f64 bits — the tolerance is 0 (exact) rather than the old 0.0001 abs,
+/// which was coarse enough to hide the `{d:.6}` truncation of small SI literals.
+const NODE_EQ_FLOAT_TOLERANCE: f64 = 0.0;
 
 /// Pretty-print a list of top-level nodes as S-expression text.
 pub fn print(allocator: std.mem.Allocator, nodes: []const Node) std.mem.Allocator.Error![]const u8 {
@@ -72,18 +76,28 @@ fn printNode(writer: anytype, node: Node, indent: u32) !void {
 }
 
 fn printFloat(writer: anytype, f: f64) !void {
+    // `{d}` is Zig's shortest-round-trip decimal: it emits the fewest digits
+    // that parse back to the exact same f64, and stays non-scientific across
+    // the whole realistic range (1e-7 → "0.0000001", 1e20 → the full integer),
+    // so an SI literal like `100n`/`22p` survives a print → parse round-trip.
+    // The old `{d:.6}` fixed-precision format collapsed any |v| < 5e-7 to
+    // "0.0" and rounded away anything needing >6 decimals — silently corrupting
+    // the value it also uses to rewrite `.kicad_pcb` board files in place.
     var buf: [64]u8 = undefined;
-    const formatted = std.fmt.bufPrint(&buf, "{d:.6}", .{f}) catch {
+    const formatted = std.fmt.bufPrint(&buf, "{d}", .{f}) catch {
         try writer.print("{d}", .{f});
         return;
     };
-    // Trim trailing zeros but keep at least one decimal digit
-    var end: usize = formatted.len;
-    if (std.mem.indexOfScalar(u8, formatted, '.') != null) {
-        while (end > 1 and formatted[end - 1] == '0') : (end -= 1) {}
-        if (end > 0 and formatted[end - 1] == '.') end += 1;
+    try writer.writeAll(formatted);
+    // Keep the float/int distinction: a whole-number float prints as "100",
+    // so append ".0" when there's no decimal point (and no exponent, which
+    // `{d}` never emits here but guard anyway).
+    if (std.mem.indexOfScalar(u8, formatted, '.') == null and
+        std.mem.indexOfScalar(u8, formatted, 'e') == null and
+        std.mem.indexOfScalar(u8, formatted, 'n') == null) // nan/inf
+    {
+        try writer.writeAll(".0");
     }
-    try writer.writeAll(formatted[0..end]);
 }
 
 fn estimateWidth(node: Node, depth: u32) ?usize {
@@ -105,13 +119,13 @@ fn estimateWidth(node: Node, depth: u32) ?usize {
             break :blk s.len;
         },
         .float => |f| blk: {
-            var buf: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d:.6}", .{f}) catch break :blk FALLBACK_FLOAT_WIDTH;
+            var buf: [64]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch break :blk FALLBACK_FLOAT_WIDTH;
             break :blk s.len;
         },
         .unit_val => |u| blk: {
-            var buf: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d:.6}", .{u}) catch break :blk FALLBACK_UNIT_VAL_WIDTH;
+            var buf: [64]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{u}) catch break :blk FALLBACK_UNIT_VAL_WIDTH;
             break :blk s.len + 2; // +2 for "mm"
         },
     };

@@ -5,6 +5,7 @@ const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const infra_random = @import("../infra/random.zig");
 const auth_store = @import("auth_store.zig");
+const oauth_store = @import("oauth_store.zig");
 
 /// Stored record for a minted plugin token. Only the hash is persisted —
 /// the raw token is shown once at mint time and never stored.
@@ -61,8 +62,6 @@ fn save(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     ensureAuthDir(auth_dir);
     const path = tokensPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
-    const file = infra_fs.cwd().createFile(path, .{}) catch return;
-    defer file.close();
     var bw: std.ArrayListUnmanaged(u8) = .empty;
     defer bw.deinit(allocator);
     const w = bw.writer(allocator);
@@ -76,7 +75,7 @@ fn save(allocator: std.mem.Allocator, auth_dir: []const u8) void {
         w.print(",\"created_at\":{d}}}", .{t.created_at}) catch return;
     }
     w.writeAll("]") catch return;
-    file.writeAll(bw.items) catch return;
+    oauth_store.writeFileAtomicWithBackup(allocator, path, bw.items);
 }
 
 /// Mint a new plugin token. Returns the raw token string (prefix `eda_p_`) —

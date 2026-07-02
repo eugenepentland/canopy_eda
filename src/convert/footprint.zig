@@ -82,10 +82,14 @@ fn emitPad(w: anytype, node: Node) !void {
     if (children.len < 4) return;
 
     // (pad "1" smd roundrect (at X Y [R]) (size W H) (layers ...) ...)
+    // num_buf MUST be function-scoped: for a bare-int pad number the slice
+    // returned below points into it, and that slice is used far later (the
+    // `(pad …)` print + the custom-pad path). A block-local buffer would be
+    // a dangling stack slice by then.
+    var num_buf: [32]u8 = undefined;
     const num_str = children[1].asAtom() orelse children[1].asString() orelse blk: {
         if (children[1].asNumber()) |n| {
             const i: i64 = @intFromFloat(n);
-            var num_buf: [32]u8 = undefined;
             break :blk std.fmt.bufPrint(&num_buf, "{d}", .{i}) catch return;
         }
         return;
@@ -167,14 +171,18 @@ fn emitPad(w: anytype, node: Node) !void {
     const out_sx = if (is_rotated) sy else sx;
     const out_sy = if (is_rotated) sx else sy;
 
-    try w.print("  (pad {s} {s} {s} (pos {d:.2} {d:.2}) (size {d:.2} {d:.2})", .{
+    // {d:.4} matches KiCad's own metric-footprint precision: 0402 pads land
+    // at ±0.485, 0.4 mm-pitch BGAs step by 0.1625 — quantising to 0.01 mm
+    // shifts every coordinate by up to 5 µm and the error compounds across
+    // an import→export round-trip.
+    try w.print("  (pad {s} {s} {s} (pos {d:.4} {d:.4}) (size {d:.4} {d:.4})", .{
         num_str, out_type, out_shape, x, y, out_sx, out_sy,
     });
     if (has_drill) {
         if (is_oval_drill) {
-            try w.print(" (drill oval {d:.2} {d:.2})", .{ drill_x, drill_y });
+            try w.print(" (drill oval {d:.4} {d:.4})", .{ drill_x, drill_y });
         } else {
-            try w.print(" (drill {d:.2})", .{drill_x});
+            try w.print(" (drill {d:.4})", .{drill_x});
         }
     }
     // Preserve rratio so the proto sync emits the right cornerRoundingRatio —
@@ -481,6 +489,7 @@ pub const ConvertError = error{
     UnexpectedCharacter,
     UnterminatedString,
     InvalidNumber,
+    TooDeep,
 };
 
 // spec: convert/footprint - Converts a KiCad footprint file into S-expression format
@@ -512,6 +521,29 @@ test "convert simple footprint" {
     try std.testing.expect(std.mem.indexOf(u8, output, "\"R_0402_1005Metric\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "(pad 1 smd roundrect") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "(courtyard") != null);
+}
+
+// spec: convert/footprint - Bare-integer pad numbers survive the conversion (no dangling num_buf slice)
+test "convert bare-int pad numbers do not dangle" {
+    const alloc = std.testing.allocator;
+    // KiCad-5 `(module …)` / re-saved boards spell numeric pads as bare
+    // integers. Emit several so the print of the first pad's bare-int number
+    // happens after later pads reuse the (formerly block-local) num_buf; the
+    // hoisted buffer keeps every number valid.
+    const input =
+        \\(footprint "R_multi"
+        \\  (pad 1 smd rect (at -1 0) (size 0.5 0.5) (layers "F.Cu"))
+        \\  (pad 22 smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu"))
+        \\  (pad 333 thru_hole circle (at 1 0) (size 0.9 0.9) (drill 0.5) (layers "*.Cu"))
+        \\)
+    ;
+    const output = try convertFootprint(alloc, input);
+    defer alloc.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 1 smd rect") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 22 smd rect") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad 333 thru circle") != null);
+    // No garbage/empty pad number leaked in (would look like "(pad  smd").
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad  ") == null);
 }
 
 // spec: convert/footprint - Captures F.Fab body outline and silkscreen polygons into the footprint

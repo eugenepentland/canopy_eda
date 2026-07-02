@@ -10,7 +10,11 @@ pub const IdInsertError = std.mem.Allocator.Error ||
     std.fs.File.OpenError ||
     std.fs.File.ReadError ||
     std.fs.File.WriteError ||
-    error{ FileTooBig, StreamTooLong, EndOfStream, IdCollision };
+    std.fs.Dir.MakeError ||
+    std.fs.Dir.OpenError ||
+    std.fs.Dir.StatFileError ||
+    std.posix.RenameError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, IdCollision, WriteFailed };
 
 /// One text insertion against the ORIGINAL source. `order` breaks ties when two
 /// edits target the same byte: lower order ends up left of higher order (we want
@@ -43,9 +47,15 @@ pub fn insertPendingIds(
     const result = try applyInserts(allocator, source, pending, pending_child);
     defer allocator.free(result);
 
-    const file = try infra_fs.cwd().createFile(source_path, .{});
-    defer file.close();
-    try file.writeAll(result);
+    // Atomic write: tmp → rename. This is the one path here that mutates a
+    // *hand-authored* source file (`src/<design>.sexp`), so a crash mid-write
+    // must not truncate/destroy it. Mirrors the tmp→rename idiom in
+    // serve/oauth_store.zig (no serve/ import — replicated locally).
+    var write_buf: [4096]u8 = undefined;
+    var atomic = try infra_fs.cwd().atomicFile(source_path, .{ .write_buffer = &write_buf });
+    defer atomic.deinit();
+    try atomic.file_writer.interface.writeAll(result);
+    try atomic.finish();
 }
 
 /// Pure core of `insertPendingIds`: given the original `source` bytes, return a

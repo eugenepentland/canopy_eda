@@ -446,12 +446,7 @@ fn mergeAwareGroupHeights(ctx: *RenderCtx, allocator: Allocator, groups: []const
 }
 
 /// Mirror of `hub_mod.SplitGroups` for the merge-aware path.
-const MergeAwareSplit = struct {
-    left: []const PinGroup,
-    right: []const PinGroup,
-    left_heights: []f64,
-    right_heights: []f64,
-};
+const MergeAwareSplit = ctx_mod.MergeAwareSplit;
 
 /// Balance hub pin groups into left/right columns by visual height
 /// (merge-aware variant). Mirrors `hub_mod.splitGroupsByHeight` but
@@ -459,12 +454,32 @@ const MergeAwareSplit = struct {
 /// (e.g. a row of decoupling caps tied to the same rail) collapse to
 /// one slot. Greedy: walks groups in their `groupHubPins` order and
 /// assigns each to whichever column is currently shorter.
+/// Content key for the merge-aware split memo: `hub_ref` plus each group's pin
+/// ids. `groupHubPins` is deterministic in (ctx, pins), so identical pin ids ⇒
+/// identical groups ⇒ identical split — a cache hit is only ever returned for
+/// byte-identical inputs. Owned by `allocator` (arena; lives for the render).
+fn splitCacheKey(allocator: Allocator, all_groups: []const PinGroup, hub_ref: []const u8) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try buf.appendSlice(allocator, hub_ref);
+    for (all_groups) |g| {
+        try buf.append(allocator, '|');
+        try buf.appendSlice(allocator, g.pin_numbers);
+    }
+    return buf.items;
+}
+
 fn splitGroupsByMergeAwareHeight(
     ctx: *RenderCtx,
     allocator: Allocator,
     all_groups: []const PinGroup,
     hub_ref: []const u8,
 ) !MergeAwareSplit {
+    // Memoize: the three per-hub render passes recompute an identical split
+    // (mergeAwareGroupHeights walks findSpokeChain per connection — the
+    // expensive part). Key on exact content so the cache is result-identical.
+    const cache_key = try splitCacheKey(allocator, all_groups, hub_ref);
+    if (ctx.hub_split_cache.get(cache_key)) |cached| return cached;
+
     const all_heights = try mergeAwareGroupHeights(ctx, allocator, all_groups, hub_ref);
     defer allocator.free(all_heights);
 
@@ -487,12 +502,14 @@ fn splitGroupsByMergeAwareHeight(
         }
     }
 
-    return .{
+    const result = MergeAwareSplit{
         .left = try left.toOwnedSlice(allocator),
         .right = try right.toOwnedSlice(allocator),
         .left_heights = try left_h.toOwnedSlice(allocator),
         .right_heights = try right_h.toOwnedSlice(allocator),
     };
+    try ctx.hub_split_cache.put(allocator, cache_key, result);
+    return result;
 }
 
 /// Compute hub height using merge-aware group heights.
@@ -756,14 +773,12 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
             const h = cell_heights[ci];
 
             // Collect hub data
-            var json_hub = try collectHubData(&ctx, allocator, cell.hub_inst, cell.part, x_offset, content_y, &alt_map, &asserted_fns);
+            const json_hub = try collectHubData(&ctx, allocator, cell.hub_inst, cell.part, x_offset, content_y, &alt_map, &asserted_fns);
             try scene.hubs.append(allocator, json_hub);
 
-            // Collect connections for this hub
-            try collectHubConnections(&ctx, &scene, allocator, cell.hub_inst, cell.part, x_offset, content_y, &json_hub);
-
-            // Update the hub in the array with pin data
-            scene.hubs.items[scene.hubs.items.len - 1] = json_hub;
+            // Collect connections for this hub (writes wires/passives straight
+            // into `scene`; it doesn't mutate the JsonHub row appended above).
+            try collectHubConnections(&ctx, &scene, allocator, cell.hub_inst, cell.part, x_offset, content_y);
 
             content_y += h + CELL_BLOCK_GAP;
         }
@@ -1001,9 +1016,7 @@ fn collectHubConnections(
     part: ?env_mod.Part,
     x_offset: f64,
     y_start: f64,
-    json_hub: *JsonHub,
 ) !void {
-    _ = json_hub;
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
 
     var all_pins_list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -1201,8 +1214,6 @@ fn collectGroupConnections(
                 scene,
                 allocator,
                 entry.classified.conn.endpoint,
-                hub_ref,
-                entry.classified.conn.pin,
                 conn_stub_x,
                 conn_stub_y,
                 cy,
@@ -1331,14 +1342,15 @@ fn mergeIdenticalSpokes(ctx: *RenderCtx, allocator: Allocator, classified: []con
     return result;
 }
 
-/// Render a merged passive: one symbol with "Nx value" label.
+/// Render a merged passive: one symbol with "Nx value" label. A merged passive
+/// is a run of identical single-passive spokes collapsed into one symbol; its
+/// chain end-x is fixed by the passive width alone, so — unlike the unmerged
+/// `collectConnBody` — there is no terminal to walk to here.
 fn collectMergedPassive(
     ctx: *RenderCtx,
     scene: *SceneGraph,
     allocator: Allocator,
     endpoint: Endpoint,
-    hub_ref: []const u8,
-    from_pin: []const u8,
     stub_x: f64,
     stub_y: f64,
     cy: f64,
@@ -1363,23 +1375,12 @@ fn collectMergedPassive(
                 .left => {
                     try scene.addWire(net_name, stub_x, stub_y, stub_x - PIN_OFFSET, cy, false);
                     try scene.addPassiveWithCount(inst, stub_x - PIN_OFFSET - passive_bw, cy, count, true);
-                    const chain_end_x = stub_x - PIN_OFFSET - passive_bw;
-                    // Find the terminal
-                    var visited: std.StringHashMapUnmanaged(void) = .empty;
-                    try visited.put(allocator, p.ref_des, {});
-                    const chain = try connection.findSpokeChain(ctx, p.ref_des, .{ .pin = .{ .ref_des = hub_ref, .pin = from_pin } }, &visited);
-                    _ = chain;
-                    return chain_end_x;
+                    return stub_x - PIN_OFFSET - passive_bw;
                 },
                 .right => {
                     try scene.addWire(net_name, stub_x, stub_y, stub_x + PIN_OFFSET, cy, false);
                     try scene.addPassiveWithCount(inst, stub_x + PIN_OFFSET, cy, count, false);
-                    const chain_end_x = stub_x + PIN_OFFSET + passive_bw;
-                    var visited: std.StringHashMapUnmanaged(void) = .empty;
-                    try visited.put(allocator, p.ref_des, {});
-                    const chain = try connection.findSpokeChain(ctx, p.ref_des, .{ .pin = .{ .ref_des = hub_ref, .pin = from_pin } }, &visited);
-                    _ = chain;
-                    return chain_end_x;
+                    return stub_x + PIN_OFFSET + passive_bw;
                 },
             }
         },
@@ -1656,7 +1657,8 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
 
     // ViewBox
     try w.print("\"viewBox\":{{\"w\":{d:.0},\"h\":{d:.0}}}", .{ scene.vb_w, scene.vb_h });
-    try w.print(",\"name\":\"{s}\"", .{scene.design_name});
+    try w.writeAll(",\"name\":");
+    try json_writer.writeString(w, scene.design_name);
 
     // Sections
     try w.writeAll(",\"sections\":[");
@@ -1879,3 +1881,27 @@ fn writeJsonPin(w: anytype, pin: JsonPin) !void {
 }
 
 const writeEscaped = json_writer.writeEscaped;
+
+// spec: render_svg - Design name is JSON-escaped in the scene graph output
+test "serializeScene escapes a quote/backslash in the design name" {
+    const alloc = std.testing.allocator;
+    var scene = SceneGraph.init(alloc);
+    defer {
+        scene.sections.deinit(alloc);
+        scene.hubs.deinit(alloc);
+        scene.wires.deinit(alloc);
+        scene.passives.deinit(alloc);
+        scene.labels.deinit(alloc);
+        scene.staged.deinit(alloc);
+    }
+    // A hostile (design-block "…") title with a quote + backslash + a would-be
+    // sibling key: without escaping this breaks out of the JSON string.
+    scene.design_name = "\"},\"evil\":\"x\\";
+    const out = try serializeScene(alloc, &scene);
+    defer alloc.free(out);
+
+    // The raw title must NOT appear verbatim — the quote/backslash are escaped.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"\\\"},\\\"evil\\\":\\\"x\\\\\"") != null);
+    // No injected top-level "evil" key with an unescaped colon leaked out.
+    try std.testing.expect(std.mem.indexOf(u8, out, ",\"evil\":\"x") == null);
+}

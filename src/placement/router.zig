@@ -118,13 +118,17 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     // Each placed via's clearance halo is stamped into the routing grid on *both*
     // signal layers, so the maze pass routes foreign copper around it.
     for (placement.nets, 0..) |net, net_i| {
+        // Hoisted above netPoints so we don't allocate + look up pads for every
+        // non-ground net just to skip it.
+        if (!isGroundName(shortName(net.name))) continue;
         const pts = try netPoints(arena, placement, &idx_of, net);
         if (pts.len < 2) continue;
-        if (!isGroundName(shortName(net.name))) continue;
         total += 1;
         const ni: i32 = @intCast(net_i);
+        var placed_any = false;
         for (pts) |c| {
             const pos = findGroundVia(&ctx, vias.items, c, ni) orelse continue;
+            placed_any = true;
             try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = params.via_dia, .net = ni });
             if (@abs(pos[0] - c[0]) > 1e-6 or @abs(pos[1] - c[1]) > 1e-6) {
                 try tracks.append(arena, .{ .x1 = c[0], .y1 = c[1], .x2 = pos[0], .y2 = pos[1], .layer = 0, .width = params.track_width, .net = ni });
@@ -132,7 +136,10 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
             }
             stampViaOcc(&ctx, pos[0], pos[1], ni);
         }
-        routed += 1;
+        // Only count the net routed if at least one plane via actually dropped —
+        // a fully hemmed-in ground net must not inflate routed/total and hide the
+        // hand-fix from fullRouteCost's unrouted term.
+        if (placed_any) routed += 1;
     }
 
     // Pass 2: every other multi-pad net, maze-routed on the two signal layers,
@@ -282,9 +289,10 @@ pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, para
     var ctx = Ctx{ .arena = arena, .grid = grid, .obs = obs, .reach = reach, .occ = occ, .params = params };
 
     for (placement.nets, 0..) |net, net_i| {
+        // Ground filter hoisted above netPoints, in lockstep with `route`.
+        if (!isGroundName(shortName(net.name))) continue;
         const pts = try netPoints(arena, placement, &idx_of, net);
         if (pts.len < 2) continue;
-        if (!isGroundName(shortName(net.name))) continue;
         const ni: i32 = @intCast(net_i);
         for (pts) |c| {
             const pos = findGroundVia(&ctx, vias.items, c, ni) orelse continue;
@@ -897,36 +905,166 @@ const Ctx = struct {
     /// switched on for the brief top-layer-first attempts; the bulk two-layer
     /// maze stays on the cheap, conservative bounding-box path.
     use_poly: bool = false,
+    /// Lazily-built spatial index over `obs` (pads are static for a route) so
+    /// `blocked` tests only pads near the node, not all of them. Null until
+    /// first use, or when the board is degenerate / the grid would be oversized
+    /// (blocked then falls back to the full scan). Result-identical: it only
+    /// pre-filters candidates by position; the exact per-pad decision is kept.
+    pad_index: ?*const PadGrid = null,
+};
+
+/// Uniform spatial bucket grid over obstacle pads. Each pad is inserted into
+/// every cell its `reach`-expanded bounding box overlaps, so a query for the
+/// cell containing a node point returns every pad within `reach` of that node
+/// (plus a few harmless extras the exact distance test rejects).
+const PadGrid = struct {
+    ox: f64,
+    oy: f64,
+    cell: f64,
+    nx: usize,
+    ny: usize,
+    cells: []const []const u32,
+
+    fn cellFor(w: f64, o: f64, cell: f64, n: usize) usize {
+        const f = @floor((w - o) / cell);
+        if (f < 0) return 0;
+        const iu: usize = @intFromFloat(f);
+        return @min(iu, n - 1);
+    }
+
+    /// Pads whose expanded box overlaps the cell containing `(px, py)`.
+    fn near(self: *const PadGrid, px: f64, py: f64) []const u32 {
+        const cx = cellFor(px, self.ox, self.cell, self.nx);
+        const cy = cellFor(py, self.oy, self.cell, self.ny);
+        return self.cells[cy * self.nx + cx];
+    }
+
+    /// Build the index, or return null (degenerate board / oversized grid) so
+    /// the caller falls back to the exact full scan. Any allocation failure
+    /// returns null rather than a partially-populated (wrong) index.
+    fn build(arena: std.mem.Allocator, obs: []const PadObs, grid: Grid, reach: f64) ?*const PadGrid {
+        if (obs.len == 0) return null;
+        const cell = @max(reach * 4.0, 1.0);
+        var minx = grid.ox;
+        var miny = grid.oy;
+        var maxx = grid.ox + @as(f64, @floatFromInt(grid.nx -| 1)) * grid.g;
+        var maxy = grid.oy + @as(f64, @floatFromInt(grid.ny -| 1)) * grid.g;
+        for (obs) |p| {
+            minx = @min(minx, p.x0 - reach);
+            miny = @min(miny, p.y0 - reach);
+            maxx = @max(maxx, p.x1 + reach);
+            maxy = @max(maxy, p.y1 + reach);
+        }
+        const gnx: usize = @as(usize, @intFromFloat(@floor((maxx - minx) / cell))) + 1;
+        const gny: usize = @as(usize, @intFromFloat(@floor((maxy - miny) / cell))) + 1;
+        const total = std.math.mul(usize, gnx, gny) catch return null;
+        if (total > (1 << 22)) return null; // too big — full scan is cheaper
+        const lists = arena.alloc(std.ArrayListUnmanaged(u32), total) catch return null;
+        for (lists) |*l| l.* = .empty;
+        for (obs, 0..) |p, i| {
+            const cx0 = cellFor(p.x0 - reach, minx, cell, gnx);
+            const cx1 = cellFor(p.x1 + reach, minx, cell, gnx);
+            const cy0 = cellFor(p.y0 - reach, miny, cell, gny);
+            const cy1 = cellFor(p.y1 + reach, miny, cell, gny);
+            var cy = cy0;
+            while (cy <= cy1) : (cy += 1) {
+                var cx = cx0;
+                while (cx <= cx1) : (cx += 1) {
+                    lists[cy * gnx + cx].append(arena, @intCast(i)) catch return null;
+                }
+            }
+        }
+        const frozen = arena.alloc([]const u32, total) catch return null;
+        for (lists, 0..) |l, i| frozen[i] = l.items;
+        const self = arena.create(PadGrid) catch return null;
+        self.* = .{ .ox = minx, .oy = miny, .cell = cell, .nx = gnx, .ny = gny, .cells = frozen };
+        return self;
+    }
 };
 
 /// True if node (layer, n) can't carry net `net`: copper of another net is
 /// there, or (on top) a foreign pad is within clearance. A node sitting on the
 /// net's *own* pad is always allowed (that's where the trace must connect).
+/// Fold one pad `p` into the `on_own`/`foreign` accumulators for a node at
+/// `(px, py)` carrying `net`. Extracted so the indexed and full-scan candidate
+/// paths in `blocked` share the exact same distance test.
+inline fn accumPad(p: PadObs, px: f64, py: f64, net: i32, use_poly: bool, reach: f64, on_own: *bool, foreign: *bool) void {
+    // Measure clearance against the pad's real copper outline only when asked
+    // (the top-first pass): a concave thermal/EP pad over-states copper in its
+    // box, walling off a corridor a short net could escape through — which is
+    // exactly what buries a feedback tap beside an EP and forces it inner. The
+    // outline test is costly, so the bulk maze keeps the cheap box distance.
+    const d = if (use_poly)
+        pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, px, py, reach)
+    else
+        distPointRect(px, py, .{ .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1 });
+    if (p.net == net) {
+        if (d <= 1e-9) on_own.* = true;
+    } else if (d < reach) {
+        foreign.* = true;
+    }
+}
+
 fn blocked(ctx: *Ctx, layer: usize, n: usize, net: i32) bool {
     const o = ctx.occ[layer][n];
     if (o != EMPTY and o != net) return true;
     if (layer != 0) return false; // pads (and their clearance) live on top
     const px = ctx.grid.worldX(n % ctx.grid.nx);
     const py = ctx.grid.worldY(n / ctx.grid.nx);
+    // Lazily build the spatial index the first time we test a top-layer node;
+    // the pad set is static for the route so one build serves all queries.
+    if (ctx.pad_index == null) ctx.pad_index = PadGrid.build(ctx.arena, ctx.obs, ctx.grid, ctx.reach);
     var on_own = false;
     var foreign = false;
-    for (ctx.obs) |p| {
-        // Measure clearance against the pad's real copper outline only when asked
-        // (the top-first pass): a concave thermal/EP pad over-states copper in its
-        // box, walling off a corridor a short net could escape through — which is
-        // exactly what buries a feedback tap beside an EP and forces it inner. The
-        // outline test is costly, so the bulk maze keeps the cheap box distance.
-        const d = if (ctx.use_poly)
-            pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, px, py, ctx.reach)
-        else
-            distPointRect(px, py, .{ .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1 });
-        if (p.net == net) {
-            if (d <= 1e-9) on_own = true;
-        } else if (d < ctx.reach) {
-            foreign = true;
-        }
+    if (ctx.pad_index) |idx| {
+        for (idx.near(px, py)) |pi| accumPad(ctx.obs[pi], px, py, net, ctx.use_poly, ctx.reach, &on_own, &foreign);
+    } else {
+        for (ctx.obs) |p| accumPad(p, px, py, net, ctx.use_poly, ctx.reach, &on_own, &foreign);
     }
     return foreign and !on_own;
+}
+
+/// True iff `idx.near(node)` includes every pad the full scan would consider
+/// (any pad within `reach` of the node) across every grid node — the invariant
+/// that makes the indexed `blocked` result-identical to the full scan (extra
+/// candidates are fine; the exact distance test in `accumPad` rejects them).
+/// Loops live here so the test body stays a single assertion.
+fn padGridCoversFullScan(arena: std.mem.Allocator) bool {
+    const grid = Grid{ .ox = 0, .oy = 0, .g = 0.1, .nx = 64, .ny = 64 };
+    const reach: f64 = 0.25;
+    const pads = [_]PadObs{
+        .{ .x0 = 1.0, .y0 = 1.0, .x1 = 1.5, .y1 = 1.3, .net = 1 },
+        .{ .x0 = 1.45, .y0 = 1.2, .x1 = 1.9, .y1 = 1.5, .net = 3 }, // clearance-overlaps pad 0
+        .{ .x0 = 3.0, .y0 = 2.0, .x1 = 3.4, .y1 = 2.4, .net = 2 },
+        .{ .x0 = 5.2, .y0 = 5.2, .x1 = 5.4, .y1 = 5.4, .net = 1 },
+        .{ .x0 = 0.0, .y0 = 0.0, .x1 = 0.15, .y1 = 6.3, .net = 4 }, // long edge pad
+    };
+    const idx = PadGrid.build(arena, &pads, grid, reach) orelse return true;
+    var iy: usize = 0;
+    while (iy < grid.ny) : (iy += 1) {
+        var ix: usize = 0;
+        while (ix < grid.nx) : (ix += 1) {
+            const px = grid.worldX(ix);
+            const py = grid.worldY(iy);
+            const cand = idx.near(px, py);
+            for (pads, 0..) |p, i| {
+                const d = distPointRect(px, py, .{ .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1 });
+                if (d >= reach) continue;
+                var found = false;
+                for (cand) |c| {
+                    if (c == @as(u32, @intCast(i))) found = true;
+                }
+                if (!found) return false;
+            }
+        }
+    }
+    return true;
+}
+
+test "PadGrid index is result-identical to the full scan" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    try std.testing.expect(padGridCoversFullScan(arena_inst.allocator()));
 }
 
 const QItem = struct { d: f64, key: usize }; // key = layer*nodes + node
@@ -1210,15 +1348,13 @@ pub fn returnPathViolations(placement: optimizer.Placement, routed: RouteResult,
     return count;
 }
 
-// ── Small helpers (mirror optimizer.zig) ───────────────────────────────────
+// ── Small helpers ──────────────────────────────────────────────────────────
 
-fn isGroundName(name: []const u8) bool {
-    const grounds = [_][]const u8{ "GND", "GNDA", "AGND", "PGND", "DGND", "GNDD", "VSS", "VSSA" };
-    for (grounds) |gg| {
-        if (std.mem.eql(u8, name, gg)) return true;
-    }
-    return false;
-}
+/// Ground-net predicate — the router shares the optimizer's exact one so a
+/// split/numbered ground (GND1, AGND2, PGND_2) is treated as a plane here just
+/// as it is in placement. A previous hand-copied exact-match list drifted and
+/// routed those nets as signal copper.
+const isGroundName = optimizer.isGroundName;
 
 fn shortName(s: []const u8) []const u8 {
     if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];

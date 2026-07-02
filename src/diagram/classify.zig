@@ -92,10 +92,13 @@ const ground_eq = [_][]const u8{ "GND", "AGND", "DGND", "PGND" };
 const ground_suf = [_][]const u8{ "_GND", "GND" };
 // Named/derived grounds keep their `GND` stem as a prefix: an isolated barrier
 // ground (`GND_ISO`), a digital/analog split (`GND_A`). Treated as ground so it
-// stays a shared reference rather than a spurious control edge.
-const ground_pre = [_][]const u8{ "GND_", "AGND_", "DGND_", "PGND_" };
+// stays a shared reference rather than a spurious control edge. `VSS`/`VSSA` is
+// the 0 V reference in CMOS naming (not a rail), so it belongs here — otherwise a
+// VSS-named design gets a spurious dense power-edge fan the ground reference class
+// exists to suppress.
+const ground_pre = [_][]const u8{ "GND_", "AGND_", "DGND_", "PGND_", "VSS" };
 
-const power_pre = [_][]const u8{ "VDD", "VCC", "AVDD", "DVDD", "VBAT", "VREG", "VPOS", "VBUS", "VSS", "VLX", "V_" };
+const power_pre = [_][]const u8{ "VDD", "VCC", "AVDD", "DVDD", "VBAT", "VREG", "VPOS", "VBUS", "VLX", "V_" };
 
 const clock_pre = [_][]const u8{ "REF_", "OSC" };
 const clock_sub = [_][]const u8{ "_REF_", "REFIN", "RADAR_REF", "_OSC", "MHZ", "TCXO", "XTAL", "SWCLK" };
@@ -197,6 +200,13 @@ test "netClass classifies real Cyclops net names" {
     // Named/isolated grounds are recognized so they stay a shared reference
     // instead of leaking into the control view as spurious edges.
     try testing.expectEqual(types.CLASS_GROUND, netClass("GND_ISO", &pm));
+    // VSS/VSSA is the CMOS 0 V reference (ground), not a power rail — else it
+    // fans a spurious dense power edge the ground reference class exists to hide.
+    try testing.expectEqual(types.CLASS_GROUND, netClass("VSS", &pm));
+    try testing.expectEqual(types.CLASS_GROUND, netClass("VSSA", &pm));
+    try testing.expectEqual(types.CLASS_GROUND, netClass("VSS_1", &pm));
+    // A real supply rail is still power.
+    try testing.expectEqual(types.CLASS_POWER, netClass("VDD", &pm));
 }
 
 // spec: diagram/classify - Honors an explicit section-port signal type over the name heuristic

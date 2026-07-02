@@ -318,7 +318,12 @@ pub fn main() !void {
             project_dir = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, a, "--reps") and i + 1 < args.len) {
-            reps = std.fmt.parseInt(usize, args[i + 1], 10) catch DEFAULT_REPS;
+            // A silent fallback to DEFAULT_REPS on a typo would quietly change
+            // the rep count and invalidate a timing protocol — flag it loudly.
+            reps = std.fmt.parseInt(usize, args[i + 1], 10) catch blk: {
+                std.debug.print("bench-layout: unparseable --reps {s}, using default {d}\n", .{ args[i + 1], DEFAULT_REPS });
+                break :blk DEFAULT_REPS;
+            };
             i += 1;
         } else if (std.mem.eql(u8, a, "--poses") and i + 1 < args.len) {
             // Score a fixed layout (JSON pose array) instead of timing a solve.

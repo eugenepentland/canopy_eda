@@ -104,7 +104,15 @@ fn hash3(d: []const u8, i: usize) u32 {
 
 /// Write `data` as one final fixed-Huffman DEFLATE block with greedy LZ77
 /// (hash-chain) matching. Correctness is checked by the round-trip tests.
+///
+/// Input-size limit: positions are stored in the `i32` hash chain (`head`/
+/// `prev`), so `data.len` must be < 2 GiB (`maxInt(i32) + 1`). Realistic
+/// inputs — PNG scanlines (≤ tens of MB at the canvas caps) and HTTP responses
+/// — are far under that; the assert makes the bound explicit rather than
+/// letting a 2 GiB input overflow the `@intCast` (panic in safe builds, UB in
+/// ReleaseSmall).
 fn deflateFixed(alloc: std.mem.Allocator, bw: *BitWriter, data: []const u8) Error!void {
+    std.debug.assert(data.len <= std.math.maxInt(i32));
     try bw.writeBits(1, 1); // BFINAL = 1
     try bw.writeBits(1, 2); // BTYPE = 01 (fixed Huffman)
 

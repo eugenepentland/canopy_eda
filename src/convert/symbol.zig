@@ -162,7 +162,10 @@ pub fn generatePackage(
                 if (child.isForm("pad")) {
                     const cl = child.asList() orelse continue;
                     if (cl.len < 4) continue;
-                    const pad_id = cl[1].asAtom() orelse cl[1].asString() orelse continue;
+                    // Bare-int pad numbers (`(pad 1 …)`) parse as `.int`;
+                    // tokenText renders them so numerically-padded footprints
+                    // aren't dropped from the generated package's pad map.
+                    const pad_id = cl[1].tokenText(allocator) orelse continue;
                     const pad_type_raw = cl[2].asAtom() orelse continue;
                     const shape_raw = cl[3].asAtom() orelse continue;
                     var px: f64 = 0;
@@ -255,6 +258,7 @@ pub const ConvertError = error{
     UnexpectedCharacter,
     UnterminatedString,
     InvalidNumber,
+    TooDeep,
 };
 
 // spec: convert/symbol - Converts a KiCad symbol file into S-expression format

@@ -4,6 +4,9 @@ const ctx_mod = @import("context.zig");
 const RenderCtx = ctx_mod.RenderCtx;
 const FlatInst = ctx_mod.FlatInst;
 const Branch = ctx_mod.Branch;
+
+/// Closing tags for a passive-branch `<text>` label inside its `<g>` group.
+const TEXT_G_CLOSE = "</text>\n</g>\n";
 const BranchBody = ctx_mod.BranchBody;
 const draw = @import("draw.zig");
 const hub_width = draw.hub_width;
@@ -25,6 +28,7 @@ const drawGndSymbol = draw.drawGndSymbol;
 const drawBlockIcon = draw.drawBlockIcon;
 const writeDebugPin = draw.writeDebugPin;
 const RenderError = draw.RenderError;
+const escape = @import("../escape.zig");
 
 // ── Layout constants ──────────────────────────────────────────────
 const HALF_DIVISOR: f64 = 2.0;
@@ -169,21 +173,22 @@ fn renderBranchTerminalsRight(self: *RenderCtx, w: anytype, bodies: []const Bran
 pub fn drawTerminal(self: *RenderCtx, w: anytype, end_x: f64, cy: f64, term: []const u8, anchor: []const u8) RenderError!void {
     const display = draw.baseNetName(term);
     if (isGroundNet(display)) {
-        try w.print(
-            \\<g class="net" data-net="{s}" style="cursor:pointer">
-            \\
-        , .{display});
+        try w.writeAll("<g class=\"net\" data-net=\"");
+        try escape.writeXml(w, display);
+        try w.writeAll("\" style=\"cursor:pointer\">\n");
         try drawGndSymbol(w, end_x, cy);
         try w.writeAll("</g>\n");
     } else {
         const color: []const u8 = if (self.port_nets.contains(term) or self.port_nets.contains(display)) "#4a9eff" else "#e8c547";
         const label_x: f64 = if (std.mem.eql(u8, anchor, "end")) end_x - net_label_gap else end_x + net_label_gap;
+        try w.writeAll("<g class=\"net\" data-net=\"");
+        try escape.writeXml(w, display);
         try w.print(
-            \\<g class="net" data-net="{s}" style="cursor:pointer">
-            \\<text x="{d:.1}" y="{d:.1}" text-anchor="{s}" font-size="11" font-weight="bold" fill="{s}">{s}</text>
-            \\</g>
-            \\
-        , .{ display, label_x, cy + LABEL_BASELINE, anchor, color, display });
+            \\" style="cursor:pointer">
+            \\<text x="{d:.1}" y="{d:.1}" text-anchor="{s}" font-size="11" font-weight="bold" fill="{s}">
+        , .{ label_x, cy + LABEL_BASELINE, anchor, color });
+        try escape.writeXml(w, display);
+        try w.writeAll(TEXT_G_CLOSE);
     }
     try writeDebugPin(w, end_x, cy);
 }
@@ -230,12 +235,13 @@ fn drawPassiveLeft(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
     const cx = bx + passive_bw / HALF_DIVISOR;
     const pad: f64 = PASSIVE_LABEL_PAD;
 
+    try w.writeAll("<g data-ref=\"");
+    try escape.writeXml(w, shortRef(inst.ref_des));
     try w.print(
-        \\<g data-ref="{s}" class="component" style="cursor:pointer">
+        \\" class="component" style="cursor:pointer">
         \\<rect x="{d:.1}" y="{d:.1}" width="{d:.1}" height="{d:.1}" fill="transparent" class="hit-area"/>
         \\
     , .{
-        shortRef(inst.ref_des),
         bx - pad,
         by - PASSIVE_LABEL_OFFSET_Y,
         passive_bw + pad * HALF_DIVISOR,
@@ -245,10 +251,12 @@ fn drawPassiveLeft(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
     try drawSymbolShape(w, bx, passive_bw, cx, cy, inst);
 
     try w.print(
-        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="9" fill="#888">{s} {s}</text>
-        \\</g>
-        \\
-    , .{ cx, by - PASSIVE_VALUE_OFFSET, shortRef(inst.ref_des), formatShort(inst) });
+        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="9" fill="#888">
+    , .{ cx, by - PASSIVE_VALUE_OFFSET });
+    try escape.writeXml(w, shortRef(inst.ref_des));
+    try w.writeAll(" ");
+    try escape.writeXml(w, formatShort(inst));
+    try w.writeAll(TEXT_G_CLOSE);
 
     try writeDebugPin(w, bx, cy);
     try writeDebugPin(w, bx + passive_bw, cy);
@@ -260,12 +268,13 @@ fn drawPassiveRight(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
     const cx = bx + passive_bw / HALF_DIVISOR;
     const pad: f64 = PASSIVE_LABEL_PAD;
 
+    try w.writeAll("<g data-ref=\"");
+    try escape.writeXml(w, shortRef(inst.ref_des));
     try w.print(
-        \\<g data-ref="{s}" class="component" style="cursor:pointer">
+        \\" class="component" style="cursor:pointer">
         \\<rect x="{d:.1}" y="{d:.1}" width="{d:.1}" height="{d:.1}" fill="transparent" class="hit-area"/>
         \\
     , .{
-        shortRef(inst.ref_des),
         bx - pad,
         by - PASSIVE_LABEL_OFFSET_Y,
         passive_bw + pad * HALF_DIVISOR,
@@ -275,10 +284,12 @@ fn drawPassiveRight(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {
     try drawSymbolShape(w, bx, passive_bw, cx, cy, inst);
 
     try w.print(
-        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="9" fill="#888">{s} {s}</text>
-        \\</g>
-        \\
-    , .{ cx, by - PASSIVE_VALUE_OFFSET, shortRef(inst.ref_des), formatShort(inst) });
+        \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="9" fill="#888">
+    , .{ cx, by - PASSIVE_VALUE_OFFSET });
+    try escape.writeXml(w, shortRef(inst.ref_des));
+    try w.writeAll(" ");
+    try escape.writeXml(w, formatShort(inst));
+    try w.writeAll(TEXT_G_CLOSE);
 
     try writeDebugPin(w, bx, cy);
     try writeDebugPin(w, bx + passive_bw, cy);
