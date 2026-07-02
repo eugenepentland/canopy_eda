@@ -487,6 +487,12 @@ pub const Placement = struct {
     /// world coordinates (same frame as `parts`). Null when the design has no
     /// effective board form — renderers draw no outline.
     board_rect: ?BoardRect = null,
+    /// Net names that have a dedicated copper plane, from the design's
+    /// `(stackup …)` form. **Null = no stackup declared** — the router keeps
+    /// its legacy implicit model (ground nets get plane vias). An **empty
+    /// slice** is a declared stackup with NO planes (e.g. `(stackup 2)`):
+    /// every net, ground included, is routed as real copper.
+    plane_nets: ?[]const []const u8 = null,
 };
 
 /// A `(board …)` outline rectangle in world mm (top-left + size).
@@ -3812,6 +3818,15 @@ fn boardRectFromPoses(
     };
 }
 
+/// The design's plane-carrying net names per its `(stackup …)` form, in the
+/// shape `Placement.plane_nets` documents (null = legacy implicit planes).
+fn planeNetsOf(arena: std.mem.Allocator, block: *const DesignBlock) std.mem.Allocator.Error!?[]const []const u8 {
+    if (!block.stackup.present) return null;
+    const out = try arena.alloc([]const u8, block.stackup.planes.len);
+    for (block.stackup.planes, 0..) |pl, i| out[i] = pl.net;
+    return out;
+}
+
 /// Build a placement for `block`. When `cached` covers every part, its poses
 /// are applied directly (no optimization — fast); otherwise the optimizer runs
 /// and `Placement.generated` is set so the caller can persist a fresh cache.
@@ -3914,6 +3929,7 @@ pub fn solve(
     // same lower-is-better scalar the explore frame used.
     emitBest(parts, bd.objective, .refine);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
+    pl.plane_nets = try planeNetsOf(arena, block);
     if (board_live) {
         if (board_rect == null) board_rect = try boardRectFromPoses(arena, parts, prep.instances, block.board);
         pl.board_rect = board_rect;
@@ -4056,6 +4072,7 @@ pub fn placeFromPoses(
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
+    pl.plane_nets = try planeNetsOf(arena, block);
     // Saved/hand layouts of a `(board …)` design keep their outline overlay.
     if (block.board.present and block.board.w > 0 and block.board.h > 0) {
         const r = try boardRectFromPoses(arena, parts, prep.instances, block.board);
@@ -4092,7 +4109,8 @@ pub fn gridPlace(
     const score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
-    const pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
+    var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
+    pl.plane_nets = try planeNetsOf(arena, block);
     return pl;
 }
 

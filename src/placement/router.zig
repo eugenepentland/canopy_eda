@@ -135,8 +135,10 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     // signal layers, so the maze pass routes foreign copper around it.
     for (placement.nets, 0..) |net, net_i| {
         // Hoisted above netPoints so we don't allocate + look up pads for every
-        // non-ground net just to skip it.
-        if (!isGroundName(shortName(net.name))) continue;
+        // non-plane net just to skip it. Only nets with a dedicated plane get
+        // via drops — on a plane-less stackup NOTHING does, and every net
+        // (ground included) falls through to the maze pass below.
+        if (!netHasPlane(placement, net.name)) continue;
         const pts = try netPoints(arena, placement, &idx_of, net);
         if (pts.len < 2) continue;
         total += 1;
@@ -171,7 +173,7 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     for (placement.nets, 0..) |net, i| net_pri[i] = netPriority(placement, &idx_of, net);
     var order: std.ArrayListUnmanaged(usize) = .empty;
     for (placement.nets, 0..) |net, net_i| {
-        if (isGroundName(shortName(net.name))) continue;
+        if (netHasPlane(placement, net.name)) continue;
         try order.append(arena, net_i);
     }
     std.sort.pdq(usize, order.items, net_pri, priorityDesc);
@@ -315,8 +317,8 @@ pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, para
     var ctx = Ctx{ .arena = arena, .grid = grid, .obs = obs, .reach = reach, .occ = occ, .params = params, .has_bottom_pads = anyBottomPads(obs) };
 
     for (placement.nets, 0..) |net, net_i| {
-        // Ground filter hoisted above netPoints, in lockstep with `route`.
-        if (!isGroundName(shortName(net.name))) continue;
+        // Plane filter hoisted above netPoints, in lockstep with `route`.
+        if (!netHasPlane(placement, net.name)) continue;
         const pts = try netPoints(arena, placement, &idx_of, net);
         if (pts.len < 2) continue;
         const ni: i32 = @intCast(net_i);
@@ -835,11 +837,26 @@ fn findStitchVia(ctx: *Ctx, placed: []const Via, tracks: []const Track, c: [2]f6
     return null;
 }
 
-/// Index of the first ground net (by name), or null when the board has none —
-/// then there's no plane to stitch to and the stitch pass is skipped.
+/// Does `name` have a dedicated copper plane on this board? Legacy (no
+/// `(stackup …)` form ⇒ `plane_nets == null`): ground nets are assumed to.
+/// With a declared stackup: exactly the nets its `(plane …)` entries name
+/// (matched case-insensitively, full or short name) — so `(stackup 2)`
+/// declares none and ground routes as real copper.
+fn netHasPlane(placement: optimizer.Placement, name: []const u8) bool {
+    const planes = placement.plane_nets orelse return isGroundName(shortName(name));
+    for (planes) |pn| {
+        if (std.ascii.eqlIgnoreCase(pn, name) or std.ascii.eqlIgnoreCase(pn, shortName(name))) return true;
+    }
+    return false;
+}
+
+/// Index of the first ground net that HAS a plane (by name), or null when the
+/// board has none — then there's no plane to stitch to and the return-path
+/// stitch pass is skipped (on a plane-less 2-layer board ground is ordinary
+/// routed copper, so "stitching" it makes no sense).
 fn firstGroundNet(placement: optimizer.Placement) ?i32 {
     for (placement.nets, 0..) |net, i| {
-        if (isGroundName(shortName(net.name))) return @intCast(i);
+        if (isGroundName(shortName(net.name)) and netHasPlane(placement, net.name)) return @intCast(i);
     }
     return null;
 }
@@ -1495,6 +1512,50 @@ test "route vias between a top part and a bottom part" {
     }
     try testing.expect(top_len > 0);
     try testing.expect(bot_len > 0);
+}
+
+// spec: placement/router - a plane-less stackup routes ground as real copper instead of dropping plane vias
+test "plane-less stackup maze-routes the ground net" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const pads_a = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    const pads_b = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads_a, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads_b, .fallback = false, .x = 3, .y = 0 },
+    };
+    const pins_g = [_]export_kicad.FlatPin{ .{ .ref_des = "C1", .pin = "1" }, .{ .ref_des = "C2", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "GND", .pins = &pins_g }};
+    var placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -0.5,
+        .miny = -0.5,
+        .maxx = 3.5,
+        .maxy = 0.5,
+        .generated = true,
+    };
+
+    // Legacy (no stackup): GND is a plane net — one via per pad, no trace run.
+    const legacy = try route(arena, placement, .{});
+    try testing.expectEqual(@as(usize, 1), legacy.routed);
+    try testing.expect(legacy.vias.len >= 2);
+
+    // Declared plane-less stackup: GND maze-routes as surface copper.
+    placement.plane_nets = &.{};
+    const flat = try route(arena, placement, .{});
+    try testing.expectEqual(@as(usize, 1), flat.routed);
+    try testing.expectEqual(@as(usize, 0), flat.vias.len);
+    var gnd_len: f64 = 0;
+    for (flat.tracks) |t| gnd_len += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
+    try testing.expect(gnd_len >= 2.5); // the ~3 mm pad-to-pad run exists as copper
 }
 
 // spec: placement/router - LoopRouter measures a real per-leg trace length that detours foreign pads

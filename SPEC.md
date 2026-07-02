@@ -133,6 +133,7 @@ Public functions: route, returnPathViolations
 
 - maze-routes a two-pad net into connected track segments
 - a net spanning the two board sides routes through a via, each leg on its part's layer
+- a plane-less stackup routes ground as real copper instead of dropping plane vias
 - routes corners as 45° diagonals rather than 90° bends
 - LoopRouter measures a real per-leg trace length that detours foreign pads
 - counts signal vias lacking a nearby ground stitching via as return-path discontinuities
