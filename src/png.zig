@@ -11,11 +11,15 @@ const deflate = @import("deflate.zig");
 const SIGNATURE = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
 
 /// Errors `encodeRgb` (and downstream rasterizer encode paths) can produce.
-pub const Error = std.mem.Allocator.Error || std.Io.Writer.Error;
+/// `EmptyImage` guards a degenerate 0×N / N×0 canvas — the IHDR spec forbids a
+/// zero dimension and decoders reject such a file, so reject it at the source
+/// (a pathological aspect ratio can round a computed board dimension to 0).
+pub const Error = std.mem.Allocator.Error || std.Io.Writer.Error || error{EmptyImage};
 
 /// Encode a row-major RGB8 buffer (`rgb.len == width*height*3`, no row padding)
 /// as PNG bytes owned by `alloc`. Color type 2 (truecolor), 8-bit, no interlace.
 pub fn encodeRgb(alloc: std.mem.Allocator, width: u32, height: u32, rgb: []const u8) Error![]u8 {
+    if (width == 0 or height == 0) return error.EmptyImage;
     const stride: usize = @as(usize, width) * 3;
     std.debug.assert(rgb.len == stride * height);
 
@@ -79,6 +83,10 @@ pub fn encodeRgb(alloc: std.mem.Allocator, width: u32, height: u32, rgb: []const
 /// Emit one PNG chunk: `length` (4 BE) + `kind` (4 ASCII) + `data` + CRC32 of
 /// `kind`+`data` (4 BE).
 fn writeChunk(w: *std.Io.Writer, kind: *const [4]u8, data: []const u8) !void {
+    // A PNG chunk length is a u32; the largest chunk we emit (IDAT) is bounded
+    // by the canvas caps, far under 4 GiB. Assert it so the `@intCast` below is
+    // a documented invariant rather than a silent panic/UB on a giant buffer.
+    std.debug.assert(data.len <= std.math.maxInt(u32));
     var len: [4]u8 = undefined;
     std.mem.writeInt(u32, &len, @intCast(data.len), .big);
     try w.writeAll(&len);
@@ -115,7 +123,7 @@ test "encodeRgb produces a decodable 2x2 PNG" {
     try std.testing.expectEqualSlices(u8, "IEND", png[png.len - 8 .. png.len - 4]);
 
     // Round-trip: inflate the IDAT and reconstruct the Up filter, checking the
-    // pixels decode back to the original (validates the dynamic-Huffman stream).
+    // pixels decode back to the original (validates the fixed-Huffman stream).
     try expectRoundTrip(alloc, png, 2, 2, &rgb);
 }
 

@@ -1,7 +1,5 @@
 # guardian-snapshot v1
-src/eval/power_budget.zig:477: hardcoded std.heap.page_allocator outside main/test
-src/eval/power_budget.zig:478: hardcoded std.heap.page_allocator outside main/test
-src/render_html.zig:762: hardcoded std.heap.page_allocator outside main/test
+src/render_html.zig:777: hardcoded std.heap.page_allocator outside main/test
 src/serve.zig:137: hardcoded std.heap.page_allocator outside main/test
 src/serve.zig:139: hardcoded std.heap.page_allocator outside main/test
 src/serve.zig:147: hardcoded std.heap.page_allocator outside main/test
@@ -13,10 +11,11 @@ src/serve.zig:56: hardcoded std.heap.page_allocator outside main/test
 src/serve.zig:63: hardcoded std.heap.page_allocator outside main/test
 src/serve.zig:76: hardcoded std.heap.page_allocator outside main/test
 src/serve.zig:78: hardcoded std.heap.page_allocator outside main/test
-src/serve/auth.zig:99: hardcoded std.heap.page_allocator outside main/test
+src/serve/auth.zig:100: hardcoded std.heap.page_allocator outside main/test
 src/serve/mcp.zig:294: hardcoded std.heap.page_allocator outside main/test
+src/serve/mcp.zig:299: hardcoded std.heap.page_allocator outside main/test
 src/serve/mcp_tools.zig:2210: hardcoded std.heap.page_allocator outside main/test
-src/serve/modules.zig:272: hardcoded std.heap.page_allocator outside main/test
+src/serve/modules.zig:285: hardcoded std.heap.page_allocator outside main/test
 src/serve/oauth_store.zig:72: hardcoded std.heap.page_allocator outside main/test
 src/serve/page_cache.zig:25: hardcoded std.heap.page_allocator outside main/test
 src/serve/pcb_layout_page.zig:1044: hardcoded std.heap.page_allocator outside main/test
@@ -26,6 +25,6 @@ src/serve/pcb_layout_page.zig:1115: hardcoded std.heap.page_allocator outside ma
 src/serve/pcb_layout_page.zig:1116: hardcoded std.heap.page_allocator outside main/test
 src/serve/pcb_layout_page.zig:1125: hardcoded std.heap.page_allocator outside main/test
 src/serve/pcb_layout_page.zig:1126: hardcoded std.heap.page_allocator outside main/test
-src/serve/plugin_tokens.zig:24: hardcoded std.heap.page_allocator outside main/test
+src/serve/plugin_tokens.zig:25: hardcoded std.heap.page_allocator outside main/test
 src/serve/schematic_page.zig:38: hardcoded std.heap.page_allocator outside main/test
-src/serve/users.zig:57: hardcoded std.heap.page_allocator outside main/test
+src/serve/users.zig:58: hardcoded std.heap.page_allocator outside main/test

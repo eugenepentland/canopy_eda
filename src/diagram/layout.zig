@@ -483,8 +483,10 @@ fn isEdgePinned(graph: *const Graph, gid: u32) bool {
 /// else: left-edge blocks one column left of the leftmost content, right-edge
 /// blocks one column right of the rightmost. Members stack vertically, centered
 /// on the content's row span. Runs last so the edges hold regardless of the
-/// relative/row placement between them.
-fn resolveEdges(graph: *const Graph, cell_of: []Cell, placed: []bool) void {
+/// relative/row placement between them. Two directives on the same side stack in
+/// distinct cells (each bumps down past cells the earlier one filled) instead of
+/// silently overwriting each other, mirroring `resolvePlacements`' collision bump.
+fn resolveEdges(arena: Allocator, graph: *const Graph, cell_of: []Cell, placed: []bool) Allocator.Error!void {
     if (graph.layout.edges.len == 0) return;
     var min_col: i32 = std.math.maxInt(i32);
     var max_col: i32 = std.math.minInt(i32);
@@ -506,6 +508,9 @@ fn resolveEdges(graph: *const Graph, cell_of: []Cell, placed: []bool) void {
         min_row = 0;
         max_row = 0;
     }
+    // Occupancy of the two edge columns as we fill them, so a later same-side
+    // directive doesn't land on an earlier one's cells.
+    var occupied: std.AutoHashMapUnmanaged(Cell, void) = .{};
     const center = @divFloor(min_row + max_row, 2);
     for (graph.layout.edges) |e| {
         const col: i32 = if (e.side == .left) min_col - 1 else max_col + 1;
@@ -513,8 +518,15 @@ fn resolveEdges(graph: *const Graph, cell_of: []Cell, placed: []bool) void {
         var i: i32 = 0;
         for (e.members) |name| {
             const gid = nodeByKey(graph, name) orelse continue;
-            cell_of[gid] = .{ .col = col, .row = center - @divFloor(k - 1, 2) + i };
+            var cell = Cell{ .col = col, .row = center - @divFloor(k - 1, 2) + i };
+            // Bump downward past any cell an earlier directive on this column took.
+            var hops: usize = 0;
+            while (occupied.contains(cell) and hops < max_bump) : (hops += 1) {
+                cell.row += 1;
+            }
+            cell_of[gid] = cell;
             placed[gid] = true;
+            try occupied.put(arena, cell, {});
             i += 1;
         }
     }
@@ -713,7 +725,7 @@ pub fn computeFreeLayout(arena: Allocator, graph: *const Graph) Allocator.Error!
     @memset(placed, false);
     resolveRows(graph, cell_of, placed);
     try resolvePlacements(arena, graph, cell_of, placed);
-    resolveEdges(graph, cell_of, placed);
+    try resolveEdges(arena, graph, cell_of, placed);
 
     // Normalise placed cells so the minimum col/row is 0 (anchors/left-of can
     // go negative), then find the fallback row (one below the lowest placed).
@@ -2387,11 +2399,9 @@ fn powerLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
 
     // ── INPUT: source card(s), vertically centred ──
     const src_right = input_x + pw_src_w;
-    var src_top: f64 = pad;
     {
         var y = pad + (inner_h - src_total) / 2;
-        for (sources.items, 0..) |g, i| {
-            if (i == 0) src_top = y;
+        for (sources.items) |g| {
             try boxes.append(arena, .{ .kind = .source, .gid = g, .x = input_x, .y = y, .w = pw_src_w, .h = pw_src_h, .v = info.battery_v });
             prx[g] = src_right;
             pcy[g] = y + pw_src_h / 2;
@@ -2408,9 +2418,17 @@ fn powerLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
             prx[g] = reg_x + pw_reg_w;
             pcy[g] = y + pw_reg_h / 2;
             if (sources.items.len > 0) {
+                // Feed from *this* regulator's own source (info.parent), not
+                // always the first card — else a battery+USB board draws every
+                // regulator off card 0 and the second source appears to feed
+                // nothing. The parent (depth-0 producer) already sits in prx/pcy.
+                const feeder: u32 = if (info.parent[g] >= 0) @intCast(info.parent[g]) else sources.items[0];
+                // Fan the wires out along the feeder card's own height so parallel
+                // regulators leave it at distinct points.
                 const frac = (@as(f64, @floatFromInt(i)) + 1) / (reg_count + 1);
-                const pts = try pwElbow(arena, src_right, src_top + frac * pw_src_h, reg_x, pcy[g]);
-                try routes.append(arena, pwRoute(0, g, info.battery_v, pts));
+                const feeder_top = pcy[feeder] - pw_src_h / 2;
+                const pts = try pwElbow(arena, prx[feeder], feeder_top + frac * pw_src_h, reg_x, pcy[g]);
+                try routes.append(arena, pwRoute(feeder, g, info.battery_v, pts));
             }
             y += pw_reg_h + pw_reg_gap;
         }
@@ -2439,7 +2457,10 @@ fn powerLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
             try boxes.append(arena, .{ .kind = .bucket, .x = loads_x, .y = y, .w = pw_bucket_w, .h = b.h, .v = b.v, .members = b.members });
             if (railFeeder(graph, is_producer, info, roles, b.v)) |fg| {
                 const pts = try pwElbow(arena, prx[fg], pcy[fg], loads_x, y + b.h / 2);
-                try routes.append(arena, pwRoute(fg, 0, b.v, pts));
+                // A bucket is not a graph node — use a sentinel `to_gid` rather
+                // than a fabricated node 0, so hover/cross-probe can't mistake the
+                // bucket wire for one landing on the first section.
+                try routes.append(arena, pwRoute(fg, std.math.maxInt(u32), b.v, pts));
             }
             y += b.h + pw_bucket_gap;
         }
@@ -2776,6 +2797,29 @@ test "computeFreeLayout never stacks two placed blocks on one cell" {
     // d kept the contested cell (declared first); e bumped one column right.
     try testing.expectApproxEqAbs(xy[3].x + node_w + free_h_gap, xy[4].x, 0.5);
     try testing.expectApproxEqAbs(xy[3].y, xy[4].y, 0.5);
+}
+
+// spec: diagram/layout - two same-side (edge …) directives stack in distinct cells instead of overlapping
+test "computeFreeLayout stacks two same-side edge directives without overlap" {
+    // a is the content; two separate (edge left …) directives each place one
+    // block. Both resolve to the same column (min_col-1) centred on a's row, so
+    // without a bump they'd render exactly on top of each other.
+    var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("l1"), mkKeyed("l2") };
+    const placements = [_]env_mod.Placement{.{ .name = "a" }};
+    const e1_mem = [_][]const u8{"l1"};
+    const e2_mem = [_][]const u8{"l2"};
+    const edges = [_]env_mod.LayoutEdge{
+        .{ .side = .left, .members = &e1_mem },
+        .{ .side = .left, .members = &e2_mem },
+    };
+    const graph = Graph{ .nodes = &nodes, .edges = &.{}, .layout = .{ .placements = &placements, .edges = &edges } };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const lay = (try computeFreeLayout(arena.allocator(), &graph)) orelse return error.TestUnexpectedResult;
+    const xy = nodeXY(lay.nodes);
+    // l1 and l2 share the edge column but must occupy different rows.
+    try testing.expectApproxEqAbs(xy[1].x, xy[2].x, 0.5);
+    try testing.expect(@abs(xy[1].y - xy[2].y) > 0.5);
 }
 
 // spec: diagram/layout - computeFreeLayout drops a scattered group's box from routing obstacles instead of punching the wire through a block

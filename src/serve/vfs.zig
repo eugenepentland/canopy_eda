@@ -421,6 +421,14 @@ pub fn readFile(
     };
     defer allocator.free(resolved.abs);
 
+    // The ACL is lexical (checks the rel path), so a pre-existing symlink whose
+    // lexical prefix is allowlisted (e.g. `src/x -> ../auth/oauth_tokens.json`)
+    // would otherwise be followed and leak a file outside the sandbox. Reject
+    // symlinks on read, mirroring the write/delete paths.
+    if (infra_fs.cwd().statFile(resolved.abs)) |stat| {
+        if (stat.kind == .sym_link) return writeError(out, allocator, "refusing to read symlink");
+    } else |_| {}
+
     const content = infra_fs.cwd().readFileAlloc(allocator, resolved.abs, MAX_FILE_BYTES) catch |e| switch (e) {
         error.FileNotFound => return writeError(out, allocator, ERR_NOT_FOUND),
         error.IsDir => return writeError(out, allocator, "is a directory"),

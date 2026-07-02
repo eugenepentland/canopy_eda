@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
+const numeric = @import("../numeric.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 const log = @import("../infra/log.zig");
 const env_mod = @import("env.zig");
@@ -12,6 +13,7 @@ const ids = @import("ids.zig");
 const validate = @import("validate.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
+const special_forms = @import("special_forms.zig");
 const rails_mod = @import("rails.zig");
 const test_point_mod = @import("test_point.zig");
 const pin_enrichment = @import("pin_enrichment.zig");
@@ -29,6 +31,12 @@ const Port = env_mod.Port;
 const Note = env_mod.Note;
 const Group = env_mod.Group;
 const SubBlock = env_mod.SubBlock;
+
+/// Sanity cap on the index count a single `(bus-net …)` / `(bus-port …)` form
+/// may expand to. A real bus is dozens of lanes wide; a value of thousands is
+/// a typo or a hostile file. Without it, `(bus-net "X" 0 100000000 "sub")`
+/// allocates 100M net ties — an OOM DoS the HTTP server evaluates on push.
+const MAX_BUS_EXPANSION: usize = 4096;
 
 /// True if the design-block body contains a bare `(hierarchical-ids)` form,
 /// which opts into Option-4 sub-block identity.
@@ -61,7 +69,7 @@ fn isInertFormHead(name: []const u8) bool {
 /// pin-net declarations and net-ties, auto-assigns ref-deses, and runs the
 /// design validator. The returned Value owns the DesignBlock.
 pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
-    if (args.len < 1) return EvalError.ArityError;
+    try special_forms.checkArity(self, .design_block, args);
 
     // First arg is name (could be computed via fmt); the rest is the body.
     const name_val = try self.evalNode(args[0], env);
@@ -396,6 +404,10 @@ fn evalBusNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_
     const start = numberAsUsize(try self.evalNode(form_children[2], env)) orelse return;
     const end = numberAsUsize(try self.evalNode(form_children[3], env)) orelse return;
     if (end < start) return;
+    if (end - start >= MAX_BUS_EXPANSION) {
+        self.warnFmt(form_children[0].span, "(bus-net …) index range {d}..{d} exceeds the {d}-lane cap — ignored", .{ start, end, MAX_BUS_EXPANSION });
+        return;
+    }
 
     // Strided mode is opted into by an `(over …)` child; collect its
     // companion `(ports …)` / optional `(suffixes …)` sub-forms.
@@ -517,10 +529,15 @@ fn appendBridgeTie(
     try net_ties.append(self.allocator, .{ .a = parent, .b = far });
 }
 
+/// Coerce a design-file number to a `usize` index, rejecting NaN/±inf and
+/// out-of-range values (a bare `@intFromFloat` on those is UB in the safety-off
+/// ReleaseSmall production build). Returns null on any non-representable input;
+/// callers treat null as "skip this form" (and the caller bounds the resulting
+/// expansion count so a huge-but-valid number can't OOM).
 fn numberAsUsize(v: env_mod.Value) ?usize {
     const f = v.asNumber() orelse return null;
     if (f < 0) return null;
-    return @intFromFloat(f);
+    return numeric.checkedInt(usize, f);
 }
 
 /// Evaluate `(decouple-defaults (ic "REF") (bypass (comp)))` — records the
@@ -981,14 +998,32 @@ fn evalSubSection(
                 try sub_instances.append(self.allocator, result.instance);
                 for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
                 for (result.inline_notes) |note| try notes.append(self.allocator, note);
+                // Same as the top-level section instance handler: a nested
+                // instance whose pin net differs from its pinout function name
+                // must emit the auto-alias tie, or a net referenced elsewhere
+                // by function name won't merge (wrong net membership).
+                try appendAutoAliases(self, result.instance, result.pin_nets, net_ties);
             },
             .pins => {
                 if (ssf_children.len < 2) continue;
                 const pins_ref_val = try self.evalNode(ssf_children[1], env);
                 const pins_ref = pins_ref_val.asString() orelse continue;
+                // Sibling `(group "label")` parsing — mirrors `evalPinsForm`.
+                // The nested copy used to drop it silently (and `group` isn't
+                // warned because `isKnownPinsChild` whitelists it), so a nested
+                // pin group's label just vanished.
+                var group_label2: []const u8 = "";
+                for (ssf_children[2..]) |ch| {
+                    if (!ch.isForm("group")) continue;
+                    const gc = ch.asList() orelse continue;
+                    if (gc.len < 2) continue;
+                    const gv = try self.evalNode(gc[1], env);
+                    group_label2 = gv.asString() orelse (gc[1].asAtom() orelse "");
+                }
                 const pin_func_map2 = builders.findPinFuncMap(self, instances.items, pins_ref);
                 var pg_pins2: std.ArrayListUnmanaged(env_mod.PartPin) = .empty;
                 for (ssf_children[2..]) |pin_form| {
+                    if (pin_form.isForm("group")) continue;
                     if (!builders.isKnownPinsChild(pin_form)) {
                         builders.warnUnknownPinsChild(self, pin_form);
                         continue;
@@ -996,7 +1031,10 @@ fn evalSubSection(
                     try builders.processPinForm(self, pin_form, pins_ref, pin_func_map2, env, all_pin_nets, &pg_pins2, net_ties);
                 }
                 const pg_slice2 = pg_pins2.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
-                try sub_pin_groups.append(self.allocator, .{ .ref_des = pins_ref, .pins = pg_slice2 });
+                if (group_label2.len > 0) {
+                    for (pg_slice2) |*pp| pp.group = group_label2;
+                }
+                try sub_pin_groups.append(self.allocator, .{ .ref_des = pins_ref, .pins = pg_slice2, .group = group_label2 });
                 try builders.addPartToInstance(self, instances.items, pins_ref, sub_name, pg_slice2);
             },
             .decouple => {
@@ -1056,6 +1094,36 @@ fn evalSubSection(
     });
 }
 
+/// Resolve `name` to the canonical root of its tie-connected component.
+/// Walks the parent chain; a name with no parent (or a self-parent) is its
+/// own root. Structurally identical to `rails.findRoot`.
+fn ufFind(uf: *std.StringHashMapUnmanaged([]const u8), name: []const u8) []const u8 {
+    var cur = name;
+    while (uf.get(cur)) |p| {
+        if (std.mem.eql(u8, p, cur)) return cur;
+        cur = p;
+    }
+    return cur;
+}
+
+/// Union the components of `a` and `b`, keeping `a`'s root as the canonical
+/// survivor (preserving the historic `keep = nt.a` net-tie semantics — the
+/// first-named net is the one that stays). Nets referenced only by a tie
+/// (a bare trunk with no direct pins) still get a parent entry so their `.x`
+/// bypass stubs later rename onto the canonical prefix.
+fn ufUnion(
+    allocator: std.mem.Allocator,
+    uf: *std.StringHashMapUnmanaged([]const u8),
+    a: []const u8,
+    b: []const u8,
+) EvalError!void {
+    const ra = ufFind(uf, a);
+    const rb = ufFind(uf, b);
+    if (std.mem.eql(u8, ra, rb)) return;
+    // Point b's root at a's root: a stays canonical.
+    uf.put(allocator, rb, ra) catch return EvalError.OutOfMemory;
+}
+
 /// Build nets from collected pin-net declarations and net-ties.
 fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl), net_ties: *std.ArrayListUnmanaged(NetTie)) EvalError![]Net {
     var net_map: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(PinRef)) = .empty;
@@ -1071,49 +1139,117 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl)
             .load_label = pn.load_label,
         }) catch return EvalError.OutOfMemory;
     }
-    // Apply net-ties: merge two nets into one.
+    // Apply net-ties: merge tied nets transitively via union-find so a chain
+    // like (net "A" "B") then (net "B" "C") collapses A+B+C into ONE net.
+    //
+    // The prior sequential pairwise merge was non-transitive and order-
+    // dependent: it merged B into A and removed B, then the second tie's
+    // getOrPut("B") *re-created* an empty net B and moved C's pins there,
+    // leaving two disjoint nets where the author declared one — a silent
+    // connectivity split (the worst class of bug in a netlist tool).
+    //
+    // Union-find keeps a canonical root per tie-connected component; every
+    // net in a component is merged onto that root once, and the "REMOVE.x →
+    // KEEP.x" bypass-stub rename runs against the canonical root at the end,
+    // in a single pass (was O(ties × nets)).
+    var uf: std.StringHashMapUnmanaged([]const u8) = .empty;
     for (net_ties.items) |nt| {
-        const a_pins = net_map.get(nt.a);
-        const b_pins = net_map.get(nt.b);
-        if (a_pins == null and b_pins == null) continue;
+        // A self-tie (a one-char typo like (net "X" "X")) is a no-op; skipping
+        // it also avoids the by-value src-pins iteration over a buffer the
+        // merge reallocates — a use-after-free that used to delete the net.
+        if (std.mem.eql(u8, nt.a, nt.b)) continue;
+
+        // Note: we no longer skip ties whose two trunk names are both absent
+        // from net_map — a rail whose pads all sit on per-pin bypass stubs
+        // (e.g. "VDD.U1.24") has NO direct-pin trunk net, yet its `.x` stubs
+        // still need to rename onto the canonical root. Union is cheap and
+        // never fabricates a net, so recording the relationship is always safe;
+        // the merge/rename passes below only touch nets that actually exist.
 
         // Auto-aliases (synthesized from symbol pin-function names) must not
         // short-circuit two distinct user-declared nets. If both sides already
         // have pins, the user clearly meant them separate — e.g. the AD7380's
         // pin 19 is named "SDOA" in its pinout, but ad7380-channel uses
         // "SDOA_RAW" on the IC side of a damping resistor and "SDOA" on the
-        // output side; merging those would jumper the 100Ω resistor.
-        if (nt.is_auto and a_pins != null and b_pins != null) continue;
+        // output side; merging those would jumper the 100Ω resistor. Compare
+        // canonical roots so a prior tie can't sneak a populated net in via an
+        // alias.
+        if (nt.is_auto) {
+            const ra = ufFind(&uf, nt.a);
+            const rb = ufFind(&uf, nt.b);
+            if (net_map.getPtr(ra) != null and net_map.getPtr(rb) != null) continue;
+        }
+        try ufUnion(self.allocator, &uf, nt.a, nt.b);
+    }
 
-        const keep = nt.a;
-        const remove = nt.b;
-        if (net_map.get(remove)) |src_pins| {
-            const gop = net_map.getOrPut(self.allocator, keep) catch return EvalError.OutOfMemory;
-            if (!gop.found_existing) {
-                gop.value_ptr.* = .empty;
+    // Merge every non-root net's pins onto its canonical root, then drop it.
+    {
+        var merge_keys: std.ArrayListUnmanaged([]const u8) = .empty;
+        var it = net_map.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const root = ufFind(&uf, key);
+            if (!std.mem.eql(u8, root, key)) {
+                try merge_keys.append(self.allocator, key);
             }
-            for (src_pins.items) |pin| {
+        }
+        for (merge_keys.items) |key| {
+            const root = ufFind(&uf, key);
+            // Remove the source net FIRST, then get-or-put the root — never hold
+            // a value_ptr across a `fetchRemove`, whose backward-shift deletion
+            // can move an entry (and invalidate a stale pointer into it).
+            const kv = net_map.fetchRemove(key) orelse continue;
+            var src = kv.value;
+            // The root may not yet exist in net_map (a trunk with no direct
+            // pins, e.g. a rail whose pads all sit on per-pin stubs); create it
+            // so its `.x` stubs still rename to the canonical prefix below.
+            const gop = net_map.getOrPut(self.allocator, root) catch return EvalError.OutOfMemory;
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            for (src.items) |pin| {
                 gop.value_ptr.append(self.allocator, pin) catch return EvalError.OutOfMemory;
             }
-            _ = net_map.remove(remove);
+            src.deinit(self.allocator);
         }
-        // Also rename per-pin nets: "REMOVE.x" -> "KEEP.x"
-        const remove_dot = std.fmt.allocPrint(self.allocator, "{s}.", .{remove}) catch return EvalError.OutOfMemory;
+    }
+
+    // Rename per-pin bypass-stub nets "REMOVE.x" → "ROOT.x" in one pass, using
+    // the canonical root for each non-root prefix (so chained ties collapse the
+    // stubs onto the same trunk the missing_decoupling aggregation expects).
+    {
         var rename_keys: std.ArrayListUnmanaged([]const u8) = .empty;
-        var map_iter = net_map.iterator();
-        while (map_iter.next()) |entry| {
-            if (std.mem.startsWith(u8, entry.key_ptr.*, remove_dot)) {
-                rename_keys.append(self.allocator, entry.key_ptr.*) catch return EvalError.OutOfMemory;
+        var it = net_map.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (std.mem.indexOfScalar(u8, key, '.')) |dot| {
+                const prefix = key[0..dot];
+                const root = ufFind(&uf, prefix);
+                if (!std.mem.eql(u8, root, prefix)) {
+                    try rename_keys.append(self.allocator, key);
+                }
             }
         }
         for (rename_keys.items) |old_key| {
-            const suffix = old_key[remove_dot.len..];
-            const new_key = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ keep, suffix }) catch return EvalError.OutOfMemory;
+            const dot = std.mem.indexOfScalar(u8, old_key, '.').?;
+            const prefix = old_key[0..dot];
+            const suffix = old_key[dot + 1 ..];
+            const root = ufFind(&uf, prefix);
+            const new_key = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ root, suffix }) catch return EvalError.OutOfMemory;
             if (net_map.fetchRemove(old_key)) |kv| {
-                net_map.put(self.allocator, new_key, kv.value) catch return EvalError.OutOfMemory;
+                // Fold into an existing same-named stub if the rename collides.
+                const gop = net_map.getOrPut(self.allocator, new_key) catch return EvalError.OutOfMemory;
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = kv.value;
+                } else {
+                    var src = kv.value;
+                    for (src.items) |pin| {
+                        gop.value_ptr.append(self.allocator, pin) catch return EvalError.OutOfMemory;
+                    }
+                    src.deinit(self.allocator);
+                }
             }
         }
     }
+    uf.deinit(self.allocator);
     // Convert to Net slice
     var nets: std.ArrayListUnmanaged(Net) = .empty;
     var net_iter = net_map.iterator();
@@ -1591,6 +1727,90 @@ test "design-block captures (kicad-pcb path)" {
     };
     try testing.expect(block.kicad_pcb_path != null);
     try testing.expectEqualStrings("/mnt/nas/test.kicad_pcb", block.kicad_pcb_path.?);
+}
+
+// spec: eval/design_block - net ties merge transitively so a chained tie collapses all three nets into one
+test "buildNets merges chained ties into a single net" {
+    const a = std.heap.page_allocator;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+
+    // One pin on each of A, B, C, then chain-tie A=B and B=C. All three must
+    // collapse into ONE net — the old pairwise merge re-created net B.
+    var pins: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    try pins.append(a, .{ .ref_des = "U1", .pin = "1", .net = "A" });
+    try pins.append(a, .{ .ref_des = "U2", .pin = "1", .net = "B" });
+    try pins.append(a, .{ .ref_des = "U3", .pin = "1", .net = "C" });
+    var ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    try ties.append(a, .{ .a = "A", .b = "B" });
+    try ties.append(a, .{ .a = "B", .b = "C" });
+
+    const nets = try buildNets(&eval, &pins, &ties);
+    try testing.expectEqual(@as(usize, 1), nets.len);
+    try testing.expectEqualStrings("A", nets[0].name);
+    try testing.expectEqual(@as(usize, 3), nets[0].pins.len);
+}
+
+// spec: eval/design_block - a reverse-order chained tie also collapses all nets onto the canonical root
+test "buildNets merges reverse-order chained ties" {
+    const a = std.heap.page_allocator;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+
+    var pins: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    try pins.append(a, .{ .ref_des = "U1", .pin = "1", .net = "A" });
+    try pins.append(a, .{ .ref_des = "U2", .pin = "1", .net = "B" });
+    try pins.append(a, .{ .ref_des = "U3", .pin = "1", .net = "C" });
+    // (net "A" "B") then (net "C" "B") — remove side (B) already merged away.
+    var ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    try ties.append(a, .{ .a = "A", .b = "B" });
+    try ties.append(a, .{ .a = "C", .b = "B" });
+
+    const nets = try buildNets(&eval, &pins, &ties);
+    try testing.expectEqual(@as(usize, 1), nets.len);
+    try testing.expectEqual(@as(usize, 3), nets[0].pins.len);
+}
+
+// spec: eval/design_block - a self-tie is a harmless no-op, never deleting the net
+test "buildNets self-tie is a no-op" {
+    const a = std.heap.page_allocator;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+
+    var pins: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    try pins.append(a, .{ .ref_des = "U1", .pin = "1", .net = "X" });
+    try pins.append(a, .{ .ref_des = "U2", .pin = "2", .net = "X" });
+    var ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    try ties.append(a, .{ .a = "X", .b = "X" });
+
+    const nets = try buildNets(&eval, &pins, &ties);
+    try testing.expectEqual(@as(usize, 1), nets.len);
+    try testing.expectEqualStrings("X", nets[0].name);
+    try testing.expectEqual(@as(usize, 2), nets[0].pins.len);
+}
+
+// spec: eval/design_block - a tie renames per-pin bypass stubs onto the canonical root prefix
+test "buildNets renames bypass stubs onto the canonical root" {
+    const a = std.heap.page_allocator;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+
+    // A bypass-stub net "VDD3V3.U1.24" whose trunk "VDD3V3" is tied to "3V3":
+    // the stub must rename to "3V3.U1.24" so missing_decoupling aggregation
+    // sees it under the canonical prefix.
+    var pins: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    try pins.append(a, .{ .ref_des = "C1", .pin = "1", .net = "VDD3V3.U1.24" });
+    try pins.append(a, .{ .ref_des = "U1", .pin = "24", .net = "3V3" });
+    var ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    try ties.append(a, .{ .a = "3V3", .b = "VDD3V3" });
+
+    const nets = try buildNets(&eval, &pins, &ties);
+    var found_stub = false;
+    for (nets) |n| {
+        if (std.mem.eql(u8, n.name, "3V3.U1.24")) found_stub = true;
+        try testing.expect(!std.mem.startsWith(u8, n.name, "VDD3V3."));
+    }
+    try testing.expect(found_stub);
 }
 
 // spec: eval/design_block - board form parses outline size, edge lists, and corners

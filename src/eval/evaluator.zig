@@ -179,6 +179,12 @@ pub const Evaluator = struct {
     /// `  in module 'x' (called at L:C)` context line per frame
     /// (innermost first) to every diagnostic it records.
     module_stack: std.ArrayListUnmanaged(ModuleFrame) = .empty,
+    /// Names currently being resolved on disk (`resolveImport` in progress),
+    /// so a circular import — `a.sexp` imports `b`, `b.sexp` imports `a` —
+    /// is detected and diagnosed instead of re-reading + re-evaluating each
+    /// file in a fresh env until the process stack overflows. Inserted on
+    /// entry, removed on exit.
+    imports_in_progress: std.StringHashMapUnmanaged(void) = .empty,
 
     pub const PendingId = struct {
         /// Byte offset of the opening paren of the form
@@ -280,6 +286,7 @@ pub const Evaluator = struct {
         self.assertions.deinit(self.allocator);
         self.warnings.deinit(self.allocator);
         self.module_stack.deinit(self.allocator);
+        self.imports_in_progress.deinit(self.allocator);
         self.loaded_files.deinit(self.allocator);
         self.component_cache.deinit(self.allocator);
         self.symbol_pin_cache.deinit(self.allocator);

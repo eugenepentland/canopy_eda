@@ -135,7 +135,11 @@ pub fn analyze(
 
     assignOrder(rows.items);
     std.mem.sort(SequenceRow, rows.items, {}, lessThanRow);
-    return rows.items;
+    // Ownership contract (doc comment + the tests' `alloc.free(rows)`): return
+    // an exact-length owned slice, not `.items` — `.items` is a sub-slice of a
+    // capacity-padded allocation, so a non-arena caller's `free` is size-
+    // mismatched and can't reclaim the slack.
+    return rows.toOwnedSlice(allocator);
 }
 
 const Resolution = struct {

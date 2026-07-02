@@ -23,6 +23,7 @@ src/commands.zig::cmdImportKicad fn
 src/config.zig::cseConnectSid fn
 src/config.zig::cseMaxInFlight fn
 src/config.zig::cseMinIntervalMs fn
+src/config.zig::devMode fn
 src/config.zig::digikeyApiBase fn
 src/config.zig::digikeyClientId fn
 src/config.zig::digikeyClientSecret fn
@@ -141,6 +142,7 @@ src/erc.zig::ViolationKind enum_
 src/erc.zig::loadPinoutMap fn
 src/erc.zig::runErc fn
 src/erc.zig::writeViolationsJson fn
+src/escape.zig::writeXml fn
 src/eval/builders.zig::addPartToInstance fn
 src/eval/builders.zig::buildGroup fn
 src/eval/builders.zig::buildNote fn
@@ -325,6 +327,8 @@ src/eval/power_sequencing.zig::SequenceRow struct_
 src/eval/power_sequencing.zig::SequenceStatus enum_
 src/eval/power_sequencing.zig::analyze fn
 src/eval/rails.zig::build fn
+src/eval/special_forms.zig::checkArity fn
+src/eval/special_forms.zig::checkAritySpan fn
 src/eval/special_forms.zig::evalAssert fn
 src/eval/special_forms.zig::evalAssertRange fn
 src/eval/special_forms.zig::evalFmt fn
@@ -420,7 +424,10 @@ src/json_writer.zig::writeString fn
 src/kicad_pcb/format.zig::PROP_CANOPY_UUID value
 src/kicad_pcb/format.zig::PROP_REFERENCE value
 src/kicad_pcb/format.zig::PROP_VALUE value
+src/kicad_pcb/format.zig::needsSexprEscape fn
 src/kicad_pcb/format.zig::padNumberText fn
+src/kicad_pcb/format.zig::sexprEscape fn
+src/kicad_pcb/format.zig::sexprUnescape fn
 src/kicad_pcb/reader.zig::ReadError value
 src/kicad_pcb/reader.zig::readBoard fn
 src/kicad_pcb/writer.zig::ApplyStats struct_
@@ -430,8 +437,10 @@ src/kicad_pcb/writer.zig::applyOpsToSourceWithStats fn
 src/layout_status.zig::ModuleLayoutStatus struct_
 src/layout_status.zig::read fn
 src/main.zig::main fn
+src/numeric.zig::checkedInt fn
 src/parts.zig::PartEntry struct_
 src/parts.zig::PartsDb struct_
+src/paths.zig::PathError value
 src/paths.zig::designSiblingPath fn
 src/paths.zig::designSourcePath fn
 src/placement/drc.zig::Kind enum_
@@ -479,6 +488,7 @@ src/placement/optimizer.zig::effAlignW fn
 src/placement/optimizer.zig::faceRotation fn
 src/placement/optimizer.zig::fullRoutedScorePoses fn
 src/placement/optimizer.zig::gridPlace fn
+src/placement/optimizer.zig::isGroundName fn
 src/placement/optimizer.zig::loopNh fn
 src/placement/optimizer.zig::perPartBlame fn
 src/placement/optimizer.zig::placeFromPoses fn
@@ -933,6 +943,7 @@ src/serve/oauth_store.zig::sha256Hex value
 src/serve/oauth_store.zig::validateToken fn
 src/serve/oauth_store.zig::verifyClientSecret fn
 src/serve/oauth_store.zig::verifyPkce fn
+src/serve/oauth_store.zig::writeFileAtomicWithBackup fn
 src/serve/page_cache.zig::FileSet struct_
 src/serve/page_cache.zig::FileStamp struct_
 src/serve/page_cache.zig::capture fn

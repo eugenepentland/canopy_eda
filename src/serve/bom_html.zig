@@ -3,6 +3,17 @@ const infra_fs = @import("../infra/fs.zig");
 const env_mod = @import("../eval/env.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const json_writer = @import("../json_writer.zig");
+const escape = @import("../escape.zig");
+
+/// A datasheet href is safe to emit as a link only if it is a same-origin
+/// path or an http(s) URL. Anything else (`javascript:`, `data:`, …) is
+/// rendered as inert text by the caller.
+fn safeHref(url: []const u8) bool {
+    if (url.len > 0 and url[0] == '/') return true;
+    const sep = std.mem.indexOf(u8, url, "://") orelse return false;
+    const scheme = url[0..sep];
+    return std.mem.eql(u8, scheme, "http") or std.mem.eql(u8, scheme, "https");
+}
 
 // ── Constants ─────────────────────────────────────────────────────
 const STEP_EXT_LEN: usize = ".step".len;
@@ -195,24 +206,30 @@ pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *
         try wr.writeAll("<td class=\"sch-bom-refs\" title=\"");
         for (line.refs.items, 0..) |r, i| {
             if (i > 0) try wr.writeAll(", ");
-            try wr.writeAll(r);
+            try escape.writeXml(wr, r);
         }
         try wr.writeAll("\">");
         for (line.refs.items, 0..) |r, i| {
             if (i > 0) try wr.writeAll(", ");
-            try wr.writeAll(r);
+            try escape.writeXml(wr, r);
         }
         try wr.writeAll("</td>");
 
-        try wr.print("<td class=\"sch-bom-comp\">{s}</td>", .{line.component});
-        try wr.print("<td>{s}</td>", .{line.value});
-        try wr.print("<td>{s}</td>", .{line.footprint});
+        try wr.writeAll("<td class=\"sch-bom-comp\">");
+        try escape.writeXml(wr, line.component);
+        try wr.writeAll("</td><td>");
+        try escape.writeXml(wr, line.value);
+        try wr.writeAll("</td><td>");
+        try escape.writeXml(wr, line.footprint);
+        try wr.writeAll("</td>");
 
         // Attrs — schematic-time annotations like "x7r", "np0"; DNP first.
         try wr.writeAll("<td class=\"sch-bom-attrs\">");
         if (line.dnp) try wr.writeAll("<span class=\"sch-bom-tag sch-bom-dnp\">DNP</span>");
         for (line.attrs) |attr| {
-            try wr.print("<span class=\"sch-bom-tag\">{s}</span>", .{attr});
+            try wr.writeAll("<span class=\"sch-bom-tag\">");
+            try escape.writeXml(wr, attr);
+            try wr.writeAll("</span>");
         }
         try wr.writeAll("</td>");
 
@@ -222,31 +239,44 @@ pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *
 
         // MPN — editable. data-ref carries every ref-des in the group; the
         // JS save handler iterates and POSTs once per ref.
-        try wr.writeAll("<td class=\"sch-bom-mpn\">");
-        try wr.print(
-            "<input class=\"sch-bom-mpn-edit\" data-ref=\"{s}\" value=\"{s}\" placeholder=\"set MPN\">" ++
-                "<button class=\"sch-bom-mpn-save\" data-ref=\"{s}\" type=\"button\">Save</button>",
-            .{ refs_csv, mpn, refs_csv },
-        );
-        try wr.writeAll("</td>");
+        try wr.writeAll("<td class=\"sch-bom-mpn\"><input class=\"sch-bom-mpn-edit\" data-ref=\"");
+        try escape.writeXml(wr, refs_csv);
+        try wr.writeAll("\" value=\"");
+        try escape.writeXml(wr, mpn);
+        try wr.writeAll("\" placeholder=\"set MPN\"><button class=\"sch-bom-mpn-save\" data-ref=\"");
+        try escape.writeXml(wr, refs_csv);
+        try wr.writeAll("\" type=\"button\">Save</button></td>");
 
         // Manufacturer — editable.
-        try wr.writeAll("<td class=\"sch-bom-mfr\">");
-        try wr.print(
-            "<input class=\"sch-bom-mfr-edit\" data-ref=\"{s}\" value=\"{s}\" placeholder=\"set manufacturer\">" ++
-                "<button class=\"sch-bom-mfr-save\" data-ref=\"{s}\" type=\"button\">Save</button>",
-            .{ refs_csv, manufacturer, refs_csv },
-        );
-        try wr.writeAll("</td>");
+        try wr.writeAll("<td class=\"sch-bom-mfr\"><input class=\"sch-bom-mfr-edit\" data-ref=\"");
+        try escape.writeXml(wr, refs_csv);
+        try wr.writeAll("\" value=\"");
+        try escape.writeXml(wr, manufacturer);
+        try wr.writeAll("\" placeholder=\"set manufacturer\"><button class=\"sch-bom-mfr-save\" data-ref=\"");
+        try escape.writeXml(wr, refs_csv);
+        try wr.writeAll("\" type=\"button\">Save</button></td>");
 
         // Other properties (datasheet, wattage, custom keys) as read-only badges.
         try wr.writeAll("<td class=\"sch-bom-other\">");
         for (line.properties) |p| {
             if (std.mem.eql(u8, p.key, "mpn") or std.mem.eql(u8, p.key, "manufacturer")) continue;
             if (std.mem.eql(u8, p.key, "datasheet")) {
-                try wr.print("<a class=\"sch-bom-tag sch-bom-tag-link\" href=\"{s}\" target=\"_blank\">datasheet</a>", .{p.value});
+                if (safeHref(p.value)) {
+                    try wr.writeAll("<a class=\"sch-bom-tag sch-bom-tag-link\" href=\"");
+                    try escape.writeXml(wr, p.value);
+                    try wr.writeAll("\" target=\"_blank\" rel=\"noopener noreferrer\">datasheet</a>");
+                } else {
+                    // Unsafe scheme (javascript:/data:/…) — render inert, not a link.
+                    try wr.writeAll("<span class=\"sch-bom-tag sch-bom-tag-prop\">datasheet: ");
+                    try escape.writeXml(wr, p.value);
+                    try wr.writeAll("</span>");
+                }
             } else {
-                try wr.print("<span class=\"sch-bom-tag sch-bom-tag-prop\">{s}: {s}</span>", .{ p.key, p.value });
+                try wr.writeAll("<span class=\"sch-bom-tag sch-bom-tag-prop\">");
+                try escape.writeXml(wr, p.key);
+                try wr.writeAll(": ");
+                try escape.writeXml(wr, p.value);
+                try wr.writeAll("</span>");
             }
         }
         try wr.writeAll("</td>");

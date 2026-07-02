@@ -1,6 +1,7 @@
 # guardian-snapshot v1
 src/export_kicad.zig: pub fn flattenAndMergeNets has no /// doc comment
 src/review.zig: pub const ReviewDoc (struct_) has no /// doc comment
+src/serve/auth.zig: pub fn createSession has no /// doc comment
 src/serve/notes.zig: pub const Note (struct_) has no /// doc comment
 src/serve/notes.zig: pub const NoteStatus (enum_) has no /// doc comment
 src/serve/notes.zig: pub const Notes (struct_) has no /// doc comment

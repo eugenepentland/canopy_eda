@@ -56,6 +56,7 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
     @import("../bom_resolve.zig").ResolveError ||
     @import("../sexpr/parser.zig").ParseError ||
+    error{InvalidName} ||
     error{
         FileTooBig,
         StreamTooLong,

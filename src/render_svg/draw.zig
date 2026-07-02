@@ -2,6 +2,7 @@ const std = @import("std");
 const ctx_mod = @import("context.zig");
 const FlatInst = ctx_mod.FlatInst;
 const Endpoint = ctx_mod.Endpoint;
+const escape = @import("../escape.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -71,9 +72,9 @@ pub fn drawWire(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64) RenderError!void
 
 /// Draw a net wire with hit area and data-net attribute.
 pub fn drawNetWire(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64, net: []const u8) RenderError!void {
-    try w.print(
-        \\<g class="net" data-net="{s}" style="cursor:pointer">
-    , .{net});
+    try w.writeAll("<g class=\"net\" data-net=\"");
+    try escape.writeXml(w, net);
+    try w.writeAll("\" style=\"cursor:pointer\">");
 
     if (y1 == y2) {
         try w.print(
@@ -420,4 +421,18 @@ pub fn pinOrder(a: []const u8, b: []const u8) bool {
     if (a_num != null) return true;
     if (b_num != null) return false;
     return std.mem.order(u8, a, b) == .lt;
+}
+
+// spec: render_svg - Net names are XML-escaped in the emitted SVG markup
+test "drawNetWire escapes a quote/angle-bracket in the net name" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const w = buf.writer(std.testing.allocator);
+    // An import-kicad net name that tries to break out of the data-net attribute
+    // and inject a <script> tag.
+    try drawNetWire(w, 0, 0, 10, 0, "\"><script>alert(1)</script>");
+    // The raw payload must not survive: no unescaped '<', '>' or '"' from the
+    // net name can reach the inlined SVG markup.
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<script>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-net=\"&quot;&gt;&lt;script&gt;") != null);
 }

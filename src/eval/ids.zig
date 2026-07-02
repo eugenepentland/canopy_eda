@@ -2,6 +2,7 @@ const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const ast = @import("../sexpr/ast.zig");
+const numeric = @import("../numeric.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
 const evaluator_mod = @import("evaluator.zig");
@@ -152,6 +153,31 @@ pub fn autoAssignRefDes(self: *Evaluator, block: *DesignBlock) EvalError!void {
         }
     }
     renameSectionRefs(@constCast(block.sections), &rename_map);
+    renameCrossRefs(block, &rename_map);
+}
+
+/// Remap the label-addressed references the net/note/section passes miss:
+/// a decoupling cap's `(decouples "IC" …)` host ref, `(group …)` members, and
+/// ref-des-addressed `(verifies …)` sign-offs. Without this a `(decouples
+/// "stm32" 24)` keeps the stale "stm32" label after `stm32 → U1`, and a group
+/// member or a verification targeting a label silently orphans on renumber.
+fn renameCrossRefs(block: *DesignBlock, rename_map: *std.StringHashMapUnmanaged([]const u8)) void {
+    for (@as([]Instance, @constCast(block.instances))) |*inst| {
+        if (inst.decouple_ic.len > 0) {
+            if (rename_map.get(inst.decouple_ic)) |new_ref| inst.decouple_ic = new_ref;
+        }
+    }
+    for (@as([]env_mod.Group, @constCast(block.groups))) |*grp| {
+        const members: [][]const u8 = @constCast(grp.members);
+        for (members) |*m| {
+            if (rename_map.get(m.*)) |new_ref| m.* = new_ref;
+        }
+    }
+    for (@as([]env_mod.Verification, @constCast(block.verifications))) |*v| {
+        if (v.ref_des.len > 0) {
+            if (rename_map.get(v.ref_des)) |new_ref| v.ref_des = new_ref;
+        }
+    }
 }
 
 /// Assign global ref-des to sub-block instances, replacing local names (U1, R1, etc.)
@@ -223,6 +249,7 @@ fn assignSubBlockRefDes(self: *Evaluator, block: *DesignBlock) !void {
     // grouped-pin labels still match the hub after it is renumbered (e.g. U1 → U12)
     // — mirrors the top-level path's renameSectionRefs call.
     renameSectionRefs(@constCast(block.sections), &rename_map);
+    renameCrossRefs(block, &rename_map);
 
     // Recurse into nested sub-blocks
     for (@as([]env_mod.SubBlock, @constCast(block.sub_blocks))) |*sb| {
@@ -257,6 +284,17 @@ pub fn prescanRefDes(self: *Evaluator, forms: []const Node) void {
             const ref_node = children[1];
             const ref_str = ref_node.asAtom() orelse (ref_node.asString() orelse continue);
             registerRefDes(self, ref_str);
+        } else if (std.mem.eql(u8, name, "stub")) {
+            // A stub's explicit ref lives in a `(ref "U7")` sub-form, not a
+            // positional. Register it so an earlier auto-mint can't take the
+            // same token before the stub form is reached during eval.
+            for (children[1..]) |sub_node| {
+                const sub = sub_node.asList() orelse continue;
+                if (sub.len < 2) continue;
+                const sub_head = sub[0].asAtom() orelse continue;
+                if (!std.mem.eql(u8, sub_head, "ref")) continue;
+                if (sub[1].asString() orelse sub[1].asAtom()) |ref_str| registerRefDes(self, ref_str);
+            }
         } else if (std.mem.eql(u8, name, "section")) {
             prescanRefDes(self, children[2..]);
         }
@@ -416,6 +454,13 @@ pub fn generateId(self: *Evaluator) EvalError![]const u8 {
 }
 
 /// Derive a child ID from a parent ID, net context, and index.
+///
+/// The derived token lives in the same ~30-bit space `generateId` dedups
+/// against, so it is registered into `design_ids` (and a pre-existing hit is
+/// logged). Derivation must stay deterministic — we can't re-roll on a
+/// collision — but registering it means a later `generateId` won't reuse the
+/// token, and the warning makes the (1-in-a-million) genuine derived collision
+/// debuggable instead of silently giving two parts the same KiCad identity.
 pub fn deriveChildId(self: *Evaluator, parent_id: []const u8, context: []const u8, index: usize) EvalError![]const u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(parent_id);
@@ -428,7 +473,12 @@ pub fn deriveChildId(self: *Evaluator, parent_id: []const u8, context: []const u
     const hash = hasher.finalResult();
     // Ensure first char is a letter (so tokenizer parses as atom)
     const first: u8 = (hash[0] % ID_FIRST_LETTER_RANGE) + 'a';
-    return std.fmt.allocPrint(self.allocator, "{c}{x:0>2}{x:0>2}{x:0>2}{x:0>1}", .{ first, hash[1], hash[2], hash[3], hash[0] & 0x0f });
+    const id = std.fmt.allocPrint(self.allocator, "{c}{x:0>2}{x:0>2}{x:0>2}{x:0>1}", .{ first, hash[1], hash[2], hash[3], hash[0] & 0x0f }) catch return EvalError.OutOfMemory;
+    if (self.design_ids.contains(id)) {
+        log.warn("derived id '{s}' collides with an existing id (parent '{s}', context '{s}', index {d}) — two parts may share a KiCad footprint identity", .{ id, parent_id, context, index });
+    }
+    registerId(self, id);
+    return id;
 }
 
 /// Assign every instance ID inside a sub-block's design-block from a
@@ -657,10 +707,16 @@ pub fn loadPinoutFile(self: *Evaluator, path: []const u8) ?LoadedPinout {
 }
 
 /// Convert a node to a pin identifier string (number -> "123", atom -> "A1").
+/// A non-finite or out-of-range numeric pin token (e.g. `(pin 1e30 …)`) can't
+/// be a real pad; `checkedInt` rejects it before the `@intFromFloat` (UB in the
+/// safety-off prod build) and we fall through to the atom/string forms (null
+/// for a bare number), so the caller skips the token instead of crashing.
 pub fn pinId(self: *Evaluator, node: Node) ?[]const u8 {
     if (node.asNumber()) |n| {
-        const i: i64 = @intFromFloat(n);
-        return std.fmt.allocPrint(self.allocator, "{d}", .{i}) catch return null;
+        if (numeric.checkedInt(i64, n)) |i| {
+            return std.fmt.allocPrint(self.allocator, "{d}", .{i}) catch return null;
+        }
+        return null;
     }
     return node.asAtom() orelse node.asString();
 }

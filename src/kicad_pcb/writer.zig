@@ -308,10 +308,14 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
             // map only registers one fp per canopy when duplicates
             // exist, so it re-emits the same add forever; without this
             // check every click adds another duplicate fp.
-            if (existing_canopy_uuids.contains(target)) continue;
+            //
+            // The dedup is keyed on a NON-EMPTY uuid only: a malformed batch of
+            // uuid-less adds would otherwise register "" on the first add and
+            // silently drop every subsequent one — losing parts without error.
+            if (target.len > 0 and existing_canopy_uuids.contains(target)) continue;
             const new_fp = try buildAddFootprint(arena, op_obj, &max_net_id, &net_id_by_name, &extra_nets);
             try extra_footprints.append(arena, new_fp);
-            try existing_canopy_uuids.put(target, {});
+            if (target.len > 0) try existing_canopy_uuids.put(target, {});
             stats.added += 1;
             continue;
         }
@@ -549,10 +553,13 @@ fn buildGrText(arena: std.mem.Allocator, text_obj: std.json.ObjectMap, layer: []
     if (label.len == 0) return null;
     const size_mm = jsonTextSizeMm(text_obj);
     const seed = try std.fmt.allocPrint(arena, "text:{s}:{d}:{d}", .{ label, pos.x, pos.y });
+    // The label is spliced into parseable s-expr text and reparsed; escape it
+    // so an embedded `"` can't close the string early and inject stray
+    // top-level nodes (only nodes[0] is kept — the rest would be dropped).
     const text = try std.fmt.allocPrint(
         arena,
         "(gr_text \"{s}\" (at {d} {d} 0) (layer \"{s}\") (uuid \"{s}\") (effects (font (size {d} {d}) (thickness {d}))))",
-        .{ label, pos.x, pos.y, layer, try boardItemUuid(arena, seed), size_mm, size_mm, size_mm * TEXT_THICKNESS_RATIO },
+        .{ try fmt_const.sexprEscape(arena, label), pos.x, pos.y, layer, try boardItemUuid(arena, seed), size_mm, size_mm, size_mm * TEXT_THICKNESS_RATIO },
     );
     const nodes = try parser.parse(arena, text);
     return if (nodes.len == 0) null else nodes[0];
@@ -615,11 +622,12 @@ fn resolveNetId(
     max_net_id.* += 1;
     const id = max_net_id.*;
     try net_id_by_name.put(name, id);
-    // Build a `(net <id> "<name>")` form.
+    // Build a `(net <id> "<name>")` form. Escape the JSON-decoded name so a
+    // top-level declaration with a `"`/`\` in it can't corrupt the board.
     var children = try arena.alloc(Node, 3);
     children[0] = Node.atom(Span.zero, "net");
     children[1] = Node.int(Span.zero, id);
-    children[2] = Node.string(Span.zero, name);
+    children[2] = Node.string(Span.zero, try fmt_const.sexprEscape(arena, name));
     try extra_nets.append(arena, Node.list(Span.zero, children));
     return id;
 }
@@ -690,6 +698,10 @@ fn setPadNet(arena: std.mem.Allocator, fp: Node, pad_num: []const u8, net_id: i6
 /// or null when the pad already references that net (no change needed).
 fn replacePadNet(arena: std.mem.Allocator, pad: Node, net_id: i64, net_name: []const u8) std.mem.Allocator.Error!?Node {
     const pl = pad.asList() orelse return pad;
+    // The board stores net names escaped (verbatim Node.string), so compare the
+    // ESCAPED form of the requested name against the stored one — otherwise a
+    // name carrying `"`/`\` never matches and the pad is rewritten every push.
+    const esc_name = try fmt_const.sexprEscape(arena, net_name);
     // Probe the current net reference first so a redundant retarget
     // (the pad already points at `net_name`) reports as a no-op. Pads
     // without any `(net …)` form fall through to the append path below.
@@ -698,7 +710,7 @@ fn replacePadNet(arena: std.mem.Allocator, pad: Node, net_id: i64, net_name: []c
         const nl = sub.asList() orelse continue;
         if (nl.len < 2) continue;
         const existing = nl[1].asString() orelse continue;
-        if (std.mem.eql(u8, existing, net_name)) return null;
+        if (std.mem.eql(u8, existing, esc_name)) return null;
         break;
     }
 
@@ -726,7 +738,10 @@ fn makeNetForm(arena: std.mem.Allocator, id: i64, name: []const u8) std.mem.Allo
     _ = id;
     var children = try arena.alloc(Node, 2);
     children[0] = Node.atom(Span.zero, FORM_NET);
-    children[1] = Node.string(Span.zero, name);
+    // `name` arrives JSON-decoded (a sync-op net field), so it hasn't been
+    // through the s-expr tokenizer — escape it before it becomes a verbatim
+    // Node.string payload, or a raw `"`/trailing `\` corrupts the board.
+    children[1] = Node.string(Span.zero, try fmt_const.sexprEscape(arena, name));
     return Node.list(Span.zero, children);
 }
 
@@ -767,13 +782,17 @@ fn setProperty(arena: std.mem.Allocator, fp: Node, key: []const u8, value: []con
                 // stats alone. Without this the file-based sync rewrites
                 // the same set_field on every push, making every click
                 // report "X fields_set" forever.
+                // Escape once, then compare the ESCAPED form against the
+                // board's stored (already-escaped, verbatim) value so
+                // idempotency still holds for values carrying `"`/`\`.
+                const esc_value = try fmt_const.sexprEscape(arena, value);
                 if (pl[2].asString()) |existing| {
-                    if (std.mem.eql(u8, existing, value)) return null;
+                    if (std.mem.eql(u8, existing, esc_value)) return null;
                 }
                 var pchildren = try arena.alloc(Node, pl.len);
                 pchildren[0] = pl[0];
                 pchildren[1] = pl[1];
-                pchildren[2] = Node.string(Span.zero, value);
+                pchildren[2] = Node.string(Span.zero, esc_value);
                 for (pl[3..], 3..) |x, i| pchildren[i] = x;
                 try new_children.append(arena, Node.list(Span.zero, pchildren));
                 found = true;
@@ -808,8 +827,11 @@ fn makeProperty(arena: std.mem.Allocator, key: []const u8, value: []const u8) st
     const n: usize = if (propertyStaysVisible(key)) 3 else 4;
     var children = try arena.alloc(Node, n);
     children[0] = Node.atom(Span.zero, FORM_PROPERTY);
-    children[1] = Node.string(Span.zero, key);
-    children[2] = Node.string(Span.zero, value);
+    // key/value can be JSON-decoded op fields (custom BOM props, MPN, …); escape
+    // them before they become verbatim Node.string payloads so an embedded `"`
+    // or trailing `\` can't break the board file.
+    children[1] = Node.string(Span.zero, try fmt_const.sexprEscape(arena, key));
+    children[2] = Node.string(Span.zero, try fmt_const.sexprEscape(arena, value));
     if (n == 4) children[3] = try makeHideForm(arena);
     return Node.list(Span.zero, children);
 }
@@ -998,6 +1020,9 @@ fn skipKmodChild(sub: Node) bool {
     const head = subl[0].asAtom() orelse return false;
     if (std.mem.eql(u8, head, "at") or std.mem.eql(u8, head, "uuid") or std.mem.eql(u8, head, "layer")) return true;
     if (std.mem.eql(u8, head, "fp_text")) return true;
+    // Drop the kmod's `(attr …)` — the board footprint's own attr flags are
+    // preserved (see swapFootprint's preserve_keys) and are authoritative.
+    if (std.mem.eql(u8, head, "attr")) return true;
     // Drop legacy KiCad-5 arcs that carry an `(angle …)` child: that is the
     // deprecated (start=center)(end)(angle) form, and the modern board parser
     // rejects it with "Expecting 'mid'" (it requires the (start)(mid)(end)
@@ -1251,7 +1276,12 @@ fn swapFootprint(
     var preserved: std.ArrayListUnmanaged(Node) = .empty;
     var fp_rot: f64 = 0;
     var is_back = false;
-    const preserve_keys = [_][]const u8{ "at", "uuid", "layer", "locked", "tstamp" };
+    // `attr` preserves the footprint's assembly flags — `(attr dnp)` /
+    // `(attr exclude_from_bom)` / `(attr board_only)` — that the user set in
+    // pcbnew. Without it a swap silently clears them (the replacement kmod from
+    // a .sexp-generated footprint carries none). The kmod's own `(attr …)` is
+    // dropped by skipKmodChild so the board's authoritative flags win.
+    const preserve_keys = [_][]const u8{ "at", "uuid", "layer", "locked", "tstamp", "attr" };
     for (cl[2..]) |sub| {
         const subl = sub.asList() orelse continue;
         if (subl.len == 0) continue;
@@ -1912,6 +1942,36 @@ test "applyOpsToSource swap_footprint accepts legacy module-format kmod" {
     try std.testing.expect(std.mem.indexOf(u8, out[pad_idx..], "(net \"VCC\")") != null);
 }
 
+// spec: kicad_pcb/writer - swap_footprint preserves the board footprint's (attr …) assembly flags
+test "applyOpsToSource swap_footprint preserves attr flags" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    // The board footprint carries (attr dnp) the user set in pcbnew. A swap
+    // must not silently clear it.
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "OLD_FP"
+        \\    (uuid "fp-1")
+        \\    (at 5 6)
+        \\    (attr dnp)
+        \\    (property "Reference" "R9")
+        \\    (pad "1" smd circle (at 0 0) (net "N1"))))
+    ;
+    // The replacement kmod also declares an attr; the board's must win and the
+    // kmod's must be dropped (so exactly one attr survives).
+    const ops =
+        \\[{"op":"swap_footprint","uuid":"fp-1","new_footprint_name":"NEW_FP",
+        \\  "kicad_mod":"(footprint \"NEW_FP\" (attr smd) (pad \"1\" smd circle (at 0 0) (size 0.2 0.2)))",
+        \\  "pad_nets":[["1","N1"]]}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(attr dnp)") != null);
+    // The kmod's (attr smd) was dropped — only the preserved board attr remains.
+    try std.testing.expect(std.mem.indexOf(u8, out, "(attr smd)") == null);
+}
+
 // spec: kicad_pcb/writer - swap_footprint mirrors a kmod onto the back for a footprint on B.Cu (layers F→B, local Y negated)
 // pcbnew stores flipped footprints with local Y negated — verified against a
 // hand-flipped board where a B.Cu connector's pads sit at (x, -y) of the
@@ -2171,4 +2231,53 @@ test "applyOpsToSource create_board_item draws a section label" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\"USB\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(at 310.5 27.5 0)") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"Dwgs.User\")") != null);
+}
+
+// spec: kicad_pcb/writer - Escapes JSON-supplied op values so a raw quote/backslash cannot corrupt the board file
+test "applyOpsToSource escapes a set_field value containing a quote and backslash" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402"
+        \\    (uuid "fp-1")
+        \\    (property "Reference" "R1")))
+    ;
+    // A value with a raw quote AND a trailing backslash — JSON-encoded as
+    // \" and \\. Before the fix these reached the board writer verbatim and
+    // produced an unparseable .kicad_pcb.
+    const ops =
+        \\[{"op":"set_field","uuid":"fp-1","field":"MPN","value":"a\"b\\"}]
+    ;
+    const out = try applyOpsToSource(arena.allocator(), src, ops);
+
+    // The rewritten board must re-parse cleanly (the whole point of escaping).
+    const reparsed = try parser.parse(arena.allocator(), out);
+    try std.testing.expect(reparsed.len == 1);
+    try std.testing.expect(reparsed[0].isForm("kicad_pcb"));
+
+    // And the property must decode back to the ORIGINAL bytes on a round-trip.
+    const root = reparsed[0].asList().?;
+    var found: ?[]const u8 = null;
+    for (root) |top| {
+        if (!top.isForm(FORM_FOOTPRINT)) continue;
+        for (top.asList().?) |sub| {
+            if (!sub.isForm(FORM_PROPERTY)) continue;
+            const pl = sub.asList().?;
+            if (pl.len < 3) continue;
+            if (std.mem.eql(u8, pl[1].asString() orelse "", "MPN")) found = pl[2].asString();
+        }
+    }
+    try std.testing.expect(found != null);
+    // The stored token is escaped; decode \x→x and compare to the raw input.
+    var decoded: std.ArrayListUnmanaged(u8) = .empty;
+    const raw = found.?;
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        if (raw[i] == '\\' and i + 1 < raw.len) i += 1;
+        try decoded.append(arena.allocator(), raw[i]);
+    }
+    try std.testing.expectEqualStrings("a\"b\\", decoded.items);
 }

@@ -21,6 +21,7 @@ const hub_mod = @import("hub.zig");
 const estimateBranchCount = hub_mod.estimateBranchCount;
 const branch_mod = @import("branch.zig");
 const RenderError = draw.RenderError;
+const escape = @import("../escape.zig");
 
 // ── Layout constants ──────────────────────────────────────────────
 const HALF_DIVISOR: f64 = 2.0;
@@ -160,13 +161,15 @@ pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u
     if (multi) {
         try drawNetWire(w, stub_x, py, bus_x, py, pin_net_name);
         if (min_cy != max_cy) {
+            try w.writeAll("<g class=\"net\" data-net=\"");
+            try escape.writeXml(w, pin_net_name);
             try w.print(
-                \\<g class="net" data-net="{s}" style="cursor:pointer">
+                \\" style="cursor:pointer">
                 \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="transparent" stroke-width="12" class="hit-area"/>
                 \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#4a9" stroke-width="1.5"/>
                 \\</g>
                 \\
-            , .{ pin_net_name, bus_x, min_cy, bus_x, max_cy, bus_x, min_cy, bus_x, max_cy });
+            , .{ bus_x, min_cy, bus_x, max_cy, bus_x, min_cy, bus_x, max_cy });
         }
     }
 

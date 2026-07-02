@@ -1699,9 +1699,19 @@ fn parseJsonObject(req: *httpz.Request, res: *httpz.Response) ?std.json.Value {
 }
 
 fn writeFileAll(path: []const u8, data: []const u8) !void {
-    const f = try infra_fs.cwd().createFile(path, .{});
-    defer f.close();
-    try f.writeAll(data);
+    // Atomic write (tmp → rename): the layout sidecar is rewritten on GET (the
+    // dedup pass in `displayLayouts`) and on every solve, from multiple worker
+    // threads with no lock. A truncate-then-write left a window where a
+    // concurrent reader — or a crash — saw a half-written file, and
+    // `parseLayouts` treats any parse failure as "no layouts", silently
+    // discarding every saved/starred layout (and the KiCad-sync seed). The
+    // rename is atomic, so a reader sees either the old or the new file whole;
+    // concurrent writers degrade to last-writer-wins instead of corruption.
+    var write_buf: [4096]u8 = undefined;
+    var atomic = try infra_fs.cwd().atomicFile(path, .{ .write_buffer = &write_buf });
+    defer atomic.deinit();
+    try atomic.file_writer.interface.writeAll(data);
+    try atomic.finish();
 }
 
 const MAX_FP_BYTES: usize = 1024 * 1024;
@@ -3824,17 +3834,34 @@ fn writeAttr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
     };
 }
 
-/// Emit `s` as a quoted, JSON-escaped string to a `std.Io.Writer`.
+/// Emit `s` as a quoted, JSON-escaped string to a `std.Io.Writer`. This
+/// serializer's output is emitted verbatim INSIDE a `<script>` element (the
+/// `const PCB=…` data blob and the editor's `window.SCENE=`), so it must also
+/// neutralize the `<script>`-context breakouts a plain JSON escaper misses:
+/// `<` is escaped to `<` (so a net/ref/value/layout name containing
+/// `</script>` can't close the tag → stored XSS), and U+2028/U+2029 are
+/// escaped (they terminate a JS string literal in older engines).
 pub fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
     try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
-    };
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            '<' => try w.writeAll("\\u003c"),
+            0xE2 => {
+                if (i + 2 < s.len and s[i + 1] == 0x80 and (s[i + 2] == 0xA8 or s[i + 2] == 0xA9)) {
+                    try w.writeAll(if (s[i + 2] == 0xA8) "\\u2028" else "\\u2029");
+                    i += 2;
+                } else try w.writeByte(c);
+            },
+            else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
+        }
+    }
     try w.writeByte('"');
 }
 

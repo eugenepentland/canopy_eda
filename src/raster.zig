@@ -8,6 +8,17 @@
 const std = @import("std");
 const png = @import("png.zig");
 const font = @import("font5x7.zig");
+const numeric = @import("numeric.zig");
+
+/// Round `f` to an `i64` pixel index clamped to `[lo, hi]`, guarding the
+/// `@intFromFloat` in float space. A NaN/±inf coordinate (which `@intFromFloat`
+/// would turn into UB in the runtime-safety-off ReleaseSmall prod build) or one
+/// far outside the range collapses to `lo` — the primitive then spans an empty
+/// pixel range and draws nothing, rather than crashing or corrupting memory.
+fn pxIndex(f: f32, lo: i64, hi: i64) i64 {
+    const v = numeric.checkedInt(i64, @floatCast(f)) orelse return lo;
+    return std.math.clamp(v, lo, hi);
+}
 
 /// An 8-bit-per-channel RGB colour.
 pub const Rgb = struct {
@@ -98,22 +109,17 @@ pub const Canvas = struct {
     /// Filled axis-aligned rectangle (final-pixel coords).
     pub fn fillRect(self: *Canvas, x: f32, y: f32, w: f32, h: f32, c: Rgb, a: f32) void {
         const s: f32 = @floatFromInt(self.ss);
-        const ix0 = clampX(self, @as(i64, @intFromFloat(@round(x * s))));
-        const iy0 = clampY(self, @as(i64, @intFromFloat(@round(y * s))));
-        const ix1 = clampX(self, @as(i64, @intFromFloat(@round((x + w) * s))));
-        const iy1 = clampY(self, @as(i64, @intFromFloat(@round((y + h) * s))));
+        const iw: i64 = @intCast(self.iw);
+        const ih: i64 = @intCast(self.ih);
+        const ix0 = pxIndex(@round(x * s), 0, iw);
+        const iy0 = pxIndex(@round(y * s), 0, ih);
+        const ix1 = pxIndex(@round((x + w) * s), 0, iw);
+        const iy1 = pxIndex(@round((y + h) * s), 0, ih);
         var iy = iy0;
         while (iy < iy1) : (iy += 1) {
             var ix = ix0;
             while (ix < ix1) : (ix += 1) self.blendPx(ix, iy, c, a);
         }
-    }
-
-    fn clampX(self: *Canvas, v: i64) i64 {
-        return std.math.clamp(v, 0, @as(i64, @intCast(self.iw)));
-    }
-    fn clampY(self: *Canvas, v: i64) i64 {
-        return std.math.clamp(v, 0, @as(i64, @intCast(self.ih)));
     }
 
     /// Filled polygon (final-pixel coords, even-odd rule). Handles arbitrary
@@ -153,8 +159,10 @@ pub const Canvas = struct {
             min_y = @min(min_y, ip[i][1]);
             max_y = @max(max_y, ip[i][1]);
         }
-        var iy: i64 = @max(0, @as(i64, @intFromFloat(@floor(min_y))));
-        const iy_end: i64 = @min(@as(i64, @intCast(self.ih)), @as(i64, @intFromFloat(@ceil(max_y))) + 1);
+        const iw: i64 = @intCast(self.iw);
+        const ih: i64 = @intCast(self.ih);
+        var iy: i64 = pxIndex(@floor(min_y), 0, ih);
+        const iy_end: i64 = pxIndex(@ceil(max_y) + 1, 0, ih);
         while (iy < iy_end) : (iy += 1) {
             const yc: f32 = @as(f32, @floatFromInt(iy)) + 0.5;
             var m: usize = 0;
@@ -172,8 +180,8 @@ pub const Canvas = struct {
             std.mem.sort(f32, xs[0..m], {}, std.sort.asc(f32));
             var pair: usize = 0;
             while (pair + 1 < m) : (pair += 2) {
-                var ix: i64 = @max(0, @as(i64, @intFromFloat(@round(xs[pair]))));
-                const ix_end: i64 = @min(@as(i64, @intCast(self.iw)), @as(i64, @intFromFloat(@round(xs[pair + 1]))));
+                var ix: i64 = pxIndex(@round(xs[pair]), 0, iw);
+                const ix_end: i64 = pxIndex(@round(xs[pair + 1]), 0, iw);
                 while (ix < ix_end) : (ix += 1) self.blendPx(ix, iy, c, a);
             }
         }
@@ -234,12 +242,14 @@ pub const Canvas = struct {
         const ri = inner_r * s;
         const ro2 = ro * ro;
         const ri2 = ri * ri;
-        var iy: i64 = @max(0, @as(i64, @intFromFloat(@floor(cyi - ro))));
-        const iy_end: i64 = @min(@as(i64, @intCast(self.ih)), @as(i64, @intFromFloat(@ceil(cyi + ro))) + 1);
+        const iw: i64 = @intCast(self.iw);
+        const ih: i64 = @intCast(self.ih);
+        var iy: i64 = pxIndex(@floor(cyi - ro), 0, ih);
+        const iy_end: i64 = pxIndex(@ceil(cyi + ro) + 1, 0, ih);
         while (iy < iy_end) : (iy += 1) {
             const dy = @as(f32, @floatFromInt(iy)) + 0.5 - cyi;
-            var ix: i64 = @max(0, @as(i64, @intFromFloat(@floor(cxi - ro))));
-            const ix_end: i64 = @min(@as(i64, @intCast(self.iw)), @as(i64, @intFromFloat(@ceil(cxi + ro))) + 1);
+            var ix: i64 = pxIndex(@floor(cxi - ro), 0, iw);
+            const ix_end: i64 = pxIndex(@ceil(cxi + ro) + 1, 0, iw);
             while (ix < ix_end) : (ix += 1) {
                 const dx = @as(f32, @floatFromInt(ix)) + 0.5 - cxi;
                 const d2 = dx * dx + dy * dy;

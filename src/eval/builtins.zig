@@ -50,7 +50,11 @@ fn arithmetic(args: []const Value, op: ArithOp) BuiltinError!Value {
             break :blk a / b;
         },
         .mod => blk: {
-            if (b == ZERO_DIVISOR) return BuiltinError.DivisionByZero;
+            // `@mod` requires the divisor to be strictly positive; a design
+            // containing `(% x -3)` (or `(% x 0)`) would otherwise be undefined
+            // behavior in the safety-off ReleaseSmall production build. Reject
+            // any non-positive divisor as a division-by-zero-class error.
+            if (b <= ZERO_DIVISOR) return BuiltinError.DivisionByZero;
             break :blk @mod(a, b);
         },
     };
@@ -123,6 +127,10 @@ const E96 = [_]f64{
 fn eSeries(args: []const Value, series: []const f64) BuiltinError!Value {
     if (args.len != 1) return BuiltinError.ArityError;
     const x = args[0].asNumber() orelse return BuiltinError.TypeError;
+    // A non-finite input (±inf from arithmetic overflow, or NaN) makes the
+    // normalization loops below never terminate — `inf / 10 == inf` spins
+    // forever, pinning the request thread. Pass it straight through instead.
+    if (!std.math.isFinite(x)) return .{ .number = x };
     if (x <= 0) return .{ .number = x };
     var m = x;
     var decade: f64 = 1.0;
@@ -198,4 +206,22 @@ test "e-series snapping" {
     try std.testing.expectApproxEqAbs(@as(f64, 402000.0), (try evalBuiltinOp(.e96, &a)).asNumber().?, 1.0);
     const z = [_]Value{.{ .number = 0.0 }};
     try std.testing.expectEqual(@as(f64, 0.0), (try evalBuiltinOp(.e96, &z)).asNumber().?);
+}
+
+// spec: eval/builtins - Modulo rejects a non-positive divisor instead of triggering UB
+test "modulo rejects non-positive divisor" {
+    const neg = [_]Value{ .{ .number = 10.0 }, .{ .number = -3.0 } };
+    try std.testing.expectError(BuiltinError.DivisionByZero, evalBuiltinOp(.mod, &neg));
+    const zero = [_]Value{ .{ .number = 10.0 }, .{ .number = 0.0 } };
+    try std.testing.expectError(BuiltinError.DivisionByZero, evalBuiltinOp(.mod, &zero));
+    const ok = [_]Value{ .{ .number = 10.0 }, .{ .number = 3.0 } };
+    try std.testing.expectEqual(@as(f64, 1.0), (try evalBuiltinOp(.mod, &ok)).asNumber().?);
+}
+
+// spec: eval/builtins - E-series snapping terminates on non-finite input instead of looping forever
+test "e-series passes through non-finite input" {
+    const inf = [_]Value{.{ .number = std.math.inf(f64) }};
+    try std.testing.expect(std.math.isInf((try evalBuiltinOp(.e96, &inf)).asNumber().?));
+    const nan = [_]Value{.{ .number = std.math.nan(f64) }};
+    try std.testing.expect(std.math.isNan((try evalBuiltinOp(.e96, &nan)).asNumber().?));
 }

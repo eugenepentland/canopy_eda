@@ -488,7 +488,9 @@ fn hexVal(c: u8) ?u8 {
 
 /// GET `url` as a browser, following redirects, into a byte buffer.
 fn downloadPdf(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
-    return curl(allocator, &.{ "-L", "-A", BROWSER_UA, url }, DOWNLOAD_TIMEOUT_SECS, MAX_DOWNLOAD_BYTES);
+    // `--` stops curl option parsing so a `-`-leading vendor URL can't be
+    // reparsed as a flag (arg-injection / SSRF hardening).
+    return curl(allocator, &.{ "-L", "-A", BROWSER_UA, "--", url }, DOWNLOAD_TIMEOUT_SECS, MAX_DOWNLOAD_BYTES);
 }
 
 /// PDF magic — distinguishes a real datasheet from an HTML interstitial page.

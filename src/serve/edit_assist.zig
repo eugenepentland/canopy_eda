@@ -65,6 +65,11 @@ pub fn validateSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
         return;
     };
     defer parsed.deinit();
+    if (parsed.value != .object) {
+        res.status = 400;
+        res.body = "{\"ok\":false,\"error\":\"body must be a JSON object\"}";
+        return;
+    }
     const source_val = parsed.value.object.get("source") orelse {
         res.status = 400;
         res.body = "{\"ok\":false,\"error\":\"missing source\"}";
@@ -397,6 +402,11 @@ pub fn saveDiagramLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
         return;
     };
     defer parsed.deinit();
+    if (parsed.value != .object) {
+        res.status = 400;
+        res.body = "{\"ok\":false,\"error\":\"body must be a JSON object\"}";
+        return;
+    }
     const form_val = parsed.value.object.get("form") orelse {
         res.status = 400;
         res.body = "{\"ok\":false,\"error\":\"missing form\"}";

@@ -226,9 +226,30 @@ pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const code = try store.issueCode(ctx.allocator, ctx.auth_dir, client_id, redirect_uri, email, code_challenge, scope);
 
     const separator: []const u8 = if (std.mem.indexOfScalar(u8, redirect_uri, '?') == null) "?" else "&";
-    const location = try std.fmt.allocPrint(req.arena, "{s}{s}code={s}&state={s}", .{ redirect_uri, separator, code, state });
+    // Percent-encode `state` (client-supplied) so it can't smuggle extra query
+    // parameters (`&admin=1`, `#frag`) into the redirect. `code` is server-minted
+    // (URL-safe base64/hex) but is encoded too for good measure.
+    const enc_state = try percentEncode(req.arena, state);
+    const enc_code = try percentEncode(req.arena, code);
+    const location = try std.fmt.allocPrint(req.arena, "{s}{s}code={s}&state={s}", .{ redirect_uri, separator, enc_code, enc_state });
     res.status = 302;
     res.header("location", location);
+}
+
+/// Percent-encode `s` for use as a URL query-parameter value (RFC 3986
+/// unreserved set kept literal; everything else `%XX`). Allocates from `a`.
+fn percentEncode(a: std.mem.Allocator, s: []const u8) ![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    for (s) |c| {
+        const unreserved = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or c == '~';
+        if (unreserved) {
+            try out.append(a, c);
+        } else {
+            try out.writer(a).print("%{X:0>2}", .{c});
+        }
+    }
+    return out.items;
 }
 
 /// POST /oauth/token

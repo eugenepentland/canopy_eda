@@ -10,12 +10,23 @@ const Token = tokenizer_mod.Token;
 // ── Constants ─────────────────────────────────────────────────────
 const MIL_TO_MM: f64 = 0.0254;
 
+/// Maximum S-expression nesting depth. `parseList` → `parseNode` → `parseList`
+/// recurses once per open paren; without a bound, a few hundred KB of `(((…`
+/// overflows the process stack and aborts the whole `netlisp serve`. This cap
+/// is far beyond any legitimate design (real files nest well under 100 deep)
+/// yet stops the runaway before the native stack does. Bounding the parser
+/// bounds the evaluator for free — eval recursion follows AST depth.
+const MAX_PARSE_DEPTH: u32 = 10_000;
+
 pub const ParseError = error{
     UnexpectedEof,
     UnexpectedRparen,
     UnexpectedCharacter,
     UnterminatedString,
     InvalidNumber,
+    /// S-expression nesting exceeded `MAX_PARSE_DEPTH` — almost certainly
+    /// malformed/hostile input rather than a real design.
+    TooDeep,
     OutOfMemory,
 };
 
@@ -28,15 +39,15 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError![]cons
     while (true) {
         const token = try tok.next();
         if (token.tag == .eof) break;
-        const node = try parseNode(allocator, &tok, token);
+        const node = try parseNode(allocator, &tok, token, 0);
         try nodes.append(allocator, node);
     }
     return nodes.toOwnedSlice(allocator);
 }
 
-fn parseNode(allocator: std.mem.Allocator, tok: *Tokenizer, token: Token) ParseError!Node {
+fn parseNode(allocator: std.mem.Allocator, tok: *Tokenizer, token: Token, depth: u32) ParseError!Node {
     switch (token.tag) {
-        .lparen => return parseList(allocator, tok, token.span),
+        .lparen => return parseList(allocator, tok, token.span, depth),
         .rparen => return ParseError.UnexpectedRparen,
         .atom => return Node.atom(token.span, token.text),
         .string => return Node.string(token.span, token.text),
@@ -96,7 +107,8 @@ fn parseSiValue(text: []const u8) ?f64 {
     return base * scale;
 }
 
-fn parseList(allocator: std.mem.Allocator, tok: *Tokenizer, open_span: Span) ParseError!Node {
+fn parseList(allocator: std.mem.Allocator, tok: *Tokenizer, open_span: Span, depth: u32) ParseError!Node {
+    if (depth >= MAX_PARSE_DEPTH) return ParseError.TooDeep;
     var children: std.ArrayListUnmanaged(Node) = .empty;
     errdefer children.deinit(allocator);
 
@@ -104,7 +116,7 @@ fn parseList(allocator: std.mem.Allocator, tok: *Tokenizer, open_span: Span) Par
         const token = try tok.next();
         if (token.tag == .eof) return ParseError.UnexpectedEof;
         if (token.tag == .rparen) break;
-        const child = try parseNode(allocator, tok, token);
+        const child = try parseNode(allocator, tok, token, depth + 1);
         try children.append(allocator, child);
     }
     return Node.list(open_span, try children.toOwnedSlice(allocator));
@@ -214,6 +226,18 @@ test "parse isForm helper" {
 
     try std.testing.expect(nodes[0].isForm("net"));
     try std.testing.expect(!nodes[0].isForm("pin"));
+}
+
+// spec: sexpr/parser - Rejects input nested past MAX_PARSE_DEPTH with TooDeep instead of overflowing the stack
+test "parse rejects excessively deep nesting" {
+    const alloc = std.testing.allocator;
+    // MAX_PARSE_DEPTH + a margin of open parens: deep enough to trip the guard
+    // but nowhere near a native stack overflow, so the test itself is safe.
+    const depth = MAX_PARSE_DEPTH + 16;
+    const src = try alloc.alloc(u8, depth);
+    defer alloc.free(src);
+    @memset(src, '(');
+    try std.testing.expectError(ParseError.TooDeep, parse(alloc, src));
 }
 
 /// Recursively free all allocated slices in a node tree.

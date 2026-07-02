@@ -20,10 +20,10 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
 /// Error set for the HTTP handlers in this module.
-pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error || error{InvalidName};
 
 /// Errors out of the pure diff (allocation only — evaluation happens before).
-pub const DiffError = std.mem.Allocator.Error;
+pub const DiffError = std.mem.Allocator.Error || error{InvalidName};
 
 /// One instance in an added/removed list.
 pub const InstanceEntry = struct {
@@ -397,7 +397,7 @@ fn revisionPath(
     project_dir: []const u8,
     name: []const u8,
     id: []const u8,
-) std.mem.Allocator.Error!?[]const u8 {
+) (std.mem.Allocator.Error || error{InvalidName})!?[]const u8 {
     if (std.mem.eql(u8, id, "current")) {
         return try paths.designSourcePath(allocator, project_dir, name);
     }

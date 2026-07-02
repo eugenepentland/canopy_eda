@@ -302,13 +302,17 @@ fn leafName(s: []const u8) []const u8 {
     return s;
 }
 
-/// Parse a capacitance string ("100nF", "4.7uF") to farads; 0 if unrecognised.
+/// Parse a capacitance string ("100nF", "4.7uF", "4.7µF") to farads; 0 if
+/// unrecognised. The micro prefix is accepted both as ASCII "u/U" and as the
+/// UTF-8 "µ" (U+00B5, bytes 0xC2 0xB5) that footprint/BOM tools emit.
 fn capValueFarads(s: []const u8) f64 {
     var i: usize = 0;
     while (i < s.len and (std.ascii.isDigit(s[i]) or s[i] == '.')) i += 1;
     if (i == 0) return 0;
     const num = std.fmt.parseFloat(f64, s[0..i]) catch return 0;
     if (i >= s.len) return 0;
+    // UTF-8 "µ" (0xC2 0xB5) → micro. Match the two-byte sequence explicitly.
+    if (s[i] == 0xC2 and i + 1 < s.len and s[i + 1] == 0xB5) return num * 1e-6;
     const mult: f64 = switch (s[i]) {
         'p', 'P' => 1e-12,
         'n', 'N' => 1e-9,
@@ -368,6 +372,22 @@ fn anyContains(s: []const u8, subs: []const []const u8) bool {
 const testing = std.testing;
 const export_kicad = @import("../export_kicad.zig");
 const geometry = @import("geometry.zig");
+
+// spec: placement/module_policy - parses capacitance with ASCII and UTF-8 micro prefixes
+test "capValueFarads parses SI prefixes including UTF-8 micro" {
+    try testing.expectApproxEqAbs(@as(f64, 100e-9), capValueFarads("100nF"), 1e-18);
+    try testing.expectApproxEqAbs(@as(f64, 10e-12), capValueFarads("10pF"), 1e-18);
+    try testing.expectApproxEqAbs(@as(f64, 4.7e-6), capValueFarads("4.7uF"), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 4.7e-6), capValueFarads("4.7U"), 1e-12);
+    // UTF-8 "µ" (0xC2 0xB5) — the prefix footprint/BOM tools emit.
+    try testing.expectApproxEqAbs(@as(f64, 4.7e-6), capValueFarads("4.7µF"), 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 10e-6), capValueFarads("10µF"), 1e-12);
+    // A bulk µF cap must clear the BULK_FARADS threshold via the µ path.
+    try testing.expect(capValueFarads("10µF") >= BULK_FARADS);
+    // Unrecognised → 0.
+    try testing.expectEqual(@as(f64, 0), capValueFarads("abc"));
+    try testing.expectEqual(@as(f64, 0), capValueFarads("100"));
+}
 
 // spec: placement/module_policy - classifies ground, input-rail, switch-node and feedback nets by name
 test "classifyNetName tags the criticality classes by leaf name" {

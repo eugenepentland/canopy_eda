@@ -18,7 +18,7 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
 /// Error set for HTTP handlers in this module.
-pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error || error{InvalidName};
 
 // ── Rendered-HTML cache ────────────────────────────────────────────────
 //

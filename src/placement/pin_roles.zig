@@ -171,6 +171,12 @@ pub fn isSupplyFn(fn_name: []const u8) bool {
     };
     const s = buf[0..n];
     if (isGroundFn(s)) return false;
+    // A supply-*named* strap ("VDD_EN", "VIN_SEL0") is a config pin tied to the
+    // rail, not a real supply pad: tokenize the raw name and reject it if any
+    // token is a strap token. (Checked before the prefix match so "VDD_EN"
+    // reads as a strap, not a supply. Done inline rather than via `isStrapFn`
+    // to avoid mutual recursion — `isStrapFn` calls `isSupplyFn` first.)
+    if (hasStrapToken(fn_name)) return false;
     const prefixes = [_][]const u8{
         "VCC",  "VDD", "AVDD", "DVDD", "PVDD", "VBAT",
         "VBUS", "VIN", "VOUT", "VEE",  "VPP",  "VREF",
@@ -393,6 +399,16 @@ fn isTranslatorChannel(fn_name: []const u8, fn_set: *const std.StringHashMapUnma
 /// never matches "EN". Supply/ground names are rejected first. ERC-only.
 fn isStrapFn(fn_name: []const u8) bool {
     if (isGroundFn(fn_name) or isSupplyFn(fn_name)) return false;
+    return hasStrapToken(fn_name);
+}
+
+/// True when any whole alphanumeric token of `fn_name` is a config-strap token.
+/// The raw name is split on separators (so "PRTPWR1/BC_EN1" → token "EN1" fires,
+/// "SCL/SMBCLK/CFG_SEL0" → "CFG"/"SEL0" fire) and each token is upper-cased and
+/// matched whole and anchored via `isStrapToken`. No supply/ground guard here —
+/// callers apply their own (this is used both by `isStrapFn` after its guard and
+/// by `isSupplyFn` to reject supply-named straps, where guarding would recurse).
+fn hasStrapToken(fn_name: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, fn_name, "_-/.# \t~{}()+");
     while (it.next()) |raw| {
         var buf: [32]u8 = undefined;
@@ -514,6 +530,17 @@ test "isSupplyFn separates real supplies from grounds and signals" {
     try testing.expect(!isSupplyFn("RF_OUT"));
     try testing.expect(!isSupplyFn("INPUT"));
     try testing.expect(!isSupplyFn("OUTPUT"));
+    // A supply-*named* strap (a config pin tied to the rail) is NOT a real
+    // supply pad — the enable/select token wins over the VDD/VIN prefix.
+    try testing.expect(!isSupplyFn("VDD_EN"));
+    try testing.expect(!isSupplyFn("VIN_SEL0"));
+    try testing.expect(!isSupplyFn("VCC_MODE"));
+    // …and such a name still reads as a strap (the interaction that matters).
+    try testing.expect(isStrapFn("VDD_EN"));
+    try testing.expect(isStrapFn("VIN_SEL0"));
+    // A plain supply name with a trailing letter (VREF bank "A") is still a supply.
+    try testing.expect(isSupplyFn("VREF_A"));
+    try testing.expect(isSupplyFn("VDD_1"));
 }
 
 // spec: placement/pin_roles - electrical type overrides the name heuristic; signal types demote to strap

@@ -8,6 +8,7 @@ const Instance = env_mod.Instance;
 const Property = env_mod.Property;
 const bom_mod = @import("bom.zig");
 const export_kicad = @import("export_kicad.zig");
+const kicad_format = @import("kicad_pcb/format.zig");
 const FlatInfo = bom_mod.FlatInfo;
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -107,14 +108,29 @@ pub fn resolveIdentities(
     }
     var used_uuids = std.StringHashMap(void).init(allocator);
     defer used_uuids.deinit();
+    // Track ids we've already consumed so the tiebreak below can tell a genuine
+    // (astronomically unlikely) SHA-256 collision of two *different* ids from a
+    // *duplicate* stable id — the latter is a source bug (copy-paste of an
+    // `(id …)` token) and worth a loud warning, because its identity then
+    // becomes renumber-sensitive (re-derived from ref_des), defeating the whole
+    // renumber-proof-id design. id_insert already rejects duplicates it mints;
+    // this catches ones a user hand-copied into the source.
+    var seen_ids = std.StringHashMap(void).init(allocator);
+    defer seen_ids.deinit();
     for (flat_list.items) |info| {
         const uuid = blk: {
             if (info.id.len == 0) break :blk try bom_mod.generateUuid(allocator);
             const primary = try export_kicad.uuidFromId(allocator, info.id);
-            if (!used_uuids.contains(primary)) break :blk primary;
-            // Deterministic collision tiebreak: two stable ids hashed to the
-            // same uuid — re-derive from "id/ref_des". ref_des is itself
-            // deterministic per design, so the result still reproduces exactly.
+            if (!used_uuids.contains(primary)) {
+                try seen_ids.put(info.id, {});
+                break :blk primary;
+            }
+            if (seen_ids.contains(info.id)) {
+                log.warn("duplicate stable id '{s}' on '{s}' — its board identity is now renumber-sensitive; give the copy-pasted instance a fresh (id …)", .{ info.id, info.ref_des });
+            }
+            // Deterministic collision tiebreak: re-derive from "id/ref_des".
+            // ref_des is itself deterministic per design, so the result still
+            // reproduces exactly build-to-build (just not across a renumber).
             allocator.free(primary);
             const combined = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ info.id, info.ref_des });
             defer allocator.free(combined);
@@ -262,19 +278,27 @@ fn saveBom(
         const uuid = uuid_map.get(info.ref_des) orelse continue;
         const props = props_map.get(info.ref_des) orelse info.properties;
 
-        try w.print("(part \"{s}\" \"{s}\" \"{s}\"\n", .{ info.ref_des, uuid, info.component });
+        // Escape every quoted field: ref-des/component/net names arrive from
+        // third-party board imports and property values from HTTP edits, so a
+        // raw `"`/trailing `\` would otherwise make the `.bom` unparseable
+        // (loadBom's `catch return &.{}` then silently drops ALL entries).
+        try w.print("(part \"{s}\" \"{s}\" \"{s}\"\n", .{
+            try kicad_format.sexprEscape(allocator, info.ref_des),
+            uuid,
+            try kicad_format.sexprEscape(allocator, info.component),
+        });
         try w.print("  (id \"{s}\")\n", .{info.id});
         if (info.nets.len > 0) {
             try w.writeAll("  (nets");
             for (info.nets) |net| {
-                try w.print(" \"{s}\"", .{net});
+                try w.print(" \"{s}\"", .{try kicad_format.sexprEscape(allocator, net)});
             }
             try w.writeAll(")\n");
         }
         for (props) |p| {
             if (std.mem.eql(u8, p.key, "footprint") or
                 std.mem.eql(u8, p.key, "value")) continue;
-            try w.print("  ({s} \"{s}\")\n", .{ p.key, p.value });
+            try w.print("  ({s} \"{s}\")\n", .{ p.key, try kicad_format.sexprEscape(allocator, p.value) });
         }
         try w.writeAll(")\n");
     }
@@ -315,16 +339,23 @@ fn writeBomEntries(
         // entry.component may be "" for a brand-new stub from setBomProperty
         // or for a legacy .bom that pre-dates the component field. The next
         // full saveBom (after a design rebuild) re-populates it from FlatInfo.
-        try w.print("(part \"{s}\" \"{s}\" \"{s}\"\n", .{ entry.ref_des, entry.uuid, entry.component });
+        // Escape every quoted field — the property value here is the raw
+        // HTTP-supplied edit from setBomProperty, so an embedded `"`/`\` must
+        // not be allowed to corrupt the `.bom`.
+        try w.print("(part \"{s}\" \"{s}\" \"{s}\"\n", .{
+            try kicad_format.sexprEscape(allocator, entry.ref_des),
+            entry.uuid,
+            try kicad_format.sexprEscape(allocator, entry.component),
+        });
         if (entry.id.len > 0) try w.print("  (id \"{s}\")\n", .{entry.id});
         if (entry.nets.len > 0) {
             try w.writeAll("  (nets");
-            for (entry.nets) |net| try w.print(" \"{s}\"", .{net});
+            for (entry.nets) |net| try w.print(" \"{s}\"", .{try kicad_format.sexprEscape(allocator, net)});
             try w.writeAll(")\n");
         }
         for (entry.properties) |p| {
             if (std.mem.eql(u8, p.key, "footprint") or std.mem.eql(u8, p.key, "value")) continue;
-            try w.print("  ({s} \"{s}\")\n", .{ p.key, p.value });
+            try w.print("  ({s} \"{s}\")\n", .{ p.key, try kicad_format.sexprEscape(allocator, p.value) });
         }
         try w.writeAll(")\n");
     }
@@ -582,4 +613,75 @@ test "deterministic identity ignores a stale prior .bom" {
     try std.testing.expect(std.mem.indexOf(u8, bom1, uid10) != null);
     try std.testing.expect(std.mem.indexOf(u8, bom1, uid11) != null);
     try std.testing.expect(std.mem.indexOf(u8, bom1, "11111111-1111-5111") == null);
+}
+
+// spec: bom-resolve - A property value containing a quote/backslash round-trips through the .bom without corrupting it
+test "setBomProperty escapes a value with a quote and reloads cleanly" {
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir_path);
+    const bom_path = try std.fmt.allocPrint(alloc, "{s}/escape.bom", .{dir_path});
+    defer alloc.free(bom_path);
+
+    // A malicious/careless MPN edit with a raw quote and trailing backslash.
+    const nasty = "MPN\"123\\";
+    try setBomProperty(alloc, bom_path, "U1", "mpn", nasty);
+
+    // loadBom must recover the ORIGINAL value (not `&.{}` from a parse failure,
+    // which would silently drop every entry).
+    const entries = try bom_mod.loadBom(alloc, bom_path);
+    defer {
+        for (entries) |e| {
+            if (e.ref_des.len > 0) alloc.free(e.ref_des);
+            if (e.uuid.len > 0) alloc.free(e.uuid);
+            if (e.component.len > 0) alloc.free(e.component);
+            if (e.id.len > 0) alloc.free(e.id);
+            for (e.properties) |p| {
+                alloc.free(p.key);
+                alloc.free(p.value);
+            }
+            if (e.properties.len > 0) alloc.free(e.properties);
+            for (e.nets) |n| alloc.free(n);
+            if (e.nets.len > 0) alloc.free(e.nets);
+        }
+        alloc.free(entries);
+    }
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqualStrings("U1", entries[0].ref_des);
+    var got: ?[]const u8 = null;
+    for (entries[0].properties) |p| {
+        if (std.mem.eql(u8, p.key, "mpn")) got = p.value;
+    }
+    try std.testing.expect(got != null);
+    try std.testing.expectEqualStrings(nasty, got.?);
+
+    // Idempotency: re-writing the same value must not double-escape (the
+    // load→save cycle stays a fixed point).
+    try setBomProperty(alloc, bom_path, "U1", "mpn", got.?);
+    const again = try bom_mod.loadBom(alloc, bom_path);
+    defer {
+        for (again) |e| {
+            if (e.ref_des.len > 0) alloc.free(e.ref_des);
+            if (e.uuid.len > 0) alloc.free(e.uuid);
+            if (e.component.len > 0) alloc.free(e.component);
+            if (e.id.len > 0) alloc.free(e.id);
+            for (e.properties) |p| {
+                alloc.free(p.key);
+                alloc.free(p.value);
+            }
+            if (e.properties.len > 0) alloc.free(e.properties);
+            for (e.nets) |n| alloc.free(n);
+            if (e.nets.len > 0) alloc.free(e.nets);
+        }
+        alloc.free(again);
+    }
+    var got2: ?[]const u8 = null;
+    for (again[0].properties) |p| {
+        if (std.mem.eql(u8, p.key, "mpn")) got2 = p.value;
+    }
+    try std.testing.expect(got2 != null);
+    try std.testing.expectEqualStrings(nasty, got2.?);
 }

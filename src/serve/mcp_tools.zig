@@ -67,7 +67,7 @@ const RenderError = render_json.RenderError;
 /// + filesystem walks, plus any writer in JSON-emitting helpers.
 pub const ToolError = std.mem.Allocator.Error || std.Io.Writer.Error || EvalError || RenderError ||
     std.fs.Dir.Iterator.Error || std.fs.Dir.OpenError || std.fs.File.OpenError || std.fs.File.ReadError ||
-    error{ NotADesign, FileTooBig, StreamTooLong, NotOpenForReading, ReadOnlyFileSystem, LinkQuotaExceeded };
+    error{ InvalidName, NotADesign, FileTooBig, StreamTooLong, NotOpenForReading, ReadOnlyFileSystem, LinkQuotaExceeded };
 
 fn warnResolveIdentities(name: []const u8, err: anyerror) void {
     log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });

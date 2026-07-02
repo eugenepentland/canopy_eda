@@ -141,7 +141,6 @@ const FULLROUTE_DRC_MM: f64 = 25.0; // one clearance violation outweighs a coupl
 // would take. 150 ≈ three full board crossings per failed net.
 const FULLROUTE_UNROUTED_MM: f64 = 150.0;
 const GRID_COURTYARDS = true; // round courtyard half-extents to GRID_MM so edges land on-grid
-const COMPACT_MIN_OVERLAP: f64 = GRID_MM; // min shared-edge length when docking a floating part
 const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" test
 
 // ── Phase-A constraint lowering weights (see docs/constraints_dsl.md) ─────────
@@ -682,6 +681,25 @@ threadlocal var g_route_gap: f64 = 0;
 /// the signal pitch. Set in `prepare`; threadlocal like `g_lowered` so the hot
 /// objective path needn't thread another parameter through every call site.
 threadlocal var g_net_current: []const f64 = &.{};
+
+/// Solve re-entrancy depth on this thread. `runRough`'s nested per-module solves
+/// deliberately clobber the arena-backed threadlocals (and manage them via
+/// `SolveState`), so only the *outermost* solve resets them on exit — a nested
+/// reset would change what the parent reads after `runRough`. 0 outside any solve.
+threadlocal var g_solve_depth: usize = 0;
+
+/// Reset the request-arena-backed threadlocal slices to empty. Called on exit of
+/// the *outermost* solve only, so they never dangle into a freed arena after the
+/// solve returns (latent hardening — a later caller touching
+/// `constraintCost`/`congestPitch`/`accumulateLoops` outside a solve then reads an
+/// empty slice, a harmless no-op, instead of freed memory). Nested solves skip
+/// it, preserving today's exact `runRough` behaviour byte-for-byte.
+fn resetArenaGlobals() void {
+    if (g_solve_depth != 0) return;
+    g_lowered = .{};
+    g_loop_force_scale = &.{};
+    g_net_current = &.{};
+}
 
 /// Staging diagnostics from the most recent solve, so the PCB-layout JSON / PNG
 /// can flag parts that didn't make the board. `unplaced` = parts still in a band
@@ -1623,6 +1641,15 @@ fn anchorCost(parts: []const Part, anchors: []const PadAnchor, i: usize) f64 {
     return sum;
 }
 
+/// `std.math.clamp(v, lo, hi)` but tolerant of an inverted interval: when the
+/// window would invert (`lo > hi`, i.e. the slot is wider than the range it
+/// slides in), return `v` unchanged rather than asserting. Used by `autofillOne`
+/// to centre a re-located window on the targets when there's no room to slide.
+fn clampOrCenter(v: f64, lo: f64, hi: f64) f64 {
+    if (lo > hi) return v;
+    return std.math.clamp(v, lo, hi);
+}
+
 /// Move staged part `i` to the collision-free (position × rotation) with the
 /// lowest anchor cost, scanning a window around the anchor targets' bounding
 /// box coarse-to-fine. Returns true if an improving pose was found.
@@ -1652,8 +1679,14 @@ fn autofillOne(parts: []Part, anchors: []const PadAnchor, i: usize) bool {
     // same span cap. Near-target fills keep the original window byte-for-byte.
     if (lo_x > hi_x or lo_y > hi_y) {
         const half_span = @as(f64, @floatFromInt(RELOCATE_MAX_CELLS)) * GRID_MM / 2.0;
-        const cx0 = std.math.clamp((minx + maxx) / 2, minx - m + half_span, maxx + m - half_span);
-        const cy0 = std.math.clamp((miny + maxy) / 2, miny - m + half_span, maxy + m - half_span);
+        // The clamp keeps the window's centre inside the targets' bbox (± the
+        // margin), but its bounds only order when the bbox+margin is at least as
+        // wide as the window (2*half_span). A single target (span 0) with a small
+        // part inverts them and `std.math.clamp` asserts lower<=upper — a Debug
+        // panic and UB in ReleaseSmall. When the window is wider than the bbox,
+        // there's nothing to slide against, so just centre on the targets.
+        const cx0 = clampOrCenter((minx + maxx) / 2, minx - m + half_span, maxx + m - half_span);
+        const cy0 = clampOrCenter((miny + maxy) / 2, miny - m + half_span, maxy + m - half_span);
         lo_x = cellOffset(cx0 - half_span - ox);
         hi_x = cellOffset(cx0 + half_span - ox);
         lo_y = cellOffset(cy0 - half_span - oy);
@@ -1903,6 +1936,15 @@ fn buildSubMacro(
     project_dir: []const u8,
     params: Params,
 ) std.mem.Allocator.Error!?Macro {
+    // The nested solve's `prepare` overwrites the collision box globals
+    // (`g_collide_shrink`/`g_route_gap`) with the *child's* values; `finishMacro`
+    // below reads them (via `keepBoxOf`) to size the parent macro's keepout box.
+    // Capture the parent's values now and restore them before `finishMacro`, so
+    // the macro extents are measured under the parent's params, not the last
+    // child's — inert at the defaults (both 0/equal), correct for any non-default
+    // `courtyard_overlap` / `route_gap`.
+    const saved_shrink = g_collide_shrink;
+    const saved_gap = g_route_gap;
     const sp = try solve(arena, sub.block, project_dir, null, params, .place);
     // Design-side lookup: refs compose as `slug/<module ref>` when the flatten
     // kept the module's numbering, but a design-level renumber shifts it
@@ -1936,6 +1978,10 @@ fn buildSubMacro(
         try rots.append(arena, part.rot);
     }
     if (members.items.len == 0) return null;
+    // Measure the macro's keepout extents under the *parent's* box params, not
+    // whatever the nested solve left in the globals.
+    g_collide_shrink = saved_shrink;
+    g_route_gap = saved_gap;
     return finishMacro(members.items, xs.items, ys.items, rots.items, prep.parts, rot_override);
 }
 
@@ -3756,6 +3802,14 @@ pub fn solve(
     params: Params,
     mode: SeedMode,
 ) std.mem.Allocator.Error!Placement {
+    // Don't leave the arena-backed threadlocals dangling once the outermost solve
+    // returns and the caller frees the arena (nested solves manage them via
+    // SolveState — see resetArenaGlobals).
+    g_solve_depth += 1;
+    defer {
+        g_solve_depth -= 1;
+        resetArenaGlobals();
+    }
     var prep = try prepare(arena, block, project_dir, params);
     const parts = prep.parts;
     const nets = prep.nets;
@@ -3778,6 +3832,12 @@ pub fn solve(
     const generated = !applyCached(parts, cached);
     if (generated) {
         try runPlacement(arena, parts, &prep, nets, built, params);
+        // Stream the first arrangement to a watching live-regen browser (no-op
+        // for a synchronous page solve, which never installs a sink). Pure
+        // observation — `emitBest`/`surrogateObjective` only read `parts`, so
+        // they can't shift output. The scalar is the smooth objective the viewer
+        // shows (lower is better).
+        emitBest(parts, surrogateObjective(parts, &prep.idx_of, nets, built.loops, params), .explore);
         // When courtyard overlap is enabled, the denser feasible region helps most
         // boards but can land a small/sparse one in a worse basin (its HPWL rises
         // even though overlap only *adds* freedom — a convergence artefact). So
@@ -3825,6 +3885,10 @@ pub fn solve(
     const score = scoreLayout(parts, &prep.idx_of, nets, built.loops);
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
+    // Final refined arrangement → the live-regen watcher (see the explore emit
+    // above). No-op without a sink; reads `parts` only. `bd.objective` is the
+    // same lower-is-better scalar the explore frame used.
+    emitBest(parts, bd.objective, .refine);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
     if (board_live) {
         if (board_rect == null) board_rect = try boardRectFromPoses(arena, parts, prep.instances, block.board);
@@ -3853,6 +3917,12 @@ pub fn scorePoses(
     poses: []const RefPose,
     params: Params,
 ) std.mem.Allocator.Error!Breakdown {
+    // See solve — don't dangle into the freed arena. scorePoses is never nested.
+    g_solve_depth += 1;
+    defer {
+        g_solve_depth -= 1;
+        resetArenaGlobals();
+    }
     var prep = try prepare(arena, block, project_dir, params);
     _ = applyCached(prep.parts, poses);
     // Score the loop term with the smooth analytic surrogate — never the maze
@@ -4543,11 +4613,26 @@ fn prepare(
     var roles = try arena.alloc(pin_roles.PartRoles, instances.len);
     var roles_cache = std.StringHashMap(pin_roles.PartRoles).init(arena);
 
+    // Per-footprint geometry cache, keyed by footprint name, mirroring
+    // `roles_cache`. A board with 100 cap-0402s used to file-read + parse
+    // `C_0402.sexp` 100 times per prepare — and prepare runs per drag-score
+    // event. A *real* footprint's Geom is a pure function of (name, margin) and
+    // margin is constant across a prepare, so caching by name is byte-identical.
+    // Fallback geoms (missing file) depend on the per-instance pin-count hint, so
+    // they are never cached — `g.fallback` gates the store.
+    var geom_cache = std.StringHashMap(geometry.Geom).init(arena);
+
     var parts = try arena.alloc(Part, instances.len);
     var idx_of = std.StringHashMap(usize).init(arena);
     for (instances, 0..) |inst, i| {
         const hint = pin_counts.get(inst.ref_des) orelse 2;
-        const g = geometry.load(arena, project_dir, inst.footprint, hint, params.bbox_margin);
+        const g = blk: {
+            if (geom_cache.get(inst.footprint)) |cached| break :blk cached;
+            const loaded = geometry.load(arena, project_dir, inst.footprint, hint, params.bbox_margin);
+            // Fallback geoms depend on the per-instance pin hint — never cache them.
+            if (!loaded.fallback) try geom_cache.put(inst.footprint, loaded);
+            break :blk loaded;
+        };
         const is_hub = isHub(inst.ref_des);
         if (is_hub) {
             const gop = try roles_cache.getOrPut(inst.component);
@@ -4766,20 +4851,6 @@ fn anyOverlap(parts: []const Part) bool {
     return false;
 }
 
-/// True if any two parts' *courtyards* overlap (ignoring escape keepouts) — the
-/// validity test for the symmetry pass, which trades the soft breakout
-/// reservation for a clean mirror.
-fn anyCourtOverlap(parts: []const Part) bool {
-    for (parts, 0..) |a, i| {
-        for (parts[i + 1 ..]) |b| {
-            const ox = (effHw(a) + effHw(b)) - @abs(a.x - b.x);
-            const oy = (effHh(a) + effHh(b)) - @abs(a.y - b.y);
-            if (ox > 1e-9 and oy > 1e-9) return true;
-        }
-    }
-    return false;
-}
-
 /// Robust overlap removal: the continuous force pass converges smoothly where
 /// the grid-only nudger can oscillate on a tight pack (e.g. large escape-stub
 /// keepouts), then snap + grid-legalize so the result is on-grid and clean.
@@ -4944,50 +5015,6 @@ fn loopLen(parts: []const Part, lp: Loop) f64 {
     return surrogatePwrLeg(parts, lp) + TUCK_GND_W * loopGroundSpan(parts, lp);
 }
 
-/// Index of the part closest to the cluster centroid — the blob seed when a
-/// design has no hub to anchor on.
-fn centralIndex(parts: []const Part) usize {
-    var cx: f64 = 0;
-    var cy: f64 = 0;
-    for (parts) |p| {
-        cx += p.x;
-        cy += p.y;
-    }
-    const inv = 1.0 / @as(f64, @floatFromInt(parts.len));
-    cx *= inv;
-    cy *= inv;
-    var best: usize = 0;
-    var best_d2: f64 = std.math.inf(f64);
-    for (parts, 0..) |p, i| {
-        const d2 = (p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy);
-        if (d2 < best_d2) {
-            best_d2 = d2;
-            best = i;
-        }
-    }
-    return best;
-}
-
-/// Transitively settle every part whose courtyard already abuts a settled one,
-/// so parts the optimizer placed flush against the blob aren't needlessly moved.
-fn growSettled(parts: []const Part, settled: []bool) void {
-    var changed = true;
-    while (changed) {
-        changed = false;
-        for (parts, 0..) |_, i| {
-            if (settled[i]) continue;
-            for (parts, 0..) |_, j| {
-                if (i == j or !settled[j]) continue;
-                if (courtyardEdge(parts[i], parts[j])) {
-                    settled[i] = true;
-                    changed = true;
-                    break;
-                }
-            }
-        }
-    }
-}
-
 /// True when two courtyards share an *edge* (not just a corner): a zero gap on
 /// one axis with a positive projection overlap on the other. Rendered courtyard
 /// (`effHw`/`effHh` about the centre).
@@ -4996,77 +5023,6 @@ fn courtyardEdge(a: Part, b: Part) bool {
     const gy = @abs(a.y - b.y) - (effHh(a) + effHh(b));
     return (@abs(gx) <= COMPACT_EPS and gy < -COMPACT_EPS) or
         (@abs(gy) <= COMPACT_EPS and gx < -COMPACT_EPS);
-}
-
-/// True when part `i`'s courtyard shares an edge with any other part's.
-fn courtyardTouchesAny(parts: []const Part, i: usize) bool {
-    for (parts, 0..) |_, j| {
-        if (j != i and courtyardEdge(parts[i], parts[j])) return true;
-    }
-    return false;
-}
-
-/// A dock candidate: the grid-aligned centre and its squared displacement.
-const Dock = struct { pt: Pt, d2: f64 };
-
-/// Minimum-displacement grid-aligned centre that makes part `i`'s courtyard abut
-/// a *settled* part, with its keepout overlapping nothing. Tries each side of
-/// every settled part, preserving `i`'s perpendicular coordinate (clamped just
-/// enough to keep a `COMPACT_MIN_OVERLAP` shared edge). Null when none is
-/// reachable (e.g. every dock would overlap a third part).
-fn bestDock(parts: []Part, i: usize, settled: []const bool, grid: ?*const CompactGrid) ?Dock {
-    const ox = parts[i].x;
-    const oy = parts[i].y;
-    const phw = effHw(parts[i]);
-    const phh = effHh(parts[i]);
-    // The trial part's keepout box is position-independent (rot is fixed during
-    // the dock), so compute it once for the grid-accelerated overlap test.
-    const tbox = keepBoxOf(parts[i]);
-    var best: ?Pt = null;
-    var best_d2: f64 = std.math.inf(f64);
-    for (parts, 0..) |o, j| {
-        if (j == i or !settled[j]) continue;
-        const sumw = phw + effHw(o);
-        const sumh = phh + effHh(o);
-        // Left / right of o: slide along x, keep y (clamped into the overlap band).
-        const ylim = @max(0.0, sumh - COMPACT_MIN_OVERLAP);
-        const cy = std.math.clamp(oy, o.y - ylim, o.y + ylim);
-        considerDock(parts, i, o.x + sumw, cy, ox, oy, &best, &best_d2, grid, tbox);
-        considerDock(parts, i, o.x - sumw, cy, ox, oy, &best, &best_d2, grid, tbox);
-        // Above / below o: slide along y, keep x (clamped into the overlap band).
-        const xlim = @max(0.0, sumw - COMPACT_MIN_OVERLAP);
-        const cx = std.math.clamp(ox, o.x - xlim, o.x + xlim);
-        considerDock(parts, i, cx, o.y + sumh, ox, oy, &best, &best_d2, grid, tbox);
-        considerDock(parts, i, cx, o.y - sumh, ox, oy, &best, &best_d2, grid, tbox);
-    }
-    if (best) |pt| return .{ .pt = pt, .d2 = best_d2 };
-    return null;
-}
-
-/// Evaluate one candidate dock centre for part `i`: snap to grid, reject if its
-/// keepout overlaps anything, else keep it when it is the closest valid dock so
-/// far. Restores `i`'s position before returning (the caller commits the winner).
-/// With a `grid`, the overlap test is the O(1) spatial-hash query (bit-identical
-/// to the dense `overlapsAny`); `tbox` is `parts[i]`'s precomputed keepout.
-fn considerDock(parts: []Part, i: usize, cx: f64, cy: f64, ox: f64, oy: f64, best: *?Pt, best_d2: *f64, grid: ?*const CompactGrid, tbox: KeepBox) void {
-    const sx = @round(cx / GRID_MM) * GRID_MM;
-    const sy = @round(cy / GRID_MM) * GRID_MM;
-    const bad = if (grid) |g|
-        g.overlaps(i, tbox, sx + tbox.cxo, sy + tbox.cyo)
-    else blk: {
-        parts[i].x = sx;
-        parts[i].y = sy;
-        const b = overlapsAny(parts, &parts[i]);
-        parts[i].x = ox;
-        parts[i].y = oy;
-        break :blk b;
-    };
-    if (bad) return;
-    const d2 = (sx - ox) * (sx - ox) + (sy - oy) * (sy - oy);
-    if (d2 < best_d2.* - 1e-12) {
-        best_d2.* = d2;
-        best.* = .{ .x = sx, .y = sy };
-    }
 }
 
 /// A solved pose snapshot (used to retain the best multi-start arrangement).
@@ -5086,6 +5042,13 @@ fn runStart(
     params: Params,
 ) void {
     if (parts.len <= MULTISTART_MAX_PARTS) seedRing(parts, s) else seedGrid(parts);
+    // Pin each series part (buck inductor across LX1/LX2, a feedback R) to the
+    // rotation that faces each pad at its own hub pin — HPWL is blind to the
+    // two-legged orientation, so this must be decided geometrically before the
+    // rotation-searching passes below run. Runs after seeding (needs the hub's
+    // seeded rotation) and pins `rot_pin = .series`, which the search passes then
+    // honour ("search position only"). No-op for boards with no series pairs.
+    applySeriesRotations(parts, built.series);
     relax(parts, built.springs, built.loops);
     // Coordinate descent: alternately pick each passive's best rotation and
     // re-relax positions, so a flipped cap's pad lands against its IC pin.
@@ -6174,14 +6137,6 @@ fn pairSeriesLegs(arena: std.mem.Allocator, cands: []const SeriesCand, parts: []
     return out.toOwnedSlice(arena);
 }
 
-/// The series pair whose part is index `part`, if any (cf. `loopForCap`).
-fn seriesFor(series: []const SeriesPair, part: usize) ?SeriesPair {
-    for (series) |sp| {
-        if (sp.part == part) return sp;
-    }
-    return null;
-}
-
 /// The quarter rotation that best aligns a series part's pad axis with its
 /// matched hub pads' axis — so each pad faces *its own* pin instead of one pad
 /// docking close while the other's leg detours around the part body. World-space
@@ -6998,147 +6953,6 @@ fn accumulateRepulsion(parts: []const Part, boxes: []const KeepBox, ax: []f64, a
     return any;
 }
 
-/// Max hash buckets (must be a power of two and >= bucketCount(maxParts)).
-const GRID_MAX_BUCKETS: usize = 8192;
-
-/// Bucket count for `n` parts: next power of two of 2n, clamped to
-/// [16, GRID_MAX_BUCKETS]. Keeps load factor < 1 while keeping the per-iter
-/// clear cheap on small boards.
-fn bucketCount(n: usize) u64 {
-    var b: u64 = 16;
-    const want = 2 * n;
-    while (b < want and b < GRID_MAX_BUCKETS) b <<= 1;
-    return b;
-}
-
-/// Hash a signed cell coordinate pair into a bucket index space. Mixing keeps
-/// adjacent cells from clustering in the same bucket.
-inline fn cellHash(cx: i64, cy: i64) u64 {
-    const ux: u64 = @bitCast(cx);
-    const uy: u64 = @bitCast(cy);
-    var h: u64 = ux *% 0x9E3779B97F4A7C15;
-    h ^= uy *% 0xC2B2AE3D27D4EB4F;
-    h ^= h >> 29;
-    h *%= 0xBF58476D1CE4E5B9;
-    h ^= h >> 32;
-    return h;
-}
-
-/// Uniform spatial hash over every part's collision keepout, used to make the
-/// `overlapsAny` boolean query ~O(1) instead of O(n). `compactToContact` is the
-/// dominant cost on large single-start boards (an O(n⁴)-ish blob-dock that calls
-/// `overlapsAny` for every trial dock of every floating part); the parts are
-/// static across one docking pass, so the grid is built once per pass and reused
-/// for all queries in it.
-///
-/// `overlapsAny` returns "does *any* other courtyard overlap" — a pure boolean
-/// OR, so it is order-independent: a grid that misses no truly-overlapping part
-/// returns the identical boolean. (False positives are impossible — the exact
-/// overlap test is still applied — and the cell size guarantees no false
-/// negatives, so this is bit-for-bit equivalent to the dense scan.) Because the
-/// answer is order-free we needn't sort or de-dup candidates: scanning a part
-/// twice (via a hash collision) or in any order yields the same boolean.
-const CompactGrid = struct {
-    n: usize,
-    box: [maxParts]KeepBox, // rotation-aware keepout (position-independent offsets)
-    wcx: [maxParts]f64, // world keepout centre x (= part.x + box.cxo)
-    wcy: [maxParts]f64,
-    minx: f64,
-    miny: f64,
-    inv_cell: f64,
-    mask: u64,
-    bstart: [GRID_MAX_BUCKETS + 1]u32,
-    items: [maxParts]u32,
-
-    /// (Re)build from the current part positions. Cheap O(n) — call once per
-    /// docking pass (positions are static within a pass).
-    fn build(g: *CompactGrid, parts: []const Part) void {
-        const n = parts.len;
-        g.n = n;
-        if (n == 0) return;
-        var max_half: f64 = 0;
-        var minx: f64 = std.math.floatMax(f64);
-        var miny: f64 = std.math.floatMax(f64);
-        var k: usize = 0;
-        while (k < n) : (k += 1) {
-            const b = keepBoxOf(parts[k]);
-            g.box[k] = b;
-            const cx = parts[k].x + b.cxo;
-            const cy = parts[k].y + b.cyo;
-            g.wcx[k] = cx;
-            g.wcy[k] = cy;
-            if (b.hw > max_half) max_half = b.hw;
-            if (b.hh > max_half) max_half = b.hh;
-            if (cx < minx) minx = cx;
-            if (cy < miny) miny = cy;
-        }
-        // Overlap needs |Δcx| < hw_i+hw_j ≤ 2·max_half on each axis, so a cell
-        // of 2·max_half puts any overlapping pair within one cell (3×3 cover).
-        const cell = 2 * max_half + 1e-9;
-        g.inv_cell = 1.0 / cell;
-        g.minx = minx;
-        g.miny = miny;
-
-        const nbuckets = bucketCount(n);
-        g.mask = nbuckets - 1;
-        var b: usize = 0;
-        while (b <= nbuckets) : (b += 1) g.bstart[b] = 0;
-        // Histogram cells into bucket counts.
-        var pbucket: [maxParts]u32 = undefined;
-        k = 0;
-        while (k < n) : (k += 1) {
-            const key: u32 = @intCast(g.cellKey(g.wcx[k], g.wcy[k]));
-            pbucket[k] = key;
-            g.bstart[key + 1] += 1;
-        }
-        b = 0;
-        while (b < nbuckets) : (b += 1) g.bstart[b + 1] += g.bstart[b];
-        var cursor: [GRID_MAX_BUCKETS]u32 = undefined;
-        b = 0;
-        while (b < nbuckets) : (b += 1) cursor[b] = g.bstart[b];
-        k = 0;
-        while (k < n) : (k += 1) {
-            const key = pbucket[k];
-            g.items[cursor[key]] = @intCast(k);
-            cursor[key] += 1;
-        }
-    }
-
-    inline fn cellOf(g: *const CompactGrid, wx: f64, wy: f64) struct { cx: i64, cy: i64 } {
-        return .{
-            .cx = @intFromFloat(@floor((wx - g.minx) * g.inv_cell)),
-            .cy = @intFromFloat(@floor((wy - g.miny) * g.inv_cell)),
-        };
-    }
-
-    inline fn cellKey(g: *const CompactGrid, wx: f64, wy: f64) u64 {
-        const c = g.cellOf(wx, wy);
-        return cellHash(c.cx, c.cy) & g.mask;
-    }
-
-    /// True iff any part other than `self` overlaps a keepout box `tbox` centred
-    /// at world `(twcx,twcy)`. Mirrors `overlapsAny`'s exact float test so the
-    /// boolean matches bit-for-bit.
-    fn overlaps(g: *const CompactGrid, self: usize, tbox: KeepBox, twcx: f64, twcy: f64) bool {
-        const c = g.cellOf(twcx, twcy);
-        var dgy: i64 = -1;
-        while (dgy <= 1) : (dgy += 1) {
-            var dgx: i64 = -1;
-            while (dgx <= 1) : (dgx += 1) {
-                const key: u32 = @intCast(cellHash(c.cx + dgx, c.cy + dgy) & g.mask);
-                const slice = g.items[g.bstart[key]..g.bstart[key + 1]];
-                for (slice) |o| {
-                    if (o == self) continue;
-                    const ox = (tbox.hw + g.box[o].hw) - @abs(twcx - g.wcx[o]);
-                    const oy = (tbox.hh + g.box[o].hh) - @abs(twcy - g.wcy[o]);
-                    if (ox > 1e-9 and oy > 1e-9) return true;
-                }
-            }
-        }
-        return false;
-    }
-};
-
 /// Deterministic separation direction; breaks exact ties by index parity.
 fn signNudge(d: f64, i: usize, j: usize) f64 {
     if (d > 0) return 1;
@@ -7347,7 +7161,11 @@ fn isHub(ref: []const u8) bool {
     };
 }
 
-fn isGroundName(name: []const u8) bool {
+/// True when `name` (already leaf-stripped) is a ground rail. Public so the
+/// router (`router.zig`) shares the exact same predicate — the two used to keep
+/// hand-copied lists and the router's drifted, routing numbered/split grounds as
+/// signal copper.
+pub fn isGroundName(name: []const u8) bool {
     // A ground rail is one of these tokens, optionally with a *numbered* suffix
     // (GND1, GND2, AGND2, VSS1, PGND_2 on a multi-ground part) — an exact-match list
     // missed numbered grounds, so on an isolated/split-ground part those nets read

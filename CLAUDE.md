@@ -104,7 +104,7 @@ Source (.sexp files)
 **Evaluator** (`src/eval/`): Split across multiple files:
 - `evaluator.zig` — Main eval dispatcher
 - `env.zig` — Core types: Value (union type), Env (lexical scope chain), DesignBlock, Instance, Net, Port
-- `special_forms.zig` — `let`, `if`, `cond`, `fmt`, `assert`
+- `special_forms.zig` — `let`, `if`, `fmt`, `assert`, `assert-range`
 - `modules.zig` — `import` (searches lib/components/ then lib/modules/), `defmodule` with closure capture
 - `design_block.zig` — `design-block` evaluation
 - `instance.zig` — Instance building + pin-net resolution
@@ -299,11 +299,10 @@ parameters and the designs using them, `/schematics/<m>` 302s to
 `/modules/<m>`, and the MCP read tools (`get_schematic`,
 `run_checks`, `list_instances`, `get_net`, `list_free_pins`)
 resolve the module standalone via its parameter
-defaults. The PCB tools already resolved module names (real
-instantiation first, else zero-arg); `POST /api/spec-save/<m>` now also
-splices a `(placement …)` form into the defmodule body, so a module's
-layout is authored once in the module file and every design instantiating
-it picks the spec up.
+defaults. The PCB tools also resolve a module name directly (real
+instantiation first, else a zero-arg call), so `/pcb-layout/<m>` and the
+`get_pcb_layout_image` / `describe_pcb_layout` MCP tools work on a bare
+module.
 
 ### Numeric literals with SI suffixes
 
@@ -328,8 +327,7 @@ caps, all on the same `VDD3V3` net that lands on a dozen IC pads) has no way to
 say *which* pad it serves, so the placer pins every one of them to the same
 (lowest-numbered) supply pad — their decoupling loops and the `/pcb-layout`
 ratsnest all collapse onto one pin. Add `(decouples "IC" PIN)` to bind the
-cap's power leg to a specific hub pad — the per-instance twin of a
-`(placement-order … (near …))`, but it lives on the cap and also drives the
+cap's power leg to a specific hub pad — it lives on the cap and also drives the
 ERC/lint requirement below:
 
 ```scheme
@@ -352,8 +350,11 @@ straps like EN/PG are excluded from that count by `pin_roles`, so a cap never
 binds to the enable pin) **must** carry a binding.
 
 - The **`decoupling_unbound` ERC check** (`src/erc.zig`, **error**) is the gate:
-  it fails `netlisp build` / `netlisp check`, lights the home-page health chip
-  red, and shows in the review doc + the `run_checks` MCP tool. It enforces the
+  it fails `netlisp check` (which exits non-zero on any error-severity
+  violation), lights the home-page health chip red, and shows in the review doc
+  + the `run_checks` MCP tool. (`netlisp build` / `--push` deliberately do *not*
+  run ERC — the push path exists to view work-in-progress designs live; run
+  `netlisp check` to gate.) It enforces the
   *requirement* — does the cap declare a pin at all? It runs **per block**
   (recursing sub-blocks), so a module's bypass cap is judged against *its own*
   IC's pad count, not an unrelated IC that merely shares a board rail once
@@ -402,8 +403,10 @@ sign-off:
 or missing reason does **not** suppress the error.
 
 - The **`strap_tied_to_rail` ERC check** (`src/erc.zig`, **error**) is the gate:
-  it fails `netlisp build` / `netlisp check`, lights the home-page health chip
-  red, and shows in the review doc + the `run_checks` MCP tool. It runs **per
+  it fails `netlisp check` (non-zero exit on any error-severity violation),
+  lights the home-page health chip red, and shows in the review doc + the
+  `run_checks` MCP tool. (As with the other ERC checks, `netlisp build` does not
+  run ERC — use `netlisp check` to gate.) It runs **per
   block** (recursing sub-blocks), so a module's strap is judged against the rail
   names in *its own* namespace (a module's `EN`→`VIN` tie is judged on `VIN`,
   not on whatever the parent wires `VIN` to). Strap-class pins are detected by
@@ -476,9 +479,10 @@ mirroring `(strap-ok …)`:
 
 The free-floating block-diagram arrangement (the schematic page's Layout
 tab) is authored with `(diagram-layout (anchor "x") (place "y"
-(right-of "x")) …)`. **`(layout …)` is the legacy alias** — both parse,
-but prefer `diagram-layout` in new files: the word "layout" alone now
-means PCB placement (`(placement …)`, `(floorplan …)`, `/pcb-layout`).
+(right-of "x")) …)`. **`diagram-layout` is the only spelling** — the old
+`(layout …)` alias is retired (`ScopeForm.fromAtom("layout")` now returns
+null; a test in `eval/forms.zig` asserts this), because the word "layout"
+alone means PCB placement (the `/pcb-layout` force/rough solver).
 
 The Layout tab is a **semantic-zoom ladder**: zoomed all the way out it
 draws the **LOD0 "glance" layer** — one chip per `(group …)` region (or
@@ -580,10 +584,10 @@ Local dev still uses `http://localhost:7050`.
 - **Design list**: `GET /` — links to all .sexp designs, with per-card health chips (ERC errors/warnings, failed assertions, open notes, green PASS)
 - **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG. The page also embeds the design-review panels inline (power-budget table, power-sequence, test-points, per-section coverage). There is no standalone review-report endpoint.
 - **Scene graph**: `GET /api/scene-graph/:name` — JSON scene graph for schematic (used by the live-push pipeline)
-- **PCB layout PNG**: `GET /api/pcb-png/:name` — server-rendered PNG of the force-directed PCB layout, so an AI agent (or any HTTP client) can *see* the board, not just parse the placement JSON. Mirrors the browser viewer's colours/projection (`src/render_pcb_png.zig` rasterizes onto `src/raster.zig`'s software canvas, encoded by `src/png.zig` — pure-Zig, no image dependency). Query: `?nets=A,B` / `?refs=U1,C3` enter *focus mode* (spotlight those nets/components in amber, dim the rest — `refs` match the bare leaf of a sub-block-prefixed ref); `?route=1` overlays routed copper + DRC markers; `?names=ref|origin|both` picks part labels (default: `origin` — the module-local names a `(placement …)` spec is written in — whenever a spec drives the solve, `ref` otherwise); `?pins=U13,C5` (or `pins=hubs`) labels those parts' pads with net names; when a spec drives the solve, the header shows its coverage (`SPEC: ALL PLACED` / `N UNPLACED` / `FELL BACK TO AUTO`) and spec-unlisted parts are hatched red in the staging band; `?crop=U1&r=6` zooms on one part (matched by ref, leaf, or origin name — combine with `?pins=`); `?sheet=1` returns a contact sheet (whole board + per-hub pin-labeled closeups); `?critique=1` draws a numbered worst-problems overlay (hottest loops by nH, longest airwire, staged parts, DRC count); `?width=`, `?layout=<saved>`, `?regen=1`, `?sub=<slug>`. When the design declares a `(board (size W H) …)` form, the physical outline rectangle + dimensions are drawn under the parts (green). Read-only; reuses the design's auto-layout cache.
-- **PCB layout facts**: `GET /api/pcb-describe/:name` — structured spatial facts about the solved placement (`src/serve/pcb_describe.zig`), the textual twin of the PNG: built from the identical placement-selection logic and accepting the same query parameters, so the facts always describe the board the image shows. Returns JSON with the axes convention (y grows down; "top" = −y, matching `(placement …)` spec words), the anchor (largest hub IC), per-part `ref`/`origin`/side-of-anchor/`gap_mm`/nets/`unplaced`, per-decoupling-loop net + power-leg mm + nH + side, each hub's net→package-edge pad map, spec coverage (incl. `unresolved` spec names), per-part `want_side` (the part sits OPPOSITE the hub edge its net's pads are on), a `module_policy` block (Phase 0 of the module-placement ruleset — `src/placement/module_policy.zig`: the detected `ModuleClass` per hub IC (buck/ldo/mcu/rf_amp/generic, best-effort — integrated power modules with no discrete inductor read `generic`), the criticality `net_classes` (input_rail/switch_node/clock/rf/feedback/analog — the routing-order taxonomy), and the inferred passive `roles` (input_cap/decoupling_cap/bulk_cap/feedback_divider/matching_element)), a `lint` array (fell-back-to-auto / unresolved-name / unplaced errors; wrong-side / long-loop / outside-outline warns; plus the Phase-1 layout gates in `src/placement/layout_lint.zig` — `decap-far` (HF decap power-leg to its nearest supply pad >6 mm; bulk caps exempt), `hot-loop-not-tightest` (the switcher input loop is looser than a less-critical decoupling loop), `feedback-near-aggressor` (an FB/comp part within ~2 mm of a switch-node/clock/RF passive)), `board.outline` (the authored `(board (size W H) …)` rectangle when one exists), and (with `?route=1`) `routed:{trace_mm,tracks,vias,drc}`. The same facts flow through the MCP `describe_pcb_layout` tool. Agents should read measurements here and use the PNG for gestalt.
+- **PCB layout PNG**: `GET /api/pcb-png/:name` — server-rendered PNG of the force-directed PCB layout, so an AI agent (or any HTTP client) can *see* the board, not just parse the placement JSON. Mirrors the browser viewer's colours/projection (`src/render_pcb_png.zig` rasterizes onto `src/raster.zig`'s software canvas, encoded by `src/png.zig` — pure-Zig, no image dependency). Query: `?nets=A,B` / `?refs=U1,C3` enter *focus mode* (spotlight those nets/components in amber, dim the rest — `refs` match the bare leaf of a sub-block-prefixed ref); `?route=1` overlays routed copper + DRC markers; `?names=ref|origin|both` picks part labels (default: `origin`, the module-local sub-block-relative names, falling back to `ref` when no origin is known); `?pins=U13,C5` (or `pins=hubs`) labels those parts' pads with net names; `?crop=U1&r=6` zooms on one part (matched by ref, leaf, or origin name — combine with `?pins=`); `?sheet=1` returns a contact sheet (whole board + per-hub pin-labeled closeups); `?critique=1` draws a numbered worst-problems overlay (hottest loops by nH, longest airwire, staged parts, DRC count); `?width=`, `?layout=<saved>`, `?regen=1`, `?sub=<slug>`. When the design declares a `(board (size W H) …)` form, the physical outline rectangle + dimensions are drawn under the parts (green). Read-only; reuses the design's auto-layout cache.
+- **PCB layout facts**: `GET /api/pcb-describe/:name` — structured spatial facts about the solved placement (`src/serve/pcb_describe.zig`), the textual twin of the PNG: built from the identical placement-selection logic and accepting the same query parameters, so the facts always describe the board the image shows. Returns JSON with the axes convention (y grows down; "top" = −y), the anchor (largest hub IC), per-part `ref`/`origin`/side-of-anchor/`gap_mm`/nets/`unplaced`, per-decoupling-loop net + power-leg mm + nH + side, each hub's net→package-edge pad map, spec coverage (incl. `unresolved` spec names), per-part `want_side` (the part sits OPPOSITE the hub edge its net's pads are on), a `module_policy` block (Phase 0 of the module-placement ruleset — `src/placement/module_policy.zig`: the detected `ModuleClass` per hub IC (buck/ldo/mcu/rf_amp/generic, best-effort — integrated power modules with no discrete inductor read `generic`), the criticality `net_classes` (input_rail/switch_node/clock/rf/feedback/analog — the routing-order taxonomy), and the inferred passive `roles` (input_cap/decoupling_cap/bulk_cap/feedback_divider/matching_element)), a `lint` array (fell-back-to-auto / unresolved-name / unplaced errors; wrong-side / long-loop / outside-outline warns; plus the Phase-1 layout gates in `src/placement/layout_lint.zig` — `decap-far` (HF decap power-leg to its nearest supply pad >6 mm; bulk caps exempt), `hot-loop-not-tightest` (the switcher input loop is looser than a less-critical decoupling loop), `feedback-near-aggressor` (an FB/comp part within ~2 mm of a switch-node/clock/RF passive)), `board.outline` (the authored `(board (size W H) …)` rectangle when one exists), and (with `?route=1`) `routed:{trace_mm,tracks,vias,drc}`. The same facts flow through the MCP `describe_pcb_layout` tool. Agents should read measurements here and use the PNG for gestalt.
 - **Rough-vs-starred match**: `GET /api/layout-match/:name` — score how hand-like the `?rough=1` seed is versus the design's *starred* layout (the saved layout flagged `"default"`/★ in `/pcb-layout`, the user's blessed hand-finished reference; `src/serve/layout_match.zig`). The metric is per interchangeable class (kind+value+footprint+net set), per IC edge, COUNT agreement — credit `min(rough, starred)` parts per edge — so swapping which fungible 100 nF cap sits on an edge isn't penalized and looseness is tolerated (only the wrong edge/proportion costs). Returns `{name, starred, n, area_match_pct, classes[]}` (each class's rough/starred per-edge tallies show which subsystem the rough scattered differently), else `{starred:null, message}` when nothing is starred yet. Measures placement hand-likeness / how little dragging remains to finish — NOT the electrical score. MCP twin: `compare_layout_to_starred`.
-- **Layout state**: one sidecar per design — `<design>.layouts.json` `{default, cache, layouts[]}`. `layouts[]` = named snapshots (manual saves + auto-recorded optimizer runs), `default` = the KiCad-sync seed, `cache` = the single-slot optimizer cache (tuning params + poses, overwritten each solve). Precedence the `/pcb-layout` viewer shows as a scorebar chip: source `(placement …)` spec > saved snapshot (`?refine=`) > cache > fresh solve > plain grid. Legacy standalone `<design>.autolayout.json` is still read as a fallback and deleted on the next solve; `.placement.json` migration was dropped (all designs migrated). Each saved-layout row has a `→spec` button that exports the snapshot into the spec panel for promotion into the source file.
+- **Layout state**: one sidecar per design — `<design>.layouts.json` `{default, cache, layouts[]}`. `layouts[]` = named snapshots (manual saves + auto-recorded optimizer runs), `default` = the starred (★) / KiCad-sync seed, `cache` = the single-slot optimizer cache (tuning params + poses, overwritten each solve). Precedence the `/pcb-layout` viewer shows as a scorebar chip: explicit `?refine=<snapshot>` > starred (★) default > cache > fresh solve > plain grid. (The old source-authored `(placement …)` spec once sat at the top of this chain; that DSL form is retired — layout is seeded from saved snapshots / the `?rough=1` seed now, not from a spec form in the `.sexp`.) Legacy standalone `<design>.autolayout.json` is still read as a fallback and deleted on the next solve; `.placement.json` migration was dropped (all designs migrated).
 - **Live push**: `POST /api/push/:name` — rebuild and push update. On eval failure the JSON (and the schematic page, and the MCP `build` tool) carries a structured `diagnostic` `{file,line,col,message,source_line}` rendered compiler-style with a caret (`src/serve/diag_format.zig`).
 - **Version history + diff**: `GET /api/history/:name` — stored snapshot ids (file copies under `<project>/history/<name>/<timestamp>/`, written before every mutation); `GET /api/diff/:name?from=<id>&to=<id|current>` — request-local netlist diff (instances added/removed, value/footprint changes, net membership changes; `src/serve/design_diff.zig`). Schematic header's History panel renders it. Caveat: snapshots capture the design file only, so an old revision re-evaluates against today's lib/ modules.
 - **Datasheet attach**: `POST /api/attach-datasheet` `{component,file}` — splices the datasheet link into `lib/components/<name>.sexp` (idempotent, traversal-safe); library page has a per-card attach control. `GET /api/datasheets` lists candidates.
@@ -591,7 +595,7 @@ Local dev still uses `http://localhost:7050`.
 - **Version polling**: `GET /api/version/:name` — returns `{"version":N}`
 - **Value editing**: `POST /api/edit-value/:name` — edit component value in .sexp file
 - **ERC**: `GET /api/erc/:name` — electrical-rule violations
-- **KiCad sync**: `POST /api/sync-kicad-pcb/:name` — file-based sync. Reads the `.kicad_pcb` declared by the design's `(kicad-pcb "<path>")` form, diffs it against the flattened netlist, and writes the updated board in place so footprint placements and routing are preserved. Driven by the schematic viewer's "Push to KiCad PCB" button, which dry-runs first and shows a categorized preview modal (board changes up top, metadata collapsed) before the real write, with a result toast. The heuristic relink (parent-path + value + net signature) is ON by default, so a refdes drift (e.g. FB→L) renames the placed part instead of staging a duplicate; a placement guard aborts the write with HTTP 409 if it would move, rotate, or side-flip any existing footprint; every write rolls a timestamped `<board>.bak-<stamp>` (newest 10 kept). (`?dry_run=1` / `?prune=1` / `?no_migrate=1` modifiers.)
+- **KiCad sync**: `POST /api/sync-kicad-pcb/:name` — file-based sync. Reads the `.kicad_pcb` declared by the design's `(kicad-pcb "<path>")` form, diffs it against the flattened netlist, and writes the updated board in place so footprint placements and routing are preserved. Driven by the schematic viewer's "Push to KiCad PCB" button, which dry-runs first and shows a categorized preview modal (board changes up top, metadata collapsed) before the real write, with a result toast. The heuristic relink (parent-path + value + net signature) is ON by default, so a refdes drift (e.g. FB→L) renames the placed part instead of staging a duplicate; a placement guard aborts the write with HTTP 409 if it would move, rotate, or side-flip any existing footprint; every write rolls a timestamped backup into a `backups/` subdirectory beside the board (`backups/<name>.bak-<stamp>`, newest 10 kept — the KiCad project dir stays free of `.bak-*` siblings). (`?dry_run=1` / `?prune=1` / `?no_migrate=1` modifiers.)
 - **Library upload**: `GET /library`, `POST /api/upload-symbol`, `POST /api/upload-footprint`
 
 ### Live update workflow
@@ -669,12 +673,22 @@ Tools exposed (defined in `src/serve/mcp_tools.zig`):
 - **VFS file ops**: `read_file`, `list_dir`, `glob` (read-only);
   `write_file`, `edit_file`, `delete_file`, `move_file` (mutation).
 - **Build / state**: `build`, `regenerate_pinout`, `restore_version`.
+- **Parts sourcing**: `search_components`, `resolve_mpn`, `check_stock`
+  (read-only, DigiKey / Component Search Engine lookups); `download_footprint`,
+  `download_datasheet` (mutation — import an ECAD model / datasheet into `lib/`);
+  `read_datasheet` (read-only, extract text from an imported datasheet).
+- **Per-design notes**: `list_design_notes` (read-only), `add_design_note`,
+  `complete_design_note`, `reopen_design_note`, `remove_design_note`
+  (mutation) — TODO sidecar (`<design>.notes.md`) for next-revision follow-ups.
+- **Component requirements**: `list_component_requirements` (read-only),
+  `add_component_requirement`, `remove_component_requirement` (mutation) —
+  library `(requirement …)` rules that live on a part and are inherited by
+  every design instantiating it (vs. `design_note`, which is per-design).
 
 There is **no** granular `add_component` / `swap_component` / `edit_value` /
 `rewire_pin` / `remove_component` tool — schematic edits go through
 `read_file` → `edit_file` (or `write_file`) on the design's `.sexp` file,
-then `build` to push the new version. There is no "requirements" concept;
-this MCP server only models S-expression schematic capture. Mutation tools
+then `build` to push the new version. Mutation tools
 return the new `live_version`, so the browser picks up changes via its
 existing 2 s poll of `/api/version/:name`.
 
