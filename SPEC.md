@@ -134,6 +134,7 @@ Public functions: route, returnPathViolations
 - maze-routes a two-pad net into connected track segments
 - a net spanning the two board sides routes through a via, each leg on its part's layer
 - a plane-less stackup routes ground as real copper instead of dropping plane vias
+- a net-class rule sets its nets' trace width and via size; unruled nets keep defaults
 - routes corners as 45° diagonals rather than 90° bends
 - LoopRouter measures a real per-leg trace length that detours foreign pads
 - counts signal vias lacking a nearby ground stitching via as return-path discontinuities
@@ -149,6 +150,8 @@ Public functions: check
 - flags a via that crowds a foreign pad's clearance
 - passes a via that shares the pad's net
 - a routed module with a crowded ground pad has no clearance violations
+- flags a via whose annular ring is under the fab minimum
+- flags copper crowding the board outline and skips the off-board staging band
 
 ## placement/module_policy
 

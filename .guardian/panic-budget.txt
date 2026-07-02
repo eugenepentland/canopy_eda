@@ -1,4 +1,6 @@
-# guardian-snapshot v1
+# guardian-snapshot v2
+comptime_calls 1
+comptime_max 100000
 fixmes 0
 panics 0
 todos 7

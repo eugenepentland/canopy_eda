@@ -59,8 +59,10 @@ fn anyBottomPads(obs: []const PadObs) bool {
 pub const Track = struct { x1: f64, y1: f64, x2: f64, y2: f64, layer: u8, width: f64, net: i32 };
 
 /// A via (drawn as the pad ring; spans the layers it connects). `net` is the
-/// flattened-net index it belongs to (for the design-rule check).
-pub const Via = struct { x: f64, y: f64, dia: f64, net: i32 };
+/// flattened-net index it belongs to (for the design-rule check); `drill` is
+/// the hole diameter (0 on legacy/synthetic vias — the annular-ring DRC then
+/// skips it).
+pub const Via = struct { x: f64, y: f64, dia: f64, net: i32, drill: f64 = 0 };
 
 /// Router output: the copper, plus how many nets routed of the total tried.
 pub const RouteResult = struct {
@@ -88,6 +90,54 @@ const TOP_FIRST_MAX_PARTS: usize = 32;
 const STITCH_MAX_PARTS: usize = 48;
 const SQRT2: f64 = 1.4142135623730951; // diagonal step length vs. orthogonal
 
+/// Pass 1 of `route`: ground/plane nets. Each pad of a plane-carrying net
+/// drops a via to its plane. The via is placed where it keeps full
+/// via-clearance from every *foreign* pad (and any via already down) —
+/// preferring the pad centre, else fanning outward into open copper and
+/// joining it with a short same-net stub, so the via can't crowd a
+/// neighbouring pad (the classic DFN/QFN via-in-pad fail). Each placed via's
+/// clearance halo is stamped into the routing grid on *both* signal layers,
+/// so the maze pass routes foreign copper around it. On a plane-less stackup
+/// NOTHING gets via drops — every net (ground included) falls through to the
+/// maze pass.
+fn planeViaPass(
+    ctx: *Ctx,
+    placement: optimizer.Placement,
+    idx_of: *std.StringHashMap(usize),
+    tracks: *std.ArrayListUnmanaged(Track),
+    vias: *std.ArrayListUnmanaged(Via),
+    routed: *usize,
+    total: *usize,
+) std.mem.Allocator.Error!void {
+    const arena = ctx.arena;
+    for (placement.nets, 0..) |net, net_i| {
+        // Hoisted above netPoints so we don't allocate + look up pads for
+        // every non-plane net just to skip it.
+        if (!netHasPlane(placement, net.name)) continue;
+        const pts = try netPoints(arena, placement, idx_of, net);
+        if (pts.len < 2) continue;
+        total.* += 1;
+        const ni: i32 = @intCast(net_i);
+        setNetParams(ctx, placement, net_i);
+        var placed_any = false;
+        for (pts) |c| {
+            const cc = [2]f64{ c.x, c.y };
+            const pos = findGroundVia(ctx, vias.items, cc, ni) orelse continue;
+            placed_any = true;
+            try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = ctx.params.via_dia, .drill = ctx.params.via_drill, .net = ni });
+            if (@abs(pos[0] - c.x) > 1e-6 or @abs(pos[1] - c.y) > 1e-6) {
+                try tracks.append(arena, .{ .x1 = c.x, .y1 = c.y, .x2 = pos[0], .y2 = pos[1], .layer = c.layer, .width = ctx.params.track_width, .net = ni });
+                stampStubOcc(ctx, cc, pos, ni, c.layer);
+            }
+            stampViaOcc(ctx, pos[0], pos[1], ni);
+        }
+        // Only count the net routed if at least one plane via actually
+        // dropped — a fully hemmed-in ground net must not inflate
+        // routed/total and hide the hand-fix from fullRouteCost's unrouted term.
+        if (placed_any) routed.* += 1;
+    }
+}
+
 /// Route `placement` under `params`. All output is allocated in `arena`.
 pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams) std.mem.Allocator.Error!RouteResult {
     var tracks: std.ArrayListUnmanaged(Track) = .empty;
@@ -97,7 +147,11 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     var idx_of = std.StringHashMap(usize).init(arena);
     for (placement.parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
 
-    const g = @max(params.track_width + params.clearance, 0.05);
+    // Grid pitch sized to the WIDEST class on the board, so adjacent occupied
+    // grid lines satisfy clearance even between the widest pair of nets.
+    // No (net-class …) forms ⇒ maxp == params ⇒ the legacy grid, unchanged.
+    const maxp = maxRouteParams(placement, params);
+    const g = @max(maxp.track_width + maxp.clearance, 0.05);
     const margin = 1.0;
     const ox = placement.minx - margin;
     const oy = placement.miny - margin;
@@ -122,44 +176,22 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
 
     // Route each net. Ground → plane vias; others → maze on the signal layers.
     const reach = params.track_width / 2 + params.clearance;
-    var ctx = Ctx{ .arena = arena, .grid = grid, .obs = obs, .reach = reach, .occ = occ, .params = params, .has_bottom_pads = anyBottomPads(obs) };
+    var ctx = Ctx{
+        .arena = arena,
+        .grid = grid,
+        .obs = obs,
+        .reach = reach,
+        .occ = occ,
+        .params = params,
+        .base = params,
+        .index_reach = maxp.track_width / 2 + maxp.clearance,
+        .has_bottom_pads = anyBottomPads(obs),
+    };
     var routed: usize = 0;
     var total: usize = 0;
 
-    // Pass 1: ground/plane nets. Each ground pad drops a via to the GND plane.
-    // The via is placed where it keeps full via-clearance from every *foreign*
-    // pad (and any via already down) — preferring the pad centre, else fanning
-    // outward into open copper and joining it with a short same-net stub, so the
-    // via can't crowd a neighbouring pad (the classic DFN/QFN via-in-pad fail).
-    // Each placed via's clearance halo is stamped into the routing grid on *both*
-    // signal layers, so the maze pass routes foreign copper around it.
-    for (placement.nets, 0..) |net, net_i| {
-        // Hoisted above netPoints so we don't allocate + look up pads for every
-        // non-plane net just to skip it. Only nets with a dedicated plane get
-        // via drops — on a plane-less stackup NOTHING does, and every net
-        // (ground included) falls through to the maze pass below.
-        if (!netHasPlane(placement, net.name)) continue;
-        const pts = try netPoints(arena, placement, &idx_of, net);
-        if (pts.len < 2) continue;
-        total += 1;
-        const ni: i32 = @intCast(net_i);
-        var placed_any = false;
-        for (pts) |c| {
-            const cc = [2]f64{ c.x, c.y };
-            const pos = findGroundVia(&ctx, vias.items, cc, ni) orelse continue;
-            placed_any = true;
-            try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = params.via_dia, .net = ni });
-            if (@abs(pos[0] - c.x) > 1e-6 or @abs(pos[1] - c.y) > 1e-6) {
-                try tracks.append(arena, .{ .x1 = c.x, .y1 = c.y, .x2 = pos[0], .y2 = pos[1], .layer = c.layer, .width = params.track_width, .net = ni });
-                stampStubOcc(&ctx, cc, pos, ni, c.layer);
-            }
-            stampViaOcc(&ctx, pos[0], pos[1], ni);
-        }
-        // Only count the net routed if at least one plane via actually dropped —
-        // a fully hemmed-in ground net must not inflate routed/total and hide the
-        // hand-fix from fullRouteCost's unrouted term.
-        if (placed_any) routed += 1;
-    }
+    // Pass 1: ground/plane nets — see `planeViaPass`.
+    try planeViaPass(&ctx, placement, &idx_of, &tracks, &vias, &routed, &total);
 
     // Pass 2: every other multi-pad net, maze-routed on the two signal layers,
     // now detouring the ground vias stamped in pass 1. Nets are routed in
@@ -189,6 +221,7 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
         if (pts.len < 2) continue;
         total += 1;
         const ni: i32 = @intCast(net_i);
+        setNetParams(&ctx, placement, net_i);
         // …and only for *short* nets (a feedback tap, a strap — a handful of
         // pads), which almost always have a clear surface path. A short net with
         // no top path rolls back and re-routes with layer changes, same as before.
@@ -229,6 +262,7 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     // breakout still has some copper leaving the part.
     for (placement.stubs) |st| {
         const part = placement.parts[st.part];
+        if (st.net >= 0) setNetParams(&ctx, placement, @intCast(st.net));
         const lay = sideLayer(part);
         const a = optimizer.worldPadCenter(part, st.ax, st.ay);
         const b = optimizer.worldPadCenter(part, st.bx, st.by);
@@ -237,14 +271,14 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
         const dl = std.math.hypot(dx, dy);
         const dir: [2]f64 = if (dl > 1e-9) .{ dx / dl, dy / dl } else .{ 1, 0 };
         if (findEscapeVia(&ctx, vias.items, tracks.items, a, dir, st.net)) |vp| {
-            try tracks.append(arena, .{ .x1 = a[0], .y1 = a[1], .x2 = vp[0], .y2 = vp[1], .layer = lay, .width = params.track_width, .net = st.net });
-            try vias.append(arena, .{ .x = vp[0], .y = vp[1], .dia = params.via_dia, .net = st.net });
+            try tracks.append(arena, .{ .x1 = a[0], .y1 = a[1], .x2 = vp[0], .y2 = vp[1], .layer = lay, .width = ctx.params.track_width, .net = st.net });
+            try vias.append(arena, .{ .x = vp[0], .y = vp[1], .dia = ctx.params.via_dia, .drill = ctx.params.via_drill, .net = st.net });
             continue;
         }
         // Too hemmed in for any DRC-safe via — fall back to the trimmed surface stub.
         const end = trimStub(&ctx, vias.items, a, b, st.net);
         if (@abs(end[0] - a[0]) < 1e-6 and @abs(end[1] - a[1]) < 1e-6) continue;
-        try tracks.append(arena, .{ .x1 = a[0], .y1 = a[1], .x2 = end[0], .y2 = end[1], .layer = lay, .width = params.track_width, .net = st.net });
+        try tracks.append(arena, .{ .x1 = a[0], .y1 = a[1], .x2 = end[0], .y2 = end[1], .layer = lay, .width = ctx.params.track_width, .net = st.net });
     }
 
     // Return-path stitching. A signal via that swaps reference planes needs a GND
@@ -258,6 +292,7 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     // boards so a big board's route doesn't grow a search per signal via.
     if (placement.parts.len <= STITCH_MAX_PARTS) {
         if (firstGroundNet(placement)) |gnet| {
+            setNetParams(&ctx, placement, @intCast(gnet));
             const n_signal = vias.items.len;
             for (0..n_signal) |i| {
                 const v = vias.items[i];
@@ -272,7 +307,7 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
                 }
                 if (stitched) continue;
                 const pos = findStitchVia(&ctx, vias.items, tracks.items, .{ v.x, v.y }, gnet, RETURN_PATH_RADIUS_MM) orelse continue;
-                try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = params.via_dia, .net = gnet });
+                try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = ctx.params.via_dia, .drill = ctx.params.via_drill, .net = gnet });
                 stampViaOcc(&ctx, pos[0], pos[1], gnet);
             }
         }
@@ -300,7 +335,9 @@ pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, para
     var idx_of = std.StringHashMap(usize).init(arena);
     for (placement.parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
 
-    const g = @max(params.track_width + params.clearance, 0.05);
+    // Same max-class pitch as `route` (MUST stay in lockstep — see doc above).
+    const gmaxp = maxRouteParams(placement, params);
+    const g = @max(gmaxp.track_width + gmaxp.clearance, 0.05);
     const margin = 1.0;
     const ox = placement.minx - margin;
     const oy = placement.miny - margin;
@@ -314,7 +351,18 @@ pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, para
     @memset(occ[1], EMPTY);
     const obs = try buildObstacles(arena, placement.parts, placement.nets);
     const reach = params.track_width / 2 + params.clearance;
-    var ctx = Ctx{ .arena = arena, .grid = grid, .obs = obs, .reach = reach, .occ = occ, .params = params, .has_bottom_pads = anyBottomPads(obs) };
+    const maxp = maxRouteParams(placement, params);
+    var ctx = Ctx{
+        .arena = arena,
+        .grid = grid,
+        .obs = obs,
+        .reach = reach,
+        .occ = occ,
+        .params = params,
+        .base = params,
+        .index_reach = maxp.track_width / 2 + maxp.clearance,
+        .has_bottom_pads = anyBottomPads(obs),
+    };
 
     for (placement.nets, 0..) |net, net_i| {
         // Plane filter hoisted above netPoints, in lockstep with `route`.
@@ -322,10 +370,11 @@ pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, para
         const pts = try netPoints(arena, placement, &idx_of, net);
         if (pts.len < 2) continue;
         const ni: i32 = @intCast(net_i);
+        setNetParams(&ctx, placement, net_i);
         for (pts) |c| {
             const cc = [2]f64{ c.x, c.y };
             const pos = findGroundVia(&ctx, vias.items, cc, ni) orelse continue;
-            try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = params.via_dia, .net = ni });
+            try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = ctx.params.via_dia, .drill = ctx.params.via_drill, .net = ni });
             // Stamp the same occupancy `route` would, so the *next* via avoids this
             // one identically (the via positions depend on placement order).
             if (@abs(pos[0] - c.x) > 1e-6 or @abs(pos[1] - c.y) > 1e-6) stampStubOcc(&ctx, cc, pos, ni, c.layer);
@@ -392,7 +441,17 @@ pub const LoopRouter = struct {
 
         const reach = params.track_width / 2 + params.clearance;
         return .{
-            .ctx = .{ .arena = arena, .grid = grid, .obs = obs, .reach = reach, .occ = occ, .params = params, .has_bottom_pads = anyBottomPads(obs) },
+            .ctx = .{
+                .arena = arena,
+                .grid = grid,
+                .obs = obs,
+                .reach = reach,
+                .occ = occ,
+                .params = params,
+                .base = params,
+                .index_reach = reach,
+                .has_bottom_pads = anyBottomPads(obs),
+            },
             .ready = true,
         };
     }
@@ -843,11 +902,41 @@ fn findStitchVia(ctx: *Ctx, placed: []const Via, tracks: []const Track, c: [2]f6
 /// (matched case-insensitively, full or short name) — so `(stackup 2)`
 /// declares none and ground routes as real copper.
 fn netHasPlane(placement: optimizer.Placement, name: []const u8) bool {
-    const planes = placement.plane_nets orelse return isGroundName(shortName(name));
+    const planes = placement.rules.plane_nets orelse return isGroundName(shortName(name));
     for (planes) |pn| {
         if (std.ascii.eqlIgnoreCase(pn, name) or std.ascii.eqlIgnoreCase(pn, shortName(name))) return true;
     }
     return false;
+}
+
+/// Overlay `net_i`'s `(net-class …)` rule onto the base route params — the
+/// per-net effective geometry every subsequent clearance/width/via read uses.
+/// Nets without a rule (or with zero fields) keep the base values.
+fn setNetParams(ctx: *Ctx, placement: optimizer.Placement, net_i: usize) void {
+    var p = ctx.base;
+    if (net_i < placement.rules.net.len) {
+        const r = placement.rules.net[net_i];
+        if (r.width > 0) p.track_width = r.width;
+        if (r.clearance > 0) p.clearance = r.clearance;
+        if (r.via_dia > 0) p.via_dia = r.via_dia;
+        if (r.via_drill > 0) p.via_drill = r.via_drill;
+    }
+    ctx.params = p;
+    ctx.reach = p.track_width / 2 + p.clearance;
+}
+
+/// The widest geometry any net on this board can use — grid pitch and the
+/// pad-index prefilter are sized to this so two adjacent occupied grid lines
+/// satisfy clearance even between the widest pair of classes. Boards with no
+/// `(net-class …)` forms return `base` unchanged (identical legacy grid).
+fn maxRouteParams(placement: optimizer.Placement, base: RouteParams) RouteParams {
+    var p = base;
+    for (placement.rules.net) |r| {
+        if (r.width > p.track_width) p.track_width = r.width;
+        if (r.clearance > p.clearance) p.clearance = r.clearance;
+        if (r.via_dia > p.via_dia) p.via_dia = r.via_dia;
+    }
+    return p;
 }
 
 /// Index of the first ground net that HAS a plane (by name), or null when the
@@ -956,7 +1045,17 @@ const Ctx = struct {
     obs: []const PadObs,
     reach: f64,
     occ: [2][]i32,
+    /// The *effective* geometry for the net currently being routed —
+    /// `base` overlaid with that net's `(net-class …)` rule (see
+    /// `setNetParams`). Every clearance/width/via read goes through this.
     params: RouteParams,
+    /// The caller's defaults, kept pristine so each net's overlay starts
+    /// from the same base.
+    base: RouteParams = .{},
+    /// Pad-index prefilter reach — the MAX reach any net class can need, so
+    /// the lazily-built PadGrid stays a superset for every net (exact tests
+    /// still use the per-net `reach`).
+    index_reach: f64 = 0,
     /// When false the maze may not change layers — used for the top-layer-only
     /// first pass so a short signal net (e.g. a feedback tap) stays on the
     /// surface instead of diving to L2 the moment a via is marginally cheaper.
@@ -1083,7 +1182,7 @@ fn blocked(ctx: *Ctx, layer: usize, n: usize, net: i32) bool {
     const py = ctx.grid.worldY(n / ctx.grid.nx);
     // Lazily build the spatial index the first time we test a node; the pad
     // set is static for the route so one build serves all queries.
-    if (ctx.pad_index == null) ctx.pad_index = PadGrid.build(ctx.arena, ctx.obs, ctx.grid, ctx.reach);
+    if (ctx.pad_index == null) ctx.pad_index = PadGrid.build(ctx.arena, ctx.obs, ctx.grid, ctx.index_reach);
     var on_own = false;
     var foreign = false;
     if (ctx.pad_index) |idx| {
@@ -1339,7 +1438,7 @@ fn emitPath(
             const n = ks[i - 1] % nodes;
             const vx = grid.worldX(n % grid.nx);
             const vy = grid.worldY(n / grid.nx);
-            try vias.append(ctx.arena, .{ .x = vx, .y = vy, .dia = ctx.params.via_dia, .net = net });
+            try vias.append(ctx.arena, .{ .x = vx, .y = vy, .dia = ctx.params.via_dia, .drill = ctx.params.via_drill, .net = net });
             stampViaOcc(ctx, vx, vy, net); // reserve its halo for later nets
             run_start = i;
         } else if (i >= 2 and !sameDir(grid, nodes, ks[i - 2], ks[i - 1], ks[i])) {
@@ -1549,13 +1648,64 @@ test "plane-less stackup maze-routes the ground net" {
     try testing.expect(legacy.vias.len >= 2);
 
     // Declared plane-less stackup: GND maze-routes as surface copper.
-    placement.plane_nets = &.{};
+    placement.rules.plane_nets = &.{};
     const flat = try route(arena, placement, .{});
     try testing.expectEqual(@as(usize, 1), flat.routed);
     try testing.expectEqual(@as(usize, 0), flat.vias.len);
     var gnd_len: f64 = 0;
     for (flat.tracks) |t| gnd_len += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
     try testing.expect(gnd_len >= 2.5); // the ~3 mm pad-to-pad run exists as copper
+}
+
+// spec: placement/router - a net-class rule sets its nets' trace width and via size; unruled nets keep defaults
+test "net-class rules drive per-net track width" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const pads_a = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    const pads_b = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    const pads_c = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    const pads_d = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads_a, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads_b, .fallback = false, .x = 4, .y = 0 },
+        .{ .ref_des = "R3", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads_c, .fallback = false, .x = 0, .y = 3 },
+        .{ .ref_des = "R4", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads_d, .fallback = false, .x = 4, .y = 3 },
+    };
+    const pins_p = [_]export_kicad.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    const pins_s = [_]export_kicad.FlatPin{ .{ .ref_des = "R3", .pin = "1" }, .{ .ref_des = "R4", .pin = "1" } };
+    const nets = [_]FlatNet{ .{ .name = "VBUS", .pins = &pins_p }, .{ .name = "SIG", .pins = &pins_s } };
+    const rules = [_]optimizer.NetRule{ .{ .width = 0.3, .via_dia = 0.6, .via_drill = 0.3 }, .{} };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -0.5,
+        .miny = -0.5,
+        .maxx = 4.5,
+        .maxy = 3.5,
+        .generated = true,
+        .rules = .{ .net = &rules },
+    };
+    const r = try route(arena, placement, .{});
+    try testing.expectEqual(@as(usize, 2), r.routed);
+    var saw_wide = false;
+    var saw_default = false;
+    for (r.tracks) |t| {
+        if (t.net == 0) {
+            try testing.expectEqual(@as(f64, 0.3), t.width);
+            saw_wide = true;
+        } else {
+            try testing.expectEqual((RouteParams{}).track_width, t.width);
+            saw_default = true;
+        }
+    }
+    try testing.expect(saw_wide and saw_default);
 }
 
 // spec: placement/router - LoopRouter measures a real per-leg trace length that detours foreign pads

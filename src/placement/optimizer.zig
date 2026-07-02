@@ -487,13 +487,29 @@ pub const Placement = struct {
     /// world coordinates (same frame as `parts`). Null when the design has no
     /// effective board form — renderers draw no outline.
     board_rect: ?BoardRect = null,
-    /// Net names that have a dedicated copper plane, from the design's
-    /// `(stackup …)` form. **Null = no stackup declared** — the router keeps
-    /// its legacy implicit model (ground nets get plane vias). An **empty
-    /// slice** is a declared stackup with NO planes (e.g. `(stackup 2)`):
-    /// every net, ground included, is routed as real copper.
-    plane_nets: ?[]const []const u8 = null,
+    /// Board-level routing rules resolved from the design's `(stackup …)` and
+    /// `(net-class …)` forms — see `BoardRules`.
+    rules: BoardRules = .{},
 };
+
+/// Routing rules a design declares for its board, carried on the `Placement`
+/// so the router needs no separate lookup.
+pub const BoardRules = struct {
+    /// Net names that have a dedicated copper plane, from `(stackup …)`.
+    /// **Null = no stackup declared** — the router keeps its legacy implicit
+    /// model (ground nets get plane vias). An **empty slice** is a declared
+    /// stackup with NO planes (e.g. `(stackup 2)`): every net, ground
+    /// included, is routed as real copper.
+    plane_nets: ?[]const []const u8 = null,
+    /// Per-net routing geometry from `(net-class …)`, index-aligned with
+    /// `Placement.nets`. Empty when no classes are declared; a zero field
+    /// keeps the router's default for that quantity.
+    net: []const NetRule = &.{},
+};
+
+/// One net's routing geometry override (mm) resolved from `(net-class …)`.
+/// Zero = keep the router default for that quantity.
+pub const NetRule = struct { width: f64 = 0, clearance: f64 = 0, via_dia: f64 = 0, via_drill: f64 = 0 };
 
 /// A `(board …)` outline rectangle in world mm (top-left + size).
 pub const BoardRect = struct { minx: f64, miny: f64, w: f64, h: f64 };
@@ -3827,6 +3843,29 @@ fn planeNetsOf(arena: std.mem.Allocator, block: *const DesignBlock) std.mem.Allo
     return out;
 }
 
+/// Per-net routing geometry from the design's `(net-class …)` forms, aligned
+/// with `nets` (see `Placement.net_rules`). Names match case-insensitively on
+/// the full flattened net name or its leaf after the last `/`; the first class
+/// naming a net wins. Empty when the design declares no classes.
+fn netRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []const FlatNet) std.mem.Allocator.Error![]const NetRule {
+    if (block.net_classes.len == 0) return &.{};
+    const out = try arena.alloc(NetRule, nets.len);
+    for (nets, 0..) |net, i| {
+        out[i] = .{};
+        outer: for (block.net_classes) |nc| {
+            for (nc.nets) |cn| {
+                const hit = std.ascii.eqlIgnoreCase(cn, net.name) or
+                    std.ascii.eqlIgnoreCase(cn, shortName(net.name));
+                if (hit) {
+                    out[i] = .{ .width = nc.width, .clearance = nc.clearance, .via_dia = nc.via_dia, .via_drill = nc.via_drill };
+                    break :outer;
+                }
+            }
+        }
+    }
+    return out;
+}
+
 /// Build a placement for `block`. When `cached` covers every part, its poses
 /// are applied directly (no optimization — fast); otherwise the optimizer runs
 /// and `Placement.generated` is set so the caller can persist a fresh cache.
@@ -3929,7 +3968,7 @@ pub fn solve(
     // same lower-is-better scalar the explore frame used.
     emitBest(parts, bd.objective, .refine);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
-    pl.plane_nets = try planeNetsOf(arena, block);
+    pl.rules = .{ .plane_nets = try planeNetsOf(arena, block), .net = try netRulesOf(arena, block, nets) };
     if (board_live) {
         if (board_rect == null) board_rect = try boardRectFromPoses(arena, parts, prep.instances, block.board);
         pl.board_rect = board_rect;
@@ -4072,7 +4111,7 @@ pub fn placeFromPoses(
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
-    pl.plane_nets = try planeNetsOf(arena, block);
+    pl.rules = .{ .plane_nets = try planeNetsOf(arena, block), .net = try netRulesOf(arena, block, nets) };
     // Saved/hand layouts of a `(board …)` design keep their outline overlay.
     if (block.board.present and block.board.w > 0 and block.board.h > 0) {
         const r = try boardRectFromPoses(arena, parts, prep.instances, block.board);
@@ -4110,7 +4149,7 @@ pub fn gridPlace(
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
-    pl.plane_nets = try planeNetsOf(arena, block);
+    pl.rules = .{ .plane_nets = try planeNetsOf(arena, block), .net = try netRulesOf(arena, block, nets) };
     return pl;
 }
 
