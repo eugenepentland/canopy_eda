@@ -3126,10 +3126,10 @@ const SubCircuitSrc = struct { map: std.StringHashMap(pcb_layout.SyncPose), is_m
 /// neither a module layout nor the parent cache can supply poses.
 fn subCircuitSource(d: *DiffContext, sec: []const u8) !?SubCircuitSrc {
     if (subBlockNamed(d.sub_blocks, sec)) |sb| {
-        // Module ★ layout keyed by origin_key (survives the parent's ref-des
+        // Module layout keyed by origin_key (survives the parent's ref-des
         // renumbering), matched per part on FlatInstance.origin_key.
-        if (pcb_layout.subBlockPoseByOriginKey(d.spc.arena, d.spc.project_dir, sb)) |m|
-            return .{ .map = m, .is_module = true };
+        if (pcb_layout.subBlockPoseByOriginKey(d.spc.arena, d.spc.project_dir, sb)) |s|
+            return .{ .map = s.map, .is_module = true };
     }
     if (d.premade_layout) |cache| return .{ .map = cache, .is_module = false };
     return null;

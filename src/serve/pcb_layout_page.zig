@@ -380,9 +380,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // default > auto cache > plain grid. ?refine= seeds a routed-tuck refine;
     // every other seed renders verbatim. Sub-scoped previews always solve fresh.
     const choice = chooseLayout(ctx.allocator, ctx.project_dir, name, sub, eff_block, refine_name, tune);
-    const spec_drives = choice.spec_drives;
     const starred_name = choice.starred_name;
-    const cached = choice.cached;
     const grid_only = choice.grid_only;
     var placement = placeForChoice(ctx.allocator, eff_block, ctx.project_dir, choice, refine_name, tune.params) catch {
         res.status = 500;
@@ -392,13 +390,10 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // Persist the layout + its weights whenever the optimizer ran (miss /
     // stale / regen / tune) — see persistGeneratedLayout.
     persistGeneratedLayout(ctx, name, placement, tune.params, sub, single);
-    // Module ★-layout stamp poses for the Stamp palette — whole-design pages
+    // Module-layout stamp poses for the Stamp palette — whole-design pages
     // only (a ?sub scoped page IS one sub-circuit already).
-    const subseeds = if (sub == null) buildSubSeedsJson(ctx.allocator, ctx.project_dir, eff_block, placement) else "{}";
-    const shown = if (sub != null or tune.tuned)
-        tune.params
-    else
-        (readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{});
+    const subseeds: SubSeedsJson = if (sub == null) buildSubSeedsJson(ctx.allocator, ctx.project_dir, eff_block, placement) else .{};
+    const shown = if (sub != null or tune.tuned) tune.params else (readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{});
 
     // The named-layout history is a whole-design concept; scoped previews show none.
     // Deduplicated + best-score-first for the panel (see displayLayouts).
@@ -426,7 +421,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const sch_base: []const u8 = if (module_res != null) "/modules/" else "/schematics/";
     if (!embed) try writeSidebar(w, placement, sch_base);
     try w.writeAll("<main class=\"pcb-main\">");
-    const src_class = classifyLayoutSource(sub, grid_only, spec_drives, refine_name, starred_name, cached);
+    const src_class = classifyLayoutSource(sub, grid_only, choice.spec_drives, refine_name, starred_name, choice.cached);
     if (embed and !edit_embed) {
         // Compact, read-only chrome for the per-sub-circuit preview embedded in
         // the schematic page: a score line plus the routed-status + show
@@ -495,7 +490,15 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         routed,
         ro.params.clearance,
         violations,
-        .{ .read_only = embed and !edit_embed, .embed = embed, .sub = sub, .subseeds_json = subseeds, .outline_drawn = outline_drawn, .single = single },
+        .{
+            .read_only = embed and !edit_embed,
+            .embed = embed,
+            .sub = sub,
+            .subseeds_json = subseeds.poses,
+            .subseedinfo_json = subseeds.info,
+            .outline_drawn = outline_drawn,
+            .single = single,
+        },
     );
     // Shared footprint engine (FP.padShape) must load before the board script
     // runs. Both scripts come after every column so the handlers find the
@@ -580,39 +583,64 @@ fn persistGeneratedLayout(ctx: *Handler, name: []const u8, placement: optimizer.
     if (!single) recordAutoLayout(ctx.allocator, ctx.project_dir, name, placement, params);
 }
 
-/// JSON object mapping each sub-block's parent-frame ref-des → its module
-/// ★-layout pose (module-local mm + rot + side), for the viewer's per-group
-/// "Stamp" button — drop a whole pre-laid sub-circuit onto the board as a
-/// rigid cluster instead of laying its parts out again. Built through the
-/// same origin_key bridge the KiCad sync seeds from (subBlockPoseByOriginKey),
-/// so the poses match what a sync would stamp. "{}" when nothing bridges.
+/// The Stamp palette's seed blobs: `poses` maps each sub-block's parent-frame
+/// ref-des → its module-layout pose, `info` maps each sub-block name → which
+/// module snapshot supplied the poses (`{layout, starred, n}`) so the button
+/// can say what a Stamp will pull and how much of the group it covers.
+const SubSeedsJson = struct { poses: []const u8 = "{}", info: []const u8 = "{}" };
+
+/// Build the viewer's per-group "Stamp" seeds — drop a whole pre-laid
+/// sub-circuit onto the board as a rigid cluster instead of laying its parts
+/// out again. Built through the same origin_key bridge the KiCad sync seeds
+/// from (subBlockPoseByOriginKey), so the poses match what a sync would stamp.
+/// Both blobs are "{}" when nothing bridges.
 fn buildSubSeedsJson(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     block: *const env_mod.DesignBlock,
     p: optimizer.Placement,
-) []const u8 {
+) SubSeedsJson {
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
-    w.writeByte('{') catch return "{}";
+    var iw_buf: std.Io.Writer.Allocating = .init(alloc);
+    const iw = &iw_buf.writer;
+    w.writeByte('{') catch return .{};
+    iw.writeByte('{') catch return .{};
     var first = true;
+    var ifirst = true;
     for (block.sub_blocks) |sb| {
-        var m = subBlockPoseByOriginKey(alloc, project_dir, sb) orelse continue;
+        var s = subBlockPoseByOriginKey(alloc, project_dir, sb) orelse continue;
+        var n: usize = 0;
         for (p.instances) |inst| {
             if (inst.ref_des.len <= sb.name.len) continue;
             if (!std.mem.startsWith(u8, inst.ref_des, sb.name) or inst.ref_des[sb.name.len] != '/') continue;
             if (inst.origin_key.len == 0) continue;
-            const pose = m.get(inst.origin_key) orelse continue;
-            if (!first) w.writeByte(',') catch return "{}";
+            const pose = s.map.get(inst.origin_key) orelse continue;
+            if (!first) w.writeByte(',') catch return .{};
             first = false;
-            writeJsonStr(w, inst.ref_des) catch return "{}";
-            w.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pose.x, pose.y, pose.rot }) catch return "{}";
-            if (pose.side == .bottom) w.writeAll(",\"side\":\"bottom\"") catch return "{}";
-            w.writeByte('}') catch return "{}";
+            n += 1;
+            writeJsonStr(w, inst.ref_des) catch return .{};
+            w.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pose.x, pose.y, pose.rot }) catch return .{};
+            if (pose.side == .bottom) w.writeAll(",\"side\":\"bottom\"") catch return .{};
+            w.writeByte('}') catch return .{};
         }
+        if (n == 0) continue;
+        if (!ifirst) iw.writeByte(',') catch return .{};
+        ifirst = false;
+        writeJsonStr(iw, sb.name) catch return .{};
+        iw.writeAll(":{\"layout\":") catch return .{};
+        writeJsonStr(iw, s.layout_name) catch return .{};
+        iw.print(",\"starred\":{},\"n\":{d}", .{ s.starred, n }) catch return .{};
+        if (s.alt_name.len > 0) {
+            iw.writeAll(",\"alt\":") catch return .{};
+            writeJsonStr(iw, s.alt_name) catch return .{};
+            iw.print(",\"alt_n\":{d}", .{s.alt_n}) catch return .{};
+        }
+        iw.writeByte('}') catch return .{};
     }
-    w.writeByte('}') catch return "{}";
-    return aw.written();
+    w.writeByte('}') catch return .{};
+    iw.writeByte('}') catch return .{};
+    return .{ .poses = aw.written(), .info = iw_buf.written() };
 }
 
 /// Initial state of the embed preview's show-clearance / show-DRC toggles,
@@ -2864,15 +2892,83 @@ fn chooseSyncPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []co
         }
         break :blk null;
     };
-    if (chosen) |parts| {
-        const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
-        for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot, .side = pt.side, .locked = pt.locked };
-        return out;
-    }
+    if (chosen) |parts| return refPosesFromParts(alloc, parts);
     // No named/recorded layouts — fall back to the bare optimizer cache.
     const poses = readAutoPoses(alloc, project_dir, name) orelse return null;
     if (poses.len == 0) return null;
     return poses;
+}
+
+/// Saved-layout parts as sync `RefPose`s (null on allocation failure).
+fn refPosesFromParts(alloc: std.mem.Allocator, parts: []const PartPose) ?[]const optimizer.RefPose {
+    const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
+    for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot, .side = pt.side, .locked = pt.locked };
+    return out;
+}
+
+/// `chooseModuleSnapshot` result: the snapshot to seed from, plus — when a
+/// different snapshot covers strictly more of the module's current parts —
+/// that fuller alternative (surfaced as a staleness hint, never auto-taken
+/// over a ★).
+const SnapshotChoice = struct {
+    chosen: *const SavedLayout,
+    /// Fuller non-chosen snapshot (only set when it beats `chosen`).
+    alt: ?*const SavedLayout = null,
+    /// How many module parts `alt` covers.
+    alt_n: usize = 0,
+};
+
+/// Pick which of a module's saved snapshots to seed a Stamp / sync from,
+/// scoring each by how many of its refs still exist in the module's *current*
+/// flatten (`ok_of`, ref-des → origin_key). A starred (★) snapshot that
+/// bridges at all wins outright — the user's blessing (and what the KiCad sync
+/// seeds from). With no ★, best coverage wins, manual beating auto on equal
+/// coverage — replacing a blind "newest manual first": a module that grew
+/// since an old hand save would stamp 42 of 59 parts from the stale snapshot
+/// while a newer, fuller one sat unused. When the winner is a ★ that a
+/// non-starred snapshot out-covers, that snapshot is reported as `alt` so the
+/// UI can flag the stale star. Null when no snapshot bridges anything (caller
+/// may fall back to the volatile cache slot).
+fn chooseModuleSnapshot(
+    layouts: []const SavedLayout,
+    ok_of: *const std.StringHashMap([]const u8),
+) ?SnapshotChoice {
+    var starred: ?*const SavedLayout = null;
+    var starred_score: usize = 0;
+    var best: ?*const SavedLayout = null;
+    var best_score: usize = 0;
+    for (layouts) |*L| {
+        if (L.parts.len == 0) continue;
+        var score: usize = 0;
+        for (L.parts) |p| {
+            const ok = ok_of.get(p.ref) orelse continue;
+            if (ok.len > 0) score += 1;
+        }
+        if (score == 0) continue;
+        if (L.default) {
+            starred = L;
+            starred_score = score;
+            continue;
+        }
+        const cur = best orelse {
+            best = L;
+            best_score = score;
+            continue;
+        };
+        const manual = std.mem.eql(u8, L.kind, KIND_MANUAL);
+        const cur_manual = std.mem.eql(u8, cur.kind, KIND_MANUAL);
+        const wins = if (score == best_score) manual and !cur_manual else score > best_score;
+        if (wins) {
+            best = L;
+            best_score = score;
+        }
+    }
+    if (starred) |st| {
+        const stale = best != null and best_score > starred_score;
+        return .{ .chosen = st, .alt = if (stale) best else null, .alt_n = if (stale) best_score else 0 };
+    }
+    const b = best orelse return null;
+    return .{ .chosen = b };
 }
 
 /// Load the design's premade placement-tool layout for the KiCad sync's
@@ -2897,20 +2993,15 @@ pub fn loadSyncLayout(
 /// layouts store only positions, so the vias are *computed* at sync time.
 pub const SyncVia = struct { x: f64, y: f64, dia: f64, drill: f64, net: []const u8 };
 
-/// Map a saved layout's poses onto stable `origin_key`, via the *design* named
-/// `source` — the one `/pcb-layout/<source>` flattened to produce the layout.
-/// The layout's ref-des keys carry that design's wrapper prefix (e.g. the
-/// `tpsm84338` eval wraps the module in a `pwr` sub-block → `pwr/U2`), so
-/// re-flattening the same design reproduces those refs exactly; each maps to the
-/// module-local `origin_key` (stable across renumbering and across boards). A
-/// bare-ref alias is also indexed so a layout saved without the wrapper still
-/// bridges. Null on any resolution failure (caller falls back to the raw layout).
-fn poseByOriginKey(
-    alloc: std.mem.Allocator,
-    project_dir: []const u8,
-    source: []const u8,
-    layout: []const optimizer.RefPose,
-) ?std.StringHashMap(SyncPose) {
+/// The design named `source` flattened to ref-des → origin_key — the bridge
+/// from a saved layout's ref-des keys (which carry that design's wrapper
+/// prefix, e.g. the `tpsm84338` eval wraps the module in a `pwr` sub-block →
+/// `pwr/U2`) to the module-local identity that survives renumbering. A
+/// bare-ref alias is indexed for each prefixed ref so a layout saved without
+/// the wrapper still bridges. Strings are duped onto `alloc` (the evaluator is
+/// torn down before returning). Null when the source path can't be evaluated —
+/// e.g. a `lib/modules/` defmodule with no design file.
+fn sourceOriginKeys(alloc: std.mem.Allocator, project_dir: []const u8, source: []const u8) ?std.StringHashMap([]const u8) {
     const path = paths.designSourcePath(alloc, project_dir, source) catch return null;
     defer alloc.free(path);
     const eval = alloc.create(Evaluator) catch return null;
@@ -2928,18 +3019,27 @@ fn poseByOriginKey(
     netlist.collectInstances(alloc, dblock, "", &flat, dblock.refStyle()) catch return null;
     var ok_of = std.StringHashMap([]const u8).init(alloc);
     for (flat.items) |fi| {
-        ok_of.put(fi.ref_des, fi.origin_key) catch return null;
-        if (std.mem.lastIndexOfScalar(u8, fi.ref_des, '/')) |slash| {
-            ok_of.put(fi.ref_des[slash + 1 ..], fi.origin_key) catch return null;
+        const ref = alloc.dupe(u8, fi.ref_des) catch return null;
+        const ok = alloc.dupe(u8, fi.origin_key) catch return null;
+        ok_of.put(ref, ok) catch return null;
+        if (std.mem.lastIndexOfScalar(u8, ref, '/')) |slash| {
+            ok_of.put(ref[slash + 1 ..], ok) catch return null;
         }
     }
+    return ok_of;
+}
+
+/// Re-key layout poses from ref-des to origin_key through `ok_of`.
+fn poseMapByOrigin(
+    alloc: std.mem.Allocator,
+    ok_of: *const std.StringHashMap([]const u8),
+    layout: []const optimizer.RefPose,
+) ?std.StringHashMap(SyncPose) {
     var pose_by_ok = std.StringHashMap(SyncPose).init(alloc);
     for (layout) |p| {
         const ok = ok_of.get(p.ref) orelse continue;
         if (ok.len == 0) continue;
-        // `ok` borrows the eval's arena (freed on the defer) — dupe it.
-        const key = alloc.dupe(u8, ok) catch return null;
-        pose_by_ok.put(key, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return null;
+        pose_by_ok.put(ok, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return null;
     }
     return pose_by_ok;
 }
@@ -2956,10 +3056,24 @@ fn poseByOriginKey(
 /// Falls back to the raw layout (caller prefix-strips) when the module can't be
 /// resolved or nothing bridges. Result lives on `alloc` (request lifetime).
 pub fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock) ?[]const optimizer.RefPose {
-    const layout = chooseSyncPoses(alloc, project_dir, sub_block.source) orelse return null;
+    // Coverage-aware snapshot pick when the source design resolves (see
+    // `chooseModuleSnapshot`); the legacy ★→manual→any→cache preference when it
+    // doesn't (nothing to score against).
+    const ok_of_opt = sourceOriginKeys(alloc, project_dir, sub_block.source);
+    const layout: []const optimizer.RefPose = blk: {
+        if (ok_of_opt) |*ok_of| {
+            const layouts = readLayouts(alloc, project_dir, sub_block.source);
+            if (chooseModuleSnapshot(layouts, ok_of)) |c|
+                if (refPosesFromParts(alloc, c.chosen.parts)) |poses| break :blk poses;
+        }
+        break :blk chooseSyncPoses(alloc, project_dir, sub_block.source) orelse return null;
+    };
 
     // origin_key → pose, via the design that produced the layout (see helper).
-    const pose_by_ok = poseByOriginKey(alloc, project_dir, sub_block.source, layout) orelse return layout;
+    const pose_by_ok = (if (ok_of_opt) |*ok_of|
+        poseMapByOrigin(alloc, ok_of, layout)
+    else
+        null) orelse return layout;
 
     // Re-key onto sub_block's own flattened refs by origin_key. This is a
     // module-scoped re-key (matched by origin_key), not the grouped root, so
@@ -2976,10 +3090,24 @@ pub fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_
     return out.toOwnedSlice(alloc) catch layout;
 }
 
-/// The sub-block's saved module layout (★-default via `chooseSyncPoses` of
-/// `sub_block.source`) keyed by stable `origin_key`, so a caller can match each
-/// flattened part by its `FlatInstance.origin_key` — the module-local identity
-/// that survives the parent design's `(hierarchical-ids)` renumbering.
+/// A sub-block's module-layout seed: poses keyed by stable `origin_key`, plus
+/// which module snapshot supplied them (shown in the Stamp palette so a user
+/// can tell a ★-blessed pull from a best-coverage fallback). `alt_*` name a
+/// fuller non-chosen snapshot when the chosen ★ has gone stale (module grew
+/// since it was starred) — a hint to re-star, never taken automatically.
+pub const SubBlockSeeds = struct {
+    map: std.StringHashMap(SyncPose),
+    layout_name: []const u8,
+    starred: bool,
+    alt_name: []const u8 = "",
+    alt_n: usize = 0,
+};
+
+/// The sub-block's saved module layout — the starred (★) snapshot when one
+/// bridges, else best current-flatten coverage (`chooseModuleSnapshot`) — keyed
+/// by stable `origin_key`, so a caller can match each flattened part by its
+/// `FlatInstance.origin_key`, the module-local identity that survives the
+/// parent design's `(hierarchical-ids)` renumbering.
 ///
 /// The layout is keyed by the *module-standalone* ref-des (`U1`, `R1`, `C1`…,
 /// as the `/pcb-layout/<module>` solve assigned them when the layout was saved),
@@ -2988,23 +3116,45 @@ pub fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_
 /// the exact standalone ref-des is to re-flatten the module the same way the
 /// layout was made — `modules_mod.resolveModuleBlock` (real instantiation first,
 /// else zero-arg) — NOT the parent's already-renumbered `sub_block.block`, and
-/// NOT `poseByOriginKey` (which re-resolves the module *source path*, failing on
-/// a `lib/modules/` defmodule). With that bridge: layout ref `C1` → origin_key
-/// `100nF@3#0` → board part `mcu/C57` (same origin_key). Null when the module
-/// has no saved layout or nothing bridges.
+/// NOT `sourceOriginKeys` (which re-resolves the module *source path*, failing
+/// on a `lib/modules/` defmodule). With that bridge: layout ref `C1` →
+/// origin_key `100nF@3#0` → board part `mcu/C57` (same origin_key). Null when
+/// the module has no saved layout or nothing bridges.
 pub fn subBlockPoseByOriginKey(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     sub_block: env_mod.SubBlock,
-) ?std.StringHashMap(SyncPose) {
-    const layout = chooseSyncPoses(alloc, project_dir, sub_block.source) orelse return null;
+) ?SubBlockSeeds {
     const resolved = modules_mod.resolveModuleBlock(alloc, project_dir, sub_block.source) orelse return null;
     // Standalone-flatten ref-des → origin_key (its refs key the saved layout).
     var flat: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
     netlist.collectInstances(alloc, resolved.block, "", &flat, .hierarchical) catch return null;
     var ok_of = std.StringHashMap([]const u8).init(alloc);
     for (flat.items) |fi| ok_of.put(fi.ref_des, fi.origin_key) catch return null;
-    // Layout ref → origin_key → pose.
+    const layouts = readLayouts(alloc, project_dir, sub_block.source);
+    const choice = chooseModuleSnapshot(layouts, &ok_of) orelse {
+        // No snapshot bridges — last resort is the volatile optimizer cache.
+        const poses = readAutoPoses(alloc, project_dir, sub_block.source) orelse return null;
+        const m = seedMapFromPoses(alloc, &ok_of, poses) orelse return null;
+        return .{ .map = m, .layout_name = "cache", .starred = false };
+    };
+    const layout = refPosesFromParts(alloc, choice.chosen.parts) orelse return null;
+    const m = seedMapFromPoses(alloc, &ok_of, layout) orelse return null;
+    return .{
+        .map = m,
+        .layout_name = choice.chosen.name,
+        .starred = choice.chosen.default,
+        .alt_name = if (choice.alt) |a| a.name else "",
+        .alt_n = choice.alt_n,
+    };
+}
+
+/// Layout ref → origin_key → pose (null when nothing bridges).
+fn seedMapFromPoses(
+    alloc: std.mem.Allocator,
+    ok_of: *const std.StringHashMap([]const u8),
+    layout: []const optimizer.RefPose,
+) ?std.StringHashMap(SyncPose) {
     var m = std.StringHashMap(SyncPose).init(alloc);
     for (layout) |p| {
         const ok = ok_of.get(p.ref) orelse continue;
@@ -3845,6 +3995,8 @@ const PcbDataOpts = struct {
     sub: ?[]const u8,
     /// Prebuilt `buildSubSeedsJson` object (the blob writer has no block).
     subseeds_json: []const u8 = "{}",
+    /// Which module snapshot each group's seeds came from (`buildSubSeedsJson`).
+    subseedinfo_json: []const u8 = "{}",
     /// The blob's "board" rect came from a user-DRAWN layout outline (the ▭
     /// tool), so the viewer treats it as editable (PCB.outline).
     outline_drawn: bool = false,
@@ -4211,9 +4363,12 @@ fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placem
     }
     if (opts.outline_drawn) try w.writeAll("\"outline_drawn\":true,");
     if (opts.single) try w.writeAll("\"single\":true,");
-    // Per-sub-block module ★-layout seed poses for the palette's Stamp button.
+    // Per-sub-block module-layout seed poses for the palette's Stamp button,
+    // plus which snapshot supplied each group's seeds (tooltip/coverage).
     try w.writeAll("\"subseeds\":");
     try w.writeAll(if (opts.subseeds_json.len > 0) opts.subseeds_json else "{}");
+    try w.writeAll(",\"subseedinfo\":");
+    try w.writeAll(if (opts.subseedinfo_json.len > 0) opts.subseedinfo_json else "{}");
     try w.writeAll(",");
 }
 
@@ -4401,8 +4556,8 @@ const COURTYARD_MODAL =
     \\<div class="court-fields" id="court-fields-offset" hidden>
     \\<label>Offset from pads <input id="court-off" type="number" step="0.05" min="0"> mm</label></div>
     \\<div id="court-full" class="court-full"></div>
-    \\<div class="court-note" id="court-note">Half-extents from the part centre;
-    \\ edges stay on the 0.1 mm grid. Saving rewrites the footprint file and applies to every design that uses it.</div>
+    \\<div class="court-note" id="court-note">Drag the box edges, or type half-extents from the part centre —
+    \\ edges snap to the grid. Saving rewrites the footprint file and applies to every design that uses it.</div>
     \\<div class="court-actions"><button id="court-save" class="btn">Save courtyard</button>
     \\<button id="court-cancel" class="btn">Cancel</button><span id="court-msg" class="savemsg"></span></div>
     \\</div></div>
@@ -4577,6 +4732,16 @@ const PAGE_CSS =
     \\  font-size:11px;padding:1px 7px;cursor:pointer}
     \\.sub-rigid.on{color:#7ee787;border-color:#2ea04366}
     \\.sub-stamp:hover,.sub-rigid:hover{border-color:#58a6ff}
+    \\.sub-cov{color:#d29922;font-size:10.5px;font-weight:600;cursor:help}
+    \\.sub-noseed{color:#6e7681;font-size:11px;cursor:help;padding:1px 7px}
+    \\/* Properties panel: the selected part's sub-circuit row (+ per-part Stamp). */
+    \\.prop-grp{display:flex;align-items:center;gap:8px;padding:6px 14px;font-size:12px;flex-wrap:wrap}
+    \\.grp-name{color:#7ee787;font-weight:600}
+    \\.grp-n{color:#6e7681;font-size:11px}
+    \\.grp-stamp{background:#21262d;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;
+    \\  font-size:11px;padding:1px 7px;cursor:pointer}
+    \\.grp-stamp:hover{border-color:#58a6ff}
+    \\.grp-noseed{color:#6e7681;font-size:11px;cursor:help}
     \\.marquee{fill:rgba(88,166,255,.12);stroke:#58a6ff;stroke-width:1;stroke-dasharray:4 3;vector-effect:non-scaling-stroke;pointer-events:none}
     \\.pad[data-net]{cursor:pointer}
     \\.pad.net-hl{fill:#f85149}
@@ -4634,7 +4799,7 @@ const PAGE_CSS =
     \\.court-h{display:flex;align-items:center;justify-content:space-between;font-weight:600;
     \\  color:#f0f6fc;font-size:14px;margin-bottom:8px}
     \\.court-x{border:0;background:none;font-size:20px;line-height:1;cursor:pointer;color:#8b949e}
-    \\.court-svg{width:100%;height:200px;background:#010409;border-radius:6px;display:block}
+    \\.court-svg{width:100%;height:240px;background:#010409;border-radius:6px;display:block;touch-action:none}
     \\.court-mode{display:flex;gap:14px;align-items:center;margin:10px 0 4px;font-size:12px;color:#c9d1d9}
     \\.court-mode label{display:flex;gap:4px;align-items:center;cursor:pointer}
     \\.court-fields{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:4px 0 4px;font-size:12px;color:#c9d1d9}
