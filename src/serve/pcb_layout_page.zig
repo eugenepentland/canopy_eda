@@ -19,6 +19,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const geometry = @import("../placement/geometry.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
+const export_fab = @import("../export_fab.zig");
 const module_policy = @import("../placement/module_policy.zig");
 const modules_mod = @import("modules.zig");
 const netlist = @import("../export_kicad_netlist.zig");
@@ -1474,6 +1475,70 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     try writeRoutedArrays(w, routed, violations, placement.nets);
     try w.print(",\"routed\":{d},\"total\":{d},\"return_path\":{d}}}", .{ routed.routed, routed.total, rp_warn });
     res.content_type = .JSON;
+    res.body = aw.written();
+}
+
+/// Resolve `name`'s design block and build a placement at its blessed poses
+/// (★ default → newest manual → any snapshot → optimizer cache — the same
+/// preference the KiCad sync seeds from). Null (+ a client error status) when
+/// the design/module doesn't resolve or has no saved layout at all — fab
+/// outputs are only meaningful for a deliberately placed board.
+fn blessedPlacement(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, name: []const u8) ?optimizer.Placement {
+    var eval = Evaluator.init(req.arena, ctx.project_dir);
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    const block: *env_mod.DesignBlock = resolveBlock(req.arena, ctx.project_dir, name, &eval, &module_res) orelse {
+        res.status = 404;
+        res.body = NO_BLOCK_MSG;
+        return null;
+    };
+    const poses = chooseSyncPoses(req.arena, ctx.project_dir, name) orelse {
+        res.status = 404;
+        res.body = "no saved layout — place the board (and save/star a layout) first";
+        return null;
+    };
+    return optimizer.placeFromPoses(req.arena, block, ctx.project_dir, poses, optimizer.Params{}) catch {
+        res.status = 500;
+        res.body = PLACEMENT_ERR_MSG;
+        return null;
+    };
+}
+
+/// GET /api/pcb-centroid/:name — the pick-and-place centroid CSV at the
+/// design's blessed poses (see `blessedPlacement`), side-aware. The assembly
+/// half of the fab package; pairs with the BOM CSV.
+pub fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const placement = blessedPlacement(ctx, req, res, name) orelse return;
+    var aw: std.Io.Writer.Allocating = .init(req.arena);
+    try export_fab.centroidCsv(&aw.writer, placement.parts, placement.instances);
+    res.header("content-type", "text/csv; charset=utf-8");
+    res.body = aw.written();
+}
+
+/// GET /api/pcb-drill/:name[?npth=1] — the Excellon drill file at the design's
+/// blessed poses: plated through-hole pads + the ★ layout's persisted routed
+/// vias (PTH), or the non-plated mounting holes (`?npth=1`).
+pub fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const placement = blessedPlacement(ctx, req, res, name) orelse return;
+    // Vias come from the blessed (★/default-preferred) layout's saved routes.
+    var vias: []const router.Via = &.{};
+    for (readLayouts(req.arena, ctx.project_dir, name)) |L| {
+        if (!L.default) continue;
+        const sr = L.routes orelse break;
+        if (restoreRoutes(req.arena, sr, placement.nets)) |r| vias = r.vias;
+        break;
+    }
+    const class: export_fab.DrillClass = if (queryFlag(req, "npth")) .non_plated else .plated;
+    var aw: std.Io.Writer.Allocating = .init(req.arena);
+    try export_fab.excellonDrill(&aw.writer, req.arena, placement.parts, vias, class);
+    res.header("content-type", "text/plain; charset=utf-8");
     res.body = aw.written();
 }
 

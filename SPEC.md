@@ -360,6 +360,13 @@ Public functions: worldShape, pointDist, shapeGap
 - Emits a custom pad's (poly …) outline as a valid KiCad custom pad with (primitives (gr_poly …)) in pad-local coords
 - Inflates the emitted F.CrtYd courtyard by BBOX_MARGIN_MM so KiCad matches the placement page's drawn courtyard
 
+## export_fab
+
+Public functions: centroidCsv, excellonDrill
+
+- the centroid CSV lists each part's pose with its board side
+- the Excellon writer splits plated pads + vias from non-plated holes and groups tools by diameter
+
 ## bom
 
 - Generates deterministic UUIDs in the expected format
