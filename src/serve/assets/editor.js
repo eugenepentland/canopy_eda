@@ -1410,16 +1410,18 @@
     return links;
   }
   // Global connection map: throw the real board layout away and rebuild it as a
-  // grid of self-contained per-IC cells. Each cell is one real IC ringed by dashed
-  // ghost proxies of the ICs it connects to point-to-point — pins aligned so each
-  // link is one straight wire + net label, differential pairs coupled in violet.
-  // Every partner gets its own row band (no interleaving) and every cell its own
-  // grid slot, so NOTHING can overlap. To avoid redundancy each connection is drawn
-  // exactly ONCE: a greedy set-cover keeps the fewest high-degree "anchor" ICs that
-  // still cover every link, and low-degree ICs survive only as ghosts inside their
-  // busiest neighbour's cell (they get no cell of their own).
+  // grid of self-contained per-IC cells. EVERY real IC gets its own cell — its
+  // complete local circuit (owned point-to-point links with ghost partners, series
+  // chains, pulls, bound bypass caps, extras spokes) on one card, so a regulator
+  // whose pins are all rails is a page too, not invisible. Each link's DETAIL is
+  // still drawn exactly once: in the cell of its lower-degree end (the
+  // peripheral's page shows the wire + chain + a dashed ghost of the busy hub;
+  // the hub's page shows that pin as a labeled stub + partner chip — the
+  // off-page-reference idiom of a hand schematic). Pins are row-banded per
+  // partner and every cell has its own grid slot, so NOTHING can overlap.
   function buildGlobalMap(m) {
     const real = m.hubs.filter((h) => !h.ghost && !h.synthetic);
+    if (!real.length) return;                            // hub-less design — keep the base layout
     const labelOf = new Map(), compOf = new Map();
     real.forEach((h) => { if (!labelOf.has(h.ref)) { labelOf.set(h.ref, h.label); compOf.set(h.ref, h.component || ""); } });
     const allNets = new Set(); real.forEach((h) => h.pins.forEach((p) => { if (p.net) allNets.add(p.net); }));
@@ -1482,49 +1484,36 @@
       arr.push(item);
     };
     // A point-to-point link carries the SAME information from either IC's side, so
-    // drawing it in both cells (and giving every IC a cell) is pure redundancy.
-    // Greedily cover every link with the fewest anchor ICs: repeatedly take the IC
-    // carrying the most still-unshown connections, show all of those in its cell,
-    // mark them covered, and repeat. Each link is then added to exactly one anchor
-    // (oriented anchor-first), and an IC with no uncovered links never gets a cell —
-    // it appears only as a ghost inside whichever neighbour absorbed it.
+    // drawing its full detail in both cells would be pure redundancy — and worse,
+    // the reader couldn't tell whether two drawings of R5 mean one part or two.
+    // Each link is therefore OWNED by (drawn in detail inside) the cell of its
+    // lower-degree end: the peripheral's page shows its complete wiring to the
+    // busy hub/connector, while the hub's page shows that pin as a labeled stub +
+    // partner chip via the extras band (its net stays out of the hub cell's
+    // partnerNets). Ties break lexically so the layout is stable across rebuilds.
+    // A synthetic terminal stub ("ref ▸") is only ever a partner, never an owner.
     const links = icLinks(m);
-    if (!links.length) return;
     const byRef = new Map();                              // ref -> [link index…]
-    const terminalRefs = new Set();                       // synthetic "ref ▸" stubs — never anchor a cell
     links.forEach((lk, i) => [lk.a.ref, lk.b.ref].forEach((r) => {
       let a = byRef.get(r); if (!a) { a = []; byRef.set(r, a); } a.push(i);
     }));
-    links.forEach((lk) => { if (lk.b.terminal) terminalRefs.add(lk.b.ref); });
-    const deg = (r) => byRef.get(r).length;               // total degree (tiebreak)
-    const covered = new Array(links.length).fill(false);
-    let remaining = links.length;
-    while (remaining > 0) {
-      let best = null, bestN = -1;
-      byRef.forEach((idxs, ref) => {
-        if (terminalRefs.has(ref)) return;                // a terminal stub is only ever a partner, not an anchor
-        let n = 0; for (const i of idxs) if (!covered[i]) n++;
-        if (n <= 0) return;
-        if (best === null || n > bestN ||
-            (n === bestN && (deg(ref) > deg(best) || (deg(ref) === deg(best) && ref < best)))) { bestN = n; best = ref; }
-      });
-      if (best === null) break;
-      for (const i of byRef.get(best)) {
-        if (covered[i]) continue;
-        covered[i] = true; remaining--;
-        const lk = links[i];
-        const a = lk.a.ref === best ? lk.a : lk.b, b = lk.a.ref === best ? lk.b : lk.a;
-        addItem(a, b, lk);
-      }
-    }
+    const deg = (r) => (byRef.get(r) || []).length;       // total degree (ownership rank)
+    const linkPartner = new Map();                        // "ref\0pin" (non-owner end) -> owner-cell ref
+    const inlinePass = new Set();                         // passives drawn inline in a link — never re-spoked in extras
+    links.forEach((lk) => {
+      let owner = lk.a, other = lk.b;
+      if (!lk.b.terminal && (deg(lk.b.ref) < deg(lk.a.ref) || (deg(lk.b.ref) === deg(lk.a.ref) && lk.b.ref < lk.a.ref))) { owner = lk.b; other = lk.a; }
+      addItem(owner, other, lk);
+      if (!other.terminal) linkPartner.set(other.ref + "\0" + other.pin, owner.ref);
+      lk.passives.forEach((x) => { if (!x.device) inlinePass.add(x.ref); });
+    });
     // For a fanout net whose target is ALREADY a ghost in an anchor's cell (e.g. the LMX2595
     // is a ghost in J1's cell via its SPI_MISO/CSN links), add a "bus pin" to that ghost so it
     // shows the net as a dot + stub + label at rest — the connecting line is drawn on hover
     // (the chip reveal lands on this pin). Multi-drop only (deg-2 is a normal link); GND skipped.
     byIC.forEach((parts, anchorRef) => {
-      const anchor = real.find((h) => h.ref === anchorRef); if (!anchor) return;
       const seen = new Set();
-      anchor.pins.forEach((p) => {
+      real.forEach((bx) => { if (bx.ref !== anchorRef) return; bx.pins.forEach((p) => {
         const net = p.anet || p.net;
         if (!net || seen.has(net) || isGroundName(net)) return;
         seen.add(net);
@@ -1535,9 +1524,8 @@
           if (arr.some((it) => it.net === net)) return;                 // a link/pin already carries this net
           arr.push({ net, outNet: null, farNet: null, through: null, via: null, tail: null, icPinName: "", ghostPinName: "", diff: false, terminal: false, busPin: true });
         });
-      });
+      }); });
     });
-    if (!byIC.size) return;
     // Pull-ups / pull-downs: a RESISTOR with one leg on a signal net and the other
     // on a rail (power/ground). Keyed by the signal net so a link carrying it can
     // draw the pull as a branch. (Resistors only — a cap to a rail is decoupling.)
@@ -1617,10 +1605,8 @@
       p.term.forEach((t) => { if (t.net && isStub(t.net)) { let a = decoupByNet.get(t.net); if (!a) { a = []; decoupByNet.set(t.net, a); } a.push(p.ref); } });
     });
     const layoutRails = (cell, ref, coreH) => {
-      const rhub = real.find((h) => h.ref === ref);
-      if (!rhub) return 0;
       const seen = new Set(), nets = [];
-      rhub.pins.forEach((p) => { const nn = p.anet || ""; if (nn && isStub(nn) && !seen.has(nn)) { seen.add(nn); nets.push(nn); } });
+      real.forEach((h) => { if (h.ref !== ref) return; h.pins.forEach((p) => { const nn = p.anet || ""; if (nn && isStub(nn) && !seen.has(nn)) { seen.add(nn); nets.push(nn); } }); });
       if (!nets.length) return 0;
       nets.sort((a, b) => ((isGroundName(a) ? 1 : 0) - (isGroundName(b) ? 1 : 0)) || (a < b ? -1 : a > b ? 1 : 0));   // power first, then ground
       const perRow = Math.max(1, Math.floor((ICW - NODEGAP) / (NODEW + NODEGAP)));
@@ -1634,7 +1620,10 @@
       return RAILTOP + Math.ceil(nets.length / perRow) * RAILROW;
     };
     const cells = [];
-    [...byIC.entries()].forEach(([ref, parts]) => {
+    const cellRefs = [], seenCellRef = new Set();          // every real IC, in scene (authored/section) order
+    real.forEach((h) => { if (!seenCellRef.has(h.ref)) { seenCellRef.add(h.ref); cellRefs.push(h.ref); } });
+    cellRefs.forEach((ref) => {
+      const parts = byIC.get(ref) || new Map();
       const groups = [...parts.entries()].map(([pref, items]) => ({ pref, label: labelOf.get(pref) || pref, items })).sort((a, b) => b.items.length - a.items.length);
       const side = { left: [], right: [] }; let lc = 0, rc = 0;                  // balance pins across the two sides
       groups.forEach((g) => { if (lc <= rc) { side.left.push(g); lc += g.items.length; } else { side.right.push(g); rc += g.items.length; } });
@@ -1647,13 +1636,13 @@
       // Gather this IC's extra pins (no point-to-point partner) and split them across the
       // two sides, balanced by row height, so the band below the partner pins is ~half as
       // tall. Done BEFORE icX so each side reserves room for its outgoing spokes.
-      const rhub = real.find((h) => h.ref === ref);
+      const boxes = real.filter((h) => h.ref === ref);     // ALL the IC's boxes — a multi-part hub splits per (part …)
       const partnerNets = new Set();
       groups.forEach((g) => g.items.forEach((it) => { if (it.busPin) return; [it.net, it.outNet, it.farNet].forEach((n) => n && partnerNets.add(n)); }));
       const passClaimed = new Set();                 // each passive lands on at most one pin of this cell
       const rowHt = (e) => Math.max(EXTRA_PITCH, (e.ps || []).length * PASSROW);
       const extras = [], seenE = new Set();
-      (rhub ? rhub.pins : []).forEach((p) => {
+      boxes.forEach((bx) => bx.pins.forEach((p) => {
         const net = p.anet || p.net;
         if (!net || partnerNets.has(net) || seenE.has(net)) return;
         if (showPower && isStub(net)) return;        // power/ground live in the rail band when that layer is on
@@ -1661,10 +1650,14 @@
         const pads = String(p.pins || p.pin || "").split(",").filter(Boolean);
         const ps = [], seenP = new Set();            // bypass caps bound to a pad (decoupByPin) + series/pulls on the net
         pads.forEach((pad) => (decoupByPin.get(ref + " " + pad) || []).forEach((x) => { if (!seenP.has(x.ref)) { seenP.add(x.ref); ps.push(x); } }));
-        (passByNet.get(net) || []).forEach((x) => { if (!seenP.has(x.ref) && !passClaimed.has(x.ref)) { seenP.add(x.ref); ps.push(x); } });
+        (passByNet.get(net) || []).forEach((x) => { if (!seenP.has(x.ref) && !passClaimed.has(x.ref) && !inlinePass.has(x.ref)) { seenP.add(x.ref); ps.push(x); } });
         ps.forEach((x) => passClaimed.add(x.ref));
-        extras.push({ net, name: p.name, ps, targets: (netICs.get(net) || []).filter((r) => r !== ref) });
-      });
+        // A chain-connected pin has no IC directly on its own net (the partner sits
+        // past the series parts, drawn in the owner's cell) — chip the owner instead.
+        let targets = (netICs.get(net) || []).filter((r) => r !== ref);
+        if (!targets.length) { const lp = linkPartner.get(ref + "\0" + p.pin); if (lp) targets = [lp]; }
+        extras.push({ net, name: p.name, ps, targets });
+      }));
       // Build each bare pin's partner-chip model (skip pins that already spoke to passives).
       const partnerPinLabel = (net, r) => { const mm = netRefPin.get(net); return mm ? (mm.get(r) || "") : ""; };
       extras.forEach((e) => {
@@ -2586,7 +2579,7 @@
       <tr><td><kbd>F</kbd></td><td>Fit current sheet / board</td></tr>
       <tr><td><kbd>N</kbd></td><td>Toggle drawn connections vs. name labels: straight lines across the channel for device-to-device nets, and a passive stood up <b>vertically</b> between the two pads it bridges on one IC (e.g. an inductor across the SW pins)</td></tr>
       <tr><td><kbd>G</kbd></td><td>Fan out the selected IC — ring it with dashed <b>ghost</b> copies of every IC it connects to point-to-point, one straight wire each with the net name above it (the rest of the board dims). Differential pairs are drawn coupled in violet. Click a ghost to hop the focus to it; <kbd>Esc</kbd> exits.</td></tr>
-      <tr><td><kbd>Shift</kbd>+<kbd>G</kbd></td><td>Connection map — rebuild the board as a grid of cells for the fewest anchor ICs that cover every point-to-point connection (each drawn once; low-degree ICs collapse into proxies inside a neighbour's cell, nothing overlaps). Every block — anchor or proxy — is selectable and editable in place.</td></tr>
+      <tr><td><kbd>Shift</kbd>+<kbd>G</kbd></td><td>Connection map — rebuild the board as a grid of cells, one per IC, each showing that IC's complete local circuit (nothing overlaps). Each connection's detail is drawn once, in the lower-fanout end's cell; the busier IC shows it as a labeled stub + partner chip. Every block — real or proxy — is selectable and editable in place.</td></tr>
       <tr><td><kbd>P</kbd></td><td>Power layer — overlay each IC card's power/ground rail nodes (the connection map normally hides rails). One pill per rail, <b>▲</b> for a supply / <b>⏚</b> for ground, with a <b>⎓N</b> badge counting its decoupling caps. Click a node to select that net so the inspector lists and edits its decoupling. (Turns the map on if it isn't already.)</td></tr>
       <tr><td><kbd>Esc</kbd></td><td>Deselect / close</td></tr>
       <tr><td>click part / net</td><td>Show its properties in the left inspector (edit value, rename net, rewire pins, copy, delete). The pin→net fields suggest existing nets — <kbd>↑</kbd>/<kbd>↓</kbd> + <kbd>Enter</kbd> to pick one, or just type a new name.</td></tr>
@@ -2696,7 +2689,7 @@
   // ── Toolbar ──────────────────────────────────────────────────────────
   const tools = document.createElement("div");
   tools.id = "ed-tools";
-  tools.innerHTML = `<button id="tool-add" title="Add (A)">+ Add</button><button id="tool-nets" title="Draw connections instead of name labels: device-to-device channel wires + a passive stood vertically between two pads it bridges on one IC (N)">Nets</button><button id="tool-ghost" title="Fan out the selected IC: ring it with dashed ghost copies of every IC it connects to point-to-point, one straight wire each. Click a ghost to hop to it. (G)">Fan-out</button><button id="tool-ghost-all" title="Connection map: the fewest anchor ICs that cover every point-to-point connection, each in its own region; low-degree ICs collapse into ghosts so nothing's drawn twice (Shift+G)">Map</button><button id="tool-power" title="Power layer: overlay each IC's power/ground rail nodes on the connection map; click a node to see/edit its decoupling caps (P)">Power</button><button id="tool-full" title="Full map: the entire netlist as one force-directed graph — every part and every net, nothing hidden. Click a net dot or part to select/edit (U)">Full</button><button id="tool-fit" title="Fit (F)">Fit</button><button id="tool-keys" title="Keys (?)">?</button>`;
+  tools.innerHTML = `<button id="tool-add" title="Add (A)">+ Add</button><button id="tool-nets" title="Draw connections instead of name labels: device-to-device channel wires + a passive stood vertically between two pads it bridges on one IC (N)">Nets</button><button id="tool-ghost" title="Fan out the selected IC: ring it with dashed ghost copies of every IC it connects to point-to-point, one straight wire each. Click a ghost to hop to it. (G)">Fan-out</button><button id="tool-ghost-all" title="Connection map: every IC in its own region with its complete local circuit; each connection's detail is drawn once, in the lower-fanout end's region, and appears on the busier IC as a labeled stub + partner chip (Shift+G)">Map</button><button id="tool-power" title="Power layer: overlay each IC's power/ground rail nodes on the connection map; click a node to see/edit its decoupling caps (P)">Power</button><button id="tool-full" title="Full map: the entire netlist as one force-directed graph — every part and every net, nothing hidden. Click a net dot or part to select/edit (U)">Full</button><button id="tool-fit" title="Fit (F)">Fit</button><button id="tool-keys" title="Keys (?)">?</button>`;
   wrap.appendChild(tools);
   tools.querySelector("#tool-add").onclick = openAdd;
   tools.querySelector("#tool-nets").onclick = toggleNets;
