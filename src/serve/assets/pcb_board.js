@@ -310,11 +310,11 @@ els.forEach(function(g,i){
  g.addEventListener("pointermove",function(ev){
    if(gdrag){var gm=mm(ev),dx=Math.round((gm.x-gdrag.sx)/G)*G,dy=Math.round((gm.y-gdrag.sy)/G)*G,any=false;
      gdrag.orig.forEach(function(o){var nx=o.x+dx,ny=o.y+dy;if(P[o.i].x!==nx||P[o.i].y!==ny){P[o.i].x=nx;P[o.i].y=ny;setT(o.i);any=true;}});
-     if(any){if(!gdrag.moved){gdrag.moved=true;clearRoute();}rats();drawClr();refreshUnplaced();}return;}
+     if(any){if(!gdrag.moved){gdrag.moved=true;clearRouteFor(sel);}rats();drawClr();refreshUnplaced();}return;}
    if(!drag||drag.i!==i)return;var m=mm(ev);
    var nx=Math.round((m.x+drag.ox)/G)*G,ny=Math.round((m.y+drag.oy)/G)*G;
    if(nx===P[i].x&&ny===P[i].y)return;P[i].x=nx;P[i].y=ny;
-   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();refreshUnplaced();
+   if(!drag.moved){drag.moved=true;clearRouteFor([i]);}setT(i);rats();drawClr();refreshUnplaced();
    if(selRef===P[i].ref)updatePropLive();});
  g.addEventListener("pointerup",function(ev){
    if(gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap;gdrag=null;g.style.cursor="grab";
@@ -380,10 +380,10 @@ document.addEventListener("keydown",function(ev){
  if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
  if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;recordUndo();
    P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
-   setT(cur);clearRoute();rats();fetchScore();refreshUnplaced();if(selRef===P[cur].ref)updatePropLive();return;}
+   setT(cur);clearRouteFor([cur]);rats();fetchScore();refreshUnplaced();if(selRef===P[cur].ref)updatePropLive();return;}
  if((ev.key=="f"||ev.key=="F")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;recordUndo();
    P[cur].side=(P[cur].side==="bottom")?"top":"bottom";
-   setT(cur);clearRoute();rats();drawClr();fetchScore();refreshUnplaced();
+   setT(cur);clearRouteFor([cur]);rats();drawClr();fetchScore();refreshUnplaced();
    if(selRef===P[cur].ref)renderProps();return;}
  if((ev.key=="l"||ev.key=="L")&&cur>=0&&!typing){ev.preventDefault();
    P[cur].locked=!P[cur].locked;setT(cur);if(selRef===P[cur].ref)renderProps();return;}});
@@ -452,6 +452,8 @@ function bindLayLoad(b){b.addEventListener("click",function(){var nm=b.getAttrib
  // a Load still lands after the parts renumber (e.g. module standalone vs nested).
  var byOrigin={};for(var k in L.parts){var v=L.parts[k];if(v&&v.origin)byOrigin[v.origin]=v;}
  P.forEach(function(p){var s=(p.origin&&byOrigin[p.origin])||L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;p.side=s.side||"top";if(s.locked!==undefined)p.locked=!!s.locked;}});applyAll();
+ if(L.routes&&((L.routes.tracks||[]).length||(L.routes.vias||[]).length)){
+  PCB.tracks=L.routes.tracks||[];PCB.vias=L.routes.vias||[];PCB.drc=[];drawRoute();drawDrc();}
  setActiveLayout(nm);});}
 function bindLayDel(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-del");
  if(!window.confirm("Delete layout \""+nm+"\"?"))return;
@@ -519,16 +521,18 @@ function loadLayoutScores(){if(!((PCB.layouts||[]).length))return;
 // page reload, so the camera and view toggles you set while editing stay put.
 function persistLayout(nm,verb){var msg=document.getElementById("pcb-savemsg");
  var parts=P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,origin:p.origin||"",side:p.side||"top",locked:!!p.locked};});
+ // Persist the on-screen copper with the poses so routing survives reloads.
+ var routes=((PCB.tracks||[]).length||(PCB.vias||[]).length)?{tracks:PCB.tracks||[],vias:PCB.vias||[]}:null;
  if(msg){msg.style.color="#8b949e";msg.textContent=verb+"\u{2026}";}
  return fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",
-   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts})})
+   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts,routes:routes})})
   .then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(){
     var pmap={};parts.forEach(function(p){pmap[p.ref]={x:p.x,y:p.y,rot:p.rot,origin:p.origin||"",side:p.side,locked:p.locked};});
     var Ls=PCB.layouts||(PCB.layouts=[]),found=null;
     for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm){found=Ls[i];break;}
-    if(found){found.parts=pmap;found.kind="manual";}
-    else Ls.push({name:nm,kind:"manual",parts:pmap,score:null});
+    if(found){found.parts=pmap;found.kind="manual";found.routes=routes;}
+    else Ls.push({name:nm,kind:"manual",parts:pmap,score:null,routes:routes});
     upsertLayoutPanel(nm);setActiveLayout(nm);loadLayoutScores();
     if(msg){msg.style.color="#3fb950";msg.textContent=(verb==="updating"?"updated":"saved")+" \u{2713}";}})
   .catch(function(){if(msg){msg.style.color="#f85149";
@@ -625,11 +629,20 @@ function viaGeo(){var va=parseFloat((document.getElementById("r-va")||{}).value)
 function drawVia(g,wx,wy,dia,drill){var r=Math.max(dia/2*S,2.5),rh=Math.min(Math.max(drill/2*S,1),r*0.7);
  g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:r.toFixed(1),fill:"#ca8a04"}));
  g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:rh.toFixed(1),fill:"#fff"}));}
+// Drop only the copper belonging to the given parts' nets (a moved part
+// invalidates its own routing, everything else stays drawn). Falls back to
+// keeping legacy net-less copper ("" — old saves) untouched.
+function clearRouteFor(idxs){
+ if(!((PCB.tracks||[]).length)&&!((PCB.vias||[]).length))return;
+ var nets={};idxs.forEach(function(i){(P[i].pads||[]).forEach(function(pd){if(pd.net)nets[pd.net]=1;});});
+ PCB.tracks=(PCB.tracks||[]).filter(function(t){return !(t.net&&nets[t.net]);});
+ PCB.vias=(PCB.vias||[]).filter(function(v){return !(v.net&&nets[v.net]);});
+ PCB.drc=[];drawRoute();drawDrc();}
 function drawRoute(){while(gT.firstChild)gT.removeChild(gT.firstChild);
  (PCB.tracks||[]).forEach(function(t){gT.appendChild(el("line",{x1:X(t.x1).toFixed(1),y1:Y(t.y1).toFixed(1),
    x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:t.l==0?"#f85149":"#388bfd",
    "stroke-width":Math.max(t.w*S,1.2).toFixed(1),"stroke-linecap":"round","stroke-linejoin":"round",opacity:0.85}));});
- (PCB.vias||[]).forEach(function(v){drawVia(gT,v.x,v.y,v.d,viaGeo().drill);});}
+ (PCB.vias||[]).forEach(function(v){drawVia(gT,v.x,v.y,v.d,(v.drill>0)?v.drill:viaGeo().drill);});}
 function clrVal(){var ci=document.getElementById("r-cl"),c=ci?parseFloat(ci.value):NaN;
  return (c>0)?c:(PCB.clr||0.127);}
 function drawClr(){while(gC.firstChild)gC.removeChild(gC.firstChild);

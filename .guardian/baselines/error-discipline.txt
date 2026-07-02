@@ -1,6 +1,4 @@
 # guardian-snapshot v1
-pub const MyError = error{ Foo, Bar };
-pub fn run(...) MyError!void { ... }
 src/eval/env.zig: pub fn put uses inferred error set `!T` (use `MyErr!T`)
 src/render_svg/context.zig: pub fn adjAppend uses inferred error set `!T` (use `MyErr!T`)
 src/render_svg/context.zig: pub fn buildAdjacency uses inferred error set `!T` (use `MyErr!T`)

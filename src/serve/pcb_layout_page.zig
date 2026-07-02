@@ -148,7 +148,21 @@ pub const SavedLayout = struct {
     /// Recorded so the schematic's Module-layouts panel can show, per
     /// sub-module, that a rough placement has been seeded (vs. starred/done).
     rough: bool = false,
+    /// Routed copper captured with the poses (null = never routed/saved).
+    routes: ?SavedRoutes = null,
 };
+
+/// One persisted routed-copper segment of a saved layout. Field names match
+/// the live route JSON (`l` layer, `w` width; net by NAME — net indices shift
+/// across flattens), so the client draws stored and live copper identically.
+const SavedTrack = struct { x1: f64, y1: f64, x2: f64, y2: f64, l: u8 = 0, w: f64, net: []const u8 = "" };
+
+/// One persisted via of a saved layout (same shape as the live route JSON).
+const SavedVia = struct { x: f64, y: f64, d: f64, drill: f64 = 0, net: []const u8 = "" };
+
+/// A saved layout's persisted copper — the routed tracks/vias captured with
+/// the poses, so a Save → reload → Load round-trips the routing too.
+const SavedRoutes = struct { tracks: []const SavedTrack, vias: []const SavedVia };
 
 /// Which layout state the page is showing — the precedence ladder made
 /// visible in the scorebar chip: source **spec** > saved **snapshot**
@@ -352,19 +366,22 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     else
         (readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{});
 
-    // Routing runs only on demand (the Route button → ?route=1), on whatever
-    // placement is loaded — it's not part of every page load.
+    // The named-layout history is a whole-design concept; scoped previews show none.
+    // Deduplicated + best-score-first for the panel (see displayLayouts).
+    const layouts = displayLayouts(ctx.allocator, ctx.project_dir, name, sub);
+
+    // Routing runs only on demand (?route=1); otherwise the shown saved
+    // layout's persisted copper is restored (see shownSavedRoutes).
     const ro = parseRoute(req);
-    const routed: ?router.RouteResult = if (ro.run) (router.route(ctx.allocator, placement, ro.params) catch null) else null;
+    var routed: ?router.RouteResult = if (ro.run) (router.route(ctx.allocator, placement, ro.params) catch null) else null;
+    if (routed == null and sub == null)
+        routed = shownSavedRoutes(ctx.allocator, layouts, refine_name orelse starred_name, placement);
     const violations: []const drc.Violation = if (routed) |r|
         (drc.check(ctx.allocator, placement, r, ro.params.clearance) catch &.{})
     else
         &.{};
 
     const view = View.init(placement);
-    // The named-layout history is a whole-design concept; scoped previews show none.
-    // Deduplicated + best-score-first for the panel (see displayLayouts).
-    const layouts = displayLayouts(ctx.allocator, ctx.project_dir, name, sub);
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
@@ -1413,7 +1430,7 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
     try w.writeAll("{");
-    try writeRoutedArrays(w, routed, violations);
+    try writeRoutedArrays(w, routed, violations, placement.nets);
     try w.print(",\"routed\":{d},\"total\":{d},\"return_path\":{d}}}", .{ routed.routed, routed.total, rp_warn });
     res.content_type = .JSON;
     res.body = aw.written();
@@ -1483,7 +1500,14 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         }
     }
 
-    var entry = SavedLayout{ .name = nm, .kind = KIND_MANUAL, .ts = clock.timestamp(), .score = score, .parts = parts };
+    var entry = SavedLayout{
+        .name = nm,
+        .kind = KIND_MANUAL,
+        .ts = clock.timestamp(),
+        .score = score,
+        .parts = parts,
+        .routes = parseSavedRoutes(req.arena, root.object.get("routes")),
+    };
     const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
     var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
     // `replaced` = wrote `entry` in place of a matching row (same name, or an
@@ -2085,6 +2109,7 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
             .parts = parts,
             .default = default_name.len > 0 and std.mem.eql(u8, nm.string, default_name),
             .rough = rough,
+            .routes = parseSavedRoutes(alloc, it.object.get("routes")),
         }) catch return list.items;
     }
     return list.toOwnedSlice(alloc) catch null;
@@ -2115,6 +2140,119 @@ fn parsePartPoses(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const PartPos
         }) catch return list.items;
     }
     return list.toOwnedSlice(alloc) catch null;
+}
+
+/// Parse a `{"tracks":[…],"vias":[…]}` saved-routes object (the same shape
+/// the live route JSON and the layouts sidecar use). Null when absent,
+/// malformed, or empty — an empty routes object is treated as "no routes".
+fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedRoutes {
+    const obj = v orelse return null;
+    if (obj != .object) return null;
+    var tracks: std.ArrayListUnmanaged(SavedTrack) = .empty;
+    if (obj.object.get("tracks")) |tv| if (tv == .array) {
+        for (tv.array.items) |it| {
+            if (it != .object) continue;
+            tracks.append(alloc, .{
+                .x1 = jsonNum(it.object.get("x1")),
+                .y1 = jsonNum(it.object.get("y1")),
+                .x2 = jsonNum(it.object.get("x2")),
+                .y2 = jsonNum(it.object.get("y2")),
+                .l = if (jsonNum(it.object.get("l")) >= 1) 1 else 0,
+                .w = jsonNum(it.object.get("w")),
+                .net = jsonStrField(it.object.get("net")),
+            }) catch return null;
+        }
+    };
+    var vias: std.ArrayListUnmanaged(SavedVia) = .empty;
+    if (obj.object.get("vias")) |vv| if (vv == .array) {
+        for (vv.array.items) |it| {
+            if (it != .object) continue;
+            vias.append(alloc, .{
+                .x = jsonNum(it.object.get("x")),
+                .y = jsonNum(it.object.get("y")),
+                .d = jsonNum(it.object.get("d")),
+                .drill = jsonNum(it.object.get("drill")),
+                .net = jsonStrField(it.object.get("net")),
+            }) catch return null;
+        }
+    };
+    if (tracks.items.len == 0 and vias.items.len == 0) return null;
+    return .{
+        .tracks = tracks.toOwnedSlice(alloc) catch return null,
+        .vias = vias.toOwnedSlice(alloc) catch return null,
+    };
+}
+
+/// A pose/route JSON string field, or "" when absent/not a string.
+fn jsonStrField(v: ?std.json.Value) []const u8 {
+    const sv = v orelse return "";
+    return if (sv == .string) sv.string else "";
+}
+
+/// Serialize saved routes in the shared live-JSON shape (see `SavedTrack`).
+fn writeSavedRoutesJson(w: *std.Io.Writer, sr: SavedRoutes) std.Io.Writer.Error!void {
+    try w.writeAll("{\"tracks\":[");
+    for (sr.tracks, 0..) |t, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d},\"net\":", .{ t.x1, t.y1, t.x2, t.y2, t.l, t.w });
+        try writeJsonStr(w, t.net);
+        try w.writeAll("}");
+    }
+    try w.writeAll("],\"vias\":[");
+    for (sr.vias, 0..) |vi, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":", .{ vi.x, vi.y, vi.d, vi.drill });
+        try writeJsonStr(w, vi.net);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
+}
+
+/// Rebuild a `router.RouteResult` from a layout's persisted copper, resolving
+/// each stored net NAME back to its index in the *current* flattened netlist
+/// (unknown names → −1, still drawn + DRC-checked as foreign copper). Lets the
+/// page draw saved routes on open and re-run DRC against the current poses.
+fn restoreRoutes(alloc: std.mem.Allocator, sr: SavedRoutes, nets: []const export_kicad.FlatNet) ?router.RouteResult {
+    var idx = std.StringHashMap(i32).init(alloc);
+    for (nets, 0..) |net, i| idx.put(net.name, @intCast(i)) catch return null;
+    const tracks = alloc.alloc(router.Track, sr.tracks.len) catch return null;
+    for (sr.tracks, 0..) |t, i| tracks[i] = .{
+        .x1 = t.x1,
+        .y1 = t.y1,
+        .x2 = t.x2,
+        .y2 = t.y2,
+        .layer = t.l,
+        .width = t.w,
+        .net = if (t.net.len > 0) (idx.get(t.net) orelse -1) else -1,
+    };
+    const vias = alloc.alloc(router.Via, sr.vias.len) catch return null;
+    for (sr.vias, 0..) |vi, i| vias[i] = .{
+        .x = vi.x,
+        .y = vi.y,
+        .dia = vi.d,
+        .drill = vi.drill,
+        .net = if (vi.net.len > 0) (idx.get(vi.net) orelse -1) else -1,
+    };
+    return .{ .tracks = tracks, .vias = vias, .routed = 0, .total = 0 };
+}
+
+/// The shown saved layout's persisted copper, rebuilt against the current
+/// netlist — the page draws it when no fresh ?route=1 ran, and DRC re-checks
+/// it against the CURRENT poses so copper gone stale after a part move shows
+/// violations. Null when nothing is shown or the layout carries no routes.
+fn shownSavedRoutes(
+    alloc: std.mem.Allocator,
+    layouts: []const SavedLayout,
+    shown: ?[]const u8,
+    placement: optimizer.Placement,
+) ?router.RouteResult {
+    const sn = shown orelse return null;
+    for (layouts) |L| {
+        if (!std.mem.eql(u8, L.name, sn)) continue;
+        const sr = L.routes orelse return null;
+        return restoreRoutes(alloc, sr, placement.nets);
+    }
+    return null;
 }
 
 /// The single-slot optimizer cache: the tuning weights that produced the
@@ -2243,6 +2381,10 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: 
         try writeJsonStr(w, L.kind);
         try w.print(",\"ts\":{d}", .{L.ts});
         if (L.rough) try w.writeAll(",\"rough\":true");
+        if (L.routes) |sr| {
+            try w.writeAll(",\"routes\":");
+            try writeSavedRoutesJson(w, sr);
+        }
         if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}", .{ s.hpwl, s.loop, s.caps, s.objective });
         try w.writeAll(",\"parts\":[");
         for (L.parts, 0..) |pt, j| {
@@ -3687,7 +3829,7 @@ fn writePcbData(
 
     // Routed copper + DRC markers — emitted in the same shape the
     // /api/pcb-route endpoint returns so drawRoute/drawClr/drawDrc read either.
-    try writeRoutedArrays(w, routed, violations);
+    try writeRoutedArrays(w, routed, violations, p.nets);
 
     // Per-footprint STEP-model references (URL + KiCad offset/rotation) for the
     // 3D-view tab. Only the full page needs it; the embedded preview has no 3D
@@ -3744,16 +3886,25 @@ fn writeModelsJson(
 /// Emit `"tracks":[…],"vias":[…],"drc":[…]` (world mm; track layer 0=top,
 /// 1=bottom). Shared by the page's embedded PCB blob and the /api/pcb-route
 /// response so both speak one routed-copper shape the client redraws from.
-fn writeRoutedArrays(w: *std.Io.Writer, routed: ?router.RouteResult, violations: []const drc.Violation) std.Io.Writer.Error!void {
+fn writeRoutedArrays(
+    w: *std.Io.Writer,
+    routed: ?router.RouteResult,
+    violations: []const drc.Violation,
+    nets: []const export_kicad.FlatNet,
+) std.Io.Writer.Error!void {
     try w.writeAll("\"tracks\":[");
     if (routed) |r| for (r.tracks, 0..) |t, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d}}}", .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.width });
+        try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d},\"net\":", .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.width });
+        try writeJsonStr(w, netNameOf(nets, t.net));
+        try w.writeAll("}");
     };
     try w.writeAll("],\"vias\":[");
     if (routed) |r| for (r.vias, 0..) |vi, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d}}}", .{ vi.x, vi.y, vi.dia });
+        try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":", .{ vi.x, vi.y, vi.dia, vi.drill });
+        try writeJsonStr(w, netNameOf(nets, vi.net));
+        try w.writeAll("}");
     };
     try w.writeAll("],\"drc\":[");
     for (violations, 0..) |vio, i| {
@@ -3761,6 +3912,12 @@ fn writeRoutedArrays(w: *std.Io.Writer, routed: ?router.RouteResult, violations:
         try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\"}}", .{ vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind) });
     }
     try w.writeAll("]");
+}
+
+/// A routed feature's net NAME for the persistable route JSON ("" for −1).
+fn netNameOf(nets: []const export_kicad.FlatNet, idx: i32) []const u8 {
+    if (idx < 0 or idx >= nets.len) return "";
+    return nets[@intCast(idx)].name;
 }
 
 /// Short label for a DRC violation kind (shown in the marker tooltip).
@@ -3792,6 +3949,10 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
         if (L.score) |s| {
             try w.print(",\"score\":{{\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}}}", .{ s.hpwl, s.loop, s.caps, s.objective });
         } else try w.writeAll(",\"score\":null");
+        if (L.routes) |sr| {
+            try w.writeAll(",\"routes\":");
+            try writeSavedRoutesJson(w, sr);
+        }
         try w.writeAll(",\"parts\":{");
         for (L.parts, 0..) |pt, j| {
             if (j > 0) try w.writeAll(",");
@@ -4362,6 +4523,43 @@ test "layouts sidecar round-trips part origin" {
     try std.testing.expectEqual(@as(usize, 2), got[0].parts.len);
     try std.testing.expectEqualStrings("C_VDDIN_BULK", got[0].parts[0].origin);
     try std.testing.expectEqualStrings("", got[0].parts[1].origin);
+}
+
+// spec: Web Server - A saved layout round-trips its routed copper (tracks + vias, net-name keyed) through the sidecar
+test "layouts sidecar round-trips saved routes" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
+    const tracks = [_]SavedTrack{.{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .l = 1, .w = 0.3, .net = "VBUS" }};
+    const vias = [_]SavedVia{.{ .x = 1, .y = 0, .d = 0.6, .drill = 0.3, .net = "VBUS" }};
+    const layouts = [_]SavedLayout{.{
+        .name = "routed",
+        .kind = KIND_MANUAL,
+        .ts = 1,
+        .score = null,
+        .parts = &parts,
+        .routes = .{ .tracks = &tracks, .vias = &vias },
+    }};
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJson(&aw.writer, &layouts, null);
+    const got = parseLayouts(alloc, aw.written()) orelse return error.TestParseFailed;
+    const sr = got[0].routes orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(usize, 1), sr.tracks.len);
+    try std.testing.expectEqual(@as(u8, 1), sr.tracks[0].l);
+    try std.testing.expectEqual(@as(f64, 0.3), sr.tracks[0].w);
+    try std.testing.expectEqualStrings("VBUS", sr.tracks[0].net);
+    try std.testing.expectEqual(@as(usize, 1), sr.vias.len);
+    try std.testing.expectEqual(@as(f64, 0.3), sr.vias[0].drill);
+
+    // Restore against a netlist where VBUS is index 1 → indices re-resolve.
+    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const nets = [_]export_kicad.FlatNet{ .{ .name = "GND", .pins = &pins }, .{ .name = "VBUS", .pins = &pins } };
+    const restored = restoreRoutes(alloc, sr, &nets) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(i32, 1), restored.tracks[0].net);
+    try std.testing.expectEqual(@as(i32, 1), restored.vias[0].net);
 }
 
 // spec: Web Server - A saved layout round-trips each part's board side and lock flag through the sidecar

@@ -1,25 +1,4 @@
 # guardian-snapshot v1
-add: // spec: eval/design_block - placement-group expands into a placement-order (pins) and a group (cohesion)
-add: // spec: kicad_pcb/format - padNumberText reads quoted, bare-atom, and bare-int pad numbers
-add: // spec: kicad_pcb/writer - preserves pcbnew-style boards: in-element net forms
-add: // spec: kicad_pcb/writer - swap_footprint mirrors a kmod onto the back for a footprint on B.Cu (layers F→B, local Y negated)
-add: // spec: lint - flags a duplicate id token within one design
-add: // spec: lint - flags a nested (id (id …)) residue form
-add: // spec: lint - flags a token that is not 8 hex chars starting a-f
-add: // spec: lint - flags an (id …) form attached to a note or net
-add: // spec: placement/module_policy - applies (module-policy …) author overrides over the heuristic detection
-add: // spec: placement/module_policy - exports the detected policy as an editable (module-policy …) block
-add: // spec: placement/optimizer - (centered) docks each side on the IC centerline, not its rail pad
-add: // spec: placement/optimizer - (no-refine) packs courtyards flush (touching) and symmetric
-add: // spec: placement/optimizer - a long manual side wraps into multiple depth lanes
-add: // spec: placement/optimizer - the manual floorplan docks sides around the anchor IC and stages unlisted parts
-add: // spec: placement/optimizer - the manual placement block keeps authored order and resolves rotations
-add: // spec: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
-add: // spec: serve/notes - Rejects bodies larger than 1 MiB
-add: // spec: serve/notes - Returns an empty string when no notes file exists yet
-add: // spec: serve/sync - runSyncPlan diffs a parsed board state against the design and returns a JSON envelope with version, summary, and the ops list
-add: // spec: serve/sync - runSyncPlan errors with BuildFailed when the source file fails to evaluate
-add: // spec: serve/sync - runSyncPlan errors with NotADesign when the source file does not evaluate to a design-block
 tag not on a test: ./src/kicad_pcb/format.zig:119: // spec: kicad_pcb/format - padNumberText reads quoted, bare-atom, and bare-int pad numbers
 tag not on a test: ./src/kicad_pcb/format.zig:79: // spec: kicad_pcb/format - sexprUnescape inverts sexprEscape so a load→save round-trip does not double-escape
 tag not on a test: ./src/kicad_pcb/format.zig:91: // spec: kicad_pcb/format - sexprEscape escapes embedded quotes and trailing backslash so the printed token round-trips
@@ -29,6 +8,7 @@ tag not on a test: ./src/serve/users.zig:251: // spec: serve/users - The user/ro
 unlinked tag: Web Server - A rough-seeded saved layout round-trips its rough flag through the sidecar in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - A saved layout round-trips each part's board side and lock flag through the sidecar in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - A saved layout round-trips each part's renumber-stable origin key through the sidecar in ./src/serve/pcb_layout_page.zig
+unlinked tag: Web Server - A saved layout round-trips its routed copper (tracks + vias, net-name keyed) through the sidecar in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - Module grouping tag detects placement-cohesion groups but not pin or diagram groups in ./src/serve/modules.zig
 unlinked tag: Web Server - Module-layout status of a missing sidecar is all-false in ./src/layout_status.zig
 unlinked tag: Web Server - Module-layout status reads rough and starred flags from the layouts sidecar in ./src/layout_status.zig
