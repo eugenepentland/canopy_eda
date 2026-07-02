@@ -100,14 +100,49 @@ const REGISTRY = [_]Asset{
 
 /// GET /static/:name — serve an embedded JS/CSS asset. 404 if the name is
 /// unknown, so pages can't accidentally pull an asset that isn't registered.
+/// Lazily-computed per-asset content hashes (the ETag values). 0 = not yet
+/// computed; the benign race (two request threads hashing the same immutable
+/// embedded bytes) stores the identical value, so no lock is needed.
+var etag_cache = [_]u64{0} ** REGISTRY.len;
+
+fn assetEtag(idx: usize) u64 {
+    const v = @atomicLoad(u64, &etag_cache[idx], .monotonic);
+    if (v != 0) return v;
+    const h = std.hash.Wyhash.hash(0, REGISTRY[idx].body);
+    const nz: u64 = if (h == 0) 1 else h; // 0 is the "uncomputed" sentinel
+    @atomicStore(u64, &etag_cache[idx], nz, .monotonic);
+    return nz;
+}
+
+/// GET /static/:name — serve an embedded asset with a content-hash ETag and
+/// `no-cache` (always revalidate, 304 when unchanged), so deploys can never
+/// leave a browser running a stale script against fresh HTML.
 pub fn staticAsset(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         res.body = "asset not found";
         return;
     };
-    for (REGISTRY) |a| {
+    for (REGISTRY, 0..) |a, i| {
         if (std.mem.eql(u8, a.name, name)) {
+            // Content-hash ETag + always-revalidate: after a deploy the
+            // browser's conditional GET misses the old tag and refetches, so
+            // clients can never run a stale script against new HTML (the
+            // "button exists but does nothing" failure). Unchanged assets
+            // stay cheap — the revalidation answers 304 with no body.
+            const tag = std.fmt.allocPrint(req.arena, "\"{x}\"", .{assetEtag(i)}) catch {
+                res.content_type = a.content_type;
+                res.body = a.body;
+                return;
+            };
+            res.header("etag", tag);
+            res.header("cache-control", "no-cache");
+            if (req.header("if-none-match")) |inm| {
+                if (std.mem.indexOf(u8, inm, tag[1 .. tag.len - 1]) != null) {
+                    res.status = 304;
+                    return;
+                }
+            }
             res.content_type = a.content_type;
             res.body = a.body;
             return;

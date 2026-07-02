@@ -606,6 +606,14 @@ Local dev still uses `http://localhost:7050`.
   (G explodes/re-coheres; per-design localStorage), and the sidebar
   Sub-circuits palette **Stamp**s a whole module ★ layout onto the board via
   the same origin_key bridge KiCad sync seeds from (`PCB.subseeds`).
+- **Single-layout designs (2026-07-02)**: a top-level DESIGN keeps exactly one
+  layout — no saved-layouts panel; the toolbar's "Save layout" overwrites the
+  single auto-starred snapshot (KiCad sync + fab outputs read it). Modules and
+  `?sub` sub circuits keep the multi-snapshot panel (variants per use case).
+  After a live Regenerate/Rough run the page reloads with `?show=cache` so the
+  fresh result is what you see (not the starred layout); Save commits it.
+  Static assets serve with content-hash ETags + no-cache revalidation, so a
+  deploy can never leave a browser running stale viewer JS.
 - **Fab outputs (no Gerber yet)**: `GET /api/pcb-centroid/:name` —
   side-aware pick-and-place CSV at the blessed poses (★ default → newest
   manual → any → cache, the KiCad-sync preference); `GET
