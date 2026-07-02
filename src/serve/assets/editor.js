@@ -279,6 +279,8 @@
     const w = String(val || "").trim().toLowerCase(); if (!w) return false;
     const reals = (M.hubs || []).filter((h) => !h.ghost);
     let hit = reals.filter((h) => h.ref.toLowerCase() === w || (h.ref.split("/").pop() || "").toLowerCase() === w || String(h.label || "").toLowerCase() === w);
+    // A canon inline part (chain filter/pad) has no cell of its own — its inline box is the target.
+    if (!hit.length) hit = (M.hubs || []).filter((h) => h.canon && (h.ref.toLowerCase() === w || (h.ref.split("/").pop() || "").toLowerCase() === w));
     if (!hit.length) hit = reals.filter((h) => (h.pins || []).some((p) => p.net && (p.net.toLowerCase() === w || chainKey(p.net).toLowerCase() === w)));
     if (!hit.length) return false;
     // Frame each match's whole CELL (the sec box that holds its inline chain + ghost
@@ -505,17 +507,21 @@
         line(h.cx + 5.5 + ox, h.cy + oy, h.x + h.w + ox, h.cy + oy);
         if (11 * s >= 7) { ctx.fillStyle = C.hubLabel; ctx.font = "600 11px sans-serif"; ctx.textAlign = "right"; ctx.fillText(h.label, h.x - 5 + ox, h.cy + oy); }
       } else {
-      // body — a ghost proxy is dashed + muted so it reads as a reference, not a real placement
-      ctx.fillStyle = h.ghost ? C.ghost : C.hub;
-      ctx.strokeStyle = seldHub ? C.sel : (h.ghost ? C.ghostStroke : C.hubStroke);
+      // body — a ghost proxy is dashed + muted so it reads as a reference, not a
+      // real placement; a `canon` inline part (a chain filter/pad whose only
+      // drawing is this one) is solid like any real part, with its ground rake.
+      const ghosty = h.ghost && !h.canon;
+      ctx.fillStyle = ghosty ? C.ghost : C.hub;
+      ctx.strokeStyle = seldHub ? C.sel : (ghosty ? C.ghostStroke : C.hubStroke);
       ctx.lineWidth = sw(seldHub ? 3 : 2);
-      if (h.ghost) ctx.setLineDash([sw(6), sw(4)]);
+      if (ghosty) ctx.setLineDash([sw(6), sw(4)]);
       roundRect(h.x + ox, h.y + oy, h.w, h.h, sw(4)); ctx.fill(); ctx.stroke();
       ctx.setLineDash([]);
+      if (h.canon && h.gnd) drawGround(h.cx + ox, h.y + h.h + oy, false, sw, false, "");
       const ev = h.terminal ? null : ercByRef.get(h.ref);            // ERC warning ring
       if (ev) { ctx.strokeStyle = ercColor(ev); ctx.lineWidth = sw(2); ctx.setLineDash([sw(3), sw(3)]); roundRect(h.x + ox - 3, h.y + oy - 3, h.w + 6, h.h + 6, sw(5)); ctx.stroke(); ctx.setLineDash([]); }
       if (15 * s >= 8) {
-        ctx.fillStyle = h.ghost ? C.ghostLabel : C.hubLabel; ctx.textAlign = "center";
+        ctx.fillStyle = ghosty ? C.ghostLabel : C.hubLabel; ctx.textAlign = "center";
         fitFont(h.label, h.w - 14, 15, 8, "600");       // shrink refdes/label to fit the box width
         ctx.fillText(h.label, h.cx + ox, h.y + oy + (h.part ? 15 : 16));
         if (h.part && 11 * s >= 7) {                    // second line: component / part number — shrunk to fit, not truncated
@@ -1160,7 +1166,10 @@
   // grid of self-contained per-IC cells. EVERY real IC gets its own cell — its
   // complete local circuit (owned point-to-point links with ghost partners, series
   // chains, pulls, bound bypass caps, extras spokes) on one card, so a regulator
-  // whose pins are all rails is a page too, not invisible. Each link's DETAIL is
+  // whose pins are all rails is a page too, not invisible. Two exceptions: test
+  // points fold into one "Test points" card, and a pure two-port passive (filter /
+  // pad / balun) draws inline in the chain that runs through it instead — solid,
+  // as its canonical drawing (`canon`). Each link's DETAIL is
   // still drawn exactly once: in the cell of its lower-degree end (the
   // peripheral's page shows the wire + chain + a dashed ghost of the busy hub;
   // the hub's page shows that pin as a labeled stub + partner chip — the
@@ -1212,7 +1221,7 @@
         // monitor mux) rides the OUTPUT leg as a small symbol; the partner ghost
         // sits on the net past it. With no tail this is the plain shifter (cyclops).
         const dev = devs[0], tail = link.passives.filter((x) => !x.device);
-        item.through = { ref: dev.ref, component: dev.component || "" };
+        item.through = { ref: dev.ref, component: dev.component || "", canon: inlinePart(dev.ref), gnd: hasGndPin(dev.ref) };
         const sOut = dev.outNet || b.net;                                   // shifter's own output net
         item.outNet = (sOut && sOut !== a.net) ? sOut : null;
         if (tail.length) {
@@ -1225,7 +1234,7 @@
         // collapsing to one box. Orient elements anchor→ghost; carry the net AFTER each.
         const fwd = a.ref === link.a.ref;
         const els = fwd ? link.passives : link.passives.slice().reverse();
-        item.chain = els.map((x) => ({ ref: x.ref, value: x.value || "", type: x.type, device: !!x.device, component: x.component || compOf.get(x.ref) || "", net: (fwd ? x.outNet : x.inNet) || "" }));
+        item.chain = els.map((x) => ({ ref: x.ref, value: x.value || "", type: x.type, device: !!x.device, component: x.component || compOf.get(x.ref) || "", net: (fwd ? x.outNet : x.inNet) || "", canon: !!x.device && inlinePart(x.ref), gnd: !!x.device && hasGndPin(x.ref) }));
         item.outNet = (b.net && b.net !== a.net) ? b.net : null;
       } else if (link.passives.length) {
         // A single series passive stays one small inline symbol on the wire. Carry the
@@ -1248,6 +1257,26 @@
     // partnerNets). Ties break lexically so the layout is stable across rebuilds.
     // A synthetic terminal stub ("ref ▸") is only ever a partner, never an owner.
     const links = icLinks(m).filter((lk) => !isTPRef(lk.a.ref) && !isTPRef(lk.b.ref));
+    // Pure two-port passives (filters, attenuator pads, baluns — a signal in +
+    // out and ground, NO supply pin) don't get a cell of their own: the signal
+    // chain that runs through them, drawn in its owner's cell, IS their complete
+    // schematic, so they render there solid (ref + part + ground rake) instead
+    // of as dashed proxies. Only parts that actually surface inline in some
+    // link are collapsed — an orphaned filter keeps its cell so it can't vanish.
+    const isRail = (n) => isPowerName(n) || /\d+v\d*/i.test(netLeaf(n));
+    const twoPortPassive = (ref) => {
+      let sig = 0, pwr = 0;
+      const seen = new Set();
+      real.forEach((h) => { if (h.ref === ref) h.pins.forEach((p) => {
+        const n = p.anet || p.net; if (!n || seen.has(n)) return; seen.add(n);
+        if (isGroundName(n)) return; if (isRail(n)) pwr++; else sig++;
+      }); });
+      return pwr === 0 && sig >= 1 && sig <= 2;
+    };
+    const hasGndPin = (ref) => real.some((h) => h.ref === ref && h.pins.some((p) => isGroundName(p.anet || p.net)));
+    const inlineDevs = new Set();
+    links.forEach((lk) => lk.passives.forEach((x) => { if (x.device) inlineDevs.add(x.ref); }));
+    const inlinePart = (r) => inlineDevs.has(r) && twoPortPassive(r);
     const byRef = new Map();                              // ref -> [link index…]
     links.forEach((lk, i) => [lk.a.ref, lk.b.ref].forEach((r) => {
       let a = byRef.get(r); if (!a) { a = []; byRef.set(r, a); } a.push(i);
@@ -1335,7 +1364,7 @@
     });
     const PITCH = 38, HEAD = 46, PAD = 18, LBL = 44, GROWGAP = 20, ICW = 168, GW = 146, OUT = 92, MX = 24, MY = 22;
     const SHEAD = 38, SHIFT_W = 122, LEAD = 92, PULLH = 30, PULL_DROP = 11;       // pass-through shifter block + leads (wide enough for a ~14-char net label); pull-branch height; riser to the spoke below the wire
-    const CHAIN_SLOT = 80, CHAIN_DEV = 30;        // per-element slot in a multi-element chain row; device-block half-width (passive elements use a small symbol)
+    const CHAIN_SLOT = 96, CHAIN_DEV = 40;        // per-element slot in a multi-element chain row; device-block half-width (passive elements use a small symbol) — wide enough for an MPN like "lfcn-1575d+" now that a chain filter's inline block is its ONLY drawing
     const BUS_LEAD = 46;                          // length of a ghost bus-pin's lead (dot → lead end where the hover reveal connects)
     // Extras band — the pins with no point-to-point partner (power/ground, multi-drop,
     // board IO) shown as horizontal SPOKES that fan out to BOTH sides of the IC, like
@@ -1350,8 +1379,8 @@
     const CHIP_CAP = 4, CHIP_H = 16, CHIP_GAP = 5, CHIP_LEADGAP = 9, CHIP_CHARW = 5.7, CHIP_PADX = 12, NETLBL_CHARW = 6.4;
     const chipW = (t) => Math.max(24, Math.round(String(t).length * CHIP_CHARW + CHIP_PADX));
     const cells = [];
-    const cellRefs = [], seenCellRef = new Set();          // every real IC (test points aside), in scene (authored/section) order
-    real.forEach((h) => { if (!isTPRef(h.ref) && !seenCellRef.has(h.ref)) { seenCellRef.add(h.ref); cellRefs.push(h.ref); } });
+    const cellRefs = [], seenCellRef = new Set();          // every real IC (test points + inline two-ports aside), in scene order
+    real.forEach((h) => { if (!isTPRef(h.ref) && !inlinePart(h.ref) && !seenCellRef.has(h.ref)) { seenCellRef.add(h.ref); cellRefs.push(h.ref); } });
     cellRefs.forEach((ref) => {
       const parts = byIC.get(ref) || new Map();
       const groups = [...parts.entries()].map(([pref, items]) => ({ pref, label: labelOf.get(pref) || pref, items })).sort((a, b) => b.items.length - a.items.length);
@@ -1485,7 +1514,7 @@
                 cell.wires.push({ net: prevNet, pts: [[prevX, r.y], [cx - dir * half, r.y]] });
                 if (prevNet) cell.labels.push({ text: prevNet, x: (prevX + cx - dir * half) / 2, y: r.y - 9, w: segW(prevX, cx - dir * half) });
                 if (el.device) {
-                  cell.ghosts.push({ ref: el.ref, label: el.ref, part: el.component || "", x: cx - half, y: r.y - SHEAD / 2, w: 2 * half, h: SHEAD, pins: [
+                  cell.ghosts.push({ ref: el.ref, label: el.ref, part: el.component || "", canon: el.canon, gnd: el.gnd, x: cx - half, y: r.y - SHEAD / 2, w: 2 * half, h: SHEAD, pins: [
                     { pin: prevNet, name: "", side: onRight ? "left" : "right", x: cx - dir * half, y: r.y, net: prevNet, vx: null, vy: null },
                     { pin: el.net, name: "", side: onRight ? "right" : "left", x: cx + dir * half, y: r.y, net: el.net, vx: null, vy: null },
                   ] });
@@ -1543,7 +1572,7 @@
               if (rr.it.outNet && !rr.it.tail) pullsOn(rr.it.outNet, shOut, ghIn, rr.y, onRight ? 1 : -1);
             });
             const d = run[0].it.through;
-            cell.ghosts.push({ ref: d.ref, label: d.ref, part: d.component || compOf.get(d.ref) || "", x: shiftX, y: run[0].y - SHEAD, w: SHIFT_W, h: (run[run.length - 1].y + PITCH / 2) - (run[0].y - SHEAD), pins: spins });
+            cell.ghosts.push({ ref: d.ref, label: d.ref, part: d.component || compOf.get(d.ref) || "", canon: d.canon, gnd: d.gnd, x: shiftX, y: run[0].y - SHEAD, w: SHIFT_W, h: (run[run.length - 1].y + PITCH / 2) - (run[0].y - SHEAD), pins: spins });
             i = j;
           }
           const isTerm = g.items.length > 0 && g.items.every((it) => it.terminal);
@@ -1659,7 +1688,7 @@
       }
       c.ghosts.forEach((g) => {
         const pins2 = g.pins.map((p) => ({ ...p, x: ox + p.x, y: oy + p.y, vx: p.vx != null ? ox + p.vx : null, vy: p.vy != null ? oy + p.vy : null }));
-        m.hubs.push({ ref: g.ref, label: g.label, part: g.part, x: ox + g.x, y: oy + g.y, w: g.w, h: g.h, cx: ox + g.x + g.w / 2, cy: oy + g.y + g.h / 2, pins: pins2, synthetic: true, ghost: true, terminal: !!g.terminal, partnerRef: g.terminal ? null : g.ref });
+        m.hubs.push({ ref: g.ref, label: g.label, part: g.part, canon: !!g.canon, gnd: !!g.gnd, x: ox + g.x, y: oy + g.y, w: g.w, h: g.h, cx: ox + g.x + g.w / 2, cy: oy + g.y + g.h / 2, pins: pins2, synthetic: true, ghost: true, terminal: !!g.terminal, partnerRef: g.terminal ? null : g.ref });
       });
       c.wires.forEach((w) => { const pts = w.pts.map((pt) => [ox + pt[0], oy + pt[1]]); m.wires.push({ net: w.net, bus: false, link: true, diff: w.diff, via: w.via, pts, bb: bbOf(pts) }); });
       c.labels.forEach((l) => m.labels.push({ text: l.text, x: ox + l.x, y: oy + l.y, anchor: l.anchor || "center", ground: !!l.ground, port: false, net: l.text, link: true, diff: l.diff, w: l.w }));
