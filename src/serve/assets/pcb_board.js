@@ -133,19 +133,73 @@ function refreshUnplaced(){
  var lbl=el("text",{"class":"unplaced-lbl",x:(x0+6).toFixed(1),y:ly.toFixed(1)});
  lbl.textContent="⚠ "+n+" part"+(n==1?"":"s")+" not in placement spec";
  gU.appendChild(lbl);}
-// ── Ratsnest: built once, updated incrementally ─────────────────────────
-// The old rats() recreated EVERY airwire + loop overlay element on every
-// pointermove — thousands of DOM allocations per frame on a big board, which
-// is what made barracuda drags crawl. Now gR holds one <line> per link
-// (ratLines, index-aligned with PCB.links) and one <g> per decoupling loop
-// (loopGs); a drag rewrites only the moved parts' line endpoints and rebuilds
-// their few loop groups (ratsUpdate). Full rats() rebuilds remain for
-// toggles (ratsnest on/off, net colours, route arrival, load/undo).
-var gRL=document.createElementNS(NS,"g"),gRP=document.createElementNS(NS,"g");
-gR.appendChild(gRL);gR.appendChild(gRP);
-var ratLines=[],loopGs=[],partLinks={},partLoops={};
-(PCB.links||[]).forEach(function(l,li){(partLinks[l.a]=partLinks[l.a]||[]).push(li);
- (partLinks[l.b]=partLinks[l.b]||[]).push(li);});
+// ── Canvas overlay: the non-interactive bulk leaves the DOM ─────────────
+// Airwires, routed copper, and clearance halos are pointer-events:none
+// visuals; as retained SVG they were thousands of nodes that made every
+// browser paint slow on a big board, no matter how little actually changed.
+// They now render on ONE 2D canvas stacked over the SVG (KiCad-style —
+// ratsnest/copper draw above the parts); repainting a few thousand canvas
+// lines costs well under a frame, so drag/pan/zoom simply repaint it.
+// Decoupling-loop overlays stay SVG (few of them, and they carry tooltips).
+var OV=document.createElement("canvas");OV.className="pcb-overlay";
+(function(){var par=svg.parentNode;if(!par)return;
+ if(getComputedStyle(par).position==="static")par.style.position="relative";
+ par.appendChild(OV);})();
+var ovQueued=false;
+function ovPaintSoon(){if(ovQueued)return;ovQueued=true;
+ (window.requestAnimationFrame||setTimeout)(ovPaint);}
+function ovPaint(){ovQueued=false;
+ var r=svg.getBoundingClientRect();if(!r.width)return;
+ var dpr=window.devicePixelRatio||1,w=Math.round(r.width*dpr),h=Math.round(r.height*dpr);
+ if(OV.width!==w||OV.height!==h){OV.width=w;OV.height=h;
+  OV.style.width=r.width+"px";OV.style.height=r.height+"px";}
+ OV.style.left=svg.offsetLeft+"px";OV.style.top=svg.offsetTop+"px";
+ var ctx=OV.getContext("2d");
+ ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,w,h);
+ var k=(r.width/vb.w)*dpr;
+ ctx.setTransform(k,0,0,k,-vb.x*k,-vb.y*k);   // draw in svg-unit coordinates
+ paintLinks(ctx);paintClr(ctx);paintTracks(ctx);}
+function paintLinks(ctx){if(!ratsOn)return;
+ (PCB.links||[]).forEach(function(l){
+  var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
+  ctx.strokeStyle=linkCol(l);
+  ctx.globalAlpha=(l.k=="signal")?0.55:0.9;
+  ctx.lineWidth=(l.k=="signal")?0.7:1.3;
+  ctx.beginPath();ctx.moveTo(X(a.x),Y(a.y));ctx.lineTo(X(b.x),Y(b.y));ctx.stroke();});
+ ctx.globalAlpha=1;}
+function paintTracks(ctx){
+ ctx.lineCap="round";ctx.globalAlpha=0.85;
+ (PCB.tracks||[]).forEach(function(t){
+  ctx.strokeStyle=(t.l==0)?"#f85149":"#388bfd";
+  ctx.lineWidth=Math.max(t.w*S,1.2);
+  ctx.beginPath();ctx.moveTo(X(t.x1),Y(t.y1));ctx.lineTo(X(t.x2),Y(t.y2));ctx.stroke();});
+ ctx.globalAlpha=1;ctx.lineCap="butt";
+ (PCB.vias||[]).forEach(function(v){
+  var rr=Math.max(v.d/2*S,2.5),dr=(v.drill>0)?v.drill:viaGeo().drill;
+  var rh=Math.min(Math.max(dr/2*S,1),rr*0.7);
+  ctx.fillStyle="#ca8a04";ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rr,0,6.2832);ctx.fill();
+  ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rh,0,6.2832);ctx.fill();});}
+function paintClr(ctx){
+ var cb=document.getElementById("r-clr-show");if(!cb||!cb.checked)return;
+ var clr=clrVal();
+ ctx.strokeStyle="#d29922";ctx.lineWidth=0.8;ctx.fillStyle="rgba(210,153,34,0.13)";
+ ctx.setLineDash([3,2]);
+ P.forEach(function(p,i){p.pads.forEach(function(pad){var r=wrect(i,pad);
+  ctx.beginPath();ctx.rect(X(r.x0-clr),Y(r.y0-clr),(r.x1-r.x0+2*clr)*S,(r.y1-r.y0+2*clr)*S);
+  ctx.fill();ctx.stroke();});});
+ (PCB.vias||[]).forEach(function(v){
+  ctx.beginPath();ctx.arc(X(v.x),Y(v.y),(v.d/2+clr)*S,0,6.2832);ctx.fill();ctx.stroke();});
+ ctx.setLineDash([]);ctx.globalAlpha=0.20;ctx.lineCap="round";
+ (PCB.tracks||[]).forEach(function(t){
+  ctx.lineWidth=(t.w+2*clr)*S;
+  ctx.beginPath();ctx.moveTo(X(t.x1),Y(t.y1));ctx.lineTo(X(t.x2),Y(t.y2));ctx.stroke();});
+ ctx.globalAlpha=1;ctx.lineCap="butt";}
+window.addEventListener("resize",ovPaintSoon);
+
+// ── Ratsnest: airwires on the canvas; loop overlays stay SVG ────────────
+var gRP=document.createElementNS(NS,"g");
+gR.appendChild(gRP);
+var loopGs=[],partLoops={};
 (PCB.loops||[]).forEach(function(L,k){(partLoops[L.hub]=partLoops[L.hub]||[]).push(k);
  (partLoops[L.cap]=partLoops[L.cap]||[]).push(k);});
 function linkCol(l){var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#22b8cf":"#9aa7b4");
@@ -171,30 +225,20 @@ function drawLoop(k){var L=PCB.loops[k],g=loopGs[k];if(!L||!g)return;
  if(!routedNow){ if(cReal)drawVia(g,C.x,C.y,viaGeo().dia,viaGeo().drill);
                  if(dReal)drawVia(g,D.x,D.y,viaGeo().dia,viaGeo().drill); }}
 function rats(){
- while(gRL.firstChild)gRL.removeChild(gRL.firstChild);
  while(gRP.firstChild)gRP.removeChild(gRP.firstChild);
- ratLines=[];loopGs=[];
+ loopGs=[];
+ ovPaintSoon();   // airwires live on the canvas overlay
  if(!ratsOn)return;
- (PCB.links||[]).forEach(function(l){
-   var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
-   var e=el("line",{x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),
-     stroke:linkCol(l),"stroke-width":l.k=="signal"?0.7:1.3,opacity:l.k=="signal"?0.55:0.9});
-   gRL.appendChild(e);ratLines.push(e);});
  (PCB.loops||[]).forEach(function(L,k){var g=document.createElementNS(NS,"g");
    gRP.appendChild(g);loopGs.push(g);drawLoop(k);});
 }
 // Update only the airwires + loop overlays touching the given part indices —
 // the per-pointermove path. O(links-on-moved-parts), not O(board).
 function ratsUpdate(idxs){
- if(!ratsOn||!ratLines.length)return;
- var seenL={},seenK={};
+ if(!ratsOn)return;
+ ovPaintSoon();   // airwires: one cheap full canvas repaint per frame
+ var seenK={};
  idxs.forEach(function(i){
-  (partLinks[i]||[]).forEach(function(li){
-    if(seenL[li])return;seenL[li]=1;
-    var l=PCB.links[li],e=ratLines[li];if(!e)return;
-    var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
-    e.setAttribute("x1",X(a.x).toFixed(1));e.setAttribute("y1",Y(a.y).toFixed(1));
-    e.setAttribute("x2",X(b.x).toFixed(1));e.setAttribute("y2",Y(b.y).toFixed(1));});
   (partLoops[i]||[]).forEach(function(k){if(seenK[k])return;seenK[k]=1;drawLoop(k);});});
 }
 function delta(id,cur,base){
@@ -303,7 +347,7 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
  var sb=body.getAttribute("data-schbase")||"/schematics/";
  h+='<a class="prop-sch" href="'+sb+encodeURIComponent(PCB.name)+'#comp-'+encodeURIComponent(p.ref)+'" '+
   'title="Open the schematic page scrolled to this part">Show in schematic →</a>';
- body.innerHTML=h;
+ body.innerHTML=h;netIdxDrop();
  var cb=body.querySelector("[data-court-ref]");
  if(cb)cb.addEventListener("click",function(){openCourt(cb.getAttribute("data-court-ref"));});
  body.querySelectorAll(".pn[data-net]").forEach(function(e){var nn=e.getAttribute("data-net");
@@ -681,7 +725,18 @@ function subPanelRefresh(){var box=document.getElementById("sub-panel");if(!box)
  var box=document.createElement("div");box.id="sub-panel";box.className="sub-panel";
  side.appendChild(box);subPanelRefresh();})();
 }
-function hlBy(at,v,cls,on){document.querySelectorAll("["+at+"]").forEach(function(e){
+// Per-net element index so a pad hover toggles only ITS net's nodes instead
+// of scanning every [data-net] element on the board (thousands on big boards).
+// Invalidated when the sidebar re-renders (it holds [data-net] pin chips too).
+var NETIDX=null;
+function netIdxDrop(){NETIDX=null;}
+function netEls(v){
+ if(!NETIDX){NETIDX={};document.querySelectorAll("[data-net]").forEach(function(e){
+  var n=e.getAttribute("data-net");(NETIDX[n]=NETIDX[n]||[]).push(e);});}
+ return NETIDX[v]||[];}
+function hlBy(at,v,cls,on){
+ if(at==="data-net"){netEls(v).forEach(function(e){e.classList.toggle(cls,on);});return;}
+ document.querySelectorAll("["+at+"]").forEach(function(e){
  if(e.getAttribute(at)===v)e.classList.toggle(cls,on);});}
 function wire(at,cls){document.querySelectorAll("["+at+"]").forEach(function(e){
  e.addEventListener("mouseenter",function(){hlBy(at,e.getAttribute(at),cls,true);});
@@ -702,7 +757,12 @@ function selNet(net){if(net&&selNetCur===net)net=null;selNetCur=net;
   e.classList.toggle("net-sel",on&&!pin);});}
 if(RO)gPads.addEventListener("click",function(ev){var net=netAt(ev.target);if(net){ev.stopPropagation();selNet(net);}});
 var VBW=PCB.w,VBH=PCB.h,vb={x:0,y:0,w:VBW,h:VBH};
-function setVB(){svg.setAttribute("viewBox",vb.x.toFixed(1)+" "+vb.y.toFixed(1)+" "+vb.w.toFixed(1)+" "+vb.h.toFixed(1));}
+function setVB(){svg.setAttribute("viewBox",vb.x.toFixed(1)+" "+vb.y.toFixed(1)+" "+vb.w.toFixed(1)+" "+vb.h.toFixed(1));
+ // Pad-number labels are thousands of <text> nodes — unreadable when zoomed
+ // out anyway, so drop them from rendering entirely below ~1.15 px/unit.
+ var r=svg.getBoundingClientRect();
+ svg.classList.toggle("zoomed-out",r.width>0&&(r.width/vb.w)<1.15);
+ ovPaintSoon();}
 function zoomAt(cx,cy,f){if((f<1&&vb.w<VBW*0.08)||(f>1&&vb.w>VBW*8))return;
  var r=svg.getBoundingClientRect();
  var px=vb.x+(cx-r.left)*(vb.w/r.width),py=vb.y+(cy-r.top)*(vb.h/r.height);
@@ -799,25 +859,10 @@ function clearRouteFor(idxs){
  PCB.tracks=(PCB.tracks||[]).filter(function(t){return !(t.net&&nets[t.net]);});
  PCB.vias=(PCB.vias||[]).filter(function(v){return !(v.net&&nets[v.net]);});
  PCB.drc=[];drawRoute();drawDrc();}
-function drawRoute(){while(gT.firstChild)gT.removeChild(gT.firstChild);
- (PCB.tracks||[]).forEach(function(t){gT.appendChild(el("line",{x1:X(t.x1).toFixed(1),y1:Y(t.y1).toFixed(1),
-   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:t.l==0?"#f85149":"#388bfd",
-   "stroke-width":Math.max(t.w*S,1.2).toFixed(1),"stroke-linecap":"round","stroke-linejoin":"round",opacity:0.85}));});
- (PCB.vias||[]).forEach(function(v){drawVia(gT,v.x,v.y,v.d,(v.drill>0)?v.drill:viaGeo().drill);});}
+function drawRoute(){ovPaintSoon();} // routed copper lives on the canvas overlay
 function clrVal(){var ci=document.getElementById("r-cl"),c=ci?parseFloat(ci.value):NaN;
  return (c>0)?c:(PCB.clr||0.127);}
-function drawClr(){while(gC.firstChild)gC.removeChild(gC.firstChild);
- var cb=document.getElementById("r-clr-show"); if(!cb||!cb.checked)return;
- var clr=clrVal();
- P.forEach(function(p,i){p.pads.forEach(function(pad){var r=wrect(i,pad);
-   gC.appendChild(el("rect",{x:X(r.x0-clr).toFixed(1),y:Y(r.y0-clr).toFixed(1),
-     width:((r.x1-r.x0+2*clr)*S).toFixed(1),height:((r.y1-r.y0+2*clr)*S).toFixed(1),
-     rx:(clr*S).toFixed(1),fill:"rgba(210,153,34,0.13)",stroke:"#d29922","stroke-width":0.8,"stroke-dasharray":"3 2"}));});});
- (PCB.vias||[]).forEach(function(v){gC.appendChild(el("circle",{cx:X(v.x).toFixed(1),cy:Y(v.y).toFixed(1),
-   r:((v.d/2+clr)*S).toFixed(1),fill:"rgba(210,153,34,0.13)",stroke:"#d29922","stroke-width":0.8,"stroke-dasharray":"3 2"}));});
- (PCB.tracks||[]).forEach(function(t){gC.appendChild(el("line",{x1:X(t.x1).toFixed(1),y1:Y(t.y1).toFixed(1),
-   x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:"#d29922","stroke-opacity":0.20,
-   "stroke-width":((t.w+2*clr)*S).toFixed(1),"stroke-linecap":"round"}));});}
+function drawClr(){ovPaintSoon();} // clearance halos live on the canvas overlay
 var clrCb=document.getElementById("r-clr-show");
 if(clrCb)clrCb.addEventListener("change",drawClr);
 var clrIn=document.getElementById("r-cl");
@@ -990,6 +1035,7 @@ var rgl=document.getElementById("pcb-regen");
 if(rgl)rgl.addEventListener("click",function(ev){ev.preventDefault();if(onSub()){subReload();return;}liveRegen("");});
 var rgh=document.getElementById("pcb-rough");
 if(rgh)rgh.addEventListener("click",function(ev){ev.preventDefault();if(onSub()){subReload();return;}liveRegen("?rough=1");});
+setVB(); // initial overlay paint + zoom-dependent label visibility
 // ── Collapsible control deck (accordion) + board-view overlays ──────────
 (function(){
  var chips=Array.prototype.slice.call(document.querySelectorAll(".tab-chip"));
