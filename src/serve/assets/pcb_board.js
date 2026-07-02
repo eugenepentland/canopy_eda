@@ -807,19 +807,24 @@ function outlineArm(on){outlineMode=on;
 // hoisted), so a middle-button or Space-held drag pans the board even when the
 // cursor is over a component instead of grabbing the part. Capture on svg so its
 // pointermove/up drive the pan regardless of which child was hit.
+// Guarded pointer capture: capture only keeps events flowing when the cursor
+// leaves the svg mid-drag — never worth aborting the whole gesture over (a
+// synthetic/test pointer can't be captured and used to throw NotFoundError
+// out of the pointerdown handler, killing the drag before it started).
+function pcap(ev){try{pcap(ev);}catch(e){}}
 function startPan(ev){pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:false};
- svg.setPointerCapture(ev.pointerId);svg.style.cursor="grabbing";}
+ pcap(ev);svg.style.cursor="grabbing";}
 var clickCand=null; // pressed a part but won't drag (RO page / locked part)
 svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.preventDefault();
  if(outlineMode){var om=mm(ev);outDraw={x0:om.x,y0:om.y,x1:om.x,y1:om.y};
-  svg.setPointerCapture(ev.pointerId);return;}
+  pcap(ev);return;}
  if(SPACE||ev.button===1){startPan(ev);return;}
  var m=mm(ev),hi=partAt(m.x,m.y);
  if(hi<0){
-  marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false};svg.setPointerCapture(ev.pointerId);
+  marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false};pcap(ev);
   marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);return;}
  // Part gesture (hit-tested — parts are canvas-painted, not DOM).
- svg.setPointerCapture(ev.pointerId);
+ pcap(ev);
  if(RO||P[hi].locked){clickCand={i:hi,m:m};return;}
  if(sel.length>1&&sel.indexOf(hi)>=0){gdrag=gdragStart(m,null);svg.style.cursor="grabbing";return;}
  if(sel.length)selClear();
