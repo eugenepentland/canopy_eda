@@ -402,8 +402,8 @@ function mm(ev){var r=svg.getBoundingClientRect(),vb=svg.viewBox.baseVal;
 // hint. No scrolling list. renderProps rebuilds the panel; updatePropLive is
 // the cheap position/rotation refresh during a drag or rotate.
 var selRef=null;
-function pEsc(s){return String(s==null?"":s).replace(/[&<>]/g,function(c){
- return c=="&"?"&amp;":(c=="<"?"&lt;":"&gt;");});}
+function pEsc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+ return c=="&"?"&amp;":(c=="<"?"&lt;":(c==">"?"&gt;":"&quot;"));});}
 function pMm(v){return (Math.round(v*100)/100).toFixed(2);}
 function nLeaf(s){var i=String(s).lastIndexOf("/");return i<0?s:s.slice(i+1);}
 function pRow(k,v,id){return '<div class="prop-row"><span class="k">'+k+'</span><span class="v"'+
@@ -419,6 +419,18 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
   pRow("Rotation",rot+"°","prop-rot")+pRow("Side",(p.side==="bottom")?"Bottom (B.Cu)":"Top (F.Cu)","prop-side")+
   pRow("Type",(p.kind=="hub"?"Hub / IC":"Passive")+(p.locked?" · 🔒 locked":""))+'</div>';
  if(p.fp)h+='<button class="prop-fp" data-court-ref="'+pEsc(p.ref)+'" title="Edit footprint courtyard">▢ '+pEsc(p.fp)+'</button>';
+ // Sub-circuit row: the part's group, and — when the module has a stampable
+ // saved layout — the same Stamp the palette offers, so "pull the module's
+ // layout" is reachable from the part itself.
+ var pg=grpOf(p.ref);
+ if(pg&&GRPS[pg]&&GRPS[pg].length>1){
+  var pinf=(PCB.subseedinfo||{})[pg];
+  h+='<div class="prop-sec">Sub-circuit</div><div class="prop-grp"><span class="grp-name">'+pEsc(pg)+
+   '</span><span class="grp-n">'+GRPS[pg].length+' parts</span>'+
+   (pinf&&!RO?'<button class="btn grp-stamp" data-grp-stamp="'+pEsc(pg)+'" title="'+stampTitle(pg,pinf)+'">Stamp module layout</button>':
+    (pinf?'':'<span class="grp-noseed" title="No saved layout on the module matches its current parts — open the module’s own /pcb-layout page, lay it out and save (★ star it to pin the choice).">no saved module layout</span>'))+
+   '</div>';
+ }
  var pads=(p.pads||[]).slice().sort(function(a,b){var an=parseInt(a.num,10),bn=parseInt(b.num,10);
   if(!isNaN(an)&&!isNaN(bn))return an-bn;return String(a.num||"").localeCompare(String(b.num||""));});
  var pins="";pads.forEach(function(pd){if(!pd.num&&!pd.net)return;
@@ -430,6 +442,8 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
  body.innerHTML=h;netIdxDrop();
  var cb=body.querySelector("[data-court-ref]");
  if(cb)cb.addEventListener("click",function(){openCourt(cb.getAttribute("data-court-ref"));});
+ var gsb=body.querySelector("[data-grp-stamp]");
+ if(gsb)gsb.addEventListener("click",function(){if(stampGroupFn)stampGroupFn(gsb.getAttribute("data-grp-stamp"));});
  body.querySelectorAll(".pn[data-net]").forEach(function(e){var nn=e.getAttribute("data-net");
   if(!nn)return;e.style.cursor="pointer";
   if(nn===selNetCur)e.classList.add("net-sel");
@@ -451,6 +465,18 @@ function clearSel(){if(!selRef)return;selRef=null;renderProps();markSelPart();}
 // the choice persists per design in localStorage.
 function grpOf(ref){var i=String(ref).indexOf("/");return i<0?null:ref.slice(0,i);}
 var GRPS={};P.forEach(function(p,i){var g=grpOf(p.ref);if(g)(GRPS[g]=GRPS[g]||[]).push(i);});
+// stampGroup lives in the edit-only block below; the properties panel (shared
+// with RO pages) reaches it through this indirection.
+var stampGroupFn=null;
+// Tooltip for a group's Stamp button: which module snapshot the seeds came
+// from (PCB.subseedinfo), how much of the group it covers, and — when the ★
+// has gone stale — the fuller snapshot to consider re-starring.
+function stampTitle(g,inf){var tot=(GRPS[g]||[]).length;
+ var t="Place this sub-circuit from its module layout ‘"+pEsc(inf.layout)+"’"+
+  (inf.starred?" (★)":"")+" — "+inf.n+" of "+tot+" parts";
+ if(!inf.starred)t+=" · no ★ on the module; best-coverage snapshot used (★ one on the module page to pin it)";
+ if(inf.alt)t+=" · newer snapshot ‘"+pEsc(inf.alt)+"’ covers "+inf.alt_n+" module parts — ★ it on the module page to stamp from it instead";
+ return t;}
 var rigidOffKey="pcb-rigid-off:"+PCB.name, rigidOff={};
 try{rigidOff=JSON.parse(localStorage.getItem(rigidOffKey)||"{}")||{};}catch(e){}
 function rigidSave(){try{localStorage.setItem(rigidOffKey,JSON.stringify(rigidOff));}catch(e){}}
@@ -499,6 +525,7 @@ function stampGroup(g){var seeds=PCB.subseeds||{},idxs=GRPS[g]||[],hit=[];
   P[i].rot=h.sd.rot||0;P[i].side=h.sd.side||"top";setT(i);});
  delete rigidOff[g];rigidSave();
  clearRouteFor(idxs);rats();drawClr();fetchScore();refreshUnplaced();subPanelRefresh();}
+stampGroupFn=stampGroup;
 // Iterative layout editing: curLayout is the saved layout the Update button
 // writes back into (overwrite in place) instead of forcing a new one. Set by
 // Load and after a Save as…. Save/Update persist in place (no page reload — see
@@ -747,19 +774,26 @@ if(updBtn)updBtn.addEventListener("click",function(){if(!curLayout)return;persis
 loadLayoutScores();
 // ── Sub-circuits palette ─────────────────────────────────────────────
 // One row per sub-block: member count, rigid/exploded toggle, and — when the
-// module has a ★ layout (PCB.subseeds) — a Stamp button that drops the whole
-// pre-laid cluster beside the board, ready to drag into place.
+// module has a stampable saved layout (PCB.subseeds) — a Stamp button that
+// drops the whole pre-laid cluster onto the board. The tooltip names the
+// snapshot the seeds came from (PCB.subseedinfo: the ★ when starred, else
+// best coverage); a coverage chip appears when it doesn't span the group, and
+// a "—" placeholder marks groups with nothing to stamp.
 function subPanelRefresh(){var box=document.getElementById("sub-panel");if(!box)return;
  var names=Object.keys(GRPS).sort();var h='<div class="side-h">Sub-circuits</div>';
- var seeds=PCB.subseeds||{};
+ var seeds=PCB.subseeds||{},sinfo=PCB.subseedinfo||{};
  names.forEach(function(g){
   var hasSeed=GRPS[g].some(function(i){return !!seeds[P[i].ref];});
+  var inf=sinfo[g],tot=GRPS[g].length;
+  var cov=(inf&&inf.n<tot)?'<span class="sub-cov" title="The module snapshot covers '+inf.n+' of this group’s '+tot+' parts — the rest keep their positions on Stamp.">'+inf.n+'/'+tot+'</span>':'';
   h+='<div class="sub-row" data-grp="'+pEsc(g)+'">'+
-   '<span class="sub-name">'+pEsc(g)+'</span><span class="sub-n">'+GRPS[g].length+'</span>'+
+   '<span class="sub-name">'+pEsc(g)+'</span><span class="sub-n">'+tot+'</span>'+
    '<button class="btn sub-rigid'+(grpRigid(g)?" on":"")+'" data-rigid="'+pEsc(g)+'" title="'+
     (grpRigid(g)?"Rigid — drags as one unit. Click to explode.":"Exploded — parts move individually. Click to re-cohere.")+'">'+
-    (grpRigid(g)?"\u{1F517}":"\u{2702}")+'</button>'+
-   (hasSeed?'<button class="btn sub-stamp" data-stamp="'+pEsc(g)+'" title="Place this sub-circuit from its module \u2605 layout">Stamp</button>':'')+
+    (grpRigid(g)?"\u{1F517}":"\u{2702}")+'</button>'+cov+
+   (hasSeed?'<button class="btn sub-stamp" data-stamp="'+pEsc(g)+'" title="'+
+     (inf?stampTitle(g,inf):"Place this sub-circuit from its module layout")+'">Stamp</button>':
+    '<span class="sub-noseed" title="No saved layout on the module matches its current parts \u2014 lay it out and save on the module\u2019s own page.">\u2014</span>')+
    '</div>';});
  box.innerHTML=h;
  box.querySelectorAll("[data-rigid]").forEach(function(b){b.addEventListener("click",function(){grpToggle(b.getAttribute("data-rigid"));});});
@@ -964,12 +998,40 @@ function partByRef(ref){for(var i=0;i<P.length;i++)if(P[i].ref===ref)return P[i]
 function gceil(v){return Math.ceil(v/G-1e-9)*G;}
 function padExt(p){var hw=0,hh=0;p.pads.forEach(function(pd){
  hw=Math.max(hw,Math.abs(pd.x)+pd.w/2);hh=Math.max(hh,Math.abs(pd.y)+pd.h/2);});return {hw:hw,hh:hh};}
-function courtDraw(p,hw,hh){var s=document.getElementById("court-svg");while(s.firstChild)s.removeChild(s.firstChild);
- var VB=260,VH=220,pd=28,sc=Math.min((VB-pd)/(2*hw),(VH-pd)/(2*hh)),cx=VB/2,cy=VH/2;
- var g=el("g",{transform:"translate("+cx+","+cy+")"});s.appendChild(g);
- g.appendChild(el("rect",{x:(-hw*sc).toFixed(1),y:(-hh*sc).toFixed(1),width:(2*hw*sc).toFixed(1),height:(2*hh*sc).toFixed(1),
-   rx:3,fill:"none",stroke:p.kind=="hub"?"#58a6ff":"#8b949e","stroke-width":1.4,"stroke-dasharray":"5 3"}));
- p.pads.forEach(function(pad){g.appendChild(FP.padShape(pad,{scale:sc,minPx:2,attrs:{fill:"#b08d57"}}));});}
+// The modal preview draws the REAL footprint — silk + fab + pads through the
+// shared FP engine, fetched once per open from /api/footprint/:fp — in mm
+// coordinates, with the editable courtyard box on top. The box is
+// origin-centred (the file stores symmetric half-extents), so dragging an edge
+// or corner grows both sides; edges snap to the same G grid the numeric fields
+// use. The viewBox freezes for the duration of a drag (courtState.vb) so the
+// scale doesn't shift under the cursor, then refits on release.
+function cn3(v){return (+v).toFixed(3);}
+function courtDraw(p,hw,hh){var s=document.getElementById("court-svg");
+ var c=courtState||{},d=c.fpdata||{pads:p.pads||[]};
+ var aw=0,ah=0;
+ if(d.bbox){aw=Math.max(Math.abs(d.bbox.x),Math.abs(d.bbox.x+d.bbox.w));ah=Math.max(Math.abs(d.bbox.y),Math.abs(d.bbox.y+d.bbox.h));}
+ (d.pads||[]).forEach(function(pd){aw=Math.max(aw,Math.abs(pd.x)+pd.w/2);ah=Math.max(ah,Math.abs(pd.y)+pd.h/2);});
+ var ex=c.vb||{w:Math.max(hw,aw)*1.18+0.4,h:Math.max(hh,ah)*1.18+0.4};
+ FP.drawFootprint(s,{bbox:{x:-ex.w,y:-ex.h,w:2*ex.w,h:2*ex.h},pads:d.pads||[],silk:d.silk,fab:d.fab,courtyard:{}},{bg:false});
+ var edit=!(p.fb||!p.fp);
+ s.appendChild(FP.el("rect",{x:cn3(-hw),y:cn3(-hh),width:cn3(2*hw),height:cn3(2*hh),
+  fill:"none",stroke:edit?"#58a6ff":"#8b949e","stroke-width":0.06,"stroke-dasharray":"0.25 0.15"}));
+ if(edit)courtHandles(s,hw,hh,ex);}
+function courtHandles(s,hw,hh,ex){
+ var t=Math.max(ex.w,ex.h)/12;   // grab-strip thickness (mm) — ~constant on screen
+ function strip(x,y,w,h,cur,edge){var e=FP.el("rect",{x:cn3(x),y:cn3(y),width:cn3(Math.max(w,0.01)),height:cn3(Math.max(h,0.01)),
+   fill:"none","pointer-events":"all","data-cedge":edge});e.style.cursor=cur;s.appendChild(e);}
+ strip(hw-t/2,-hh+t/2,t,2*hh-t,"ew-resize","e");
+ strip(-hw-t/2,-hh+t/2,t,2*hh-t,"ew-resize","w");
+ strip(-hw+t/2,hh-t/2,2*hw-t,t,"ns-resize","s");
+ strip(-hw+t/2,-hh-t/2,2*hw-t,t,"ns-resize","n");
+ strip(hw-t/2,hh-t/2,t,t,"nwse-resize","se");
+ strip(-hw-t/2,-hh-t/2,t,t,"nwse-resize","nw");
+ strip(hw-t/2,-hh-t/2,t,t,"nesw-resize","ne");
+ strip(-hw-t/2,hh-t/2,t,t,"nesw-resize","sw");
+ [[hw,hh],[hw,-hh],[-hw,hh],[-hw,-hh],[hw,0],[-hw,0],[0,hh],[0,-hh]].forEach(function(cp){
+  s.appendChild(FP.el("rect",{x:cn3(cp[0]-t/6),y:cn3(cp[1]-t/6),width:cn3(t/3),height:cn3(t/3),
+   fill:"#58a6ff","pointer-events":"none"}));});}
 function courtBox(){var c=courtState;return c.mode=="offset"?{hw:gceil(c.ext.hw+c.offset),hh:gceil(c.ext.hh+c.offset)}:{hw:c.hw,hh:c.hh};}
 function courtRefresh(){if(!courtState)return;var b=courtBox();courtDraw(courtState.p,b.hw,b.hh);
  document.getElementById("court-full").textContent="full "+(2*b.hw).toFixed(2)+" × "+(2*b.hh).toFixed(2)+" mm";}
@@ -978,20 +1040,26 @@ function courtSetMode(m){if(!courtState)return;courtState.mode=m;
  document.getElementById("court-fields-offset").hidden=(m!="offset");courtRefresh();}
 function openCourt(ref){var p=partByRef(ref);if(!p)return;var ext=padExt(p),cm=PCB.cmargin||0.15;
  var min={hw:gceil(ext.hw+cm),hh:gceil(ext.hh+cm)};
- courtState={p:p,fp:p.fp,mode:"size",hw:p.hw,hh:p.hh,offset:cm,ext:ext,min:min};
+ courtState={p:p,fp:p.fp,mode:"size",hw:p.hw,hh:p.hh,offset:cm,ext:ext,min:min,fpdata:null,vb:null};
  document.getElementById("court-title").textContent=p.fp+"  ·  "+p.ref;
  var hwI=document.getElementById("court-hw"),hhI=document.getElementById("court-hh"),offI=document.getElementById("court-off");
  var sv=document.getElementById("court-save"),note=document.getElementById("court-note"),msg=document.getElementById("court-msg");
- msg.textContent="";hwI.value=p.hw.toFixed(1);hhI.value=p.hh.toFixed(1);hwI.min=min.hw;hhI.min=min.hh;offI.value=cm.toFixed(2);
+ msg.textContent="";hwI.value=p.hw.toFixed(2);hhI.value=p.hh.toFixed(2);hwI.min=min.hw;hhI.min=min.hh;offI.value=cm.toFixed(2);
  var fab=p.fb||!p.fp,noPads=!(ext.hw>0||ext.hh>0);
  sv.disabled=fab;hwI.disabled=fab;hhI.disabled=fab;offI.disabled=fab||noPads;
  document.querySelectorAll("input[name=court-mode]").forEach(function(r){r.checked=(r.value=="size");r.disabled=fab||(r.value=="offset"&&noPads);});
  courtSetMode("size");
  note.textContent=fab?"Synthesized placeholder box (no footprint file) — courtyard can't be edited.":
-  "Overall size sets the half-extents directly; Pad offset puts the courtyard edge that gap "+
-  "outside the pad bounding box, snapped to the "+G.toFixed(2)+" mm grid. "+
+  "Drag the blue edges or corners — the box stays centred on the part origin and edges snap to the "+
+  G.toFixed(2)+" mm grid (or type half-extents below). Pad offset instead holds that gap outside the pads. "+
   "Saving rewrites lib/footprints/"+p.fp+".sexp and applies to every design using it.";
- document.getElementById("court-modal").hidden=false;}
+ document.getElementById("court-modal").hidden=false;
+ // Real footprint art (silk + fab + true pad shapes) for the preview; the
+ // placement pads already drawn are the fallback if this fetch fails.
+ if(!fab)fetch("/api/footprint/"+encodeURIComponent(p.fp))
+  .then(function(r){return r.ok?r.json():null;})
+  .then(function(d){if(d&&courtState&&courtState.fp===p.fp){courtState.fpdata=d;courtRefresh();}})
+  .catch(function(){});}
 function courtClose(){document.getElementById("court-modal").hidden=true;courtState=null;}
 document.querySelectorAll("[data-court-ref]").forEach(function(b){
  b.addEventListener("click",function(){openCourt(b.getAttribute("data-court-ref"));});});
@@ -1001,9 +1069,44 @@ if(ccBtn)ccBtn.addEventListener("click",courtClose);
 if(modalBg)modalBg.addEventListener("click",function(ev){if(ev.target===modalBg)courtClose();});
 document.querySelectorAll("input[name=court-mode]").forEach(function(r){
  r.addEventListener("change",function(){if(r.checked)courtSetMode(r.value);});});
+// Drag-resize the courtyard box: pointerdown on an edge/corner grab strip
+// (data-cedge) starts a gesture; each move snaps that edge to the G grid,
+// clamped to the pad-extent minimum, mirrored to the opposite side (the box is
+// origin-centred). A drag in offset mode adopts the shown box then switches to
+// size mode, so the rect never jumps under the cursor.
+function courtSyncInputs(){var c=courtState;if(!c)return;
+ var hwI=document.getElementById("court-hw"),hhI=document.getElementById("court-hh");
+ if(hwI)hwI.value=c.hw.toFixed(2);if(hhI)hhI.value=c.hh.toFixed(2);}
+(function(){var s=document.getElementById("court-svg");if(!s)return;
+ var cd=null;
+ function courtMm(ev){var r=s.getBoundingClientRect(),vb=s.viewBox.baseVal;
+  if(!vb||!vb.width||!r.width)return null;
+  var sc=Math.min(r.width/vb.width,r.height/vb.height);
+  var ox=(r.width-vb.width*sc)/2,oy=(r.height-vb.height*sc)/2;
+  return {x:vb.x+(ev.clientX-r.left-ox)/sc,y:vb.y+(ev.clientY-r.top-oy)/sc};}
+ s.addEventListener("pointerdown",function(ev){
+  var edge=ev.target&&ev.target.getAttribute&&ev.target.getAttribute("data-cedge");
+  if(!edge||!courtState)return;
+  ev.preventDefault();
+  if(courtState.mode!="size"){var b=courtBox();courtState.hw=b.hw;courtState.hh=b.hh;
+   document.querySelectorAll("input[name=court-mode]").forEach(function(r){r.checked=(r.value=="size");});
+   courtSetMode("size");courtSyncInputs();}
+  var vb=s.viewBox.baseVal;courtState.vb={w:vb.width/2,h:vb.height/2};
+  cd={edge:edge};try{s.setPointerCapture(ev.pointerId);}catch(e){}});
+ s.addEventListener("pointermove",function(ev){if(!cd||!courtState)return;
+  var m=courtMm(ev);if(!m)return;var c=courtState;
+  if(cd.edge.indexOf("e")>=0||cd.edge.indexOf("w")>=0)
+   c.hw=Math.max(c.min.hw,Math.round(Math.abs(m.x)/G)*G);
+  if(cd.edge.indexOf("n")>=0||cd.edge.indexOf("s")>=0)
+   c.hh=Math.max(c.min.hh,Math.round(Math.abs(m.y)/G)*G);
+  courtSyncInputs();courtRefresh();});
+ function courtDragEnd(){if(!cd)return;cd=null;
+  if(courtState){courtState.vb=null;courtRefresh();}}
+ s.addEventListener("pointerup",courtDragEnd);
+ s.addEventListener("pointercancel",courtDragEnd);})();
 function courtInput(which){if(!courtState)return;var inp=document.getElementById(which=="hw"?"court-hw":"court-hh");
  var v=Math.round(parseFloat(inp.value)/G)*G;if(!(v>0))v=courtState.min[which];
- v=Math.max(v,courtState.min[which]);courtState[which]=v;inp.value=v.toFixed(1);courtRefresh();}
+ v=Math.max(v,courtState.min[which]);courtState[which]=v;inp.value=v.toFixed(2);courtRefresh();}
 var hwI2=document.getElementById("court-hw"),hhI2=document.getElementById("court-hh");
 if(hwI2)hwI2.addEventListener("change",function(){courtInput("hw");});
 if(hhI2)hhI2.addEventListener("change",function(){courtInput("hh");});
