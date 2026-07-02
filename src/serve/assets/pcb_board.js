@@ -885,7 +885,7 @@ function outlineArm(on){outlineMode=on;
 // leaves the svg mid-drag — never worth aborting the whole gesture over (a
 // synthetic/test pointer can't be captured and used to throw NotFoundError
 // out of the pointerdown handler, killing the drag before it started).
-function pcap(ev){try{pcap(ev);}catch(e){}}
+function pcap(ev){try{svg.setPointerCapture(ev.pointerId);}catch(e){}}
 function startPan(ev){pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:false};
  pcap(ev);svg.style.cursor="grabbing";}
 var clickCand=null; // pressed a part but won't drag (RO page / locked part)
@@ -900,10 +900,10 @@ svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.pre
  // Part gesture (hit-tested — parts are canvas-painted, not DOM).
  pcap(ev);
  if(RO||P[hi].locked){clickCand={i:hi,m:m};return;}
- if(sel.length>1&&sel.indexOf(hi)>=0){gdrag=gdragStart(m,null);svg.style.cursor="grabbing";return;}
+ if(sel.length>1&&sel.indexOf(hi)>=0){gdrag=gdragStart(m,hi);svg.style.cursor="grabbing";return;}
  if(sel.length)selClear();
  var gi=grpIdxs(hi);
- if(gi){gdrag=gdragStart(m,null,gi);svg.style.cursor="grabbing";return;}
+ if(gi){gdrag=gdragStart(m,hi,gi);svg.style.cursor="grabbing";return;}
  drag={i:hi,ox:P[hi].x-m.x,oy:P[hi].y-m.y,m0:m,snap:snapPoses()};svg.style.cursor="grabbing";});
 svg.addEventListener("pointermove",function(ev){
  if(outDraw){var om=mm(ev);outDraw.x1=om.x;outDraw.y1=om.y;
@@ -937,8 +937,10 @@ function clickPart(ev,i){var m=mm(ev),pd=padAt(i,m.x,m.y);
  if(pd&&pd.net)selNet(pd.net);
  if(!RO)selectComp(P[i].ref);}
 svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.pointerId);}catch(e){}
- if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap;gdrag=null;svg.style.cursor="";
-  if(gmv){recordUndo(gsnap);fetchScore();}return;}
+ if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap,gdn=gdrag.down;gdrag=null;svg.style.cursor="";
+  // No movement = a plain click on a rigid-group / multi-selected part —
+  // select it like any other part instead of swallowing the click.
+  if(gmv){recordUndo(gsnap);fetchScore();}else if(gdn!=null&&gdn>=0)clickPart(ev,gdn);return;}
  if(typeof drag!=="undefined"&&drag){var dmv=drag.moved,dsnap=drag.snap,di2=drag.i;drag=null;svg.style.cursor="";
   if(dmv){recordUndo(dsnap);fetchScore();return;}
   clickPart(ev,di2);return;}
