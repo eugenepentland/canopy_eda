@@ -1,7 +1,7 @@
 (function(){
 const NS="http://www.w3.org/2000/svg";
 const S=PCB.scale,MX=PCB.minx,MY=PCB.miny,M=PCB.margin,G=PCB.grid;
-const P=PCB.parts, orig=P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0};});
+const P=PCB.parts, orig=P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};});
 var RO=!!PCB.ro;
 // `?sub=` query for a sub-circuit page so layout save/delete/star/rescore POST
 // to the per-sub sidecar (<design>.<sub>.layouts.json) instead of the design's.
@@ -33,22 +33,29 @@ if(PCB.board){
  bt.textContent=br.w.toFixed(0)+"×"+br.h.toFixed(0)+" mm"; gB.appendChild(bt);
 }
 function wpt(i,lx,ly){var p=P[i],a=(p.rot||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a);
+ if(p.side==="bottom")lx=-lx; // bottom parts mirror about their own axis (matches worldPt)
  return {x:p.x+lx*c-ly*s,y:p.y+lx*s+ly*c};}
-function moved(i){return P[i].x!==orig[i].x||P[i].y!==orig[i].y||(P[i].rot||0)!==orig[i].rot;}
+function moved(i){return P[i].x!==orig[i].x||P[i].y!==orig[i].y||(P[i].rot||0)!==orig[i].rot||(P[i].side||"top")!==orig[i].side;}
 function wrect(i,pad){var p=P[i],c=wpt(i,pad.x,pad.y),q=(((p.rot||0)%360)+360)%360;
  var hw=(q==90||q==270)?pad.h/2:pad.w/2, hh=(q==90||q==270)?pad.w/2:pad.h/2;
  return {x0:c.x-hw,y0:c.y-hh,x1:c.x+hw,y1:c.y+hh};}
 function setT(i){var p=P[i],tx=X(p.x).toFixed(1),ty=Y(p.y).toFixed(1),rot=(p.rot||0);
+ var bot=(p.side==="bottom"),mir=bot?" scale(-1,1)":"";
  els[i].setAttribute("transform","translate("+tx+","+ty+")");
- bodies[i].setAttribute("transform","rotate("+rot+")");
+ els[i].classList.toggle("botside",bot);
+ els[i].classList.toggle("plocked",!!p.locked);
+ bodies[i].setAttribute("transform","rotate("+rot+")"+mir);
  // Pads live in the top gPads layer (above the ratsnest), so they carry the
  // part's full translate+rotate themselves rather than inheriting it.
- if(padEls[i]){padEls[i].setAttribute("transform","translate("+tx+","+ty+") rotate("+rot+")");
-  // Keep pad numbers reading horizontally at any part orientation: counter-
-  // rotate each label by -rot about its own centre (its x/y attrs ARE the pad
-  // centre), cancelling the padset's rotation so the digit never flips.
+ if(padEls[i]){padEls[i].setAttribute("transform","translate("+tx+","+ty+") rotate("+rot+")"+mir);
+  padEls[i].classList.toggle("botside",bot);
+  // Keep pad numbers reading horizontally (and unmirrored on the bottom side)
+  // at any orientation: counter-transform each label about its own centre
+  // (its x/y attrs ARE the pad centre) with the inverse of the frame's
+  // rotate+mirror, so the digit never flips.
   padEls[i].querySelectorAll("text").forEach(function(t){
-   t.setAttribute("transform","rotate("+(-rot)+" "+t.getAttribute("x")+" "+t.getAttribute("y")+")");});}}
+   var ax=parseFloat(t.getAttribute("x"))||0,ay=parseFloat(t.getAttribute("y"))||0;
+   t.setAttribute("transform","translate("+ax+" "+ay+")"+mir+" rotate("+(-rot)+") translate("+(-ax)+" "+(-ay)+")");});}}
 // Defined decoupling pads: each loop pins a cap to ONE hub pad (L.pp =
 // hub_pwr_pin). Mark those hub pads so a net selection glows them red (the
 // authored decoupling target) rather than gold. Keyed hubIndex:padX:padY.
@@ -202,7 +209,7 @@ function fetchScore(){
  setSc("sc-obj","objective …");var seq=++scoreReq;
  // Ask for per-part blame only while the Heatmap view is on, so a finished
  // drag/rotate re-tints the board to the new cost distribution.
- var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};}),blame:heatOn};
+ var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),blame:heatOn};
  fetch("/api/pcb-score/"+encodeURIComponent(PCB.name),{method:"POST",
    headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
   .then(function(r){return r.json();})
@@ -235,7 +242,8 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
  var h='<div class="prop-head"><span class="prop-ref">'+pEsc(p.ref)+'</span>'+
   (p.val?'<span class="prop-val">'+pEsc(p.val)+'</span>':'')+'</div>';
  h+='<div class="prop-rows">'+pRow("X",pMm(p.x)+" mm","prop-x")+pRow("Y",pMm(p.y)+" mm","prop-y")+
-  pRow("Rotation",rot+"°","prop-rot")+pRow("Type",p.kind=="hub"?"Hub / IC":"Passive")+'</div>';
+  pRow("Rotation",rot+"°","prop-rot")+pRow("Side",(p.side==="bottom")?"Bottom (B.Cu)":"Top (F.Cu)","prop-side")+
+  pRow("Type",(p.kind=="hub"?"Hub / IC":"Passive")+(p.locked?" · 🔒 locked":""))+'</div>';
  if(p.fp)h+='<button class="prop-fp" data-court-ref="'+pEsc(p.ref)+'" title="Edit footprint courtyard">▢ '+pEsc(p.fp)+'</button>';
  var pads=(p.pads||[]).slice().sort(function(a,b){var an=parseInt(a.num,10),bn=parseInt(b.num,10);
   if(!isNaN(an)&&!isNaN(bn))return an-bn;return String(a.num||"").localeCompare(String(b.num||""));});
@@ -273,7 +281,7 @@ function markSel(){els.forEach(function(g,i){g.classList.toggle("msel",sel.index
 function selSet(idxs){sel=idxs;markSel();}
 function selClear(){if(!sel.length)return;sel=[];markSel();}
 function gdragStart(m,down){return {sx:m.x,sy:m.y,moved:false,down:down,snap:snapPoses(),
- orig:sel.map(function(k){return {i:k,x:P[k].x,y:P[k].y};})};}
+ orig:sel.filter(function(k){return !P[k].locked;}).map(function(k){return {i:k,x:P[k].x,y:P[k].y};})};}
 // Iterative layout editing: curLayout is the saved layout the Update button
 // writes back into (overwrite in place) instead of forcing a new one. Set by
 // Load and after a Save as…. Save/Update persist in place (no page reload — see
@@ -297,6 +305,7 @@ els.forEach(function(g,i){
    var m=mm(ev);
    if(sel.length>1&&sel.indexOf(i)>=0){gdrag=gdragStart(m,ev.target);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
    if(sel.length)selClear();
+   if(P[i].locked){var net0=netAt(ev.target);if(net0)selNet(net0);selectComp(P[i].ref);return;}
    drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target,snap:snapPoses()};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
  g.addEventListener("pointermove",function(ev){
    if(gdrag){var gm=mm(ev),dx=Math.round((gm.x-gdrag.sx)/G)*G,dy=Math.round((gm.y-gdrag.sy)/G)*G,any=false;
@@ -326,6 +335,7 @@ els.forEach(function(g,i){
     var m=mm(ev);
     if(sel.length>1&&sel.indexOf(i)>=0){gdrag=gdragStart(m,ev.target);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
     if(sel.length)selClear();
+    if(P[i].locked){var net0=netAt(ev.target);if(net0)selNet(net0);selectComp(P[i].ref);return;}
     drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target,snap:snapPoses()};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});}
 });
 // Keyboard: R / Shift+R rotates the hovered part; ? toggles the
@@ -339,6 +349,8 @@ function kbdToggle(){
  kbdOv.innerHTML='<div class="kbd-box"><h3>Keyboard &amp; mouse</h3>'+
   '<div class="kbd-row"><span>Rotate hovered part +90°</span><kbd>R</kbd></div>'+
   '<div class="kbd-row"><span>Rotate hovered part −90°</span><kbd>Shift+R</kbd></div>'+
+  '<div class="kbd-row"><span>Flip hovered part top/bottom</span><kbd>F</kbd></div>'+
+  '<div class="kbd-row"><span>Lock / unlock hovered part</span><kbd>L</kbd></div>'+
   '<div class="kbd-row"><span>Move part (snaps to grid)</span><kbd>drag part</kbd></div>'+
   '<div class="kbd-row"><span>Select box (multi-select)</span><kbd>drag empty space</kbd></div>'+
   '<div class="kbd-row"><span>Move all selected together</span><kbd>drag a selected part</kbd></div>'+
@@ -366,9 +378,15 @@ document.addEventListener("keydown",function(ev){
  if(ev.key=="Escape"){if(kbdOv){kbdClose();}else{selClear();clearSel();}return;}
  var typing=kbTyping(ev.target);
  if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
- if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();recordUndo();
+ if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;recordUndo();
    P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
-   setT(cur);clearRoute();rats();fetchScore();refreshUnplaced();if(selRef===P[cur].ref)updatePropLive();}});
+   setT(cur);clearRoute();rats();fetchScore();refreshUnplaced();if(selRef===P[cur].ref)updatePropLive();return;}
+ if((ev.key=="f"||ev.key=="F")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;recordUndo();
+   P[cur].side=(P[cur].side==="bottom")?"top":"bottom";
+   setT(cur);clearRoute();rats();drawClr();fetchScore();refreshUnplaced();
+   if(selRef===P[cur].ref)renderProps();return;}
+ if((ev.key=="l"||ev.key=="L")&&cur>=0&&!typing){ev.preventDefault();
+   P[cur].locked=!P[cur].locked;setT(cur);if(selRef===P[cur].ref)renderProps();return;}});
 function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();refreshUnplaced();updatePropLive();
  if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
 // ── Undo / redo ─────────────────────────────────────────────────────────
@@ -378,12 +396,12 @@ function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetch
 // rotate / reset / load record just before they mutate. Snapshots are pose
 // arrays indexed by P order (stable), so a restore is a write-back + applyAll.
 var undoStack=[],redoStack=[];
-function snapPoses(){return P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0};});}
+function snapPoses(){return P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top",locked:!!p.locked};});}
 function undoBtns(){var u=document.getElementById("pcb-undo"),r=document.getElementById("pcb-redo");
  if(u)u.disabled=!undoStack.length;if(r)r.disabled=!redoStack.length;}
 function recordUndo(snap){undoStack.push(snap||snapPoses());if(undoStack.length>200)undoStack.shift();
  redoStack.length=0;undoBtns();}
-function restorePoses(s){s.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y=q.y;P[i].rot=q.rot;}});applyAll();}
+function restorePoses(s){s.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y=q.y;P[i].rot=q.rot;P[i].side=q.side||"top";P[i].locked=!!q.locked;}});applyAll();}
 function doUndo(){if(!undoStack.length)return;redoStack.push(snapPoses());restorePoses(undoStack.pop());undoBtns();}
 function doRedo(){if(!redoStack.length)return;undoStack.push(snapPoses());restorePoses(redoStack.pop());undoBtns();}
 var undoBtn=document.getElementById("pcb-undo");if(undoBtn)undoBtn.addEventListener("click",doUndo);
@@ -394,7 +412,7 @@ document.addEventListener("keydown",function(ev){if(!(ev.ctrlKey||ev.metaKey)||k
  else if((k==="z"&&ev.shiftKey)||k==="y"){ev.preventDefault();doRedo();}});
 undoBtns();
 document.getElementById("pcb-reset").addEventListener("click",function(){recordUndo();
- selClear();P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
+ selClear();P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;p.side=orig[i].side;});applyAll();});
 document.getElementById("pcb-score").addEventListener("click",fetchScore);
 document.getElementById("t-apply").addEventListener("click",function(ev){ev.preventDefault();
  var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
@@ -433,7 +451,7 @@ function bindLayLoad(b){b.addEventListener("click",function(){var nm=b.getAttrib
  // key first (falls back to ref-des for legacy layouts saved without one), so
  // a Load still lands after the parts renumber (e.g. module standalone vs nested).
  var byOrigin={};for(var k in L.parts){var v=L.parts[k];if(v&&v.origin)byOrigin[v.origin]=v;}
- P.forEach(function(p){var s=(p.origin&&byOrigin[p.origin])||L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();
+ P.forEach(function(p){var s=(p.origin&&byOrigin[p.origin])||L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;p.side=s.side||"top";if(s.locked!==undefined)p.locked=!!s.locked;}});applyAll();
  setActiveLayout(nm);});}
 function bindLayDel(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-del");
  if(!window.confirm("Delete layout \""+nm+"\"?"))return;
@@ -500,13 +518,13 @@ function loadLayoutScores(){if(!((PCB.layouts||[]).length))return;
 // Persist the current poses to layout nm and update the panel IN PLACE — no
 // page reload, so the camera and view toggles you set while editing stay put.
 function persistLayout(nm,verb){var msg=document.getElementById("pcb-savemsg");
- var parts=P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,origin:p.origin||""};});
+ var parts=P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,origin:p.origin||"",side:p.side||"top",locked:!!p.locked};});
  if(msg){msg.style.color="#8b949e";msg.textContent=verb+"\u{2026}";}
  return fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",
    headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts})})
   .then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(){
-    var pmap={};parts.forEach(function(p){pmap[p.ref]={x:p.x,y:p.y,rot:p.rot,origin:p.origin||""};});
+    var pmap={};parts.forEach(function(p){pmap[p.ref]={x:p.x,y:p.y,rot:p.rot,origin:p.origin||"",side:p.side,locked:p.locked};});
     var Ls=PCB.layouts||(PCB.layouts=[]),found=null;
     for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm){found=Ls[i];break;}
     if(found){found.parts=pmap;found.kind="manual";}
@@ -710,7 +728,7 @@ if(rgo)rgo.addEventListener("click",function(){
  var nf=function(id){return parseFloat(document.getElementById(id).value);};
  var hint=document.getElementById("r-hint");if(hint)hint.style.display="none";
  setStat("r-stat","","routing…");setStat("r-drc","","");rgo.disabled=true;
- var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};}),
+ var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),
    track_width:nf("r-tw"),clearance:nf("r-cl"),via_drill:nf("r-vd"),via_dia:nf("r-va")};
  fetch("/api/pcb-route/"+encodeURIComponent(PCB.name),{method:"POST",
    headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})

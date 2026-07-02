@@ -528,9 +528,11 @@ src/placement/optimizer.zig::RatKind enum_
 src/placement/optimizer.zig::RefPose struct_
 src/placement/optimizer.zig::Score struct_
 src/placement/optimizer.zig::SeedMode enum_
+src/placement/optimizer.zig::Side enum_
 src/placement/optimizer.zig::Stub struct_
 src/placement/optimizer.zig::effAlignW fn
 src/placement/optimizer.zig::faceRotation fn
+src/placement/optimizer.zig::fromStr fn
 src/placement/optimizer.zig::fullRoutedScorePoses fn
 src/placement/optimizer.zig::gridPlace fn
 src/placement/optimizer.zig::isGroundName fn

@@ -24,10 +24,12 @@ const Rgb = raster.Rgb;
 // ── Theme (matches BOARD_JS) ───────────────────────────────────────────────
 const BG = Rgb.hex("#0d1117");
 const COURT_FILL = Rgb.hex("#161b22");
+const COURT_FILL_BOT = Rgb.hex("#122036"); // bottom-side part body (blue wash, KiCad-like)
 const HUB_STROKE = Rgb.hex("#58a6ff");
 const PASSIVE_STROKE = Rgb.hex("#8b949e");
 const SILK = Rgb.hex("#8b949e");
 const PAD_COL = Rgb.hex("#b08d57");
+const PAD_COL_BOT = Rgb.hex("#5b8dd6"); // bottom-side pad copper (B.Cu blue)
 const AW_PROX = Rgb.hex("#ea580c"); // hot decoupling loop / proximity hug
 const AW_GND = Rgb.hex("#22b8cf"); // ground return airwire
 const AW_SIG = Rgb.hex("#9aa7b4"); // generic signal airwire
@@ -438,11 +440,13 @@ const Ctx = struct {
     }
 
     /// World point of a footprint-local offset on `part` (matches BOARD_JS wpt).
+    /// A bottom-side part mirrors local x before rotating (see optimizer.Side).
     fn world(part: optimizer.Part, lx: f64, ly: f64) [2]f64 {
+        const mlx = if (part.side == .bottom) -lx else lx;
         const a = part.rot * std.math.pi / 180.0;
         const c = @cos(a);
         const s = @sin(a);
-        return .{ part.x + lx * c - ly * s, part.y + lx * s + ly * c };
+        return .{ part.x + mlx * c - ly * s, part.y + mlx * s + ly * c };
     }
     /// Pixel point of a footprint-local offset on `part`.
     fn lp(self: *Ctx, part: optimizer.Part, lx: f64, ly: f64) [2]f32 {
@@ -529,9 +533,11 @@ const Ctx = struct {
                 self.lp(part, part.hw, part.hh),   self.lp(part, -part.hw, part.hh),
             };
             // Blame heatmap tints the fill green→red by objective share; the cool
-            // baseline COURT_FILL otherwise.
+            // baseline COURT_FILL otherwise (blue wash for bottom-side parts).
             const fill = if (self.opts.blame and pi < self.blame_norm.len)
                 blameColor(self.blame_norm[pi])
+            else if (part.side == .bottom)
+                COURT_FILL_BOT
             else
                 COURT_FILL;
             self.cv.fillPoly(&court, fill, base_a);
@@ -568,7 +574,7 @@ const Ctx = struct {
     fn drawPads(self: *Ctx, part: optimizer.Part, active: bool) void {
         for (part.pads) |pad| {
             const hot = self.focus and self.netHot(self.netOf(part.ref_des, pad.number));
-            const col = if (hot) ACCENT else PAD_COL;
+            const col = if (hot) ACCENT else if (part.side == .bottom) PAD_COL_BOT else PAD_COL;
             const a: f32 = if (hot or active) 1.0 else DIM_A;
             if (pad.poly.len >= 3) {
                 // KiCad custom pads carry full copper outlines (100-200+ pts);

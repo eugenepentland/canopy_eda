@@ -91,7 +91,38 @@ const MAX_AUTO_LAYOUTS: usize = 12;
 /// is the module-local source name, invariant across both, so a Load matches
 /// on it first and falls back to `ref` only for legacy entries saved before
 /// `origin` was recorded (empty string). See `rekeyPosesByOrigin`.
-const PartPose = struct { ref: []const u8, x: f64, y: f64, rot: f64, origin: []const u8 = "" };
+const PartPose = struct {
+    ref: []const u8,
+    x: f64,
+    y: f64,
+    rot: f64,
+    origin: []const u8 = "",
+    /// Board side (viewer F-flip state). Persisted as `"side":"bottom"` only
+    /// when bottom, so legacy top-side sidecars stay byte-identical.
+    side: optimizer.Side = .top,
+    /// Editor lock (viewer refuses drag/rotate/flip). Persisted as
+    /// `"locked":true` only when set.
+    locked: bool = false,
+};
+
+/// Parse a pose object's optional `"side"` field ("bottom" → bottom, else top).
+fn jsonSide(v: ?std.json.Value) optimizer.Side {
+    const s = v orelse return .top;
+    return if (s == .string) optimizer.Side.fromStr(s.string) else .top;
+}
+
+/// Parse a pose object's optional boolean field (absent/non-bool → false).
+fn jsonFlag(v: ?std.json.Value) bool {
+    const b = v orelse return false;
+    return b == .bool and b.bool;
+}
+
+/// Append the non-default pose fields (`,"side":"bottom"` / `,"locked":true`)
+/// — one spelling for every pose writer (sidecar, cache, API blobs).
+fn writePoseSideLocked(w: *std.Io.Writer, side: optimizer.Side, locked: bool) std.Io.Writer.Error!void {
+    if (side == .bottom) try w.writeAll(",\"side\":\"bottom\"");
+    if (locked) try w.writeAll(",\"locked\":true");
+}
 
 /// The weighted `objective` the optimizer minimizes plus its visible HPWL +
 /// decoupling-loop terms, stored with a layout so the list shows "better/worse"
@@ -941,7 +972,7 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
             try writeJsonStr(w, p.instances[i].origin_key);
         }
         const bl = if (i < blame.len and bmax > 0) blame[i] / bmax else 0;
-        try w.print(",\"kind\":\"{s}\",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"fallback\":{s},\"blame\":{d:.3}}}", .{
+        try w.print(",\"kind\":\"{s}\",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"fallback\":{s},\"blame\":{d:.3}", .{
             if (pt.kind == .hub) "hub" else "passive",
             pt.x,
             pt.y,
@@ -951,6 +982,8 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
             if (pt.fallback) "true" else "false",
             bl,
         });
+        try writePoseSideLocked(w, pt.side, pt.locked);
+        try w.writeAll("}");
     }
     try w.writeAll("],\"loops\":[");
     for (p.loops, 0..) |L, i| {
@@ -1210,6 +1243,8 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
             .x = jsonNum(it.object.get("x")),
             .y = jsonNum(it.object.get("y")),
             .rot = jsonNum(it.object.get("rot")),
+            .side = jsonSide(it.object.get("side")),
+            .locked = jsonFlag(it.object.get("locked")),
         });
     }
 
@@ -1320,6 +1355,8 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
             .x = jsonNum(it.object.get("x")),
             .y = jsonNum(it.object.get("y")),
             .rot = jsonNum(it.object.get("rot")),
+            .side = jsonSide(it.object.get("side")),
+            .locked = jsonFlag(it.object.get("locked")),
         });
     }
 
@@ -1438,8 +1475,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
             } else block;
             if (score_block) |sblk| {
                 const params = readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{};
-                const poses = try req.arena.alloc(optimizer.RefPose, parts.len);
-                for (parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
+                const poses = try refPosesFromPartPoses(req.arena, parts);
                 if (optimizer.scorePoses(ctx.allocator, sblk, ctx.project_dir, poses, params)) |bd| {
                     score = .{ .hpwl = bd.hpwl, .loop = bd.loop_raw, .caps = 0, .objective = bd.objective };
                 } else |_| {}
@@ -1597,8 +1633,7 @@ pub fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     for (existing) |L| {
         var updated = L;
         if (L.parts.len > 0) {
-            const poses = try req.arena.alloc(optimizer.RefPose, L.parts.len);
-            for (L.parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
+            const poses = try refPosesFromPartPoses(req.arena, L.parts);
             if (optimizer.scorePoses(req.arena, block, ctx.project_dir, poses, params)) |bd| {
                 updated.score = .{
                     .hpwl = bd.hpwl,
@@ -1662,8 +1697,7 @@ pub fn pcbScoreBatchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     var first = true;
     for (layouts) |L| {
         if (L.parts.len == 0) continue;
-        const poses = try req.arena.alloc(optimizer.RefPose, L.parts.len);
-        for (L.parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
+        const poses = try refPosesFromPartPoses(req.arena, L.parts);
         const bd = optimizer.scorePoses(req.arena, block, ctx.project_dir, poses, tune.params) catch continue;
         if (!first) try w.writeAll(",");
         first = false;
@@ -1894,8 +1928,18 @@ fn posesFromPlacement(alloc: std.mem.Allocator, p: optimizer.Placement) ?[]PartP
         .y = pt.y,
         .rot = pt.rot,
         .origin = if (i < p.instances.len) p.instances[i].origin_key else "",
+        .side = pt.side,
+        .locked = pt.locked,
     };
     return parts;
+}
+
+/// PartPose slice → RefPose slice, carrying side/locked — shared by the
+/// scoring endpoints so a saved layout's board sides survive the conversion.
+fn refPosesFromPartPoses(alloc: std.mem.Allocator, parts: []const PartPose) std.mem.Allocator.Error![]optimizer.RefPose {
+    const out = try alloc.alloc(optimizer.RefPose, parts.len);
+    for (parts, 0..) |p, i| out[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot, .side = p.side, .locked = p.locked };
+    return out;
 }
 
 /// Re-key a saved layout's poses onto `block`'s *current* ref-des via the
@@ -1922,7 +1966,7 @@ fn rekeyPosesByOrigin(
     const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
     for (parts, 0..) |pp, i| {
         const ref = if (pp.origin.len > 0) (ref_of.get(pp.origin) orelse pp.ref) else pp.ref;
-        out[i] = .{ .ref = ref, .x = pp.x, .y = pp.y, .rot = pp.rot };
+        out[i] = .{ .ref = ref, .x = pp.x, .y = pp.y, .rot = pp.rot, .side = pp.side, .locked = pp.locked };
     }
     return out;
 }
@@ -1957,7 +2001,7 @@ fn readLayoutPosesFor(
         // Re-key failed (flatten error) — fall back to the raw stored refs.
         var list: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
         for (lay.parts) |pp| {
-            list.append(alloc, .{ .ref = pp.ref, .x = pp.x, .y = pp.y, .rot = pp.rot }) catch return null;
+            list.append(alloc, .{ .ref = pp.ref, .x = pp.x, .y = pp.y, .rot = pp.rot, .side = pp.side, .locked = pp.locked }) catch return null;
         }
         return list.toOwnedSlice(alloc) catch null;
     }
@@ -2066,6 +2110,8 @@ fn parsePartPoses(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const PartPos
             .y = jsonNum(it.object.get("y")),
             .rot = jsonNum(it.object.get("rot")),
             .origin = origin,
+            .side = jsonSide(it.object.get("side")),
+            .locked = jsonFlag(it.object.get("locked")),
         }) catch return list.items;
     }
     return list.toOwnedSlice(alloc) catch null;
@@ -2204,6 +2250,7 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: 
             try w.writeAll(REF_OPEN);
             try writeJsonStr(w, pt.ref);
             try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pt.x, pt.y, pt.rot });
+            try writePoseSideLocked(w, pt.side, pt.locked);
             if (pt.origin.len > 0) {
                 try w.writeAll(ORIGIN_OPEN);
                 try writeJsonStr(w, pt.origin);
@@ -2386,13 +2433,14 @@ fn readAutoPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []cons
     const slot = readCacheSlot(alloc, project_dir, name) orelse return null;
     const parts = slot.parts orelse return null;
     const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
-    for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot };
+    for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot, .side = pt.side, .locked = pt.locked };
     return out;
 }
 
 /// One placed part exported to the KiCad sync: centre (mm) + rotation (deg,
-/// CCW). The sync stamps these onto a footprint it inserts for the first time.
-pub const SyncPose = struct { x: f64, y: f64, rot: f64 };
+/// CCW) + board side. The sync stamps these onto a footprint it inserts for
+/// the first time.
+pub const SyncPose = struct { x: f64, y: f64, rot: f64, side: optimizer.Side = .top };
 
 /// Re-export so the KiCad sync can name a module's poses (`loadSubBlockPoses`)
 /// without importing the placement layer directly.
@@ -2421,7 +2469,7 @@ fn chooseSyncPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []co
     };
     if (chosen) |parts| {
         const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
-        for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot };
+        for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot, .side = pt.side, .locked = pt.locked };
         return out;
     }
     // No named/recorded layouts — fall back to the bare optimizer cache.
@@ -2443,7 +2491,7 @@ pub fn loadSyncLayout(
 ) ?std.StringHashMap(SyncPose) {
     const poses = chooseSyncPoses(alloc, project_dir, name) orelse return null;
     var m = std.StringHashMap(SyncPose).init(alloc);
-    for (poses) |p| m.put(p.ref, .{ .x = p.x, .y = p.y, .rot = p.rot }) catch return m;
+    for (poses) |p| m.put(p.ref, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return m;
     return m;
 }
 
@@ -2494,7 +2542,7 @@ fn poseByOriginKey(
         if (ok.len == 0) continue;
         // `ok` borrows the eval's arena (freed on the defer) — dupe it.
         const key = alloc.dupe(u8, ok) catch return null;
-        pose_by_ok.put(key, .{ .x = p.x, .y = p.y, .rot = p.rot }) catch return null;
+        pose_by_ok.put(key, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return null;
     }
     return pose_by_ok;
 }
@@ -2525,7 +2573,7 @@ pub fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_
     for (flat2.items) |fi| {
         if (fi.origin_key.len == 0) continue;
         const pose = pose_by_ok.get(fi.origin_key) orelse continue;
-        out.append(alloc, .{ .ref = fi.ref_des, .x = pose.x, .y = pose.y, .rot = pose.rot }) catch return layout;
+        out.append(alloc, .{ .ref = fi.ref_des, .x = pose.x, .y = pose.y, .rot = pose.rot, .side = pose.side }) catch return layout;
     }
     if (out.items.len == 0) return layout; // nothing bridged — let the caller prefix-strip
     return out.toOwnedSlice(alloc) catch layout;
@@ -2564,7 +2612,7 @@ pub fn subBlockPoseByOriginKey(
     for (layout) |p| {
         const ok = ok_of.get(p.ref) orelse continue;
         if (ok.len == 0) continue;
-        m.put(ok, .{ .x = p.x, .y = p.y, .rot = p.rot }) catch return null;
+        m.put(ok, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return null;
     }
     if (m.count() == 0) return null;
     return m;
@@ -2644,7 +2692,9 @@ fn writeCacheSlotJson(w: *std.Io.Writer, c: CacheSlot) std.Io.Writer.Error!void 
         if (i > 0) try w.writeAll(",");
         try w.writeAll(REF_OPEN);
         try writeJsonStr(w, pt.ref);
-        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}}}", .{ pt.x, pt.y, pt.rot });
+        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pt.x, pt.y, pt.rot });
+        try writePoseSideLocked(w, pt.side, pt.locked);
+        try w.writeAll("}");
     }
     try w.writeAll("]}");
 }
@@ -3532,12 +3582,13 @@ fn writePcbData(
         // it instead of the volatile ref-des (see PartPose.origin / bindLayLoad).
         try w.writeAll(ORIGIN_OPEN);
         try writeJsonStr(w, if (i < p.instances.len) p.instances[i].origin_key else "");
-        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"kind\":\"{s}\",\"fb\":{s},", .{
+        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"kind\":\"{s}\",\"fb\":{s}", .{
             pt.x,                                 pt.y,  pt.rot,
             pt.hw,                                pt.hh, if (pt.kind == .hub) "hub" else "passive",
             if (pt.fallback) "true" else "false",
         });
-        try w.print("\"blame\":{d:.4},", .{if (i < blame.len) blame[i] else 0});
+        try writePoseSideLocked(w, pt.side, pt.locked);
+        try w.print(",\"blame\":{d:.4},", .{if (i < blame.len) blame[i] else 0});
         try w.writeAll("\"fp\":");
         try writeJsonStr(w, fp_of.get(pt.ref_des) orelse "");
         try w.writeAll(",\"val\":");
@@ -3744,6 +3795,7 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
             if (j > 0) try w.writeAll(",");
             try writeJsonStr(w, pt.ref);
             try w.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pt.x, pt.y, pt.rot });
+            try writePoseSideLocked(w, pt.side, pt.locked);
             if (pt.origin.len > 0) {
                 try w.writeAll(ORIGIN_OPEN);
                 try writeJsonStr(w, pt.origin);
@@ -4030,6 +4082,13 @@ const PAGE_CSS =
     \\.part.hl .court{filter:drop-shadow(0 0 3px rgba(88,166,255,.75))}
     \\.part.sel .court{stroke:#58a6ff!important;stroke-width:2!important;filter:drop-shadow(0 0 4px rgba(88,166,255,.9))}
     \\.part.msel .court{stroke:#d2a8ff!important;stroke-width:2!important;filter:drop-shadow(0 0 4px rgba(210,168,255,.85))}
+    \\/* Bottom-side (B.Cu) parts: blue body wash + blue pads, KiCad-style. The
+    \\   geometry itself is mirrored by setT (scale(-1,1) inside the rotation). */
+    \\.part.botside .court{fill:#122036}
+    \\.padset.botside .pad{fill:#5b8dd6}
+    \\/* Locked parts refuse drag/rotate/flip — dashed outline + no grab cursor. */
+    \\.part.plocked{cursor:not-allowed}
+    \\.part.plocked .court{stroke-dasharray:2 2!important;opacity:.92}
     \\.marquee{fill:rgba(88,166,255,.12);stroke:#58a6ff;stroke-width:1;stroke-dasharray:4 3;vector-effect:non-scaling-stroke;pointer-events:none}
     \\.pad{transition:fill .08s,filter .08s}
     \\.pad[data-net]{cursor:pointer}
@@ -4301,4 +4360,32 @@ test "layouts sidecar round-trips part origin" {
     try std.testing.expectEqual(@as(usize, 2), got[0].parts.len);
     try std.testing.expectEqualStrings("C_VDDIN_BULK", got[0].parts[0].origin);
     try std.testing.expectEqualStrings("", got[0].parts[1].origin);
+}
+
+// spec: Web Server - A saved layout round-trips each part's board side and lock flag through the sidecar
+test "layouts sidecar round-trips side and locked" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    // One bottom-side locked part; one default (top, unlocked) part.
+    const parts = [_]PartPose{
+        .{ .ref = "U1", .x = 1, .y = 2, .rot = 0, .side = .bottom, .locked = true },
+        .{ .ref = "C1", .x = 3, .y = 4, .rot = 90 },
+    };
+    const layouts = [_]SavedLayout{.{ .name = "two-sided", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts }};
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJson(&aw.writer, &layouts, null);
+    const text = aw.written();
+    // Non-default fields are spelled out; the default part stays legacy-shaped.
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"side\":\"bottom\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"locked\":true") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\"side\""));
+
+    const got = parseLayouts(alloc, text) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(optimizer.Side.bottom, got[0].parts[0].side);
+    try std.testing.expect(got[0].parts[0].locked);
+    try std.testing.expectEqual(optimizer.Side.top, got[0].parts[1].side);
+    try std.testing.expect(!got[0].parts[1].locked);
 }

@@ -1,7 +1,6 @@
 # guardian-snapshot v1
 pub const MyError = error{ Foo, Bar };
 pub fn run(...) MyError!void { ... }
-src/escape.zig: pub fn writeXml uses inferred error set `!T` (use `MyErr!T`)
 src/eval/env.zig: pub fn put uses inferred error set `!T` (use `MyErr!T`)
 src/render_svg/context.zig: pub fn adjAppend uses inferred error set `!T` (use `MyErr!T`)
 src/render_svg/context.zig: pub fn buildAdjacency uses inferred error set `!T` (use `MyErr!T`)
@@ -17,9 +16,6 @@ src/serve.zig: pub fn dispatch uses inferred error set `!T` (use `MyErr!T`)
 src/serve.zig: pub fn notFound uses inferred error set `!T` (use `MyErr!T`)
 src/serve/mcp.zig: pub fn clientMessage uses inferred error set `!T` (use `MyErr!T`)
 src/serve/mcp.zig: pub fn init uses inferred error set `!T` (use `MyErr!T`)
-src/serve/mcp_tools.zig: pub fn getNet uses inferred error set `!T` (use `MyErr!T`)
-src/serve/mcp_tools.zig: pub fn listInstances uses inferred error set `!T` (use `MyErr!T`)
-src/serve/mcp_tools.zig: pub fn listLibrarySubdir uses inferred error set `!T` (use `MyErr!T`)
 src/serve/notes.zig: pub fn addTaskCore uses inferred error set `!T` (use `MyErr!T`)
 src/serve/notes.zig: pub fn loadNotes uses inferred error set `!T` (use `MyErr!T`)
 src/serve/notes.zig: pub fn mutateTaskCore uses inferred error set `!T` (use `MyErr!T`)

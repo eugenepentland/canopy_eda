@@ -346,6 +346,14 @@ pub const Part = struct {
     /// the part centre) — so a part with no escape stub behaves exactly as
     /// before. Escape stubs grow this box outward (see `applyKeepout`).
     keep: Keepout = .{},
+    /// Copper side the part sits on. Manual state (viewer F-flip), carried
+    /// through poses — the solver never changes it. Bottom parts mirror in
+    /// `worldPt` and only collide with other bottom parts.
+    side: Side = .top,
+    /// Editor lock: the viewer refuses to drag/rotate/flip a locked part.
+    /// Carried through poses; the auto-solver does not consult it (a full
+    /// re-solve replaces the whole arrangement deliberately).
+    locked: bool = false,
 };
 
 /// Footprint-local collision keepout: centre offset (`ox`,`oy`) + half-extents
@@ -484,9 +492,25 @@ pub const Placement = struct {
 /// A `(board …)` outline rectangle in world mm (top-left + size).
 pub const BoardRect = struct { minx: f64, miny: f64, w: f64, h: f64 };
 
-/// A cached part pose (ref-des + centre + rotation) — the persisted form of an
-/// auto-generated layout, so the optimizer needn't re-run on every page load.
-pub const RefPose = struct { ref: []const u8, x: f64, y: f64, rot: f64 };
+/// Which copper side a part sits on. `top` is the default. A `bottom` part is
+/// drawn/placed mirrored about its own vertical axis (footprint-local x
+/// negates *before* rotation) — the view stays "looking down at the top", the
+/// KiCad convention — and it only collides with other `bottom` parts.
+pub const Side = enum {
+    top,
+    bottom,
+
+    /// Parse the persisted JSON spelling ("bottom"); anything else = top.
+    pub fn fromStr(s: []const u8) Side {
+        return if (std.mem.eql(u8, s, "bottom")) .bottom else .top;
+    }
+};
+
+/// A cached part pose (ref-des + centre + rotation + board side + lock flag) —
+/// the persisted form of an auto-generated layout, so the optimizer needn't
+/// re-run on every page load. `side`/`locked` default so legacy poses parse
+/// unchanged.
+pub const RefPose = struct { ref: []const u8, x: f64, y: f64, rot: f64, side: Side = .top, locked: bool = false };
 
 const Spring = struct {
     a: usize,
@@ -4835,6 +4859,8 @@ fn applyCached(parts: []Part, cached: ?[]const RefPose) bool {
                 p.x = rp.x;
                 p.y = rp.y;
                 p.rot = rp.rot;
+                p.side = rp.side;
+                p.locked = rp.locked;
                 matched += 1;
                 break;
             }
@@ -5200,9 +5226,11 @@ fn routedPolishPart(
 }
 
 /// True if `p`'s courtyard overlaps any other part's (rotation-aware).
+/// Parts on opposite board sides never collide.
 fn overlapsAny(parts: []const Part, p: *const Part) bool {
     for (parts) |*o| {
         if (o == p) continue;
+        if (o.side != p.side) continue;
         const ox = (keepHw(p.*) + keepHw(o.*)) - @abs(keepCx(p.*) - keepCx(o.*));
         const oy = (keepHh(p.*) + keepHh(o.*)) - @abs(keepCy(p.*) - keepCy(o.*));
         if (ox > 1e-9 and oy > 1e-9) return true;
@@ -5252,13 +5280,16 @@ fn rotateLocal(lx: f64, ly: f64, rot: f64) Pt {
     };
 }
 
-/// World position of a footprint-local point on `p`, honouring its rotation.
-/// Rotation is one of {0,90,180,270}; the `rot == 0` identity is by far the
-/// commonest case (every hub, and unrotated passives) and the inner loops call
-/// this millions of times, so it skips `rotateLocal`'s `@mod`/`@round`/switch.
+/// World position of a footprint-local point on `p`, honouring its rotation
+/// and board side (a bottom part mirrors local x before rotating — see `Side`).
+/// Rotation is one of {0,90,180,270}; the `rot == 0` top-side identity is by
+/// far the commonest case (every hub, and unrotated passives) and the inner
+/// loops call this millions of times, so it skips `rotateLocal`'s
+/// `@mod`/`@round`/switch.
 fn worldPt(p: Part, lx: f64, ly: f64) Pt {
-    if (p.rot == 0) return .{ .x = p.x + lx, .y = p.y + ly };
-    const r = rotateLocal(lx, ly, p.rot);
+    const mlx = if (p.side == .bottom) -lx else lx;
+    if (p.rot == 0) return .{ .x = p.x + mlx, .y = p.y + ly };
+    const r = rotateLocal(mlx, ly, p.rot);
     return .{ .x = p.x + r.x, .y = p.y + r.y };
 }
 
@@ -5275,9 +5306,10 @@ pub fn worldPadCenter(p: Part, lx: f64, ly: f64) [2]f64 {
 /// bypasses `worldPt`/`isQuarter` entirely.
 fn worldRect(p: Part, pr: PadRect) Rect {
     if (p.rot == 0) {
+        const mx = if (p.side == .bottom) -pr.x else pr.x;
         const hw0 = pr.w / 2;
         const hh0 = pr.h / 2;
-        return .{ .x0 = p.x + pr.x - hw0, .y0 = p.y + pr.y - hh0, .x1 = p.x + pr.x + hw0, .y1 = p.y + pr.y + hh0 };
+        return .{ .x0 = p.x + mx - hw0, .y0 = p.y + pr.y - hh0, .x1 = p.x + mx + hw0, .y1 = p.y + pr.y + hh0 };
     }
     const c = worldPt(p, pr.x, pr.y);
     const hw = if (isQuarter(p.rot)) pr.h / 2 else pr.w / 2;
@@ -6854,6 +6886,7 @@ fn legalizeOnGrid(parts: []Part) void {
         while (i < n) : (i += 1) {
             var j: usize = i + 1;
             while (j < n) : (j += 1) {
+                if (parts[i].side != parts[j].side) continue;
                 const dx = keepCx(parts[i]) - keepCx(parts[j]);
                 const dy = keepCy(parts[i]) - keepCy(parts[j]);
                 const ox = (keepHw(parts[i]) + keepHw(parts[j])) - @abs(dx);
@@ -6906,7 +6939,8 @@ fn keepBoxOf(p: Part) KeepBox {
     const s = g_collide_shrink; // courtyards may overlap their clearance margins
     const r = g_route_gap; // …or leave extra routing room between them
     if (p.keep.hw < 0) return .{ .cxo = 0, .cyo = 0, .hw = @max(0.0, (if (q) p.hh else p.hw) - s) + r, .hh = @max(0.0, (if (q) p.hw else p.hh) - s) + r };
-    const off = rotateLocal(p.keep.ox, p.keep.oy, p.rot);
+    const kox = if (p.side == .bottom) -p.keep.ox else p.keep.ox;
+    const off = rotateLocal(kox, p.keep.oy, p.rot);
     const hw = @max(0.0, (if (q) p.keep.hh else p.keep.hw) - s) + r;
     const hh = @max(0.0, (if (q) p.keep.hw else p.keep.hh) - s) + r;
     return .{ .cxo = off.x, .cyo = off.y, .hw = hw, .hh = hh };
@@ -6930,6 +6964,7 @@ fn accumulateRepulsion(parts: []const Part, boxes: []const KeepBox, ax: []f64, a
         const cyi = parts[i].y + boxes[i].cyo;
         var j: usize = i + 1;
         while (j < n) : (j += 1) {
+            if (parts[i].side != parts[j].side) continue;
             const dx = cxi - (parts[j].x + boxes[j].cxo);
             const dy = cyi - (parts[j].y + boxes[j].cyo);
             const ox = (boxes[i].hw + boxes[j].hw + clearance) - @abs(dx);
@@ -8330,4 +8365,39 @@ test "surrogateObjective ranks a tighter layout below a spread one" {
     parts[1].x = 40; // fling the cap far from the hub
     const spread = surrogateObjective(&parts, &idx_of, &nets, &no_loops, params);
     try testing.expect(tight < spread);
+}
+
+// spec: placement/optimizer - a bottom-side part mirrors footprint-local x in world transforms and never collides with top-side parts
+test "bottom side mirrors worldPt and skips cross-side overlap" {
+    var p = Part{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 10, .y = 5 };
+    p.side = .bottom;
+    // rot 0: local (+1, +0.5) mirrors to (−1, +0.5).
+    const w = worldPt(p, 1.0, 0.5);
+    try testing.expectEqual(@as(f64, 9.0), w.x);
+    try testing.expectEqual(@as(f64, 5.5), w.y);
+    // rot 90: mirrored local (−1, 0.5) rotates to (−0.5, −1).
+    p.rot = 90;
+    const w2 = worldPt(p, 1.0, 0.5);
+    try testing.expectEqual(@as(f64, 9.5), w2.x);
+    try testing.expectEqual(@as(f64, 4.0), w2.y);
+    // Two parts stacked at the same spot: opposite sides never collide,
+    // same side does.
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 0, .y = 0, .side = .bottom },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 0, .y = 0 },
+    };
+    try testing.expect(!anyOverlap(&parts));
+    parts[1].side = .bottom;
+    try testing.expect(anyOverlap(&parts));
+}
+
+// spec: placement/optimizer - cached poses restore each part's board side and lock flag
+test "applyCached applies side and locked" {
+    var parts = [_]Part{.{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false }};
+    const poses = [_]RefPose{.{ .ref = "C1", .x = 4, .y = 6, .rot = 180, .side = .bottom, .locked = true }};
+    _ = applyCached(&parts, &poses);
+    try testing.expectEqual(Side.bottom, parts[0].side);
+    try testing.expect(parts[0].locked);
+    try testing.expectEqual(@as(f64, 4), parts[0].x);
+    try testing.expectEqual(@as(f64, 180), parts[0].rot);
 }

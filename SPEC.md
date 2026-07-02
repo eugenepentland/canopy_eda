@@ -100,6 +100,8 @@ Public functions: solve
 - input-rail names (and raw rails ≥7V) read as the switching hot loop; output/low rails do not
 - routing congestion is zero with no multi-pin nets and positive when nets pile into one region
 - legalization separates two overlapping courtyards
+- a bottom-side part mirrors footprint-local x in world transforms and never collides with top-side parts
+- cached poses restore each part's board side and lock flag
 - rotates footprint-local offsets in right-angle steps matching the page
 - rotation refine picks the orientation that shortens the decoupling loop
 - loop legs measure edge-to-edge to the nearest hub pad
