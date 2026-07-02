@@ -51,14 +51,18 @@ pub const SilkLine = struct { x1: f64, y1: f64, x2: f64, y2: f64 };
 /// A silkscreen circle (footprint-local mm) — usually a pin-1 marker.
 pub const SilkCircle = struct { cx: f64, cy: f64, r: f64 };
 
-/// A footprint's physical extent: a box of `2*hw` by `2*hh` centred on the
-/// origin, plus its pads and silkscreen. `fallback` flags a synthesized
-/// (non-library) box.
+/// A footprint's physical extent: a box of `2*hw` by `2*hh` centred at
+/// (`ccx`,`ccy`) in footprint-local coordinates — (0,0) unless the library
+/// courtyard rect is off-origin (connectors whose pads hang off one side) —
+/// plus its pads and silkscreen. `fallback` flags a synthesized (non-library)
+/// box.
 pub const Geom = struct {
     hw: f64,
     hh: f64,
     pads: []const Pad,
     fallback: bool,
+    ccx: f64 = 0,
+    ccy: f64 = 0,
     silk_lines: []const SilkLine = &.{},
     silk_circles: []const SilkCircle = &.{},
 };
@@ -88,6 +92,8 @@ pub fn load(
     var court_hh: f64 = 0;
     var have_court = false;
 
+    var court_cx: f64 = 0;
+    var court_cy: f64 = 0;
     for (children[2..]) |sub| {
         if (sub.isForm("pad")) {
             if (parsePad(arena, sub)) |p| pads.append(arena, p) catch return fallbackGeom(pin_count_hint);
@@ -95,6 +101,8 @@ pub fn load(
             if (parseCourtyard(sub)) |ext| {
                 court_hw = ext.hw;
                 court_hh = ext.hh;
+                court_cx = ext.cx;
+                court_cy = ext.cy;
                 have_court = true;
             }
         } else if (sub.isForm("silkscreen")) {
@@ -104,7 +112,8 @@ pub fn load(
 
     const pad_slice = pads.items;
     const ext_with_margin = blk: {
-        if (have_court and court_hw > 0 and court_hh > 0) break :blk Ext{ .hw = court_hw, .hh = court_hh };
+        if (have_court and court_hw > 0 and court_hh > 0)
+            break :blk Ext{ .hw = court_hw, .hh = court_hh, .cx = court_cx, .cy = court_cy };
         break :blk padExtents(pad_slice) orelse return fallbackGeom(pin_count_hint);
     };
     return .{
@@ -112,6 +121,8 @@ pub fn load(
         .hh = ext_with_margin.hh + margin,
         .pads = pad_slice,
         .fallback = false,
+        .ccx = ext_with_margin.cx,
+        .ccy = ext_with_margin.cy,
         .silk_lines = silk_lines.items,
         .silk_circles = silk_circles.items,
     };
@@ -216,10 +227,12 @@ fn parsePadPoly(arena: std.mem.Allocator, node: Node) ?[]const [2]f64 {
     return pts.items;
 }
 
-const Ext = struct { hw: f64, hh: f64 };
+const Ext = struct { hw: f64, hh: f64, cx: f64 = 0, cy: f64 = 0 };
 
 /// `(courtyard (rect x1 y1 x2 y2))` or `(courtyard (circle (cx cy) r))`.
-/// Returns origin-centred half-extents (max abs corner), or null.
+/// Returns the box's half-extents plus its centre offset from the footprint
+/// origin — a courtyard need not be origin-centred (connectors whose pads
+/// hang off one side), or null.
 fn parseCourtyard(node: Node) ?Ext {
     const cl = node.asList() orelse return null;
     if (cl.len < 2) return null;
@@ -229,7 +242,8 @@ fn parseCourtyard(node: Node) ?Ext {
     return null;
 }
 
-/// `(rect x1 y1 x2 y2)` → origin-centred half-extents.
+/// `(rect x1 y1 x2 y2)` → the true box: half-extents + centre offset (no
+/// max-abs symmetrizing — an off-origin rect keeps its position).
 fn parseRectExt(shape: Node) ?Ext {
     const rl = shape.asList() orelse return null;
     if (rl.len < 5) return null;
@@ -237,15 +251,22 @@ fn parseRectExt(shape: Node) ?Ext {
     const y1 = rl[2].asNumber() orelse return null;
     const x2 = rl[3].asNumber() orelse return null;
     const y2 = rl[4].asNumber() orelse return null;
-    return .{ .hw = @max(@abs(x1), @abs(x2)), .hh = @max(@abs(y1), @abs(y2)) };
+    return .{
+        .hw = @abs(x2 - x1) / 2,
+        .hh = @abs(y2 - y1) / 2,
+        .cx = (x1 + x2) / 2,
+        .cy = (y1 + y2) / 2,
+    };
 }
 
-/// `(circle (cx cy) r)` → half-extents (radius is the last numeric child).
+/// `(circle (cx cy) r)` → half-extents (radius is the last numeric child)
+/// centred on the circle's own centre when one is given.
 fn parseCircleExt(shape: Node) ?Ext {
     const cc = shape.asList() orelse return null;
     if (cc.len < 2) return null;
     const r = cc[cc.len - 1].asNumber() orelse return null;
-    return .{ .hw = @abs(r), .hh = @abs(r) };
+    const c = if (cc.len >= 3) (parsePoint(cc[1]) orelse [2]f64{ 0, 0 }) else [2]f64{ 0, 0 };
+    return .{ .hw = @abs(r), .hh = @abs(r), .cx = c[0], .cy = c[1] };
 }
 
 /// Half-extents of the bounding box around every pad (including pad size).

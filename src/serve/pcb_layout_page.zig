@@ -496,6 +496,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
             .sub = sub,
             .subseeds_json = subseeds.poses,
             .subseedinfo_json = subseeds.info,
+            .submodules_json = subseeds.mods,
             .outline_drawn = outline_drawn,
             .single = single,
         },
@@ -586,8 +587,30 @@ fn persistGeneratedLayout(ctx: *Handler, name: []const u8, placement: optimizer.
 /// The Stamp palette's seed blobs: `poses` maps each sub-block's parent-frame
 /// ref-des → its module-layout pose, `info` maps each sub-block name → which
 /// module snapshot supplied the poses (`{layout, starred, n}`) so the button
-/// can say what a Stamp will pull and how much of the group it covers.
-const SubSeedsJson = struct { poses: []const u8 = "{}", info: []const u8 = "{}" };
+/// can say what a Stamp will pull and how much of the group it covers, and
+/// `mods` maps every sub-block name → its module source (palette name links).
+const SubSeedsJson = struct { poses: []const u8 = "{}", info: []const u8 = "{}", mods: []const u8 = "{}" };
+
+/// JSON map of sub-block name → module source ("mcu" → "w55rp20"), for the
+/// palette's name links to each module's own /pcb-layout page — emitted for
+/// every sub-block, including ones with no stampable layout yet (that page is
+/// exactly where you go to make one).
+fn buildSubModulesJson(alloc: std.mem.Allocator, block: *const env_mod.DesignBlock) []const u8 {
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    w.writeByte('{') catch return "{}";
+    var first = true;
+    for (block.sub_blocks) |sb| {
+        if (sb.source.len == 0) continue;
+        if (!first) w.writeByte(',') catch return "{}";
+        first = false;
+        writeJsonStr(w, sb.name) catch return "{}";
+        w.writeByte(':') catch return "{}";
+        writeJsonStr(w, sb.source) catch return "{}";
+    }
+    w.writeByte('}') catch return "{}";
+    return aw.written();
+}
 
 /// Build the viewer's per-group "Stamp" seeds — drop a whole pre-laid
 /// sub-circuit onto the board as a rigid cluster instead of laying its parts
@@ -640,7 +663,7 @@ fn buildSubSeedsJson(
     }
     w.writeByte('}') catch return .{};
     iw.writeByte('}') catch return .{};
-    return .{ .poses = aw.written(), .info = iw_buf.written() };
+    return .{ .poses = aw.written(), .info = iw_buf.written(), .mods = buildSubModulesJson(alloc, block) };
 }
 
 /// Initial state of the embed preview's show-clearance / show-DRC toggles,
@@ -1113,6 +1136,7 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
             if (pt.fallback) "true" else "false",
             bl,
         });
+        if (pt.ccx != 0 or pt.ccy != 0) try w.print(",\"ccx\":{d},\"ccy\":{d}", .{ pt.ccx, pt.ccy });
         try writePoseSideLocked(w, pt.side, pt.locked);
         try w.writeAll("}");
     }
@@ -1977,15 +2001,23 @@ fn courtCeilGrid(v: f64) f64 {
     return std.math.ceil(v / g - 1e-9) * g;
 }
 
-/// POST /api/courtyard/:name — rewrite a footprint's courtyard. Two modes:
-///   `{"fp":"c-0402","mode":"size","hw":1.2,"hh":0.8}` — hw/hh are the
-///     *effective* courtyard half-extents (what the layout draws); we invert
-///     the loader's air-gap margin so the written rect reloads to exactly those.
+/// `courtCeilGrid`'s outward twin for a low edge (rounds down / away).
+fn courtFloorGrid(v: f64) f64 {
+    const g = optimizer.GRID_MM;
+    return std.math.floor(v / g + 1e-9) * g;
+}
+
+/// POST /api/courtyard/:name — rewrite a footprint's courtyard. Three modes:
+///   `{"fp":"conn-x","mode":"rect","x0":-1.2,"y0":-0.8,"x1":2.4,"y1":0.8}` —
+///     the four *effective* edges verbatim (the drag editor; the box needn't
+///     be origin-centred); the loader's air-gap margin is inverted per side so
+///     the written rect reloads to exactly those edges.
 ///   `{"fp":"c-0402","mode":"offset","offset":0.2}` — the offset is the literal
-///     gap from the pad bounding box to the courtyard edge. Sized off the
-///     footprint's own pads, snapped to the placer grid, then (like "size") with
-///     the loader's air-margin stripped back out, so the drawn courtyard is
-///     exactly `pad-bbox + offset` on the grid — no extra margin on top.
+///     gap from the pad bounding box to the courtyard edge on every side,
+///     grid-snapped outward per side (asymmetric pads stay hugged), then with
+///     the loader's air-margin stripped back out.
+///   `{"fp":"c-0402","mode":"size","hw":1.2,"hh":0.8}` — legacy symmetric
+///     *effective* half-extents about the origin.
 /// Mode defaults to "size" when absent. Then re-pack via `?regen=1`.
 pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
@@ -2022,47 +2054,74 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
         return;
     };
 
-    // Two ways to size the rect (see the doc comment). Both store an effective
-    // half-extent with the loader's air-gap margin stripped out, so geometry.load
-    // adds it back to exactly the intended courtyard. "offset" derives that
-    // effective extent from the footprint's own pads (pad-bbox + gap, snapped);
-    // "size" (the default) takes it straight from the hw/hh fields.
-    const is_offset = blk: {
-        const mv = root.object.get("mode") orelse break :blk false;
-        if (mv != .string) break :blk false;
-        break :blk std.mem.eql(u8, mv.string, "offset");
+    // Three ways to size the rect (see the doc comment). All store an
+    // *effective* box with the loader's air-gap margin stripped per side, so
+    // geometry.load adds it back to exactly the intended courtyard.
+    //   "rect"   — the four effective edges verbatim (the drag editor; the box
+    //              needn't be origin-centred).
+    //   "offset" — the pad bounding box + that gap on every side, grid-snapped
+    //              outward (per side, so asymmetric pads stay hugged).
+    //   "size"   — legacy symmetric half-extents.
+    const mode: []const u8 = blk: {
+        const mv = root.object.get("mode") orelse break :blk "size";
+        break :blk if (mv == .string) mv.string else "size";
     };
-    var rw: f64 = undefined;
-    var rh: f64 = undefined;
-    if (is_offset) {
+    const margin = geometry.BBOX_MARGIN_MM;
+    var rx0: f64 = undefined;
+    var ry0: f64 = undefined;
+    var rx1: f64 = undefined;
+    var ry1: f64 = undefined;
+    if (std.mem.eql(u8, mode, "rect")) {
+        rx0 = jsonNum(root.object.get("x0")) + margin;
+        ry0 = jsonNum(root.object.get("y0")) + margin;
+        rx1 = jsonNum(root.object.get("x1")) - margin;
+        ry1 = jsonNum(root.object.get("y1")) - margin;
+    } else if (std.mem.eql(u8, mode, "offset")) {
         const off = @max(jsonNum(root.object.get("offset")), 0);
-        const g = geometry.load(req.arena, ctx.project_dir, fp_v.string, 0, geometry.BBOX_MARGIN_MM);
-        var ehw: f64 = 0;
-        var ehh: f64 = 0;
+        const g = geometry.load(req.arena, ctx.project_dir, fp_v.string, 0, margin);
+        var px0: f64 = std.math.inf(f64);
+        var py0: f64 = std.math.inf(f64);
+        var px1: f64 = -std.math.inf(f64);
+        var py1: f64 = -std.math.inf(f64);
         for (g.pads) |p| {
-            ehw = @max(ehw, @abs(p.x) + p.w / 2);
-            ehh = @max(ehh, @abs(p.y) + p.h / 2);
+            px0 = @min(px0, p.x - p.w / 2);
+            px1 = @max(px1, p.x + p.w / 2);
+            py0 = @min(py0, p.y - p.h / 2);
+            py1 = @max(py1, p.y + p.h / 2);
         }
-        if (g.pads.len == 0 or (ehw <= 0 and ehh <= 0)) {
+        if (g.pads.len == 0) {
             res.status = 400;
             res.body = "footprint has no pads to offset from";
             return;
         }
         // The offset is the literal gap from the pad bounding box to the
-        // courtyard edge. Snap that target half-extent to the grid the placer
-        // draws on, then strip the loader's air-margin (geometry.load adds it
-        // back) so the rendered courtyard is exactly the grid-snapped gap — no
-        // extra margin stacked on top.
-        const margin = geometry.BBOX_MARGIN_MM;
-        rw = @max(courtCeilGrid(ehw + off) - margin, 0.05);
-        rh = @max(courtCeilGrid(ehh + off) - margin, 0.05);
+        // effective courtyard edge, snapped outward to the grid per side, then
+        // deflated by the loader's air-margin (geometry.load adds it back).
+        rx0 = courtFloorGrid(px0 - off) + margin;
+        ry0 = courtFloorGrid(py0 - off) + margin;
+        rx1 = courtCeilGrid(px1 + off) - margin;
+        ry1 = courtCeilGrid(py1 + off) - margin;
     } else {
-        const margin = geometry.BBOX_MARGIN_MM;
-        rw = @max(jsonNum(root.object.get("hw")) - margin, 0.05);
-        rh = @max(jsonNum(root.object.get("hh")) - margin, 0.05);
+        const rw = @max(jsonNum(root.object.get("hw")) - margin, 0.05);
+        const rh = @max(jsonNum(root.object.get("hh")) - margin, 0.05);
+        rx0 = -rw;
+        ry0 = -rh;
+        rx1 = rw;
+        ry1 = rh;
+    }
+    // Degenerate guard: a span the margin deflation collapsed keeps a sliver.
+    if (rx1 - rx0 < 0.05) {
+        const cx = (rx0 + rx1) / 2;
+        rx0 = cx - 0.025;
+        rx1 = cx + 0.025;
+    }
+    if (ry1 - ry0 < 0.05) {
+        const cy = (ry0 + ry1) / 2;
+        ry0 = cy - 0.025;
+        ry1 = cy + 0.025;
     }
 
-    const updated = rewriteCourtyard(ctx.allocator, src, rw, rh) catch {
+    const updated = rewriteCourtyard(ctx.allocator, src, rx0, ry0, rx1, ry1) catch {
         res.status = 500;
         res.body = "rewrite failed";
         return;
@@ -2086,13 +2145,13 @@ fn safeFootprintName(fp: []const u8) bool {
     return true;
 }
 
-/// Return `src` with its `(courtyard …)` form replaced by an origin-centred
-/// rect of the given half-extents, inserting one before the footprint's closing
-/// paren if none exists.
-fn rewriteCourtyard(alloc: std.mem.Allocator, src: []const u8, rw: f64, rh: f64) HandlerError![]u8 {
+/// Return `src` with its `(courtyard …)` form replaced by the given rect
+/// (footprint-local corners — need not be origin-centred), inserting one
+/// before the footprint's closing paren if none exists.
+fn rewriteCourtyard(alloc: std.mem.Allocator, src: []const u8, x0: f64, y0: f64, x1: f64, y1: f64) HandlerError![]u8 {
     var buf: std.Io.Writer.Allocating = .init(alloc);
     const w = &buf.writer;
-    const form = try std.fmt.allocPrint(alloc, "(courtyard (rect {d:.3} {d:.3} {d:.3} {d:.3}))", .{ -rw, -rh, rw, rh });
+    const form = try std.fmt.allocPrint(alloc, "(courtyard (rect {d:.3} {d:.3} {d:.3} {d:.3}))", .{ x0, y0, x1, y1 });
     if (std.mem.indexOf(u8, src, "(courtyard")) |start| {
         var depth: i32 = 0;
         var i: usize = start;
@@ -3997,6 +4056,8 @@ const PcbDataOpts = struct {
     subseeds_json: []const u8 = "{}",
     /// Which module snapshot each group's seeds came from (`buildSubSeedsJson`).
     subseedinfo_json: []const u8 = "{}",
+    /// Sub-block name → module source, for palette name links (`buildSubModulesJson`).
+    submodules_json: []const u8 = "{}",
     /// The blob's "board" rect came from a user-DRAWN layout outline (the ▭
     /// tool), so the viewer treats it as editable (PCB.outline).
     outline_drawn: bool = false,
@@ -4148,6 +4209,8 @@ fn writePcbData(
             pt.hw,                                pt.hh, if (pt.kind == .hub) "hub" else "passive",
             if (pt.fallback) "true" else "false",
         });
+        // Courtyard-box centre offset (footprint-local; omitted when centred).
+        if (pt.ccx != 0 or pt.ccy != 0) try w.print(",\"ccx\":{d},\"ccy\":{d}", .{ pt.ccx, pt.ccy });
         try writePoseSideLocked(w, pt.side, pt.locked);
         try w.print(",\"blame\":{d:.4},", .{if (i < blame.len) blame[i] else 0});
         try w.writeAll("\"fp\":");
@@ -4369,6 +4432,8 @@ fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placem
     try w.writeAll(if (opts.subseeds_json.len > 0) opts.subseeds_json else "{}");
     try w.writeAll(",\"subseedinfo\":");
     try w.writeAll(if (opts.subseedinfo_json.len > 0) opts.subseedinfo_json else "{}");
+    try w.writeAll(",\"submodules\":");
+    try w.writeAll(if (opts.submodules_json.len > 0) opts.submodules_json else "{}");
     try w.writeAll(",");
 }
 
@@ -4551,13 +4616,15 @@ const COURTYARD_MODAL =
     \\<label><input type="radio" name="court-mode" value="size" checked> Overall size</label>
     \\<label><input type="radio" name="court-mode" value="offset"> Pad offset</label></div>
     \\<div class="court-fields" id="court-fields-size">
-    \\<label>½-width <input id="court-hw" type="number" step="0.1" min="0"> mm</label>
-    \\<label>½-height <input id="court-hh" type="number" step="0.1" min="0"> mm</label></div>
+    \\<label>left <input id="court-x0" type="number" step="0.1"></label>
+    \\<label>top <input id="court-y0" type="number" step="0.1"></label>
+    \\<label>right <input id="court-x1" type="number" step="0.1"></label>
+    \\<label>bottom <input id="court-y1" type="number" step="0.1"></label></div>
     \\<div class="court-fields" id="court-fields-offset" hidden>
     \\<label>Offset from pads <input id="court-off" type="number" step="0.05" min="0"> mm</label></div>
     \\<div id="court-full" class="court-full"></div>
-    \\<div class="court-note" id="court-note">Drag the box edges, or type half-extents from the part centre —
-    \\ edges snap to the grid. Saving rewrites the footprint file and applies to every design that uses it.</div>
+    \\<div class="court-note" id="court-note">Drag any box edge — each edge moves independently (mm from the
+    \\ part origin) and snaps to the grid. Saving rewrites the footprint file and applies to every design that uses it.</div>
     \\<div class="court-actions"><button id="court-save" class="btn">Save courtyard</button>
     \\<button id="court-cancel" class="btn">Cancel</button><span id="court-msg" class="savemsg"></span></div>
     \\</div></div>
@@ -4584,8 +4651,11 @@ const PAGE_CSS =
     \\.src-chip.src-star{color:#e3b341;border-color:#9e6a03}
     \\.src-chip.src-cache{color:#d29922;border-color:#9e6a03}
     \\.src-chip.src-grid{color:#f85149;border-color:#da3633}
-    \\.pcb-bar .score{font-weight:600;color:#e6edf3;background:#161b22;border:1px solid #21262d;border-radius:4px;padding:2px 8px}
-    \\.pcb-bar .delta{font-size:12px;font-weight:600;min-width:34px}
+    \\/* Fixed-footprint score chips: inline-block + min-width + tabular digits,
+    \\   so a recalculated number never rewraps the toolbar and jumps the board. */
+    \\.pcb-bar .score{font-weight:600;color:#e6edf3;background:#161b22;border:1px solid #21262d;border-radius:4px;padding:2px 8px;
+    \\  display:inline-block;min-width:118px;text-align:center;font-variant-numeric:tabular-nums}
+    \\.pcb-bar .delta{font-size:12px;font-weight:600;min-width:34px;display:inline-block;font-variant-numeric:tabular-nums}
     \\.pcb-bar .delta.up{color:#f85149}
     \\.pcb-bar .delta.down{color:#3fb950}
     \\.pcb-bar .bar-grp{display:inline-flex;gap:5px;align-items:center}
@@ -4726,7 +4796,9 @@ const PAGE_CSS =
     \\.sub-panel{border-top:1px solid #21262d}
     \\.sub-row{display:flex;align-items:center;gap:6px;padding:5px 12px;font-size:12px}
     \\.sub-row:hover{background:#1c2129}
+    \\.sub-row.cur{background:#0d1f2d;box-shadow:inset 2px 0 0 #58a6ff}
     \\.sub-name{color:#e6edf3;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\a.sub-name:hover,a.grp-name:hover{color:#58a6ff;text-decoration:underline}
     \\.sub-n{color:#6e7681;font-size:11px}
     \\.sub-rigid,.sub-stamp{background:#21262d;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;
     \\  font-size:11px;padding:1px 7px;cursor:pointer}

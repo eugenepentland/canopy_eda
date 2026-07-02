@@ -69,7 +69,7 @@ function partAt(wx,wy){var best=-1,ba=1e18;
   var a=-(p.rot||0)*Math.PI/180,c=Math.cos(a),sn=Math.sin(a);
   var lx=wx-p.x,ly=wy-p.y,rx=lx*c-ly*sn,ry=lx*sn+ly*c;
   if(p.side==="bottom")rx=-rx;
-  if(Math.abs(rx)<=p.hw&&Math.abs(ry)<=p.hh){var ar=p.hw*p.hh;if(ar<ba){ba=ar;best=i;}}}
+  if(Math.abs(rx-(p.ccx||0))<=p.hw&&Math.abs(ry-(p.ccy||0))<=p.hh){var ar=p.hw*p.hh;if(ar<ba){ba=ar;best=i;}}}
  return best;}
 function padAt(i,wx,wy){var p=P[i],a=-(p.rot||0)*Math.PI/180,c=Math.cos(a),sn=Math.sin(a);
  var lx=wx-p.x,ly=wy-p.y,rx=lx*c-ly*sn,ry=lx*sn+ly*c;
@@ -99,9 +99,10 @@ function scenePaint(){paintQueued=false;
  paintClr(ctx);
  paintTracks(ctx);
  if(flashIdx>=0&&Date.now()<flashUntil){var fp=P[flashIdx];
+  var fc=wpt(flashIdx,fp.ccx||0,fp.ccy||0);
   ctx.strokeStyle="#f0b72f";ctx.lineWidth=2.6;
   ctx.globalAlpha=0.4+0.6*Math.abs(Math.sin(Date.now()/180));
-  ctx.strokeRect(X(fp.x)-fp.hw*S,Y(fp.y)-fp.hh*S,2*fp.hw*S,2*fp.hh*S);
+  ctx.strokeRect(X(fc.x)-fp.hw*S,Y(fc.y)-fp.hh*S,2*fp.hw*S,2*fp.hh*S);
   ctx.globalAlpha=1;setTimeout(paintSoon,60);}
  else if(flashIdx>=0){flashIdx=-1;}}
 function partStroke(i,p){
@@ -117,23 +118,24 @@ function paintParts(ctx,k){
   ctx.save();
   ctx.translate(X(p.x),Y(p.y));ctx.rotate((p.rot||0)*Math.PI/180);
   if(bot)ctx.scale(-1,1);
-  // courtyard
-  var hw=p.hw*S,hh=p.hh*S;
+  // courtyard (box centre can be offset from the part origin — asymmetric
+  // library rects; the local frame already carries rotation + mirror)
+  var hw=p.hw*S,hh=p.hh*S,ccx=(p.ccx||0)*S,ccy=(p.ccy||0)*S;
   ctx.fillStyle=(heatOn&&p.ref!==anchorRef)?blameColor(heatScale>0?(p.blame||0)/heatScale:0)
     :(bot?"#122036":"#161b22");
   if(unp)ctx.fillStyle="rgba(248,81,73,.12)";
-  ctx.fillRect(-hw,-hh,2*hw,2*hh);
+  ctx.fillRect(ccx-hw,ccy-hh,2*hw,2*hh);
   var st=partStroke(i,p);
   ctx.strokeStyle=unp?"#f85149":st.c;ctx.lineWidth=unp?1.6:st.w;
   if(unp)ctx.setLineDash([4,3]);
   else if(p.locked)ctx.setLineDash([2,2]);
   else if(p.fb)ctx.setLineDash([4,3]);
   else ctx.setLineDash([]);
-  ctx.strokeRect(-hw,-hh,2*hw,2*hh);
+  ctx.strokeRect(ccx-hw,ccy-hh,2*hw,2*hh);
   ctx.setLineDash([]);
   if(unp){ctx.strokeStyle="#f85149";ctx.lineWidth=1;
-   ctx.beginPath();ctx.moveTo(-hw,-hh);ctx.lineTo(hw,hh);
-   ctx.moveTo(hw,-hh);ctx.lineTo(-hw,hh);ctx.globalAlpha=0.8;ctx.stroke();ctx.globalAlpha=1;}
+   ctx.beginPath();ctx.moveTo(ccx-hw,ccy-hh);ctx.lineTo(ccx+hw,ccy+hh);
+   ctx.moveTo(ccx+hw,ccy-hh);ctx.lineTo(ccx-hw,ccy+hh);ctx.globalAlpha=0.8;ctx.stroke();ctx.globalAlpha=1;}
   // silk
   if(p.silk){ctx.strokeStyle="#8b949e";ctx.lineWidth=0.8;ctx.lineCap="round";
    ctx.beginPath();
@@ -168,7 +170,8 @@ function paintParts(ctx,k){
    ctx.font="600 9px system-ui,sans-serif";
    ctx.textAlign="center";ctx.textBaseline="alphabetic";
    ctx.fillStyle=unp?"#f85149":(p.kind=="hub"?"#58a6ff":"#8b949e");
-   ctx.fillText(p.ref,X(p.x),Y(p.y)-p.hh*S-2);}}}
+   var lc=wpt(i,p.ccx||0,p.ccy||0);
+   ctx.fillText(p.ref,X(lc.x),Y(lc.y)-p.hh*S-2);}}}
 function padPath(ctx,pd){
  ctx.beginPath();
  if(pd.poly&&pd.poly.length>=3){
@@ -189,8 +192,9 @@ function paintGroupBoxes(ctx,k){
   idxs.forEach(function(i){var p=P[i];if(unplacedSet[p.ref])return;
    var a=(p.rot||0)*Math.PI/180,ca=Math.abs(Math.cos(a)),sa=Math.abs(Math.sin(a));
    var ehw=(p.hw*ca+p.hh*sa)*S,ehh=(p.hw*sa+p.hh*ca)*S;
-   x0=Math.min(x0,X(p.x)-ehw);x1=Math.max(x1,X(p.x)+ehw);
-   y0=Math.min(y0,Y(p.y)-ehh);y1=Math.max(y1,Y(p.y)+ehh);n++;});
+   var cc=wpt(i,p.ccx||0,p.ccy||0);
+   x0=Math.min(x0,X(cc.x)-ehw);x1=Math.max(x1,X(cc.x)+ehw);
+   y0=Math.min(y0,Y(cc.y)-ehh);y1=Math.max(y1,Y(cc.y)+ehh);n++;});
   if(!n)continue;
   var pd=3;x0-=pd;y0-=pd;x1+=pd;y1+=pd;
   var hov=(hoverGrpName===g);
@@ -380,7 +384,10 @@ function reweighLayouts(){var aobj=svTerms(PCB.auto).obj;
 }
 var scoreReq=0;
 function fetchScore(){
- setSc("sc-obj","objective …");var seq=++scoreReq;
+ // Keep the current number on screen until the new one arrives — blanking to
+ // "…" resized the chip and made the toolbar (and the board below it) jump
+ // on every drag/rotate/change.
+ var seq=++scoreReq;
  // Ask for per-part blame only while the Heatmap view is on, so a finished
  // drag/rotate re-tints the board to the new cost distribution.
  var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),blame:heatOn};
@@ -425,8 +432,11 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
  var pg=grpOf(p.ref);
  if(pg&&GRPS[pg]&&GRPS[pg].length>1){
   var pinf=(PCB.subseedinfo||{})[pg];
-  h+='<div class="prop-sec">Sub-circuit</div><div class="prop-grp"><span class="grp-name">'+pEsc(pg)+
-   '</span><span class="grp-n">'+GRPS[pg].length+' parts</span>'+
+  var pmod=(PCB.submodules||{})[pg];
+  var pname=pmod?'<a class="grp-name" href="/pcb-layout/'+encodeURIComponent(pmod)+'" target="_blank" rel="noopener" title="Open module ‘'+pEsc(pmod)+'’ on its own PCB-layout page.">'+pEsc(pg)+'</a>'
+   :'<span class="grp-name">'+pEsc(pg)+'</span>';
+  h+='<div class="prop-sec">Sub-circuit</div><div class="prop-grp">'+pname+
+   '<span class="grp-n">'+GRPS[pg].length+' parts</span>'+
    (pinf&&!RO?'<button class="btn grp-stamp" data-grp-stamp="'+pEsc(pg)+'" title="'+stampTitle(pg,pinf)+'">Stamp module layout</button>':
     (pinf?'':'<span class="grp-noseed" title="No saved layout on the module matches its current parts — open the module’s own /pcb-layout page, lay it out and save (★ star it to pin the choice).">no saved module layout</span>'))+
    '</div>';
@@ -455,8 +465,8 @@ function updatePropLive(){if(!selRef)return;var p=partByRef(selRef);if(!p)return
  if(ex)ex.textContent=pMm(p.x)+" mm";if(ey)ey.textContent=pMm(p.y)+" mm";
  if(er)er.textContent=((((p.rot||0)%360)+360)%360)+"°";}
 function markSelPart(){paintSoon();}
-function selectComp(ref){selRef=ref;renderProps();markSelPart();}
-function clearSel(){if(!selRef)return;selRef=null;renderProps();markSelPart();}
+function selectComp(ref){selRef=ref;renderProps();markGrpRow();markSelPart();}
+function clearSel(){if(!selRef)return;selRef=null;renderProps();markGrpRow();markSelPart();}
 // ── Rigid sub-circuits (top-level: hover glow + paint read them in RO too) ─
 // Each sub-block's parts share a ref prefix ("buck/C3" → group "buck").
 // A rigid group drags/rotates as one unit — the pre-laid module keeps its
@@ -468,6 +478,12 @@ var GRPS={};P.forEach(function(p,i){var g=grpOf(p.ref);if(g)(GRPS[g]=GRPS[g]||[]
 // stampGroup lives in the edit-only block below; the properties panel (shared
 // with RO pages) reaches it through this indirection.
 var stampGroupFn=null;
+// Selecting a part lights its sub-circuit's row in the sidebar palette (and
+// scrolls it into view), so board and palette stay cross-referenced.
+function markGrpRow(){var g=selRef?grpOf(selRef):null,hit=null;
+ document.querySelectorAll(".sub-row").forEach(function(r){
+  var on=!!g&&r.getAttribute("data-grp")===g;r.classList.toggle("cur",on);if(on)hit=r;});
+ if(hit&&hit.scrollIntoView)try{hit.scrollIntoView({block:"nearest"});}catch(e){}}
 // Tooltip for a group's Stamp button: which module snapshot the seeds came
 // from (PCB.subseedinfo), how much of the group it covers, and — when the ★
 // has gone stale — the fuller snapshot to consider re-starring.
@@ -786,8 +802,11 @@ function subPanelRefresh(){var box=document.getElementById("sub-panel");if(!box)
   var hasSeed=GRPS[g].some(function(i){return !!seeds[P[i].ref];});
   var inf=sinfo[g],tot=GRPS[g].length;
   var cov=(inf&&inf.n<tot)?'<span class="sub-cov" title="The module snapshot covers '+inf.n+' of this group’s '+tot+' parts — the rest keep their positions on Stamp.">'+inf.n+'/'+tot+'</span>':'';
+  var mod=(PCB.submodules||{})[g];
+  var nameH=mod?'<a class="sub-name" href="/pcb-layout/'+encodeURIComponent(mod)+'" target="_blank" rel="noopener" title="Open module ‘'+pEsc(mod)+'’ on its own PCB-layout page — lay it out and save / ★ a layout there.">'+pEsc(g)+'</a>'
+   :'<span class="sub-name">'+pEsc(g)+'</span>';
   h+='<div class="sub-row" data-grp="'+pEsc(g)+'">'+
-   '<span class="sub-name">'+pEsc(g)+'</span><span class="sub-n">'+tot+'</span>'+
+   nameH+'<span class="sub-n">'+tot+'</span>'+
    '<button class="btn sub-rigid'+(grpRigid(g)?" on":"")+'" data-rigid="'+pEsc(g)+'" title="'+
     (grpRigid(g)?"Rigid — drags as one unit. Click to explode.":"Exploded — parts move individually. Click to re-cohere.")+'">'+
     (grpRigid(g)?"\u{1F517}":"\u{2702}")+'</button>'+cov+
@@ -800,7 +819,8 @@ function subPanelRefresh(){var box=document.getElementById("sub-panel");if(!box)
  box.querySelectorAll("[data-stamp]").forEach(function(b){b.addEventListener("click",function(){stampGroup(b.getAttribute("data-stamp"));});});
  box.querySelectorAll(".sub-row").forEach(function(r){var g=r.getAttribute("data-grp");
   r.addEventListener("mouseenter",function(){grpHl(g,true);});
-  r.addEventListener("mouseleave",function(){grpHl(g,false);});});}
+  r.addEventListener("mouseleave",function(){grpHl(g,false);});});
+ markGrpRow();}
 (function(){
  if(!Object.keys(GRPS).length)return;
  var side=document.querySelector(".pcb-side");if(!side)return;
@@ -998,62 +1018,102 @@ function clearRoute(){if(!(PCB.tracks&&PCB.tracks.length)&&!(PCB.vias&&PCB.vias.
 var courtState=null;
 function partByRef(ref){for(var i=0;i<P.length;i++)if(P[i].ref===ref)return P[i];return null;}
 function gceil(v){return Math.ceil(v/G-1e-9)*G;}
-function padExt(p){var hw=0,hh=0;p.pads.forEach(function(pd){
- hw=Math.max(hw,Math.abs(pd.x)+pd.w/2);hh=Math.max(hh,Math.abs(pd.y)+pd.h/2);});return {hw:hw,hh:hh};}
+function gfloor(v){return Math.floor(v/G+1e-9)*G;}
+// Raw pad bounding box (footprint-local mm), or null for a padless part.
+// The courtyard may never cut inside this box + the clearance margin.
+function padBBox(p){if(!(p.pads||[]).length)return null;
+ var x0=1/0,y0=1/0,x1=-1/0,y1=-1/0;
+ p.pads.forEach(function(pd){x0=Math.min(x0,pd.x-pd.w/2);x1=Math.max(x1,pd.x+pd.w/2);
+  y0=Math.min(y0,pd.y-pd.h/2);y1=Math.max(y1,pd.y+pd.h/2);});
+ return {x0:x0,y0:y0,x1:x1,y1:y1};}
 // The modal preview draws the REAL footprint — silk + fab + pads through the
 // shared FP engine, fetched once per open from /api/footprint/:fp — in mm
-// coordinates, with the editable courtyard box on top. The box is
-// origin-centred (the file stores symmetric half-extents), so dragging an edge
-// or corner grows both sides; edges snap to the same G grid the numeric fields
-// use. The viewBox freezes for the duration of a drag (courtState.vb) so the
-// scale doesn't shift under the cursor, then refits on release.
+// coordinates, with the editable courtyard box on top. The box is a free
+// rectangle (courtState.box {x0,y0,x1,y1}, footprint-local): each edge drags
+// independently, snapping to the G grid and clamped to the pads + margin, so
+// an off-origin footprint (connector pads hanging off one side) gets a
+// courtyard that hugs it instead of a forced origin-centred one. The viewBox
+// freezes for the duration of a drag (courtState.vb) so the scale doesn't
+// shift under the cursor, then refits on release.
 function cn3(v){return (+v).toFixed(3);}
-function courtDraw(p,hw,hh){var s=document.getElementById("court-svg");
+function courtDraw(p,box){var s=document.getElementById("court-svg");
  var c=courtState||{},d=c.fpdata||{pads:p.pads||[]};
- var aw=0,ah=0;
- if(d.bbox){aw=Math.max(Math.abs(d.bbox.x),Math.abs(d.bbox.x+d.bbox.w));ah=Math.max(Math.abs(d.bbox.y),Math.abs(d.bbox.y+d.bbox.h));}
- (d.pads||[]).forEach(function(pd){aw=Math.max(aw,Math.abs(pd.x)+pd.w/2);ah=Math.max(ah,Math.abs(pd.y)+pd.h/2);});
- var ex=c.vb||{w:Math.max(hw,aw)*1.18+0.4,h:Math.max(hh,ah)*1.18+0.4};
- FP.drawFootprint(s,{bbox:{x:-ex.w,y:-ex.h,w:2*ex.w,h:2*ex.h},pads:d.pads||[],silk:d.silk,fab:d.fab,courtyard:{}},{bg:false});
+ var mnx=box.x0,mny=box.y0,mxx=box.x1,mxy=box.y1;
+ if(d.bbox){mnx=Math.min(mnx,d.bbox.x);mny=Math.min(mny,d.bbox.y);
+  mxx=Math.max(mxx,d.bbox.x+d.bbox.w);mxy=Math.max(mxy,d.bbox.y+d.bbox.h);}
+ (d.pads||[]).forEach(function(pd){mnx=Math.min(mnx,pd.x-pd.w/2);mxx=Math.max(mxx,pd.x+pd.w/2);
+  mny=Math.min(mny,pd.y-pd.h/2);mxy=Math.max(mxy,pd.y+pd.h/2);});
+ var padm=Math.max(mxx-mnx,mxy-mny)*0.09+0.3;
+ var vbb=c.vb||{x:mnx-padm,y:mny-padm,w:(mxx-mnx)+2*padm,h:(mxy-mny)+2*padm};
+ FP.drawFootprint(s,{bbox:vbb,pads:d.pads||[],silk:d.silk,fab:d.fab,courtyard:{}},{bg:false});
  var edit=!(p.fb||!p.fp);
- s.appendChild(FP.el("rect",{x:cn3(-hw),y:cn3(-hh),width:cn3(2*hw),height:cn3(2*hh),
+ s.appendChild(FP.el("rect",{x:cn3(box.x0),y:cn3(box.y0),width:cn3(box.x1-box.x0),height:cn3(box.y1-box.y0),
   fill:"none",stroke:edit?"#58a6ff":"#8b949e","stroke-width":0.06,"stroke-dasharray":"0.25 0.15"}));
- if(edit)courtHandles(s,hw,hh,ex);}
-function courtHandles(s,hw,hh,ex){
- var t=Math.max(ex.w,ex.h)/12;   // grab-strip thickness (mm) — ~constant on screen
- function strip(x,y,w,h,cur,edge){var e=FP.el("rect",{x:cn3(x),y:cn3(y),width:cn3(Math.max(w,0.01)),height:cn3(Math.max(h,0.01)),
+ // part-origin cross, so the box's offset from the origin stays readable
+ var tt=Math.max(vbb.w,vbb.h)/40;
+ s.appendChild(FP.el("line",{x1:cn3(-tt),y1:0,x2:cn3(tt),y2:0,stroke:"#6e7681","stroke-width":0.04}));
+ s.appendChild(FP.el("line",{x1:0,y1:cn3(-tt),x2:0,y2:cn3(tt),stroke:"#6e7681","stroke-width":0.04}));
+ if(edit)courtHandles(s,box,vbb);}
+function courtHandles(s,box,vbb){
+ var t=Math.max(vbb.w,vbb.h)/13;   // grab-strip thickness (mm) — ~constant on screen
+ var w=box.x1-box.x0,h=box.y1-box.y0;
+ function strip(x,y,sw,sh,cur,edge){var e=FP.el("rect",{x:cn3(x),y:cn3(y),width:cn3(Math.max(sw,0.01)),height:cn3(Math.max(sh,0.01)),
    fill:"none","pointer-events":"all","data-cedge":edge});e.style.cursor=cur;s.appendChild(e);}
- strip(hw-t/2,-hh+t/2,t,2*hh-t,"ew-resize","e");
- strip(-hw-t/2,-hh+t/2,t,2*hh-t,"ew-resize","w");
- strip(-hw+t/2,hh-t/2,2*hw-t,t,"ns-resize","s");
- strip(-hw+t/2,-hh-t/2,2*hw-t,t,"ns-resize","n");
- strip(hw-t/2,hh-t/2,t,t,"nwse-resize","se");
- strip(-hw-t/2,-hh-t/2,t,t,"nwse-resize","nw");
- strip(hw-t/2,-hh-t/2,t,t,"nesw-resize","ne");
- strip(-hw-t/2,hh-t/2,t,t,"nesw-resize","sw");
- [[hw,hh],[hw,-hh],[-hw,hh],[-hw,-hh],[hw,0],[-hw,0],[0,hh],[0,-hh]].forEach(function(cp){
+ strip(box.x1-t/2,box.y0+t/2,t,h-t,"ew-resize","e");
+ strip(box.x0-t/2,box.y0+t/2,t,h-t,"ew-resize","w");
+ strip(box.x0+t/2,box.y1-t/2,w-t,t,"ns-resize","s");
+ strip(box.x0+t/2,box.y0-t/2,w-t,t,"ns-resize","n");
+ strip(box.x1-t/2,box.y1-t/2,t,t,"nwse-resize","se");
+ strip(box.x0-t/2,box.y0-t/2,t,t,"nwse-resize","nw");
+ strip(box.x1-t/2,box.y0-t/2,t,t,"nesw-resize","ne");
+ strip(box.x0-t/2,box.y1-t/2,t,t,"nesw-resize","sw");
+ var cx=(box.x0+box.x1)/2,cy=(box.y0+box.y1)/2;
+ [[box.x1,box.y1],[box.x1,box.y0],[box.x0,box.y1],[box.x0,box.y0],
+  [box.x1,cy],[box.x0,cy],[cx,box.y1],[cx,box.y0]].forEach(function(cp){
   s.appendChild(FP.el("rect",{x:cn3(cp[0]-t/6),y:cn3(cp[1]-t/6),width:cn3(t/3),height:cn3(t/3),
    fill:"#58a6ff","pointer-events":"none"}));});}
-function courtBox(){var c=courtState;return c.mode=="offset"?{hw:gceil(c.ext.hw+c.offset),hh:gceil(c.ext.hh+c.offset)}:{hw:c.hw,hh:c.hh};}
-function courtRefresh(){if(!courtState)return;var b=courtBox();courtDraw(courtState.p,b.hw,b.hh);
- document.getElementById("court-full").textContent="full "+(2*b.hw).toFixed(2)+" × "+(2*b.hh).toFixed(2)+" mm";}
+// Per-edge clamps: an edge snaps to the grid but can never cut inside the
+// pads + margin, nor cross its opposite edge.
+function courtClampX0(v){var c=courtState,lim=c.pb?gfloor(c.pb.x0-c.cm):c.box.x1-G;
+ return Math.min(Math.round(v/G)*G,Math.min(lim,c.box.x1-G));}
+function courtClampX1(v){var c=courtState,lim=c.pb?gceil(c.pb.x1+c.cm):c.box.x0+G;
+ return Math.max(Math.round(v/G)*G,Math.max(lim,c.box.x0+G));}
+function courtClampY0(v){var c=courtState,lim=c.pb?gfloor(c.pb.y0-c.cm):c.box.y1-G;
+ return Math.min(Math.round(v/G)*G,Math.min(lim,c.box.y1-G));}
+function courtClampY1(v){var c=courtState,lim=c.pb?gceil(c.pb.y1+c.cm):c.box.y0+G;
+ return Math.max(Math.round(v/G)*G,Math.max(lim,c.box.y0+G));}
+function courtBox(){var c=courtState;
+ if(c.mode=="offset"&&c.pb)return {x0:gfloor(c.pb.x0-c.offset),y0:gfloor(c.pb.y0-c.offset),
+  x1:gceil(c.pb.x1+c.offset),y1:gceil(c.pb.y1+c.offset)};
+ return {x0:c.box.x0,y0:c.box.y0,x1:c.box.x1,y1:c.box.y1};}
+function courtRefresh(){if(!courtState)return;var b=courtBox();courtDraw(courtState.p,b);
+ var cx=(b.x0+b.x1)/2,cy=(b.y0+b.y1)/2;
+ document.getElementById("court-full").textContent="full "+(b.x1-b.x0).toFixed(2)+" \u00d7 "+(b.y1-b.y0).toFixed(2)
+  +" mm \u00b7 centre ("+cx.toFixed(2)+", "+cy.toFixed(2)+")";}
 function courtSetMode(m){if(!courtState)return;courtState.mode=m;
  document.getElementById("court-fields-size").hidden=(m!="size");
  document.getElementById("court-fields-offset").hidden=(m!="offset");courtRefresh();}
-function openCourt(ref){var p=partByRef(ref);if(!p)return;var ext=padExt(p),cm=PCB.cmargin||0.15;
- var min={hw:gceil(ext.hw+cm),hh:gceil(ext.hh+cm)};
- courtState={p:p,fp:p.fp,mode:"size",hw:p.hw,hh:p.hh,offset:cm,ext:ext,min:min,fpdata:null,vb:null};
- document.getElementById("court-title").textContent=p.fp+"  ·  "+p.ref;
- var hwI=document.getElementById("court-hw"),hhI=document.getElementById("court-hh"),offI=document.getElementById("court-off");
+var COURT_EDGE_IDS=["court-x0","court-y0","court-x1","court-y1"];
+function courtSyncInputs(){var c=courtState;if(!c)return;
+ var v=[c.box.x0,c.box.y0,c.box.x1,c.box.y1];
+ COURT_EDGE_IDS.forEach(function(id,i){var e=document.getElementById(id);if(e)e.value=v[i].toFixed(2);});}
+function openCourt(ref){var p=partByRef(ref);if(!p)return;var cm=PCB.cmargin||0.15;
+ var pb=padBBox(p);
+ courtState={p:p,fp:p.fp,mode:"size",offset:cm,cm:cm,pb:pb,fpdata:null,vb:null,
+  box:{x0:(p.ccx||0)-p.hw,y0:(p.ccy||0)-p.hh,x1:(p.ccx||0)+p.hw,y1:(p.ccy||0)+p.hh}};
+ document.getElementById("court-title").textContent=p.fp+"  \u00b7  "+p.ref;
+ var offI=document.getElementById("court-off");
  var sv=document.getElementById("court-save"),note=document.getElementById("court-note"),msg=document.getElementById("court-msg");
- msg.textContent="";hwI.value=p.hw.toFixed(2);hhI.value=p.hh.toFixed(2);hwI.min=min.hw;hhI.min=min.hh;offI.value=cm.toFixed(2);
- var fab=p.fb||!p.fp,noPads=!(ext.hw>0||ext.hh>0);
- sv.disabled=fab;hwI.disabled=fab;hhI.disabled=fab;offI.disabled=fab||noPads;
+ msg.textContent="";offI.value=cm.toFixed(2);
+ var fab=p.fb||!p.fp,noPads=!pb;
+ sv.disabled=fab;offI.disabled=fab||noPads;
+ COURT_EDGE_IDS.forEach(function(id){var e=document.getElementById(id);if(e)e.disabled=fab;});
+ courtSyncInputs();
  document.querySelectorAll("input[name=court-mode]").forEach(function(r){r.checked=(r.value=="size");r.disabled=fab||(r.value=="offset"&&noPads);});
  courtSetMode("size");
- note.textContent=fab?"Synthesized placeholder box (no footprint file) — courtyard can't be edited.":
-  "Drag the blue edges or corners — the box stays centred on the part origin and edges snap to the "+
-  G.toFixed(2)+" mm grid (or type half-extents below). Pad offset instead holds that gap outside the pads. "+
+ note.textContent=fab?"Synthesized placeholder box (no footprint file) \u2014 courtyard can't be edited.":
+  "Drag any edge or corner \u2014 each edge moves independently (the box needn't be centred on the part origin, marked +) "+
+  "and snaps to the "+G.toFixed(2)+" mm grid, never cutting inside the pads. Pad offset instead holds that gap outside the pads on every side. "+
   "Saving rewrites lib/footprints/"+p.fp+".sexp and applies to every design using it.";
  document.getElementById("court-modal").hidden=false;
  // Real footprint art (silk + fab + true pad shapes) for the preview; the
@@ -1071,14 +1131,10 @@ if(ccBtn)ccBtn.addEventListener("click",courtClose);
 if(modalBg)modalBg.addEventListener("click",function(ev){if(ev.target===modalBg)courtClose();});
 document.querySelectorAll("input[name=court-mode]").forEach(function(r){
  r.addEventListener("change",function(){if(r.checked)courtSetMode(r.value);});});
-// Drag-resize the courtyard box: pointerdown on an edge/corner grab strip
-// (data-cedge) starts a gesture; each move snaps that edge to the G grid,
-// clamped to the pad-extent minimum, mirrored to the opposite side (the box is
-// origin-centred). A drag in offset mode adopts the shown box then switches to
-// size mode, so the rect never jumps under the cursor.
-function courtSyncInputs(){var c=courtState;if(!c)return;
- var hwI=document.getElementById("court-hw"),hhI=document.getElementById("court-hh");
- if(hwI)hwI.value=c.hw.toFixed(2);if(hhI)hhI.value=c.hh.toFixed(2);}
+// Drag-resize: pointerdown on an edge/corner grab strip (data-cedge) starts a
+// gesture; each move snaps that edge to the grid with the pad clamp. A drag in
+// offset mode adopts the shown box then switches to size mode, so the rect
+// never jumps under the cursor.
 (function(){var s=document.getElementById("court-svg");if(!s)return;
  var cd=null;
  function courtMm(ev){var r=s.getBoundingClientRect(),vb=s.viewBox.baseVal;
@@ -1090,40 +1146,42 @@ function courtSyncInputs(){var c=courtState;if(!c)return;
   var edge=ev.target&&ev.target.getAttribute&&ev.target.getAttribute("data-cedge");
   if(!edge||!courtState)return;
   ev.preventDefault();
-  if(courtState.mode!="size"){var b=courtBox();courtState.hw=b.hw;courtState.hh=b.hh;
+  if(courtState.mode!="size"){courtState.box=courtBox();
    document.querySelectorAll("input[name=court-mode]").forEach(function(r){r.checked=(r.value=="size");});
    courtSetMode("size");courtSyncInputs();}
-  var vb=s.viewBox.baseVal;courtState.vb={w:vb.width/2,h:vb.height/2};
+  var vb=s.viewBox.baseVal;courtState.vb={x:vb.x,y:vb.y,w:vb.width,h:vb.height};
   cd={edge:edge};try{s.setPointerCapture(ev.pointerId);}catch(e){}});
  s.addEventListener("pointermove",function(ev){if(!cd||!courtState)return;
   var m=courtMm(ev);if(!m)return;var c=courtState;
-  if(cd.edge.indexOf("e")>=0||cd.edge.indexOf("w")>=0)
-   c.hw=Math.max(c.min.hw,Math.round(Math.abs(m.x)/G)*G);
-  if(cd.edge.indexOf("n")>=0||cd.edge.indexOf("s")>=0)
-   c.hh=Math.max(c.min.hh,Math.round(Math.abs(m.y)/G)*G);
+  if(cd.edge.indexOf("e")>=0)c.box.x1=courtClampX1(m.x);
+  if(cd.edge.indexOf("w")>=0)c.box.x0=courtClampX0(m.x);
+  if(cd.edge.indexOf("n")>=0)c.box.y0=courtClampY0(m.y);
+  if(cd.edge.indexOf("s")>=0)c.box.y1=courtClampY1(m.y);
   courtSyncInputs();courtRefresh();});
  function courtDragEnd(){if(!cd)return;cd=null;
   if(courtState){courtState.vb=null;courtRefresh();}}
  s.addEventListener("pointerup",courtDragEnd);
  s.addEventListener("pointercancel",courtDragEnd);})();
-function courtInput(which){if(!courtState)return;var inp=document.getElementById(which=="hw"?"court-hw":"court-hh");
- var v=Math.round(parseFloat(inp.value)/G)*G;if(!(v>0))v=courtState.min[which];
- v=Math.max(v,courtState.min[which]);courtState[which]=v;inp.value=v.toFixed(2);courtRefresh();}
-var hwI2=document.getElementById("court-hw"),hhI2=document.getElementById("court-hh");
-if(hwI2)hwI2.addEventListener("change",function(){courtInput("hw");});
-if(hhI2)hhI2.addEventListener("change",function(){courtInput("hh");});
+COURT_EDGE_IDS.forEach(function(id,idx){var e=document.getElementById(id);if(!e)return;
+ e.addEventListener("change",function(){if(!courtState)return;var v=parseFloat(e.value);
+  if(isNaN(v)){courtSyncInputs();return;}
+  var c=courtState;
+  if(idx===0)c.box.x0=courtClampX0(v);else if(idx===1)c.box.y0=courtClampY0(v);
+  else if(idx===2)c.box.x1=courtClampX1(v);else c.box.y1=courtClampY1(v);
+  courtSyncInputs();courtRefresh();});});
 var offI2=document.getElementById("court-off");
 if(offI2)offI2.addEventListener("change",function(){if(!courtState)return;var v=parseFloat(offI2.value);
  if(!(v>=0))v=0;v=Math.round(v/0.05)*0.05;courtState.offset=v;offI2.value=v.toFixed(2);courtRefresh();});
 var csv=document.getElementById("court-save");
 if(csv)csv.addEventListener("click",function(){if(!courtState||!courtState.fp)return;
- var msg=document.getElementById("court-msg");msg.style.color="#8b949e";msg.textContent="saving…";
+ var msg=document.getElementById("court-msg");msg.style.color="#8b949e";msg.textContent="saving\u2026";
+ var b=courtBox();
  var body=courtState.mode=="offset"?{fp:courtState.fp,mode:"offset",offset:courtState.offset}
-   :{fp:courtState.fp,mode:"size",hw:courtState.hw,hh:courtState.hh};
+   :{fp:courtState.fp,mode:"rect",x0:b.x0,y0:b.y0,x1:b.x1,y1:b.y1};
  fetch("/api/courtyard/"+encodeURIComponent(PCB.name),{method:"POST",headers:{"Content-Type":"application/json"},
    body:JSON.stringify(body)})
   .then(function(r){if(!r.ok)throw 0;return r.json();})
-  .then(function(){msg.style.color="#3fb950";msg.textContent="saved ✓ — rebuilding";
+  .then(function(){msg.style.color="#3fb950";msg.textContent="saved \u2713 \u2014 rebuilding";
     window.location="/pcb-layout/"+encodeURIComponent(PCB.name)+"?regen=1";})
   .catch(function(){msg.style.color="#f85149";msg.textContent="save failed";});});
 var rgo=document.getElementById("r-go");
