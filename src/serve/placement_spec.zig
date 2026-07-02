@@ -268,6 +268,130 @@ pub fn specSaveApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb
     res.body = aw.written();
 }
 
+/// POST /api/flip-side/:name — set the design's placement `(back-side …)` clause
+/// to exactly the posted ref list. The PCB page's "hover a part, press F" flip
+/// sends every part currently on the back copper layer; this writes that set to
+/// source. The body is a bare list of ref-des separated by commas/whitespace
+/// (empty clears the clause). Only the `(back-side …)` clause changes — any
+/// hand-authored anchor/side lists in the `(placement …)` form are preserved —
+/// then a history snapshot is taken, the design re-evaluates, and the live
+/// version bumps so the colour (and the exported KiCad layer) persists.
+pub fn flipSideApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void {
+    const arena = req.arena;
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    res.content_type = .JSON;
+    const body = std.mem.trim(u8, req.body() orelse "", " \t\r\n");
+
+    var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+    var it = std.mem.tokenizeAny(u8, body, ", \t\r\n");
+    while (it.next()) |tok| {
+        // A ref-des never contains a quote/paren; skip anything that would break
+        // the emitted clause (the client only ever sends real part refs).
+        if (std.mem.indexOfAny(u8, tok, "\"()") != null) continue;
+        refs.append(arena, tok) catch return error.OutOfMemory;
+    }
+
+    const path = paths.designSourcePath(arena, ctx.project_dir, name) catch {
+        res.status = 500;
+        return;
+    };
+    const source = infra_fs.cwd().readFileAlloc(arena, path, MAX_DESIGN_BYTES) catch {
+        res.status = 404;
+        res.body = "{\"error\":\"not a design - back-side flips aren't supported on modules yet\"}";
+        return;
+    };
+    const new_source = (setBackSideClause(arena, source, refs.items) catch {
+        res.status = 500;
+        return;
+    }) orelse {
+        res.status = 422;
+        res.body = "{\"error\":\"no (design-block ...) found in the design file\"}";
+        return;
+    };
+    const mr = edit.writeAndRebuild(arena, ctx.project_dir, name, new_source, "flip part side (PCB page)") catch |e| {
+        res.status = 500;
+        res.body = if (e == error.RebuildFailed)
+            "{\"error\":\"design failed to rebuild after the flip - restore from history\"}"
+        else
+            ERR_WRITE_FAILED;
+        return;
+    };
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    const w = &aw.writer;
+    w.print("{{\"ok\":true,\"version\":{d}}}", .{mr.version}) catch return error.OutOfMemory;
+    res.body = aw.written();
+}
+
+/// Build a `(back-side "A" "B" …)` clause for `refs` (no escaping — ref-des are
+/// plain tokens). Empty `refs` ⇒ empty string (the caller drops the clause).
+fn buildBackSideClause(alloc: std.mem.Allocator, refs: []const []const u8) BuildError![]const u8 {
+    if (refs.len == 0) return "";
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    try w.writeAll("(back-side");
+    for (refs) |r| {
+        try w.writeAll(" \"");
+        try w.writeAll(r);
+        try w.writeAll("\"");
+    }
+    try w.writeAll(")");
+    return aw.written();
+}
+
+fn isSpaceByte(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\r' or c == '\n';
+}
+
+/// Surgically rewrite `source` so the placement `(back-side …)` clause lists
+/// exactly `refs`, leaving every other clause untouched:
+///  - existing `(placement …)` with a `(back-side …)`: replace it (or drop it +
+///    its leading whitespace when `refs` is empty);
+///  - existing `(placement …)` without one: insert before the form's close;
+///  - no placement form (+ non-empty `refs`): insert an anchor-less
+///    `(placement (back-side …))` before the design-block close — it declares
+///    copper sides only and falls through to auto-placement.
+/// Null ⇒ no `(design-block …)` to host the form. String/comment-aware.
+fn setBackSideClause(alloc: std.mem.Allocator, source: []const u8, refs: []const []const u8) BuildError!?[]u8 {
+    const clause = try buildBackSideClause(alloc, refs);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    if (findForm(source, "(placement")) |ph| {
+        if (findForm(source[ph.start..ph.end], "(back-side")) |rel| {
+            const bs = ph.start + rel.start;
+            const be = ph.start + rel.end;
+            if (refs.len == 0) {
+                var s = bs;
+                while (s > ph.start and isSpaceByte(source[s - 1])) s -= 1;
+                try out.appendSlice(alloc, source[0..s]);
+                try out.appendSlice(alloc, source[be..]);
+            } else {
+                try out.appendSlice(alloc, source[0..bs]);
+                try out.appendSlice(alloc, clause);
+                try out.appendSlice(alloc, source[be..]);
+            }
+            return try out.toOwnedSlice(alloc);
+        }
+        if (refs.len == 0) return try alloc.dupe(u8, source); // nothing to clear
+        const close = ph.end - 1; // before the placement form's ')'
+        try out.appendSlice(alloc, source[0..close]);
+        try out.appendSlice(alloc, "\n  ");
+        try out.appendSlice(alloc, clause);
+        try out.appendSlice(alloc, source[close..]);
+        return try out.toOwnedSlice(alloc);
+    }
+    if (refs.len == 0) return try alloc.dupe(u8, source); // nothing to add
+    const block = findForm(source, "(design-block") orelse return null;
+    const close = block.end - 1; // before the design-block's ')'
+    try out.appendSlice(alloc, source[0..close]);
+    try out.appendSlice(alloc, "\n  (placement ");
+    try out.appendSlice(alloc, clause);
+    try out.appendSlice(alloc, ")\n");
+    try out.appendSlice(alloc, source[close..]);
+    return try out.toOwnedSlice(alloc);
+}
+
 /// Max design-file size the spec save will read (matches edit.zig's cap).
 const MAX_DESIGN_BYTES: usize = 1 << 20;
 
@@ -663,6 +787,19 @@ pub fn buildSpecSexp(
         }
         try w.writeAll(")");
     }
+    // Copper-side clause: list every back-layer (B.Cu) part so the round-trip
+    // preserves which parts the author put on the back. Orthogonal to the side
+    // blocks above (a back part still appears in its anchor-side list too).
+    var any_back = false;
+    for (p.parts, 0..) |part, pi| {
+        if (pi == anchor) continue;
+        if (skip.contains(part.ref_des)) continue;
+        if (part.side != .bottom) continue;
+        try w.writeAll(if (any_back) " " else "\n  (back-side ");
+        any_back = true;
+        try writeName(w, p, use_origin, pi);
+    }
+    if (any_back) try w.writeAll(")");
     try w.writeAll(")\n");
     return aw.written();
 }
@@ -889,6 +1026,41 @@ test "splicePlacementForm inserts before the design-block closing paren" {
     try std.testing.expect(std.mem.indexOf(u8, out, "(placement-order (\"C1\"))") != null);
     // No design-block at all -> null.
     try std.testing.expect((try splicePlacementForm(alloc, "(import buck)\n", "(placement)", "(placement")) == null);
+}
+
+// spec: Web Server - flip-side sets the (back-side …) clause, preserving the rest of the form
+test "setBackSideClause inserts, replaces, and clears the back-side clause" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const two = [_][]const u8{ "C1", "C2" };
+    const one = [_][]const u8{"C9"};
+    const none: []const []const u8 = &.{};
+
+    // 1. No placement form: insert an anchor-less (placement (back-side …)) and
+    //    KEEP the design-block's closing paren (the splice bug regression guard).
+    const src1 = "(import buck)\n(design-block \"Demo\"\n  (instance \"U1\" buck))\n";
+    const o1 = (try setBackSideClause(alloc, src1, &two)).?;
+    try std.testing.expect(std.mem.indexOf(u8, o1, "(placement (back-side \"C1\" \"C2\"))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, o1, "(instance \"U1\" buck)") != null);
+    try std.testing.expectEqual(std.mem.count(u8, o1, "("), std.mem.count(u8, o1, ")"));
+
+    // 2. Existing placement form, no back-side clause: add one, keep the sides.
+    const src2 = "(design-block \"Demo\"\n  (placement (anchor \"U1\") (left \"C1\"))\n  (instance \"U1\" buck))\n";
+    const o2 = (try setBackSideClause(alloc, src2, &two)).?;
+    try std.testing.expect(std.mem.indexOf(u8, o2, "(anchor \"U1\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, o2, "(back-side \"C1\" \"C2\")") != null);
+    try std.testing.expectEqual(std.mem.count(u8, o2, "("), std.mem.count(u8, o2, ")"));
+
+    // 3. Existing back-side clause: replace it wholesale.
+    const o3 = (try setBackSideClause(alloc, o2, &one)).?;
+    try std.testing.expect(std.mem.indexOf(u8, o3, "(back-side \"C9\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, o3, "\"C2\"") == null);
+
+    // 4. Empty refs: drop the clause; the form still balances.
+    const o4 = (try setBackSideClause(alloc, o3, none)).?;
+    try std.testing.expect(std.mem.indexOf(u8, o4, "back-side") == null);
+    try std.testing.expectEqual(std.mem.count(u8, o4, "("), std.mem.count(u8, o4, ")"));
 }
 
 // spec: Web Server - propose_placement parses a standalone placement/floorplan form

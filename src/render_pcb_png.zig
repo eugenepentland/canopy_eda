@@ -23,6 +23,11 @@ const Rgb = raster.Rgb;
 // ── Theme (matches BOARD_JS) ───────────────────────────────────────────────
 const BG = Rgb.hex("#0d1117");
 const COURT_FILL = Rgb.hex("#161b22");
+// Per-side courtyard wash (KiCad-style): front/F.Cu parts read warm red, back/
+// B.Cu parts read cool blue. Kept dark so pads + ref labels stay legible and so
+// the warm tint never reads as the bright DRC red (#f85149).
+const TOP_FILL = Rgb.hex("#3a1d22"); // front / F.Cu
+const BOT_FILL = Rgb.hex("#17263f"); // back / B.Cu
 const HUB_STROKE = Rgb.hex("#58a6ff");
 const PASSIVE_STROKE = Rgb.hex("#8b949e");
 const SILK = Rgb.hex("#8b949e");
@@ -525,12 +530,14 @@ const Ctx = struct {
                 self.lp(part, -part.hw, -part.hh), self.lp(part, part.hw, -part.hh),
                 self.lp(part, part.hw, part.hh),   self.lp(part, -part.hw, part.hh),
             };
-            // Blame heatmap tints the fill green→red by objective share; the cool
-            // baseline COURT_FILL otherwise.
+            // Blame heatmap tints the fill green→red by objective share; the
+            // per-side wash (front red / back blue) otherwise.
             const fill = if (self.opts.blame and pi < self.blame_norm.len)
                 blameColor(self.blame_norm[pi])
+            else if (part.side == .bottom)
+                BOT_FILL
             else
-                COURT_FILL;
+                TOP_FILL;
             self.cv.fillPoly(&court, fill, base_a);
             self.cv.strokePath(&court, .closed, self.outlineW(active), stroke, base_a);
             if (self.focus and active and (self.refHot(part.ref_des))) {

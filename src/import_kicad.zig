@@ -59,6 +59,7 @@ pub const Part = struct {
     manufacturer: []const u8,
     dnp: bool,
     rot: f64, // footprint board rotation (deg)
+    is_back: bool = false, // placed on B.Cu (back copper layer)
     pads: []Pad,
     node: Node, // the (footprint …) subtree, for geometry emission
     // Filled by classification:
@@ -222,6 +223,13 @@ fn parseFootprint(
             for (al[1..]) |a| {
                 const word = a.asAtom() orelse continue;
                 if (std.mem.eql(u8, word, "dnp")) part.dnp = true;
+            }
+        } else if (sub.isForm("layer")) {
+            // A footprint's top-level (layer "B.Cu") means it's on the back side.
+            const ll = sub.asList().?;
+            if (ll.len >= 2) {
+                const ln = ll[1].asString() orelse ll[1].asAtom() orelse "";
+                part.is_back = std.mem.eql(u8, ln, "B.Cu");
             }
         } else if (sub.isForm("descr")) {
             const dl = sub.asList().?;
@@ -693,6 +701,19 @@ fn buildDesignText(
         }
         try emitInstance(arena, w, part, &nets, summary);
     }
+    // Preserve which parts KiCad placed on the back copper layer (B.Cu) as an
+    // anchor-less (placement (back-side …)) form: re-placement keeps them on the
+    // back (blue in the viewer, mirrored B.Cu on export). Folded-channel parts
+    // are omitted — their side would belong to the module, not the flat design.
+    var any_back = false;
+    for (order) |idx| {
+        if (fold_res.active and fold_res.folded[idx]) continue;
+        if (!parts[idx].is_back) continue;
+        try w.writeAll(if (any_back) " " else "\n  (placement (back-side");
+        any_back = true;
+        try w.print(" \"{s}\"", .{parts[idx].ref});
+    }
+    if (any_back) try w.writeAll("))");
     try w.writeAll(")\n");
     summary.nets = nets.count();
     return buf.items;

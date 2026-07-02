@@ -1978,6 +1978,7 @@ fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_m
     var centered = false;
     var sides: std.ArrayListUnmanaged(env_mod.PlacementSideSpec) = .empty;
     var switches: std.ArrayListUnmanaged(env_mod.SwitchPlacement) = .empty;
+    var back_side: std.ArrayListUnmanaged([]const u8) = .empty;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
@@ -1994,6 +1995,16 @@ fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_m
         }
         if (std.mem.eql(u8, head, "anchor")) {
             if (c.len >= 2) anchor = c[1].asString() orelse c[1].asAtom() orelse anchor;
+            continue;
+        }
+        // (back-side "REF" …) — copper-layer override: every listed part lives
+        // on the back (B.Cu). Orthogonal to the left/right/top/bottom anchor
+        // sides; a part may appear in both a side list AND here.
+        if (std.mem.eql(u8, head, "back-side")) {
+            for (c[1..]) |item_node| {
+                const ref = item_node.asString() orelse item_node.asAtom() orelse continue;
+                back_side.append(self.allocator, ref) catch return EvalError.OutOfMemory;
+            }
             continue;
         }
         // (switch "REF" side) — power inductor straddling the SW node.
@@ -2037,6 +2048,7 @@ fn parsePlacement(self: *Evaluator, form_children: []const Node) EvalError!env_m
         .present = true,
         .refine = refine,
         .centered = centered,
+        .back_side = back_side.toOwnedSlice(self.allocator) catch &.{},
     };
 }
 
@@ -2073,6 +2085,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
         .h = h,
         .sides = ps.sides,
         .corners = corners.toOwnedSlice(self.allocator) catch &.{},
+        .back_side = ps.back_side,
         .present = true,
     };
 }
@@ -2133,6 +2146,30 @@ test "design-block parses a (board ...) form" {
     try testing.expectEqual(@as(f64, 90), block.board.sides[1].items[0].rot.?);
     try testing.expectEqual(@as(usize, 4), block.board.corners.len);
     try testing.expectEqualStrings("MK3", block.board.corners[2].ref);
+}
+
+// spec: eval/design_block - placement back-side clause lists parts on the back copper layer
+test "design-block parses a (placement … (back-side …)) clause" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (placement (anchor "U1")
+        \\    (left "C1" "C2")
+        \\    (back-side "C1" "C3")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    try testing.expect(block.placement.present);
+    // Anchor sides parse alongside the copper-layer clause, independently.
+    try testing.expectEqual(@as(usize, 1), block.placement.sides.len);
+    try testing.expectEqual(@as(usize, 2), block.placement.back_side.len);
+    try testing.expectEqualStrings("C1", block.placement.back_side[0]);
+    try testing.expectEqualStrings("C3", block.placement.back_side[1]);
 }
 
 // spec: eval/design_block - revision form captures id, date, and newest-first changelog

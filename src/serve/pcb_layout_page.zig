@@ -209,7 +209,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // A `(placement …)` form is the source of truth: when the design carries one
     // (and we're not loading a saved/refine layout or a sub-scoped preview), drive a
     // fresh solve so the spec — not a stale auto cache — places the board.
-    const spec_drives = sub == null and refine_name == null and eff_block.placement.present;
+    const spec_drives = sub == null and refine_name == null and eff_block.placement.arranges();
     const cached = if (sub != null) null else if (refine_name) |rn|
         readLayoutPoses(ctx.allocator, ctx.project_dir, name, rn)
     else if (tune.regen or spec_drives) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
@@ -454,7 +454,7 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const refine_name: ?[]const u8 = if (req.query()) |q| q.get("refine") else |_| null;
     // A `(placement …)` form drives a fresh solve (see the page handler) unless a
     // saved/refine layout was asked for.
-    const spec_drives = refine_name == null and block.placement.present;
+    const spec_drives = refine_name == null and block.placement.arranges();
     const cached = if (refine_name) |rn|
         readLayoutPoses(ctx.allocator, ctx.project_dir, name, rn)
     else if (tune.regen or spec_drives) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
@@ -579,7 +579,7 @@ pub fn solveForRequest(
         block;
 
     const spec_drives = opts.sub == null and opts.layout == null and !opts.placement_off and
-        (eff_block.placement.present or eff_block.floorplan.present);
+        (eff_block.placement.arranges() or eff_block.floorplan.arranges());
     const cached = if (opts.sub != null) null else if (opts.layout) |ln|
         readLayoutPoses(alloc, project_dir, name, ln)
     else if (opts.regen or spec_drives) null else readAutoPoses(alloc, project_dir, name);
@@ -3204,10 +3204,10 @@ fn writePcbData(
         if (i > 0) try w.writeAll(",");
         try w.writeAll(REF_OPEN);
         try writeJsonStr(w, pt.ref_des);
-        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"kind\":\"{s}\",\"fb\":{s},", .{
-            pt.x,                                 pt.y,  pt.rot,
-            pt.hw,                                pt.hh, if (pt.kind == .hub) "hub" else "passive",
-            if (pt.fallback) "true" else "false",
+        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"kind\":\"{s}\",\"fb\":{s},\"side\":\"{s}\",", .{
+            pt.x,                                 pt.y,                                        pt.rot,
+            pt.hw,                                pt.hh,                                       if (pt.kind == .hub) "hub" else "passive",
+            if (pt.fallback) "true" else "false", if (pt.side == .bottom) "bottom" else "top",
         });
         try w.print("\"blame\":{d:.4},", .{if (i < blame.len) blame[i] else 0});
         try w.writeAll("\"fp\":");
@@ -3893,8 +3893,11 @@ const BOARD_JS =
     \\// (see the drag block) keeps a part draggable even when grabbed by a pad.
     \\svg.appendChild(gP); svg.appendChild(gR); svg.appendChild(gPads); svg.appendChild(gC); svg.appendChild(gT); svg.appendChild(gD); svg.appendChild(gU);
     \\gT.style.pointerEvents="none"; gR.style.pointerEvents="none"; gC.style.pointerEvents="none"; gD.style.pointerEvents="none"; gU.style.pointerEvents="none";
-    \\const els=[], bodies=[], padEls=[];
+    \\const els=[], bodies=[], padEls=[], courts=[];
     \\function el(n,a){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e;}
+    \\// Per-side courtyard wash (KiCad-style): front/F.Cu red, back/B.Cu blue.
+    \\// Matches the server PNG (render_pcb_png.zig TOP_FILL / BOT_FILL).
+    \\function sideFill(p){return p.side=="bottom"?"#17263f":"#3a1d22";}
     \\// (board (size W H) …) physical outline, under everything (read-only).
     \\if(PCB.board){
     \\ var br=PCB.board,gB=document.createElementNS(NS,"g");
@@ -3919,10 +3922,11 @@ const BOARD_JS =
     \\P.forEach(function(p,i){
     \\ var g=el("g",{"class":"part","data-ref":p.ref});
     \\ var body=el("g",{"class":"body"});
-    \\ body.appendChild(el("rect",{"class":"court",x:(-p.hw*S).toFixed(1),y:(-p.hh*S).toFixed(1),
-    \\   width:(2*p.hw*S).toFixed(1),height:(2*p.hh*S).toFixed(1),rx:2,fill:"#161b22",
+    \\ var court=el("rect",{"class":"court",x:(-p.hw*S).toFixed(1),y:(-p.hh*S).toFixed(1),
+    \\   width:(2*p.hw*S).toFixed(1),height:(2*p.hh*S).toFixed(1),rx:2,fill:sideFill(p),
     \\   stroke:p.kind=="hub"?"#58a6ff":"#8b949e","stroke-width":1.3,
-    \\   "stroke-dasharray":p.fb?"4 3":"0"}));
+    \\   "stroke-dasharray":p.fb?"4 3":"0"});
+    \\ body.appendChild(court);
     \\ if(p.silk){
     \\  p.silk.l.forEach(function(s){body.appendChild(el("line",{x1:(s[0]*S).toFixed(1),y1:(s[1]*S).toFixed(1),
     \\    x2:(s[2]*S).toFixed(1),y2:(s[3]*S).toFixed(1),stroke:"#8b949e","stroke-width":0.8,"stroke-linecap":"round"}));});
@@ -3938,7 +3942,7 @@ const BOARD_JS =
     \\ g.appendChild(body);
     \\ var t=el("text",{"class":"pcb-ref",x:0,y:(-p.hh*S-2).toFixed(1),fill:p.kind=="hub"?"#58a6ff":"#8b949e"});
     \\ t.textContent=p.ref; g.appendChild(t);
-    \\ gP.appendChild(g); gPads.appendChild(pg); els.push(g); bodies.push(body); padEls.push(pg);
+    \\ gP.appendChild(g); gPads.appendChild(pg); els.push(g); bodies.push(body); padEls.push(pg); courts.push(court);
     \\ setT(i);
     \\});
     \\// ── Unplaced (auto-staged) parts: the ones a (placement …) spec didn't list.
@@ -4129,6 +4133,7 @@ const BOARD_JS =
     \\ kbdOv.innerHTML='<div class="kbd-box"><h3>Keyboard &amp; mouse</h3>'+
     \\  '<div class="kbd-row"><span>Rotate hovered part +90°</span><kbd>R</kbd></div>'+
     \\  '<div class="kbd-row"><span>Rotate hovered part −90°</span><kbd>Shift+R</kbd></div>'+
+    \\  '<div class="kbd-row"><span>Flip hovered part (top↔bottom side)</span><kbd>F</kbd></div>'+
     \\  '<div class="kbd-row"><span>Move part (snaps to grid)</span><kbd>drag part</kbd></div>'+
     \\  '<div class="kbd-row"><span>Pan</span><kbd>drag background</kbd></div>'+
     \\  '<div class="kbd-row"><span>Zoom</span><kbd>scroll</kbd></div>'+
@@ -4149,7 +4154,18 @@ const BOARD_JS =
     \\ if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
     \\ if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();
     \\   P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
-    \\   setT(cur);clearRoute();rats();fetchScore();refreshUnplaced();}});
+    \\   setT(cur);clearRoute();rats();fetchScore();refreshUnplaced();}
+    \\ if((ev.key=="f"||ev.key=="F")&&cur>=0&&!typing){ev.preventDefault();flipSide(cur);}});
+    \\// Flip the hovered part to the other copper side (top↔bottom): recolour its
+    \\// courtyard immediately, then persist the full back-side set to the design's
+    \\// (back-side …) clause. Side is a design property (not a layout-cache pose),
+    \\// so it writes straight to source; x/y/rot are unchanged ⇒ no re-solve.
+    \\function flipSide(i){if(RO||i<0||i>=P.length)return;
+    \\ P[i].side=(P[i].side=="bottom")?"top":"bottom";
+    \\ if(courts[i])courts[i].setAttribute("fill",sideFill(P[i]));
+    \\ var bs=[];P.forEach(function(p){if(p.side=="bottom")bs.push(p.ref);});
+    \\ fetch("/api/flip-side/"+encodeURIComponent(PCB.name),{method:"POST",
+    \\  headers:{"Content-Type":"text/plain"},body:bs.join(",")}).catch(function(){});}
     \\function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();refreshUnplaced();
     \\ if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
     \\document.getElementById("pcb-reset").addEventListener("click",function(){

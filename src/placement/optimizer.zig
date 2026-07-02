@@ -393,6 +393,14 @@ pub const Part = struct {
     x: f64 = 0,
     y: f64 = 0,
     rot: f64 = 0,
+    /// Copper layer (board face) the part lives on: `.top` = front/F.Cu
+    /// (default), `.bottom` = back/B.Cu. Set in `prepare` from the design's
+    /// `(back-side …)` clause; drives renderer colour (top red / bottom blue,
+    /// matching KiCad) and the exported KiCad layer. Placement math is
+    /// unchanged for now — parts on opposite faces don't physically collide,
+    /// but the solver still treats every courtyard as a single-plane keepout
+    /// (a conservative, never-wrong overlap rule).
+    side: env.BoardSide = .top,
     /// Rotation provenance: `.authored` (a spec `(rot …)`) and `.series` (a
     /// series part's pad-pairing — see `SeriesPair`) rotations are *decided*,
     /// not searched — the HPWL-driven rotation searches are blind to
@@ -1508,6 +1516,13 @@ fn resolvePlacement(
 ) std.mem.Allocator.Error!?ResolvedPlacement {
     const spec = block.placement;
     if (!spec.present) return null;
+    // An anchor-less placement form (e.g. `(placement (back-side …))` — a
+    // copper-side declaration with no manual arrangement) falls through to the
+    // force/auto path: there's nothing to dock around. `prepare` still reads
+    // `spec.back_side` independently, so the side colouring/layer applies.
+    // (Guard before resolvePart: an empty ref would spuriously match the first
+    // instance whose origin_key is also empty.)
+    if (spec.anchor.len == 0) return null;
     const anchor = resolvePart(instances, spec.anchor) orelse return null;
 
     // Claim explicit refs + switches up front so a `(net …)` rule never grabs a
@@ -4076,6 +4091,20 @@ fn prepare(
             .silk_circles = g.silk_circles,
         };
         try idx_of.put(inst.ref_des, i);
+    }
+
+    // Copper-side assignment: every ref a `(back-side …)` clause names (in the
+    // placement / floorplan / board form) lands on the back layer (B.Cu).
+    // Resolved exactly like a placement ref (origin-key / ref-des / sub-block
+    // leaf). Default — no clause — leaves every part on the front (.top).
+    for ([_][]const []const u8{
+        block.placement.back_side,
+        block.floorplan.back_side,
+        block.board.back_side,
+    }) |refs| {
+        for (refs) |ref| {
+            if (resolvePart(instances, ref)) |pi| parts[pi].side = .bottom;
+        }
     }
 
     // Resolve declared `(placement-order …)` into per-part data: a priority rank

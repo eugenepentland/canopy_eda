@@ -515,19 +515,22 @@ pub const scope_form_docs = blk: {
     } };
     t[@intFromEnum(ScopeForm.placement)] = .{ .scope = tl, .doc = .{
         .syntax = "(placement (anchor \"REF\") " ++
-            "(left|right|top|bottom \"REF\"… | (rot N \"REF\") | (net \"NAME\")…)… [(switch \"REF\" side)] [(no-refine)] [(centered)])",
+            "(left|right|top|bottom \"REF\"… | (rot N \"REF\") | (net \"NAME\")…)… [(switch \"REF\" side)] [(back-side \"REF\"…)] [(no-refine)] [(centered)])",
         .summary = "Agent-authored PCB floorplan: declare each part's side of the main IC, " ++
             "the order along that edge, and an optional rotation; the solver legalizes it to " ++
             "exact coordinates (the manual twin of the automatic switcher floorplan). " ++
             "A (net \"VIN\") item is a membership rule: every not-otherwise-claimed part with " ++
             "a pad on that net joins the side (smallest first) — survives part additions. " ++
             "Parts no side lists are pin-hug auto-filled beside their placed pads. " ++
+            "(back-side \"REF\"…) puts those parts on the back copper layer (B.Cu) — a " ++
+            "copper-layer choice orthogonal to the left/right/top/bottom anchor sides; the " ++
+            "viewer colours them blue (front parts red, KiCad-style) and KiCad export mirrors them. " ++
             "(no-refine) shows the raw constructive pack (flush, symmetric); " ++
             "(centered) centers every side on the IC instead of opposite its rail pad.",
     } };
     t[@intFromEnum(ScopeForm.floorplan)] = .{ .scope = tl, .doc = .{
         .syntax = "(floorplan (anchor \"SUB\") " ++
-            "(left|right|top|bottom \"SUB\"… | (rot N \"SUB\")…)…)",
+            "(left|right|top|bottom \"SUB\"… | (rot N \"SUB\")…)… [(back-side \"REF\"…)])",
         .summary = "Design-level macro floorplan: the same side/order grammar as (placement …) " ++
             "but the names are (sub-block …) slugs. Each listed sub-block is solved as its own " ++
             "board (its module-level (placement …) spec composes) and docked as a RIGID macro " ++
@@ -538,7 +541,7 @@ pub const scope_form_docs = blk: {
     } };
     t[@intFromEnum(ScopeForm.board)] = .{ .scope = tl, .doc = .{
         .syntax = "(board (size W H) " ++
-            "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(corners \"REF\"…)])",
+            "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(corners \"REF\"…)] [(back-side \"REF\"…)])",
         .summary = "Physical board outline + edge hardware: (size W H) is the outline in mm " ++
             "(required — without it the form is inert). Each (left|right|top|bottom …) list " ++
             "docks those parts flush INSIDE that board edge (the words name physical edges, " ++

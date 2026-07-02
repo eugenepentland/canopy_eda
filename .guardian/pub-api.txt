@@ -161,6 +161,7 @@ src/eval/electrical.zig::parse fn
 src/eval/electrical.zig::parseSubForms fn
 src/eval/env.zig::AssertionResult struct_
 src/eval/env.zig::BlockRole enum_
+src/eval/env.zig::BoardSide enum_
 src/eval/env.zig::BoardSpec struct_
 src/eval/env.zig::CalcBlock struct_
 src/eval/env.zig::CalcResult struct_
@@ -969,6 +970,7 @@ src/serve/placement_spec.zig::BuildError value
 src/serve/placement_spec.zig::ExportedSpec struct_
 src/serve/placement_spec.zig::buildSpecSexp fn
 src/serve/placement_spec.zig::exportSpec fn
+src/serve/placement_spec.zig::flipSideApi fn
 src/serve/placement_spec.zig::placementSpecApi fn
 src/serve/placement_spec.zig::proposePlacement fn
 src/serve/placement_spec.zig::proposePlacementApi fn

@@ -1060,6 +1060,14 @@ pub const LayoutSpec = struct {
 /// Which side of the anchor IC a `(placement …)` directive docks a part to.
 pub const PlacementSide = enum { left, right, top, bottom };
 
+/// Which copper layer (board face) a part sits on. `.top` = front/F.Cu (the
+/// default), `.bottom` = back/B.Cu (mirrored). Authored per-part via a
+/// `(back-side "REF"…)` clause in a `(placement …)` / `(floorplan …)` /
+/// `(board …)` form; entirely orthogonal to `PlacementSide` (which is a 2-D
+/// direction around the anchor IC, NOT a copper layer). Drives renderer colour
+/// (top red / bottom blue, matching KiCad) and the exported KiCad layer.
+pub const BoardSide = enum { top, bottom };
+
 /// One part in a `(placement …)` side list: the ref-des and an optional
 /// rotation override (degrees CCW). `null` ⇒ the solver picks the rotation that
 /// turns the part's power pad toward the IC (the loop-shortening default).
@@ -1108,6 +1116,21 @@ pub const PlacementSpec = struct {
     /// off the IC centerline. A `(centered)` marker in the form sets this true for a
     /// symmetric floorplan (every side mirrored about the anchor).
     centered: bool = false,
+    /// Ref-des (or origin-key / sub-block leaf — resolved like any placement
+    /// ref) of every part the author put on the back copper layer via a
+    /// `(back-side "REF"…)` clause. The optimizer's `prepare` sets each
+    /// resolved part's `Part.side = .bottom`; the rest stay `.top`. Empty ⇒
+    /// every part on the front. Orthogonal to the `sides` anchor lists.
+    back_side: []const []const u8 = &.{},
+
+    /// True when this form drives the part *arrangement* — it names an anchor,
+    /// side lists, or switches. A bare `(placement (back-side …))` (no anchor)
+    /// is a copper-side-only declaration: it falls through to the force/auto
+    /// placer (so it must NOT read as "spec fell back to auto"), while still
+    /// colouring and exporting the listed parts on the back layer.
+    pub fn arranges(self: PlacementSpec) bool {
+        return self.present and (self.anchor.len > 0 or self.sides.len > 0 or self.switches.len > 0);
+    }
 };
 
 /// The physical board declared by a top-level `(board …)` form: the outline
@@ -1126,6 +1149,10 @@ pub const BoardSpec = struct {
     sides: []const PlacementSideSpec = &.{},
     /// Corner-pinned parts (mounting holes/standoffs): TL, TR, BR, BL.
     corners: []const PlacementItem = &.{},
+    /// Parts on the back copper layer (B.Cu) — same `(back-side "REF"…)` clause
+    /// and meaning as `PlacementSpec.back_side`, carried here so a design whose
+    /// only PCB form is `(board …)` can still author bottom-side parts.
+    back_side: []const []const u8 = &.{},
     present: bool = false,
 };
 

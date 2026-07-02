@@ -8,10 +8,12 @@ add: // spec: serve/sync - runSyncPlan errors with NotADesign when the source fi
 unlinked tag: Web Server - Placement-spec export falls back to ref-des when origin names repeat in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - Placement-spec export rebuilds an editable (placement …) form from a solved layout in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - The layouts sidecar round-trips snapshots and the optimizer cache slot through one file in ./src/serve/pcb_layout_page.zig
+unlinked tag: Web Server - flip-side sets the (back-side …) clause, preserving the rest of the form in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - propose_placement parses a standalone placement/floorplan form in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - spec save inserts a new placement form before the design-block close in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - spec save replaces an existing placement form in place in ./src/serve/placement_spec.zig
 unlinked tag: Web Server - spec save splices the placement form into a defmodule body in ./src/serve/placement_spec.zig
+unlinked tag: eval/design_block - placement back-side clause lists parts on the back copper layer in ./src/eval/design_block.zig
 unlinked tag: eval/forms - diagram-layout is the canonical name for the schematic layout form, layout the alias in ./src/eval/forms.zig
 unlinked tag: eval/modules - A later parameter's default may reference an earlier parameter in ./src/eval/modules.zig
 unlinked tag: eval/modules - A supplied argument overrides the parameter's declared default in ./src/eval/modules.zig

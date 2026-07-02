@@ -369,6 +369,8 @@ pub fn serve(
     // The PCB page's live spec panel: solve-as-you-type preview + save-to-design.
     router.post("/api/spec-solve/:name", placement_spec.specSolveApi, .{});
     router.post("/api/spec-save/:name", placement_spec.specSaveApi, .{});
+    // The PCB page's "hover a part, press F" flip → toggles its (back-side …) membership.
+    router.post("/api/flip-side/:name", placement_spec.flipSideApi, .{});
     router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/delete", pcb_layout_page.deleteNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/default", pcb_layout_page.setDefaultLayoutApi, .{});
