@@ -246,7 +246,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             // this component so downstream renderers (schematic overview,
             // review doc, BOM) can show it without re-reading lib files.
             const val = cl[1].asText() orelse continue;
-            props.append(self.allocator, .{ .key = "description", .value = val }) catch continue;
+            try props.append(self.allocator, .{ .key = "description", .value = val });
         } else if (std.mem.eql(u8, field, "symbol")) {
             symbol_name = cl[1].asText() orelse "";
         } else if (std.mem.eql(u8, field, FOOTPRINT_FORM)) {
@@ -255,7 +255,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             pinout_name = cl[1].asText() orelse "";
         } else if (std.mem.eql(u8, field, "datasheet")) {
             const ds = cl[1].asText() orelse continue;
-            datasheets.append(self.allocator, ds) catch continue;
+            try datasheets.append(self.allocator, ds);
         } else if (std.mem.eql(u8, field, "requirement")) {
             const text = cl[1].asString() orelse continue;
             var ref: ?env_mod.NoteRef = null;
@@ -282,10 +282,10 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
                 explicit_id
             else
                 env_mod.requirementIdForText(self.allocator, text) catch "";
-            requirements.append(self.allocator, .{ .text = text, .ref = ref, .check = chk, .id = rid }) catch continue;
+            try requirements.append(self.allocator, .{ .text = text, .ref = ref, .check = chk, .id = rid });
         } else if (std.mem.eql(u8, field, "electrical")) {
             if (electrical_mod.parse(cl)) |d| {
-                electrical.append(self.allocator, d) catch continue;
+                try electrical.append(self.allocator, d);
             }
         } else if (std.mem.eql(u8, field, "bus")) {
             // (bus "name" pin1 pin2 pin3 ...)
@@ -293,12 +293,12 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             var bus_pins: std.ArrayListUnmanaged([]const u8) = .empty;
             for (cl[2..]) |pin_node| {
                 const pin_name = pin_node.asText() orelse continue;
-                bus_pins.append(self.allocator, pin_name) catch continue;
+                try bus_pins.append(self.allocator, pin_name);
             }
-            buses.append(self.allocator, .{
+            try buses.append(self.allocator, .{
                 .name = bus_name,
-                .pins = bus_pins.toOwnedSlice(self.allocator) catch &.{},
-            }) catch continue;
+                .pins = bus_pins.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+            });
         } else if (std.mem.eql(u8, field, "refdes")) {
             // (refdes "Y") — declare this part's ref-des class explicitly, so
             // its instances get that prefix regardless of the family-name
@@ -308,7 +308,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         } else if (!env_mod.containsString(&skip_fields, field)) {
             // Unknown, non-structural field -- treat as inline property.
             const val = cl[1].asText() orelse continue;
-            props.append(self.allocator, .{ .key = field, .value = val }) catch continue;
+            try props.append(self.allocator, .{ .key = field, .value = val });
         }
     }
 
@@ -317,14 +317,14 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         .symbol_name = symbol_name,
         .footprint_name = footprint_name,
         .pinout_name = pinout_name,
-        .properties = props.toOwnedSlice(self.allocator) catch &.{},
-        .buses = buses.toOwnedSlice(self.allocator) catch &.{},
+        .properties = props.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+        .buses = buses.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .is_family = false,
         .param_type = "",
-        .datasheets = datasheets.toOwnedSlice(self.allocator) catch &.{},
-        .requirements = requirements.toOwnedSlice(self.allocator) catch &.{},
+        .datasheets = datasheets.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+        .requirements = requirements.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .requirements_ignored = requirements_ignored,
-        .electrical = electrical.toOwnedSlice(self.allocator) catch &.{},
+        .electrical = electrical.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .refdes_prefix = refdes_prefix,
     });
 }

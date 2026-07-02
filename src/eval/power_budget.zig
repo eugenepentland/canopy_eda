@@ -105,7 +105,7 @@ pub fn analyze(
         for (sb.block.ports) |port| {
             if (port.current_typ == null and port.current_max == null) continue;
             if (!std.mem.eql(u8, port.direction, "out")) continue;
-            const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, port.name }) catch continue;
+            const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, port.name });
             for (block.net_ties) |nt| {
                 const matched = std.mem.eql(u8, nt.a, path) or std.mem.eql(u8, nt.b, path);
                 if (!matched) continue;
@@ -177,8 +177,8 @@ pub fn analyze(
                 load.any_max = true;
             }
             if (pin.ref_des.len == 0) continue;
-            const group_key = std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ pin.ref_des, base }) catch continue;
-            const gop = consumer_groups.getOrPut(allocator, group_key) catch continue;
+            const group_key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ pin.ref_des, base });
+            const gop = try consumer_groups.getOrPut(allocator, group_key);
             if (!gop.found_existing) {
                 gop.value_ptr.* = .{
                     .ref_des = pin.ref_des,
@@ -231,9 +231,9 @@ pub fn analyze(
                 // for the SUM of both outputs' back-computed draw. Keying on
                 // sb.name alone made output B's delta cancel A's and the upsert
                 // overwrite it, so the rail saw only the last-visited output.
-                const contrib_key = std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ sb.name, out_port.name }) catch continue;
+                const contrib_key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ sb.name, out_port.name });
 
-                const out_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, out_port.name }) catch continue;
+                const out_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, out_port.name });
                 const out_rail_root = findRailForSubPath(block, &net_parent, out_path) orelse continue;
                 const out_load = loads.get(out_rail_root) orelse RailLoad{};
                 if (!out_load.any_typ and !out_load.any_max) continue;
@@ -241,7 +241,7 @@ pub fn analyze(
                 for (sb.block.ports) |in_port| {
                     if (!std.mem.eql(u8, in_port.direction, "in")) continue;
 
-                    const in_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, in_port.name }) catch continue;
+                    const in_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, in_port.name });
                     const in_rail_root = findRailForSubPath(block, &net_parent, in_path) orelse continue;
                     const in_display = loads.get(in_rail_root) orelse RailLoad{
                         .first_name = findDisplayForSubPath(block, in_path) orelse in_rail_root,
@@ -271,8 +271,8 @@ pub fn analyze(
                     // latest absolute value. Keyed on the OUTPUT port too so a
                     // dual-output module's two outputs land in distinct groups
                     // instead of colliding on the shared input rail.
-                    const group_key = std.fmt.allocPrint(allocator, "{s}\x00{s}\x00{s}", .{ sb.name, out_port.name, in_display.first_name }) catch break;
-                    const gop = consumer_groups.getOrPut(allocator, group_key) catch break;
+                    const group_key = try std.fmt.allocPrint(allocator, "{s}\x00{s}\x00{s}", .{ sb.name, out_port.name, in_display.first_name });
+                    const gop = try consumer_groups.getOrPut(allocator, group_key);
                     if (!gop.found_existing) {
                         gop.value_ptr.* = .{ .ref_des = sb.name, .net = in_display.first_name, .root = in_rail_root };
                         try gop.value_ptr.pins.append(allocator, in_port.name);

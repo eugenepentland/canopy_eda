@@ -11,6 +11,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
+const escape = @import("../escape.zig");
 const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env_mod = @import("../eval/env.zig");
@@ -99,6 +100,10 @@ fn sourceIsSafe(src: []const u8) bool {
     if (std.mem.indexOf(u8, src, "..") != null) return false;
     if (std.mem.indexOfScalar(u8, src, 0) != null) return false;
     if (std.mem.indexOfScalar(u8, src, '\\') != null) return false;
+    // A legitimate module name / .sexp path never contains markup
+    // metacharacters; rejecting them keeps a hostile `source` out of the
+    // `<title>`/`<h1>`/`data-src` sinks even before output escaping.
+    if (std.mem.indexOfAny(u8, src, "\"'<>") != null) return false;
     return true;
 }
 
@@ -516,7 +521,7 @@ fn writeSourceOnlyPage(
     const w = &aw.writer;
     try w.writeAll("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     try w.writeAll("<title>");
-    try writeHtmlEscaped(w, name);
+    try escape.writeXml(w, name);
     try w.writeAll(" — module</title><style>");
     try w.writeAll(assets_css.NAVBAR_CSS);
     try w.writeAll("</style>");
@@ -525,9 +530,9 @@ fn writeSourceOnlyPage(
     try pages.Navbar.render(.{"designs"}, w);
     try w.writeAll("<div class=\"mod-wrap\">");
     try w.writeAll("<div class=\"mod-src-head\"><h1>");
-    try writeHtmlEscaped(w, name);
+    try escape.writeXml(w, name);
     try w.writeAll("</h1><button type=\"button\" class=\"copy-src-btn\" data-src=\"");
-    try writeHtmlEscaped(w, name);
+    try escape.writeXml(w, name);
     try w.writeAll("\">Copy source</button></div>");
     try w.writeAll("<div class=\"mod-src-note\">");
     if (render_failed) {
@@ -540,25 +545,13 @@ fn writeSourceOnlyPage(
     }
     try w.writeAll("</div>");
     try w.writeAll("<pre class=\"mod-src-pre\">");
-    try writeHtmlEscaped(w, content);
+    try escape.writeXml(w, content);
     try w.writeAll("</pre></div>");
     try w.writeAll(COPY_SCRIPT);
     try w.writeAll("</body></html>");
 
     res.body = aw.written();
     res.content_type = .HTML;
-}
-
-// ── helpers ───────────────────────────────────────────────────────────
-
-fn writeHtmlEscaped(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    for (s) |c| switch (c) {
-        '<' => try w.writeAll("&lt;"),
-        '>' => try w.writeAll("&gt;"),
-        '&' => try w.writeAll("&amp;"),
-        '"' => try w.writeAll("&quot;"),
-        else => try w.writeByte(c),
-    };
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -580,4 +573,24 @@ test "nodeHasCohesionGroup distinguishes cohesion groups from pin and diagram gr
     // Diagram-layout group: bare-string members, no list → does not count.
     const diagram = try parser_mod.parse(a, "(defmodule m () (design-block \"t\" (diagram-layout (group \"Front\" \"a\" \"b\"))))");
     try std.testing.expect(!nodeHasCohesionGroup(diagram[0]));
+}
+
+// A hostile module `source` must never reach the `<title>`/`<h1>`/`data-src`
+// sinks in the source page: sourceIsSafe rejects markup metacharacters and the
+// pre-existing path-traversal set, so both output escaping and this input gate
+// have to fail before an injection lands.
+test "sourceIsSafe rejects markup metacharacters and traversal" {
+    // Markup metacharacters (the XSS-hardening addition).
+    try std.testing.expect(!sourceIsSafe("evil\"onload=x"));
+    try std.testing.expect(!sourceIsSafe("a'b"));
+    try std.testing.expect(!sourceIsSafe("<script>"));
+    try std.testing.expect(!sourceIsSafe("a>b"));
+    // Pre-existing path/traversal rejections still hold.
+    try std.testing.expect(!sourceIsSafe(""));
+    try std.testing.expect(!sourceIsSafe("/etc/passwd"));
+    try std.testing.expect(!sourceIsSafe("../secrets"));
+    try std.testing.expect(!sourceIsSafe("a\\b"));
+    // A legitimate module name / .sexp path is still accepted.
+    try std.testing.expect(sourceIsSafe("stm32_power"));
+    try std.testing.expect(sourceIsSafe("lib/modules/buck.sexp"));
 }

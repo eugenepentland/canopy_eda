@@ -364,7 +364,10 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         if (!embed) {
             const schematic_path: []const u8 = if (module_res != null) "/modules/" else "/schematics/";
             try w.writeAll("<div class=\"pcb-head\">");
-            try w.print("<h1>{s} <span class=\"pcb-sub\">PCB Layout · force-directed · drag to edit</span></h1>", .{eff_block.name});
+            // `eff_block.name` is the free-form quoted design name — escape it, don't `{s}` it raw.
+            try w.writeAll("<h1>");
+            try writeEscaped(w, eff_block.name);
+            try w.writeAll(" <span class=\"pcb-sub\">PCB Layout · force-directed · drag to edit</span></h1>");
             try w.print(
                 "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
                     "<a href=\"{s}{s}\">Schematic</a>" ++
@@ -3154,7 +3157,10 @@ fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!
 fn writeDocHead(w: *std.Io.Writer, title: []const u8, embed: bool, edit_embed: bool) std.Io.Writer.Error!void {
     try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
     try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-    try w.print("<title>{s} — PCB Layout</title>", .{title});
+    // `title` is the free-form design/module name — escape it, don't `{s}` it raw.
+    try w.writeAll("<title>");
+    try writeEscaped(w, title);
+    try w.writeAll(" — PCB Layout</title>");
     try w.writeAll("<style>");
     try w.writeAll(assets_css.NAVBAR_CSS);
     try w.writeAll(PAGE_CSS);

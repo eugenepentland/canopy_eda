@@ -27,6 +27,7 @@ const parser = @import("../sexpr/parser.zig");
 const infra_fs = @import("../infra/fs.zig");
 const electrical = @import("../eval/electrical.zig");
 const env = @import("../eval/env.zig");
+const numeric = @import("../numeric.zig");
 
 const Node = ast.Node;
 const MAX_BYTES = 1024 * 256;
@@ -111,7 +112,12 @@ fn loadList(arena: std.mem.Allocator, project_dir: []const u8, dir: []const u8, 
 /// keeps the map keys aligned with the flattened net's `pin` ids.
 fn nodeText(arena: std.mem.Allocator, n: Node) ?[]const u8 {
     if (n.asText()) |t| return t;
-    if (n.asNumber()) |num| return std.fmt.allocPrint(arena, "{d}", .{@as(i64, @intFromFloat(num))}) catch null;
+    if (n.asNumber()) |num| {
+        // Reject a non-finite / out-of-range token before the `@intFromFloat`
+        // (UB in the safety-off prod build); mirrors `ids.pinId`.
+        const i = numeric.checkedInt(i64, num) orelse return null;
+        return std.fmt.allocPrint(arena, "{d}", .{i}) catch null;
+    }
     return null;
 }
 

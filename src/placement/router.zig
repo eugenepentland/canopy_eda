@@ -20,6 +20,7 @@ const optimizer = @import("optimizer.zig");
 const module_policy = @import("module_policy.zig");
 const pad_shape = @import("pad_shape.zig");
 const export_kicad = @import("../export_kicad.zig");
+const numeric = @import("../numeric.zig");
 
 const Part = optimizer.Part;
 const FlatNet = export_kicad.FlatNet;
@@ -85,8 +86,10 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     const margin = 1.0;
     const ox = placement.minx - margin;
     const oy = placement.miny - margin;
-    const nx: usize = @intFromFloat(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
-    const ny: usize = @intFromFloat(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
+    // Corrupt/NaN placement bounds → checkedInt returns null → `orelse 0` trips
+    // the degenerate-grid guard below instead of `@intFromFloat` UB (safety-off prod).
+    const nx = numeric.checkedInt(usize, @ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1) orelse 0;
+    const ny = numeric.checkedInt(usize, @ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1) orelse 0;
     if (nx * ny == 0 or nx * ny > MAX_NODES) {
         return .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
     }
@@ -276,8 +279,10 @@ pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, para
     const margin = 1.0;
     const ox = placement.minx - margin;
     const oy = placement.miny - margin;
-    const nx: usize = @intFromFloat(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
-    const ny: usize = @intFromFloat(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
+    // Corrupt/NaN placement bounds → checkedInt returns null → `orelse 0` trips
+    // the degenerate-grid guard below instead of `@intFromFloat` UB (safety-off prod).
+    const nx = numeric.checkedInt(usize, @ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1) orelse 0;
+    const ny = numeric.checkedInt(usize, @ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1) orelse 0;
     if (nx * ny == 0 or nx * ny > MAX_NODES) return &.{};
     const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
 

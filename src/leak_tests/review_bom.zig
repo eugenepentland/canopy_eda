@@ -218,6 +218,37 @@ test "leak: bom_html.writeNetsJson with net_ties and a sub-block" {
     try std.testing.expect(written);
 }
 
+// A component value containing a double-quote (an inch mark like 0.1") must be
+// JSON-escaped by writeComponentsJson: unescaped it produces malformed JSON and
+// JSON.parse blanks the entire /api/components map client-side. Regression for
+// raw `{s}` string emission that bypassed writeJsonEscaped.
+test "correctness: bom_html.writeComponentsJson escapes double-quotes in string fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const insts = [_]Instance{
+        .{ .ref_des = "J1", .component = "conn", .value = "0.1\" header", .footprint = "", .symbol = "" },
+    };
+    const top = block("top", &insts, &.{});
+    const sym_cache: bom_html.SymbolPinCache = .empty;
+
+    // Mirror the /api/components caller: writeComponentsJson emits the object
+    // body, the caller supplies the surrounding braces.
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    const w = buf.writer(alloc);
+    try w.writeAll("{");
+    _ = try bom_html.writeComponentsJson(w, &top, "", &sym_cache, alloc, ".");
+    try w.writeAll("}");
+
+    // The inch mark is escaped in the raw bytes …
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "0.1\\\" header") != null);
+    // … and the whole payload parses as valid JSON with J1 present.
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, buf.items, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.contains("J1"));
+}
+
 // leak-audit: writeSchematicBomHtml is the schematic-page BOM card — same
 // hierarchical collect + dedup + per-line refs lists as writeBomCsv but emits
 // HTML and joins refs (joinRefs alloc). Part of the dominant pre-fix leak.
