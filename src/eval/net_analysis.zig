@@ -139,3 +139,81 @@ fn tiedSubBlockHasCap(block: *const DesignBlock, base: []const u8) bool {
     }
     return false;
 }
+
+// ── Ferrite-bridge union-find ────────────────────────────────────────────
+// Shared by rails.zig and power_budget.zig (previously copy-pasted in both).
+
+/// Find the canonical root of `name` in a net union-find map.
+pub fn findRoot(parent: *std.StringHashMapUnmanaged([]const u8), name: []const u8) []const u8 {
+    var cur = name;
+    while (parent.get(cur)) |p| {
+        if (std.mem.eql(u8, p, cur)) return cur;
+        cur = p;
+    }
+    return cur;
+}
+
+/// Union the classes containing `a` and `b`. Internal to `buildFerriteBridges`.
+fn unionNets(
+    allocator: std.mem.Allocator,
+    parent: *std.StringHashMapUnmanaged([]const u8),
+    a: []const u8,
+    b: []const u8,
+) std.mem.Allocator.Error!void {
+    const ra = findRoot(parent, a);
+    const rb = findRoot(parent, b);
+    if (std.mem.eql(u8, ra, rb)) return;
+    try parent.put(allocator, rb, ra);
+}
+
+/// Build a union-find over base-net names bridged by ferrite beads (a ferrite
+/// is a DC conductor, so loads on its downstream net attribute to the upstream
+/// rail). Caller owns the returned map (`deinit`).
+///
+/// The legacy pin-`1`↔pin-`2` bridge is preserved exactly (including the
+/// partial bridge it produced on multi-channel ferrite arrays). When a ferrite
+/// has no `1`/`2` pads (letter-named pads, `A`/`B`, …) it now falls back to
+/// bridging its two nets *by membership* — but only when it touches exactly two
+/// distinct base-nets, so a genuine array (≥3 nets) is never mis-bridged. This
+/// is purely additive: any ferrite that bridged before still bridges identically.
+pub fn buildFerriteBridges(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]const u8) {
+    var net_parent: std.StringHashMapUnmanaged([]const u8) = .empty;
+    errdefer net_parent.deinit(allocator);
+    for (block.instances) |inst| {
+        if (!std.mem.startsWith(u8, inst.component, "ferrite")) continue;
+        var net_a: ?[]const u8 = null; // pad "1"
+        var net_b: ?[]const u8 = null; // pad "2"
+        var d0: ?[]const u8 = null; // first distinct base-net touched
+        var d1: ?[]const u8 = null; // second distinct base-net touched
+        var multi = false; // touches ≥3 distinct base-nets
+        for (block.nets) |net| {
+            const base = baseNetName(net.name);
+            var touches = false;
+            for (net.pins) |p| {
+                if (!std.mem.eql(u8, p.ref_des, inst.ref_des)) continue;
+                touches = true;
+                if (std.mem.eql(u8, p.pin, "1")) net_a = base;
+                if (std.mem.eql(u8, p.pin, "2")) net_b = base;
+            }
+            if (!touches) continue;
+            if (d0 == null) {
+                d0 = base;
+            } else if (!std.mem.eql(u8, d0.?, base)) {
+                if (d1 == null) {
+                    d1 = base;
+                } else if (!std.mem.eql(u8, d1.?, base)) {
+                    multi = true;
+                }
+            }
+        }
+        if (net_a != null and net_b != null) {
+            try unionNets(allocator, &net_parent, net_a.?, net_b.?);
+        } else if (!multi) {
+            if (d0) |a| if (d1) |b| try unionNets(allocator, &net_parent, a, b);
+        }
+    }
+    return net_parent;
+}

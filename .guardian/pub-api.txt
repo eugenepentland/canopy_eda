@@ -315,7 +315,9 @@ src/eval/modules.zig::loadComponentFamily fn
 src/eval/modules.zig::loadPassivesPrelude fn
 src/eval/modules.zig::resolveImport fn
 src/eval/net_analysis.zig::baseNetName fn
+src/eval/net_analysis.zig::buildFerriteBridges fn
 src/eval/net_analysis.zig::findMissingDecouplingNets fn
+src/eval/net_analysis.zig::findRoot fn
 src/eval/net_analysis.zig::refDesLocalPrefix fn
 src/eval/net_analysis.zig::subBlockNetHasCap fn
 src/eval/pin_enrichment.zig::enrichPinFunctions fn
@@ -581,6 +583,7 @@ src/render_svg/context.zig::BranchBody struct_
 src/render_svg/context.zig::Endpoint value
 src/render_svg/context.zig::FlatInst struct_
 src/render_svg/context.zig::FlatNet struct_
+src/render_svg/context.zig::MergeAwareSplit struct_
 src/render_svg/context.zig::PinGroup struct_
 src/render_svg/context.zig::RenderCtx struct_
 src/render_svg/context.zig::Side enum_

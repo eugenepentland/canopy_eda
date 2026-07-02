@@ -430,12 +430,7 @@ fn mergeAwareGroupHeights(ctx: *RenderCtx, allocator: Allocator, groups: []const
 }
 
 /// Mirror of `hub_mod.SplitGroups` for the merge-aware path.
-const MergeAwareSplit = struct {
-    left: []const PinGroup,
-    right: []const PinGroup,
-    left_heights: []f64,
-    right_heights: []f64,
-};
+const MergeAwareSplit = ctx_mod.MergeAwareSplit;
 
 /// Balance hub pin groups into left/right columns by visual height
 /// (merge-aware variant). Mirrors `hub_mod.splitGroupsByHeight` but
@@ -443,12 +438,32 @@ const MergeAwareSplit = struct {
 /// (e.g. a row of decoupling caps tied to the same rail) collapse to
 /// one slot. Greedy: walks groups in their `groupHubPins` order and
 /// assigns each to whichever column is currently shorter.
+/// Content key for the merge-aware split memo: `hub_ref` plus each group's pin
+/// ids. `groupHubPins` is deterministic in (ctx, pins), so identical pin ids ⇒
+/// identical groups ⇒ identical split — a cache hit is only ever returned for
+/// byte-identical inputs. Owned by `allocator` (arena; lives for the render).
+fn splitCacheKey(allocator: Allocator, all_groups: []const PinGroup, hub_ref: []const u8) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    try buf.appendSlice(allocator, hub_ref);
+    for (all_groups) |g| {
+        try buf.append(allocator, '|');
+        try buf.appendSlice(allocator, g.pin_numbers);
+    }
+    return buf.items;
+}
+
 fn splitGroupsByMergeAwareHeight(
     ctx: *RenderCtx,
     allocator: Allocator,
     all_groups: []const PinGroup,
     hub_ref: []const u8,
 ) !MergeAwareSplit {
+    // Memoize: the three per-hub render passes recompute an identical split
+    // (mergeAwareGroupHeights walks findSpokeChain per connection — the
+    // expensive part). Key on exact content so the cache is result-identical.
+    const cache_key = try splitCacheKey(allocator, all_groups, hub_ref);
+    if (ctx.hub_split_cache.get(cache_key)) |cached| return cached;
+
     const all_heights = try mergeAwareGroupHeights(ctx, allocator, all_groups, hub_ref);
     defer allocator.free(all_heights);
 
@@ -471,12 +486,14 @@ fn splitGroupsByMergeAwareHeight(
         }
     }
 
-    return .{
+    const result = MergeAwareSplit{
         .left = try left.toOwnedSlice(allocator),
         .right = try right.toOwnedSlice(allocator),
         .left_heights = try left_h.toOwnedSlice(allocator),
         .right_heights = try right_h.toOwnedSlice(allocator),
     };
+    try ctx.hub_split_cache.put(allocator, cache_key, result);
+    return result;
 }
 
 /// Compute hub height using merge-aware group heights.

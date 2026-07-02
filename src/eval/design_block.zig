@@ -793,7 +793,7 @@ fn evalSection(
             .pins => try evalPinsForm(self, sf_children, sec_name, env, instances, all_pin_nets, net_ties, &sec_pin_groups),
             .decouple => {
                 const pre_count = instances.items.len;
-                try evalSectionDecouple(self, sf_children, env, instances, all_pin_nets);
+                try evalDecoupleForm(self, sf_children, env, instances, all_pin_nets);
                 for (instances.items[pre_count..]) |new_inst| try sec_instances.append(self.allocator, new_inst);
             },
             .series => {
@@ -903,48 +903,6 @@ fn evalPinsForm(
 }
 
 /// Evaluate a decouple form inside a section.
-fn evalSectionDecouple(
-    self: *Evaluator,
-    sf_children: []const Node,
-    env: *Env,
-    instances: *std.ArrayListUnmanaged(Instance),
-    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
-) EvalError!void {
-    if (sf_children.len < 3) return;
-    const dec_first_val = try self.evalNode(sf_children[1], env);
-    // Stamp the decouple form's own (id) anchor. Under (hierarchical-ids) it
-    // seeds every child cap's derived id; otherwise children use the (ids …) sidecar.
-    const form_id = try ids.getOrCreateFormId(self, sf_children);
-    var sidecar = ids.parseChildIdSidecar(self, sf_children);
-
-    // Multi-net (comp-first) shorthand removed — see evalDecoupleForm. Spell
-    // out one (decouple "NET" (comp) COUNT per-pin REF PIN…) per rail.
-    if (dec_first_val == .component or dec_first_val == .component_instance) {
-        log.warn("decouple no longer supports the multi-net (comp-first) form; " ++
-            "write one (decouple \"NET\" (comp) COUNT per-pin REF PIN1 PIN2 …) per rail", .{});
-        return EvalError.InvalidForm;
-    } else {
-        const net_name = dec_first_val.asString() orelse return;
-        var has_sub_forms = false;
-        for (sf_children[2..]) |ssf| {
-            if (ssf.isForm("bulk") or ssf.isForm("bypass")) {
-                has_sub_forms = true;
-                break;
-            }
-        }
-        if (has_sub_forms) {
-            for (sf_children[2..]) |ssf| {
-                if (ssf.isForm("bulk") or ssf.isForm("bypass")) {
-                    const sub = ssf.asList().?;
-                    try builders.emitDecoupleItems(self, sub[1..], net_name, env, instances, all_pin_nets, form_id, &sidecar);
-                }
-            }
-        } else {
-            try builders.emitDecoupleItems(self, sf_children[2..], net_name, env, instances, all_pin_nets, form_id, &sidecar);
-        }
-    }
-}
-
 /// Evaluate a nested sub-section within a section.
 fn evalSubSection(
     self: *Evaluator,
@@ -1039,7 +997,7 @@ fn evalSubSection(
             },
             .decouple => {
                 const pre_count = instances.items.len;
-                try evalSectionDecouple(self, ssf_children, env, instances, all_pin_nets);
+                try evalDecoupleForm(self, ssf_children, env, instances, all_pin_nets);
                 for (instances.items[pre_count..]) |new_inst| {
                     try sec_instances.append(self.allocator, new_inst);
                     try sub_instances.append(self.allocator, new_inst);
