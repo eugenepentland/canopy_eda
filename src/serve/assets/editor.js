@@ -44,6 +44,7 @@
   };
   const GRID = 60; // spatial-hash cell size (world units)
   const SPOKE_SYM = 22; // side-spoke passive symbol length (shared by map layout + draw + hit-test)
+  const GLANCE_S = 0.30; // world→px scale below which the map draws as glance chips (bands + one chip per cell)
 
   // ── State ────────────────────────────────────────────────────────────
   let cam = { x: 0, y: 0, w: 1000, h: 800 };
@@ -333,6 +334,41 @@
     const vx0 = cam.x - mx, vy0 = cam.y - my, vx1 = cam.x + cam.w + mx, vy1 = cam.y + cam.h + my;
     const boxVis = (x0, y0, x1, y1) => x1 >= vx0 && x0 <= vx1 && y1 >= vy0 && y0 <= vy1;
     const ptVis = (x, y) => x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1;
+
+    // Band containers (Power / multi-cell sections) — the wayfinding layer.
+    const drawBands = (fs) => (M.bands || []).forEach((b) => {
+      if (!boxVis(b.x, b.y, b.x + b.w, b.y + b.h)) return;
+      ctx.strokeStyle = b.power ? "#3a3423" : "#1d2733"; ctx.lineWidth = sw(1.6);
+      roundRect(b.x, b.y, b.w, b.h, 10); ctx.stroke();
+      ctx.fillStyle = b.power ? C.rail : C.secLabel; ctx.font = "600 " + fs + "px sans-serif";
+      ctx.textAlign = "left"; ctx.textBaseline = "middle";
+      ctx.fillText(b.name, b.x + 16, b.y + Math.max(24, fs * 0.75));
+    });
+
+    // Far-zoom glance: the whole board as titled bands + one chip per cell —
+    // "fit all" reads like a block diagram; zoom in (or double-click a chip)
+    // for the full detail.
+    if (s < GLANCE_S && M.mapBox) {
+      drawBands(Math.min(150, 20 / s));
+      const cfs = 14 / s;
+      M.secs.forEach((sc) => {
+        if (!boxVis(sc.x, sc.y, sc.x + sc.w, sc.y + sc.h)) return;
+        ctx.fillStyle = C.hub; ctx.strokeStyle = C.hubStroke; ctx.lineWidth = sw(1.4);
+        roundRect(sc.x, sc.y, sc.w, sc.h, 8); ctx.fill(); ctx.stroke();
+        const label = sc.ref || sc.name || "";
+        ctx.fillStyle = C.hubLabel; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        fitFont(label, sc.w * 0.86, Math.min(sc.h * 0.34, cfs), 4, "600");
+        ctx.fillText(label, sc.cx, sc.cy - (sc.part ? sc.h * 0.1 : 0));
+        if (sc.part) {
+          ctx.fillStyle = C.pinName;
+          fitFont(sc.part, sc.w * 0.86, Math.min(sc.h * 0.2, cfs * 0.6), 3);
+          ctx.fillText(sc.part, sc.cx, sc.cy + sc.h * 0.18);
+        }
+      });
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      return;
+    }
+    drawBands(Math.min(40, Math.max(20, 12 / s)));
 
     // Sections (dashed structure boxes) — dim those outside the active sheet.
     M.secs.forEach((sc) => {
@@ -821,7 +857,12 @@
   // field (net name / part value) for a quick edit. (The two single-clicks fire
   // first — they just select it.)
   canvas.addEventListener("dblclick", (e) => {
-    const w = worldFromEvent(e), h = pick(w[0], w[1]);
+    const w = worldFromEvent(e);
+    if (scale() < GLANCE_S) {                        // glance chip → zoom into that cell
+      const sec = (M.secs || []).find((sc) => w[0] >= sc.x && w[0] <= sc.x + sc.w && w[1] >= sc.y && w[1] <= sc.y + sc.h);
+      if (sec) { fitTo(sec, 0.12); return; }
+    }
+    const h = pick(w[0], w[1]);
     if (h.t === "net" || (h.t === "pin" && h.net)) { setHotNet(h.net); focusInspectorPrimary(); }
     else if (h.t === "part" && h.ghost) { select(h.kind, h.ref); focusTarget(h.ref); }   // proxy → frame the part's own region
     else if (h.t === "part") { select(h.kind, h.ref); focusInspectorPrimary(); }         // real part → focus its value for editing
@@ -1525,7 +1566,7 @@
       const comp = compOf.get(ref) || "";
       const secName = boxes.length ? secNameOf(boxes[0]) : "";
       const title = ref + (comp && comp !== ref ? " · " + comp : "") + (secName ? " — " + secName : "");
-      const cell = { ref, title, label: labelOf.get(ref) || ref, ox: MX, oy: MY, ch: 0, w: 2 * MX + leftW + ICW + rightW, h: 0, icX, ghosts: [], wires: [], labels: [], pulls: [], chips: [], leftPins: [], rightPins: [] };
+      const cell = { ref, title, group: secName, label: labelOf.get(ref) || ref, ox: MX, oy: MY, ch: 0, w: 2 * MX + leftW + ICW + rightW, h: 0, icX, ghosts: [], wires: [], labels: [], pulls: [], chips: [], leftPins: [], rightPins: [] };
       // A pull-up/down on `net` taps the wire segment [x0,x1]@y, drops a short riser
       // into the band just below it, then runs HORIZONTALLY (compact, to fit the partner
       // gap) out to its terminal — the same side-spoke idiom as the extra pins, so the
@@ -1742,18 +1783,50 @@
       cell.h = 2 * MY + cell.ch;
       cells.push(cell);
     }
-    // Shelf-pack the cells into rows so no two cells touch.
-    const CGX = 72, CGY = 64, MAXW = 2600;
-    let cx = 0, cy = 0, rowH = 0, bx1 = 0, by1 = 0;
+    // Band the cells — Power first (the producer cells, already depth-sorted),
+    // then each authored section that holds ≥2 cells, with single-cell sections
+    // merging into unnamed runs in between — and shelf-pack each band into rows
+    // so no two cells touch. A named band draws a faint container + title: the
+    // wayfinding layer the far-zoom glance view enlarges.
+    const bgroups = [], bgIdx = new Map();
     cells.forEach((c) => {
-      if (cx > 0 && cx + c.w > MAXW) { cx = 0; cy += rowH + CGY; rowH = 0; }
-      c.x = cx; c.y = cy; cx += c.w + CGX; rowH = Math.max(rowH, c.h);
+      const nm = c.tps ? " tp" : (producerRefs.has(c.ref) ? "Power" : (c.group || ""));
+      let gi = bgIdx.get(nm);
+      if (gi === undefined) { gi = bgroups.length; bgIdx.set(nm, gi); bgroups.push({ name: nm, cells: [] }); }
+      bgroups[gi].cells.push(c);
     });
+    const packs = [];
+    bgroups.forEach((g) => {
+      if (g.name === "Power" || (g.name && g.name !== " tp" && g.cells.length >= 2)) { packs.push({ name: g.name, cells: g.cells }); return; }
+      const last = packs[packs.length - 1];
+      if (last && !last.name) last.cells.push.apply(last.cells, g.cells);
+      else packs.push({ name: null, cells: g.cells });
+    });
+    const CGX = 72, CGY = 64, MAXW = 2600, BAND_PAD = 24, BAND_HEAD = 68, BAND_GAP = 56;   // header tall enough that the band title clears the first cell's own title row
+    let cy = 0, bx1 = 0, by1 = 0;
+    m.bands = [];
+    packs.forEach((p) => {
+      const top = cy;
+      if (p.name) cy += BAND_HEAD;
+      let cx = 0, rowH = 0, right = 0;
+      p.cells.forEach((c) => {
+        if (cx > 0 && cx + c.w > MAXW) { cx = 0; cy += rowH + CGY; rowH = 0; }
+        c.x = cx; c.y = cy; cx += c.w + CGX; rowH = Math.max(rowH, c.h);
+        right = Math.max(right, c.x + c.w);
+      });
+      cy += rowH;
+      if (p.name) {
+        m.bands.push({ name: p.name, x: -BAND_PAD, y: top, w: right + 2 * BAND_PAD, h: (cy - top) + BAND_PAD, count: p.cells.length, power: p.name === "Power" });
+        cy += BAND_PAD + BAND_GAP;
+      } else cy += CGY;
+      bx1 = Math.max(bx1, right);
+    });
+    by1 = cy;
     // Emit the synthesized model (replacing the real layout).
     m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = []; m.chips = [];
     cells.forEach((c) => {
       const ox = c.x + c.ox, oy = c.y + c.oy;                      // content origin (inset by the cell margin)
-      m.secs.push({ name: c.title || "", x: c.x, y: c.y, w: c.w, h: c.h, idx: 0, cx: c.x + c.w / 2, cy: c.y + c.h / 2 });   // region title: ref · part — section
+      m.secs.push({ name: c.title || "", ref: c.ref || "", part: c.tps ? "" : (compOf.get(c.ref) || ""), x: c.x, y: c.y, w: c.w, h: c.h, idx: 0, cx: c.x + c.w / 2, cy: c.y + c.h / 2 });   // region title: ref · part — section (ref/part feed the glance chips)
       if (c.tps) {
         c.tps.forEach((t) => {
           const x = ox + t.x, y = oy + t.y;
@@ -1777,28 +1850,16 @@
     m.mapBox = { x: -40, y: -40, w: bx1 + 80, h: by1 + 80 };
   }
 
-  function countInBox(x, y, w, h) {
-    const pad = 8; let c = 0;
-    const inside = (cx, cy) => cx >= x - pad && cx <= x + w + pad && cy >= y - pad && cy <= y + h + pad;
-    M.hubs.forEach((hh) => { if (!hh.synthetic && inside(hh.cx, hh.cy)) c++; });
-    M.passes.forEach((p) => { if (inside(p.cx, p.cy)) c++; });
-    return c;
-  }
   function buildSheets() {
     sheets = [];
     const authored = scene.authored_sections || [];
-    if (!authored.length) return;   // no explicit sections → one whole-design sheet
-    // List EVERY authored section (so a freshly-created, still-empty section shows up
-    // as a sheet). Attach its laid-out box/count when present — a grid-less section
-    // has no box, so it lists + renames/deletes but doesn't zoom-to on select.
-    const byName = new Map();
-    M.secs.forEach((sc) => byName.set(sc.name, sc));
-    authored.forEach((nm) => {
-      const sc = byName.get(nm);
-      sheets.push(sc
-        ? { name: nm, title: nm, box: { x: sc.x, y: sc.y, w: sc.w, h: sc.h }, count: countInBox(sc.x, sc.y, sc.w, sc.h) }
-        : { name: nm, title: nm, box: null, count: 0 });
-    });
+    // The map's bands are the primary pages (Power, multi-cell sections) —
+    // click zooms to the band. Authored sections that didn't form a band still
+    // list box-less so they can be renamed / deleted (their `authored` flag
+    // gates the manage tools; synthetic bands like "Power" have none).
+    ((M && M.bands) || []).forEach((b) => sheets.push({ name: b.name, title: b.name, box: { x: b.x, y: b.y, w: b.w, h: b.h }, count: b.count, authored: authored.includes(b.name) }));
+    const seen = new Set(sheets.map((s) => s.name));
+    authored.forEach((nm) => { if (!seen.has(nm)) sheets.push({ name: nm, title: nm, box: null, count: 0, authored: true }); });
   }
   function buildSheetList() {
     clear(sheetList);
@@ -1816,12 +1877,14 @@
       row.querySelector(".nm").textContent = s.name;
       row.title = s.title;
       row.onclick = () => selectSheet(i);
-      const tools = mkEl("span", "ed-sheet-tools");
-      const rn = mkEl("button", "ed-x", "✎"); rn.title = "Rename sheet";
-      rn.onclick = (e) => { e.stopPropagation(); const nm = (prompt("Rename sheet:", s.name) || "").trim(); if (nm) applyRenameSection(s.name, nm); };
-      const dl = mkEl("button", "ed-x", "✕"); dl.title = "Delete sheet (must be empty)";
-      dl.onclick = (e) => { e.stopPropagation(); applyRemoveSection(s.name); };
-      tools.appendChild(rn); tools.appendChild(dl); row.appendChild(tools);
+      if (s.authored) {                              // synthetic bands (Power, misc runs) aren't source sections
+        const tools = mkEl("span", "ed-sheet-tools");
+        const rn = mkEl("button", "ed-x", "✎"); rn.title = "Rename sheet";
+        rn.onclick = (e) => { e.stopPropagation(); const nm = (prompt("Rename sheet:", s.name) || "").trim(); if (nm) applyRenameSection(s.name, nm); };
+        const dl = mkEl("button", "ed-x", "✕"); dl.title = "Delete sheet (must be empty)";
+        dl.onclick = (e) => { e.stopPropagation(); applyRemoveSection(s.name); };
+        tools.appendChild(rn); tools.appendChild(dl); row.appendChild(tools);
+      }
       sheetList.appendChild(row);
     });
     const addRow = mkEl("div", "ed-sheet ed-sheet-add", "+ New sheet");
@@ -2274,6 +2337,8 @@
       <tr><td><kbd>1</kbd>–<kbd>9</kbd></td><td>Jump to sheet · <kbd>0</kbd> whole board</td></tr>
       <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Previous / next sheet</td></tr>
       <tr><td><kbd>F</kbd></td><td>Fit current sheet / board</td></tr>
+      <tr><td><kbd>/</kbd></td><td>Find — type a ref (U17), a net (SPI_SCK) or a chain key and <kbd>Enter</kbd> jumps the view there</td></tr>
+      <tr><td>zoom out</td><td>Far out, the map turns into a <b>glance</b> block diagram — titled bands (Power, sections) with one chip per part. Double-click a chip to dive into its full cell.</td></tr>
       <tr><td><kbd>Esc</kbd></td><td>Deselect / close</td></tr>
       <tr><td>click part / net</td><td>Show its properties in the left inspector (edit value, rename net, rewire pins, copy, delete). The pin→net fields suggest existing nets — <kbd>↑</kbd>/<kbd>↓</kbd> + <kbd>Enter</kbd> to pick one, or just type a new name.</td></tr>
       <tr><td><b>double-click</b></td><td>Select it and jump straight to the first editable field in the inspector; on a dashed proxy, jump to that part's own region</td></tr>
@@ -2299,6 +2364,7 @@
       case "e": case "E": editSelected(); break;
       case "Delete": case "Backspace": e.preventDefault(); deleteSelected(); break;
       case "f": case "F": if (activeSheet >= 0) selectSheet(activeSheet); else fitAll(); break;
+      case "/": e.preventDefault(); findBox.focus(); findBox.select(); break;
       case "?": toggleKeys(); break;
       case "Escape": deselect(); break;
       case "[": stepSheet(-1); break;
@@ -2316,6 +2382,16 @@
   tools.querySelector("#tool-add").onclick = openAdd;
   tools.querySelector("#tool-fit").onclick = () => { if (activeSheet >= 0) selectSheet(activeSheet); else fitAll(); };
   tools.querySelector("#tool-keys").onclick = toggleKeys;
+
+  // Find box (/) — jump straight to a ref, a net, or a chain key.
+  const findBox = document.createElement("input");
+  findBox.id = "ed-find"; findBox.placeholder = "Find ref / net…  ( / )";
+  findBox.autocomplete = "off"; findBox.spellcheck = false;
+  findBox.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { const v = findBox.value.trim(); if (!v) return; if (focusTarget(v)) findBox.blur(); else toast("No match: " + v, true); }
+    else if (e.key === "Escape") { findBox.value = ""; findBox.blur(); }
+  });
+  sheetList.parentNode.insertBefore(findBox, sheetList);
   isoBox.addEventListener("change", scheduleDraw);
 
   // ── ERC / validation surface ─────────────────────────────────────────
