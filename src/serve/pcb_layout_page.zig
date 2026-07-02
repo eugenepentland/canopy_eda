@@ -4495,13 +4495,11 @@ const PAGE_CSS =
     \\.pcb-legend .sw.viadot{border:0;height:9px;width:9px;border-radius:50%;background:radial-gradient(circle,#fff 0 1.5px,#ca8a04 1.5px)}
     \\.pcb-legend .sw.sig{border-color:#9aa7b4}
     \\.pcb-legend .note{color:#d29922}
-    \\.pcb-svg{background:#010409;border:1px solid #30363d;border-radius:8px;max-width:100%;height:auto;touch-action:none}
-    \\/* Canvas overlay carrying airwires / routed copper / clearance halos —
-    \\   stacked over the SVG, never intercepts the mouse. */
-    \\.pcb-overlay{position:absolute;pointer-events:none;z-index:3}
-    \\/* Zoomed out, pad-number labels are sub-pixel noise — dropping the
-    \\   thousands of <text> nodes from rendering is a big paint win. */
-    \\.pcb-svg.zoomed-out .padset text{display:none}
+    \\/* The scene (parts/pads/airwires/copper) is painted on the canvas; the
+    \\   transparent SVG above it carries pointer events + light overlays. */
+    \\.pcb-svg{background:transparent;border:1px solid #30363d;border-radius:8px;max-width:100%;height:auto;
+    \\  touch-action:none;position:relative;z-index:1}
+    \\.pcb-scene{position:absolute;pointer-events:none;z-index:0;border-radius:8px}
     \\.pcb-ref{font:600 9px system-ui,sans-serif;text-anchor:middle;pointer-events:none;user-select:none}
     \\.part{cursor:grab}
     \\/* Highlights are plain strokes — SVG drop-shadow filters forced slow
