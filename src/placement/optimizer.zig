@@ -327,6 +327,11 @@ pub const Part = struct {
     kind: PartKind,
     hw: f64,
     hh: f64,
+    /// Courtyard-box centre offset from the footprint origin (footprint-local
+    /// mm; (0,0) for origin-centred boxes). The pose (`x`,`y`) is always the
+    /// footprint ORIGIN — collision/bounds add the rotated offset.
+    ccx: f64 = 0,
+    ccy: f64 = 0,
     pads: []const geometry.Pad,
     fallback: bool,
     value: []const u8 = "",
@@ -4729,6 +4734,8 @@ fn prepare(
             // footprint, so clearance is preserved.
             .hw = if (params.grid_courtyards) ceilToGrid(g.hw) else g.hw,
             .hh = if (params.grid_courtyards) ceilToGrid(g.hh) else g.hh,
+            .ccx = g.ccx,
+            .ccy = g.ccy,
             .pads = g.pads,
             .fallback = g.fallback,
             .value = instValue(inst),
@@ -5456,15 +5463,25 @@ fn effHh(p: Part) f64 {
     return if (isQuarter(p.rot)) p.hw else p.hh;
 }
 
+/// World-space centre of the part's courtyard box: the pose plus the rotated
+/// (and side-mirrored) courtyard offset — equal to the pose for the common
+/// origin-centred box.
+fn courtCx(p: Part) f64 {
+    return if (p.ccx == 0 and p.ccy == 0) p.x else worldPt(p, p.ccx, p.ccy).x;
+}
+fn courtCy(p: Part) f64 {
+    return if (p.ccx == 0 and p.ccy == 0) p.y else worldPt(p, p.ccx, p.ccy).y;
+}
+
 /// Collision-keepout box used by every overlap/repulsion test: the escape-stub
-/// box when set (`khw≥0`), else the symmetric courtyard about the part centre
+/// box when set (`khw≥0`), else the courtyard box about its own centre
 /// (sentinel `khw<0` ⇒ identical to the pre-stub behaviour). The centre offset
 /// rotates with the part; the half-extents swap on a quarter turn.
 fn keepCx(p: Part) f64 {
-    return if (p.keep.hw < 0) p.x else worldPt(p, p.keep.ox, p.keep.oy).x;
+    return if (p.keep.hw < 0) courtCx(p) else worldPt(p, p.keep.ox, p.keep.oy).x;
 }
 fn keepCy(p: Part) f64 {
-    return if (p.keep.hw < 0) p.y else worldPt(p, p.keep.ox, p.keep.oy).y;
+    return if (p.keep.hw < 0) courtCy(p) else worldPt(p, p.keep.ox, p.keep.oy).y;
 }
 fn keepHw(p: Part) f64 {
     const base = if (p.keep.hw < 0) effHw(p) else (if (isQuarter(p.rot)) p.keep.hh else p.keep.hw);
@@ -5534,10 +5551,10 @@ fn escapeDir(p: Part, px: f64, py: f64) Pt {
 /// reserved corridor. Parts with no stub keep the sentinel (`khw<0`).
 fn applyKeepout(parts: []Part, stubs: []const Stub) void {
     for (parts, 0..) |*p, i| {
-        var x0 = -p.hw;
-        var x1 = p.hw;
-        var y0 = -p.hh;
-        var y1 = p.hh;
+        var x0 = p.ccx - p.hw;
+        var x1 = p.ccx + p.hw;
+        var y0 = p.ccy - p.hh;
+        var y1 = p.ccy + p.hh;
         var has = false;
         for (stubs) |st| {
             if (st.part != i) continue;
@@ -5726,8 +5743,8 @@ fn constraintCost(
 /// Edge-to-edge gap (mm) between two parts' rotation-aware courtyards — the
 /// distance a `(keep-out (part …) (from …))` penalises below its `min`.
 fn partGap(a: Part, b: Part) f64 {
-    const ar = Rect{ .x0 = a.x - effHw(a), .y0 = a.y - effHh(a), .x1 = a.x + effHw(a), .y1 = a.y + effHh(a) };
-    const br = Rect{ .x0 = b.x - effHw(b), .y0 = b.y - effHh(b), .x1 = b.x + effHw(b), .y1 = b.y + effHh(b) };
+    const ar = Rect{ .x0 = courtCx(a) - effHw(a), .y0 = courtCy(a) - effHh(a), .x1 = courtCx(a) + effHw(a), .y1 = courtCy(a) + effHh(a) };
+    const br = Rect{ .x0 = courtCx(b) - effHw(b), .y0 = courtCy(b) - effHh(b), .x1 = courtCx(b) + effHw(b), .y1 = courtCy(b) + effHh(b) };
     return rectGap(ar, br);
 }
 
@@ -5794,10 +5811,10 @@ fn fullRouteCost(
     var maxx: f64 = -std.math.inf(f64);
     var maxy: f64 = -std.math.inf(f64);
     for (parts) |p| {
-        minx = @min(minx, p.x - effHw(p));
-        miny = @min(miny, p.y - effHh(p));
-        maxx = @max(maxx, p.x + effHw(p));
-        maxy = @max(maxy, p.y + effHh(p));
+        minx = @min(minx, courtCx(p) - effHw(p));
+        miny = @min(miny, courtCy(p) - effHh(p));
+        maxx = @max(maxx, courtCx(p) + effHw(p));
+        maxy = @max(maxy, courtCy(p) + effHh(p));
     }
     // A minimal Placement — exactly the fields `router.route`/`drc.check` read
     // (parts, nets, stubs, priority, bounds). Links/instances are render-only.
@@ -5852,10 +5869,10 @@ fn compactnessArea(parts: []const Part) f64 {
     var maxx: f64 = -std.math.inf(f64);
     var maxy: f64 = -std.math.inf(f64);
     for (parts) |p| {
-        minx = @min(minx, p.x - effHw(p));
-        miny = @min(miny, p.y - effHh(p));
-        maxx = @max(maxx, p.x + effHw(p));
-        maxy = @max(maxy, p.y + effHh(p));
+        minx = @min(minx, courtCx(p) - effHw(p));
+        miny = @min(miny, courtCy(p) - effHh(p));
+        maxx = @max(maxx, courtCx(p) + effHw(p));
+        maxy = @max(maxy, courtCy(p) + effHh(p));
     }
     return (maxx - minx) * (maxy - miny);
 }
@@ -5949,10 +5966,10 @@ fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMap(usize), net
     var maxx: f64 = -std.math.inf(f64);
     var maxy: f64 = -std.math.inf(f64);
     for (parts) |p| {
-        minx = @min(minx, p.x - effHw(p));
-        miny = @min(miny, p.y - effHh(p));
-        maxx = @max(maxx, p.x + effHw(p));
-        maxy = @max(maxy, p.y + effHh(p));
+        minx = @min(minx, courtCx(p) - effHw(p));
+        miny = @min(miny, courtCy(p) - effHh(p));
+        maxx = @max(maxx, courtCx(p) + effHw(p));
+        maxy = @max(maxy, courtCy(p) + effHh(p));
     }
     const nbx = congestBins(maxx - minx);
     const nby = congestBins(maxy - miny);
@@ -6995,7 +7012,11 @@ fn keepBoxOf(p: Part) KeepBox {
     const q = isQuarter(p.rot);
     const s = g_collide_shrink; // courtyards may overlap their clearance margins
     const r = g_route_gap; // …or leave extra routing room between them
-    if (p.keep.hw < 0) return .{ .cxo = 0, .cyo = 0, .hw = @max(0.0, (if (q) p.hh else p.hw) - s) + r, .hh = @max(0.0, (if (q) p.hw else p.hh) - s) + r };
+    if (p.keep.hw < 0) {
+        const ccx = if (p.side == .bottom) -p.ccx else p.ccx;
+        const coff = rotateLocal(ccx, p.ccy, p.rot);
+        return .{ .cxo = coff.x, .cyo = coff.y, .hw = @max(0.0, (if (q) p.hh else p.hw) - s) + r, .hh = @max(0.0, (if (q) p.hw else p.hh) - s) + r };
+    }
     const kox = if (p.side == .bottom) -p.keep.ox else p.keep.ox;
     const off = rotateLocal(kox, p.keep.oy, p.rot);
     const hw = @max(0.0, (if (q) p.keep.hh else p.keep.hw) - s) + r;

@@ -527,10 +527,11 @@ const Ctx = struct {
             const active = self.partActive(part);
             const base_a: f32 = if (active) 1.0 else DIM_A;
             const stroke = if (part.kind == .hub) HUB_STROKE else PASSIVE_STROKE;
-            // Courtyard (rotated quad about the part origin).
+            // Courtyard (rotated quad about the box centre — offset from the
+            // part origin when the library rect is off-origin).
             const court = [_][2]f32{
-                self.lp(part, -part.hw, -part.hh), self.lp(part, part.hw, -part.hh),
-                self.lp(part, part.hw, part.hh),   self.lp(part, -part.hw, part.hh),
+                self.lp(part, part.ccx - part.hw, part.ccy - part.hh), self.lp(part, part.ccx + part.hw, part.ccy - part.hh),
+                self.lp(part, part.ccx + part.hw, part.ccy + part.hh), self.lp(part, part.ccx - part.hw, part.ccy + part.hh),
             };
             // Blame heatmap tints the fill green→red by objective share; the cool
             // baseline COURT_FILL otherwise (blue wash for bottom-side parts).
