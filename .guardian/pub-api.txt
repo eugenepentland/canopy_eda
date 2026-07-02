@@ -197,6 +197,7 @@ src/eval/env.zig::LayoutRow struct_
 src/eval/env.zig::LayoutSpec struct_
 src/eval/env.zig::NcOk struct_
 src/eval/env.zig::Net struct_
+src/eval/env.zig::NetClassSpec struct_
 src/eval/env.zig::NetLengthConstraint struct_
 src/eval/env.zig::NetTie struct_
 src/eval/env.zig::Note struct_
@@ -233,6 +234,8 @@ src/eval/env.zig::SectionPort struct_
 src/eval/env.zig::SectionStatus enum_
 src/eval/env.zig::SeriesKind enum_
 src/eval/env.zig::SignalType enum_
+src/eval/env.zig::StackupPlane struct_
+src/eval/env.zig::StackupSpec struct_
 src/eval/env.zig::StrapOk struct_
 src/eval/env.zig::SubBlock struct_
 src/eval/env.zig::TestPoint struct_
@@ -245,6 +248,7 @@ src/eval/env.zig::asString fn
 src/eval/env.zig::containsString fn
 src/eval/env.zig::deinit fn
 src/eval/env.zig::get fn
+src/eval/env.zig::hasPlanes fn
 src/eval/env.zig::init fn
 src/eval/env.zig::isPowerSource fn
 src/eval/env.zig::isTestPoint fn

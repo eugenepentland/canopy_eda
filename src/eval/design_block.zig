@@ -100,6 +100,8 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var board_spec: env_mod.BoardSpec = .{};
     var revision_spec: env_mod.Revision = .{};
     var rough_spec: env_mod.RoughSpec = .{};
+    var stackup_spec: env_mod.StackupSpec = .{};
+    var net_class_specs: std.ArrayListUnmanaged(env_mod.NetClassSpec) = .empty;
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
 
@@ -200,6 +202,9 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
             .board => board_spec = try parseBoard(self, form_children),
             .revision => revision_spec = try parseRevision(self, form_children),
             .rough => rough_spec = try parseRough(self, form_children),
+            .stackup => stackup_spec = try parseStackup(self, form_children),
+            .net_class => if (try parseNetClass(self, form_children)) |nc|
+                net_class_specs.append(self.allocator, nc) catch return EvalError.OutOfMemory,
             // Section-only forms are ignored at the top level — a
             // design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract; the warning
@@ -242,6 +247,8 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .board = board_spec,
         .revision = revision_spec,
         .rough = rough_spec,
+        .stackup = stackup_spec,
+        .net_classes = net_class_specs.toOwnedSlice(self.allocator) catch &.{},
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -825,6 +832,8 @@ fn evalSection(
             .board,
             .revision,
             .rough,
+            .stackup,
+            .net_class,
             => {
                 self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name});
             },
@@ -1656,6 +1665,101 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     };
 }
 
+/// Parse a top-level `(stackup N (plane IDX "NET")…)` form into a
+/// `StackupSpec`. N (total copper layers) is required and must be ≥1; a
+/// malformed count leaves the spec absent (warned) so a typo can't silently
+/// change the routing model. `(plane …)` entries with a bad index (0 or > N)
+/// are skipped with a warning.
+fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod.StackupSpec {
+    if (form_children.len < 2) {
+        self.warnFmt(form_children[0].span, "(stackup …) needs a copper layer count, e.g. (stackup 2)", .{});
+        return .{};
+    }
+    const n_raw = form_children[1].asNumber() orelse {
+        self.warnFmt(form_children[1].span, "(stackup …) layer count must be a number", .{});
+        return .{};
+    };
+    if (n_raw < 1 or n_raw > 32 or n_raw != @floor(n_raw)) {
+        self.warnFmt(form_children[1].span, "(stackup …) layer count must be a whole number 1–32", .{});
+        return .{};
+    }
+    const layers: u8 = @intFromFloat(n_raw);
+    var planes: std.ArrayListUnmanaged(env_mod.StackupPlane) = .empty;
+    for (form_children[2..]) |child| {
+        const c = child.asList() orelse continue;
+        if (c.len < 1) continue;
+        const head = c[0].asAtom() orelse continue;
+        if (!std.mem.eql(u8, head, "plane")) {
+            self.warnFmt(c[0].span, "unknown (stackup …) sub-form ({s} …) — expected (plane IDX \"NET\")", .{head});
+            continue;
+        }
+        if (c.len < 3) {
+            self.warnFmt(c[0].span, "(plane …) needs a layer index and a net name", .{});
+            continue;
+        }
+        const idx_raw = c[1].asNumber() orelse {
+            self.warnFmt(c[1].span, "(plane …) layer index must be a number", .{});
+            continue;
+        };
+        if (idx_raw < 1 or idx_raw > n_raw or idx_raw != @floor(idx_raw)) {
+            self.warnFmt(c[1].span, "(plane …) layer index out of range for this stackup", .{});
+            continue;
+        }
+        const net = c[2].asString() orelse c[2].asAtom() orelse {
+            self.warnFmt(c[2].span, "(plane …) net must be a name", .{});
+            continue;
+        };
+        planes.append(self.allocator, .{ .index = @intFromFloat(idx_raw), .net = net }) catch return EvalError.OutOfMemory;
+    }
+    return .{
+        .layers = layers,
+        .planes = planes.toOwnedSlice(self.allocator) catch &.{},
+        .present = true,
+    };
+}
+
+/// Parse one top-level `(net-class "name" (width MM) (clearance MM)
+/// (via DIA DRILL) (nets "A" …))` form. Null (with a warning) when the name or
+/// the `(nets …)` list is missing — a class that names no nets can't apply.
+fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_mod.NetClassSpec {
+    if (form_children.len < 2) {
+        self.warnFmt(form_children[0].span, "(net-class …) needs a name, e.g. (net-class \"power\" …)", .{});
+        return null;
+    }
+    const name = form_children[1].asString() orelse form_children[1].asAtom() orelse {
+        self.warnFmt(form_children[1].span, "(net-class …) name must be a string", .{});
+        return null;
+    };
+    var spec = env_mod.NetClassSpec{ .name = name };
+    var nets: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (form_children[2..]) |child| {
+        const c = child.asList() orelse continue;
+        if (c.len < 1) continue;
+        const head = c[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "width")) {
+            if (c.len >= 2) spec.width = c[1].asNumber() orelse 0;
+        } else if (std.mem.eql(u8, head, "clearance")) {
+            if (c.len >= 2) spec.clearance = c[1].asNumber() orelse 0;
+        } else if (std.mem.eql(u8, head, "via")) {
+            if (c.len >= 2) spec.via_dia = c[1].asNumber() orelse 0;
+            if (c.len >= 3) spec.via_drill = c[2].asNumber() orelse 0;
+        } else if (std.mem.eql(u8, head, "nets")) {
+            for (c[1..]) |net_node| {
+                const net = net_node.asString() orelse net_node.asAtom() orelse continue;
+                nets.append(self.allocator, net) catch return EvalError.OutOfMemory;
+            }
+        } else {
+            self.warnFmt(c[0].span, "unknown (net-class …) sub-form ({s} …)", .{head});
+        }
+    }
+    if (nets.items.len == 0) {
+        self.warnFmt(form_children[0].span, "(net-class \"{s}\" …) names no nets — add (nets \"A\" …)", .{name});
+        return null;
+    }
+    spec.nets = nets.toOwnedSlice(self.allocator) catch &.{};
+    return spec;
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -1685,6 +1789,86 @@ test "design-block captures (kicad-pcb path)" {
     };
     try testing.expect(block.kicad_pcb_path != null);
     try testing.expectEqualStrings("/mnt/nas/test.kicad_pcb", block.kicad_pcb_path.?);
+}
+
+// spec: eval/design_block - stackup form captures layer count and plane assignments on the design block
+test "design-block captures (stackup …)" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stackup 4 (plane 2 "GND") (plane 3 "PWR")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const value = try evalDesignBlock(&eval, form_children[1..], &env);
+    const block = switch (value) {
+        .design_block => |b| b,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expect(block.stackup.present);
+    try testing.expectEqual(@as(u8, 4), block.stackup.layers);
+    try testing.expectEqual(@as(usize, 2), block.stackup.planes.len);
+    try testing.expectEqual(@as(u8, 2), block.stackup.planes[0].index);
+    try testing.expectEqualStrings("GND", block.stackup.planes[0].net);
+    try testing.expectEqualStrings("PWR", block.stackup.planes[1].net);
+}
+
+// spec: eval/design_block - a bare 2-layer stackup declares no planes so ground routes as copper
+test "design-block captures a plane-less (stackup 2)" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stackup 2))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const value = try evalDesignBlock(&eval, form_children[1..], &env);
+    const block = switch (value) {
+        .design_block => |b| b,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expect(block.stackup.present);
+    try testing.expectEqual(@as(u8, 2), block.stackup.layers);
+    try testing.expect(!block.stackup.hasPlanes());
+}
+
+// spec: eval/design_block - net-class forms capture width/clearance/via geometry for their listed nets
+test "design-block captures (net-class …) rules" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (net-class "power" (width 0.3) (clearance 0.2) (via 0.5 0.3) (nets "VBUS" "+5V"))
+        \\  (net-class "broken-no-nets" (width 1.0)))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const value = try evalDesignBlock(&eval, form_children[1..], &env);
+    const block = switch (value) {
+        .design_block => |b| b,
+        else => return error.TestUnexpectedResult,
+    };
+    // The nets-less class is dropped (warned), the valid one is kept intact.
+    try testing.expectEqual(@as(usize, 1), block.net_classes.len);
+    const nc = block.net_classes[0];
+    try testing.expectEqualStrings("power", nc.name);
+    try testing.expectEqual(@as(f64, 0.3), nc.width);
+    try testing.expectEqual(@as(f64, 0.2), nc.clearance);
+    try testing.expectEqual(@as(f64, 0.5), nc.via_dia);
+    try testing.expectEqual(@as(f64, 0.3), nc.via_drill);
+    try testing.expectEqual(@as(usize, 2), nc.nets.len);
+    try testing.expectEqualStrings("VBUS", nc.nets[0]);
 }
 
 // spec: eval/design_block - net ties merge transitively so a chained tie collapses all three nets into one

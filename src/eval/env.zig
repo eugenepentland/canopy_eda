@@ -1066,6 +1066,45 @@ pub const BoardSpec = struct {
     present: bool = false,
 };
 
+/// One `(plane IDX "NET")` entry of a `(stackup …)` form: copper layer IDX
+/// (1-based, 1 = top/F.Cu, `layers` = bottom/B.Cu) is a solid plane carrying
+/// NET instead of a routed signal layer.
+pub const StackupPlane = struct {
+    index: u8,
+    net: []const u8,
+};
+
+/// The board's copper stack from a top-level `(stackup N (plane IDX "NET")…)`
+/// form. `layers` is the total copper count; layers not named in `planes` are
+/// signal layers. `present=false` ⇒ no form authored — the router keeps its
+/// legacy implicit model (4 layers, GND+PWR planes assumed) so existing
+/// designs are unchanged. `(stackup 2)` declares a plain 2-layer board with
+/// NO planes: ground/power become routed copper like any other net.
+pub const StackupSpec = struct {
+    layers: u8 = 0,
+    planes: []const StackupPlane = &.{},
+    present: bool = false,
+
+    /// The declared plane carrying `net` names a ground-ish plane? Helper for
+    /// the router: true when ANY plane is declared (used per-net at routing).
+    pub fn hasPlanes(self: StackupSpec) bool {
+        return self.planes.len > 0;
+    }
+};
+
+/// One routing rule from a top-level `(net-class "name" (width MM)
+/// (clearance MM) (via DIA DRILL) (nets "A" "B" …))` form: trace geometry for
+/// the named nets. A zero field keeps the router's default; `nets` entries
+/// match flattened net names exactly (case-insensitive).
+pub const NetClassSpec = struct {
+    name: []const u8 = "",
+    width: f64 = 0,
+    clearance: f64 = 0,
+    via_dia: f64 = 0,
+    via_drill: f64 = 0,
+    nets: []const []const u8 = &.{},
+};
+
 /// One historical entry from a `(change "id" "summary")` line inside the
 /// `(revision …)` form — the in-file changelog. By convention the list is
 /// newest-first and `id` matches the revision the change shipped in.
@@ -1200,6 +1239,12 @@ pub const DesignBlock = struct {
     /// the anchor IC + ordered priority groups the rough placer (`?rough=1`)
     /// honours. `present=false` ⇒ the rougher uses its heuristic defaults.
     rough: RoughSpec = .{},
+    /// Copper stack from a top-level `(stackup …)` form. `present=false` ⇒
+    /// legacy implicit model (4 layers, GND+PWR planes assumed by the router).
+    stackup: StackupSpec = .{},
+    /// Routing rules from top-level `(net-class …)` forms, in authored order.
+    /// The first class naming a net wins when two overlap.
+    net_classes: []const NetClassSpec = &.{},
 
     /// Ref-des flattening style for the netlist/BOM/emit flatteners: sub-block
     /// parts keep their path prefix (`pwr/C1`). Always `.hierarchical` now that
