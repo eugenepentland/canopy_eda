@@ -219,21 +219,91 @@ pub fn deleteSession(allocator: std.mem.Allocator, auth_dir: []const u8, token: 
 
 // ── Challenge store ──────────────────────────────────────────────────
 
+// WebAuthn ceremony challenges are keyed by a per-attempt id (the `authcid`
+// cookie) rather than a single process-global slot — a global slot meant two
+// concurrent register/login ceremonies clobbered each other, so one would fail
+// "challenge mismatch" under any concurrency. Each entry is single-use with a
+// short TTL.
+const CHALLENGE_TTL_SECS: i64 = 300;
+const CHALLENGE_COOKIE = "authcid";
+const ChallengeEntry = struct { challenge: [32]u8, expiry: i64 };
 var challenge_mutex: std.Thread.Mutex = .{};
-var pending_challenge: ?[32]u8 = null;
+var challenges: ?std.StringHashMap(ChallengeEntry) = null;
 
-fn storePendingChallenge(challenge: [32]u8) void {
-    challenge_mutex.lock();
-    defer challenge_mutex.unlock();
-    pending_challenge = challenge;
+fn challengeMap() *std.StringHashMap(ChallengeEntry) {
+    if (challenges == null) challenges = std.StringHashMap(ChallengeEntry).init(store_alloc);
+    return &challenges.?;
 }
 
-fn takePendingChallenge() ?[32]u8 {
+/// Evict expired challenge entries (bounded batch per call). Caller holds
+/// `challenge_mutex`.
+fn sweepExpiredChallenges(map: *std.StringHashMap(ChallengeEntry), now: i64) void {
+    var expired: [32][]const u8 = undefined;
+    var n: usize = 0;
+    var it = map.iterator();
+    while (it.next()) |e| {
+        if (now > e.value_ptr.expiry and n < expired.len) {
+            expired[n] = e.key_ptr.*;
+            n += 1;
+        }
+    }
+    for (expired[0..n]) |k| if (map.fetchRemove(k)) |kv| store_alloc.free(kv.key);
+}
+
+/// Mint a per-attempt id, store `challenge` under it with a TTL, and return the
+/// id (the caller emits it as the `authcid` cookie). Returns "" on allocation
+/// failure — the complete step then simply finds no challenge and rejects.
+fn storePendingChallenge(challenge: [32]u8) []const u8 {
     challenge_mutex.lock();
     defer challenge_mutex.unlock();
-    const c = pending_challenge orelse return null;
-    pending_challenge = null;
-    return c;
+    const map = challengeMap();
+    const now = clock.timestamp();
+    sweepExpiredChallenges(map, now);
+    var rand: [16]u8 = undefined;
+    infra_random.bytes(&rand);
+    const hex = std.fmt.bytesToHex(rand, .lower);
+    const cid = store_alloc.dupe(u8, &hex) catch return "";
+    map.put(cid, .{ .challenge = challenge, .expiry = now + CHALLENGE_TTL_SECS }) catch {
+        store_alloc.free(cid);
+        return "";
+    };
+    return cid;
+}
+
+/// Consume the challenge for attempt id `cid` (single-use). Null when the id is
+/// unknown or expired.
+fn takePendingChallenge(cid: []const u8) ?[32]u8 {
+    challenge_mutex.lock();
+    defer challenge_mutex.unlock();
+    const map = challengeMap();
+    const kv = map.fetchRemove(cid) orelse return null;
+    defer store_alloc.free(kv.key);
+    if (clock.timestamp() > kv.value.expiry) return null;
+    return kv.value.challenge;
+}
+
+/// Parse a named cookie value out of the request's `Cookie` header.
+fn getCookie(req: *httpz.Request, name: []const u8) ?[]const u8 {
+    const cookie_header = req.header("cookie") orelse return null;
+    var iter = std.mem.splitSequence(u8, cookie_header, "; ");
+    while (iter.next()) |part| {
+        const trimmed = std.mem.trim(u8, part, " ");
+        if (std.mem.startsWith(u8, trimmed, name) and trimmed.len > name.len and trimmed[name.len] == '=') {
+            return trimmed[name.len + 1 ..];
+        }
+    }
+    return null;
+}
+
+/// Emit the short-lived `authcid` cookie binding this response's challenge to
+/// the follow-up complete request.
+fn setChallengeCookie(res: *httpz.Response, arena: std.mem.Allocator, cid: []const u8) !void {
+    const cookie = try std.fmt.allocPrint(
+        arena,
+        CHALLENGE_COOKIE ++ "={s}; Max-Age={d}; Path=/; HttpOnly; SameSite=Strict",
+        .{ cid, CHALLENGE_TTL_SECS },
+    );
+    res.header("Set-Cookie", cookie);
 }
 
 // ── Credential storage ───────────────────────────────────────────────
@@ -933,7 +1003,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 
     var challenge: [32]u8 = undefined;
     infra_random.bytes(&challenge);
-    storePendingChallenge(challenge);
+    try setChallengeCookie(res, req.arena, storePendingChallenge(challenge));
 
     const challenge_b64 = try base64urlEncode(req.arena, &challenge);
 
@@ -1079,7 +1149,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
         return;
     }).string;
 
-    const stored_challenge = takePendingChallenge() orelse {
+    const stored_challenge = takePendingChallenge(getCookie(req, CHALLENGE_COOKIE) orelse "") orelse {
         res.status = HTTP_BAD_REQUEST;
         res.body = "{\"error\":\"no pending challenge\"}";
         res.content_type = .JSON;
@@ -1331,7 +1401,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 pub fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     var challenge: [32]u8 = undefined;
     infra_random.bytes(&challenge);
-    storePendingChallenge(challenge);
+    try setChallengeCookie(res, req.arena, storePendingChallenge(challenge));
 
     const challenge_b64 = try base64urlEncode(req.arena, &challenge);
 
@@ -1496,7 +1566,7 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
         return;
     }).string;
 
-    const stored_challenge = takePendingChallenge() orelse {
+    const stored_challenge = takePendingChallenge(getCookie(req, CHALLENGE_COOKIE) orelse "") orelse {
         res.status = HTTP_BAD_REQUEST;
         res.body = "{\"error\":\"no pending challenge\"}";
         res.content_type = .JSON;
