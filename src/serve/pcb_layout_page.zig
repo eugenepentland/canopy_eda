@@ -4496,12 +4496,19 @@ const PAGE_CSS =
     \\.pcb-legend .sw.sig{border-color:#9aa7b4}
     \\.pcb-legend .note{color:#d29922}
     \\.pcb-svg{background:#010409;border:1px solid #30363d;border-radius:8px;max-width:100%;height:auto;touch-action:none}
+    \\/* Canvas overlay carrying airwires / routed copper / clearance halos —
+    \\   stacked over the SVG, never intercepts the mouse. */
+    \\.pcb-overlay{position:absolute;pointer-events:none;z-index:3}
+    \\/* Zoomed out, pad-number labels are sub-pixel noise — dropping the
+    \\   thousands of <text> nodes from rendering is a big paint win. */
+    \\.pcb-svg.zoomed-out .padset text{display:none}
     \\.pcb-ref{font:600 9px system-ui,sans-serif;text-anchor:middle;pointer-events:none;user-select:none}
     \\.part{cursor:grab}
-    \\.part .court{transition:filter .08s}
-    \\.part.hl .court{filter:drop-shadow(0 0 3px rgba(88,166,255,.75))}
-    \\.part.sel .court{stroke:#58a6ff!important;stroke-width:2!important;filter:drop-shadow(0 0 4px rgba(88,166,255,.9))}
-    \\.part.msel .court{stroke:#d2a8ff!important;stroke-width:2!important;filter:drop-shadow(0 0 4px rgba(210,168,255,.85))}
+    \\/* Highlights are plain strokes — SVG drop-shadow filters forced slow
+    \\   repaints of everything under them on every hover/drag. */
+    \\.part.hl .court{stroke:#58a6ff!important;stroke-width:2!important}
+    \\.part.sel .court{stroke:#58a6ff!important;stroke-width:2.4!important}
+    \\.part.msel .court{stroke:#d2a8ff!important;stroke-width:2!important}
     \\/* Bottom-side (B.Cu) parts: blue body wash + blue pads, KiCad-style. The
     \\   geometry itself is mirrored by setT (scale(-1,1) inside the rotation). */
     \\.part.botside .court{fill:#122036}
@@ -4514,7 +4521,7 @@ const PAGE_CSS =
     \\#pcb-outline.on{color:#7ee787;border-color:#2ea043;box-shadow:0 0 0 1px #2ea04366}
     \\/* Rigid sub-circuit hover: every member of the group glows together, so
     \\   "this whole block drags as one" is visible before you grab it. */
-    \\.part.grp-hl .court{filter:drop-shadow(0 0 3px rgba(126,231,135,.8));stroke:#7ee787!important}
+    \\.part.grp-hl .court{stroke:#7ee787!important;stroke-width:2!important}
     \\/* Sub-circuits palette (sidebar): one row per sub-block. */
     \\.sub-panel{border-top:1px solid #21262d}
     \\.sub-row{display:flex;align-items:center;gap:6px;padding:5px 12px;font-size:12px}
@@ -4526,17 +4533,16 @@ const PAGE_CSS =
     \\.sub-rigid.on{color:#7ee787;border-color:#2ea04366}
     \\.sub-stamp:hover,.sub-rigid:hover{border-color:#58a6ff}
     \\.marquee{fill:rgba(88,166,255,.12);stroke:#58a6ff;stroke-width:1;stroke-dasharray:4 3;vector-effect:non-scaling-stroke;pointer-events:none}
-    \\.pad{transition:fill .08s,filter .08s}
     \\.pad[data-net]{cursor:pointer}
     \\.pad.net-hl{fill:#f85149}
     \\.pn.net-hl{background:#5b1e28;color:#ffa198}
     \\/* Sticky net selection (click a pad / pin chip): a gold glow + ring on every
     \\   pad on that net, drawn as a filter so it shows over any fill (net colours
     \\   on or off). Re-click the same net, or click the empty board, to clear. */
-    \\.pad.net-sel{stroke:#ffd33d;stroke-width:1.6;paint-order:stroke;filter:drop-shadow(0 0 2px #ffd33d) drop-shadow(0 0 5px #ffd33d)}
+    \\.pad.net-sel{stroke:#ffd33d;stroke-width:1.8;paint-order:stroke}
     \\/* The authored decoupling target pad on the IC (a cap's defined pin): red
     \\   glow instead of gold, so you can see exactly which pad each cap decouples. */
-    \\.pad.net-sel-pin{stroke:#f85149;stroke-width:1.6;paint-order:stroke;filter:drop-shadow(0 0 2px #f85149) drop-shadow(0 0 5px #f85149)}
+    \\.pad.net-sel-pin{stroke:#f85149;stroke-width:1.8;paint-order:stroke}
     \\.pn.net-sel{background:#3a2e07;color:#ffd33d;box-shadow:0 0 0 1px #ffd33d}
     \\.pcb-side{width:288px;flex:none;position:sticky;top:8px;max-height:calc(100vh - 16px);
     \\  overflow:auto;border:1px solid #21262d;border-radius:8px;background:#161b22}
