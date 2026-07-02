@@ -1,139 +1,139 @@
 # guardian-snapshot v1
-src/diagram/membership.zig: pub fn deinit has no /// doc comment
-src/diagram/types.zig: pub fn deinit has no /// doc comment
-src/docgen.zig: pub fn next has no /// doc comment
-src/eval/env.zig: pub fn asBool has no /// doc comment
-src/eval/env.zig: pub fn asNumber has no /// doc comment
-src/eval/env.zig: pub fn asString has no /// doc comment
-src/eval/env.zig: pub fn deinit has no /// doc comment
-src/eval/env.zig: pub fn get has no /// doc comment
-src/eval/env.zig: pub fn init has no /// doc comment
-src/eval/env.zig: pub fn isTruthy has no /// doc comment
-src/eval/env.zig: pub fn put has no /// doc comment
-src/eval/evaluator.zig: pub const BusDef (struct_) has no /// doc comment
-src/eval/evaluator.zig: pub const ComponentData (struct_) has no /// doc comment
-src/eval/evaluator.zig: pub const NetTie (struct_) has no /// doc comment
-src/eval/evaluator.zig: pub const PendingChildId (struct_) has no /// doc comment
-src/eval/evaluator.zig: pub const PendingId (struct_) has no /// doc comment
-src/eval/evaluator.zig: pub fn deinit has no /// doc comment
-src/eval/evaluator.zig: pub fn init has no /// doc comment
-src/eval/evaluator.zig: pub fn initWithLibDir has no /// doc comment
-src/eval/forms.zig: pub fn fromAtom has no /// doc comment
-src/eval/forms.zig: pub fn fromAtom has no /// doc comment
-src/eval/forms.zig: pub fn fromAtom has no /// doc comment
-src/export_kicad.zig: pub fn flattenAndMergeNets has no /// doc comment
-src/parts.zig: pub fn deinit has no /// doc comment
-src/parts.zig: pub fn init has no /// doc comment
-src/placement/module_policy.zig: pub fn deinit has no /// doc comment
-src/placement/optimizer.zig: pub fn label has no /// doc comment
-src/placement/router.zig: pub fn init has no /// doc comment
-src/raster.zig: pub fn deinit has no /// doc comment
-src/raster.zig: pub fn init has no /// doc comment
-src/render_svg/context.zig: pub fn adjAppend has no /// doc comment
-src/render_svg/context.zig: pub fn buildAdjacency has no /// doc comment
-src/render_svg/context.zig: pub fn buildNetIndex has no /// doc comment
-src/render_svg/context.zig: pub fn buildPinCanonicalNets has no /// doc comment
-src/render_svg/context.zig: pub fn buildPinNetMap has no /// doc comment
-src/render_svg/context.zig: pub fn buildSignificantNets has no /// doc comment
-src/render_svg/context.zig: pub fn classify has no /// doc comment
-src/render_svg/context.zig: pub fn collectFlat has no /// doc comment
-src/render_svg/context.zig: pub fn init has no /// doc comment
-src/render_svg/context.zig: pub fn isSpokeGroundPin has no /// doc comment
-src/render_svg/context.zig: pub fn synthesizeSpokeConnections has no /// doc comment
-src/render_svg/context.zig: pub fn validateNetConsistency has no /// doc comment
-src/review.zig: pub const ReviewDoc (struct_) has no /// doc comment
-src/serve.zig: pub fn dispatch has no /// doc comment
-src/serve.zig: pub fn notFound has no /// doc comment
-src/serve/auth.zig: pub fn createSession has no /// doc comment
-src/serve/library.zig: pub const Kind (enum_) has no /// doc comment
-src/serve/mcp.zig: pub fn clientMessage has no /// doc comment
-src/serve/mcp.zig: pub fn init has no /// doc comment
-src/serve/notes.zig: pub const Note (struct_) has no /// doc comment
-src/serve/notes.zig: pub const NoteStatus (enum_) has no /// doc comment
-src/serve/notes.zig: pub const Notes (struct_) has no /// doc comment
-src/serve/notes.zig: pub const TaskMutation (enum_) has no /// doc comment
-src/serve/rate_limiter.zig: pub fn init has no /// doc comment
-src/serve/templates/account.zig: pub const Account (struct_) has no /// doc comment
-src/serve/templates/account.zig: pub const ClientCreateForm (struct_) has no /// doc comment
-src/serve/templates/account.zig: pub const ClientRow (struct_) has no /// doc comment
-src/serve/templates/account.zig: pub const InviteCard (struct_) has no /// doc comment
-src/serve/templates/account.zig: pub const OAuthClientsCard (struct_) has no /// doc comment
-src/serve/templates/account.zig: pub const PasskeysCard (struct_) has no /// doc comment
-src/serve/templates/account.zig: pub const UserRow (struct_) has no /// doc comment
-src/serve/templates/account.zig: pub const UsersCard (struct_) has no /// doc comment
-src/serve/templates/account.zig: pub fn bind has no /// doc comment
-src/serve/templates/account.zig: pub fn bind has no /// doc comment
-src/serve/templates/account.zig: pub fn bind has no /// doc comment
-src/serve/templates/account.zig: pub fn bind has no /// doc comment
-src/serve/templates/account.zig: pub fn bind has no /// doc comment
-src/serve/templates/account.zig: pub fn bind has no /// doc comment
-src/serve/templates/account.zig: pub fn bind has no /// doc comment
-src/serve/templates/account.zig: pub fn bind has no /// doc comment
-src/serve/templates/account.zig: pub fn render has no /// doc comment
-src/serve/templates/account.zig: pub fn render has no /// doc comment
-src/serve/templates/account.zig: pub fn render has no /// doc comment
-src/serve/templates/account.zig: pub fn render has no /// doc comment
-src/serve/templates/account.zig: pub fn render has no /// doc comment
-src/serve/templates/account.zig: pub fn render has no /// doc comment
-src/serve/templates/account.zig: pub fn render has no /// doc comment
-src/serve/templates/account.zig: pub fn render has no /// doc comment
-src/serve/templates/auth.zig: pub const InviteAccept (struct_) has no /// doc comment
-src/serve/templates/auth.zig: pub const InviteExpired (struct_) has no /// doc comment
-src/serve/templates/auth.zig: pub const Login (struct_) has no /// doc comment
-src/serve/templates/auth.zig: pub const Setup (struct_) has no /// doc comment
-src/serve/templates/auth.zig: pub fn bind has no /// doc comment
-src/serve/templates/auth.zig: pub fn bind has no /// doc comment
-src/serve/templates/auth.zig: pub fn bind has no /// doc comment
-src/serve/templates/auth.zig: pub fn bind has no /// doc comment
-src/serve/templates/auth.zig: pub fn render has no /// doc comment
-src/serve/templates/auth.zig: pub fn render has no /// doc comment
-src/serve/templates/auth.zig: pub fn render has no /// doc comment
-src/serve/templates/auth.zig: pub fn render has no /// doc comment
-src/serve/templates/library.zig: pub const Card (struct_) has no /// doc comment
-src/serve/templates/library.zig: pub const ComponentDetails (struct_) has no /// doc comment
-src/serve/templates/library.zig: pub const Library (struct_) has no /// doc comment
-src/serve/templates/library.zig: pub fn bind has no /// doc comment
-src/serve/templates/library.zig: pub fn bind has no /// doc comment
-src/serve/templates/library.zig: pub fn bind has no /// doc comment
-src/serve/templates/library.zig: pub fn render has no /// doc comment
-src/serve/templates/library.zig: pub fn render has no /// doc comment
-src/serve/templates/library.zig: pub fn render has no /// doc comment
-src/serve/templates/mcp_docs.zig: pub const Mcp (struct_) has no /// doc comment
-src/serve/templates/mcp_docs.zig: pub const ParamRow (struct_) has no /// doc comment
-src/serve/templates/mcp_docs.zig: pub const ToolCard (struct_) has no /// doc comment
-src/serve/templates/mcp_docs.zig: pub fn bind has no /// doc comment
-src/serve/templates/mcp_docs.zig: pub fn bind has no /// doc comment
-src/serve/templates/mcp_docs.zig: pub fn bind has no /// doc comment
-src/serve/templates/mcp_docs.zig: pub fn render has no /// doc comment
-src/serve/templates/mcp_docs.zig: pub fn render has no /// doc comment
-src/serve/templates/mcp_docs.zig: pub fn render has no /// doc comment
-src/serve/templates/oauth.zig: pub const Authorize (struct_) has no /// doc comment
-src/serve/templates/oauth.zig: pub fn bind has no /// doc comment
-src/serve/templates/oauth.zig: pub fn render has no /// doc comment
-src/serve/templates/pages.zig: pub const DesignCard (struct_) has no /// doc comment
-src/serve/templates/pages.zig: pub const Home (struct_) has no /// doc comment
-src/serve/templates/pages.zig: pub const ModuleCard (struct_) has no /// doc comment
-src/serve/templates/pages.zig: pub const Navbar (struct_) has no /// doc comment
-src/serve/templates/pages.zig: pub fn bind has no /// doc comment
-src/serve/templates/pages.zig: pub fn bind has no /// doc comment
-src/serve/templates/pages.zig: pub fn bind has no /// doc comment
-src/serve/templates/pages.zig: pub fn bind has no /// doc comment
-src/serve/templates/pages.zig: pub fn formatHtml has no /// doc comment
-src/serve/templates/pages.zig: pub fn render has no /// doc comment
-src/serve/templates/pages.zig: pub fn render has no /// doc comment
-src/serve/templates/pages.zig: pub fn render has no /// doc comment
-src/serve/templates/pages.zig: pub fn render has no /// doc comment
-src/serve/templates/pdf_viewer.zig: pub const Page (struct_) has no /// doc comment
-src/serve/templates/pdf_viewer.zig: pub fn bind has no /// doc comment
-src/serve/templates/pdf_viewer.zig: pub fn render has no /// doc comment
-src/serve/users.zig: pub fn fromString has no /// doc comment
-src/serve/users.zig: pub fn toString has no /// doc comment
-src/sexpr/ast.zig: pub const Tag (union_) has no /// doc comment
-src/sexpr/ast.zig: pub fn atom has no /// doc comment
-src/sexpr/ast.zig: pub fn float has no /// doc comment
-src/sexpr/ast.zig: pub fn int has no /// doc comment
-src/sexpr/ast.zig: pub fn list has no /// doc comment
-src/sexpr/ast.zig: pub fn string has no /// doc comment
-src/sexpr/ast.zig: pub fn unitVal has no /// doc comment
-src/sexpr/tokenizer.zig: pub fn init has no /// doc comment
-src/sexpr/tokenizer.zig: pub fn next has no /// doc comment
+src/diagram/membership.zig: pub fn deinit: has no /// doc comment
+src/diagram/types.zig: pub fn deinit: has no /// doc comment
+src/docgen.zig: pub fn next: has no /// doc comment
+src/eval/env.zig: pub fn asBool: has no /// doc comment
+src/eval/env.zig: pub fn asNumber: has no /// doc comment
+src/eval/env.zig: pub fn asString: has no /// doc comment
+src/eval/env.zig: pub fn deinit: has no /// doc comment
+src/eval/env.zig: pub fn get: has no /// doc comment
+src/eval/env.zig: pub fn init: has no /// doc comment
+src/eval/env.zig: pub fn isTruthy: has no /// doc comment
+src/eval/env.zig: pub fn put: has no /// doc comment
+src/eval/evaluator.zig: pub const BusDef (struct_): has no /// doc comment
+src/eval/evaluator.zig: pub const ComponentData (struct_): has no /// doc comment
+src/eval/evaluator.zig: pub const NetTie (struct_): has no /// doc comment
+src/eval/evaluator.zig: pub const PendingChildId (struct_): has no /// doc comment
+src/eval/evaluator.zig: pub const PendingId (struct_): has no /// doc comment
+src/eval/evaluator.zig: pub fn deinit: has no /// doc comment
+src/eval/evaluator.zig: pub fn init: has no /// doc comment
+src/eval/evaluator.zig: pub fn initWithLibDir: has no /// doc comment
+src/eval/forms.zig: pub fn fromAtom: has no /// doc comment
+src/eval/forms.zig: pub fn fromAtom: has no /// doc comment
+src/eval/forms.zig: pub fn fromAtom: has no /// doc comment
+src/export_kicad.zig: pub fn flattenAndMergeNets: has no /// doc comment
+src/parts.zig: pub fn deinit: has no /// doc comment
+src/parts.zig: pub fn init: has no /// doc comment
+src/placement/module_policy.zig: pub fn deinit: has no /// doc comment
+src/placement/optimizer.zig: pub fn label: has no /// doc comment
+src/placement/router.zig: pub fn init: has no /// doc comment
+src/raster.zig: pub fn deinit: has no /// doc comment
+src/raster.zig: pub fn init: has no /// doc comment
+src/render_svg/context.zig: pub fn adjAppend: has no /// doc comment
+src/render_svg/context.zig: pub fn buildAdjacency: has no /// doc comment
+src/render_svg/context.zig: pub fn buildNetIndex: has no /// doc comment
+src/render_svg/context.zig: pub fn buildPinCanonicalNets: has no /// doc comment
+src/render_svg/context.zig: pub fn buildPinNetMap: has no /// doc comment
+src/render_svg/context.zig: pub fn buildSignificantNets: has no /// doc comment
+src/render_svg/context.zig: pub fn classify: has no /// doc comment
+src/render_svg/context.zig: pub fn collectFlat: has no /// doc comment
+src/render_svg/context.zig: pub fn init: has no /// doc comment
+src/render_svg/context.zig: pub fn isSpokeGroundPin: has no /// doc comment
+src/render_svg/context.zig: pub fn synthesizeSpokeConnections: has no /// doc comment
+src/render_svg/context.zig: pub fn validateNetConsistency: has no /// doc comment
+src/review.zig: pub const ReviewDoc (struct_): has no /// doc comment
+src/serve.zig: pub fn dispatch: has no /// doc comment
+src/serve.zig: pub fn notFound: has no /// doc comment
+src/serve/auth.zig: pub fn createSession: has no /// doc comment
+src/serve/library.zig: pub const Kind (enum_): has no /// doc comment
+src/serve/mcp.zig: pub fn clientMessage: has no /// doc comment
+src/serve/mcp.zig: pub fn init: has no /// doc comment
+src/serve/notes.zig: pub const Note (struct_): has no /// doc comment
+src/serve/notes.zig: pub const NoteStatus (enum_): has no /// doc comment
+src/serve/notes.zig: pub const Notes (struct_): has no /// doc comment
+src/serve/notes.zig: pub const TaskMutation (enum_): has no /// doc comment
+src/serve/rate_limiter.zig: pub fn init: has no /// doc comment
+src/serve/templates/account.zig: pub const Account (struct_): has no /// doc comment
+src/serve/templates/account.zig: pub const ClientCreateForm (struct_): has no /// doc comment
+src/serve/templates/account.zig: pub const ClientRow (struct_): has no /// doc comment
+src/serve/templates/account.zig: pub const InviteCard (struct_): has no /// doc comment
+src/serve/templates/account.zig: pub const OAuthClientsCard (struct_): has no /// doc comment
+src/serve/templates/account.zig: pub const PasskeysCard (struct_): has no /// doc comment
+src/serve/templates/account.zig: pub const UserRow (struct_): has no /// doc comment
+src/serve/templates/account.zig: pub const UsersCard (struct_): has no /// doc comment
+src/serve/templates/account.zig: pub fn bind: has no /// doc comment
+src/serve/templates/account.zig: pub fn bind: has no /// doc comment
+src/serve/templates/account.zig: pub fn bind: has no /// doc comment
+src/serve/templates/account.zig: pub fn bind: has no /// doc comment
+src/serve/templates/account.zig: pub fn bind: has no /// doc comment
+src/serve/templates/account.zig: pub fn bind: has no /// doc comment
+src/serve/templates/account.zig: pub fn bind: has no /// doc comment
+src/serve/templates/account.zig: pub fn bind: has no /// doc comment
+src/serve/templates/account.zig: pub fn render: has no /// doc comment
+src/serve/templates/account.zig: pub fn render: has no /// doc comment
+src/serve/templates/account.zig: pub fn render: has no /// doc comment
+src/serve/templates/account.zig: pub fn render: has no /// doc comment
+src/serve/templates/account.zig: pub fn render: has no /// doc comment
+src/serve/templates/account.zig: pub fn render: has no /// doc comment
+src/serve/templates/account.zig: pub fn render: has no /// doc comment
+src/serve/templates/account.zig: pub fn render: has no /// doc comment
+src/serve/templates/auth.zig: pub const InviteAccept (struct_): has no /// doc comment
+src/serve/templates/auth.zig: pub const InviteExpired (struct_): has no /// doc comment
+src/serve/templates/auth.zig: pub const Login (struct_): has no /// doc comment
+src/serve/templates/auth.zig: pub const Setup (struct_): has no /// doc comment
+src/serve/templates/auth.zig: pub fn bind: has no /// doc comment
+src/serve/templates/auth.zig: pub fn bind: has no /// doc comment
+src/serve/templates/auth.zig: pub fn bind: has no /// doc comment
+src/serve/templates/auth.zig: pub fn bind: has no /// doc comment
+src/serve/templates/auth.zig: pub fn render: has no /// doc comment
+src/serve/templates/auth.zig: pub fn render: has no /// doc comment
+src/serve/templates/auth.zig: pub fn render: has no /// doc comment
+src/serve/templates/auth.zig: pub fn render: has no /// doc comment
+src/serve/templates/library.zig: pub const Card (struct_): has no /// doc comment
+src/serve/templates/library.zig: pub const ComponentDetails (struct_): has no /// doc comment
+src/serve/templates/library.zig: pub const Library (struct_): has no /// doc comment
+src/serve/templates/library.zig: pub fn bind: has no /// doc comment
+src/serve/templates/library.zig: pub fn bind: has no /// doc comment
+src/serve/templates/library.zig: pub fn bind: has no /// doc comment
+src/serve/templates/library.zig: pub fn render: has no /// doc comment
+src/serve/templates/library.zig: pub fn render: has no /// doc comment
+src/serve/templates/library.zig: pub fn render: has no /// doc comment
+src/serve/templates/mcp_docs.zig: pub const Mcp (struct_): has no /// doc comment
+src/serve/templates/mcp_docs.zig: pub const ParamRow (struct_): has no /// doc comment
+src/serve/templates/mcp_docs.zig: pub const ToolCard (struct_): has no /// doc comment
+src/serve/templates/mcp_docs.zig: pub fn bind: has no /// doc comment
+src/serve/templates/mcp_docs.zig: pub fn bind: has no /// doc comment
+src/serve/templates/mcp_docs.zig: pub fn bind: has no /// doc comment
+src/serve/templates/mcp_docs.zig: pub fn render: has no /// doc comment
+src/serve/templates/mcp_docs.zig: pub fn render: has no /// doc comment
+src/serve/templates/mcp_docs.zig: pub fn render: has no /// doc comment
+src/serve/templates/oauth.zig: pub const Authorize (struct_): has no /// doc comment
+src/serve/templates/oauth.zig: pub fn bind: has no /// doc comment
+src/serve/templates/oauth.zig: pub fn render: has no /// doc comment
+src/serve/templates/pages.zig: pub const DesignCard (struct_): has no /// doc comment
+src/serve/templates/pages.zig: pub const Home (struct_): has no /// doc comment
+src/serve/templates/pages.zig: pub const ModuleCard (struct_): has no /// doc comment
+src/serve/templates/pages.zig: pub const Navbar (struct_): has no /// doc comment
+src/serve/templates/pages.zig: pub fn bind: has no /// doc comment
+src/serve/templates/pages.zig: pub fn bind: has no /// doc comment
+src/serve/templates/pages.zig: pub fn bind: has no /// doc comment
+src/serve/templates/pages.zig: pub fn bind: has no /// doc comment
+src/serve/templates/pages.zig: pub fn formatHtml: has no /// doc comment
+src/serve/templates/pages.zig: pub fn render: has no /// doc comment
+src/serve/templates/pages.zig: pub fn render: has no /// doc comment
+src/serve/templates/pages.zig: pub fn render: has no /// doc comment
+src/serve/templates/pages.zig: pub fn render: has no /// doc comment
+src/serve/templates/pdf_viewer.zig: pub const Page (struct_): has no /// doc comment
+src/serve/templates/pdf_viewer.zig: pub fn bind: has no /// doc comment
+src/serve/templates/pdf_viewer.zig: pub fn render: has no /// doc comment
+src/serve/users.zig: pub fn fromString: has no /// doc comment
+src/serve/users.zig: pub fn toString: has no /// doc comment
+src/sexpr/ast.zig: pub const Tag (union_): has no /// doc comment
+src/sexpr/ast.zig: pub fn atom: has no /// doc comment
+src/sexpr/ast.zig: pub fn float: has no /// doc comment
+src/sexpr/ast.zig: pub fn int: has no /// doc comment
+src/sexpr/ast.zig: pub fn list: has no /// doc comment
+src/sexpr/ast.zig: pub fn string: has no /// doc comment
+src/sexpr/ast.zig: pub fn unitVal: has no /// doc comment
+src/sexpr/tokenizer.zig: pub fn init: has no /// doc comment
+src/sexpr/tokenizer.zig: pub fn next: has no /// doc comment

@@ -1,7 +1,7 @@
 (function(){
 const NS="http://www.w3.org/2000/svg";
 const S=PCB.scale,MX=PCB.minx,MY=PCB.miny,M=PCB.margin,G=PCB.grid;
-const P=PCB.parts, orig=P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0};});
+const P=PCB.parts, orig=P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};});
 var RO=!!PCB.ro;
 // `?sub=` query for a sub-circuit page so layout save/delete/star/rescore POST
 // to the per-sub sidecar (<design>.<sub>.layouts.json) instead of the design's.
@@ -33,22 +33,29 @@ if(PCB.board){
  bt.textContent=br.w.toFixed(0)+"×"+br.h.toFixed(0)+" mm"; gB.appendChild(bt);
 }
 function wpt(i,lx,ly){var p=P[i],a=(p.rot||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a);
+ if(p.side==="bottom")lx=-lx; // bottom parts mirror about their own axis (matches worldPt)
  return {x:p.x+lx*c-ly*s,y:p.y+lx*s+ly*c};}
-function moved(i){return P[i].x!==orig[i].x||P[i].y!==orig[i].y||(P[i].rot||0)!==orig[i].rot;}
+function moved(i){return P[i].x!==orig[i].x||P[i].y!==orig[i].y||(P[i].rot||0)!==orig[i].rot||(P[i].side||"top")!==orig[i].side;}
 function wrect(i,pad){var p=P[i],c=wpt(i,pad.x,pad.y),q=(((p.rot||0)%360)+360)%360;
  var hw=(q==90||q==270)?pad.h/2:pad.w/2, hh=(q==90||q==270)?pad.w/2:pad.h/2;
  return {x0:c.x-hw,y0:c.y-hh,x1:c.x+hw,y1:c.y+hh};}
 function setT(i){var p=P[i],tx=X(p.x).toFixed(1),ty=Y(p.y).toFixed(1),rot=(p.rot||0);
+ var bot=(p.side==="bottom"),mir=bot?" scale(-1,1)":"";
  els[i].setAttribute("transform","translate("+tx+","+ty+")");
- bodies[i].setAttribute("transform","rotate("+rot+")");
+ els[i].classList.toggle("botside",bot);
+ els[i].classList.toggle("plocked",!!p.locked);
+ bodies[i].setAttribute("transform","rotate("+rot+")"+mir);
  // Pads live in the top gPads layer (above the ratsnest), so they carry the
  // part's full translate+rotate themselves rather than inheriting it.
- if(padEls[i]){padEls[i].setAttribute("transform","translate("+tx+","+ty+") rotate("+rot+")");
-  // Keep pad numbers reading horizontally at any part orientation: counter-
-  // rotate each label by -rot about its own centre (its x/y attrs ARE the pad
-  // centre), cancelling the padset's rotation so the digit never flips.
+ if(padEls[i]){padEls[i].setAttribute("transform","translate("+tx+","+ty+") rotate("+rot+")"+mir);
+  padEls[i].classList.toggle("botside",bot);
+  // Keep pad numbers reading horizontally (and unmirrored on the bottom side)
+  // at any orientation: counter-transform each label about its own centre
+  // (its x/y attrs ARE the pad centre) with the inverse of the frame's
+  // rotate+mirror, so the digit never flips.
   padEls[i].querySelectorAll("text").forEach(function(t){
-   t.setAttribute("transform","rotate("+(-rot)+" "+t.getAttribute("x")+" "+t.getAttribute("y")+")");});}}
+   var ax=parseFloat(t.getAttribute("x"))||0,ay=parseFloat(t.getAttribute("y"))||0;
+   t.setAttribute("transform","translate("+ax+" "+ay+")"+mir+" rotate("+(-rot)+") translate("+(-ax)+" "+(-ay)+")");});}}
 // Defined decoupling pads: each loop pins a cap to ONE hub pad (L.pp =
 // hub_pwr_pin). Mark those hub pads so a net selection glows them red (the
 // authored decoupling target) rather than gold. Keyed hubIndex:padX:padY.
@@ -202,7 +209,7 @@ function fetchScore(){
  setSc("sc-obj","objective …");var seq=++scoreReq;
  // Ask for per-part blame only while the Heatmap view is on, so a finished
  // drag/rotate re-tints the board to the new cost distribution.
- var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};}),blame:heatOn};
+ var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),blame:heatOn};
  fetch("/api/pcb-score/"+encodeURIComponent(PCB.name),{method:"POST",
    headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
   .then(function(r){return r.json();})
@@ -235,7 +242,8 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
  var h='<div class="prop-head"><span class="prop-ref">'+pEsc(p.ref)+'</span>'+
   (p.val?'<span class="prop-val">'+pEsc(p.val)+'</span>':'')+'</div>';
  h+='<div class="prop-rows">'+pRow("X",pMm(p.x)+" mm","prop-x")+pRow("Y",pMm(p.y)+" mm","prop-y")+
-  pRow("Rotation",rot+"°","prop-rot")+pRow("Type",p.kind=="hub"?"Hub / IC":"Passive")+'</div>';
+  pRow("Rotation",rot+"°","prop-rot")+pRow("Side",(p.side==="bottom")?"Bottom (B.Cu)":"Top (F.Cu)","prop-side")+
+  pRow("Type",(p.kind=="hub"?"Hub / IC":"Passive")+(p.locked?" · 🔒 locked":""))+'</div>';
  if(p.fp)h+='<button class="prop-fp" data-court-ref="'+pEsc(p.ref)+'" title="Edit footprint courtyard">▢ '+pEsc(p.fp)+'</button>';
  var pads=(p.pads||[]).slice().sort(function(a,b){var an=parseInt(a.num,10),bn=parseInt(b.num,10);
   if(!isNaN(an)&&!isNaN(bn))return an-bn;return String(a.num||"").localeCompare(String(b.num||""));});
@@ -272,8 +280,48 @@ var sel=[], gdrag=null;
 function markSel(){els.forEach(function(g,i){g.classList.toggle("msel",sel.indexOf(i)>=0);});}
 function selSet(idxs){sel=idxs;markSel();}
 function selClear(){if(!sel.length)return;sel=[];markSel();}
-function gdragStart(m,down){return {sx:m.x,sy:m.y,moved:false,down:down,snap:snapPoses(),
- orig:sel.map(function(k){return {i:k,x:P[k].x,y:P[k].y};})};}
+function gdragStart(m,down,idxs){var src=idxs||sel;return {sx:m.x,sy:m.y,moved:false,down:down,snap:snapPoses(),
+ orig:src.filter(function(k){return !P[k].locked;}).map(function(k){return {i:k,x:P[k].x,y:P[k].y};})};}
+// ── Rigid sub-circuits ────────────────────────────────────────────────
+// Each sub-block's parts share a ref prefix ("buck/C3" → group "buck").
+// A rigid group drags/rotates as one unit — the pre-laid module keeps its
+// internal layout while you slide the whole block around the board. "G"
+// (or the palette scissors) explodes a group back to individual parts;
+// the choice persists per design in localStorage.
+function grpOf(ref){var i=String(ref).indexOf("/");return i<0?null:ref.slice(0,i);}
+var GRPS={};P.forEach(function(p,i){var g=grpOf(p.ref);if(g)(GRPS[g]=GRPS[g]||[]).push(i);});
+var rigidOffKey="pcb-rigid-off:"+PCB.name, rigidOff={};
+try{rigidOff=JSON.parse(localStorage.getItem(rigidOffKey)||"{}")||{};}catch(e){}
+function rigidSave(){try{localStorage.setItem(rigidOffKey,JSON.stringify(rigidOff));}catch(e){}}
+function grpRigid(g){return !!(g&&GRPS[g]&&GRPS[g].length>1&&!rigidOff[g]);}
+function grpIdxs(i){var g=grpOf(P[i].ref);return grpRigid(g)?GRPS[g]:null;}
+function grpToggle(g){if(!GRPS[g])return;rigidOff[g]=!rigidOff[g];if(!rigidOff[g])delete rigidOff[g];
+ rigidSave();subPanelRefresh();}
+function grpHl(g,on){(GRPS[g]||[]).forEach(function(i){els[i].classList.toggle("grp-hl",on);
+ if(padEls[i])padEls[i].classList.toggle("grp-hl",on);});}
+// Rotate a rigid group 90° about its centroid (locked members stay put).
+function rotateGroup(idxs,sign){recordUndo();
+ var mv=idxs.filter(function(i){return !P[i].locked;});if(!mv.length)return;
+ var cx=0,cy=0;mv.forEach(function(i){cx+=P[i].x;cy+=P[i].y;});cx/=mv.length;cy/=mv.length;
+ mv.forEach(function(i){var dx=P[i].x-cx,dy=P[i].y-cy;
+  if(sign>0){P[i].x=cx-dy;P[i].y=cy+dx;}else{P[i].x=cx+dy;P[i].y=cy-dx;}
+  P[i].x=Math.round(P[i].x/G)*G;P[i].y=Math.round(P[i].y/G)*G;
+  P[i].rot=((((P[i].rot||0)+(sign>0?90:-90))%360)+360)%360;setT(i);});
+ clearRouteFor(mv);rats();drawClr();fetchScore();refreshUnplaced();}
+// Stamp a group from its module ★ layout (PCB.subseeds): normalize the seed
+// cluster to its own bbox, drop it just right of everything currently placed.
+function stampGroup(g){var seeds=PCB.subseeds||{},idxs=GRPS[g]||[],hit=[];
+ idxs.forEach(function(i){var sd=seeds[P[i].ref];if(sd)hit.push({i:i,sd:sd});});
+ if(!hit.length)return;
+ recordUndo();
+ var minx=1e9,miny=1e9;hit.forEach(function(h){minx=Math.min(minx,h.sd.x);miny=Math.min(miny,h.sd.y);});
+ var maxx=-1e9;P.forEach(function(p){maxx=Math.max(maxx,p.x+(p.hw||1));});
+ var ox=Math.round((maxx+5)/G)*G, oy=0;
+ hit.forEach(function(h){var i=h.i;if(P[i].locked)return;
+  P[i].x=Math.round((h.sd.x-minx+ox)/G)*G;P[i].y=Math.round((h.sd.y-miny+oy)/G)*G;
+  P[i].rot=h.sd.rot||0;P[i].side=h.sd.side||"top";setT(i);});
+ delete rigidOff[g];rigidSave();
+ clearRouteFor(idxs);rats();drawClr();fetchScore();refreshUnplaced();subPanelRefresh();}
 // Iterative layout editing: curLayout is the saved layout the Update button
 // writes back into (overwrite in place) instead of forcing a new one. Set by
 // Load and after a Save as…. Save/Update persist in place (no page reload — see
@@ -290,22 +338,25 @@ function setActiveLayout(nm){curLayout=(nm&&nm.length)?nm:null;
  if(chip&&curLayout){chip.textContent="saved \u{00b7} "+curLayout;chip.className="src-chip src-snapshot";
   chip.title="Showing saved layout \u{201c}"+curLayout+"\u{201d} \u{2014} drag to edit, then Update to save progress.";}}
 els.forEach(function(g,i){
- g.addEventListener("mouseenter",function(){cur=i;});
- g.addEventListener("mouseleave",function(){if(cur===i)cur=-1;});
+ g.addEventListener("mouseenter",function(){cur=i;var gg=grpOf(P[i].ref);if(gg&&grpRigid(gg))grpHl(gg,true);});
+ g.addEventListener("mouseleave",function(){if(cur===i)cur=-1;var gg=grpOf(P[i].ref);if(gg)grpHl(gg,false);});
  g.addEventListener("pointerdown",function(ev){ev.preventDefault();
    if(SPACE||ev.button===1){startPan(ev);return;}   // pan, don't grab the part
    var m=mm(ev);
    if(sel.length>1&&sel.indexOf(i)>=0){gdrag=gdragStart(m,ev.target);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
    if(sel.length)selClear();
+   if(P[i].locked){var net0=netAt(ev.target);if(net0)selNet(net0);selectComp(P[i].ref);return;}
+   var gi=grpIdxs(i);
+   if(gi){gdrag=gdragStart(m,ev.target,gi);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
    drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target,snap:snapPoses()};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
  g.addEventListener("pointermove",function(ev){
    if(gdrag){var gm=mm(ev),dx=Math.round((gm.x-gdrag.sx)/G)*G,dy=Math.round((gm.y-gdrag.sy)/G)*G,any=false;
      gdrag.orig.forEach(function(o){var nx=o.x+dx,ny=o.y+dy;if(P[o.i].x!==nx||P[o.i].y!==ny){P[o.i].x=nx;P[o.i].y=ny;setT(o.i);any=true;}});
-     if(any){if(!gdrag.moved){gdrag.moved=true;clearRoute();}rats();drawClr();refreshUnplaced();}return;}
+     if(any){if(!gdrag.moved){gdrag.moved=true;clearRouteFor(gdrag.orig.map(function(o){return o.i;}));}rats();drawClr();refreshUnplaced();}return;}
    if(!drag||drag.i!==i)return;var m=mm(ev);
    var nx=Math.round((m.x+drag.ox)/G)*G,ny=Math.round((m.y+drag.oy)/G)*G;
    if(nx===P[i].x&&ny===P[i].y)return;P[i].x=nx;P[i].y=ny;
-   if(!drag.moved){drag.moved=true;clearRoute();}setT(i);rats();drawClr();refreshUnplaced();
+   if(!drag.moved){drag.moved=true;clearRouteFor([i]);}setT(i);rats();drawClr();refreshUnplaced();
    if(selRef===P[i].ref)updatePropLive();});
  g.addEventListener("pointerup",function(ev){
    if(gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap;gdrag=null;g.style.cursor="grab";
@@ -326,6 +377,9 @@ els.forEach(function(g,i){
     var m=mm(ev);
     if(sel.length>1&&sel.indexOf(i)>=0){gdrag=gdragStart(m,ev.target);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
     if(sel.length)selClear();
+    if(P[i].locked){var net0=netAt(ev.target);if(net0)selNet(net0);selectComp(P[i].ref);return;}
+    var gi=grpIdxs(i);
+    if(gi){gdrag=gdragStart(m,ev.target,gi);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
     drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target,snap:snapPoses()};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});}
 });
 // Keyboard: R / Shift+R rotates the hovered part; ? toggles the
@@ -339,6 +393,10 @@ function kbdToggle(){
  kbdOv.innerHTML='<div class="kbd-box"><h3>Keyboard &amp; mouse</h3>'+
   '<div class="kbd-row"><span>Rotate hovered part +90°</span><kbd>R</kbd></div>'+
   '<div class="kbd-row"><span>Rotate hovered part −90°</span><kbd>Shift+R</kbd></div>'+
+  '<div class="kbd-row"><span>Flip hovered part top/bottom</span><kbd>F</kbd></div>'+
+  '<div class="kbd-row"><span>Lock / unlock hovered part</span><kbd>L</kbd></div>'+
+  '<div class="kbd-row"><span>Explode / re-cohere hovered sub-circuit</span><kbd>G</kbd></div>'+
+  '<div class="kbd-row"><span>Move whole sub-circuit</span><kbd>drag any of its parts</kbd></div>'+
   '<div class="kbd-row"><span>Move part (snaps to grid)</span><kbd>drag part</kbd></div>'+
   '<div class="kbd-row"><span>Select box (multi-select)</span><kbd>drag empty space</kbd></div>'+
   '<div class="kbd-row"><span>Move all selected together</span><kbd>drag a selected part</kbd></div>'+
@@ -366,9 +424,20 @@ document.addEventListener("keydown",function(ev){
  if(ev.key=="Escape"){if(kbdOv){kbdClose();}else{selClear();clearSel();}return;}
  var typing=kbTyping(ev.target);
  if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
- if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();recordUndo();
+ if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;
+   var rgi=grpIdxs(cur);
+   if(rgi){rotateGroup(rgi,ev.shiftKey?-1:1);return;}
+   recordUndo();
    P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
-   setT(cur);clearRoute();rats();fetchScore();refreshUnplaced();if(selRef===P[cur].ref)updatePropLive();}});
+   setT(cur);clearRouteFor([cur]);rats();fetchScore();refreshUnplaced();if(selRef===P[cur].ref)updatePropLive();return;}
+ if((ev.key=="g"||ev.key=="G")&&cur>=0&&!typing){ev.preventDefault();
+   var gg=grpOf(P[cur].ref);if(gg&&GRPS[gg]){grpToggle(gg);grpHl(gg,grpRigid(gg));}return;}
+ if((ev.key=="f"||ev.key=="F")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;recordUndo();
+   P[cur].side=(P[cur].side==="bottom")?"top":"bottom";
+   setT(cur);clearRouteFor([cur]);rats();drawClr();fetchScore();refreshUnplaced();
+   if(selRef===P[cur].ref)renderProps();return;}
+ if((ev.key=="l"||ev.key=="L")&&cur>=0&&!typing){ev.preventDefault();
+   P[cur].locked=!P[cur].locked;setT(cur);if(selRef===P[cur].ref)renderProps();return;}});
 function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetchScore();refreshUnplaced();updatePropLive();
  if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
 // ── Undo / redo ─────────────────────────────────────────────────────────
@@ -378,12 +447,12 @@ function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetch
 // rotate / reset / load record just before they mutate. Snapshots are pose
 // arrays indexed by P order (stable), so a restore is a write-back + applyAll.
 var undoStack=[],redoStack=[];
-function snapPoses(){return P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0};});}
+function snapPoses(){return P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top",locked:!!p.locked};});}
 function undoBtns(){var u=document.getElementById("pcb-undo"),r=document.getElementById("pcb-redo");
  if(u)u.disabled=!undoStack.length;if(r)r.disabled=!redoStack.length;}
 function recordUndo(snap){undoStack.push(snap||snapPoses());if(undoStack.length>200)undoStack.shift();
  redoStack.length=0;undoBtns();}
-function restorePoses(s){s.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y=q.y;P[i].rot=q.rot;}});applyAll();}
+function restorePoses(s){s.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y=q.y;P[i].rot=q.rot;P[i].side=q.side||"top";P[i].locked=!!q.locked;}});applyAll();}
 function doUndo(){if(!undoStack.length)return;redoStack.push(snapPoses());restorePoses(undoStack.pop());undoBtns();}
 function doRedo(){if(!redoStack.length)return;undoStack.push(snapPoses());restorePoses(redoStack.pop());undoBtns();}
 var undoBtn=document.getElementById("pcb-undo");if(undoBtn)undoBtn.addEventListener("click",doUndo);
@@ -394,7 +463,7 @@ document.addEventListener("keydown",function(ev){if(!(ev.ctrlKey||ev.metaKey)||k
  else if((k==="z"&&ev.shiftKey)||k==="y"){ev.preventDefault();doRedo();}});
 undoBtns();
 document.getElementById("pcb-reset").addEventListener("click",function(){recordUndo();
- selClear();P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;});applyAll();});
+ selClear();P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;p.side=orig[i].side;});applyAll();});
 document.getElementById("pcb-score").addEventListener("click",fetchScore);
 document.getElementById("t-apply").addEventListener("click",function(ev){ev.preventDefault();
  var v=function(id){return encodeURIComponent(document.getElementById(id).value);};
@@ -433,7 +502,9 @@ function bindLayLoad(b){b.addEventListener("click",function(){var nm=b.getAttrib
  // key first (falls back to ref-des for legacy layouts saved without one), so
  // a Load still lands after the parts renumber (e.g. module standalone vs nested).
  var byOrigin={};for(var k in L.parts){var v=L.parts[k];if(v&&v.origin)byOrigin[v.origin]=v;}
- P.forEach(function(p){var s=(p.origin&&byOrigin[p.origin])||L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;}});applyAll();
+ P.forEach(function(p){var s=(p.origin&&byOrigin[p.origin])||L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;p.side=s.side||"top";if(s.locked!==undefined)p.locked=!!s.locked;}});applyAll();
+ if(L.routes&&((L.routes.tracks||[]).length||(L.routes.vias||[]).length)){
+  PCB.tracks=L.routes.tracks||[];PCB.vias=L.routes.vias||[];PCB.drc=[];drawRoute();drawDrc();}
  setActiveLayout(nm);});}
 function bindLayDel(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-del");
  if(!window.confirm("Delete layout \""+nm+"\"?"))return;
@@ -500,17 +571,19 @@ function loadLayoutScores(){if(!((PCB.layouts||[]).length))return;
 // Persist the current poses to layout nm and update the panel IN PLACE — no
 // page reload, so the camera and view toggles you set while editing stay put.
 function persistLayout(nm,verb){var msg=document.getElementById("pcb-savemsg");
- var parts=P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,origin:p.origin||""};});
+ var parts=P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,origin:p.origin||"",side:p.side||"top",locked:!!p.locked};});
+ // Persist the on-screen copper with the poses so routing survives reloads.
+ var routes=((PCB.tracks||[]).length||(PCB.vias||[]).length)?{tracks:PCB.tracks||[],vias:PCB.vias||[]}:null;
  if(msg){msg.style.color="#8b949e";msg.textContent=verb+"\u{2026}";}
  return fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",
-   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts})})
+   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts,routes:routes})})
   .then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(){
-    var pmap={};parts.forEach(function(p){pmap[p.ref]={x:p.x,y:p.y,rot:p.rot,origin:p.origin||""};});
+    var pmap={};parts.forEach(function(p){pmap[p.ref]={x:p.x,y:p.y,rot:p.rot,origin:p.origin||"",side:p.side,locked:p.locked};});
     var Ls=PCB.layouts||(PCB.layouts=[]),found=null;
     for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm){found=Ls[i];break;}
-    if(found){found.parts=pmap;found.kind="manual";}
-    else Ls.push({name:nm,kind:"manual",parts:pmap,score:null});
+    if(found){found.parts=pmap;found.kind="manual";found.routes=routes;}
+    else Ls.push({name:nm,kind:"manual",parts:pmap,score:null,routes:routes});
     upsertLayoutPanel(nm);setActiveLayout(nm);loadLayoutScores();
     if(msg){msg.style.color="#3fb950";msg.textContent=(verb==="updating"?"updated":"saved")+" \u{2713}";}})
   .catch(function(){if(msg){msg.style.color="#f85149";
@@ -523,6 +596,33 @@ document.getElementById("pcb-saveas").addEventListener("click",function(){
 var updBtn=document.getElementById("pcb-update");
 if(updBtn)updBtn.addEventListener("click",function(){if(!curLayout)return;persistLayout(curLayout,"updating");});
 loadLayoutScores();
+// ── Sub-circuits palette ─────────────────────────────────────────────
+// One row per sub-block: member count, rigid/exploded toggle, and — when the
+// module has a ★ layout (PCB.subseeds) — a Stamp button that drops the whole
+// pre-laid cluster beside the board, ready to drag into place.
+function subPanelRefresh(){var box=document.getElementById("sub-panel");if(!box)return;
+ var names=Object.keys(GRPS).sort();var h='<div class="side-h">Sub-circuits</div>';
+ var seeds=PCB.subseeds||{};
+ names.forEach(function(g){
+  var hasSeed=GRPS[g].some(function(i){return !!seeds[P[i].ref];});
+  h+='<div class="sub-row" data-grp="'+pEsc(g)+'">'+
+   '<span class="sub-name">'+pEsc(g)+'</span><span class="sub-n">'+GRPS[g].length+'</span>'+
+   '<button class="btn sub-rigid'+(grpRigid(g)?" on":"")+'" data-rigid="'+pEsc(g)+'" title="'+
+    (grpRigid(g)?"Rigid — drags as one unit. Click to explode.":"Exploded — parts move individually. Click to re-cohere.")+'">'+
+    (grpRigid(g)?"\u{1F517}":"\u{2702}")+'</button>'+
+   (hasSeed?'<button class="btn sub-stamp" data-stamp="'+pEsc(g)+'" title="Place this sub-circuit from its module \u2605 layout">Stamp</button>':'')+
+   '</div>';});
+ box.innerHTML=h;
+ box.querySelectorAll("[data-rigid]").forEach(function(b){b.addEventListener("click",function(){grpToggle(b.getAttribute("data-rigid"));});});
+ box.querySelectorAll("[data-stamp]").forEach(function(b){b.addEventListener("click",function(){stampGroup(b.getAttribute("data-stamp"));});});
+ box.querySelectorAll(".sub-row").forEach(function(r){var g=r.getAttribute("data-grp");
+  r.addEventListener("mouseenter",function(){grpHl(g,true);});
+  r.addEventListener("mouseleave",function(){grpHl(g,false);});});}
+(function(){
+ if(!Object.keys(GRPS).length)return;
+ var side=document.querySelector(".pcb-side");if(!side)return;
+ var box=document.createElement("div");box.id="sub-panel";box.className="sub-panel";
+ side.appendChild(box);subPanelRefresh();})();
 }
 function hlBy(at,v,cls,on){document.querySelectorAll("["+at+"]").forEach(function(e){
  if(e.getAttribute(at)===v)e.classList.toggle(cls,on);});}
@@ -607,11 +707,20 @@ function viaGeo(){var va=parseFloat((document.getElementById("r-va")||{}).value)
 function drawVia(g,wx,wy,dia,drill){var r=Math.max(dia/2*S,2.5),rh=Math.min(Math.max(drill/2*S,1),r*0.7);
  g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:r.toFixed(1),fill:"#ca8a04"}));
  g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:rh.toFixed(1),fill:"#fff"}));}
+// Drop only the copper belonging to the given parts' nets (a moved part
+// invalidates its own routing, everything else stays drawn). Falls back to
+// keeping legacy net-less copper ("" — old saves) untouched.
+function clearRouteFor(idxs){
+ if(!((PCB.tracks||[]).length)&&!((PCB.vias||[]).length))return;
+ var nets={};idxs.forEach(function(i){(P[i].pads||[]).forEach(function(pd){if(pd.net)nets[pd.net]=1;});});
+ PCB.tracks=(PCB.tracks||[]).filter(function(t){return !(t.net&&nets[t.net]);});
+ PCB.vias=(PCB.vias||[]).filter(function(v){return !(v.net&&nets[v.net]);});
+ PCB.drc=[];drawRoute();drawDrc();}
 function drawRoute(){while(gT.firstChild)gT.removeChild(gT.firstChild);
  (PCB.tracks||[]).forEach(function(t){gT.appendChild(el("line",{x1:X(t.x1).toFixed(1),y1:Y(t.y1).toFixed(1),
    x2:X(t.x2).toFixed(1),y2:Y(t.y2).toFixed(1),stroke:t.l==0?"#f85149":"#388bfd",
    "stroke-width":Math.max(t.w*S,1.2).toFixed(1),"stroke-linecap":"round","stroke-linejoin":"round",opacity:0.85}));});
- (PCB.vias||[]).forEach(function(v){drawVia(gT,v.x,v.y,v.d,viaGeo().drill);});}
+ (PCB.vias||[]).forEach(function(v){drawVia(gT,v.x,v.y,v.d,(v.drill>0)?v.drill:viaGeo().drill);});}
 function clrVal(){var ci=document.getElementById("r-cl"),c=ci?parseFloat(ci.value):NaN;
  return (c>0)?c:(PCB.clr||0.127);}
 function drawClr(){while(gC.firstChild)gC.removeChild(gC.firstChild);
@@ -710,7 +819,7 @@ if(rgo)rgo.addEventListener("click",function(){
  var nf=function(id){return parseFloat(document.getElementById(id).value);};
  var hint=document.getElementById("r-hint");if(hint)hint.style.display="none";
  setStat("r-stat","","routing…");setStat("r-drc","","");rgo.disabled=true;
- var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0};}),
+ var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),
    track_width:nf("r-tw"),clearance:nf("r-cl"),via_drill:nf("r-vd"),via_dia:nf("r-va")};
  fetch("/api/pcb-route/"+encodeURIComponent(PCB.name),{method:"POST",
    headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})

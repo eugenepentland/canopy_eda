@@ -100,6 +100,8 @@ Public functions: solve
 - input-rail names (and raw rails ≥7V) read as the switching hot loop; output/low rails do not
 - routing congestion is zero with no multi-pin nets and positive when nets pile into one region
 - legalization separates two overlapping courtyards
+- a bottom-side part mirrors footprint-local x in world transforms and never collides with top-side parts
+- cached poses restore each part's board side and lock flag
 - rotates footprint-local offsets in right-angle steps matching the page
 - rotation refine picks the orientation that shortens the decoupling loop
 - loop legs measure edge-to-edge to the nearest hub pad
@@ -130,6 +132,9 @@ Public functions: solve
 Public functions: route, returnPathViolations
 
 - maze-routes a two-pad net into connected track segments
+- a net spanning the two board sides routes through a via, each leg on its part's layer
+- a plane-less stackup routes ground as real copper instead of dropping plane vias
+- a net-class rule sets its nets' trace width and via size; unruled nets keep defaults
 - routes corners as 45° diagonals rather than 90° bends
 - LoopRouter measures a real per-leg trace length that detours foreign pads
 - counts signal vias lacking a nearby ground stitching via as return-path discontinuities
@@ -145,6 +150,8 @@ Public functions: check
 - flags a via that crowds a foreign pad's clearance
 - passes a via that shares the pad's net
 - a routed module with a crowded ground pad has no clearance violations
+- flags a via whose annular ring is under the fab minimum
+- flags copper crowding the board outline and skips the off-board staging band
 
 ## placement/module_policy
 
@@ -352,6 +359,13 @@ Public functions: worldShape, pointDist, shapeGap
 - Emits silkscreen/fab (poly …) as a filled fp_poly and (rect …) as fp_rect on the target layer
 - Emits a custom pad's (poly …) outline as a valid KiCad custom pad with (primitives (gr_poly …)) in pad-local coords
 - Inflates the emitted F.CrtYd courtyard by BBOX_MARGIN_MM so KiCad matches the placement page's drawn courtyard
+
+## export_fab
+
+Public functions: centroidCsv, excellonDrill
+
+- the centroid CSV lists each part's pose with its board side
+- the Excellon writer splits plated pads + vias from non-plated holes and groups tools by diameter
 
 ## bom
 
@@ -569,6 +583,9 @@ Public functions: analyze
 - bus-port expands one port per index times optional suffix list
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block
+- stackup form captures layer count and plane assignments on the design block
+- a bare 2-layer stackup declares no planes so ground routes as copper
+- net-class forms capture width/clearance/via geometry for their listed nets
 - layout form parses (anchor "name") roots and (place "name" (rel "ref")) directives
 - layout place resolves right-of/left-of/above/below into a relative offset from the referenced block
 - layout place collects multiple constraints so a block is positioned by several references

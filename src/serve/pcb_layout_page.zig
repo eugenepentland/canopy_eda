@@ -19,6 +19,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const geometry = @import("../placement/geometry.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
+const export_fab = @import("../export_fab.zig");
 const module_policy = @import("../placement/module_policy.zig");
 const modules_mod = @import("modules.zig");
 const netlist = @import("../export_kicad_netlist.zig");
@@ -91,7 +92,38 @@ const MAX_AUTO_LAYOUTS: usize = 12;
 /// is the module-local source name, invariant across both, so a Load matches
 /// on it first and falls back to `ref` only for legacy entries saved before
 /// `origin` was recorded (empty string). See `rekeyPosesByOrigin`.
-const PartPose = struct { ref: []const u8, x: f64, y: f64, rot: f64, origin: []const u8 = "" };
+const PartPose = struct {
+    ref: []const u8,
+    x: f64,
+    y: f64,
+    rot: f64,
+    origin: []const u8 = "",
+    /// Board side (viewer F-flip state). Persisted as `"side":"bottom"` only
+    /// when bottom, so legacy top-side sidecars stay byte-identical.
+    side: optimizer.Side = .top,
+    /// Editor lock (viewer refuses drag/rotate/flip). Persisted as
+    /// `"locked":true` only when set.
+    locked: bool = false,
+};
+
+/// Parse a pose object's optional `"side"` field ("bottom" → bottom, else top).
+fn jsonSide(v: ?std.json.Value) optimizer.Side {
+    const s = v orelse return .top;
+    return if (s == .string) optimizer.Side.fromStr(s.string) else .top;
+}
+
+/// Parse a pose object's optional boolean field (absent/non-bool → false).
+fn jsonFlag(v: ?std.json.Value) bool {
+    const b = v orelse return false;
+    return b == .bool and b.bool;
+}
+
+/// Append the non-default pose fields (`,"side":"bottom"` / `,"locked":true`)
+/// — one spelling for every pose writer (sidecar, cache, API blobs).
+fn writePoseSideLocked(w: *std.Io.Writer, side: optimizer.Side, locked: bool) std.Io.Writer.Error!void {
+    if (side == .bottom) try w.writeAll(",\"side\":\"bottom\"");
+    if (locked) try w.writeAll(",\"locked\":true");
+}
 
 /// The weighted `objective` the optimizer minimizes plus its visible HPWL +
 /// decoupling-loop terms, stored with a layout so the list shows "better/worse"
@@ -117,7 +149,21 @@ pub const SavedLayout = struct {
     /// Recorded so the schematic's Module-layouts panel can show, per
     /// sub-module, that a rough placement has been seeded (vs. starred/done).
     rough: bool = false,
+    /// Routed copper captured with the poses (null = never routed/saved).
+    routes: ?SavedRoutes = null,
 };
+
+/// One persisted routed-copper segment of a saved layout. Field names match
+/// the live route JSON (`l` layer, `w` width; net by NAME — net indices shift
+/// across flattens), so the client draws stored and live copper identically.
+const SavedTrack = struct { x1: f64, y1: f64, x2: f64, y2: f64, l: u8 = 0, w: f64, net: []const u8 = "" };
+
+/// One persisted via of a saved layout (same shape as the live route JSON).
+const SavedVia = struct { x: f64, y: f64, d: f64, drill: f64 = 0, net: []const u8 = "" };
+
+/// A saved layout's persisted copper — the routed tracks/vias captured with
+/// the poses, so a Save → reload → Load round-trips the routing too.
+const SavedRoutes = struct { tracks: []const SavedTrack, vias: []const SavedVia };
 
 /// Which layout state the page is showing — the precedence ladder made
 /// visible in the scorebar chip: source **spec** > saved **snapshot**
@@ -307,33 +353,32 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         return;
     };
     // Persist the layout + its weights whenever the optimizer ran (miss /
-    // stale / regen / tune), so later loads are instant and the controls show
-    // the weights that actually produced the layout on screen. Each run is also
-    // appended to the named-layout history so the user can review whether the
-    // auto placement got better or worse over time. Scoped sub-block runs skip
-    // this — there's no sidecar key for an individual sub-block yet.
-    if (sub == null and placement.generated) {
-        writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, tune.params);
-        recordAutoLayout(ctx.allocator, ctx.project_dir, name, placement, tune.params);
-    }
+    // stale / regen / tune) — see persistGeneratedLayout.
+    persistGeneratedLayout(ctx, name, placement, tune.params, sub);
+    // Module ★-layout stamp poses for the Stamp palette — whole-design pages
+    // only (a ?sub scoped page IS one sub-circuit already).
+    const subseeds = if (sub == null) buildSubSeedsJson(ctx.allocator, ctx.project_dir, eff_block, placement) else "{}";
     const shown = if (sub != null or tune.tuned)
         tune.params
     else
         (readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{});
 
-    // Routing runs only on demand (the Route button → ?route=1), on whatever
-    // placement is loaded — it's not part of every page load.
+    // The named-layout history is a whole-design concept; scoped previews show none.
+    // Deduplicated + best-score-first for the panel (see displayLayouts).
+    const layouts = displayLayouts(ctx.allocator, ctx.project_dir, name, sub);
+
+    // Routing runs only on demand (?route=1); otherwise the shown saved
+    // layout's persisted copper is restored (see shownSavedRoutes).
     const ro = parseRoute(req);
-    const routed: ?router.RouteResult = if (ro.run) (router.route(ctx.allocator, placement, ro.params) catch null) else null;
+    var routed: ?router.RouteResult = if (ro.run) (router.route(ctx.allocator, placement, ro.params) catch null) else null;
+    if (routed == null and sub == null)
+        routed = shownSavedRoutes(ctx.allocator, layouts, refine_name orelse starred_name, placement);
     const violations: []const drc.Violation = if (routed) |r|
         (drc.check(ctx.allocator, placement, r, ro.params.clearance) catch &.{})
     else
         &.{};
 
     const view = View.init(placement);
-    // The named-layout history is a whole-design concept; scoped previews show none.
-    // Deduplicated + best-score-first for the panel (see displayLayouts).
-    const layouts = displayLayouts(ctx.allocator, ctx.project_dir, name, sub);
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
@@ -415,7 +460,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         routed,
         ro.params.clearance,
         violations,
-        .{ .read_only = embed and !edit_embed, .embed = embed, .sub = sub },
+        .{ .read_only = embed and !edit_embed, .embed = embed, .sub = sub, .subseeds_json = subseeds },
     );
     // Shared footprint engine (FP.padShape) must load before the board script
     // runs. Both scripts come after every column so the handlers find the
@@ -486,6 +531,51 @@ fn descendToSub(
         if (std.mem.eql(u8, slug, sub_slug)) return sb;
     }
     return null;
+}
+
+/// Persist a freshly generated layout + its weights (auto cache + the named
+/// history), so later loads are instant and the controls show the weights
+/// that actually produced the layout on screen. Scoped sub-block runs skip
+/// this — there's no sidecar key for an individual sub-block yet.
+fn persistGeneratedLayout(ctx: *Handler, name: []const u8, placement: optimizer.Placement, params: optimizer.Params, sub: ?[]const u8) void {
+    if (sub != null or !placement.generated) return;
+    writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, params);
+    recordAutoLayout(ctx.allocator, ctx.project_dir, name, placement, params);
+}
+
+/// JSON object mapping each sub-block's parent-frame ref-des → its module
+/// ★-layout pose (module-local mm + rot + side), for the viewer's per-group
+/// "Stamp" button — drop a whole pre-laid sub-circuit onto the board as a
+/// rigid cluster instead of laying its parts out again. Built through the
+/// same origin_key bridge the KiCad sync seeds from (subBlockPoseByOriginKey),
+/// so the poses match what a sync would stamp. "{}" when nothing bridges.
+fn buildSubSeedsJson(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    block: *const env_mod.DesignBlock,
+    p: optimizer.Placement,
+) []const u8 {
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    w.writeByte('{') catch return "{}";
+    var first = true;
+    for (block.sub_blocks) |sb| {
+        var m = subBlockPoseByOriginKey(alloc, project_dir, sb) orelse continue;
+        for (p.instances) |inst| {
+            if (inst.ref_des.len <= sb.name.len) continue;
+            if (!std.mem.startsWith(u8, inst.ref_des, sb.name) or inst.ref_des[sb.name.len] != '/') continue;
+            if (inst.origin_key.len == 0) continue;
+            const pose = m.get(inst.origin_key) orelse continue;
+            if (!first) w.writeByte(',') catch return "{}";
+            first = false;
+            writeJsonStr(w, inst.ref_des) catch return "{}";
+            w.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pose.x, pose.y, pose.rot }) catch return "{}";
+            if (pose.side == .bottom) w.writeAll(",\"side\":\"bottom\"") catch return "{}";
+            w.writeByte('}') catch return "{}";
+        }
+    }
+    w.writeByte('}') catch return "{}";
+    return aw.written();
 }
 
 /// Initial state of the embed preview's show-clearance / show-DRC toggles,
@@ -941,7 +1031,7 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
             try writeJsonStr(w, p.instances[i].origin_key);
         }
         const bl = if (i < blame.len and bmax > 0) blame[i] / bmax else 0;
-        try w.print(",\"kind\":\"{s}\",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"fallback\":{s},\"blame\":{d:.3}}}", .{
+        try w.print(",\"kind\":\"{s}\",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"fallback\":{s},\"blame\":{d:.3}", .{
             if (pt.kind == .hub) "hub" else "passive",
             pt.x,
             pt.y,
@@ -951,6 +1041,8 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
             if (pt.fallback) "true" else "false",
             bl,
         });
+        try writePoseSideLocked(w, pt.side, pt.locked);
+        try w.writeAll("}");
     }
     try w.writeAll("],\"loops\":[");
     for (p.loops, 0..) |L, i| {
@@ -1210,6 +1302,8 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
             .x = jsonNum(it.object.get("x")),
             .y = jsonNum(it.object.get("y")),
             .rot = jsonNum(it.object.get("rot")),
+            .side = jsonSide(it.object.get("side")),
+            .locked = jsonFlag(it.object.get("locked")),
         });
     }
 
@@ -1320,6 +1414,8 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
             .x = jsonNum(it.object.get("x")),
             .y = jsonNum(it.object.get("y")),
             .rot = jsonNum(it.object.get("rot")),
+            .side = jsonSide(it.object.get("side")),
+            .locked = jsonFlag(it.object.get("locked")),
         });
     }
 
@@ -1376,9 +1472,73 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
     try w.writeAll("{");
-    try writeRoutedArrays(w, routed, violations);
+    try writeRoutedArrays(w, routed, violations, placement.nets);
     try w.print(",\"routed\":{d},\"total\":{d},\"return_path\":{d}}}", .{ routed.routed, routed.total, rp_warn });
     res.content_type = .JSON;
+    res.body = aw.written();
+}
+
+/// Resolve `name`'s design block and build a placement at its blessed poses
+/// (★ default → newest manual → any snapshot → optimizer cache — the same
+/// preference the KiCad sync seeds from). Null (+ a client error status) when
+/// the design/module doesn't resolve or has no saved layout at all — fab
+/// outputs are only meaningful for a deliberately placed board.
+fn blessedPlacement(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, name: []const u8) ?optimizer.Placement {
+    var eval = Evaluator.init(req.arena, ctx.project_dir);
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    const block: *env_mod.DesignBlock = resolveBlock(req.arena, ctx.project_dir, name, &eval, &module_res) orelse {
+        res.status = 404;
+        res.body = NO_BLOCK_MSG;
+        return null;
+    };
+    const poses = chooseSyncPoses(req.arena, ctx.project_dir, name) orelse {
+        res.status = 404;
+        res.body = "no saved layout — place the board (and save/star a layout) first";
+        return null;
+    };
+    return optimizer.placeFromPoses(req.arena, block, ctx.project_dir, poses, optimizer.Params{}) catch {
+        res.status = 500;
+        res.body = PLACEMENT_ERR_MSG;
+        return null;
+    };
+}
+
+/// GET /api/pcb-centroid/:name — the pick-and-place centroid CSV at the
+/// design's blessed poses (see `blessedPlacement`), side-aware. The assembly
+/// half of the fab package; pairs with the BOM CSV.
+pub fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const placement = blessedPlacement(ctx, req, res, name) orelse return;
+    var aw: std.Io.Writer.Allocating = .init(req.arena);
+    try export_fab.centroidCsv(&aw.writer, placement.parts, placement.instances);
+    res.header("content-type", "text/csv; charset=utf-8");
+    res.body = aw.written();
+}
+
+/// GET /api/pcb-drill/:name[?npth=1] — the Excellon drill file at the design's
+/// blessed poses: plated through-hole pads + the ★ layout's persisted routed
+/// vias (PTH), or the non-plated mounting holes (`?npth=1`).
+pub fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const placement = blessedPlacement(ctx, req, res, name) orelse return;
+    // Vias come from the blessed (★/default-preferred) layout's saved routes.
+    var vias: []const router.Via = &.{};
+    for (readLayouts(req.arena, ctx.project_dir, name)) |L| {
+        if (!L.default) continue;
+        const sr = L.routes orelse break;
+        if (restoreRoutes(req.arena, sr, placement.nets)) |r| vias = r.vias;
+        break;
+    }
+    const class: export_fab.DrillClass = if (queryFlag(req, "npth")) .non_plated else .plated;
+    var aw: std.Io.Writer.Allocating = .init(req.arena);
+    try export_fab.excellonDrill(&aw.writer, req.arena, placement.parts, vias, class);
+    res.header("content-type", "text/plain; charset=utf-8");
     res.body = aw.written();
 }
 
@@ -1438,8 +1598,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
             } else block;
             if (score_block) |sblk| {
                 const params = readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{};
-                const poses = try req.arena.alloc(optimizer.RefPose, parts.len);
-                for (parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
+                const poses = try refPosesFromPartPoses(req.arena, parts);
                 if (optimizer.scorePoses(ctx.allocator, sblk, ctx.project_dir, poses, params)) |bd| {
                     score = .{ .hpwl = bd.hpwl, .loop = bd.loop_raw, .caps = 0, .objective = bd.objective };
                 } else |_| {}
@@ -1447,7 +1606,14 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         }
     }
 
-    var entry = SavedLayout{ .name = nm, .kind = KIND_MANUAL, .ts = clock.timestamp(), .score = score, .parts = parts };
+    var entry = SavedLayout{
+        .name = nm,
+        .kind = KIND_MANUAL,
+        .ts = clock.timestamp(),
+        .score = score,
+        .parts = parts,
+        .routes = parseSavedRoutes(req.arena, root.object.get("routes")),
+    };
     const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
     var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
     // `replaced` = wrote `entry` in place of a matching row (same name, or an
@@ -1597,8 +1763,7 @@ pub fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     for (existing) |L| {
         var updated = L;
         if (L.parts.len > 0) {
-            const poses = try req.arena.alloc(optimizer.RefPose, L.parts.len);
-            for (L.parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
+            const poses = try refPosesFromPartPoses(req.arena, L.parts);
             if (optimizer.scorePoses(req.arena, block, ctx.project_dir, poses, params)) |bd| {
                 updated.score = .{
                     .hpwl = bd.hpwl,
@@ -1662,8 +1827,7 @@ pub fn pcbScoreBatchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     var first = true;
     for (layouts) |L| {
         if (L.parts.len == 0) continue;
-        const poses = try req.arena.alloc(optimizer.RefPose, L.parts.len);
-        for (L.parts, 0..) |p, i| poses[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot };
+        const poses = try refPosesFromPartPoses(req.arena, L.parts);
         const bd = optimizer.scorePoses(req.arena, block, ctx.project_dir, poses, tune.params) catch continue;
         if (!first) try w.writeAll(",");
         first = false;
@@ -1894,8 +2058,18 @@ fn posesFromPlacement(alloc: std.mem.Allocator, p: optimizer.Placement) ?[]PartP
         .y = pt.y,
         .rot = pt.rot,
         .origin = if (i < p.instances.len) p.instances[i].origin_key else "",
+        .side = pt.side,
+        .locked = pt.locked,
     };
     return parts;
+}
+
+/// PartPose slice → RefPose slice, carrying side/locked — shared by the
+/// scoring endpoints so a saved layout's board sides survive the conversion.
+fn refPosesFromPartPoses(alloc: std.mem.Allocator, parts: []const PartPose) std.mem.Allocator.Error![]optimizer.RefPose {
+    const out = try alloc.alloc(optimizer.RefPose, parts.len);
+    for (parts, 0..) |p, i| out[i] = .{ .ref = p.ref, .x = p.x, .y = p.y, .rot = p.rot, .side = p.side, .locked = p.locked };
+    return out;
 }
 
 /// Re-key a saved layout's poses onto `block`'s *current* ref-des via the
@@ -1922,7 +2096,7 @@ fn rekeyPosesByOrigin(
     const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
     for (parts, 0..) |pp, i| {
         const ref = if (pp.origin.len > 0) (ref_of.get(pp.origin) orelse pp.ref) else pp.ref;
-        out[i] = .{ .ref = ref, .x = pp.x, .y = pp.y, .rot = pp.rot };
+        out[i] = .{ .ref = ref, .x = pp.x, .y = pp.y, .rot = pp.rot, .side = pp.side, .locked = pp.locked };
     }
     return out;
 }
@@ -1957,7 +2131,7 @@ fn readLayoutPosesFor(
         // Re-key failed (flatten error) — fall back to the raw stored refs.
         var list: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
         for (lay.parts) |pp| {
-            list.append(alloc, .{ .ref = pp.ref, .x = pp.x, .y = pp.y, .rot = pp.rot }) catch return null;
+            list.append(alloc, .{ .ref = pp.ref, .x = pp.x, .y = pp.y, .rot = pp.rot, .side = pp.side, .locked = pp.locked }) catch return null;
         }
         return list.toOwnedSlice(alloc) catch null;
     }
@@ -2041,6 +2215,7 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
             .parts = parts,
             .default = default_name.len > 0 and std.mem.eql(u8, nm.string, default_name),
             .rough = rough,
+            .routes = parseSavedRoutes(alloc, it.object.get("routes")),
         }) catch return list.items;
     }
     return list.toOwnedSlice(alloc) catch null;
@@ -2066,9 +2241,124 @@ fn parsePartPoses(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const PartPos
             .y = jsonNum(it.object.get("y")),
             .rot = jsonNum(it.object.get("rot")),
             .origin = origin,
+            .side = jsonSide(it.object.get("side")),
+            .locked = jsonFlag(it.object.get("locked")),
         }) catch return list.items;
     }
     return list.toOwnedSlice(alloc) catch null;
+}
+
+/// Parse a `{"tracks":[…],"vias":[…]}` saved-routes object (the same shape
+/// the live route JSON and the layouts sidecar use). Null when absent,
+/// malformed, or empty — an empty routes object is treated as "no routes".
+fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedRoutes {
+    const obj = v orelse return null;
+    if (obj != .object) return null;
+    var tracks: std.ArrayListUnmanaged(SavedTrack) = .empty;
+    if (obj.object.get("tracks")) |tv| if (tv == .array) {
+        for (tv.array.items) |it| {
+            if (it != .object) continue;
+            tracks.append(alloc, .{
+                .x1 = jsonNum(it.object.get("x1")),
+                .y1 = jsonNum(it.object.get("y1")),
+                .x2 = jsonNum(it.object.get("x2")),
+                .y2 = jsonNum(it.object.get("y2")),
+                .l = if (jsonNum(it.object.get("l")) >= 1) 1 else 0,
+                .w = jsonNum(it.object.get("w")),
+                .net = jsonStrField(it.object.get("net")),
+            }) catch return null;
+        }
+    };
+    var vias: std.ArrayListUnmanaged(SavedVia) = .empty;
+    if (obj.object.get("vias")) |vv| if (vv == .array) {
+        for (vv.array.items) |it| {
+            if (it != .object) continue;
+            vias.append(alloc, .{
+                .x = jsonNum(it.object.get("x")),
+                .y = jsonNum(it.object.get("y")),
+                .d = jsonNum(it.object.get("d")),
+                .drill = jsonNum(it.object.get("drill")),
+                .net = jsonStrField(it.object.get("net")),
+            }) catch return null;
+        }
+    };
+    if (tracks.items.len == 0 and vias.items.len == 0) return null;
+    return .{
+        .tracks = tracks.toOwnedSlice(alloc) catch return null,
+        .vias = vias.toOwnedSlice(alloc) catch return null,
+    };
+}
+
+/// A pose/route JSON string field, or "" when absent/not a string.
+fn jsonStrField(v: ?std.json.Value) []const u8 {
+    const sv = v orelse return "";
+    return if (sv == .string) sv.string else "";
+}
+
+/// Serialize saved routes in the shared live-JSON shape (see `SavedTrack`).
+fn writeSavedRoutesJson(w: *std.Io.Writer, sr: SavedRoutes) std.Io.Writer.Error!void {
+    try w.writeAll("{\"tracks\":[");
+    for (sr.tracks, 0..) |t, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d},\"net\":", .{ t.x1, t.y1, t.x2, t.y2, t.l, t.w });
+        try writeJsonStr(w, t.net);
+        try w.writeAll("}");
+    }
+    try w.writeAll("],\"vias\":[");
+    for (sr.vias, 0..) |vi, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":", .{ vi.x, vi.y, vi.d, vi.drill });
+        try writeJsonStr(w, vi.net);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
+}
+
+/// Rebuild a `router.RouteResult` from a layout's persisted copper, resolving
+/// each stored net NAME back to its index in the *current* flattened netlist
+/// (unknown names → −1, still drawn + DRC-checked as foreign copper). Lets the
+/// page draw saved routes on open and re-run DRC against the current poses.
+fn restoreRoutes(alloc: std.mem.Allocator, sr: SavedRoutes, nets: []const export_kicad.FlatNet) ?router.RouteResult {
+    var idx = std.StringHashMap(i32).init(alloc);
+    for (nets, 0..) |net, i| idx.put(net.name, @intCast(i)) catch return null;
+    const tracks = alloc.alloc(router.Track, sr.tracks.len) catch return null;
+    for (sr.tracks, 0..) |t, i| tracks[i] = .{
+        .x1 = t.x1,
+        .y1 = t.y1,
+        .x2 = t.x2,
+        .y2 = t.y2,
+        .layer = t.l,
+        .width = t.w,
+        .net = if (t.net.len > 0) (idx.get(t.net) orelse -1) else -1,
+    };
+    const vias = alloc.alloc(router.Via, sr.vias.len) catch return null;
+    for (sr.vias, 0..) |vi, i| vias[i] = .{
+        .x = vi.x,
+        .y = vi.y,
+        .dia = vi.d,
+        .drill = vi.drill,
+        .net = if (vi.net.len > 0) (idx.get(vi.net) orelse -1) else -1,
+    };
+    return .{ .tracks = tracks, .vias = vias, .routed = 0, .total = 0 };
+}
+
+/// The shown saved layout's persisted copper, rebuilt against the current
+/// netlist — the page draws it when no fresh ?route=1 ran, and DRC re-checks
+/// it against the CURRENT poses so copper gone stale after a part move shows
+/// violations. Null when nothing is shown or the layout carries no routes.
+fn shownSavedRoutes(
+    alloc: std.mem.Allocator,
+    layouts: []const SavedLayout,
+    shown: ?[]const u8,
+    placement: optimizer.Placement,
+) ?router.RouteResult {
+    const sn = shown orelse return null;
+    for (layouts) |L| {
+        if (!std.mem.eql(u8, L.name, sn)) continue;
+        const sr = L.routes orelse return null;
+        return restoreRoutes(alloc, sr, placement.nets);
+    }
+    return null;
 }
 
 /// The single-slot optimizer cache: the tuning weights that produced the
@@ -2197,6 +2487,10 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: 
         try writeJsonStr(w, L.kind);
         try w.print(",\"ts\":{d}", .{L.ts});
         if (L.rough) try w.writeAll(",\"rough\":true");
+        if (L.routes) |sr| {
+            try w.writeAll(",\"routes\":");
+            try writeSavedRoutesJson(w, sr);
+        }
         if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}", .{ s.hpwl, s.loop, s.caps, s.objective });
         try w.writeAll(",\"parts\":[");
         for (L.parts, 0..) |pt, j| {
@@ -2204,6 +2498,7 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: 
             try w.writeAll(REF_OPEN);
             try writeJsonStr(w, pt.ref);
             try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pt.x, pt.y, pt.rot });
+            try writePoseSideLocked(w, pt.side, pt.locked);
             if (pt.origin.len > 0) {
                 try w.writeAll(ORIGIN_OPEN);
                 try writeJsonStr(w, pt.origin);
@@ -2386,13 +2681,14 @@ fn readAutoPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []cons
     const slot = readCacheSlot(alloc, project_dir, name) orelse return null;
     const parts = slot.parts orelse return null;
     const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
-    for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot };
+    for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot, .side = pt.side, .locked = pt.locked };
     return out;
 }
 
 /// One placed part exported to the KiCad sync: centre (mm) + rotation (deg,
-/// CCW). The sync stamps these onto a footprint it inserts for the first time.
-pub const SyncPose = struct { x: f64, y: f64, rot: f64 };
+/// CCW) + board side. The sync stamps these onto a footprint it inserts for
+/// the first time.
+pub const SyncPose = struct { x: f64, y: f64, rot: f64, side: optimizer.Side = .top };
 
 /// Re-export so the KiCad sync can name a module's poses (`loadSubBlockPoses`)
 /// without importing the placement layer directly.
@@ -2421,7 +2717,7 @@ fn chooseSyncPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []co
     };
     if (chosen) |parts| {
         const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
-        for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot };
+        for (parts, 0..) |pt, i| out[i] = .{ .ref = pt.ref, .x = pt.x, .y = pt.y, .rot = pt.rot, .side = pt.side, .locked = pt.locked };
         return out;
     }
     // No named/recorded layouts — fall back to the bare optimizer cache.
@@ -2443,7 +2739,7 @@ pub fn loadSyncLayout(
 ) ?std.StringHashMap(SyncPose) {
     const poses = chooseSyncPoses(alloc, project_dir, name) orelse return null;
     var m = std.StringHashMap(SyncPose).init(alloc);
-    for (poses) |p| m.put(p.ref, .{ .x = p.x, .y = p.y, .rot = p.rot }) catch return m;
+    for (poses) |p| m.put(p.ref, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return m;
     return m;
 }
 
@@ -2494,7 +2790,7 @@ fn poseByOriginKey(
         if (ok.len == 0) continue;
         // `ok` borrows the eval's arena (freed on the defer) — dupe it.
         const key = alloc.dupe(u8, ok) catch return null;
-        pose_by_ok.put(key, .{ .x = p.x, .y = p.y, .rot = p.rot }) catch return null;
+        pose_by_ok.put(key, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return null;
     }
     return pose_by_ok;
 }
@@ -2525,7 +2821,7 @@ pub fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_
     for (flat2.items) |fi| {
         if (fi.origin_key.len == 0) continue;
         const pose = pose_by_ok.get(fi.origin_key) orelse continue;
-        out.append(alloc, .{ .ref = fi.ref_des, .x = pose.x, .y = pose.y, .rot = pose.rot }) catch return layout;
+        out.append(alloc, .{ .ref = fi.ref_des, .x = pose.x, .y = pose.y, .rot = pose.rot, .side = pose.side }) catch return layout;
     }
     if (out.items.len == 0) return layout; // nothing bridged — let the caller prefix-strip
     return out.toOwnedSlice(alloc) catch layout;
@@ -2564,7 +2860,7 @@ pub fn subBlockPoseByOriginKey(
     for (layout) |p| {
         const ok = ok_of.get(p.ref) orelse continue;
         if (ok.len == 0) continue;
-        m.put(ok, .{ .x = p.x, .y = p.y, .rot = p.rot }) catch return null;
+        m.put(ok, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return null;
     }
     if (m.count() == 0) return null;
     return m;
@@ -2644,7 +2940,9 @@ fn writeCacheSlotJson(w: *std.Io.Writer, c: CacheSlot) std.Io.Writer.Error!void 
         if (i > 0) try w.writeAll(",");
         try w.writeAll(REF_OPEN);
         try writeJsonStr(w, pt.ref);
-        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}}}", .{ pt.x, pt.y, pt.rot });
+        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pt.x, pt.y, pt.rot });
+        try writePoseSideLocked(w, pt.side, pt.locked);
+        try w.writeAll("}");
     }
     try w.writeAll("]}");
 }
@@ -3370,7 +3668,13 @@ const LocalPt = struct { x: f64, y: f64 };
 /// (read-only preview *or* editable embed) — neither has the 3D toggle, so both
 /// skip the filesystem-scanning STEP-model resolution; `sub` is the `?sub=` slug
 /// a sub circuit's save/star POSTs append to target the per-sub layout sidecar.
-const PcbDataOpts = struct { read_only: bool, embed: bool, sub: ?[]const u8 };
+const PcbDataOpts = struct {
+    read_only: bool,
+    embed: bool,
+    sub: ?[]const u8,
+    /// Prebuilt `buildSubSeedsJson` object (the blob writer has no block).
+    subseeds_json: []const u8 = "{}",
+};
 
 /// World position of the GND-plane via covering the pad centred at (`cx`,`cy`),
 /// or that pad centre itself when no via is near (big board / no route). The
@@ -3509,6 +3813,10 @@ fn writePcbData(
     } else {
         try w.writeAll("\"sub\":null,");
     }
+    // Per-sub-block module ★-layout seed poses for the palette's Stamp button.
+    try w.writeAll("\"subseeds\":");
+    try w.writeAll(if (opts.subseeds_json.len > 0) opts.subseeds_json else "{}");
+    try w.writeAll(",");
     // Server-computed objective breakdown of the layout on screen — the baseline
     // the live score deltas against. Same shape the /api/pcb-score endpoint returns.
     try w.print("\"caps\":{d},\"auto\":", .{p.score.loop_caps});
@@ -3532,12 +3840,13 @@ fn writePcbData(
         // it instead of the volatile ref-des (see PartPose.origin / bindLayLoad).
         try w.writeAll(ORIGIN_OPEN);
         try writeJsonStr(w, if (i < p.instances.len) p.instances[i].origin_key else "");
-        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"kind\":\"{s}\",\"fb\":{s},", .{
+        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"kind\":\"{s}\",\"fb\":{s}", .{
             pt.x,                                 pt.y,  pt.rot,
             pt.hw,                                pt.hh, if (pt.kind == .hub) "hub" else "passive",
             if (pt.fallback) "true" else "false",
         });
-        try w.print("\"blame\":{d:.4},", .{if (i < blame.len) blame[i] else 0});
+        try writePoseSideLocked(w, pt.side, pt.locked);
+        try w.print(",\"blame\":{d:.4},", .{if (i < blame.len) blame[i] else 0});
         try w.writeAll("\"fp\":");
         try writeJsonStr(w, fp_of.get(pt.ref_des) orelse "");
         try w.writeAll(",\"val\":");
@@ -3636,7 +3945,7 @@ fn writePcbData(
 
     // Routed copper + DRC markers — emitted in the same shape the
     // /api/pcb-route endpoint returns so drawRoute/drawClr/drawDrc read either.
-    try writeRoutedArrays(w, routed, violations);
+    try writeRoutedArrays(w, routed, violations, p.nets);
 
     // Per-footprint STEP-model references (URL + KiCad offset/rotation) for the
     // 3D-view tab. Only the full page needs it; the embedded preview has no 3D
@@ -3693,16 +4002,25 @@ fn writeModelsJson(
 /// Emit `"tracks":[…],"vias":[…],"drc":[…]` (world mm; track layer 0=top,
 /// 1=bottom). Shared by the page's embedded PCB blob and the /api/pcb-route
 /// response so both speak one routed-copper shape the client redraws from.
-fn writeRoutedArrays(w: *std.Io.Writer, routed: ?router.RouteResult, violations: []const drc.Violation) std.Io.Writer.Error!void {
+fn writeRoutedArrays(
+    w: *std.Io.Writer,
+    routed: ?router.RouteResult,
+    violations: []const drc.Violation,
+    nets: []const export_kicad.FlatNet,
+) std.Io.Writer.Error!void {
     try w.writeAll("\"tracks\":[");
     if (routed) |r| for (r.tracks, 0..) |t, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d}}}", .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.width });
+        try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d},\"net\":", .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.width });
+        try writeJsonStr(w, netNameOf(nets, t.net));
+        try w.writeAll("}");
     };
     try w.writeAll("],\"vias\":[");
     if (routed) |r| for (r.vias, 0..) |vi, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d}}}", .{ vi.x, vi.y, vi.dia });
+        try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":", .{ vi.x, vi.y, vi.dia, vi.drill });
+        try writeJsonStr(w, netNameOf(nets, vi.net));
+        try w.writeAll("}");
     };
     try w.writeAll("],\"drc\":[");
     for (violations, 0..) |vio, i| {
@@ -3712,6 +4030,12 @@ fn writeRoutedArrays(w: *std.Io.Writer, routed: ?router.RouteResult, violations:
     try w.writeAll("]");
 }
 
+/// A routed feature's net NAME for the persistable route JSON ("" for −1).
+fn netNameOf(nets: []const export_kicad.FlatNet, idx: i32) []const u8 {
+    if (idx < 0 or idx >= nets.len) return "";
+    return nets[@intCast(idx)].name;
+}
+
 /// Short label for a DRC violation kind (shown in the marker tooltip).
 fn drcKindStr(k: drc.Kind) []const u8 {
     return switch (k) {
@@ -3719,6 +4043,8 @@ fn drcKindStr(k: drc.Kind) []const u8 {
         .via_via => "via↔via",
         .via_track => "via↔track",
         .pad_pad => "pad↔pad",
+        .annular => "annular ring",
+        .board_edge => "board edge",
     };
 }
 
@@ -3739,11 +4065,16 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
         if (L.score) |s| {
             try w.print(",\"score\":{{\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}}}", .{ s.hpwl, s.loop, s.caps, s.objective });
         } else try w.writeAll(",\"score\":null");
+        if (L.routes) |sr| {
+            try w.writeAll(",\"routes\":");
+            try writeSavedRoutesJson(w, sr);
+        }
         try w.writeAll(",\"parts\":{");
         for (L.parts, 0..) |pt, j| {
             if (j > 0) try w.writeAll(",");
             try writeJsonStr(w, pt.ref);
             try w.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pt.x, pt.y, pt.rot });
+            try writePoseSideLocked(w, pt.side, pt.locked);
             if (pt.origin.len > 0) {
                 try w.writeAll(ORIGIN_OPEN);
                 try writeJsonStr(w, pt.origin);
@@ -4030,6 +4361,26 @@ const PAGE_CSS =
     \\.part.hl .court{filter:drop-shadow(0 0 3px rgba(88,166,255,.75))}
     \\.part.sel .court{stroke:#58a6ff!important;stroke-width:2!important;filter:drop-shadow(0 0 4px rgba(88,166,255,.9))}
     \\.part.msel .court{stroke:#d2a8ff!important;stroke-width:2!important;filter:drop-shadow(0 0 4px rgba(210,168,255,.85))}
+    \\/* Bottom-side (B.Cu) parts: blue body wash + blue pads, KiCad-style. The
+    \\   geometry itself is mirrored by setT (scale(-1,1) inside the rotation). */
+    \\.part.botside .court{fill:#122036}
+    \\.padset.botside .pad{fill:#5b8dd6}
+    \\/* Locked parts refuse drag/rotate/flip — dashed outline + no grab cursor. */
+    \\.part.plocked{cursor:not-allowed}
+    \\.part.plocked .court{stroke-dasharray:2 2!important;opacity:.92}
+    \\/* Rigid sub-circuit hover: every member of the group glows together, so
+    \\   "this whole block drags as one" is visible before you grab it. */
+    \\.part.grp-hl .court{filter:drop-shadow(0 0 3px rgba(126,231,135,.8));stroke:#7ee787!important}
+    \\/* Sub-circuits palette (sidebar): one row per sub-block. */
+    \\.sub-panel{border-top:1px solid #21262d}
+    \\.sub-row{display:flex;align-items:center;gap:6px;padding:5px 12px;font-size:12px}
+    \\.sub-row:hover{background:#1c2129}
+    \\.sub-name{color:#e6edf3;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\.sub-n{color:#6e7681;font-size:11px}
+    \\.sub-rigid,.sub-stamp{background:#21262d;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;
+    \\  font-size:11px;padding:1px 7px;cursor:pointer}
+    \\.sub-rigid.on{color:#7ee787;border-color:#2ea04366}
+    \\.sub-stamp:hover,.sub-rigid:hover{border-color:#58a6ff}
     \\.marquee{fill:rgba(88,166,255,.12);stroke:#58a6ff;stroke-width:1;stroke-dasharray:4 3;vector-effect:non-scaling-stroke;pointer-events:none}
     \\.pad{transition:fill .08s,filter .08s}
     \\.pad[data-net]{cursor:pointer}
@@ -4301,4 +4652,69 @@ test "layouts sidecar round-trips part origin" {
     try std.testing.expectEqual(@as(usize, 2), got[0].parts.len);
     try std.testing.expectEqualStrings("C_VDDIN_BULK", got[0].parts[0].origin);
     try std.testing.expectEqualStrings("", got[0].parts[1].origin);
+}
+
+// spec: Web Server - A saved layout round-trips its routed copper (tracks + vias, net-name keyed) through the sidecar
+test "layouts sidecar round-trips saved routes" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
+    const tracks = [_]SavedTrack{.{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .l = 1, .w = 0.3, .net = "VBUS" }};
+    const vias = [_]SavedVia{.{ .x = 1, .y = 0, .d = 0.6, .drill = 0.3, .net = "VBUS" }};
+    const layouts = [_]SavedLayout{.{
+        .name = "routed",
+        .kind = KIND_MANUAL,
+        .ts = 1,
+        .score = null,
+        .parts = &parts,
+        .routes = .{ .tracks = &tracks, .vias = &vias },
+    }};
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJson(&aw.writer, &layouts, null);
+    const got = parseLayouts(alloc, aw.written()) orelse return error.TestParseFailed;
+    const sr = got[0].routes orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(usize, 1), sr.tracks.len);
+    try std.testing.expectEqual(@as(u8, 1), sr.tracks[0].l);
+    try std.testing.expectEqual(@as(f64, 0.3), sr.tracks[0].w);
+    try std.testing.expectEqualStrings("VBUS", sr.tracks[0].net);
+    try std.testing.expectEqual(@as(usize, 1), sr.vias.len);
+    try std.testing.expectEqual(@as(f64, 0.3), sr.vias[0].drill);
+
+    // Restore against a netlist where VBUS is index 1 → indices re-resolve.
+    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const nets = [_]export_kicad.FlatNet{ .{ .name = "GND", .pins = &pins }, .{ .name = "VBUS", .pins = &pins } };
+    const restored = restoreRoutes(alloc, sr, &nets) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(i32, 1), restored.tracks[0].net);
+    try std.testing.expectEqual(@as(i32, 1), restored.vias[0].net);
+}
+
+// spec: Web Server - A saved layout round-trips each part's board side and lock flag through the sidecar
+test "layouts sidecar round-trips side and locked" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    // One bottom-side locked part; one default (top, unlocked) part.
+    const parts = [_]PartPose{
+        .{ .ref = "U1", .x = 1, .y = 2, .rot = 0, .side = .bottom, .locked = true },
+        .{ .ref = "C1", .x = 3, .y = 4, .rot = 90 },
+    };
+    const layouts = [_]SavedLayout{.{ .name = "two-sided", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts }};
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJson(&aw.writer, &layouts, null);
+    const text = aw.written();
+    // Non-default fields are spelled out; the default part stays legacy-shaped.
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"side\":\"bottom\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"locked\":true") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\"side\""));
+
+    const got = parseLayouts(alloc, text) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(optimizer.Side.bottom, got[0].parts[0].side);
+    try std.testing.expect(got[0].parts[0].locked);
+    try std.testing.expectEqual(optimizer.Side.top, got[0].parts[1].side);
+    try std.testing.expect(!got[0].parts[1].locked);
 }

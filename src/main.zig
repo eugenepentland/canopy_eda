@@ -459,6 +459,7 @@ test {
     _ = @import("font5x7.zig");
     _ = @import("raster.zig");
     _ = @import("render_pcb_png.zig");
+    _ = @import("export_fab.zig");
 
     // Memory-leak audit regression tests (src/leak_tests/) — exercise
     // allocator-owning paths under std.testing.allocator's leak detector.

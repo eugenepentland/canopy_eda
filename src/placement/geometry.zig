@@ -34,6 +34,15 @@ pub const Pad = struct {
     h: f64,
     shape: []const u8 = "rect",
     poly: []const [2]f64 = &.{},
+    /// Through-hole (or NPTH) pad — its copper exists on every layer, so the
+    /// router treats it as an obstacle (and a terminal) on both signal layers
+    /// regardless of which side its part is placed on.
+    thru: bool = false,
+    /// Non-plated (mounting hole) — drilled but not plated; kept apart from
+    /// plated holes because fabs take them as separate drill files.
+    npth: bool = false,
+    /// Drill diameter (mm; 0 = no hole). Oval drills record their larger axis.
+    drill: f64 = 0,
 };
 
 /// A silkscreen line segment (footprint-local mm).
@@ -159,11 +168,15 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
     const cl = node.asList() orelse return null;
     if (cl.len < 2) return null;
     const number = nodeText(arena, cl[1]);
+    const ptype: []const u8 = if (cl.len >= 3) (cl[2].asAtom() orelse "smd") else "smd";
+    const npth = std.mem.eql(u8, ptype, "npth");
+    const thru = npth or std.mem.eql(u8, ptype, "thru");
     const shape: []const u8 = if (cl.len >= 4) (cl[3].asAtom() orelse "rect") else "rect";
     var x: f64 = 0;
     var y: f64 = 0;
     var w: f64 = 0;
     var h: f64 = 0;
+    var drill: f64 = 0;
     var poly: []const [2]f64 = &.{};
     for (cl[2..]) |c| {
         if (c.isForm("pos")) {
@@ -176,9 +189,15 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
             if (sl.len >= 3) h = sl[2].asNumber() orelse 0;
         } else if (c.isForm("poly")) {
             poly = parsePadPoly(arena, c) orelse poly;
+        } else if (c.isForm("drill")) {
+            // `(drill D)` or `(drill oval DX DY)` — record the larger axis.
+            const dl = c.asList() orelse continue;
+            for (dl[1..]) |dn| {
+                if (dn.asNumber()) |d| drill = @max(drill, d);
+            }
         }
     }
-    return .{ .number = number, .x = x, .y = y, .w = w, .h = h, .shape = shape, .poly = poly };
+    return .{ .number = number, .x = x, .y = y, .w = w, .h = h, .shape = shape, .poly = poly, .thru = thru, .npth = npth, .drill = drill };
 }
 
 /// Parse a `(poly (x y) …)` form into footprint-absolute points, or null.

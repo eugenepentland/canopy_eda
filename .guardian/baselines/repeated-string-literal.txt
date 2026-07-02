@@ -1,4 +1,14 @@
 # guardian-snapshot v1
+duplicate const DOWNLOAD_TIMEOUT_SECS = "60" across 2 files
+duplicate const HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin" across 4 files
+duplicate const NAME_FIELD_PREFIX = "{\"name\":" across 2 files
+duplicate const Node = "" across 2 files
+duplicate const OK_JSON_TRUE = "{\"ok\":true}" across 5 files
+duplicate const SEXP_EXT_LEN = ".sexp" across 2 files
+duplicate const SEXP_PATH_TEMPLATE = "{s}/{s}.sexp" across 2 files
+duplicate const STYLE_BLOCK = "<style>" across 4 files
+duplicate const sectionClose = "</section>" across 2 files
+duplicate const u8 = "." across 2 files
 src/import_kicad.zig: string literal {s}/lib/components/{s}.sexp appears 3 times — extract a const
 src/render_json.zig: string literal component appears 3 times — extract a const
 src/serve/bom_html.zig: string literal manufacturer appears 3 times — extract a const

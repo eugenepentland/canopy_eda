@@ -2752,6 +2752,11 @@ fn emitOp(w: anytype, first: *bool, op: []const u8, fields: anytype) !void {
     try w.*.writeAll("}");
 }
 
+/// Where a first-insert footprint lands: staging position (board nm),
+/// rotation (deg, page CW-positive — negated for KiCad inside emitAddOp),
+/// and which board side it goes on.
+const AddPose = struct { x_nm: i64, y_nm: i64, rot_deg: f64 = 0, back: bool = false };
+
 fn emitAddOp(
     w: anytype,
     first: *bool,
@@ -2760,9 +2765,7 @@ fn emitAddOp(
     kmod: []const u8,
     fp_def_json: ?[]const u8,
     pad_net_map: *std.StringHashMap([]const u8),
-    x_nm: i64,
-    y_nm: i64,
-    rot_deg: f64,
+    pose: AddPose,
     canopy_net: ?[]const u8,
     section: []const u8,
 ) !void {
@@ -2820,7 +2823,7 @@ fn emitAddOp(
     try w.*.writeAll("]");
     // Staging position (board nm). Both paths move the new fp here; (0,0)
     // means "no staging hint" (the part stays at the origin).
-    try w.*.print(",\"x\":{d},\"y\":{d}", .{ x_nm, y_nm });
+    try w.*.print(",\"x\":{d},\"y\":{d}", .{ pose.x_nm, pose.y_nm });
     // Orientation. The placement engine's angle is CW-positive (the page's
     // `wpt()` rotates with SVG `rotate()` in a Y-down world), but KiCad's
     // `(at x y angle)` is CCW-positive — so emit the negated angle. 0/180 are
@@ -2829,8 +2832,17 @@ fn emitAddOp(
     // Negating here also keeps each pad where the EDA computed it, so the GND
     // vias (placed at EDA pad centres) still land on the right KiCad pads.
     // The staging grid passes 0 → stays the writer's bare `(at x y)` form.
-    const kicad_rot = @mod(360.0 - rot_deg, 360.0);
+    //
+    // Bottom-side parts additionally get +180°: netlisp mirrors footprint-local
+    // X (before rotation) for a bottom part, while KiCad's stored back-side
+    // convention mirrors local Y (see writer.adaptKmodChild) — the two mirrors
+    // differ by exactly a half-turn, folded into the stored angle here.
+    const back_half_turn: f64 = if (pose.back) 180.0 else 0.0;
+    const kicad_rot = @mod(360.0 - pose.rot_deg + back_half_turn, 360.0);
     if (kicad_rot != 0) try w.*.print(",\"rot\":{d}", .{kicad_rot});
+    // Board side: the writer lands the new footprint on B.Cu with its geometry
+    // adapted to KiCad's stored back-side form. Omitted for front (legacy shape).
+    if (pose.back) try w.*.writeAll(",\"side\":\"bottom\"");
     try w.*.writeAll(",\"pad_nets\":");
     try writePadNetsArray(w.*, inst.ref_des, pad_net_map);
     try w.*.writeAll("}");
@@ -2931,7 +2943,8 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
             const pa = p.pa;
             const kmod = loadKicadMod(d.spc, pa.fp_name, pa.inst.component) orelse continue;
             const fp_def = loadFootprintDefForInstance(d.spc, pa.fp_name, pa.inst, pa.canopy_net, pa.section);
-            try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, mmToNm(p.x_mm), mmToNm(p.y_mm), p.rot, pa.canopy_net, pa.section);
+            const ap = AddPose{ .x_nm = mmToNm(p.x_mm), .y_nm = mmToNm(p.y_mm), .rot_deg = p.rot, .back = p.back };
+            try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, ap, pa.canopy_net, pa.section);
             d.summary.added += 1;
         }
         // One off-board box per seeded sub-circuit: a labelled rectangle around
@@ -2986,7 +2999,8 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
         };
         const kmod = loadKicadMod(d.spc, pa.fp_name, pa.inst.component) orelse continue;
         const fp_def = loadFootprintDefForInstance(d.spc, pa.fp_name, pa.inst, pa.canopy_net, pa.section);
-        try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, mmToNm(pose.x), mmToNm(pose.y), pose.rot, pa.canopy_net, pa.section);
+        const ap = AddPose{ .x_nm = mmToNm(pose.x), .y_nm = mmToNm(pose.y), .rot_deg = pose.rot, .back = pose.side == .bottom };
+        try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, ap, pa.canopy_net, pa.section);
         d.summary.added += 1;
     }
     // Tier 3: grid staging.
@@ -3077,7 +3091,7 @@ fn groupSelected(d: *DiffContext, sec: []const u8) bool {
 
 /// One fresh add placed at an absolute board coordinate (mm) by the seeding
 /// planner. `emitStagedAdds` turns each into an `add` op (it owns the writer).
-const PositionedAdd = struct { pa: PendingAdd, x_mm: f64, y_mm: f64, rot: f64 };
+const PositionedAdd = struct { pa: PendingAdd, x_mm: f64, y_mm: f64, rot: f64, back: bool = false };
 /// A group add with its already-resolved pre-offset board position (mm + rot)
 /// and its sub-circuit name (the `sectionForRef` key — the sub-block slug, e.g.
 /// `mcu`). The position is the part's source pose (module ★ layout for a
@@ -3215,7 +3229,7 @@ fn placeOneSelected(
         const bx = sp.x + offx;
         const by = sp.y + offy;
         if (on_board)
-            try placed.append(arena, .{ .pa = pa, .x_mm = bx, .y_mm = by, .rot = sp.rot })
+            try placed.append(arena, .{ .pa = pa, .x_mm = bx, .y_mm = by, .rot = sp.rot, .back = sp.side == .bottom })
         else
             try block.append(arena, .{ .pa = pa, .bx = bx, .by = by, .rot = sp.rot, .sec = sec });
     }
@@ -3448,9 +3462,12 @@ fn seedOneSubBlock(
             kmod,
             fp_def,
             d.pad_net_map,
-            mmToNm(pose.x + dx),
-            mmToNm(pose.y + dy),
-            pose.rot,
+            .{
+                .x_nm = mmToNm(pose.x + dx),
+                .y_nm = mmToNm(pose.y + dy),
+                .rot_deg = pose.rot,
+                .back = pose.side == .bottom,
+            },
             pa.canopy_net,
             pa.section,
         );
@@ -3613,7 +3630,7 @@ fn emitStagingGrid(d: *DiffContext, w: anytype, first: *bool, adds: []const Pend
             const row: f64 = @floatFromInt(slot / ucols);
             const px = cell_x + STAGE_BOX_PAD_MM + (col + STAGE_HALF) * STAGE_PART_PITCH_MM;
             const py = cell_y + STAGE_LABEL_H_MM + STAGE_BOX_PAD_MM + (row + STAGE_HALF) * STAGE_PART_PITCH_MM;
-            try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, mmToNm(px), mmToNm(py), 0, pa.canopy_net, pa.section);
+            try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, .{ .x_nm = mmToNm(px), .y_nm = mmToNm(py) }, pa.canopy_net, pa.section);
             d.summary.added += 1;
             emitted += 1;
         }

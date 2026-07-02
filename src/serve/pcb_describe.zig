@@ -205,6 +205,10 @@ pub fn writeDescribeJson(
                 }
             }
         }
+        // Board copper side ("layer", not "side" — that key is already the
+        // side-of-anchor direction above). Emitted only for bottom parts.
+        if (part.side == .bottom) try w.writeAll(",\"layer\":\"bottom\"");
+        if (part.locked) try w.writeAll(",\"locked\":true");
         if (unplaced.contains(part.ref_des)) try w.writeAll(",\"unplaced\":true");
         if (auto_filled.contains(part.ref_des)) try w.writeAll(",\"auto_filled\":true");
         try writePartNets(w, alloc, &pad_net, part);
@@ -551,10 +555,11 @@ fn writeHubPads(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placem
 
 /// World offset of a footprint-local point on `part` (rotation applied).
 fn world(part: optimizer.Part, lx: f64, ly: f64) [2]f64 {
+    const mlx = if (part.side == .bottom) -lx else lx;
     const a = part.rot * std.math.pi / 180.0;
     const c = @cos(a);
     const s = @sin(a);
-    return .{ part.x + lx * c - ly * s, part.y + lx * s + ly * c };
+    return .{ part.x + mlx * c - ly * s, part.y + mlx * s + ly * c };
 }
 
 /// World-axis-aligned half-extents of `part`'s rotated courtyard (AABB).

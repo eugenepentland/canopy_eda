@@ -379,6 +379,8 @@ pub fn serve(
     router.get("/api/pcb-png/:name", pcb_layout_page.pcbPngApi, .{});
     router.get("/api/pcb-describe/:name", pcb_describe.pcbDescribeApi, .{});
     router.get("/api/layout-match/:name", layout_match.layoutMatchApi, .{});
+    router.get("/api/pcb-centroid/:name", pcb_layout_page.pcbCentroidApi, .{});
+    router.get("/api/pcb-drill/:name", pcb_layout_page.pcbDrillApi, .{});
     router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/delete", pcb_layout_page.deleteNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/default", pcb_layout_page.setDefaultLayoutApi, .{});

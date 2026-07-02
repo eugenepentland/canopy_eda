@@ -17,7 +17,16 @@ const export_kicad = @import("../export_kicad.zig");
 const FlatNet = export_kicad.FlatNet;
 
 /// What two features clash. Used for the marker label on the page.
-pub const Kind = enum { via_pad, via_via, via_track, pad_pad };
+/// `annular` = a via's copper ring around its drill is thinner than the
+/// fab minimum; `board_edge` = copper closer to the board outline than the
+/// clearance rule.
+pub const Kind = enum { via_pad, via_via, via_track, pad_pad, annular, board_edge };
+
+/// Minimum via annular ring (copper radius minus drill radius, mm) — the
+/// JLC-class proto-fab floor. The router's default via (0.4 ⌀ / 0.2 drill)
+/// sits exactly on it, so default routing is legal by construction and only
+/// a deliberately thinner (net-class) via trips the check.
+pub const MIN_ANNULAR_MM: f64 = 0.1;
 
 /// One clearance violation, located at the midpoint of the offending gap.
 pub const Violation = struct {
@@ -81,6 +90,52 @@ pub fn check(
             }
         }
     }
+    // via annular ring: the copper ring around the drill must meet the fab
+    // minimum. Vias without recorded drills (legacy/synthetic) are skipped.
+    for (vias) |v| {
+        if (v.drill <= 0) continue;
+        const ring = (v.dia - v.drill) / 2;
+        if (ring < MIN_ANNULAR_MM - EPS) {
+            try out.append(arena, .{ .x = v.x, .y = v.y, .gap = ring, .clearance = MIN_ANNULAR_MM, .kind = .annular });
+        }
+    }
+    // copper ↔ board edge: when the design declares a `(board (size W H) …)`
+    // outline, routed copper must keep the clearance rule from it. Features
+    // clearly OUTSIDE the outline (the off-board staging band) are skipped —
+    // they're a workflow state, not an edge-clearance problem.
+    if (placement.board_rect) |br| {
+        for (vias) |v| {
+            const vr = v.dia / 2;
+            const inset = edgeInset(br, v.x, v.y);
+            if (inset < -vr) continue; // fully off-board (staged)
+            const gap = inset - vr;
+            if (gap < clearance - EPS) {
+                try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = clearance, .kind = .board_edge });
+            }
+        }
+        for (tracks) |t| {
+            const hw = t.width / 2;
+            // The inset function is concave over a segment, so its minimum is
+            // at an endpoint — checking both ends covers the whole track.
+            const ends = [_][2]f64{ .{ t.x1, t.y1 }, .{ t.x2, t.y2 } };
+            var worst: f64 = std.math.inf(f64);
+            var wx: f64 = t.x1;
+            var wy: f64 = t.y1;
+            for (ends) |e| {
+                const inset = edgeInset(br, e[0], e[1]);
+                if (inset < worst) {
+                    worst = inset;
+                    wx = e[0];
+                    wy = e[1];
+                }
+            }
+            if (worst < -hw) continue; // fully off-board (staged)
+            const gap = worst - hw;
+            if (gap < clearance - EPS) {
+                try out.append(arena, .{ .x = wx, .y = wy, .gap = gap, .clearance = clearance, .kind = .board_edge });
+            }
+        }
+    }
     // pad ↔ pad (different parts)
     for (pads, 0..) |a, i| {
         for (pads[i + 1 ..]) |b| {
@@ -126,6 +181,16 @@ fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Al
         }
     }
     return list.toOwnedSlice(arena);
+}
+
+/// Signed distance from (x,y) to the nearest board-outline edge — positive
+/// inside the rectangle, negative outside.
+fn edgeInset(br: optimizer.BoardRect, x: f64, y: f64) f64 {
+    const dl = x - br.minx;
+    const dr = br.minx + br.w - x;
+    const dt = y - br.miny;
+    const db = br.miny + br.h - y;
+    return @min(@min(dl, dr), @min(dt, db));
 }
 
 /// Shortest distance from point (px,py) to segment (ax,ay)-(bx,by).
@@ -212,6 +277,70 @@ test "check ignores a via on the same net as the pad" {
 
     const v = try check(arena, placement, routed, 0.127);
     try testing.expectEqual(@as(usize, 0), v.len);
+}
+
+// spec: placement/drc - flags a via whose annular ring is under the fab minimum
+test "check flags a thin annular ring" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -1,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = true,
+    };
+    // dia 0.4 / drill 0.3 ⇒ 0.05 mm ring, far under the 0.13 mm floor; the
+    // second via has a healthy ring and a legacy via records no drill at all.
+    const vias = [_]router.Via{
+        .{ .x = 0, .y = 0, .dia = 0.4, .drill = 0.3, .net = 0 },
+        .{ .x = 5, .y = 0, .dia = 0.6, .drill = 0.3, .net = 0 },
+        .{ .x = 9, .y = 0, .dia = 0.4, .net = 0 },
+    };
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 1, .total = 1 };
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), v.len);
+    try testing.expectEqual(Kind.annular, v[0].kind);
+}
+
+// spec: placement/drc - flags copper crowding the board outline and skips the off-board staging band
+test "check flags copper at the board edge, not staged copper" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 },
+    };
+    // Track ends 0.05 mm from the left edge (violation); a via sits 20 mm
+    // outside the outline — the staging band — and must be skipped.
+    const tracks = [_]router.Track{
+        .{ .x1 = 0.05, .y1 = 5, .x2 = 3, .y2 = 5, .layer = 0, .width = 0.127, .net = 0 },
+    };
+    const vias = [_]router.Via{.{ .x = -20, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 }};
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &vias, .routed = 1, .total = 1 };
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), v.len);
+    try testing.expectEqual(Kind.board_edge, v[0].kind);
 }
 
 // spec: placement/drc - a routed module with a crowded ground pad has no clearance violations

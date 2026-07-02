@@ -129,6 +129,8 @@ pub const ScopeForm = enum {
     board,
     revision,
     rough,
+    stackup,
+    net_class,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -167,6 +169,8 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "board", .board },
     .{ "revision", .revision },
     .{ "rough", .rough },
+    .{ "stackup", .stackup },
+    .{ "net-class", .net_class },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -497,6 +501,21 @@ pub const scope_form_docs = blk: {
             "position: every member still lands on the IC side its pad connects to (GND ignored), so " ++
             "a bypass cap sits by its VDD pad and a pull resistor by its signal pad. Parts in no " ++
             "group are placed last. Refs match by ref-des or module-local origin name (exact or leaf).",
+    } };
+    t[@intFromEnum(ScopeForm.stackup)] = .{ .scope = tl, .doc = .{
+        .syntax = "(stackup N [(plane IDX \"NET\")…])",
+        .summary = "Declare the board's copper stack: N total copper layers (1-based, 1 = top/F.Cu, " ++
+            "N = bottom/B.Cu); each (plane IDX \"NET\") makes layer IDX a solid plane carrying NET, " ++
+            "all other layers are routed signal layers. `(stackup 2)` is a plain 2-layer board with " ++
+            "no planes — ground/power are routed as copper like any other net. Without the form the " ++
+            "router keeps its legacy implicit model (4 layers with assumed GND+PWR inner planes).",
+    } };
+    t[@intFromEnum(ScopeForm.net_class)] = .{ .scope = tl, .doc = .{
+        .syntax = "(net-class \"name\" [(width MM)] [(clearance MM)] [(via DIA DRILL)] (nets \"A\" \"B\"…))",
+        .summary = "Routing geometry for the named nets: trace width, copper clearance, and via size " ++
+            "(diameter + drill) in mm. Omitted numbers keep the router defaults; net names match the " ++
+            "flattened netlist case-insensitively. The first class naming a net wins. Repeat the form " ++
+            "for more classes (e.g. a wide \"power\" class and a tight \"rf\" class).",
     } };
     t[@intFromEnum(ScopeForm.revision)] = .{ .scope = tl, .doc = .{
         .syntax = "(revision \"ID\" [(date \"YYYY-MM-DD\")] [(change \"ID\" \"summary\")…])",
