@@ -1,2 +1,6 @@
 # guardian-snapshot v1
 src/bom.zig::applyBomUuids: unused public declaration
+src/serve.zig::WebsocketHandler: unused public declaration
+src/serve.zig::dispatch: unused public declaration
+src/serve/mcp.zig::clientMessage: unused public declaration
+src/serve/templates/pages.zig::formatHtml: unused public declaration

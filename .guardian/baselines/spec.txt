@@ -1,5 +1,13 @@
 # guardian-snapshot v1
+add: // spec: config - stripQuotes removes one layer of matching quotes
 add: // spec: eval/design_block - placement-group expands into a placement-order (pins) and a group (cohesion)
+add: // spec: export_kicad - Emits a custom pad's (poly …) outline as a valid KiCad custom pad with (primitives (gr_poly …)) in pad-local coords
+add: // spec: export_kicad - Emits a footprint's (fab …) body outline as fp_line/fp_circle on the F.Fab layer
+add: // spec: export_kicad - Emits silkscreen/fab (poly …) as a filled fp_poly and (rect …) as fp_rect on the target layer
+add: // spec: export_kicad - Inflates the emitted F.CrtYd courtyard by BBOX_MARGIN_MM so KiCad matches the placement page's drawn courtyard
+add: // spec: kicad_pcb/format - padNumberText reads quoted, bare-atom, and bare-int pad numbers
+add: // spec: kicad_pcb/writer - preserves pcbnew-style boards: in-element net forms
+add: // spec: kicad_pcb/writer - swap_footprint mirrors a kmod onto the back for a footprint on B.Cu (layers F→B, local Y negated)
 add: // spec: lint - flags a duplicate id token within one design
 add: // spec: lint - flags a nested (id (id …)) residue form
 add: // spec: lint - flags a token that is not 8 hex chars starting a-f
@@ -11,12 +19,181 @@ add: // spec: placement/optimizer - (no-refine) packs courtyards flush (touching
 add: // spec: placement/optimizer - a long manual side wraps into multiple depth lanes
 add: // spec: placement/optimizer - the manual floorplan docks sides around the anchor IC and stages unlisted parts
 add: // spec: placement/optimizer - the manual placement block keeps authored order and resolves rotations
+add: // spec: serve/component_info - add list and remove requirement round-trip on disk
+add: // spec: serve/component_info - addRequirement appends a requirement form before the component close
+add: // spec: serve/component_info - addRequirement rejects a check clause the checker does not recognize
+add: // spec: serve/component_info - findSourceComment finds the source-of-truth path
+add: // spec: serve/component_info - formEnd skips parens inside string literals
+add: // spec: serve/component_info - kebab-cases every Check variant tag
+add: // spec: serve/component_info - listRequirements returns each requirement with its derived id
+add: // spec: serve/component_info - parsePinoutBody normalises pin ID shapes
+add: // spec: serve/component_info - removeRequirement deletes a requirement by id or exact text
+add: // spec: serve/component_search - collectHits maps suggestions to search hits
+add: // spec: serve/component_search - looksLikeZip detects the ZIP magic bytes
+add: // spec: serve/component_search - parses part id and datasheet url from a suggestion
+add: // spec: serve/component_search - percentEncode escapes spaces and reserved chars
+add: // spec: serve/component_search - safeFilename builds a path-safe LIB_<part>.zip
+add: // spec: serve/component_search - searchVariants relaxes the part number
+add: // spec: serve/digikey - collectProducts captures live stock, unit price, status, and per-variation price breaks
+add: // spec: serve/digikey - collectProducts maps the Products array to resolved parts
+add: // spec: serve/digikey - keywordVariants drops trailing keywords for graceful relaxation
+add: // spec: serve/digikey - normalizeDatasheetUrl unwraps a gotoUrl interstitial
+add: // spec: serve/digikey - parseAccessToken extracts the bearer token from the OAuth response
+add: // spec: serve/edit - datasheet dedupe ignores re-download counter suffix
+add: // spec: serve/edit - datasheet stem preserves trailing-digit part numbers
+add: // spec: serve/edit - edit-footprint locates the component token within the instance form
+add: // spec: serve/edit - rewire-pin finds a pin in a section pins map
+add: // spec: serve/edit - rewire-pin locates the instance by component-token offset
+add: // spec: serve/edit - rewire-pin splits a multi-pin shorthand to re-wire one pin
+add: // spec: serve/edit_assist - diagram-layout writeback locates the existing form
+add: // spec: serve/edit_assist - lib-index extracts a module's parameter names
+add: // spec: serve/edit_assist - lib-index handles (param default) pairs
+add: // spec: serve/edit_assist - lib-index reports each component's footprint name
+add: // spec: serve/edit_assist - lib-index returns no params when the defmodule is absent
+add: // spec: serve/mcp_docs - buildExample renders an example invocation
+add: // spec: serve/mcp_docs - buildToolDocs marks mutating tools and required params
+add: // spec: serve/mcp_docs - buildToolDocs projects each tool from the embedded schema
+add: // spec: serve/mcp_tools - fuzzyScore ranks a contiguous substring hit above a scattered subsequence hit
+add: // spec: serve/mcp_tools - fuzzyScore ranks a prefix hit above a mid-token hit for the same needle
+add: // spec: serve/mcp_tools - fuzzyScore returns 0 when the needle does not match the haystack as a substring or subsequence
+add: // spec: serve/mcp_tools - libEntryScore ranks a name match above a description-only match
+add: // spec: serve/mcp_tools - list_library with a query returns only fuzzily-matching entries ranked best-first
+add: // spec: serve/mcp_tools - list_library without a query (or a blank one) lists every entry
 add: // spec: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
 add: // spec: serve/notes - Rejects bodies larger than 1 MiB
 add: // spec: serve/notes - Returns an empty string when no notes file exists yet
+add: // spec: serve/sync - boxCols returns a roughly-square (ceil-sqrt) column count for a staging box of N parts
+add: // spec: serve/sync - buildCanopyNetValue lists a passive's pads in numeric order joined by ' / ' and returns null when the passive has no connected pads
+add: // spec: serve/sync - buildCanopyNetValue renders each passive pad as destRef.destPin.net for a single hub pin, else the bare net name
+add: // spec: serve/sync - buildStagingLayout gives each part a fixed staging seat from the whole design, independent of push composition
+add: // spec: serve/sync - isPassiveRef classifies R/C/L/F/D ref-des prefixes as passive spokes and everything else as a hub
+add: // spec: serve/sync - loadFootprintDefImpl ships a footprint's fab geometry on F.Fab so the synced part keeps its outline
+add: // spec: serve/sync - maybeCollapseDotSubNet folds a per-pin sub-net to its rail by default but keeps it verbatim in dot-net mode
+add: // spec: serve/sync - pickByKicadUuid adopts an orphan whose KiCad uuid equals the instance's canopy_uuid
+add: // spec: serve/sync - pickByKicadUuid refuses an fp another instance already claimed in this walk
+add: // spec: serve/sync - pickByUuidOrRef falls back to by_ref when canopy_uuid is missing and the fp is not reserved
+add: // spec: serve/sync - pickByUuidOrRef refuses a by_ref match whose fp is reserved by another instance's canopy_uuid
+add: // spec: serve/sync - pickByUuidOrRef refuses a by_uuid match whose fp another instance already claimed in this walk
+add: // spec: serve/sync - pickByUuidOrRef returns null when neither tier matches
+add: // spec: serve/sync - pickByUuidOrRef returns the by_uuid match when the instance's canopy_uuid is on the board
+add: // spec: serve/sync - protoBoardLayer maps F.Fab and B.Fab to their KiCad board-layer enums
 add: // spec: serve/sync - runSyncPlan diffs a parsed board state against the design and returns a JSON envelope with version, summary, and the ops list
 add: // spec: serve/sync - runSyncPlan errors with BuildFailed when the source file fails to evaluate
 add: // spec: serve/sync - runSyncPlan errors with NotADesign when the source file does not evaluate to a design-block
+add: // spec: serve/sync - sectionForRef attributes a sub-block part to its sub-block name and a top-level part to its declared section, else ""
+add: // spec: serve/sync - stripSubPrefix removes a leading "<sub>/" so a flattened sub-block ref maps to its module layout's ref
+add: // spec: serve/sync - writeGeomBlockProtoJson traces a (poly …) outline as boundary segments and emits (rect …) on the block's layer
+add: // spec: serve/upload_datasheet - isPdfMagic gates non-PDF input
+add: // spec: serve/upload_datasheet - sanitize forces .pdf extension
+add: // spec: serve/upload_datasheet - sanitize preserves trailing-digit names
+add: // spec: serve/upload_datasheet - sanitize replaces unsafe chars
+add: // spec: serve/upload_datasheet - sanitize strips duplicate-download marker
+add: // spec: serve/upload_datasheet - sanitize strips path segments
+add: // spec: serve/vfs - allows project source and library paths
+add: // spec: serve/vfs - denialHint redirects PDF writes to the disk/browser route
+add: // spec: serve/vfs - denialHint redirects bare lib listing to list_library
+add: // spec: serve/vfs - denies auth and oauth paths
+add: // spec: serve/vfs - denies write_file on lib/datasheets (PDFs are read-only via MCP)
+add: // spec: serve/vfs - denies writes to history and out
+add: // spec: serve/vfs - import detection respects word boundaries
+add: // spec: serve/vfs - libraryEntityFor classifies library subdirs
+add: // spec: serve/vfs - matches basic glob patterns
+add: // spec: serve/vfs - rejects NUL and backslash bytes
+add: // spec: serve/vfs - rejects absolute paths
+add: // spec: serve/vfs - rejects dot-prefixed segments
+add: // spec: serve/vfs - rejects parent traversal
+tag not on a test: ./src/commands.zig:558: // spec: commands - a lone positional design name builds without pushing
+tag not on a test: ./src/commands.zig:568: // spec: commands - --push with an explicit name pushes that design
+tag not on a test: ./src/commands.zig:576: // spec: commands - a bare --push flag pushes the positional design
+tag not on a test: ./src/commands.zig:585: // spec: commands - --output-dir writes a file without a network push
+tag not on a test: ./src/config.zig:117: // spec: config - stripQuotes removes one layer of matching quotes
+tag not on a test: ./src/export_kicad_footprint.zig:698: // spec: export_kicad - Emits a footprint's (fab …) body outline as fp_line/fp_circle on the F.Fab layer
+tag not on a test: ./src/export_kicad_footprint.zig:716: // spec: export_kicad - Inflates the emitted F.CrtYd courtyard by BBOX_MARGIN_MM so KiCad matches the placement page's drawn courtyard
+tag not on a test: ./src/export_kicad_footprint.zig:730: // spec: export_kicad - Emits silkscreen/fab (poly …) as a filled fp_poly and (rect …) as fp_rect on the target layer
+tag not on a test: ./src/export_kicad_footprint.zig:749: // spec: export_kicad - Emits a custom pad's (poly …) outline as a valid KiCad custom pad with (primitives (gr_poly …)) in pad-local coords
+tag not on a test: ./src/kicad_pcb/format.zig:119: // spec: kicad_pcb/format - padNumberText reads quoted, bare-atom, and bare-int pad numbers
+tag not on a test: ./src/kicad_pcb/format.zig:79: // spec: kicad_pcb/format - sexprUnescape inverts sexprEscape so a load→save round-trip does not double-escape
+tag not on a test: ./src/kicad_pcb/format.zig:91: // spec: kicad_pcb/format - sexprEscape escapes embedded quotes and trailing backslash so the printed token round-trips
+tag not on a test: ./src/kicad_pcb/writer.zig:1975: // spec: kicad_pcb/writer - swap_footprint mirrors a kmod onto the back for a footprint on B.Cu (layers F→B, local Y negated)
+tag not on a test: ./src/kicad_pcb/writer.zig:2053: // spec: kicad_pcb/writer - preserves pcbnew-style boards: in-element net forms
+tag not on a test: ./src/serve/component_info.zig:823: // spec: serve/component_info - parsePinoutBody normalises pin ID shapes
+tag not on a test: ./src/serve/component_info.zig:852: // spec: serve/component_info - findSourceComment finds the source-of-truth path
+tag not on a test: ./src/serve/component_info.zig:867: // spec: serve/component_info - kebab-cases every Check variant tag
+tag not on a test: ./src/serve/component_info.zig:886: // spec: serve/component_info - listRequirements returns each requirement with its derived id
+tag not on a test: ./src/serve/component_info.zig:902: // spec: serve/component_info - addRequirement appends a requirement form before the component close
+tag not on a test: ./src/serve/component_info.zig:912: // spec: serve/component_info - addRequirement rejects a check clause the checker does not recognize
+tag not on a test: ./src/serve/component_info.zig:924: // spec: serve/component_info - removeRequirement deletes a requirement by id or exact text
+tag not on a test: ./src/serve/component_info.zig:949: // spec: serve/component_info - formEnd skips parens inside string literals
+tag not on a test: ./src/serve/component_info.zig:956: // spec: serve/component_info - add list and remove requirement round-trip on disk
+tag not on a test: ./src/serve/component_search.zig:512: // spec: serve/component_search - percentEncode escapes spaces and reserved chars
+tag not on a test: ./src/serve/component_search.zig:520: // spec: serve/component_search - searchVariants relaxes the part number
+tag not on a test: ./src/serve/component_search.zig:536: // spec: serve/component_search - parses part id and datasheet url from a suggestion
+tag not on a test: ./src/serve/component_search.zig:568: // spec: serve/component_search - looksLikeZip detects the ZIP magic bytes
+tag not on a test: ./src/serve/component_search.zig:575: // spec: serve/component_search - safeFilename builds a path-safe LIB_<part>.zip
+tag not on a test: ./src/serve/component_search.zig:583: // spec: serve/component_search - collectHits maps suggestions to search hits
+tag not on a test: ./src/serve/digikey.zig:504: // spec: serve/digikey - parseAccessToken extracts the bearer token from the OAuth response
+tag not on a test: ./src/serve/digikey.zig:514: // spec: serve/digikey - keywordVariants drops trailing keywords for graceful relaxation
+tag not on a test: ./src/serve/digikey.zig:533: // spec: serve/digikey - normalizeDatasheetUrl unwraps a gotoUrl interstitial
+tag not on a test: ./src/serve/digikey.zig:551: // spec: serve/digikey - collectProducts maps the Products array to resolved parts
+tag not on a test: ./src/serve/digikey.zig:594: // spec: serve/digikey - collectProducts captures live stock, unit price, status, and per-variation price breaks
+tag not on a test: ./src/serve/edit.zig:3008: // spec: serve/edit - datasheet dedupe ignores re-download counter suffix
+tag not on a test: ./src/serve/edit.zig:3022: // spec: serve/edit - edit-footprint locates the component token within the instance form
+tag not on a test: ./src/serve/edit.zig:3037: // spec: serve/edit - datasheet stem preserves trailing-digit part numbers
+tag not on a test: ./src/serve/edit.zig:3043: // spec: serve/edit - rewire-pin locates the instance by component-token offset
+tag not on a test: ./src/serve/edit.zig:3060: // spec: serve/edit - rewire-pin splits a multi-pin shorthand to re-wire one pin
+tag not on a test: ./src/serve/edit.zig:3089: // spec: serve/edit - rewire-pin finds a pin in a section pins map
+tag not on a test: ./src/serve/edit_assist.zig:466: // spec: serve/edit_assist - diagram-layout writeback locates the existing form
+tag not on a test: ./src/serve/edit_assist.zig:485: // spec: serve/edit_assist - lib-index extracts a module's parameter names
+tag not on a test: ./src/serve/edit_assist.zig:495: // spec: serve/edit_assist - lib-index handles (param default) pairs
+tag not on a test: ./src/serve/edit_assist.zig:508: // spec: serve/edit_assist - lib-index returns no params when the defmodule is absent
+tag not on a test: ./src/serve/edit_assist.zig:513: // spec: serve/edit_assist - lib-index reports each component's footprint name
+tag not on a test: ./src/serve/mcp_docs.zig:197: // spec: serve/mcp_docs - buildToolDocs projects each tool from the embedded schema
+tag not on a test: ./src/serve/mcp_docs.zig:212: // spec: serve/mcp_docs - buildToolDocs marks mutating tools and required params
+tag not on a test: ./src/serve/mcp_docs.zig:233: // spec: serve/mcp_docs - buildExample renders an example invocation
+tag not on a test: ./src/serve/mcp_tools.zig:2609: // spec: serve/mcp_tools - fuzzyScore returns 0 when the needle does not match the haystack as a substring or subsequence
+tag not on a test: ./src/serve/mcp_tools.zig:2616: // spec: serve/mcp_tools - fuzzyScore ranks a contiguous substring hit above a scattered subsequence hit
+tag not on a test: ./src/serve/mcp_tools.zig:2624: // spec: serve/mcp_tools - fuzzyScore ranks a prefix hit above a mid-token hit for the same needle
+tag not on a test: ./src/serve/mcp_tools.zig:2632: // spec: serve/mcp_tools - libEntryScore ranks a name match above a description-only match
+tag not on a test: ./src/serve/mcp_tools.zig:2640: // spec: serve/mcp_tools - list_library with a query returns only fuzzily-matching entries ranked best-first
+tag not on a test: ./src/serve/mcp_tools.zig:2666: // spec: serve/mcp_tools - list_library without a query (or a blank one) lists every entry
+tag not on a test: ./src/serve/sync.zig:3766: // spec: serve/sync - pickByUuidOrRef returns the by_uuid match when the instance's canopy_uuid is on the board
+tag not on a test: ./src/serve/sync.zig:3786: // spec: serve/sync - pickByUuidOrRef falls back to by_ref when canopy_uuid is missing and the fp is not reserved
+tag not on a test: ./src/serve/sync.zig:3806: // spec: serve/sync - pickByUuidOrRef refuses a by_ref match whose fp is reserved by another instance's canopy_uuid
+tag not on a test: ./src/serve/sync.zig:3833: // spec: serve/sync - pickByUuidOrRef refuses a by_uuid match whose fp another instance already claimed in this walk
+tag not on a test: ./src/serve/sync.zig:3858: // spec: serve/sync - pickByUuidOrRef returns null when neither tier matches
+tag not on a test: ./src/serve/sync.zig:3873: // spec: serve/sync - pickByKicadUuid adopts an orphan whose KiCad uuid equals the instance's canopy_uuid
+tag not on a test: ./src/serve/sync.zig:3893: // spec: serve/sync - pickByKicadUuid refuses an fp another instance already claimed in this walk
+tag not on a test: ./src/serve/sync.zig:3908: // spec: serve/sync - isPassiveRef classifies R/C/L/F/D ref-des prefixes as passive spokes and everything else as a hub
+tag not on a test: ./src/serve/sync.zig:3922: // spec: serve/sync - buildCanopyNetValue renders each passive pad as destRef.destPin.net for a single hub pin, else the bare net name
+tag not on a test: ./src/serve/sync.zig:3952: // spec: serve/sync - buildCanopyNetValue lists a passive's pads in numeric order joined by ' / ' and returns null when the passive has no connected pads
+tag not on a test: ./src/serve/sync.zig:3984: // spec: serve/sync - sectionForRef attributes a sub-block part to its sub-block name and a top-level part to its declared section, else ""
+tag not on a test: ./src/serve/sync.zig:4000: // spec: serve/sync - stripSubPrefix removes a leading "<sub>/" so a flattened sub-block ref maps to its module layout's ref
+tag not on a test: ./src/serve/sync.zig:4010: // spec: serve/sync - boxCols returns a roughly-square (ceil-sqrt) column count for a staging box of N parts
+tag not on a test: ./src/serve/sync.zig:4020: // spec: serve/sync - buildStagingLayout gives each part a fixed staging seat from the whole design, independent of push composition
+tag not on a test: ./src/serve/sync.zig:4058: // spec: serve/sync - maybeCollapseDotSubNet folds a per-pin sub-net to its rail by default but keeps it verbatim in dot-net mode
+tag not on a test: ./src/serve/sync.zig:4071: // spec: serve/sync - protoBoardLayer maps F.Fab and B.Fab to their KiCad board-layer enums
+tag not on a test: ./src/serve/sync.zig:4080: // spec: serve/sync - loadFootprintDefImpl ships a footprint's fab geometry on F.Fab so the synced part keeps its outline
+tag not on a test: ./src/serve/sync.zig:4096: // spec: serve/sync - writeGeomBlockProtoJson traces a (poly …) outline as boundary segments and emits (rect …) on the block's layer
+tag not on a test: ./src/serve/upload_datasheet.zig:227: // spec: serve/upload_datasheet - sanitize strips path segments
+tag not on a test: ./src/serve/upload_datasheet.zig:235: // spec: serve/upload_datasheet - sanitize forces .pdf extension
+tag not on a test: ./src/serve/upload_datasheet.zig:243: // spec: serve/upload_datasheet - sanitize replaces unsafe chars
+tag not on a test: ./src/serve/upload_datasheet.zig:251: // spec: serve/upload_datasheet - sanitize strips duplicate-download marker
+tag not on a test: ./src/serve/upload_datasheet.zig:262: // spec: serve/upload_datasheet - sanitize preserves trailing-digit names
+tag not on a test: ./src/serve/upload_datasheet.zig:270: // spec: serve/upload_datasheet - isPdfMagic gates non-PDF input
+tag not on a test: ./src/serve/users.zig:251: // spec: serve/users - The user/role store persists to and resolves from auth_dir, not the project dir (users.json lives at <auth_dir>/users.json)
+tag not on a test: ./src/serve/vfs.zig:1144: // spec: serve/vfs - rejects parent traversal
+tag not on a test: ./src/serve/vfs.zig:1150: // spec: serve/vfs - rejects absolute paths
+tag not on a test: ./src/serve/vfs.zig:1155: // spec: serve/vfs - rejects dot-prefixed segments
+tag not on a test: ./src/serve/vfs.zig:1161: // spec: serve/vfs - rejects NUL and backslash bytes
+tag not on a test: ./src/serve/vfs.zig:1167: // spec: serve/vfs - allows project source and library paths
+tag not on a test: ./src/serve/vfs.zig:1176: // spec: serve/vfs - denies write_file on lib/datasheets (PDFs are read-only via MCP)
+tag not on a test: ./src/serve/vfs.zig:1181: // spec: serve/vfs - denies auth and oauth paths
+tag not on a test: ./src/serve/vfs.zig:1188: // spec: serve/vfs - denies writes to history and out
+tag not on a test: ./src/serve/vfs.zig:1194: // spec: serve/vfs - matches basic glob patterns
+tag not on a test: ./src/serve/vfs.zig:1204: // spec: serve/vfs - import detection respects word boundaries
+tag not on a test: ./src/serve/vfs.zig:1211: // spec: serve/vfs - denialHint redirects bare lib listing to list_library
+tag not on a test: ./src/serve/vfs.zig:1224: // spec: serve/vfs - denialHint redirects PDF writes to the disk/browser route
+tag not on a test: ./src/serve/vfs.zig:1232: // spec: serve/vfs - libraryEntityFor classifies library subdirs
 unlinked tag: Web Server - A rough-seeded saved layout round-trips its rough flag through the sidecar in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - A saved layout round-trips each part's renumber-stable origin key through the sidecar in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - Module grouping tag detects placement-cohesion groups but not pin or diagram groups in ./src/serve/modules.zig
@@ -28,10 +205,6 @@ unlinked tag: Web Server - The layouts sidecar round-trips snapshots and the opt
 unlinked tag: Web Server - layout-match counts a wrong-edge proportion as a partial area mismatch in ./src/serve/layout_match.zig
 unlinked tag: Web Server - layout-match credits interchangeable parts by per-edge count, ignoring which fungible part is where in ./src/serve/layout_match.zig
 unlinked tag: bom-resolve - A property value containing a quote/backslash round-trips through the .bom without corrupting it in ./src/bom_resolve.zig
-unlinked tag: commands - --output-dir writes a file without a network push in ./src/commands.zig
-unlinked tag: commands - --push with an explicit name pushes that design in ./src/commands.zig
-unlinked tag: commands - a bare --push flag pushes the positional design in ./src/commands.zig
-unlinked tag: commands - a lone positional design name builds without pushing in ./src/commands.zig
 unlinked tag: convert/footprint - Bare-integer pad numbers survive the conversion (no dangling num_buf slice) in ./src/convert/footprint.zig
 unlinked tag: diagram/layout - two same-side (edge …) directives stack in distinct cells instead of overlapping in ./src/diagram/layout.zig
 unlinked tag: diagram/lod - Glance chips resolve nodes by id not label, so duplicate-labelled blocks stay distinct in ./src/diagram/lod.zig
@@ -63,8 +236,6 @@ unlinked tag: eval/modules - Required parameters are still diagnosed when only d
 unlinked tag: export_kicad - Sanitizes a declared footprint name so a path-traversal component can't escape the output directory in ./src/export_kicad.zig
 unlinked tag: export_kicad_netlist - extractPadNames reads bare-integer pad numbers so numerically-padded footprints appear in the NC inventory in ./src/export_kicad_netlist.zig
 unlinked tag: import_fold - A channel with a passive rewired between two same-template internal nets deviates instead of folding silently in ./src/import_fold.zig
-unlinked tag: kicad_pcb/format - sexprEscape escapes embedded quotes and trailing backslash so the printed token round-trips in ./src/kicad_pcb/format.zig
-unlinked tag: kicad_pcb/format - sexprUnescape inverts sexprEscape so a load→save round-trip does not double-escape in ./src/kicad_pcb/format.zig
 unlinked tag: kicad_pcb/writer - Escapes JSON-supplied op values so a raw quote/backslash cannot corrupt the board file in ./src/kicad_pcb/writer.zig
 unlinked tag: kicad_pcb/writer - swap_footprint preserves the board footprint's (attr …) assembly flags in ./src/kicad_pcb/writer.zig
 unlinked tag: paths - Rejects design names that are not bare basenames (traversal defense) in ./src/paths.zig
@@ -96,9 +267,16 @@ unlinked tag: serve/design_diff - identical revisions produce an empty diff in .
 unlinked tag: serve/diag_format - build blanks the source line when the span doesn't match the buffer (module-file spans) in ./src/serve/diag_format.zig
 unlinked tag: serve/diag_format - build extracts the offending source line from the buffer at the span in ./src/serve/diag_format.zig
 unlinked tag: serve/diag_format - caretLine pads to the 1-based column (preserving tabs) and ends with a caret in ./src/serve/diag_format.zig
-unlinked tag: serve/users - The user/role store persists to and resolves from auth_dir, not the project dir (users.json lives at <auth_dir>/users.json) in ./src/serve/users.zig
 unlinked tag: sexpr/parser - Rejects input nested past MAX_PARSE_DEPTH with TooDeep instead of overflowing the stack in ./src/sexpr/parser.zig
+unverified: config - stripQuotes removes one layer of matching quotes
 unverified: eval/design_block - placement-group expands into a placement-order (pins) and a group (cohesion)
+unverified: export_kicad - Emits a custom pad's (poly …) outline as a valid KiCad custom pad with (primitives (gr_poly …)) in pad-local coords
+unverified: export_kicad - Emits a footprint's (fab …) body outline as fp_line/fp_circle on the F.Fab layer
+unverified: export_kicad - Emits silkscreen/fab (poly …) as a filled fp_poly and (rect …) as fp_rect on the target layer
+unverified: export_kicad - Inflates the emitted F.CrtYd courtyard by BBOX_MARGIN_MM so KiCad matches the placement page's drawn courtyard
+unverified: kicad_pcb/format - padNumberText reads quoted, bare-atom, and bare-int pad numbers
+unverified: kicad_pcb/writer - preserves pcbnew-style boards: in-element net forms
+unverified: kicad_pcb/writer - swap_footprint mirrors a kmod onto the back for a footprint on B.Cu (layers F→B, local Y negated)
 unverified: lint - flags a duplicate id token within one design
 unverified: lint - flags a nested (id (id …)) residue form
 unverified: lint - flags a token that is not 8 hex chars starting a-f
@@ -110,9 +288,86 @@ unverified: placement/optimizer - (no-refine) packs courtyards flush (touching) 
 unverified: placement/optimizer - a long manual side wraps into multiple depth lanes
 unverified: placement/optimizer - the manual floorplan docks sides around the anchor IC and stages unlisted parts
 unverified: placement/optimizer - the manual placement block keeps authored order and resolves rotations
+unverified: serve/component_info - add list and remove requirement round-trip on disk
+unverified: serve/component_info - addRequirement appends a requirement form before the component close
+unverified: serve/component_info - addRequirement rejects a check clause the checker does not recognize
+unverified: serve/component_info - findSourceComment finds the source-of-truth path
+unverified: serve/component_info - formEnd skips parens inside string literals
+unverified: serve/component_info - kebab-cases every Check variant tag
+unverified: serve/component_info - listRequirements returns each requirement with its derived id
+unverified: serve/component_info - parsePinoutBody normalises pin ID shapes
+unverified: serve/component_info - removeRequirement deletes a requirement by id or exact text
+unverified: serve/component_search - collectHits maps suggestions to search hits
+unverified: serve/component_search - looksLikeZip detects the ZIP magic bytes
+unverified: serve/component_search - parses part id and datasheet url from a suggestion
+unverified: serve/component_search - percentEncode escapes spaces and reserved chars
+unverified: serve/component_search - safeFilename builds a path-safe LIB_<part>.zip
+unverified: serve/component_search - searchVariants relaxes the part number
+unverified: serve/digikey - collectProducts captures live stock, unit price, status, and per-variation price breaks
+unverified: serve/digikey - collectProducts maps the Products array to resolved parts
+unverified: serve/digikey - keywordVariants drops trailing keywords for graceful relaxation
+unverified: serve/digikey - normalizeDatasheetUrl unwraps a gotoUrl interstitial
+unverified: serve/digikey - parseAccessToken extracts the bearer token from the OAuth response
+unverified: serve/edit - datasheet dedupe ignores re-download counter suffix
+unverified: serve/edit - datasheet stem preserves trailing-digit part numbers
+unverified: serve/edit - edit-footprint locates the component token within the instance form
+unverified: serve/edit - rewire-pin finds a pin in a section pins map
+unverified: serve/edit - rewire-pin locates the instance by component-token offset
+unverified: serve/edit - rewire-pin splits a multi-pin shorthand to re-wire one pin
+unverified: serve/edit_assist - diagram-layout writeback locates the existing form
+unverified: serve/edit_assist - lib-index extracts a module's parameter names
+unverified: serve/edit_assist - lib-index handles (param default) pairs
+unverified: serve/edit_assist - lib-index reports each component's footprint name
+unverified: serve/edit_assist - lib-index returns no params when the defmodule is absent
+unverified: serve/mcp_docs - buildExample renders an example invocation
+unverified: serve/mcp_docs - buildToolDocs marks mutating tools and required params
+unverified: serve/mcp_docs - buildToolDocs projects each tool from the embedded schema
+unverified: serve/mcp_tools - fuzzyScore ranks a contiguous substring hit above a scattered subsequence hit
+unverified: serve/mcp_tools - fuzzyScore ranks a prefix hit above a mid-token hit for the same needle
+unverified: serve/mcp_tools - fuzzyScore returns 0 when the needle does not match the haystack as a substring or subsequence
+unverified: serve/mcp_tools - libEntryScore ranks a name match above a description-only match
+unverified: serve/mcp_tools - list_library with a query returns only fuzzily-matching entries ranked best-first
+unverified: serve/mcp_tools - list_library without a query (or a blank one) lists every entry
 unverified: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
 unverified: serve/notes - Rejects bodies larger than 1 MiB
 unverified: serve/notes - Returns an empty string when no notes file exists yet
+unverified: serve/sync - boxCols returns a roughly-square (ceil-sqrt) column count for a staging box of N parts
+unverified: serve/sync - buildCanopyNetValue lists a passive's pads in numeric order joined by ' / ' and returns null when the passive has no connected pads
+unverified: serve/sync - buildCanopyNetValue renders each passive pad as destRef.destPin.net for a single hub pin, else the bare net name
+unverified: serve/sync - buildStagingLayout gives each part a fixed staging seat from the whole design, independent of push composition
+unverified: serve/sync - isPassiveRef classifies R/C/L/F/D ref-des prefixes as passive spokes and everything else as a hub
+unverified: serve/sync - loadFootprintDefImpl ships a footprint's fab geometry on F.Fab so the synced part keeps its outline
+unverified: serve/sync - maybeCollapseDotSubNet folds a per-pin sub-net to its rail by default but keeps it verbatim in dot-net mode
+unverified: serve/sync - pickByKicadUuid adopts an orphan whose KiCad uuid equals the instance's canopy_uuid
+unverified: serve/sync - pickByKicadUuid refuses an fp another instance already claimed in this walk
+unverified: serve/sync - pickByUuidOrRef falls back to by_ref when canopy_uuid is missing and the fp is not reserved
+unverified: serve/sync - pickByUuidOrRef refuses a by_ref match whose fp is reserved by another instance's canopy_uuid
+unverified: serve/sync - pickByUuidOrRef refuses a by_uuid match whose fp another instance already claimed in this walk
+unverified: serve/sync - pickByUuidOrRef returns null when neither tier matches
+unverified: serve/sync - pickByUuidOrRef returns the by_uuid match when the instance's canopy_uuid is on the board
+unverified: serve/sync - protoBoardLayer maps F.Fab and B.Fab to their KiCad board-layer enums
 unverified: serve/sync - runSyncPlan diffs a parsed board state against the design and returns a JSON envelope with version, summary, and the ops list
 unverified: serve/sync - runSyncPlan errors with BuildFailed when the source file fails to evaluate
 unverified: serve/sync - runSyncPlan errors with NotADesign when the source file does not evaluate to a design-block
+unverified: serve/sync - sectionForRef attributes a sub-block part to its sub-block name and a top-level part to its declared section, else ""
+unverified: serve/sync - stripSubPrefix removes a leading "<sub>/" so a flattened sub-block ref maps to its module layout's ref
+unverified: serve/sync - writeGeomBlockProtoJson traces a (poly …) outline as boundary segments and emits (rect …) on the block's layer
+unverified: serve/upload_datasheet - isPdfMagic gates non-PDF input
+unverified: serve/upload_datasheet - sanitize forces .pdf extension
+unverified: serve/upload_datasheet - sanitize preserves trailing-digit names
+unverified: serve/upload_datasheet - sanitize replaces unsafe chars
+unverified: serve/upload_datasheet - sanitize strips duplicate-download marker
+unverified: serve/upload_datasheet - sanitize strips path segments
+unverified: serve/vfs - allows project source and library paths
+unverified: serve/vfs - denialHint redirects PDF writes to the disk/browser route
+unverified: serve/vfs - denialHint redirects bare lib listing to list_library
+unverified: serve/vfs - denies auth and oauth paths
+unverified: serve/vfs - denies write_file on lib/datasheets (PDFs are read-only via MCP)
+unverified: serve/vfs - denies writes to history and out
+unverified: serve/vfs - import detection respects word boundaries
+unverified: serve/vfs - libraryEntityFor classifies library subdirs
+unverified: serve/vfs - matches basic glob patterns
+unverified: serve/vfs - rejects NUL and backslash bytes
+unverified: serve/vfs - rejects absolute paths
+unverified: serve/vfs - rejects dot-prefixed segments
+unverified: serve/vfs - rejects parent traversal

@@ -3,6 +3,7 @@ const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const json_writer = @import("json_writer.zig");
 const asserted_fns_mod = @import("asserted_fns.zig");
+const rails_mod = @import("eval/rails.zig");
 const DesignBlock = env_mod.DesignBlock;
 
 const ctx_mod = @import("render_svg/context.zig");
@@ -240,6 +241,75 @@ const JsonLabel = struct {
     is_ground: bool,
 };
 
+/// One resolved power-rail entry for the scene JSON: the sub-block-declared
+/// source (from `eval/rails`) resolved down to the concrete IC instance inside
+/// that sub-block, so the editor's connection map can anchor the rail's
+/// producer ghost and order the power tree without re-deriving module
+/// structure client-side.
+const ScenePowerRail = struct {
+    /// Canonical (source-side) top-level net name, e.g. "V_6VA".
+    net: []const u8,
+    /// Sub-block handle that sources the rail, e.g. "buck_6v".
+    source: []const u8,
+    /// The source sub-block's output port name, e.g. "VOUT".
+    source_port: []const u8,
+    /// Ref-des of the producing IC inside that sub-block (parent-renumbered,
+    /// so it matches the scene's hub refs). Empty when no IC could be resolved.
+    source_hub: []const u8,
+    nominal: ?f64,
+    /// Ferrite-bridged downstream names that belong to this rail.
+    aliases: []const []const u8,
+};
+
+/// First U-prefixed ref among the pins of `net_name` inside `sb` — the IC leg
+/// of a sub-block's output net, when the IC touches it directly.
+fn icOnSubBlockNet(sb: env_mod.SubBlock, net_name: []const u8) []const u8 {
+    for (sb.block.nets) |n| {
+        if (!std.mem.eql(u8, n.name, net_name)) continue;
+        for (n.pins) |p| {
+            if (p.ref_des.len > 0 and (p.ref_des[0] == 'U' or p.ref_des[0] == 'u')) return p.ref_des;
+        }
+    }
+    return "";
+}
+
+/// First U-prefixed instance in the sub-block — the fallback producer when the
+/// output net never touches the IC (a boost's L→D→cap output, say).
+fn firstIcInSubBlock(sb: env_mod.SubBlock) []const u8 {
+    for (sb.block.instances) |inst| {
+        if (inst.ref_des.len > 0 and (inst.ref_des[0] == 'U' or inst.ref_des[0] == 'u')) return inst.ref_des;
+    }
+    return "";
+}
+
+/// Resolve each `eval/rails` PowerRail to its producing IC ref for the scene.
+fn buildPowerRails(allocator: Allocator, block: *const DesignBlock) Allocator.Error![]const ScenePowerRail {
+    const power_rails = try rails_mod.build(allocator, block);
+    var out: std.ArrayListUnmanaged(ScenePowerRail) = .empty;
+    for (power_rails) |r| {
+        var hub: []const u8 = "";
+        for (block.sub_blocks) |sb| {
+            if (!std.mem.eql(u8, sb.name, r.source_ref_des)) continue;
+            var port_net: []const u8 = "";
+            for (sb.block.ports) |p| {
+                if (std.mem.eql(u8, p.name, r.source_port)) port_net = p.net;
+            }
+            if (port_net.len > 0) hub = icOnSubBlockNet(sb, port_net);
+            if (hub.len == 0) hub = firstIcInSubBlock(sb);
+            break;
+        }
+        try out.append(allocator, .{
+            .net = r.name,
+            .source = r.source_ref_des,
+            .source_port = r.source_port,
+            .source_hub = hub,
+            .nominal = r.nominal,
+            .aliases = r.aliases,
+        });
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 const SceneGraph = struct {
     allocator: Allocator,
     vb_w: f64 = 0,
@@ -258,6 +328,9 @@ const SceneGraph = struct {
     /// The design's top-level boundary `(port …)` forms, so the editor can list /
     /// add / remove them (the design-level interface view).
     ports: []const env_mod.Port = &.{},
+    /// Sub-block-sourced power rails with their producer IC resolved — the
+    /// editor's map draws the power tree from these.
+    power_rails: []const ScenePowerRail = &.{},
 
     fn init(allocator: Allocator) SceneGraph {
         return .{
@@ -597,6 +670,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     scene.design_name = block.name;
     scene.authored_sections = try collectAuthoredSections(allocator, block);
     scene.ports = block.ports;
+    scene.power_rails = try buildPowerRails(allocator, block);
 
     var alt_map: PinoutAltMap = .empty;
     var asserted_fns = try asserted_fns_mod.buildMap(allocator, block);
@@ -1649,6 +1723,32 @@ fn collectTerminalLabel(ctx: *RenderCtx, scene: *SceneGraph, end_x: f64, cy: f64
 
 // ── JSON Serialization ───────────────────────────────────────────────
 
+/// Power rails (sub-block-sourced) with their producer IC resolved — the
+/// editor's map draws the power tree from these (producer ghost on a
+/// regulator's input rail, power-first cell ordering).
+fn writeRailsJson(w: anytype, power_rails: []const ScenePowerRail) !void {
+    try w.writeAll(",\"rails\":[");
+    for (power_rails, 0..) |r, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"net\":");
+        try json_writer.writeString(w, r.net);
+        try w.writeAll(",\"source\":");
+        try json_writer.writeString(w, r.source);
+        try w.writeAll(",\"source_port\":");
+        try json_writer.writeString(w, r.source_port);
+        try w.writeAll(",\"source_hub\":");
+        try json_writer.writeString(w, r.source_hub);
+        if (r.nominal) |v| try w.print(",\"nominal\":{d}", .{v});
+        try w.writeAll(",\"aliases\":[");
+        for (r.aliases, 0..) |a, j| {
+            if (j > 0) try w.writeAll(",");
+            try json_writer.writeString(w, a);
+        }
+        try w.writeAll("]}");
+    }
+    try w.writeAll("]");
+}
+
 fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const w = buf.writer(allocator);
@@ -1832,6 +1932,8 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         try w.writeAll("}");
     }
     try w.writeAll("]");
+
+    try writeRailsJson(w, scene.power_rails);
 
     try w.writeAll("}");
     return buf.toOwnedSlice(allocator);
