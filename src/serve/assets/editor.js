@@ -365,17 +365,25 @@
       const mid = w.pts[Math.floor(w.pts.length / 2)];
       const hot = hotNet && w.net === hotNet;
       ctx.globalAlpha = drag ? dimW : (w.link ? 1 : (inBox(mid[0], mid[1]) ? 1 : 0.12));
-      if (w.via && !hot) {                             // in-line element in the path: leads + symbol/chip
+      if (w.via) {                                     // in-line element in the path: leads + symbol/chip.
+        // Draw even when the net is hot — highlighting one side must NOT make the part vanish.
         const dev = w.via.device, half = dev ? 16 : 11;
+        const seld = selection && w.via.ref && selection.ref === w.via.ref;   // selected in inspector → tint the part
         const p0 = w.pts[0], p1 = w.pts[w.pts.length - 1], yy = p0[1], cxw = (p0[0] + p1[0]) / 2;
-        ctx.strokeStyle = w.diff ? C.diff : C.link; ctx.lineWidth = sw(w.diff ? 1.5 : 1.6);
+        ctx.strokeStyle = hot ? C.hot : (w.diff ? C.diff : C.link); ctx.lineWidth = sw(hot ? 2 : (w.diff ? 1.5 : 1.6));
         ctx.beginPath(); ctx.moveTo(p0[0], yy); ctx.lineTo(cxw - half, yy); ctx.moveTo(cxw + half, yy); ctx.lineTo(p1[0], yy); ctx.stroke();
         if (dev) {                                      // pass-through device (level shifter): a filled chip
-          const amp = half * 0.5; ctx.fillStyle = C.ghost; ctx.strokeStyle = C.ghostStroke; ctx.lineWidth = sw(1.6);
+          const amp = half * 0.5; ctx.fillStyle = C.ghost; ctx.strokeStyle = seld ? C.sel : C.ghostStroke; ctx.lineWidth = sw(seld ? 2.4 : 1.6);
           roundRect(cxw - half, yy - amp, 2 * half, 2 * amp, sw(2)); ctx.fill(); ctx.stroke();
         } else {
-          ctx.strokeStyle = C.passStroke; ctx.lineWidth = sw(1.5);
+          // The part BRIDGES two nets — it isn't ON one — so a hot net never tints it (only selection does).
+          ctx.strokeStyle = seld ? C.sel : C.passStroke; ctx.lineWidth = sw(seld ? 2.2 : 1.5);
           symbol(w.via.type || "box", cxw - half, cxw + half, yy, sw);
+        }
+        if (w.via.value && 11 * s >= 7) {               // value caption BELOW the symbol (net labels sit above)
+          ctx.fillStyle = C.passText; ctx.font = "10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+          ctx.fillText(w.via.value.length > 9 ? w.via.value.slice(0, 8) + "…" : w.via.value, cxw, yy + 7);
+          ctx.textBaseline = "middle";
         }
         return;
       }
@@ -419,11 +427,12 @@
       if (!ptVis(p.x, p.y)) return;
       const txt = 15 * s >= 7;
       const type = p.type || "resistor", term = p.term || (p.up ? "rail" : "gnd");
+      const seld = selection && p.ref && selection.ref === p.ref;   // selected in inspector → tint the spoke
       if (p.axis === "h") {                                          // side spoke: symbol inline on a horizontal wire
         const dir = p.dir || 1, y = p.y;
         const sA = p.x - SPOKE_SYM / 2, sB = p.x + SPOKE_SYM / 2;
         const jx = p.jx != null ? p.jx : (dir > 0 ? sA - 8 : sB + 8), tx = p.tx != null ? p.tx : (dir > 0 ? sB + 14 : sA - 14);
-        ctx.strokeStyle = C.passStroke; ctx.lineWidth = sw(1.4);
+        ctx.strokeStyle = seld ? C.sel : C.passStroke; ctx.lineWidth = sw(seld ? 2.2 : 1.4);
         line(jx, y, dir > 0 ? sA : sB, y); line(dir > 0 ? sB : sA, y, tx, y);   // lead-in + lead-out
         symbol(type, sA, sB, y, sw);                                 // passive drawn ALONG the spoke
         if (txt) { const cap = p.value || p.ref || ""; ctx.fillStyle = C.passText; ctx.font = "10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "bottom"; ctx.fillText(cap.length > 9 ? cap.slice(0, 8) + "…" : cap, p.x, y - 7); ctx.textBaseline = "middle"; }
@@ -438,7 +447,7 @@
         return;
       }
       const x = p.x, y0 = p.y + 4, yb = y0 + 14, yend = yb + 6;
-      ctx.strokeStyle = C.passStroke; ctx.lineWidth = sw(1.4);
+      ctx.strokeStyle = seld ? C.sel : C.passStroke; ctx.lineWidth = sw(seld ? 2.2 : 1.4);
       line(x, p.y, x, y0); line(x, yb, x, yend);
       ctx.save(); ctx.translate(x, (y0 + yb) / 2); ctx.rotate(Math.PI / 2); symbol(type, -7, 7, 0, sw); ctx.restore();
       // value-only caption (e.g. "100nF", "2× 10uF"), like the standard editor — the
@@ -483,7 +492,6 @@
     // draws at any zoom; only its caption obeys the LOD text cutoff.
     {
       const showText = 11 * s >= 7;
-      ctx.font = "11px sans-serif";
       M.labels.forEach((l) => {
         if (!ptVis(l.x, l.y)) return;
         ctx.globalAlpha = (l.link || inBox(l.x, l.y)) ? 1 : 0.12;
@@ -494,6 +502,7 @@
         ctx.fillStyle = hot ? C.hot : lev ? ercColor(lev) : l.diff ? C.diff : l.link ? C.link : l.port ? C.labelPort : C.labelNet;
         ctx.textAlign = l.anchor === "start" ? "left" : l.anchor === "end" ? "right" : "center";
         ctx.textBaseline = "middle";
+        if (l.w) fitFont(l.text, l.w, 11, 6); else ctx.font = "11px sans-serif";   // shrink a net label wider than its line
         ctx.fillText(l.text, l.x, l.y);
       });
       ctx.globalAlpha = 1;
@@ -545,13 +554,15 @@
       const ev = h.terminal ? null : ercByRef.get(h.ref);            // ERC warning ring
       if (ev) { ctx.strokeStyle = ercColor(ev); ctx.lineWidth = sw(2); ctx.setLineDash([sw(3), sw(3)]); roundRect(h.x + ox - 3, h.y + oy - 3, h.w + 6, h.h + 6, sw(5)); ctx.stroke(); ctx.setLineDash([]); }
       if (15 * s >= 8) {
-        ctx.fillStyle = h.ghost ? C.ghostLabel : C.hubLabel; ctx.font = "600 15px sans-serif"; ctx.textAlign = "center";
+        ctx.fillStyle = h.ghost ? C.ghostLabel : C.hubLabel; ctx.textAlign = "center";
         // The ↗ marks a click-to-jump link (fan-out only); map proxies edit in place.
-        ctx.fillText((h.ghost && !ghostAll ? "↗ " : "") + h.label, h.cx + ox, h.y + oy + (h.part ? 15 : 16));
-        if (h.part && 11 * s >= 7) {                    // second line: the component / part number
-          ctx.fillStyle = C.pinName; ctx.font = "11px sans-serif";
-          const maxc = Math.max(4, Math.floor((h.w - 14) / 6.2));
-          ctx.fillText(h.part.length > maxc ? h.part.slice(0, maxc - 1) + "…" : h.part, h.cx + ox, h.y + oy + 30);
+        const title = (h.ghost && !ghostAll ? "↗ " : "") + h.label;
+        fitFont(title, h.w - 14, 15, 8, "600");         // shrink refdes/label to fit the box width
+        ctx.fillText(title, h.cx + ox, h.y + oy + (h.part ? 15 : 16));
+        if (h.part && 11 * s >= 7) {                    // second line: component / part number — shrunk to fit, not truncated
+          ctx.fillStyle = C.pinName;
+          fitFont(h.part, h.w - 14, 11, 7);
+          ctx.fillText(h.part, h.cx + ox, h.y + oy + 30);
         }
       }
       // pins
@@ -632,6 +643,21 @@
   }
   function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
   function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+  // Shrink the font so `text` fits within `maxW` world-units (down to `floor`px), for labels
+  // pinned to a fixed span — a net line, a component box. Sets ctx.font to the fitted
+  // "[weight ]<px>px sans-serif" and returns the px used. maxW<=0 ⇒ keep base size.
+  function fitFont(text, maxW, px, floor, weight) {
+    const pre = weight ? weight + " " : "";
+    ctx.font = pre + px + "px sans-serif";
+    if (!(maxW > 0)) return px;
+    const tw = ctx.measureText(text).width;
+    if (tw <= maxW) return px;
+    const p = Math.max(floor || 6, px * (maxW / tw));
+    ctx.font = pre + p + "px sans-serif";
+    return p;
+  }
+  // Usable text width of a wire segment between world-x a and b (its length minus padding).
+  function segW(a, b) { return Math.max(8, Math.abs(b - a) - 10); }
 
   // Earth-ground symbol drawn at a terminal: the connection node sits ON the
   // wire end (x,y) so it visibly touches the net, a short stub drops to the
@@ -829,7 +855,7 @@
       const h = down.hit;
       if (h.t === "pin") highlightNetToggle(h.net);
       else if (h.t === "ghost") jumpToGhost(h.ref);
-      else if (h.t === "part") { if (h.ghost) revealGhostBus(h.ref); select(h.kind, h.ref); }
+      else if (h.t === "part") { if (h.ghost) revealGhostBus(h.ref); else pinnedChips.clear(); select(h.kind, h.ref); }
       else if (h.t === "chip") toggleChipPin(h.chip);
       else if (h.t === "net") highlightNetToggle(h.net);
       else deselect();
@@ -859,7 +885,9 @@
   canvas.addEventListener("dblclick", (e) => {
     const w = worldFromEvent(e), h = pick(w[0], w[1]);
     if (h.t === "net" || (h.t === "pin" && h.net)) { setHotNet(h.net); focusInspectorPrimary(); }
-    else if (h.t === "part") { select(h.kind, h.ref); focusInspectorPrimary(); }
+    else if (h.t === "part" && h.kind === "hub") { fanOutPart(h.ref); }              // double-click an IC (or a ghost proxy) → dive into its fan-out view
+    else if (h.t === "part") { select(h.kind, h.ref); focusInspectorPrimary(); }     // passive → focus its value for editing
+    else if (h.t === "ghost") { jumpToGhost(h.ref); }                                // already in fan-out view → hop to this partner
   });
 
   // Part and net are mutually exclusive in the inspector: selecting one clears
@@ -876,12 +904,14 @@
     scheduleDraw();
   }
   // Click a ghost → pin (reveal) every bus line landing on it, so all its yellow connections
-  // (e.g. the LMX2595 ghost's SPI_MOSI + SPI_SCK) draw at once. Toggles: a second click clears them.
+  // (e.g. the LMX2595 ghost's SPI_MOSI + SPI_SCK) draw at once — EXCLUSIVELY: this replaces any
+  // other ghost's reveal so only one part is highlighted at a time. Re-clicking a ghost whose
+  // lines are already the sole reveal toggles it back off.
   function revealGhostBus(ref) {
     const cs = (M.chips || []).filter((c) => c.target === ref && !c.overflow);
-    if (!cs.length) return;
-    const allOn = cs.every((c) => pinnedChips.has(c));
-    cs.forEach((c) => { if (allOn) pinnedChips.delete(c); else pinnedChips.add(c); });
+    const allOn = cs.length > 0 && pinnedChips.size === cs.length && cs.every((c) => pinnedChips.has(c));
+    pinnedChips.clear();
+    if (!allOn) cs.forEach((c) => pinnedChips.add(c));
     scheduleDraw();
   }
   function setHotNet(net) { if (!net) return; hotNet = net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
@@ -1441,10 +1471,13 @@
         item.chain = els.map((x) => ({ ref: x.ref, value: x.value || "", type: x.type, device: !!x.device, component: x.component || compOf.get(x.ref) || "", net: (fwd ? x.outNet : x.inNet) || "" }));
         item.outNet = (b.net && b.net !== a.net) ? b.net : null;
       } else if (link.passives.length) {
-        // A single series passive stays one small inline symbol on the wire.
+        // A single series passive stays one small inline symbol on the wire. Carry the
+        // partner-side net too — a series R bridges two DIFFERENT nets — so the layout
+        // can name each side of the symbol (not one label centered on it) and the ghost
+        // pin reads its own net (netB), not the IC-side net.
         const one = link.passives[0];
-        item.via = { type: one.type, label: one.ref + (one.value ? " " + one.value : ""), device: devs.length > 0, ref: one.ref };
-        item.outNet = (devs.length > 0 && b.net && b.net !== a.net) ? b.net : null;
+        item.via = { type: one.type, label: one.ref + (one.value ? " " + one.value : ""), device: devs.length > 0, ref: one.ref, value: one.value || "" };
+        item.outNet = (b.net && b.net !== a.net) ? b.net : null;
       }
       arr.push(item);
     };
@@ -1608,7 +1641,7 @@
       // The middle column between IC and ghost holds inline blocks: a pass-through
       // shifter (SHIFT_W) or a multi-element chain (one CHAIN_SLOT per element). Its
       // width sets how far out the ghost partner sits.
-      const sideMid = (gs) => { let w = 0; gs.forEach((g) => g.items.forEach((it) => { if (it.through) w = Math.max(w, SHIFT_W); if (it.chain) w = Math.max(w, it.chain.length * CHAIN_SLOT); })); return w; };
+      const sideMid = (gs) => { let w = 0; gs.forEach((g) => g.items.forEach((it) => { if (it.through) w = Math.max(w, SHIFT_W); if (it.chain) w = Math.max(w, it.chain.length * CHAIN_SLOT); if (it.via) w = Math.max(w, CHAIN_SLOT); })); return w; };
       const leftMid = sideMid(side.left), rightMid = sideMid(side.right);
       const sideW = (gs, mid) => gs.length ? (mid > 0 ? LEAD + mid + LEAD + GW : OUT + GW) : 0;
       // Gather this IC's extra pins (no point-to-point partner) and split them across the
@@ -1677,18 +1710,24 @@
         });
         return PULLH;
       };
-      const layoutSide = (gs, onRight, mid) => {
+      const layoutSide = (gs, onRight) => {
         if (!gs.length) return HEAD;
         const icEdge = onRight ? icX + ICW : icX;
         const dir = onRight ? 1 : -1;
         const shiftX = onRight ? icEdge + LEAD : icEdge - LEAD - SHIFT_W;
         const shIn = onRight ? shiftX : shiftX + SHIFT_W, shOut = onRight ? shiftX + SHIFT_W : shiftX;
-        const ghX = mid > 0 ? (onRight ? icEdge + LEAD + mid + LEAD : icEdge - LEAD - mid - LEAD - GW)
-          : (onRight ? icEdge + OUT : icEdge - OUT - GW);
-        const ghIn = onRight ? ghX : ghX + GW;
         const colStart = onRight ? icEdge + LEAD : icEdge - LEAD;   // IC-side edge of the chain column
         let y = HEAD + PITCH / 2, lastBot = HEAD + PITCH;
         gs.forEach((g) => {
+          // Each ghost hugs the IC at ITS OWN distance — just past THIS group's widest
+          // in-line run (shifter / chain), not the widest run on the whole side — so a
+          // direct-link partner stays close even when a sibling group has a long chain.
+          // (The cell still reserves the side max via sideW, so nothing overflows.)
+          let gmid = 0;
+          g.items.forEach((it) => { if (it.through) gmid = Math.max(gmid, SHIFT_W); if (it.chain) gmid = Math.max(gmid, it.chain.length * CHAIN_SLOT); if (it.via) gmid = Math.max(gmid, CHAIN_SLOT); });
+          const ghX = gmid > 0 ? (onRight ? icEdge + LEAD + gmid + LEAD : icEdge - LEAD - gmid - LEAD - GW)
+            : (onRight ? icEdge + OUT : icEdge - OUT - GW);
+          const ghIn = onRight ? ghX : ghX + GW;
           // Order items so each shifter's channels are a contiguous run (direct first).
           const ordered = g.items.slice().sort((p, q) => {
             const sp = p.through ? p.through.ref : "", sq = q.through ? q.through.ref : "";
@@ -1719,31 +1758,48 @@
                 const cx = colStart + dir * (k * CHAIN_SLOT + CHAIN_SLOT / 2);
                 const half = el.device ? CHAIN_DEV : 13;
                 cell.wires.push({ net: prevNet, pts: [[prevX, r.y], [cx - dir * half, r.y]] });
-                if (prevNet) cell.labels.push({ text: prevNet, x: (prevX + cx - dir * half) / 2, y: r.y - 9 });
+                if (prevNet) cell.labels.push({ text: prevNet, x: (prevX + cx - dir * half) / 2, y: r.y - 9, w: segW(prevX, cx - dir * half) });
                 if (el.device) {
                   cell.ghosts.push({ ref: el.ref, label: el.ref, part: el.component || "", x: cx - half, y: r.y - SHEAD / 2, w: 2 * half, h: SHEAD, pins: [
                     { pin: prevNet, name: "", side: onRight ? "left" : "right", x: cx - dir * half, y: r.y, net: prevNet, vx: null, vy: null },
                     { pin: el.net, name: "", side: onRight ? "right" : "left", x: cx + dir * half, y: r.y, net: el.net, vx: null, vy: null },
                   ] });
                 } else {
-                  cell.wires.push({ net: prevNet, via: { type: el.type, label: el.ref + (el.value ? " " + el.value : ""), ref: el.ref }, pts: [[cx - dir * half, r.y], [cx + dir * half, r.y]] });
+                  cell.wires.push({ net: prevNet, via: { type: el.type, label: el.ref + (el.value ? " " + el.value : ""), ref: el.ref, value: el.value || "" }, pts: [[cx - half, r.y], [cx + half, r.y]] });   // symbol span only, left→right (zero-length via-leads)
                 }
                 prevX = cx + dir * half; prevNet = el.net;
               });
               cell.wires.push({ net: prevNet, pts: [[prevX, r.y], [ghIn, r.y]] });
-              if (prevNet) cell.labels.push({ text: prevNet, x: (prevX + ghIn) / 2, y: r.y - 9 });
+              if (prevNet) cell.labels.push({ text: prevNet, x: (prevX + ghIn) / 2, y: r.y - 9, w: segW(prevX, ghIn) });
               i++; continue;
             }
             if (r.it.busPin) {                                     // bus pin ON the ghost: dot + a lead (the gpin's vx/vy stub) + net label ABOVE the lead; the yellow reveal connects to the lead end
               // Align the label to the ghost edge, reading outward along the lead: left-aligned
               // when the pin is on the ghost's RIGHT edge (dir<0), right-aligned on the LEFT edge.
-              cell.labels.push({ text: netLeaf(r.it.net), x: ghIn - dir * 7, y: r.y - 10, anchor: dir < 0 ? "start" : "end" });
+              cell.labels.push({ text: netLeaf(r.it.net), x: ghIn - dir * 7, y: r.y - 10, anchor: dir < 0 ? "start" : "end", w: BUS_LEAD - 8 });
               i++; continue;
             }
-            if (!r.s) {                                            // direct link: one straight wire + label
-              cell.wires.push({ net: r.it.net, diff: r.it.diff, via: r.it.via, pts: [[icEdge, r.y], [ghIn, r.y]] });
-              cell.labels.push({ text: r.it.net, x: (icEdge + ghIn) / 2, y: r.y - 10, diff: r.it.diff });
-              pullsOn(r.it.net, icEdge, ghIn, r.y, onRight ? 1 : -1);
+            if (!r.s) {                                            // direct link: one straight wire + label(s)
+              if (r.it.via && r.it.outNet && r.it.outNet !== r.it.net) {
+                // A series passive bridges two DIFFERENT nets. Emit it as three pieces —
+                // IC-lead (icNet) + symbol + ghost-lead (farNet) — so EACH SIDE is its own
+                // wire object: clicking one highlights only that net (not the whole line),
+                // and each side carries its own label + pulls. (Same shape the multi-element
+                // chain path produces; the ghost is spaced out one CHAIN_SLOT to fit it.)
+                const half = r.it.via.device ? 16 : 11, cxw = (icEdge + ghIn) / 2;
+                const icEnd = cxw - dir * half, ghEnd = cxw + dir * half;
+                cell.wires.push({ net: r.it.net, diff: r.it.diff, pts: [[icEdge, r.y], [icEnd, r.y]] });
+                cell.wires.push({ net: r.it.net, diff: r.it.diff, via: r.it.via, pts: [[cxw - half, r.y], [cxw + half, r.y]] });   // symbol span only, left→right: its via-leads are zero-length so no line is drawn THROUGH the part
+                cell.wires.push({ net: r.it.outNet, diff: r.it.diff, pts: [[ghEnd, r.y], [ghIn, r.y]] });
+                cell.labels.push({ text: r.it.net, x: (icEdge + icEnd) / 2, y: r.y - 10, diff: r.it.diff, w: segW(icEdge, icEnd) });
+                cell.labels.push({ text: r.it.outNet, x: (ghEnd + ghIn) / 2, y: r.y - 10, diff: r.it.diff, w: segW(ghEnd, ghIn) });
+                pullsOn(r.it.net, icEdge, icEnd, r.y, onRight ? 1 : -1);
+                pullsOn(r.it.outNet, ghEnd, ghIn, r.y, onRight ? 1 : -1);
+              } else {
+                cell.wires.push({ net: r.it.net, diff: r.it.diff, via: r.it.via, pts: [[icEdge, r.y], [ghIn, r.y]] });
+                cell.labels.push({ text: r.it.net, x: (icEdge + ghIn) / 2, y: r.y - 10, diff: r.it.diff, w: segW(icEdge, ghIn) });
+                pullsOn(r.it.net, icEdge, ghIn, r.y, onRight ? 1 : -1);
+              }
               i++; continue;
             }
             let j = i; while (j < rows.length && rows[j].s === r.s) j++;
@@ -1755,9 +1811,9 @@
               spins.push({ pin: oNet, name: "", side: onRight ? "right" : "left", x: shOut, y: rr.y, net: oNet, vx: null, vy: null });
               cell.wires.push({ net: rr.it.net, diff: rr.it.diff, pts: [[icEdge, rr.y], [shIn, rr.y]] });
               cell.wires.push({ net: fNet, diff: rr.it.diff, via: rr.it.tail || null, pts: [[shOut, rr.y], [ghIn, rr.y]] });
-              cell.labels.push({ text: rr.it.net, x: (icEdge + shIn) / 2, y: rr.y - 10, diff: rr.it.diff });
+              cell.labels.push({ text: rr.it.net, x: (icEdge + shIn) / 2, y: rr.y - 10, diff: rr.it.diff, w: segW(icEdge, shIn) });
               // shifter output net: at the leg midpoint normally, else hugged to the shifter so it clears the tail symbol.
-              if (rr.it.outNet) cell.labels.push({ text: oNet, x: rr.it.tail ? shOut + (onRight ? 1 : -1) * (LEAD * 0.3) : (shOut + ghIn) / 2, y: rr.y - 10, diff: rr.it.diff });
+              if (rr.it.outNet) cell.labels.push({ text: oNet, x: rr.it.tail ? shOut + (onRight ? 1 : -1) * (LEAD * 0.3) : (shOut + ghIn) / 2, y: rr.y - 10, diff: rr.it.diff, w: rr.it.tail ? LEAD * 0.5 : segW(shOut, ghIn) });
               pullsOn(rr.it.net, icEdge, shIn, rr.y, onRight ? 1 : -1);
               if (rr.it.outNet && !rr.it.tail) pullsOn(rr.it.outNet, shOut, ghIn, rr.y, onRight ? 1 : -1);
             });
@@ -1816,7 +1872,7 @@
         };
         return Math.max(drawSide(eLeft, false), drawSide(eRight, true));
       };
-      const lh = layoutSide(side.left, false, leftMid), rh = layoutSide(side.right, true, rightMid);
+      const lh = layoutSide(side.left, false), rh = layoutSide(side.right, true);
       const coreH = Math.max(lh, rh, HEAD + PITCH) + PAD;
       const extraH = layoutExtras(coreH);
       cell.ch = coreH + extraH + (showPower ? layoutRails(cell, ref, coreH + extraH) : 0);
@@ -1843,7 +1899,7 @@
         m.hubs.push({ ref: g.ref, label: g.label, part: g.part, x: ox + g.x, y: oy + g.y, w: g.w, h: g.h, cx: ox + g.x + g.w / 2, cy: oy + g.y + g.h / 2, pins: pins2, synthetic: true, ghost: true, terminal: !!g.terminal, partnerRef: g.terminal ? null : g.ref });
       });
       c.wires.forEach((w) => { const pts = w.pts.map((pt) => [ox + pt[0], oy + pt[1]]); m.wires.push({ net: w.net, bus: false, link: true, diff: w.diff, via: w.via, pts, bb: bbOf(pts) }); });
-      c.labels.forEach((l) => m.labels.push({ text: l.text, x: ox + l.x, y: oy + l.y, anchor: l.anchor || "center", ground: false, port: false, net: l.text, link: true, diff: l.diff }));
+      c.labels.forEach((l) => m.labels.push({ text: l.text, x: ox + l.x, y: oy + l.y, anchor: l.anchor || "center", ground: false, port: false, net: l.text, link: true, diff: l.diff, w: l.w }));
       c.pulls.forEach((p) => m.pulls.push({ x: ox + p.x, y: oy + p.y, ref: p.ref, value: p.value, rail: p.rail, up: p.up, type: p.type, term: p.term, axis: p.axis, dir: p.dir, jx: p.jx != null ? ox + p.jx : null, tx: p.tx != null ? ox + p.tx : null }));
       if (c.chips) c.chips.forEach((ch) => m.chips.push({ x: ox + ch.x, y: oy + ch.y, w: ch.w, h: ch.h, text: ch.text, net: ch.net, target: ch.target, overflow: ch.overflow, hidden: ch.hidden, side: ch.side, hx: ox + ch.hx, hy: oy + ch.hy, hostRef: c.ref }));
       if (c.rails) c.rails.forEach((r) => m.rails.push({ x: ox + r.x, y: oy + r.y, net: r.net, up: r.up, decoup: r.decoup }));
@@ -2590,6 +2646,22 @@
   function jumpToGhost(ref) {
     ghostAll = false; ghostRef = ref; selection = { kind: "hub", ref }; hotNet = null; deleteArmed = false;
     buildModel(); if (M.ghostBox) fitTo(M.ghostBox, 0.08);
+    syncGhostBtns(); renderInspector(); updateStatus(); scheduleDraw();
+  }
+  // Double-click an IC in the map → dive into its fan-out view (ring it with its direct
+  // partners). Same destination as selecting it + pressing G, but one gesture. Guards the
+  // no-partner case so a double-click never strands you on an empty view.
+  function fanOutPart(ref) {
+    if (!isHubRef(ref)) return;
+    ghostAll = false; ghostRef = ref; selection = { kind: "hub", ref }; hotNet = null; deleteArmed = false;
+    buildModel();
+    if (M.ghostBox) {
+      fitTo(M.ghostBox, 0.08);
+      toast("Fanning out " + ref + "'s direct connections — click a ghost to hop, Esc to exit");
+    } else {                                   // no point-to-point partners — bounce back to the map
+      ghostRef = null; ghostAll = true; buildModel(); if (M.mapBox) fitTo(M.mapBox, 0.03);
+      toast(ref + " has no direct IC-to-IC nets to fan out.", true);
+    }
     syncGhostBtns(); renderInspector(); updateStatus(); scheduleDraw();
   }
 
