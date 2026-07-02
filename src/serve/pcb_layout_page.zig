@@ -237,12 +237,17 @@ fn classifyLayoutSource(
 }
 
 /// The page's resolved placement source: the spec/starred flags the scorebar
-/// chip reads, plus the seed poses + grid fallback the solve uses.
+/// chip reads, plus the seed poses + grid fallback the solve uses. `verbatim`
+/// means the poses are a user-saved layout and must render exactly as saved
+/// (`placeFromPoses`), never through `solve`'s apply-or-re-solve ladder — a
+/// hand layout with a courtyard overlap is still the user's layout, not a
+/// stale cache to discard.
 const LayoutChoice = struct {
     spec_drives: bool,
     starred_name: ?[]const u8,
     cached: ?[]const optimizer.RefPose,
     grid_only: bool,
+    verbatim: bool,
 };
 
 /// Decide which placement `pcbLayoutPage` renders, walking the precedence ladder:
@@ -284,7 +289,28 @@ fn chooseLayout(
     // instead of running the (potentially expensive) optimizer on page open.
     // (Sub circuits always solve fresh instead — there's no grid placeholder.)
     const grid_only = sub == null and refine_name == null and !tune.regen and cached == null;
-    return .{ .spec_drives = spec_drives, .starred_name = starred_name, .cached = cached, .grid_only = grid_only };
+    // A starred saved layout is the user's hand state: render it VERBATIM.
+    // Routing it through `solve` would let `applyCached` reject it on any
+    // courtyard overlap (normal mid-floor-planning, e.g. right after a Stamp)
+    // and silently re-solve — the "I saved, refreshed, and my edits vanished" bug.
+    const verbatim = starred_name != null and cached != null;
+    return .{ .spec_drives = spec_drives, .starred_name = starred_name, .cached = cached, .grid_only = grid_only, .verbatim = verbatim };
+}
+
+/// Run the placement a resolved `LayoutChoice` calls for: the plain grid
+/// placeholder, the saved layout verbatim (`placeFromPoses` — never re-solved,
+/// even with courtyard overlaps), or a (possibly seeded) solve / refine.
+fn placeForChoice(
+    alloc: std.mem.Allocator,
+    eff_block: *env_mod.DesignBlock,
+    project_dir: []const u8,
+    choice: LayoutChoice,
+    refine_name: ?[]const u8,
+    params: optimizer.Params,
+) std.mem.Allocator.Error!optimizer.Placement {
+    if (choice.grid_only) return optimizer.gridPlace(alloc, eff_block, project_dir, params);
+    if (choice.verbatim) return optimizer.placeFromPoses(alloc, eff_block, project_dir, choice.cached.?, params);
+    return optimizer.solve(alloc, eff_block, project_dir, choice.cached, params, if (refine_name != null) .refine else .place);
 }
 
 /// GET /pcb-layout/:name — evaluate the design, run the optimizer, and return
@@ -358,17 +384,14 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const starred_name = choice.starred_name;
     const cached = choice.cached;
     const grid_only = choice.grid_only;
-    var placement = (if (grid_only)
-        optimizer.gridPlace(ctx.allocator, eff_block, ctx.project_dir, tune.params)
-    else
-        optimizer.solve(ctx.allocator, eff_block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place)) catch {
+    var placement = placeForChoice(ctx.allocator, eff_block, ctx.project_dir, choice, refine_name, tune.params) catch {
         res.status = 500;
         res.body = PLACEMENT_ERR_MSG;
         return;
     };
     // Persist the layout + its weights whenever the optimizer ran (miss /
     // stale / regen / tune) — see persistGeneratedLayout.
-    persistGeneratedLayout(ctx, name, placement, tune.params, sub);
+    persistGeneratedLayout(ctx, name, placement, tune.params, sub, single);
     // Module ★-layout stamp poses for the Stamp palette — whole-design pages
     // only (a ?sub scoped page IS one sub-circuit already).
     const subseeds = if (sub == null) buildSubSeedsJson(ctx.allocator, ctx.project_dir, eff_block, placement) else "{}";
@@ -548,11 +571,13 @@ fn descendToSub(
 /// Persist a freshly generated layout + its weights (auto cache + the named
 /// history), so later loads are instant and the controls show the weights
 /// that actually produced the layout on screen. Scoped sub-block runs skip
-/// this — there's no sidecar key for an individual sub-block yet.
-fn persistGeneratedLayout(ctx: *Handler, name: []const u8, placement: optimizer.Placement, params: optimizer.Params, sub: ?[]const u8) void {
+/// this — there's no sidecar key for an individual sub-block yet. A `single`
+/// (top-level design) page keeps exactly ONE saved layout, so it writes the
+/// cache slot only — never an "auto · …" history row alongside it.
+fn persistGeneratedLayout(ctx: *Handler, name: []const u8, placement: optimizer.Placement, params: optimizer.Params, sub: ?[]const u8, single: bool) void {
     if (sub != null or !placement.generated) return;
     writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, params);
-    recordAutoLayout(ctx.allocator, ctx.project_dir, name, placement, params);
+    if (!single) recordAutoLayout(ctx.allocator, ctx.project_dir, name, placement, params);
 }
 
 /// JSON object mapping each sub-block's parent-frame ref-des → its module
@@ -641,7 +666,12 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     else if (starred_name) |sn|
         readLayoutPosesFor(ctx.allocator, ctx.project_dir, name, sn, block, null)
     else if (tune.regen) null else readAutoPoses(ctx.allocator, ctx.project_dir, name);
-    const placement = optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place) catch {
+    // Starred = the user's saved hand layout: verbatim, same as the page (see
+    // chooseLayout — `solve` would re-solve it away on any courtyard overlap).
+    const placement = (if (starred_name != null and cached != null)
+        optimizer.placeFromPoses(ctx.allocator, block, ctx.project_dir, cached.?, tune.params)
+    else
+        optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place)) catch {
         res.status = 500;
         res.body = PLACEMENT_ERR_MSG;
         return;
@@ -790,11 +820,13 @@ pub fn solveForRequest(
     // Rough is the default top-level engine — a fresh solve always seeds rough.
     // (`?rough` is now redundant with this; left functional as a harmless alias.)
     params.rough = true;
-    // A named saved layout renders VERBATIM (placeFromPoses) — "show me this
-    // layout" must display exactly what was saved, not a re-optimized version:
-    // refine can drift a hand-tuned layout to a worse arrangement (e.g. a 70.8
-    // hand layout relaxing back to 86 because it isn't a relax fixed-point).
-    const placement = (if (opts.layout != null and cached != null)
+    // A named saved layout OR the starred default renders VERBATIM
+    // (placeFromPoses) — "show me this layout" must display exactly what was
+    // saved, not a re-optimized version: refine can drift a hand-tuned layout
+    // to a worse arrangement (e.g. a 70.8 hand layout relaxing back to 86
+    // because it isn't a relax fixed-point), and `solve` discards any saved
+    // layout with a courtyard overlap outright (applyCached's staleness test).
+    const placement = (if ((opts.layout != null or starred_name != null) and cached != null)
         optimizer.placeFromPoses(alloc, eff_block, project_dir, cached.?, params)
     else if (grid_only)
         optimizer.gridPlace(alloc, eff_block, project_dir, params)
@@ -2099,14 +2131,21 @@ fn refPosesFromPartPoses(alloc: std.mem.Allocator, parts: []const PartPose) std.
     return out;
 }
 
-/// Re-key a saved layout's poses onto `block`'s *current* ref-des via the
-/// renumber-stable `origin_key`. A pose whose `origin` matches an instance in
-/// `block` adopts that instance's present ref-des; one with no origin (a legacy
-/// entry saved before origin was recorded) or no match keeps its stored `ref`.
-/// This bridges a layout saved when the block flattened to different ref-des —
-/// e.g. a module previously rendered as a sub-block of a parent board (so its
-/// poses carry the parent's counters) but now rendered standalone — the same
-/// `origin_key` bridge the KiCad-sync / sub-block paths use (`poseByOriginKey`).
+/// The sub-block scope of a hierarchical ref-des: everything before the last
+/// `/` ("hmc733/U14" → "hmc733", "U5" → ""). Origin keys are module-LOCAL, so
+/// they only identify a part within one sub-block's scope.
+fn refPrefix(ref: []const u8) []const u8 {
+    const i = std.mem.lastIndexOfScalar(u8, ref, '/') orelse return "";
+    return ref[0..i];
+}
+
+/// Re-key a saved layout's poses onto `block`'s *current* ref-des. A pose
+/// whose stored `ref` still exists in the flatten keeps it verbatim (exact
+/// identity beats any heuristic). Otherwise the renumber-stable `origin_key`
+/// bridges the drift — scoped by the ref's sub-block prefix, because origin
+/// keys are module-local ("U1" names the main IC of EVERY sub-block; an
+/// unscoped map would let 13 sub-blocks clobber each other and drop 12 poses).
+/// A pose with no origin (a legacy entry) or no match keeps its stored `ref`.
 /// Null only on a flatten/allocation failure (caller falls back to raw refs).
 fn rekeyPosesByOrigin(
     alloc: std.mem.Allocator,
@@ -2115,14 +2154,22 @@ fn rekeyPosesByOrigin(
 ) ?[]const optimizer.RefPose {
     var flat: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
     netlist.collectInstances(alloc, block, "", &flat, block.refStyle()) catch return null;
+    var live = std.StringHashMap(void).init(alloc);
     var ref_of = std.StringHashMap([]const u8).init(alloc);
     for (flat.items) |fi| {
+        live.put(fi.ref_des, {}) catch return null;
         if (fi.origin_key.len == 0) continue;
-        ref_of.put(fi.origin_key, fi.ref_des) catch return null;
+        const key = std.fmt.allocPrint(alloc, "{s}\x00{s}", .{ refPrefix(fi.ref_des), fi.origin_key }) catch return null;
+        ref_of.put(key, fi.ref_des) catch return null;
     }
     const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
     for (parts, 0..) |pp, i| {
-        const ref = if (pp.origin.len > 0) (ref_of.get(pp.origin) orelse pp.ref) else pp.ref;
+        const ref = if (live.contains(pp.ref))
+            pp.ref
+        else if (pp.origin.len > 0) blk: {
+            const key = std.fmt.allocPrint(alloc, "{s}\x00{s}", .{ refPrefix(pp.ref), pp.origin }) catch return null;
+            break :blk ref_of.get(key) orelse pp.ref;
+        } else pp.ref;
         out[i] = .{ .ref = ref, .x = pp.x, .y = pp.y, .rot = pp.rot, .side = pp.side, .locked = pp.locked };
     }
     return out;

@@ -93,6 +93,7 @@ function scenePaint(){paintQueued=false;
  var k=(r.width/vb.w);            // CSS px per svg-unit (label gating)
  var kk=k*dpr;
  ctx.setTransform(kk,0,0,kk,-vb.x*kk,-vb.y*kk);   // draw in svg-unit coords
+ paintGroupBoxes(ctx,k);
  paintParts(ctx,k);
  paintLinks(ctx);
  paintClr(ctx);
@@ -160,10 +161,14 @@ function paintParts(ctx,k){
     var c=wpt(i,pd.x,pd.y);
     ctx.font="600 "+fs.toFixed(1)+"px system-ui,sans-serif";
     ctx.fillText(pd.num,X(c.x),Y(c.y));});}
-  ctx.font="600 9px system-ui,sans-serif";
-  ctx.textAlign="center";ctx.textBaseline="alphabetic";
-  ctx.fillStyle=unp?"#f85149":(p.kind=="hub"?"#58a6ff":"#8b949e");
-  ctx.fillText(p.ref,X(p.x),Y(p.y)-p.hh*S-2);}}
+  // Ref labels only where they carry signal — the hovered part, the selected/
+  // cross-probed part, and red-flagged staged parts. Sub-circuits are named by
+  // their group box (paintGroupBoxes) instead of a per-part refdes cloud.
+  if(i===cur||unp||(selRef&&p.ref===selRef)){
+   ctx.font="600 9px system-ui,sans-serif";
+   ctx.textAlign="center";ctx.textBaseline="alphabetic";
+   ctx.fillStyle=unp?"#f85149":(p.kind=="hub"?"#58a6ff":"#8b949e");
+   ctx.fillText(p.ref,X(p.x),Y(p.y)-p.hh*S-2);}}}
 function padPath(ctx,pd){
  ctx.beginPath();
  if(pd.poly&&pd.poly.length>=3){
@@ -172,6 +177,32 @@ function padPath(ctx,pd){
   ctx.closePath();return;}
  if(pd.shape==="circle"){ctx.arc(pd.x*S,pd.y*S,Math.min(pd.w,pd.h)/2*S,0,6.2832);return;}
  ctx.rect((pd.x-pd.w/2)*S,(pd.y-pd.h/2)*S,pd.w*S,pd.h*S);}
+// Sub-circuit boxes: each ref-prefix group ("buck/…") draws as ONE named
+// bounding box, so the board reads as sub-circuits rather than a refdes
+// cloud. Solid while rigid (drags as a unit), dashed when exploded; the name
+// label above the box stays a constant screen size across zoom. Staged
+// (unplaced) members are excluded so the box doesn't stretch to the band.
+function paintGroupBoxes(ctx,k){
+ var ik=1/Math.max(k,0.01);
+ for(var g in GRPS){var idxs=GRPS[g];if(idxs.length<2)continue;
+  var x0=1/0,y0=1/0,x1=-1/0,y1=-1/0,n=0;
+  idxs.forEach(function(i){var p=P[i];if(unplacedSet[p.ref])return;
+   var a=(p.rot||0)*Math.PI/180,ca=Math.abs(Math.cos(a)),sa=Math.abs(Math.sin(a));
+   var ehw=(p.hw*ca+p.hh*sa)*S,ehh=(p.hw*sa+p.hh*ca)*S;
+   x0=Math.min(x0,X(p.x)-ehw);x1=Math.max(x1,X(p.x)+ehw);
+   y0=Math.min(y0,Y(p.y)-ehh);y1=Math.max(y1,Y(p.y)+ehh);n++;});
+  if(!n)continue;
+  var pd=3;x0-=pd;y0-=pd;x1+=pd;y1+=pd;
+  var hov=(hoverGrpName===g);
+  ctx.strokeStyle=hov?"#7ee787":"rgba(126,231,135,0.4)";
+  ctx.lineWidth=hov?1.6:1;
+  ctx.setLineDash(grpRigid(g)?[]:[5,4]);
+  ctx.strokeRect(x0,y0,x1-x0,y1-y0);
+  ctx.setLineDash([]);
+  ctx.font="600 "+(11*ik).toFixed(2)+"px system-ui,sans-serif";
+  ctx.textAlign="left";ctx.textBaseline="alphabetic";
+  ctx.fillStyle=hov?"#7ee787":"rgba(126,231,135,0.8)";
+  ctx.fillText(g,x0,y0-4*ik);}}
 // ── Unplaced (auto-staged) parts: the ones a (placement …) spec didn't list.
 //    The optimizer drops them into a staging band; flag each one red and draw
 //    a dashed red box around the cluster so a gap in the spec is obvious.
@@ -693,6 +724,15 @@ function persistLayout(nm,verb){var msg=document.getElementById("pcb-savemsg");
     if(found){found.parts=pmap;found.kind="manual";found.routes=routes;found.outline=PCB.outline||null;}
     else Ls.push({name:nm,kind:"manual",parts:pmap,score:null,routes:routes,outline:PCB.outline||null});
     upsertLayoutPanel(nm);setActiveLayout(nm);loadLayoutScores();
+    // The URL may still carry a layout-selection flag from an earlier Rough/
+    // Regenerate (?show=cache, ?regen, tuning params) that outranks the starred
+    // layout on reload. You just SAVED — a refresh must show the saved board,
+    // so scrub those flags from the address bar.
+    try{var u=new URL(window.location.href);
+     ["show","refine","regen","rough","loop_w","w_align","w_congest","cap_w_max","grid",
+      "court_overlap","route_gap","group_w","group_zone_w","group_loop_relief","zone_pack"]
+      .forEach(function(kq){u.searchParams.delete(kq);});
+     window.history.replaceState(null,"",u.pathname+(u.searchParams.toString()?"?"+u.searchParams.toString():"")+u.hash);}catch(e){}
     if(msg){msg.style.color="#3fb950";msg.textContent=(verb==="updating"?"updated":"saved")+" \u{2713}";}})
   .catch(function(){if(msg){msg.style.color="#f85149";
     msg.textContent=(verb==="updating"?"update":"save")+" failed";}});}
