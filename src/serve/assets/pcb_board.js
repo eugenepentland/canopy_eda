@@ -280,8 +280,48 @@ var sel=[], gdrag=null;
 function markSel(){els.forEach(function(g,i){g.classList.toggle("msel",sel.indexOf(i)>=0);});}
 function selSet(idxs){sel=idxs;markSel();}
 function selClear(){if(!sel.length)return;sel=[];markSel();}
-function gdragStart(m,down){return {sx:m.x,sy:m.y,moved:false,down:down,snap:snapPoses(),
- orig:sel.filter(function(k){return !P[k].locked;}).map(function(k){return {i:k,x:P[k].x,y:P[k].y};})};}
+function gdragStart(m,down,idxs){var src=idxs||sel;return {sx:m.x,sy:m.y,moved:false,down:down,snap:snapPoses(),
+ orig:src.filter(function(k){return !P[k].locked;}).map(function(k){return {i:k,x:P[k].x,y:P[k].y};})};}
+// ── Rigid sub-circuits ────────────────────────────────────────────────
+// Each sub-block's parts share a ref prefix ("buck/C3" → group "buck").
+// A rigid group drags/rotates as one unit — the pre-laid module keeps its
+// internal layout while you slide the whole block around the board. "G"
+// (or the palette scissors) explodes a group back to individual parts;
+// the choice persists per design in localStorage.
+function grpOf(ref){var i=String(ref).indexOf("/");return i<0?null:ref.slice(0,i);}
+var GRPS={};P.forEach(function(p,i){var g=grpOf(p.ref);if(g)(GRPS[g]=GRPS[g]||[]).push(i);});
+var rigidOffKey="pcb-rigid-off:"+PCB.name, rigidOff={};
+try{rigidOff=JSON.parse(localStorage.getItem(rigidOffKey)||"{}")||{};}catch(e){}
+function rigidSave(){try{localStorage.setItem(rigidOffKey,JSON.stringify(rigidOff));}catch(e){}}
+function grpRigid(g){return !!(g&&GRPS[g]&&GRPS[g].length>1&&!rigidOff[g]);}
+function grpIdxs(i){var g=grpOf(P[i].ref);return grpRigid(g)?GRPS[g]:null;}
+function grpToggle(g){if(!GRPS[g])return;rigidOff[g]=!rigidOff[g];if(!rigidOff[g])delete rigidOff[g];
+ rigidSave();subPanelRefresh();}
+function grpHl(g,on){(GRPS[g]||[]).forEach(function(i){els[i].classList.toggle("grp-hl",on);
+ if(padEls[i])padEls[i].classList.toggle("grp-hl",on);});}
+// Rotate a rigid group 90° about its centroid (locked members stay put).
+function rotateGroup(idxs,sign){recordUndo();
+ var mv=idxs.filter(function(i){return !P[i].locked;});if(!mv.length)return;
+ var cx=0,cy=0;mv.forEach(function(i){cx+=P[i].x;cy+=P[i].y;});cx/=mv.length;cy/=mv.length;
+ mv.forEach(function(i){var dx=P[i].x-cx,dy=P[i].y-cy;
+  if(sign>0){P[i].x=cx-dy;P[i].y=cy+dx;}else{P[i].x=cx+dy;P[i].y=cy-dx;}
+  P[i].x=Math.round(P[i].x/G)*G;P[i].y=Math.round(P[i].y/G)*G;
+  P[i].rot=((((P[i].rot||0)+(sign>0?90:-90))%360)+360)%360;setT(i);});
+ clearRouteFor(mv);rats();drawClr();fetchScore();refreshUnplaced();}
+// Stamp a group from its module ★ layout (PCB.subseeds): normalize the seed
+// cluster to its own bbox, drop it just right of everything currently placed.
+function stampGroup(g){var seeds=PCB.subseeds||{},idxs=GRPS[g]||[],hit=[];
+ idxs.forEach(function(i){var sd=seeds[P[i].ref];if(sd)hit.push({i:i,sd:sd});});
+ if(!hit.length)return;
+ recordUndo();
+ var minx=1e9,miny=1e9;hit.forEach(function(h){minx=Math.min(minx,h.sd.x);miny=Math.min(miny,h.sd.y);});
+ var maxx=-1e9;P.forEach(function(p){maxx=Math.max(maxx,p.x+(p.hw||1));});
+ var ox=Math.round((maxx+5)/G)*G, oy=0;
+ hit.forEach(function(h){var i=h.i;if(P[i].locked)return;
+  P[i].x=Math.round((h.sd.x-minx+ox)/G)*G;P[i].y=Math.round((h.sd.y-miny+oy)/G)*G;
+  P[i].rot=h.sd.rot||0;P[i].side=h.sd.side||"top";setT(i);});
+ delete rigidOff[g];rigidSave();
+ clearRouteFor(idxs);rats();drawClr();fetchScore();refreshUnplaced();subPanelRefresh();}
 // Iterative layout editing: curLayout is the saved layout the Update button
 // writes back into (overwrite in place) instead of forcing a new one. Set by
 // Load and after a Save as…. Save/Update persist in place (no page reload — see
@@ -298,19 +338,21 @@ function setActiveLayout(nm){curLayout=(nm&&nm.length)?nm:null;
  if(chip&&curLayout){chip.textContent="saved \u{00b7} "+curLayout;chip.className="src-chip src-snapshot";
   chip.title="Showing saved layout \u{201c}"+curLayout+"\u{201d} \u{2014} drag to edit, then Update to save progress.";}}
 els.forEach(function(g,i){
- g.addEventListener("mouseenter",function(){cur=i;});
- g.addEventListener("mouseleave",function(){if(cur===i)cur=-1;});
+ g.addEventListener("mouseenter",function(){cur=i;var gg=grpOf(P[i].ref);if(gg&&grpRigid(gg))grpHl(gg,true);});
+ g.addEventListener("mouseleave",function(){if(cur===i)cur=-1;var gg=grpOf(P[i].ref);if(gg)grpHl(gg,false);});
  g.addEventListener("pointerdown",function(ev){ev.preventDefault();
    if(SPACE||ev.button===1){startPan(ev);return;}   // pan, don't grab the part
    var m=mm(ev);
    if(sel.length>1&&sel.indexOf(i)>=0){gdrag=gdragStart(m,ev.target);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
    if(sel.length)selClear();
    if(P[i].locked){var net0=netAt(ev.target);if(net0)selNet(net0);selectComp(P[i].ref);return;}
+   var gi=grpIdxs(i);
+   if(gi){gdrag=gdragStart(m,ev.target,gi);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
    drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target,snap:snapPoses()};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});
  g.addEventListener("pointermove",function(ev){
    if(gdrag){var gm=mm(ev),dx=Math.round((gm.x-gdrag.sx)/G)*G,dy=Math.round((gm.y-gdrag.sy)/G)*G,any=false;
      gdrag.orig.forEach(function(o){var nx=o.x+dx,ny=o.y+dy;if(P[o.i].x!==nx||P[o.i].y!==ny){P[o.i].x=nx;P[o.i].y=ny;setT(o.i);any=true;}});
-     if(any){if(!gdrag.moved){gdrag.moved=true;clearRouteFor(sel);}rats();drawClr();refreshUnplaced();}return;}
+     if(any){if(!gdrag.moved){gdrag.moved=true;clearRouteFor(gdrag.orig.map(function(o){return o.i;}));}rats();drawClr();refreshUnplaced();}return;}
    if(!drag||drag.i!==i)return;var m=mm(ev);
    var nx=Math.round((m.x+drag.ox)/G)*G,ny=Math.round((m.y+drag.oy)/G)*G;
    if(nx===P[i].x&&ny===P[i].y)return;P[i].x=nx;P[i].y=ny;
@@ -336,6 +378,8 @@ els.forEach(function(g,i){
     if(sel.length>1&&sel.indexOf(i)>=0){gdrag=gdragStart(m,ev.target);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
     if(sel.length)selClear();
     if(P[i].locked){var net0=netAt(ev.target);if(net0)selNet(net0);selectComp(P[i].ref);return;}
+    var gi=grpIdxs(i);
+    if(gi){gdrag=gdragStart(m,ev.target,gi);g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";return;}
     drag={i:i,ox:P[i].x-m.x,oy:P[i].y-m.y,down:ev.target,snap:snapPoses()};g.setPointerCapture(ev.pointerId);g.style.cursor="grabbing";});}
 });
 // Keyboard: R / Shift+R rotates the hovered part; ? toggles the
@@ -351,6 +395,8 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Rotate hovered part −90°</span><kbd>Shift+R</kbd></div>'+
   '<div class="kbd-row"><span>Flip hovered part top/bottom</span><kbd>F</kbd></div>'+
   '<div class="kbd-row"><span>Lock / unlock hovered part</span><kbd>L</kbd></div>'+
+  '<div class="kbd-row"><span>Explode / re-cohere hovered sub-circuit</span><kbd>G</kbd></div>'+
+  '<div class="kbd-row"><span>Move whole sub-circuit</span><kbd>drag any of its parts</kbd></div>'+
   '<div class="kbd-row"><span>Move part (snaps to grid)</span><kbd>drag part</kbd></div>'+
   '<div class="kbd-row"><span>Select box (multi-select)</span><kbd>drag empty space</kbd></div>'+
   '<div class="kbd-row"><span>Move all selected together</span><kbd>drag a selected part</kbd></div>'+
@@ -378,9 +424,14 @@ document.addEventListener("keydown",function(ev){
  if(ev.key=="Escape"){if(kbdOv){kbdClose();}else{selClear();clearSel();}return;}
  var typing=kbTyping(ev.target);
  if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
- if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;recordUndo();
+ if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;
+   var rgi=grpIdxs(cur);
+   if(rgi){rotateGroup(rgi,ev.shiftKey?-1:1);return;}
+   recordUndo();
    P[cur].rot=((((P[cur].rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;
    setT(cur);clearRouteFor([cur]);rats();fetchScore();refreshUnplaced();if(selRef===P[cur].ref)updatePropLive();return;}
+ if((ev.key=="g"||ev.key=="G")&&cur>=0&&!typing){ev.preventDefault();
+   var gg=grpOf(P[cur].ref);if(gg&&GRPS[gg]){grpToggle(gg);grpHl(gg,grpRigid(gg));}return;}
  if((ev.key=="f"||ev.key=="F")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;recordUndo();
    P[cur].side=(P[cur].side==="bottom")?"top":"bottom";
    setT(cur);clearRouteFor([cur]);rats();drawClr();fetchScore();refreshUnplaced();
@@ -545,6 +596,33 @@ document.getElementById("pcb-saveas").addEventListener("click",function(){
 var updBtn=document.getElementById("pcb-update");
 if(updBtn)updBtn.addEventListener("click",function(){if(!curLayout)return;persistLayout(curLayout,"updating");});
 loadLayoutScores();
+// ── Sub-circuits palette ─────────────────────────────────────────────
+// One row per sub-block: member count, rigid/exploded toggle, and — when the
+// module has a ★ layout (PCB.subseeds) — a Stamp button that drops the whole
+// pre-laid cluster beside the board, ready to drag into place.
+function subPanelRefresh(){var box=document.getElementById("sub-panel");if(!box)return;
+ var names=Object.keys(GRPS).sort();var h='<div class="side-h">Sub-circuits</div>';
+ var seeds=PCB.subseeds||{};
+ names.forEach(function(g){
+  var hasSeed=GRPS[g].some(function(i){return !!seeds[P[i].ref];});
+  h+='<div class="sub-row" data-grp="'+pEsc(g)+'">'+
+   '<span class="sub-name">'+pEsc(g)+'</span><span class="sub-n">'+GRPS[g].length+'</span>'+
+   '<button class="btn sub-rigid'+(grpRigid(g)?" on":"")+'" data-rigid="'+pEsc(g)+'" title="'+
+    (grpRigid(g)?"Rigid — drags as one unit. Click to explode.":"Exploded — parts move individually. Click to re-cohere.")+'">'+
+    (grpRigid(g)?"\u{1F517}":"\u{2702}")+'</button>'+
+   (hasSeed?'<button class="btn sub-stamp" data-stamp="'+pEsc(g)+'" title="Place this sub-circuit from its module \u2605 layout">Stamp</button>':'')+
+   '</div>';});
+ box.innerHTML=h;
+ box.querySelectorAll("[data-rigid]").forEach(function(b){b.addEventListener("click",function(){grpToggle(b.getAttribute("data-rigid"));});});
+ box.querySelectorAll("[data-stamp]").forEach(function(b){b.addEventListener("click",function(){stampGroup(b.getAttribute("data-stamp"));});});
+ box.querySelectorAll(".sub-row").forEach(function(r){var g=r.getAttribute("data-grp");
+  r.addEventListener("mouseenter",function(){grpHl(g,true);});
+  r.addEventListener("mouseleave",function(){grpHl(g,false);});});}
+(function(){
+ if(!Object.keys(GRPS).length)return;
+ var side=document.querySelector(".pcb-side");if(!side)return;
+ var box=document.createElement("div");box.id="sub-panel";box.className="sub-panel";
+ side.appendChild(box);subPanelRefresh();})();
 }
 function hlBy(at,v,cls,on){document.querySelectorAll("["+at+"]").forEach(function(e){
  if(e.getAttribute(at)===v)e.classList.toggle(cls,on);});}

@@ -352,15 +352,11 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         return;
     };
     // Persist the layout + its weights whenever the optimizer ran (miss /
-    // stale / regen / tune), so later loads are instant and the controls show
-    // the weights that actually produced the layout on screen. Each run is also
-    // appended to the named-layout history so the user can review whether the
-    // auto placement got better or worse over time. Scoped sub-block runs skip
-    // this — there's no sidecar key for an individual sub-block yet.
-    if (sub == null and placement.generated) {
-        writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, tune.params);
-        recordAutoLayout(ctx.allocator, ctx.project_dir, name, placement, tune.params);
-    }
+    // stale / regen / tune) — see persistGeneratedLayout.
+    persistGeneratedLayout(ctx, name, placement, tune.params, sub);
+    // Module ★-layout stamp poses for the Stamp palette — whole-design pages
+    // only (a ?sub scoped page IS one sub-circuit already).
+    const subseeds = if (sub == null) buildSubSeedsJson(ctx.allocator, ctx.project_dir, eff_block, placement) else "{}";
     const shown = if (sub != null or tune.tuned)
         tune.params
     else
@@ -463,7 +459,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         routed,
         ro.params.clearance,
         violations,
-        .{ .read_only = embed and !edit_embed, .embed = embed, .sub = sub },
+        .{ .read_only = embed and !edit_embed, .embed = embed, .sub = sub, .subseeds_json = subseeds },
     );
     // Shared footprint engine (FP.padShape) must load before the board script
     // runs. Both scripts come after every column so the handlers find the
@@ -534,6 +530,51 @@ fn descendToSub(
         if (std.mem.eql(u8, slug, sub_slug)) return sb;
     }
     return null;
+}
+
+/// Persist a freshly generated layout + its weights (auto cache + the named
+/// history), so later loads are instant and the controls show the weights
+/// that actually produced the layout on screen. Scoped sub-block runs skip
+/// this — there's no sidecar key for an individual sub-block yet.
+fn persistGeneratedLayout(ctx: *Handler, name: []const u8, placement: optimizer.Placement, params: optimizer.Params, sub: ?[]const u8) void {
+    if (sub != null or !placement.generated) return;
+    writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, params);
+    recordAutoLayout(ctx.allocator, ctx.project_dir, name, placement, params);
+}
+
+/// JSON object mapping each sub-block's parent-frame ref-des → its module
+/// ★-layout pose (module-local mm + rot + side), for the viewer's per-group
+/// "Stamp" button — drop a whole pre-laid sub-circuit onto the board as a
+/// rigid cluster instead of laying its parts out again. Built through the
+/// same origin_key bridge the KiCad sync seeds from (subBlockPoseByOriginKey),
+/// so the poses match what a sync would stamp. "{}" when nothing bridges.
+fn buildSubSeedsJson(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    block: *const env_mod.DesignBlock,
+    p: optimizer.Placement,
+) []const u8 {
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    w.writeByte('{') catch return "{}";
+    var first = true;
+    for (block.sub_blocks) |sb| {
+        var m = subBlockPoseByOriginKey(alloc, project_dir, sb) orelse continue;
+        for (p.instances) |inst| {
+            if (inst.ref_des.len <= sb.name.len) continue;
+            if (!std.mem.startsWith(u8, inst.ref_des, sb.name) or inst.ref_des[sb.name.len] != '/') continue;
+            if (inst.origin_key.len == 0) continue;
+            const pose = m.get(inst.origin_key) orelse continue;
+            if (!first) w.writeByte(',') catch return "{}";
+            first = false;
+            writeJsonStr(w, inst.ref_des) catch return "{}";
+            w.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pose.x, pose.y, pose.rot }) catch return "{}";
+            if (pose.side == .bottom) w.writeAll(",\"side\":\"bottom\"") catch return "{}";
+            w.writeByte('}') catch return "{}";
+        }
+    }
+    w.writeByte('}') catch return "{}";
+    return aw.written();
 }
 
 /// Initial state of the embed preview's show-clearance / show-DRC toggles,
@@ -3562,7 +3603,13 @@ const LocalPt = struct { x: f64, y: f64 };
 /// (read-only preview *or* editable embed) — neither has the 3D toggle, so both
 /// skip the filesystem-scanning STEP-model resolution; `sub` is the `?sub=` slug
 /// a sub circuit's save/star POSTs append to target the per-sub layout sidecar.
-const PcbDataOpts = struct { read_only: bool, embed: bool, sub: ?[]const u8 };
+const PcbDataOpts = struct {
+    read_only: bool,
+    embed: bool,
+    sub: ?[]const u8,
+    /// Prebuilt `buildSubSeedsJson` object (the blob writer has no block).
+    subseeds_json: []const u8 = "{}",
+};
 
 /// World position of the GND-plane via covering the pad centred at (`cx`,`cy`),
 /// or that pad centre itself when no via is near (big board / no route). The
@@ -3701,6 +3748,10 @@ fn writePcbData(
     } else {
         try w.writeAll("\"sub\":null,");
     }
+    // Per-sub-block module ★-layout seed poses for the palette's Stamp button.
+    try w.writeAll("\"subseeds\":");
+    try w.writeAll(if (opts.subseeds_json.len > 0) opts.subseeds_json else "{}");
+    try w.writeAll(",");
     // Server-computed objective breakdown of the layout on screen — the baseline
     // the live score deltas against. Same shape the /api/pcb-score endpoint returns.
     try w.print("\"caps\":{d},\"auto\":", .{p.score.loop_caps});
@@ -4252,6 +4303,19 @@ const PAGE_CSS =
     \\/* Locked parts refuse drag/rotate/flip — dashed outline + no grab cursor. */
     \\.part.plocked{cursor:not-allowed}
     \\.part.plocked .court{stroke-dasharray:2 2!important;opacity:.92}
+    \\/* Rigid sub-circuit hover: every member of the group glows together, so
+    \\   "this whole block drags as one" is visible before you grab it. */
+    \\.part.grp-hl .court{filter:drop-shadow(0 0 3px rgba(126,231,135,.8));stroke:#7ee787!important}
+    \\/* Sub-circuits palette (sidebar): one row per sub-block. */
+    \\.sub-panel{border-top:1px solid #21262d}
+    \\.sub-row{display:flex;align-items:center;gap:6px;padding:5px 12px;font-size:12px}
+    \\.sub-row:hover{background:#1c2129}
+    \\.sub-name{color:#e6edf3;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\.sub-n{color:#6e7681;font-size:11px}
+    \\.sub-rigid,.sub-stamp{background:#21262d;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;
+    \\  font-size:11px;padding:1px 7px;cursor:pointer}
+    \\.sub-rigid.on{color:#7ee787;border-color:#2ea04366}
+    \\.sub-stamp:hover,.sub-rigid:hover{border-color:#58a6ff}
     \\.marquee{fill:rgba(88,166,255,.12);stroke:#58a6ff;stroke-width:1;stroke-dasharray:4 3;vector-effect:non-scaling-stroke;pointer-events:none}
     \\.pad{transition:fill .08s,filter .08s}
     \\.pad[data-net]{cursor:pointer}
