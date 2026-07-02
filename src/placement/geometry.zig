@@ -34,6 +34,10 @@ pub const Pad = struct {
     h: f64,
     shape: []const u8 = "rect",
     poly: []const [2]f64 = &.{},
+    /// Through-hole (or NPTH) pad — its copper exists on every layer, so the
+    /// router treats it as an obstacle (and a terminal) on both signal layers
+    /// regardless of which side its part is placed on.
+    thru: bool = false,
 };
 
 /// A silkscreen line segment (footprint-local mm).
@@ -159,6 +163,8 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
     const cl = node.asList() orelse return null;
     if (cl.len < 2) return null;
     const number = nodeText(arena, cl[1]);
+    const ptype: []const u8 = if (cl.len >= 3) (cl[2].asAtom() orelse "smd") else "smd";
+    const thru = std.mem.eql(u8, ptype, "thru") or std.mem.eql(u8, ptype, "npth");
     const shape: []const u8 = if (cl.len >= 4) (cl[3].asAtom() orelse "rect") else "rect";
     var x: f64 = 0;
     var y: f64 = 0;
@@ -178,7 +184,7 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
             poly = parsePadPoly(arena, c) orelse poly;
         }
     }
-    return .{ .number = number, .x = x, .y = y, .w = w, .h = h, .shape = shape, .poly = poly };
+    return .{ .number = number, .x = x, .y = y, .w = w, .h = h, .shape = shape, .poly = poly, .thru = thru };
 }
 
 /// Parse a `(poly (x y) …)` form into footprint-absolute points, or null.

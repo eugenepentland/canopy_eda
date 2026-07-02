@@ -1402,6 +1402,11 @@ fn buildAddFootprint(
     // staging grid and legacy origin placement leave it 0. Read raw — it is a
     // plain angle, not an nm-scaled length.
     const rot_deg = jsonNumNm(op_obj.get("rot"));
+    // Board side. "bottom" lands the new footprint on B.Cu with its geometry
+    // adapted to KiCad's stored back-side convention (local Y mirrored, layer
+    // tokens flipped — see adaptKmodChild). The op's rot already carries the
+    // +180° that maps netlisp's X-mirror onto KiCad's Y-mirror.
+    const is_back = std.mem.eql(u8, jsonStr(op_obj.get("side")), "bottom");
     if (lib_id.len == 0 or kmod.len == 0) return error.InvalidAdd;
 
     const kmod_nodes = try parser.parse(arena, kmod);
@@ -1413,7 +1418,7 @@ fn buildAddFootprint(
     try children.append(arena, Node.atom(Span.zero, FORM_FOOTPRINT));
     try children.append(arena, Node.string(Span.zero, lib_id));
     try children.append(arena, try makeAtForm(arena, x_mm, y_mm, rot_deg));
-    try children.append(arena, try makeLayerForm(arena, "F.Cu"));
+    try children.append(arena, try makeLayerForm(arena, if (is_back) "B.Cu" else "F.Cu"));
     // KiCad expects a (uuid …) per footprint; use the canopy_uuid as the
     // KiCad-internal uuid for new adds so the next sync's reader links
     // them up via the same handle without needing a second pass.
@@ -1443,12 +1448,13 @@ fn buildAddFootprint(
         }
     }
     // Inline geometry from .kicad_mod, skipping the placement/identity and
-    // legacy ref/value text we inject or reissue separately. Adds always land
-    // on the front, but a premade-layout pose can carry a rotation — fold it
-    // into each pad's stored angle (the file format keeps pad angles absolute).
+    // legacy ref/value text we inject or reissue separately. A premade-layout
+    // pose can carry a rotation — fold it into each pad's stored angle (the
+    // file format keeps pad angles absolute) — and a bottom-side pose lands
+    // the geometry in KiCad's stored back form.
     for (kmod_children[2..]) |sub| {
         if (skipKmodChild(sub)) continue;
-        try children.append(arena, try adaptKmodChild(arena, sub, false, rot_deg));
+        try children.append(arena, try adaptKmodChild(arena, sub, is_back, rot_deg));
     }
 
     var fp = Node.list(Span.zero, try children.toOwnedSlice(arena));
