@@ -151,6 +151,8 @@ pub const SavedLayout = struct {
     rough: bool = false,
     /// Routed copper captured with the poses (null = never routed/saved).
     routes: ?SavedRoutes = null,
+    /// User-drawn board outline captured with the poses (null = none drawn).
+    outline: ?SavedOutline = null,
 };
 
 /// One persisted routed-copper segment of a saved layout. Field names match
@@ -164,6 +166,13 @@ const SavedVia = struct { x: f64, y: f64, d: f64, drill: f64 = 0, net: []const u
 /// A saved layout's persisted copper — the routed tracks/vias captured with
 /// the poses, so a Save → reload → Load round-trips the routing too.
 const SavedRoutes = struct { tracks: []const SavedTrack, vias: []const SavedVia };
+
+/// A user-DRAWN board outline rectangle (world mm) captured with a saved
+/// layout — the interactive counterpart of the authored `(board (size W H))`
+/// form (the ▭ Outline tool: rough-place first, then draw the board around
+/// it). When the shown layout carries one it becomes the placement's
+/// `board_rect`, so every renderer draws it and the board-edge DRC checks it.
+const SavedOutline = struct { x: f64, y: f64, w: f64, h: f64 };
 
 /// Which layout state the page is showing — the precedence ladder made
 /// visible in the scorebar chip: source **spec** > saved **snapshot**
@@ -344,7 +353,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const starred_name = choice.starred_name;
     const cached = choice.cached;
     const grid_only = choice.grid_only;
-    const placement = (if (grid_only)
+    var placement = (if (grid_only)
         optimizer.gridPlace(ctx.allocator, eff_block, ctx.project_dir, tune.params)
     else
         optimizer.solve(ctx.allocator, eff_block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place)) catch {
@@ -367,16 +376,13 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // Deduplicated + best-score-first for the panel (see displayLayouts).
     const layouts = displayLayouts(ctx.allocator, ctx.project_dir, name, sub);
 
-    // Routing runs only on demand (?route=1); otherwise the shown saved
-    // layout's persisted copper is restored (see shownSavedRoutes).
-    const ro = parseRoute(req);
-    var routed: ?router.RouteResult = if (ro.run) (router.route(ctx.allocator, placement, ro.params) catch null) else null;
-    if (routed == null and sub == null)
-        routed = shownSavedRoutes(ctx.allocator, layouts, refine_name orelse starred_name, placement);
-    const violations: []const drc.Violation = if (routed) |r|
-        (drc.check(ctx.allocator, placement, r, ro.params.clearance) catch &.{})
-    else
-        &.{};
+    // Fold the shown layout's persisted extras (drawn outline, saved copper)
+    // into the placement and resolve routing/DRC — see resolveShownView.
+    const rv = resolveShownView(ctx, req, &placement, layouts, if (sub == null) (refine_name orelse starred_name) else null);
+    const ro = rv.ro;
+    const routed = rv.routed;
+    const violations = rv.violations;
+    const outline_drawn = rv.outline_drawn;
 
     const view = View.init(placement);
 
@@ -460,7 +466,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         routed,
         ro.params.clearance,
         violations,
-        .{ .read_only = embed and !edit_embed, .embed = embed, .sub = sub, .subseeds_json = subseeds },
+        .{ .read_only = embed and !edit_embed, .embed = embed, .sub = sub, .subseeds_json = subseeds, .outline_drawn = outline_drawn },
     );
     // Shared footprint engine (FP.padShape) must load before the board script
     // runs. Both scripts come after every column so the handlers find the
@@ -1613,6 +1619,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         .score = score,
         .parts = parts,
         .routes = parseSavedRoutes(req.arena, root.object.get("routes")),
+        .outline = parseSavedOutline(root.object.get("outline")),
     };
     const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
     var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
@@ -2216,6 +2223,7 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
             .default = default_name.len > 0 and std.mem.eql(u8, nm.string, default_name),
             .rough = rough,
             .routes = parseSavedRoutes(alloc, it.object.get("routes")),
+            .outline = parseSavedOutline(it.object.get("outline")),
         }) catch return list.items;
     }
     return list.toOwnedSlice(alloc) catch null;
@@ -2289,6 +2297,21 @@ fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedRoutes {
     };
 }
 
+/// Parse an `{"x","y","w","h"}` outline object; null when absent/malformed
+/// or degenerate (w/h must be positive real board dimensions).
+fn parseSavedOutline(v: ?std.json.Value) ?SavedOutline {
+    const obj = v orelse return null;
+    if (obj != .object) return null;
+    const o = SavedOutline{
+        .x = jsonNum(obj.object.get("x")),
+        .y = jsonNum(obj.object.get("y")),
+        .w = jsonNum(obj.object.get("w")),
+        .h = jsonNum(obj.object.get("h")),
+    };
+    if (!(o.w > 0) or !(o.h > 0)) return null;
+    return o;
+}
+
 /// A pose/route JSON string field, or "" when absent/not a string.
 fn jsonStrField(v: ?std.json.Value) []const u8 {
     const sv = v orelse return "";
@@ -2340,6 +2363,64 @@ fn restoreRoutes(alloc: std.mem.Allocator, sr: SavedRoutes, nets: []const export
         .net = if (vi.net.len > 0) (idx.get(vi.net) orelse -1) else -1,
     };
     return .{ .tracks = tracks, .vias = vias, .routed = 0, .total = 0 };
+}
+
+/// The page's resolved routing view: route params, the copper to draw (fresh
+/// ?route=1 result, else the shown layout's persisted routes), its DRC
+/// violations against the CURRENT poses, and whether a user-drawn outline was
+/// applied onto the placement (see applyShownOutline).
+const ShownView = struct {
+    ro: RouteOpts,
+    routed: ?router.RouteResult,
+    violations: []const drc.Violation,
+    outline_drawn: bool,
+};
+
+/// Resolve everything the shown saved layout contributes to the page: apply
+/// its drawn outline onto the placement (before DRC, so the board-edge check
+/// sees it), run routing when ?route=1 asked for it, else restore the
+/// layout's persisted copper, and DRC whatever copper is shown. `shown` is
+/// null for ?sub scoped pages (no whole-design layout applies).
+fn resolveShownView(
+    ctx: *Handler,
+    req: *httpz.Request,
+    placement: *optimizer.Placement,
+    layouts: []const SavedLayout,
+    shown: ?[]const u8,
+) ShownView {
+    // Drawn outline wins over the authored (board (size …)) rectangle — it's
+    // the explicit per-layout edit.
+    const outline_drawn = applyShownOutline(placement, layouts, shown);
+    // Routing runs only on demand (?route=1); otherwise the shown saved
+    // layout's persisted copper is restored (see shownSavedRoutes).
+    const ro = parseRoute(req);
+    var routed: ?router.RouteResult = if (ro.run) (router.route(ctx.allocator, placement.*, ro.params) catch null) else null;
+    if (routed == null)
+        routed = shownSavedRoutes(ctx.allocator, layouts, shown, placement.*);
+    const violations: []const drc.Violation = if (routed) |r|
+        (drc.check(ctx.allocator, placement.*, r, ro.params.clearance) catch &.{})
+    else
+        &.{};
+    return .{ .ro = ro, .routed = routed, .violations = violations, .outline_drawn = outline_drawn };
+}
+
+/// Apply the shown saved layout's user-drawn outline (if any) onto the
+/// placement: sets `board_rect` and grows the framing bbox so the whole
+/// rectangle is on screen. Returns true when an outline was applied (the
+/// blob then flags it editable — see PCB.outline in the viewer).
+fn applyShownOutline(placement: *optimizer.Placement, layouts: []const SavedLayout, shown: ?[]const u8) bool {
+    const sn = shown orelse return false;
+    for (layouts) |L| {
+        if (!std.mem.eql(u8, L.name, sn)) continue;
+        const o = L.outline orelse return false;
+        placement.board_rect = .{ .minx = o.x, .miny = o.y, .w = o.w, .h = o.h };
+        placement.minx = @min(placement.minx, o.x);
+        placement.miny = @min(placement.miny, o.y);
+        placement.maxx = @max(placement.maxx, o.x + o.w);
+        placement.maxy = @max(placement.maxy, o.y + o.h);
+        return true;
+    }
+    return false;
 }
 
 /// The shown saved layout's persisted copper, rebuilt against the current
@@ -2491,6 +2572,7 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: 
             try w.writeAll(",\"routes\":");
             try writeSavedRoutesJson(w, sr);
         }
+        if (L.outline) |o| try w.print(",\"outline\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}", .{ o.x, o.y, o.w, o.h });
         if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}", .{ s.hpwl, s.loop, s.caps, s.objective });
         try w.writeAll(",\"parts\":[");
         for (L.parts, 0..) |pt, j| {
@@ -3141,6 +3223,9 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     try w.writeAll("<button class=\"btn\" id=\"pcb-undo\" disabled title=\"Undo last move / rotate (Ctrl+Z)\">↶ Undo</button>");
     try w.writeAll("<button class=\"btn\" id=\"pcb-redo\" disabled title=\"Redo (Ctrl+Shift+Z)\">↷ Redo</button>");
     try w.writeAll("<button class=\"btn\" id=\"pcb-reset\" title=\"Discard manual edits, restore the auto layout\">Reset</button>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-outline\" title=\"Draw the board outline: click, then drag a rectangle " ++
+        "on the board (a plain click clears it). Grid-snapped; saved with the layout (Save/Update); becomes the board edge " ++
+        "the renderers draw and the board-edge DRC checks.\">\u{25AD} Outline</button>");
     try w.writeAll(BAR_GRP_END);
     try w.writeAll("<span class=\"zoom-grp\"><button class=\"btn\" id=\"z-out\" title=\"Zoom out\">−</button>");
     try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");
@@ -3674,6 +3759,9 @@ const PcbDataOpts = struct {
     sub: ?[]const u8,
     /// Prebuilt `buildSubSeedsJson` object (the blob writer has no block).
     subseeds_json: []const u8 = "{}",
+    /// The blob's "board" rect came from a user-DRAWN layout outline (the ▭
+    /// tool), so the viewer treats it as editable (PCB.outline).
+    outline_drawn: bool = false,
 };
 
 /// World position of the GND-plane via covering the pad centred at (`cx`,`cy`),
@@ -3790,33 +3878,7 @@ fn writePcbData(
     }
 
     try w.writeAll("<script>const PCB=");
-    try w.print("{{\"scale\":{d},\"minx\":{d},\"miny\":{d},", .{ v.scale, v.minx, v.miny });
-    try w.print("\"margin\":{d},\"grid\":{d},\"w\":{d},\"h\":{d},", .{ MARGIN_MM, optimizer.GRID_MM, v.width, v.height });
-    try w.print("\"clr\":{d},\"cmargin\":{d},", .{ clearance, geometry.BBOX_MARGIN_MM });
-    // `(board (size W H) …)` outline rectangle (world mm) — null when the
-    // design declares no physical board; the viewer draws the edge.
-    if (p.board_rect) |br| {
-        try w.print("\"board\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}},", .{ br.minx, br.miny, br.w, br.h });
-    } else {
-        try w.writeAll("\"board\":null,");
-    }
-    // Read-only flag for the embedded per-sub-block preview — BOARD_JS skips all
-    // edit wiring (drag/rotate/route/save) when set, leaving a pan/zoom viewer.
-    try w.print("\"ro\":{s},", .{if (opts.read_only) "true" else "false"});
-    // `sub` slug when this page is a `?sub=` scoped sub circuit — BOARD_JS appends
-    // it as `?sub=` to the save/delete/star/rescore POSTs so they persist to the
-    // per-sub layout sidecar instead of the parent design's.
-    if (opts.sub) |s| {
-        try w.writeAll("\"sub\":");
-        try writeJsonStr(w, s);
-        try w.writeAll(",");
-    } else {
-        try w.writeAll("\"sub\":null,");
-    }
-    // Per-sub-block module ★-layout seed poses for the palette's Stamp button.
-    try w.writeAll("\"subseeds\":");
-    try w.writeAll(if (opts.subseeds_json.len > 0) opts.subseeds_json else "{}");
-    try w.writeAll(",");
+    try writeBlobHead(w, v, clearance, p, opts);
     // Server-computed objective breakdown of the layout on screen — the baseline
     // the live score deltas against. Same shape the /api/pcb-score endpoint returns.
     try w.print("\"caps\":{d},\"auto\":", .{p.score.loop_caps});
@@ -4030,6 +4092,41 @@ fn writeRoutedArrays(
     try w.writeAll("]");
 }
 
+/// The PCB blob's leading scalar/flag fields: projection, grid, board rect
+/// (the placement's — carries a drawn outline when one was applied), the
+/// read-only/sub flags, and the Stamp seed poses. Split from writePcbData
+/// purely to keep both under the function-length cap.
+fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placement, opts: PcbDataOpts) HandlerError!void {
+    try w.print("{{\"scale\":{d},\"minx\":{d},\"miny\":{d},", .{ v.scale, v.minx, v.miny });
+    try w.print("\"margin\":{d},\"grid\":{d},\"w\":{d},\"h\":{d},", .{ MARGIN_MM, optimizer.GRID_MM, v.width, v.height });
+    try w.print("\"clr\":{d},\"cmargin\":{d},", .{ clearance, geometry.BBOX_MARGIN_MM });
+    // Outline rectangle (world mm) — the authored `(board (size W H) …)` or
+    // the shown layout's drawn outline; null when neither exists.
+    if (p.board_rect) |br| {
+        try w.print("\"board\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}},", .{ br.minx, br.miny, br.w, br.h });
+    } else {
+        try w.writeAll("\"board\":null,");
+    }
+    // Read-only flag for the embedded per-sub-block preview — BOARD_JS skips all
+    // edit wiring (drag/rotate/route/save) when set, leaving a pan/zoom viewer.
+    try w.print("\"ro\":{s},", .{if (opts.read_only) "true" else "false"});
+    // `sub` slug when this page is a `?sub=` scoped sub circuit — BOARD_JS appends
+    // it as `?sub=` to the save/delete/star/rescore POSTs so they persist to the
+    // per-sub layout sidecar instead of the parent design's.
+    if (opts.sub) |sq| {
+        try w.writeAll("\"sub\":");
+        try writeJsonStr(w, sq);
+        try w.writeAll(",");
+    } else {
+        try w.writeAll("\"sub\":null,");
+    }
+    if (opts.outline_drawn) try w.writeAll("\"outline_drawn\":true,");
+    // Per-sub-block module ★-layout seed poses for the palette's Stamp button.
+    try w.writeAll("\"subseeds\":");
+    try w.writeAll(if (opts.subseeds_json.len > 0) opts.subseeds_json else "{}");
+    try w.writeAll(",");
+}
+
 /// A routed feature's net NAME for the persistable route JSON ("" for −1).
 fn netNameOf(nets: []const export_kicad.FlatNet, idx: i32) []const u8 {
     if (idx < 0 or idx >= nets.len) return "";
@@ -4069,6 +4166,7 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
             try w.writeAll(",\"routes\":");
             try writeSavedRoutesJson(w, sr);
         }
+        if (L.outline) |o| try w.print(",\"outline\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}", .{ o.x, o.y, o.w, o.h });
         try w.writeAll(",\"parts\":{");
         for (L.parts, 0..) |pt, j| {
             if (j > 0) try w.writeAll(",");
@@ -4652,6 +4750,32 @@ test "layouts sidecar round-trips part origin" {
     try std.testing.expectEqual(@as(usize, 2), got[0].parts.len);
     try std.testing.expectEqualStrings("C_VDDIN_BULK", got[0].parts[0].origin);
     try std.testing.expectEqualStrings("", got[0].parts[1].origin);
+}
+
+// spec: Web Server - A saved layout round-trips its user-drawn board outline through the sidecar
+test "layouts sidecar round-trips a drawn outline" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
+    const layouts = [_]SavedLayout{.{
+        .name = "outlined",
+        .kind = KIND_MANUAL,
+        .ts = 1,
+        .score = null,
+        .parts = &parts,
+        .outline = .{ .x = -5, .y = -2.5, .w = 50, .h = 40 },
+    }};
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJson(&aw.writer, &layouts, null);
+    const got = parseLayouts(alloc, aw.written()) orelse return error.TestParseFailed;
+    const o = got[0].outline orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(f64, -5), o.x);
+    try std.testing.expectEqual(@as(f64, 50), o.w);
+    try std.testing.expectEqual(@as(f64, 40), o.h);
+    // A degenerate outline (zero size) never round-trips into existence.
+    try std.testing.expect(parseSavedOutline(null) == null);
 }
 
 // spec: Web Server - A saved layout round-trips its routed copper (tracks + vias, net-name keyed) through the sidecar

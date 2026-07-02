@@ -9,6 +9,7 @@ unlinked tag: Web Server - A rough-seeded saved layout round-trips its rough fla
 unlinked tag: Web Server - A saved layout round-trips each part's board side and lock flag through the sidecar in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - A saved layout round-trips each part's renumber-stable origin key through the sidecar in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - A saved layout round-trips its routed copper (tracks + vias, net-name keyed) through the sidecar in ./src/serve/pcb_layout_page.zig
+unlinked tag: Web Server - A saved layout round-trips its user-drawn board outline through the sidecar in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - Module grouping tag detects placement-cohesion groups but not pin or diagram groups in ./src/serve/modules.zig
 unlinked tag: Web Server - Module-layout status of a missing sidecar is all-false in ./src/layout_status.zig
 unlinked tag: Web Server - Module-layout status reads rough and starred flags from the layouts sidecar in ./src/layout_status.zig
