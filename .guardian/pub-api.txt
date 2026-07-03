@@ -521,6 +521,7 @@ src/placement/optimizer.zig::BoardRect struct_
 src/placement/optimizer.zig::BoardRules struct_
 src/placement/optimizer.zig::Breakdown struct_
 src/placement/optimizer.zig::Edge enum_
+src/placement/optimizer.zig::FlatNet value
 src/placement/optimizer.zig::FullRouted struct_
 src/placement/optimizer.zig::GRID_MM value
 src/placement/optimizer.zig::Link struct_
@@ -549,6 +550,7 @@ src/placement/optimizer.zig::isGroundName | fn isGroundName(name: []const u8) bo
 src/placement/optimizer.zig::label | fn label(self: ProgressPass) []const u8
 src/placement/optimizer.zig::loopNh | fn loopNh(parts: []const Part, lp: Loop) f64
 src/placement/optimizer.zig::perPartBlame | fn perPartBlame(p: Placement, params: Params, out: []f64) void
+src/placement/optimizer.zig::pickAnchorHub | fn pickAnchorHub(parts: []const Part, nets: []const FlatNet) ?usize
 src/placement/optimizer.zig::placeFromPoses | fn placeFromPoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!Placement
 src/placement/optimizer.zig::placementDiag | fn placementDiag() PlacementDiag
 src/placement/optimizer.zig::routedScorePoses | fn routedScorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!f64
@@ -1050,7 +1052,7 @@ src/serve/pages.zig::indexPage | fn indexPage(ctx: *Handler, _: *httpz.Request, 
 src/serve/pcb_describe.zig::DescribeError value
 src/serve/pcb_describe.zig::Side enum_
 src/serve/pcb_describe.zig::aabbHalf | fn aabbHalf(part: optimizer.Part) [2]f64
-src/serve/pcb_describe.zig::anchorIndex | fn anchorIndex(parts: []const optimizer.Part) ?usize
+src/serve/pcb_describe.zig::anchorIndex | fn anchorIndex(parts: []const optimizer.Part, nets: []const optimizer.FlatNet) ?usize
 src/serve/pcb_describe.zig::describeDesign | fn describeDesign( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: pcb_layout_page.PngRequest, ) pcb_layout_page.PngError![]u8
 src/serve/pcb_describe.zig::originOf | fn originOf(p: optimizer.Placement, pi: usize) []const u8
 src/serve/pcb_describe.zig::pcbDescribeApi | fn pcbDescribeApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void

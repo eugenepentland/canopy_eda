@@ -94,7 +94,7 @@ fn classKey(alloc: std.mem.Allocator, p: optimizer.Placement, idx: usize) std.me
 /// Analyze every non-anchor part of `p` into a `PInfo` (edge + class). Returns an
 /// empty slice if the placement has no anchor hub.
 pub fn analyze(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]PInfo {
-    const ai = pcb_describe.anchorIndex(p.parts) orelse return &.{};
+    const ai = pcb_describe.anchorIndex(p.parts, p.nets) orelse return &.{};
     const anchor = p.parts[ai];
     const a_half = pcb_describe.aabbHalf(anchor);
     var out: std.ArrayListUnmanaged(PInfo) = .empty;

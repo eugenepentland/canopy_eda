@@ -495,7 +495,7 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.rough)] = .{ .scope = tl, .doc = .{
         .syntax = "(rough [(anchor \"REF\")] (group \"name\" \"REF\"…)…)",
         .summary = "Author the rough-placement seed (the `?rough=1` / \"Rough\" button on /pcb-layout): " ++
-            "(anchor …) names the IC everything centres on (default: the largest hub), and each " ++
+            "(anchor …) names the IC everything centres on (default: the most-connected hub), and each " ++
             "(group …) is a priority TIER in descending order — the first group is placed first and " ++
             "packs tightest to the anchor, later groups fan outward. A group sets priority, not " ++
             "position: every member still lands on the IC side its pad connects to (GND ignored), so " ++

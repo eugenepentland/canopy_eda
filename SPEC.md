@@ -93,6 +93,7 @@ Public functions: load
 Public functions: solve
 
 - classifies hub vs passive ref-des, handling hierarchical paths
+- anchor pick prefers net degree over courtyard area, area only breaks ties
 - excludes ground nets from spring forces
 - multi-pin wirelength uses the rectilinear MST, which equals span when collinear and exceeds HPWL otherwise
 - loop inductance floors at the via mounting inductance and rises with conductor length

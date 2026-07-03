@@ -49,7 +49,7 @@ const parser = @import("../sexpr/parser.zig");
 const infra_fs = @import("../infra/fs.zig");
 
 const DesignBlock = env.DesignBlock;
-const FlatNet = export_kicad.FlatNet;
+pub const FlatNet = export_kicad.FlatNet;
 
 // ── Tunables ─────────────────────────────────────────────────────────────
 const K_DECOUPLE: f64 = 0.95; // power/decoupling cap hug + ground-return (highest priority)
@@ -3125,6 +3125,38 @@ fn orientPadsToIC(
     }
 }
 
+/// Anchor pick for the pad-anchored ring and for spatial attribution: the hub
+/// with the most distinct nets on its pads. A reset button or a power FET can
+/// out-measure the MCU on courtyard *area* (which mis-anchored whole modules —
+/// w55rp20 once ringed 56 parts around its SW_RESET), but never on
+/// connectivity. Area only breaks degree ties, so a two-hub board keeps the
+/// physically dominant IC. Returns null when the board has no hub at all.
+pub fn pickAnchorHub(parts: []const Part, nets: []const FlatNet) ?usize {
+    var best: ?usize = null;
+    var best_deg: usize = 0;
+    var best_area: f64 = -1;
+    for (parts, 0..) |p, i| {
+        if (p.kind != .hub) continue;
+        var deg: usize = 0;
+        for (nets) |net| {
+            for (net.pins) |pin| {
+                if (std.mem.eql(u8, pin.ref_des, p.ref_des)) {
+                    deg += 1;
+                    break;
+                }
+            }
+        }
+        const area = p.hw * p.hh;
+        const wins = if (best == null) true else if (deg != best_deg) deg > best_deg else area > best_area;
+        if (wins) {
+            best = i;
+            best_deg = deg;
+            best_area = area;
+        }
+    }
+    return best;
+}
+
 fn packPadAnchored(
     arena: std.mem.Allocator,
     parts: []Part,
@@ -3137,7 +3169,9 @@ fn packPadAnchored(
     cohere: bool,
 ) std.mem.Allocator.Error!bool {
     // Anchor: the author's `(rough (anchor …))` IC when it resolves to a hub,
-    // else the largest hub IC. Matched by ref-des or module-local origin name.
+    // else the most-connected hub (see `pickAnchorHub` — courtyard area alone
+    // let a reset button out-anchor the MCU). Matched by ref-des or
+    // module-local origin name.
     const rough = prep.block.rough;
     var hi: usize = 0;
     var found = false;
@@ -3153,16 +3187,9 @@ fn packPadAnchored(
         }
     }
     if (!found) {
-        var best: f64 = -1;
-        for (parts, 0..) |p, i| {
-            if (p.kind != .hub) continue;
-            const kb = keepBoxOf(p);
-            const area = kb.hw * kb.hh;
-            if (area > best) {
-                best = area;
-                hi = i;
-                found = true;
-            }
+        if (pickAnchorHub(parts, nets)) |i| {
+            hi = i;
+            found = true;
         }
     }
     if (!found) return false;
@@ -8478,4 +8505,25 @@ test "applyCached applies side and locked" {
     try testing.expect(parts[0].locked);
     try testing.expectEqual(@as(f64, 4), parts[0].x);
     try testing.expectEqual(@as(f64, 180), parts[0].rot);
+}
+
+// spec: placement/optimizer - anchor pick prefers net degree over courtyard area, area only breaks ties
+test "pickAnchorHub picks the wired MCU over a big-courtyard button" {
+    // U1 = small MCU on three nets; U4 = reset button with a 4x bigger
+    // courtyard on one net (the w55rp20 mis-anchor shape).
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "U4", .kind = .hub, .hw = 4, .hh = 4, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "VDD", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
+        .{ .name = "GND", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C1", .pin = "2" }, .{ .ref_des = "U4", .pin = "2" } } },
+        .{ .name = "RUN", .pins = &.{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "U4", .pin = "1" } } },
+    };
+    try testing.expectEqual(@as(?usize, 0), pickAnchorHub(&parts, &nets));
+    // Degree tie (no nets at all) falls back to courtyard area: U4 wins.
+    try testing.expectEqual(@as(?usize, 1), pickAnchorHub(&parts, &.{}));
+    // No hub anywhere: null.
+    try testing.expectEqual(@as(?usize, null), pickAnchorHub(parts[2..], &nets));
 }
