@@ -27,6 +27,7 @@ const escape = @import("escape.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
 const Allocator = std.mem.Allocator;
+const RenderCtx = @import("render_svg/context.zig").RenderCtx;
 
 /// Render the design-review markdown document.
 ///
@@ -334,7 +335,7 @@ fn writeAssertions(w: anytype, asserts: []const review.AssertionReport) !void {
 
 fn writeSchematicSections(
     allocator: Allocator,
-    ctx: anytype,
+    ctx: *RenderCtx,
     w: anytype,
     block: *const DesignBlock,
 ) !void {
@@ -365,7 +366,7 @@ fn writeSchematicSections(
 
 fn writeSchematicSection(
     allocator: Allocator,
-    ctx: anytype,
+    ctx: *RenderCtx,
     w: anytype,
     sec: Section,
     heading_level: u8,
@@ -418,7 +419,7 @@ fn writeSchematicSection(
 /// just repeats that symbol. Mirrors the live schematic page's `isHub` filter.
 fn writeHubBlock(
     allocator: Allocator,
-    ctx: anytype,
+    ctx: *RenderCtx,
     w: anytype,
     pin_groups: []const env_mod.PinGroup,
     ref_des: []const u8,
@@ -644,7 +645,7 @@ fn writeMdEscaped(w: anytype, s: []const u8) !void {
     };
 }
 
-fn lookupInstance(ctx: anytype, ref_des: []const u8) ?env_mod.Instance {
+fn lookupInstance(ctx: *RenderCtx, ref_des: []const u8) ?env_mod.Instance {
     const fi = ctx.inst_map.get(ref_des) orelse return null;
     return env_mod.Instance{
         .ref_des = fi.ref_des,
