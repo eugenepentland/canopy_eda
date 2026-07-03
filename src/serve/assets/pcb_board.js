@@ -603,6 +603,11 @@ document.addEventListener("keydown",function(ev){
  var typing=kbTyping(ev.target);
  if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
  if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;
+   // Mirror the drag priority (pointerdown): a marquee multi-select that
+   // includes the hovered part rotates as ONE rigid body about the
+   // selection's centroid — not each part spinning in place — then a rigid
+   // sub-circuit, then the lone hovered part.
+   if(sel.length>1&&sel.indexOf(cur)>=0){rotateGroup(sel,ev.shiftKey?-1:1);return;}
    var rgi=grpIdxs(cur);
    if(rgi){rotateGroup(rgi,ev.shiftKey?-1:1);return;}
    recordUndo();
