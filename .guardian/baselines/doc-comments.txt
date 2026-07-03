@@ -1,11 +1,7 @@
 # guardian-snapshot v1
-src/diagram/membership.zig: pub fn deinit: has no /// doc comment
-src/diagram/types.zig: pub fn deinit: has no /// doc comment
-src/docgen.zig: pub fn next: has no /// doc comment
 src/eval/env.zig: pub fn asBool: has no /// doc comment
 src/eval/env.zig: pub fn asNumber: has no /// doc comment
 src/eval/env.zig: pub fn asString: has no /// doc comment
-src/eval/env.zig: pub fn deinit: has no /// doc comment
 src/eval/env.zig: pub fn get: has no /// doc comment
 src/eval/env.zig: pub fn init: has no /// doc comment
 src/eval/env.zig: pub fn isTruthy: has no /// doc comment
@@ -15,19 +11,15 @@ src/eval/evaluator.zig: pub const ComponentData (struct_): has no /// doc commen
 src/eval/evaluator.zig: pub const NetTie (struct_): has no /// doc comment
 src/eval/evaluator.zig: pub const PendingChildId (struct_): has no /// doc comment
 src/eval/evaluator.zig: pub const PendingId (struct_): has no /// doc comment
-src/eval/evaluator.zig: pub fn deinit: has no /// doc comment
 src/eval/evaluator.zig: pub fn init: has no /// doc comment
 src/eval/evaluator.zig: pub fn initWithLibDir: has no /// doc comment
 src/eval/forms.zig: pub fn fromAtom: has no /// doc comment
 src/eval/forms.zig: pub fn fromAtom: has no /// doc comment
 src/eval/forms.zig: pub fn fromAtom: has no /// doc comment
 src/export_kicad.zig: pub fn flattenAndMergeNets: has no /// doc comment
-src/parts.zig: pub fn deinit: has no /// doc comment
 src/parts.zig: pub fn init: has no /// doc comment
-src/placement/module_policy.zig: pub fn deinit: has no /// doc comment
 src/placement/optimizer.zig: pub fn label: has no /// doc comment
 src/placement/router.zig: pub fn init: has no /// doc comment
-src/raster.zig: pub fn deinit: has no /// doc comment
 src/raster.zig: pub fn init: has no /// doc comment
 src/render_svg/context.zig: pub fn adjAppend: has no /// doc comment
 src/render_svg/context.zig: pub fn buildAdjacency: has no /// doc comment
@@ -136,4 +128,3 @@ src/sexpr/ast.zig: pub fn list: has no /// doc comment
 src/sexpr/ast.zig: pub fn string: has no /// doc comment
 src/sexpr/ast.zig: pub fn unitVal: has no /// doc comment
 src/sexpr/tokenizer.zig: pub fn init: has no /// doc comment
-src/sexpr/tokenizer.zig: pub fn next: has no /// doc comment

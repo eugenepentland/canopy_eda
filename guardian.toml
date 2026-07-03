@@ -1,11 +1,6 @@
 spec_file = "SPEC.md"
 max_file_lines = 10000
 
-# Checks skipped entirely (matched by registry name). spec-drift is redundant
-# with pub-api-surface (both snapshot the public API), and magic-number is
-# pure noise against this codebase's SVG/geometry/electrical constants.
-disabled = ["spec-drift", "magic-number"]
-
 # Baseline mode: every check records its current violations into
 # .guardian/baselines/<check>.txt on the first build and only fails
 # when NEW violations are introduced. This lets us turn on Guardian's
@@ -34,33 +29,31 @@ enabled = true
 # parseCheck (eval/env.zig), runDrc (drc.zig), renderHub
 # (render_svg/hub.zig), evalDesignBlock, and several renderer
 # entry points are single-pass interpreters/dispatchers whose data
-# flow lives in one function. Splitting them adds context-passing
-# noise without making the logic clearer. New consumers should keep
-# the framework default 60.
+# flow lives in one function. Tried 150 with the recalibrated suite
+# (2026-07): ~24 functions sit in the 150-200 band, so 200 stands;
+# the six above 200 (worst: registerCompletePage in serve/auth.zig,
+# 339 lines) are ratcheted in the baseline. Framework default is 120.
 [function_length]
 max_lines = 200
 
 # The evaluator's switch-on-token-tag dispatch nests inside a switch
 # inside a for-loop, and the DRC's grid-clearance check uses
-# nested-loop spatial scans. Both reach depth 5-6 idiomatically.
-# New consumers should keep the framework default 4.
+# nested-loop spatial scans. Tried the default 5 with the recalibrated
+# suite (2026-07): 40 functions sit at depth 6, so 6 stands; the 16
+# deeper ones (worst: depth 10 in render_json.zig
+# collectGroupConnections and render_svg/connection.zig
+# renderGroupedConnections) are ratcheted in the baseline.
+# Framework default is 5.
 [nesting_depth]
 max_depth = 6
 
 # Cognitive complexity counts each branch + nesting level. Eval and
 # render functions stitch many small branches but each is locally
-# readable; refactoring fragments the readability rather than
-# improving it. New consumers should keep the framework default 15.
+# readable. Ratcheted 50→45 with the recalibrated suite (2026-07);
+# current worst is analyze (eval/power_budget.zig) at 42.
+# Framework default is 25.
 [complexity]
-max_score = 50
-
-# Pattern-matching dispatchers (parseCheck, classifyPin, isHub) and
-# resolver chains (loadPinoutMap, resolveRailVoltage) idiomatically
-# emit many early returns — one per case. Refactoring to a single
-# tail return adds nesting without changing behaviour. New consumers
-# should keep the framework default 3.
-[returns_per_fn]
-max_returns = 12
+max_score = 45
 
 # HTML / SVG / KiCad-S-expression template literals (multi-line
 # `\\` block strings) and JSON-schema definitions in src/serve/
@@ -93,13 +86,3 @@ max_fields = 16
 # framework default 4.
 [function_size]
 max_params = 12
-
-# Template-rendering modules (`render_html.zig` 22, `review_md.zig` 20,
-# `review_html.zig` 17, `branch.zig` 11, `review_json.zig` 10,
-# `mcp_tools.zig` 8) take `writer: anytype` on every helper — that's
-# the idiomatic Zig pattern for a generic format-target. The 22 cap
-# is the current worst case (render_html.zig); DO NOT INCREASE.
-# Refactoring to a typed Writer interface would touch every helper
-# in those modules. New consumers should keep the framework default 2.
-[anytype_budget]
-max_per_file = 22
