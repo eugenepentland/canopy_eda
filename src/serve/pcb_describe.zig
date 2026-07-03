@@ -7,7 +7,7 @@
 //! the facts always describe the board the image shows.
 //!
 //! Facts emitted: board bbox + axes convention, objective summary, anchor
-//! (largest hub), per-part side-of-anchor / gap / nets / spec coverage,
+//! (most-connected hub), per-part side-of-anchor / gap / nets / spec coverage,
 //! per-decoupling-loop power-leg length + inductance + net, each hub's
 //! net→package-edge pad map, and (with `?route=1`) the routed-copper summary.
 
@@ -127,7 +127,7 @@ pub fn writeDescribeJson(
     var wrong_side: std.ArrayListUnmanaged([]const u8) = .empty;
     defer wrong_side.deinit(alloc);
 
-    const anchor = anchorIndex(p.parts);
+    const anchor = anchorIndex(p.parts, p.nets);
 
     try w.writeAll("{\"name\":");
     try pcb_layout_page.writeJsonStr(w, name);
@@ -598,20 +598,11 @@ fn rectGap(a: optimizer.Part, b: optimizer.Part) f64 {
     return std.math.hypot(gx, gy);
 }
 
-/// Index of the anchor part facts are oriented around: the largest hub by
-/// courtyard area (the IC the live-regen view pins), else null.
-pub fn anchorIndex(parts: []const optimizer.Part) ?usize {
-    var best: ?usize = null;
-    var best_area: f64 = 0;
-    for (parts, 0..) |part, i| {
-        if (part.kind != .hub) continue;
-        const area = part.hw * part.hh;
-        if (area > best_area) {
-            best_area = area;
-            best = i;
-        }
-    }
-    return best;
+/// Index of the anchor part facts are oriented around: the most-connected hub
+/// (`optimizer.pickAnchorHub` — same pick the rough ring uses, so the facts'
+/// side attribution matches the placement's own anchor), else null.
+pub fn anchorIndex(parts: []const optimizer.Part, nets: []const optimizer.FlatNet) ?usize {
+    return optimizer.pickAnchorHub(parts, nets);
 }
 
 /// The part's stable module-local origin name (what a `(placement …)` spec

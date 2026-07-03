@@ -49,7 +49,7 @@ const parser = @import("../sexpr/parser.zig");
 const infra_fs = @import("../infra/fs.zig");
 
 const DesignBlock = env.DesignBlock;
-const FlatNet = export_kicad.FlatNet;
+pub const FlatNet = export_kicad.FlatNet;
 
 // ── Tunables ─────────────────────────────────────────────────────────────
 const K_DECOUPLE: f64 = 0.95; // power/decoupling cap hug + ground-return (highest priority)
@@ -252,6 +252,12 @@ pub const Params = struct {
     /// layout is enough for a starting point, and N full solves (one per module)
     /// would be far too slow for an interactive button.
     fast: bool = false,
+    /// "Rough the remaining parts": apply the caller's cached poses to every
+    /// part they cover and LOCK those parts in place (`partialApplyLock`), then
+    /// let the placer arrange only the uncovered ones around them. This is the
+    /// incremental mode — add three parts to a hand-finished board and only
+    /// those three move; a full re-solve would discard all the hand work.
+    remaining: bool = false,
 };
 
 /// The effective alignment weight: an explicit `w_align` (≥0) wins; the
@@ -815,6 +821,17 @@ fn runPlacement(
     // arrangement — the point is a predictable, legible module-clustered start.
     if (params.rough) {
         if (try runRough(arena, parts, prep, nets, params)) return;
+        // Discrete switcher module: the hand layout is a VIN│IC│L│VOUT flow
+        // row, which a radial ring structurally can't express. Try the
+        // constructive zone floorplan first — it self-gates on topology
+        // (single-IC group orbit) and returns false for anything it can't lay
+        // out cleanly, so non-switchers fall through to the ring unchanged.
+        if (isSwitcherBoard(parts, nets, &prep.idx_of) and
+            try packZoned(arena, parts, prep, nets, built, params))
+        {
+            tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+            return;
+        }
         // Flat module/design: ring the anchor IC with each part on the side of the
         // pad it connects to (GND ignored; cap→VDD pad, R→signal pad), hugging the
         // edge. This is the pad-anchored hand-layout seed.
@@ -1352,6 +1369,11 @@ fn packZoned(
     params: Params,
 ) std.mem.Allocator.Error!bool {
     _ = params;
+    // The zone floorplan is whole-board constructive — it cannot build around
+    // pinned parts, so any lock hands the board to the ring/relax paths instead.
+    for (parts) |p| {
+        if (p.locked) return false;
+    }
     const topo = analyzeTopology(parts, g_lowered) orelse return false;
     const ic = topo.ic;
     parts[ic].x = 0;
@@ -1521,7 +1543,9 @@ fn autofillUnlisted(
 
     var idxs: std.ArrayListUnmanaged(usize) = .empty;
     for (staged_refs) |ref| {
-        if (idx_of.get(ref)) |i| try idxs.append(arena, i);
+        if (idx_of.get(ref)) |i| {
+            if (!parts[i].locked) try idxs.append(arena, i);
+        }
     }
     // Most-constrained first: loop-bearing caps must reach their hub pins, and
     // big parts need contiguous room — both go before small free placements so
@@ -1996,7 +2020,20 @@ fn buildSubMacro(
     // `courtyard_overlap` / `route_gap`.
     const saved_shrink = g_collide_shrink;
     const saved_gap = g_route_gap;
-    const sp = try solve(arena, sub.block, project_dir, null, params, .place);
+    // A starred (★) module layout is the user's blessed arrangement — use it as
+    // the block's internal layout instead of re-solving from scratch. Partial
+    // coverage (the module grew since the save) pins what the ★ covers and
+    // places only the new parts around it (`Params.remaining`); no ★ ⇒ the
+    // nested fast solve below behaves exactly as before.
+    var child_params = params;
+    var cached: ?[]const RefPose = null;
+    if (try starredModulePoses(arena, project_dir, sub.source, sub.name, prep.instances)) |sposes| {
+        if (!sub.reflow) {
+            cached = sposes;
+            child_params.remaining = true;
+        }
+    }
+    const sp = try solve(arena, sub.block, project_dir, cached, child_params, .place);
     // Design-side lookup: refs compose as `slug/<module ref>` when the flatten
     // kept the module's numbering, but a design-level renumber shifts it
     // (design `buck/U2` vs module `U1`) — fall back to the renumber-proof
@@ -2036,6 +2073,238 @@ fn buildSubMacro(
     return finishMacro(members.items, xs.items, ys.items, rots.items, prep.parts, rot_override);
 }
 
+/// The module's starred (★ "default") saved layout, translated into this
+/// sub-block instantiation's ref-des namespace: each parent instance under
+/// `slug/` maps back to its module-local origin key (renumber-proof), falling
+/// back to the saved ref for legacy poses that predate origin recording. Null
+/// when the sub-block has no module source, no sidecar, no starred entry, or
+/// nothing matches — the caller then solves the module from scratch as before.
+fn starredModulePoses(
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    source: []const u8,
+    slug: []const u8,
+    instances: []const export_kicad.FlatInstance,
+) std.mem.Allocator.Error!?[]RefPose {
+    if (source.len == 0) return null;
+    const rel = if (std.mem.endsWith(u8, source, ".sexp"))
+        try std.fmt.allocPrint(arena, "{s}.layouts.json", .{source[0 .. source.len - 5]})
+    else
+        try std.fmt.allocPrint(arena, "lib/modules/{s}.layouts.json", .{source});
+    const path = try std.fs.path.join(arena, &.{ project_dir, rel });
+    const raw = infra_fs.cwd().readFileAlloc(arena, path, 4 * 1024 * 1024) catch return null;
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, raw, .{}) catch return null;
+    if (root != .object) return null;
+    const def = root.object.get("default") orelse return null;
+    if (def != .string or def.string.len == 0) return null;
+    const lays = root.object.get("layouts") orelse return null;
+    if (lays != .array) return null;
+    var star: ?std.json.Value = null;
+    for (lays.array.items) |l| {
+        if (l != .object) continue;
+        const nm = l.object.get("name") orelse continue;
+        if (nm == .string and std.mem.eql(u8, nm.string, def.string)) star = l;
+    }
+    const sv = star orelse return null;
+    const pv = sv.object.get("parts") orelse return null;
+    if (pv != .array) return null;
+    // Saved poses keyed by module-local origin, plus by saved ref for
+    // origin-less legacy entries.
+    var by_origin = std.StringHashMap(RefPose).init(arena);
+    var by_ref = std.StringHashMap(RefPose).init(arena);
+    for (pv.array.items) |it| {
+        if (it != .object) continue;
+        const rv = it.object.get("ref") orelse continue;
+        if (rv != .string) continue;
+        const pose = RefPose{
+            .ref = rv.string,
+            .x = jsonF(it.object.get("x")),
+            .y = jsonF(it.object.get("y")),
+            .rot = jsonF(it.object.get("rot")),
+            .side = jsonSideOf(it.object.get("side")),
+        };
+        const ov = it.object.get("origin");
+        if (ov != null and ov.? == .string and ov.?.string.len > 0) {
+            try by_origin.put(ov.?.string, pose);
+        } else {
+            try by_ref.put(rv.string, pose);
+        }
+    }
+    // Translate into the child's current refs via the parent's first-level
+    // `slug/<ref>` instances (their origin keys are the module-local keys).
+    const prefix = try std.fmt.allocPrint(arena, "{s}/", .{slug});
+    var out: std.ArrayListUnmanaged(RefPose) = .empty;
+    for (instances) |inst| {
+        if (!std.mem.startsWith(u8, inst.ref_des, prefix)) continue;
+        const child_ref = inst.ref_des[prefix.len..];
+        if (std.mem.indexOfScalar(u8, child_ref, '/') != null) continue;
+        const saved = (if (inst.origin_key.len > 0) by_origin.get(inst.origin_key) else null) orelse
+            by_ref.get(child_ref) orelse continue;
+        var pose = saved;
+        pose.ref = child_ref;
+        try out.append(arena, pose);
+    }
+    if (out.items.len == 0) return null;
+    return out.items;
+}
+
+/// JSON number → f64 (0 when absent/not a number) for the layouts sidecar.
+fn jsonF(v: ?std.json.Value) f64 {
+    const val = v orelse return 0;
+    if (val == .float) return val.float;
+    if (val == .integer) return @floatFromInt(val.integer);
+    return 0;
+}
+
+/// JSON `"side"` string → board side (top unless explicitly "bottom").
+fn jsonSideOf(v: ?std.json.Value) Side {
+    const val = v orelse return .top;
+    if (val == .string and std.mem.eql(u8, val.string, "bottom")) return .bottom;
+    return .top;
+}
+
+/// Partition the loose (non-sub-block) parts around the loose hubs they serve
+/// and freeze each hub + its satellites as ONE rigid pad-anchored block. This
+/// is what keeps a design's top-level MCU and its decoupling bank looking like
+/// a hand cluster inside the hierarchical arrangement, instead of a hundred
+/// independent singleton blocks spring-scattered across the board. A loose
+/// part picks the loose hub on its most specific (fewest-pin, non-ground)
+/// shared net; parts with no such hub stay singletons and land by
+/// connectivity as before. Locked parts are left alone (they are pinned).
+fn buildGlueMacros(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    macro_of: []?usize,
+    macros: *std.ArrayListUnmanaged(Macro),
+) std.mem.Allocator.Error!void {
+    const hub_of = try arena.alloc(?usize, parts.len);
+    @memset(hub_of, null);
+    for (parts, 0..) |p, pi| {
+        if (macro_of[pi] != null or p.locked or p.kind == .hub) continue;
+        var best_hub: ?usize = null;
+        var best_pins: usize = std.math.maxInt(usize);
+        for (nets) |net| {
+            if (pin_roles.isGroundFn(shortName(net.name))) continue;
+            if (net.pins.len >= best_pins) continue; // want the most specific net
+            if (!netHasPart(net, pi, &prep.idx_of)) continue;
+            for (net.pins) |pin| {
+                const qi = prep.idx_of.get(pin.ref_des) orelse continue;
+                if (qi == pi or parts[qi].kind != .hub) continue;
+                if (macro_of[qi] != null or parts[qi].locked) continue;
+                best_hub = qi;
+                best_pins = net.pins.len;
+                break;
+            }
+        }
+        hub_of[pi] = best_hub;
+    }
+    for (parts, 0..) |p, hpi| {
+        if (macro_of[hpi] != null or p.kind != .hub or p.locked) continue;
+        var members: std.ArrayListUnmanaged(usize) = .empty;
+        for (hub_of, 0..) |h, pi| {
+            if (h != null and h.? == hpi) try members.append(arena, pi);
+        }
+        if (members.items.len == 0) continue; // a bare hub stays a singleton
+        const m = try ringGlueMacro(arena, parts, prep, nets, hpi, members.items);
+        macro_of[hpi] = macros.items.len;
+        for (members.items) |pi| macro_of[pi] = macros.items.len;
+        try macros.append(arena, m);
+    }
+}
+
+/// Pad-anchored mini-ring for one loose hub and its glue satellites, frozen
+/// as a rigid block: the same side/lane machinery the flat seed uses, run on
+/// a local copy with the hub at the origin, so the cluster reads like a hand
+/// layout before `arrangeMacros` places the whole block by connectivity.
+fn ringGlueMacro(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    hpi: usize,
+    members: []const usize,
+) std.mem.Allocator.Error!Macro {
+    const n = members.len + 1;
+    const local = try arena.alloc(Part, n);
+    var idx_of = std.StringHashMap(usize).init(arena);
+    local[0] = parts[hpi];
+    local[0].x = 0;
+    local[0].y = 0;
+    local[0].rot = 0;
+    local[0].locked = false;
+    try idx_of.put(parts[hpi].ref_des, 0);
+    for (members, 0..) |pi, k| {
+        local[k + 1] = parts[pi];
+        local[k + 1].locked = false;
+        try idx_of.put(parts[pi].ref_des, k + 1);
+    }
+    const hkb = keepBoxOf(local[0]);
+    const roles = pin_roles.load(arena, prep.project_dir, if (hpi < prep.instances.len) prep.instances[hpi].component else "");
+    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
+    var leftover: std.ArrayListUnmanaged(usize) = .empty;
+    const ci = try buildClusters(arena, local, 0, nets, &idx_of);
+    const tier_of = try arena.alloc(usize, n);
+    @memset(tier_of, 0);
+    const sig_side = try arena.alloc(u8, n);
+    @memset(sig_side, 255);
+    const cohere_side = try arena.alloc(u8, n);
+    @memset(cohere_side, 255);
+    // Per-cap served decoupling pad, same as the flat rough path — glue bypass
+    // caps dock on the edge of the pin they serve.
+    const served_pad = try arena.alloc(?[2]f64, n);
+    @memset(served_pad, null);
+    for (members, 0..) |pi, k| {
+        var tok: []const u8 = "";
+        if (pi < prep.instances.len) {
+            const inst = prep.instances[pi];
+            if (inst.decouple_pin.len > 0) {
+                tok = inst.decouple_pin;
+            } else if (decouplePinFromOrigin(inst.origin_key)) |dp| {
+                tok = dp;
+            }
+        }
+        served_pad[k + 1] = servedPadLocal(local, 0, k + 1, tok, nets, &idx_of);
+    }
+    const saved_ic_gap = g_rough_ic_gap;
+    const saved_part_gap = g_rough_part_gap;
+    g_rough_ic_gap = FINAL_CLEAR;
+    g_rough_part_gap = FINAL_CLEAR;
+    defer {
+        g_rough_ic_gap = saved_ic_gap;
+        g_rough_part_gap = saved_part_gap;
+    }
+    try assignSides(arena, local, 0, nets, &idx_of, roles, ci, tier_of, sig_side, served_pad, &sides, &leftover);
+    dockSidesByTier(local, &sides, hkb);
+    if (leftover.items.len > 0) {
+        var x: f64 = -hkb.hw;
+        const y = gridRound(hkb.hh + 6);
+        for (leftover.items) |pi| {
+            const pkb = keepBoxOf(local[pi]);
+            x += pkb.hw;
+            local[pi].x = gridRound(x);
+            local[pi].y = y;
+            x += pkb.hw + PAD_ANCHOR_PART_GAP_MM;
+        }
+    }
+    try refineSidesByPull(arena, local, 0, nets, &idx_of, tier_of, cohere_side, &sides, hkb);
+    orientPadsToIC(local, 0, nets, &idx_of);
+    legalizeFinal(local);
+    const g_members = try arena.alloc(usize, n);
+    const xs = try arena.alloc(f64, n);
+    const ys = try arena.alloc(f64, n);
+    const rots = try arena.alloc(f64, n);
+    g_members[0] = hpi;
+    for (members, 0..) |pi, k| g_members[k + 1] = pi;
+    for (local, 0..) |lp, k| {
+        xs[k] = lp.x;
+        ys[k] = lp.y;
+        rots[k] = lp.rot;
+    }
+    return finishMacro(g_members, xs, ys, rots, parts, null);
+}
+
 /// Penetration-driven separation after the macro re-stamp: a free part
 /// overlapping a macro member moves away; two distinct macros overlapping
 /// move the later one as a unit (the first stays — stamped order). Free-vs-
@@ -2043,7 +2312,7 @@ fn buildSubMacro(
 /// force result. Pushes are grid-ceiled along the smaller penetration axis.
 /// Sweeps cap out; the caller's `anyOverlap` accept-test decides whether
 /// the result ships.
-fn legalizeComposed(parts: []Part, macro_of: []const ?usize) void {
+fn legalizeComposed(parts: []Part, macro_of: []const ?usize, pinned_part: []const bool) void {
     var pushed_free = false;
     var sweep: usize = 0;
     while (sweep < 24) : (sweep += 1) {
@@ -2054,7 +2323,7 @@ fn legalizeComposed(parts: []Part, macro_of: []const ?usize) void {
                 const mb = macro_of[j];
                 if (ma != null and mb != null and ma.? == mb.?) continue;
                 if (ma == null and mb == null and !pushed_free) continue;
-                if (separateComposedPair(parts, macro_of, i, j)) {
+                if (separateComposedPair(parts, macro_of, pinned_part, i, j)) {
                     moved = true;
                     if (ma == null or mb == null) pushed_free = true;
                 }
@@ -2066,30 +2335,44 @@ fn legalizeComposed(parts: []Part, macro_of: []const ?usize) void {
 
 /// Resolve one overlapping pair for `legalizeComposed`: push the free side
 /// (or the later-stamped macro as a unit) along the smaller-penetration
-/// axis, away from the stationary box's centre. True when something moved.
-fn separateComposedPair(parts: []Part, macro_of: []const ?usize, i: usize, j: usize) bool {
+/// axis, away from the stationary box's centre. A pinned side (locked part /
+/// block with a locked member) never moves — the other side absorbs the whole
+/// push; both pinned ⇒ left as saved. True when something moved.
+fn separateComposedPair(parts: []Part, macro_of: []const ?usize, pinned_part: []const bool, i: usize, j: usize) bool {
     const a = &parts[i];
     const b = &parts[j];
     const px = (keepHw(a.*) + keepHw(b.*)) - @abs(keepCx(a.*) - keepCx(b.*));
     const py = (keepHh(a.*) + keepHh(b.*)) - @abs(keepCy(a.*) - keepCy(b.*));
     if (px <= 1e-9 or py <= 1e-9) return false;
+    if (pinned_part[i] and pinned_part[j]) return false;
     const dx = if (px <= py) ceilToGrid(px) * (if (keepCx(b.*) >= keepCx(a.*)) @as(f64, 1) else -1) else 0;
     const dy = if (px <= py) 0 else ceilToGrid(py) * (if (keepCy(b.*) >= keepCy(a.*)) @as(f64, 1) else -1);
-    if (macro_of[j] == null) {
+    if (macro_of[j] == null and !pinned_part[j]) {
         b.x += dx;
         b.y += dy;
         return true;
     }
-    if (macro_of[i] == null) {
+    if (macro_of[i] == null and !pinned_part[i]) {
         a.x -= dx;
         a.y -= dy;
         return true;
     }
-    const mb = macro_of[j].?;
+    if (!pinned_part[j]) {
+        const mb = macro_of[j].?;
+        for (parts, 0..) |*p, k| {
+            if (macro_of[k] != null and macro_of[k].? == mb) {
+                p.x += dx;
+                p.y += dy;
+            }
+        }
+        return true;
+    }
+    // j is pinned: shove i's whole block the other way instead.
+    const ma = macro_of[i].?;
     for (parts, 0..) |*p, k| {
-        if (macro_of[k] != null and macro_of[k].? == mb) {
-            p.x += dx;
-            p.y += dy;
+        if (macro_of[k] != null and macro_of[k].? == ma) {
+            p.x -= dx;
+            p.y -= dy;
         }
     }
     return true;
@@ -2117,6 +2400,11 @@ const ROUGH_STEP: f64 = 0.5;
 const ROUGH_MAX_STEP_MM: f64 = 4.0;
 /// Breathing room left between blocks during the relaxation (mm).
 const ROUGH_BLOCK_GAP_MM: f64 = 2.0;
+/// Cap on the residual overlap-only settling sweeps after the spring
+/// relaxation — a short cleanup for the last touching pairs, not the main
+/// separation mechanism (that's the scaled spring/repulsion loop, which
+/// keeps adjacency while it separates).
+const ROUGH_SEPARATE_ITERS: usize = 150;
 /// Coarse grid the block centres snap to — legible + easy to grab (5× base grid).
 const ROUGH_ORIGIN_GRID_MM: f64 = 1.0;
 /// Courtyard spacing forced on a FLAT rough seed so the compaction pass spreads the
@@ -2162,16 +2450,20 @@ fn runRough(
 
     // No sub-block macros means a FLAT design/module (or a grouped-refdes board
     // whose members didn't map): there are no modules to cluster, so hierarchical
-    // arrangement adds nothing. Bail to the caller, which runs the pad-aware force
-    // relax instead (parts settle toward the hub pad they connect to, not clumped).
-    if (macros.items.len < 2) return false;
+    // arrangement adds nothing. Bail to the caller, which runs the pad-aware ring
+    // instead (parts settle toward the hub pad they connect to, not clumped).
+    if (macros.items.len == 0) return false;
 
     const macro_of = try arena.alloc(?usize, parts.len);
     @memset(macro_of, null);
     for (macros.items, 0..) |m, mi| {
         for (m.members) |pi| macro_of[pi] = mi;
     }
-    // Every top-level part with no module home becomes its own block, so it lands
+    // Glue: each loose hub and the loose parts that serve it ring together as
+    // one rigid block, so the top-level MCU + its bypass bank arranges as a
+    // hand-like cluster instead of a hundred spring-scattered singletons.
+    try buildGlueMacros(arena, parts, prep, nets, macro_of, &macros);
+    // Every remaining part with no home becomes its own block, so it lands
     // by connectivity (a bare bypass cap beside the IC module it wires to).
     for (0..parts.len) |pi| {
         if (macro_of[pi] != null) continue;
@@ -2179,19 +2471,34 @@ fn runRough(
         try macros.append(arena, try singletonMacro(arena, parts, pi));
     }
 
-    const origins = try arrangeMacros(arena, macros.items, macro_of, nets, &prep.idx_of);
-    stampMacros(parts, macros.items, origins);
+    // A block containing any locked member is pinned: it keeps its current
+    // world position (the "rough the remaining" base layout), arrangeMacros
+    // anchors its centre there and never pushes it, stampMacros skips it, and
+    // the composed legalizer shoves free blocks away from it instead.
+    const pinned = try arena.alloc(bool, macros.items.len);
+    @memset(pinned, false);
+    for (macros.items, 0..) |m, mi| {
+        for (m.members) |pi| {
+            if (parts[pi].locked) pinned[mi] = true;
+        }
+    }
+    const part_pinned = try arena.alloc(bool, parts.len);
+    for (part_pinned, 0..) |*pp, pi| pp.* = if (macro_of[pi]) |mi| pinned[mi] else parts[pi].locked;
+
+    const origins = try arrangeMacros(arena, macros.items, macro_of, nets, &prep.idx_of, parts, pinned);
+    stampMacros(parts, macros.items, origins, pinned);
     // Final hard de-overlap: push whole blocks apart on grid (same legalizer the
     // spec-composition path uses). A residual touch is acceptable for a rough seed.
-    legalizeComposed(parts, macro_of);
+    legalizeComposed(parts, macro_of, part_pinned);
     return true;
 }
 
 /// Drop each rigid block at its arranged origin: every member lands at
 /// `origin + (lx,ly)` with the block's rotation, so the module's internal layout
 /// is preserved exactly and only the block as a whole has moved.
-fn stampMacros(parts: []Part, macros: []const Macro, origins: []const [2]f64) void {
+fn stampMacros(parts: []Part, macros: []const Macro, origins: []const [2]f64, pinned: []const bool) void {
     for (macros, 0..) |m, mi| {
+        if (pinned[mi]) continue; // a pinned block's members already sit at their poses
         for (m.members, 0..) |pi, k| {
             parts[pi].x = origins[mi][0] + m.lx[k];
             parts[pi].y = origins[mi][1] + m.ly[k];
@@ -2522,6 +2829,7 @@ fn assignSides(
     var net_next: std.AutoHashMapUnmanaged(usize, usize) = .empty;
     for (parts, 0..) |p, pi| {
         if (pi == hi) continue; // only the anchor hub is fixed; other hubs (a TCXO) ring it too
+        if (p.locked) continue; // pinned by the caller — never re-bucketed onto a side
         // Classify this part's IC nets into the most-signal-like (fewest hub pads,
         // ≤2) and the widest rail (most hub pads).
         var sig: ?[2]f64 = null;
@@ -3034,9 +3342,9 @@ fn polishCrossings(
     while (best > 0 and pass < ROUGH_POLISH_PASSES) : (pass += 1) {
         var improved = false;
         for (parts, 0..) |_, i| {
-            if (i == hi) continue;
+            if (i == hi or parts[i].locked) continue;
             for (i + 1..parts.len) |j| {
-                if (j == hi) continue;
+                if (j == hi or parts[j].locked) continue;
                 if (@abs(parts[i].hw - parts[j].hw) > 1e-6 or @abs(parts[i].hh - parts[j].hh) > 1e-6) continue;
                 // i would move to j's spot and vice versa — skip if that lands a
                 // side-constrained part on the wrong side of the anchor.
@@ -3116,6 +3424,7 @@ fn orientPadsToIC(
 ) void {
     for (parts, 0..) |*p, pi| {
         if (pi == hi or p.kind == .hub or p.pads.len != 2) continue;
+        if (p.locked) continue; // a pinned pose keeps its hand-set orientation
         const lp = importantPadLocal(p.*, pi, hi, nets, idx_of) orelse continue;
         const off = rotateLocal(lp[0], lp[1], p.rot);
         // Inward = from the part toward the IC; flip when the pad points outward.
@@ -3123,6 +3432,60 @@ fn orientPadsToIC(
         const iny = parts[hi].y - p.y;
         if (off.x * inx + off.y * iny < 0) p.rot = @mod(p.rot + 180, 360);
     }
+}
+
+/// Discrete-switcher test for the rough dispatch, mirroring module_policy's
+/// buck signature on the anchor hub: an L-prefix inductor shares one of the
+/// hub's non-ground nets AND the hub touches an input-rail or switch-node
+/// class net. A clock module's ferrite beads don't ride VIN/SW-class nets,
+/// so it doesn't qualify.
+fn isSwitcherBoard(parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) bool {
+    const hi = pickAnchorHub(parts, nets) orelse return false;
+    var has_ind = false;
+    var has_hot = false;
+    for (nets) |net| {
+        if (!netHasPart(net, hi, idx_of)) continue;
+        const cls = module_policy.classifyNetName(net.name);
+        if (cls == .ground) continue;
+        if (cls == .input_rail or cls == .switch_node) has_hot = true;
+        for (net.pins) |pin| {
+            const qi = idx_of.get(pin.ref_des) orelse continue;
+            if (qi != hi and leafRefPrefix(parts[qi].ref_des) == 'L') has_ind = true;
+        }
+    }
+    return has_ind and has_hot;
+}
+
+/// Anchor pick for the pad-anchored ring and for spatial attribution: the hub
+/// with the most distinct nets on its pads. A reset button or a power FET can
+/// out-measure the MCU on courtyard *area* (which mis-anchored whole modules —
+/// w55rp20 once ringed 56 parts around its SW_RESET), but never on
+/// connectivity. Area only breaks degree ties, so a two-hub board keeps the
+/// physically dominant IC. Returns null when the board has no hub at all.
+pub fn pickAnchorHub(parts: []const Part, nets: []const FlatNet) ?usize {
+    var best: ?usize = null;
+    var best_deg: usize = 0;
+    var best_area: f64 = -1;
+    for (parts, 0..) |p, i| {
+        if (p.kind != .hub) continue;
+        var deg: usize = 0;
+        for (nets) |net| {
+            for (net.pins) |pin| {
+                if (std.mem.eql(u8, pin.ref_des, p.ref_des)) {
+                    deg += 1;
+                    break;
+                }
+            }
+        }
+        const area = p.hw * p.hh;
+        const wins = if (best == null) true else if (deg != best_deg) deg > best_deg else area > best_area;
+        if (wins) {
+            best = i;
+            best_deg = deg;
+            best_area = area;
+        }
+    }
+    return best;
 }
 
 fn packPadAnchored(
@@ -3137,7 +3500,9 @@ fn packPadAnchored(
     cohere: bool,
 ) std.mem.Allocator.Error!bool {
     // Anchor: the author's `(rough (anchor …))` IC when it resolves to a hub,
-    // else the largest hub IC. Matched by ref-des or module-local origin name.
+    // else the most-connected hub (see `pickAnchorHub` — courtyard area alone
+    // let a reset button out-anchor the MCU). Matched by ref-des or
+    // module-local origin name.
     const rough = prep.block.rough;
     var hi: usize = 0;
     var found = false;
@@ -3153,20 +3518,19 @@ fn packPadAnchored(
         }
     }
     if (!found) {
-        var best: f64 = -1;
-        for (parts, 0..) |p, i| {
-            if (p.kind != .hub) continue;
-            const kb = keepBoxOf(p);
-            const area = kb.hw * kb.hh;
-            if (area > best) {
-                best = area;
-                hi = i;
-                found = true;
-            }
+        if (pickAnchorHub(parts, nets)) |i| {
+            hi = i;
+            found = true;
         }
     }
     if (!found) return false;
 
+    // The ring math runs in the anchor-at-origin frame. A locked anchor (the
+    // "rough the remaining parts" mode pins the hand-placed MCU) must not move:
+    // remember its real pose, solve at the origin as usual, and rigid-transform
+    // the newly-ringed parts into its frame at the end.
+    const a_locked = parts[hi].locked;
+    const a_pose = [3]f64{ parts[hi].x, parts[hi].y, parts[hi].rot };
     parts[hi].x = 0;
     parts[hi].y = 0;
     parts[hi].rot = 0;
@@ -3291,8 +3655,28 @@ fn packPadAnchored(
     // bypass cap toward the IC power pin, signal pad of a resistor toward the IC).
     orientPadsToIC(parts, hi, nets, &prep.idx_of);
 
+    if (a_locked) {
+        parts[hi].x = a_pose[0];
+        parts[hi].y = a_pose[1];
+        parts[hi].rot = a_pose[2];
+        transformRingToAnchor(parts, hi, a_pose[0], a_pose[1], a_pose[2]);
+    }
     legalizeFinal(parts); // resolve any corner / cross-side overlaps
     return true;
+}
+
+/// Rigid-transform every free part out of the ring's anchor-at-origin frame
+/// into the anchor's real pose: rotate each ring position by `arot`, translate
+/// by (ax, ay), and add `arot` to the part's own rotation. Locked parts are
+/// already in world coordinates and stay put.
+fn transformRingToAnchor(parts: []Part, hi: usize, ax: f64, ay: f64, arot: f64) void {
+    for (parts, 0..) |*p, pi| {
+        if (pi == hi or p.locked) continue;
+        const r = rotateLocal(p.x, p.y, arot);
+        p.x = ax + r.x;
+        p.y = ay + r.y;
+        p.rot = @mod(p.rot + arot, 360);
+    }
 }
 
 /// Place rigid blocks by connectivity: a coarse spring relaxation on block centres
@@ -3307,6 +3691,8 @@ fn arrangeMacros(
     macro_of: []const ?usize,
     nets: []const FlatNet,
     idx_of: *const std.StringHashMap(usize),
+    parts: []const Part,
+    pinned: []const bool,
 ) std.mem.Allocator.Error![][2]f64 {
     const n = macros.len;
     // Pairwise shared-net weights: a net touching k distinct blocks adds 1 to each
@@ -3357,6 +3743,11 @@ fn arrangeMacros(
     const cols: usize = @max(1, @as(usize, @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(n)))))));
     const spacing = max_span + ROUGH_BLOCK_GAP_MM;
     for (0..n) |i| {
+        if (pinned[i]) { // a pinned block anchors at its members' current centre
+            const b = membersBox(parts, macros[i].members);
+            centers[i] = .{ (b[0] + b[2]) / 2, (b[1] + b[3]) / 2 };
+            continue;
+        }
         const r: f64 = @floatFromInt(i / cols);
         const c: f64 = @floatFromInt(i % cols);
         centers[i] = .{ c * spacing, r * spacing };
@@ -3364,8 +3755,12 @@ fn arrangeMacros(
 
     const nf: f64 = @floatFromInt(n);
     const force = try arena.alloc([2]f64, n);
+    // Iteration budget scales with block count: 240 settles a dozen modules,
+    // but a 100+-block board (labstation) needs several times that for the
+    // spring/repulsion pair to finish separating while keeping adjacency.
+    const iters = ROUGH_ITERS + 8 * n;
     var it: usize = 0;
-    while (it < ROUGH_ITERS) : (it += 1) {
+    while (it < iters) : (it += 1) {
         @memset(force, [2]f64{ 0, 0 });
         var gx: f64 = 0;
         var gy: f64 = 0;
@@ -3406,9 +3801,42 @@ fn arrangeMacros(
             }
         }
         for (0..n) |a| {
+            if (pinned[a]) continue; // pinned blocks push others but never move
             centers[a][0] += @max(-ROUGH_MAX_STEP_MM, @min(ROUGH_MAX_STEP_MM, force[a][0] * ROUGH_STEP));
             centers[a][1] += @max(-ROUGH_MAX_STEP_MM, @min(ROUGH_MAX_STEP_MM, force[a][1] * ROUGH_STEP));
         }
+    }
+
+    // Overlap-only settling: the springs above place blocks by connectivity but
+    // on a dense board (100+ blocks) 240 iterations rarely finish separating
+    // them, and the composed legalizer downstream can only shove interleaved
+    // boxes locally. Keep pushing overlapping pairs apart (no springs, so the
+    // arrangement's shape is preserved) until every pair of block boxes is
+    // disjoint or the pass caps out.
+    var sit: usize = 0;
+    while (sit < ROUGH_SEPARATE_ITERS) : (sit += 1) {
+        var any = false;
+        for (0..n) |a| {
+            for (a + 1..n) |b| {
+                const dx = centers[b][0] - centers[a][0];
+                const dy = centers[b][1] - centers[a][1];
+                const ox = hw[a] + hw[b] + ROUGH_BLOCK_GAP_MM - @abs(dx);
+                const oy = hh[a] + hh[b] + ROUGH_BLOCK_GAP_MM - @abs(dy);
+                if (ox <= 0 or oy <= 0) continue;
+                any = true;
+                const half: f64 = if (pinned[a] or pinned[b]) 1.0 else 0.5;
+                if (ox <= oy) {
+                    const push = half * ox * (if (dx >= 0) @as(f64, 1) else -1);
+                    if (!pinned[a]) centers[a][0] -= push;
+                    if (!pinned[b]) centers[b][0] += push;
+                } else {
+                    const push = half * oy * (if (dy >= 0) @as(f64, 1) else -1);
+                    if (!pinned[a]) centers[a][1] -= push;
+                    if (!pinned[b]) centers[b][1] += push;
+                }
+            }
+        }
+        if (!any) break;
     }
 
     const origins = try arena.alloc([2]f64, n);
@@ -3601,6 +4029,48 @@ fn scrubClaimed(
 /// Realize a `(board …)` form on an already-solved interior placement. Mutates
 /// only the claimed (edge/corner) parts and the staging band; returns the
 /// outline rectangle for the renderers.
+/// Dock the `(corners …)` hardware flush into the four outline corners (TL,
+/// TR, BR, BL in authored order), returning each one's world keepout so the
+/// edge lanes dodge it. A locked corner part stays where the hand put it —
+/// its box is still recorded so the edges keep clear.
+fn dockCorners(parts: []Part, corner_parts: []const usize, x0: f64, y0: f64, x1: f64, y1: f64) [4]?Rect {
+    var corner_box = [4]?Rect{ null, null, null, null };
+    for (corner_parts, 0..) |pi, k| {
+        if (k >= 4) break;
+        const p = &parts[pi];
+        if (!p.locked) {
+            p.rot = 0;
+            const kb = keepBoxOf(p.*);
+            switch (@as(CornerSlot, @enumFromInt(k))) {
+                .tl => {
+                    p.x = gridRound(x0 + kb.hw - kb.cxo);
+                    p.y = gridRound(y0 + kb.hh - kb.cyo);
+                },
+                .tr => {
+                    p.x = gridRound(x1 - kb.hw - kb.cxo);
+                    p.y = gridRound(y0 + kb.hh - kb.cyo);
+                },
+                .br => {
+                    p.x = gridRound(x1 - kb.hw - kb.cxo);
+                    p.y = gridRound(y1 - kb.hh - kb.cyo);
+                },
+                .bl => {
+                    p.x = gridRound(x0 + kb.hw - kb.cxo);
+                    p.y = gridRound(y1 - kb.hh - kb.cyo);
+                },
+            }
+        }
+        const kb = keepBoxOf(p.*);
+        corner_box[k] = .{
+            .x0 = p.x + kb.cxo - kb.hw,
+            .y0 = p.y + kb.cyo - kb.hh,
+            .x1 = p.x + kb.cxo + kb.hw,
+            .y1 = p.y + kb.cyo + kb.hh,
+        };
+    }
+    return corner_box;
+}
+
 fn packBoard(
     arena: std.mem.Allocator,
     parts: []Part,
@@ -3661,37 +4131,7 @@ fn packBoard(
 
     // Corners first (TL, TR, BR, BL in authored order) — they bound the edge
     // spans. Track each one's world keepout so the edges dodge it.
-    var corner_box = [4]?Rect{ null, null, null, null };
-    for (bc.corner_parts, 0..) |pi, k| {
-        if (k >= 4) break;
-        const p = &parts[pi];
-        p.rot = 0;
-        const kb = keepBoxOf(p.*);
-        switch (@as(CornerSlot, @enumFromInt(k))) {
-            .tl => {
-                p.x = gridRound(x0 + kb.hw - kb.cxo);
-                p.y = gridRound(y0 + kb.hh - kb.cyo);
-            },
-            .tr => {
-                p.x = gridRound(x1 - kb.hw - kb.cxo);
-                p.y = gridRound(y0 + kb.hh - kb.cyo);
-            },
-            .br => {
-                p.x = gridRound(x1 - kb.hw - kb.cxo);
-                p.y = gridRound(y1 - kb.hh - kb.cyo);
-            },
-            .bl => {
-                p.x = gridRound(x0 + kb.hw - kb.cxo);
-                p.y = gridRound(y1 - kb.hh - kb.cyo);
-            },
-        }
-        corner_box[k] = .{
-            .x0 = p.x + kb.cxo - kb.hw,
-            .y0 = p.y + kb.cyo - kb.hh,
-            .x1 = p.x + kb.cxo + kb.hw,
-            .y1 = p.y + kb.cyo + kb.hh,
-        };
-    }
+    const corner_box = dockCorners(parts, bc.corner_parts, x0, y0, x1, y1);
 
     // Each edge: rotation (pads inward unless overridden) → cross-axis flush
     // inside the edge → desired slide position (attachment centroid) → 1-D
@@ -3713,9 +4153,11 @@ fn packBoard(
         if (corner_at[1]) |cb| span_max = @min(span_max, (if (vertical) cb.y0 else cb.x0) - BOARD_EDGE_GAP_MM);
 
         const Entry = struct { pi: usize, want: f64, half: f64 };
-        var entries = try arena.alloc(Entry, list.len);
-        for (list, 0..) |sr, i| {
+        var entries_buf = try arena.alloc(Entry, list.len);
+        var live: usize = 0;
+        for (list) |sr| {
             const p = &parts[sr.pi];
+            if (p.locked) continue; // a pinned connector keeps its hand-set dock
             p.rot = if (sr.rot) |r| @mod(@round(r / 90.0) * 90.0, 360.0) else edgeInwardRot(p.*, edge);
             const kb = keepBoxOf(p.*);
             switch (edge) {
@@ -3728,12 +4170,15 @@ fn packBoard(
                 (if (vertical) c.y else c.x)
             else
                 (span_min + span_max) / 2;
-            entries[i] = .{
+            entries_buf[live] = .{
                 .pi = sr.pi,
                 .want = std.math.clamp(want, span_min, span_max),
                 .half = if (vertical) kb.hh else kb.hw,
             };
+            live += 1;
         }
+        const entries = entries_buf[0..live];
+        if (entries.len == 0) continue;
         std.mem.sort(Entry, entries, {}, struct {
             fn less(_: void, a: Entry, b: Entry) bool {
                 return a.want < b.want;
@@ -3914,6 +4359,10 @@ pub fn solve(
 
     const generated = !applyCached(parts, cached);
     if (generated) {
+        // "Rough the remaining": pin every part the base layout covers, then
+        // place only the uncovered ones around them. (When the base covered
+        // everything cleanly, applyCached above already took the verbatim path.)
+        if (params.remaining) _ = partialApplyLock(parts, cached);
         try runPlacement(arena, parts, &prep, nets, built, params);
         // Stream the first arrangement to a watching live-regen browser (no-op
         // for a synchronous page solve, which never installs a sink). Pure
@@ -4908,6 +5357,30 @@ fn routedSubsetWeighted(
     return weighted;
 }
 
+/// Partial cousin of `applyCached` for the "rough the remaining parts" mode
+/// (`Params.remaining`): apply every matching pose AND lock the part, leaving
+/// unmatched parts free for the placer. Never rejects on coverage or overlap —
+/// the caller wants the base layout pinned exactly as saved. Returns how many
+/// parts matched.
+fn partialApplyLock(parts: []Part, cached: ?[]const RefPose) usize {
+    const poses = cached orelse return 0;
+    var matched: usize = 0;
+    for (parts) |*p| {
+        for (poses) |rp| {
+            if (std.mem.eql(u8, rp.ref, p.ref_des)) {
+                p.x = rp.x;
+                p.y = rp.y;
+                p.rot = rp.rot;
+                p.side = rp.side;
+                p.locked = true;
+                matched += 1;
+                break;
+            }
+        }
+    }
+    return matched;
+}
+
 /// Apply a cached layout to `parts` when it covers every one (matched by
 /// ref-des) *and* the result has no courtyard overlap. Returns true on a clean
 /// hit (positions applied, optimizer skipped); false on a miss, a partial/
@@ -4983,6 +5456,7 @@ fn tightenPriorityLoops(arena: std.mem.Allocator, parts: []Part, loops: []const 
     for (order) |li| {
         const lp = loops[li];
         if (lp.cap >= priority.len or priority[lp.cap] == 0) continue;
+        if (parts[lp.cap].locked) continue; // pinned cap keeps its hand pose
         const p = &parts[lp.cap];
         const sx = p.x;
         const sy = p.y;
@@ -5192,7 +5666,7 @@ fn routedPolish(
     while (sweep < ROUTED_POLISH_SWEEPS) : (sweep += 1) {
         var improved = false;
         for (parts, 0..) |*p, i| {
-            if (p.kind == .hub or !in_loop[i]) continue;
+            if (p.kind == .hub or !in_loop[i] or p.locked) continue;
             if (routedPolishPart(&scratch, parts, idx_of, nets, loops, i, params)) improved = true;
         }
         if (!improved) break;
@@ -5306,6 +5780,7 @@ fn overlapsAny(parts: []const Part, p: *const Part) bool {
 /// positions are grid-aligned (the interactive page drags on the same grid).
 fn snapToGrid(parts: []Part) void {
     for (parts) |*p| {
+        if (p.locked) continue; // a pinned hand pose keeps its exact coordinates
         p.x = @round(p.x / GRID_MM) * GRID_MM;
         p.y = @round(p.y / GRID_MM) * GRID_MM;
     }
@@ -6813,6 +7288,7 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
 
         var maxdisp: f64 = 0;
         for (0..n) |i| {
+            if (parts[i].locked) continue; // pinned by the caller — forces flow around it
             const mass = if (parts[i].kind == .hub) HUB_MASS else PASSIVE_MASS;
             const dx = clampDisp(step * ax[i] / mass);
             const dy = clampDisp(step * ay[i] / mass);
@@ -6941,6 +7417,7 @@ fn legalize(parts: []Part, clearance: f64) void {
         const moved = accumulateRepulsion(parts, boxes[0..n], &ax, &ay, clearance);
         if (!moved) break;
         for (0..n) |i| {
+            if (parts[i].locked) continue; // the free side of a pair absorbs the push
             parts[i].x += ax[i];
             parts[i].y += ay[i];
         }
@@ -6966,12 +7443,14 @@ fn legalizeOnGrid(parts: []Part) void {
                 const ox = (keepHw(parts[i]) + keepHw(parts[j])) - @abs(dx);
                 const oy = (keepHh(parts[i]) + keepHh(parts[j])) - @abs(dy);
                 if (ox <= 0 or oy <= 0) continue;
+                if (parts[i].locked and parts[j].locked) continue; // both pinned — leave as saved
                 any = true;
-                // Move the higher-index part one cell away on the tight axis.
+                // Move the higher-index part one cell away on the tight axis —
+                // unless it's locked, in which case the free partner steps back.
                 if (ox < oy) {
-                    parts[j].x -= signNudge(dx, i, j) * GRID_MM;
+                    if (parts[j].locked) parts[i].x += signNudge(dx, i, j) * GRID_MM else parts[j].x -= signNudge(dx, i, j) * GRID_MM;
                 } else {
-                    parts[j].y -= signNudge(dy, i, j) * GRID_MM;
+                    if (parts[j].locked) parts[i].y += signNudge(dy, i, j) * GRID_MM else parts[j].y -= signNudge(dy, i, j) * GRID_MM;
                 }
             }
         }
@@ -7098,6 +7577,7 @@ fn seedRing(parts: []Part, start: usize) void {
     var placed_hubs: usize = 0;
     var pord: usize = 0;
     for (parts) |*p| {
+        if (p.locked) continue; // pinned — the relax flows around it
         if (p.kind == .hub) {
             const col = placed_hubs % hub_cols;
             const row = placed_hubs / hub_cols;
@@ -7125,6 +7605,7 @@ fn seedGrid(parts: []Part) void {
     cell += SEED_GAP_MM;
     const cols = @max(1, @as(usize, @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(n)))))));
     for (parts, 0..) |*p, i| {
+        if (p.locked) continue; // pinned — the relax flows around it
         p.x = @as(f64, @floatFromInt(i % cols)) * cell;
         p.y = @as(f64, @floatFromInt(i / cols)) * cell;
     }
@@ -8044,7 +8525,7 @@ test "legalizeComposed moves the free part, not the macro members" {
         .{ .ref_des = "R1", .kind = .passive, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 6, .y = 0.5 },
     };
     const macro_of = [_]?usize{ 0, 0, null };
-    legalizeComposed(&parts, &macro_of);
+    legalizeComposed(&parts, &macro_of, &.{ false, false, false });
     // Macro members never moved relative to each other (or at all).
     try testing.expectApproxEqAbs(@as(f64, 0), parts[0].x, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 4), parts[1].x, 1e-9);
@@ -8061,7 +8542,7 @@ test "legalizeComposed shifts the later macro rigidly" {
         .{ .ref_des = "b/C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 7, .y = 0.5 },
     };
     const macro_of = [_]?usize{ 0, 1, 1 };
-    legalizeComposed(&parts, &macro_of);
+    legalizeComposed(&parts, &macro_of, &.{ false, false, false });
     // Macro b moved as a unit: the b members' relative offset is preserved.
     try testing.expectApproxEqAbs(@as(f64, 4), parts[2].x - parts[1].x, 1e-9);
     try testing.expectApproxEqAbs(parts[2].y, parts[1].y, 1e-9);
@@ -8144,9 +8625,9 @@ test "arrangeMacros + legalize keep modules intact and disjoint" {
     try idx_of.put("b/U1", 2);
     try idx_of.put("b/C1", 3);
 
-    const origins = try arrangeMacros(arena, &macros, &macro_of, &nets, &idx_of);
-    stampMacros(&parts, &macros, origins);
-    legalizeComposed(&parts, &macro_of);
+    const origins = try arrangeMacros(arena, &macros, &macro_of, &nets, &idx_of, &parts, &.{ false, false });
+    stampMacros(&parts, &macros, origins, &.{ false, false });
+    legalizeComposed(&parts, &macro_of, &.{ false, false, false, false });
 
     // Rigidity: each module's internal member offset survived the arrange + legalize
     // (a module moves only as a whole block). finishMacro snapped both to dx = 12.
@@ -8478,4 +8959,141 @@ test "applyCached applies side and locked" {
     try testing.expect(parts[0].locked);
     try testing.expectEqual(@as(f64, 4), parts[0].x);
     try testing.expectEqual(@as(f64, 180), parts[0].rot);
+}
+
+// spec: placement/optimizer - anchor pick prefers net degree over courtyard area, area only breaks ties
+test "pickAnchorHub picks the wired MCU over a big-courtyard button" {
+    // U1 = small MCU on three nets; U4 = reset button with a 4x bigger
+    // courtyard on one net (the w55rp20 mis-anchor shape).
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "U4", .kind = .hub, .hw = 4, .hh = 4, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "VDD", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
+        .{ .name = "GND", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C1", .pin = "2" }, .{ .ref_des = "U4", .pin = "2" } } },
+        .{ .name = "RUN", .pins = &.{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "U4", .pin = "1" } } },
+    };
+    try testing.expectEqual(@as(?usize, 0), pickAnchorHub(&parts, &nets));
+    // Degree tie (no nets at all) falls back to courtyard area: U4 wins.
+    try testing.expectEqual(@as(?usize, 1), pickAnchorHub(&parts, &.{}));
+    // No hub anywhere: null.
+    try testing.expectEqual(@as(?usize, null), pickAnchorHub(parts[2..], &nets));
+}
+
+// spec: placement/optimizer - partial apply locks every covered part and leaves the rest free
+test "partialApplyLock pins matched parts only" {
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "C9", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+    };
+    const poses = [_]RefPose{.{ .ref = "U1", .x = 10, .y = 5, .rot = 90 }};
+    try testing.expectEqual(@as(usize, 1), partialApplyLock(&parts, &poses));
+    try testing.expect(parts[0].locked);
+    try testing.expectEqual(@as(f64, 10), parts[0].x);
+    try testing.expect(!parts[1].locked);
+}
+
+// spec: placement/optimizer - legalization never moves a locked part; the free side absorbs the push
+test "legalizeOnGrid and snapToGrid leave locked parts untouched" {
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 0.03, .y = 0, .locked = true },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 1, .y = 0.5 },
+    };
+    snapToGrid(&parts);
+    try testing.expectEqual(@as(f64, 0.03), parts[0].x); // locked keeps its off-grid pose
+    legalizeOnGrid(&parts);
+    try testing.expectEqual(@as(f64, 0.03), parts[0].x); // never pushed
+    try testing.expectEqual(@as(f64, 0), parts[0].y);
+    try testing.expect(!anyOverlap(&parts)); // the free part moved clear instead
+}
+
+// spec: placement/optimizer - a locked anchor keeps its pose and the ring transforms into its frame
+test "transformRingToAnchor maps ring coordinates into the anchor pose" {
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 10, .y = 20, .rot = 90, .locked = true },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 5, .y = 0, .rot = 0 },
+    };
+    transformRingToAnchor(&parts, 0, 10, 20, 90);
+    // Ring position (5,0) rotated 90° → (0,5)… in this codebase's rotateLocal
+    // convention; verify via rotateLocal itself so the test can't drift.
+    const r = rotateLocal(5, 0, 90);
+    try testing.expectEqual(@as(f64, 10 + r.x), parts[1].x);
+    try testing.expectEqual(@as(f64, 20 + r.y), parts[1].y);
+    try testing.expectEqual(@as(f64, 90), parts[1].rot);
+}
+
+// spec: placement/optimizer - a pinned block pushes free blocks aside and never moves
+test "separateComposedPair shoves the free block away from a pinned one" {
+    var parts = [_]Part{
+        .{ .ref_des = "a/U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 0, .y = 0, .locked = true },
+        .{ .ref_des = "b/U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 3, .y = 0.5 },
+    };
+    const macro_of = [_]?usize{ 0, 1 };
+    legalizeComposed(&parts, &macro_of, &.{ true, false });
+    try testing.expectEqual(@as(f64, 0), parts[0].x); // pinned block never moved
+    try testing.expectEqual(@as(f64, 0), parts[0].y);
+    try testing.expect(!anyOverlap(&parts)); // the free block got pushed clear
+}
+
+// spec: placement/optimizer - a starred module layout seeds the sub-block macro, matched by origin key
+test "starredModulePoses translates the starred layout into child refs" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var td = std.testing.tmpDir(.{});
+    defer td.cleanup();
+    try td.dir.makePath("lib/modules");
+    try td.dir.writeFile(.{ .sub_path = "lib/modules/x.layouts.json", .data = 
+        \\{"default":"hand","layouts":[{"name":"hand","parts":[
+        \\ {"ref":"U1","x":3,"y":4,"rot":90,"origin":"U1"},
+        \\ {"ref":"C7","x":1,"y":2,"rot":0,"origin":"100nF@5#0"},
+        \\ {"ref":"R9","x":8,"y":9,"rot":0}]}]}
+    });
+    const project_dir = try td.dir.realpathAlloc(arena, ".");
+    // Parent flatten renumbered the module: U1→U4, cap→C12; R9 kept its ref
+    // but recorded no origin (legacy pose → ref fallback).
+    const instances = [_]export_kicad.FlatInstance{
+        .{ .ref_des = "m/U4", .origin_key = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "m/C12", .origin_key = "100nF@5#0", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "m/R9", .origin_key = "", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "other/U1", .origin_key = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+    };
+    const poses = (try starredModulePoses(arena, project_dir, "x", "m", &instances)).?;
+    try testing.expectEqual(@as(usize, 3), poses.len);
+    try testing.expectEqualStrings("U4", poses[0].ref);
+    try testing.expectEqual(@as(f64, 3), poses[0].x);
+    try testing.expectEqual(@as(f64, 90), poses[0].rot);
+    try testing.expectEqualStrings("C12", poses[1].ref);
+    try testing.expectEqualStrings("R9", poses[2].ref);
+    try testing.expectEqual(@as(f64, 8), poses[2].x);
+    // No starred sidecar for an unknown module → null.
+    try testing.expectEqual(@as(?[]RefPose, null), try starredModulePoses(arena, project_dir, "nope", "m", &instances));
+}
+
+// spec: placement/optimizer - a switcher board tries the zone floorplan before the ring; ferrites on plain rails do not qualify
+test "isSwitcherBoard detects the buck signature and rejects ferrite-on-rail" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "L1", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("L1", 1);
+    try idx_of.put("C1", 2);
+    const buck_nets = [_]FlatNet{
+        .{ .name = "VIN", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
+        .{ .name = "SW", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "L1", .pin = "1" } } },
+    };
+    try testing.expect(isSwitcherBoard(&parts, &buck_nets, &idx_of));
+    // A clock module's ferrite bead rides a plain 3V3 rail — no VIN/SW class.
+    const clk_nets = [_]FlatNet{
+        .{ .name = "V_3V3D", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "L1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
+    };
+    try testing.expect(!isSwitcherBoard(&parts, &clk_nets, &idx_of));
 }

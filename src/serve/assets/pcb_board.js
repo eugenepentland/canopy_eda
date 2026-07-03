@@ -1276,7 +1276,26 @@ var onSub=function(){return PCB.sub&&PCB.sub.length;};
 var rgl=document.getElementById("pcb-regen");
 if(rgl)rgl.addEventListener("click",function(ev){ev.preventDefault();if(onSub()){subReload();return;}liveRegen("");});
 var rgh=document.getElementById("pcb-rough");
-if(rgh)rgh.addEventListener("click",function(ev){ev.preventDefault();if(onSub()){subReload();return;}liveRegen("?rough=1");});
+if(rgh)rgh.addEventListener("click",function(ev){ev.preventDefault();if(onSub()){subReload();return;}liveRegen("?remaining=1");});
+// ★-match chip: when a starred layout exists, show how close a fresh rough
+// seed lands to it (area-match %) so the seed's hand-likeness is visible
+// without leaving the page. Skipped on sub previews and ★-less boards.
+(function(){
+ if(onSub())return;
+ if(!document.querySelector(".lay-row.def"))return;
+ var anchor=document.getElementById("sc-obj-d");if(!anchor)return;
+ fetch("/api/layout-match/"+encodeURIComponent(PCB.name))
+  .then(function(r){return r.ok?r.json():null;})
+  .then(function(j){
+   if(!j||j.starred==null||typeof j.area_match_pct!=="number")return;
+   var el=document.createElement("span");el.className="score";el.id="sc-starm";
+   var t="Rough-vs-★ area match: how much of a fresh rough seed lands in the same general area as the starred layout (\""+j.starred+"\")";
+   if(j.coverage&&j.coverage.unmatched&&j.coverage.unmatched.length)t+=" — ★ covers "+j.coverage.covered+"/"+j.coverage.parts+" parts; unmatched parts are excluded";
+   el.title=t;
+   el.textContent="★match "+j.area_match_pct.toFixed(0)+"%";
+   anchor.parentNode.insertBefore(el,anchor.nextSibling);
+  }).catch(function(){});
+})();
 setVB(); // initial overlay paint + zoom-dependent label visibility
 // ── Collapsible control deck (accordion) + board-view overlays ──────────
 (function(){

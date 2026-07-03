@@ -1153,11 +1153,11 @@ pub const RoughGroup = struct {
 /// anchor IC everything centres on, plus ordered priority groups telling the
 /// rough placer which parts to place first (tightest to the anchor). Consumed by
 /// `placement/optimizer.zig`'s `packPadAnchored` in `?rough=1` mode. `present=
-/// false` ⇒ none authored, so the rougher uses its largest-hub anchor + the
-/// pad-count heuristic with no priority ordering.
+/// false` ⇒ none authored, so the rougher uses its most-connected-hub anchor +
+/// the pad-count heuristic with no priority ordering.
 pub const RoughSpec = struct {
     /// Anchor IC ref-des or origin name (matched leniently). Empty ⇒ the rougher
-    /// picks the largest hub.
+    /// picks the most-connected hub.
     anchor: []const u8 = "",
     /// Priority groups in descending priority (index 0 = placed first).
     groups: []const RoughGroup = &.{},
