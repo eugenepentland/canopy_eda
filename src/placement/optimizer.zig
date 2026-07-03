@@ -252,6 +252,12 @@ pub const Params = struct {
     /// layout is enough for a starting point, and N full solves (one per module)
     /// would be far too slow for an interactive button.
     fast: bool = false,
+    /// "Rough the remaining parts": apply the caller's cached poses to every
+    /// part they cover and LOCK those parts in place (`partialApplyLock`), then
+    /// let the placer arrange only the uncovered ones around them. This is the
+    /// incremental mode — add three parts to a hand-finished board and only
+    /// those three move; a full re-solve would discard all the hand work.
+    remaining: bool = false,
 };
 
 /// The effective alignment weight: an explicit `w_align` (≥0) wins; the
@@ -1352,6 +1358,11 @@ fn packZoned(
     params: Params,
 ) std.mem.Allocator.Error!bool {
     _ = params;
+    // The zone floorplan is whole-board constructive — it cannot build around
+    // pinned parts, so any lock hands the board to the ring/relax paths instead.
+    for (parts) |p| {
+        if (p.locked) return false;
+    }
     const topo = analyzeTopology(parts, g_lowered) orelse return false;
     const ic = topo.ic;
     parts[ic].x = 0;
@@ -1521,7 +1532,9 @@ fn autofillUnlisted(
 
     var idxs: std.ArrayListUnmanaged(usize) = .empty;
     for (staged_refs) |ref| {
-        if (idx_of.get(ref)) |i| try idxs.append(arena, i);
+        if (idx_of.get(ref)) |i| {
+            if (!parts[i].locked) try idxs.append(arena, i);
+        }
     }
     // Most-constrained first: loop-bearing caps must reach their hub pins, and
     // big parts need contiguous room — both go before small free placements so
@@ -2043,7 +2056,7 @@ fn buildSubMacro(
 /// force result. Pushes are grid-ceiled along the smaller penetration axis.
 /// Sweeps cap out; the caller's `anyOverlap` accept-test decides whether
 /// the result ships.
-fn legalizeComposed(parts: []Part, macro_of: []const ?usize) void {
+fn legalizeComposed(parts: []Part, macro_of: []const ?usize, pinned_part: []const bool) void {
     var pushed_free = false;
     var sweep: usize = 0;
     while (sweep < 24) : (sweep += 1) {
@@ -2054,7 +2067,7 @@ fn legalizeComposed(parts: []Part, macro_of: []const ?usize) void {
                 const mb = macro_of[j];
                 if (ma != null and mb != null and ma.? == mb.?) continue;
                 if (ma == null and mb == null and !pushed_free) continue;
-                if (separateComposedPair(parts, macro_of, i, j)) {
+                if (separateComposedPair(parts, macro_of, pinned_part, i, j)) {
                     moved = true;
                     if (ma == null or mb == null) pushed_free = true;
                 }
@@ -2066,30 +2079,44 @@ fn legalizeComposed(parts: []Part, macro_of: []const ?usize) void {
 
 /// Resolve one overlapping pair for `legalizeComposed`: push the free side
 /// (or the later-stamped macro as a unit) along the smaller-penetration
-/// axis, away from the stationary box's centre. True when something moved.
-fn separateComposedPair(parts: []Part, macro_of: []const ?usize, i: usize, j: usize) bool {
+/// axis, away from the stationary box's centre. A pinned side (locked part /
+/// block with a locked member) never moves — the other side absorbs the whole
+/// push; both pinned ⇒ left as saved. True when something moved.
+fn separateComposedPair(parts: []Part, macro_of: []const ?usize, pinned_part: []const bool, i: usize, j: usize) bool {
     const a = &parts[i];
     const b = &parts[j];
     const px = (keepHw(a.*) + keepHw(b.*)) - @abs(keepCx(a.*) - keepCx(b.*));
     const py = (keepHh(a.*) + keepHh(b.*)) - @abs(keepCy(a.*) - keepCy(b.*));
     if (px <= 1e-9 or py <= 1e-9) return false;
+    if (pinned_part[i] and pinned_part[j]) return false;
     const dx = if (px <= py) ceilToGrid(px) * (if (keepCx(b.*) >= keepCx(a.*)) @as(f64, 1) else -1) else 0;
     const dy = if (px <= py) 0 else ceilToGrid(py) * (if (keepCy(b.*) >= keepCy(a.*)) @as(f64, 1) else -1);
-    if (macro_of[j] == null) {
+    if (macro_of[j] == null and !pinned_part[j]) {
         b.x += dx;
         b.y += dy;
         return true;
     }
-    if (macro_of[i] == null) {
+    if (macro_of[i] == null and !pinned_part[i]) {
         a.x -= dx;
         a.y -= dy;
         return true;
     }
-    const mb = macro_of[j].?;
+    if (!pinned_part[j]) {
+        const mb = macro_of[j].?;
+        for (parts, 0..) |*p, k| {
+            if (macro_of[k] != null and macro_of[k].? == mb) {
+                p.x += dx;
+                p.y += dy;
+            }
+        }
+        return true;
+    }
+    // j is pinned: shove i's whole block the other way instead.
+    const ma = macro_of[i].?;
     for (parts, 0..) |*p, k| {
-        if (macro_of[k] != null and macro_of[k].? == mb) {
-            p.x += dx;
-            p.y += dy;
+        if (macro_of[k] != null and macro_of[k].? == ma) {
+            p.x -= dx;
+            p.y -= dy;
         }
     }
     return true;
@@ -2179,19 +2206,34 @@ fn runRough(
         try macros.append(arena, try singletonMacro(arena, parts, pi));
     }
 
-    const origins = try arrangeMacros(arena, macros.items, macro_of, nets, &prep.idx_of);
-    stampMacros(parts, macros.items, origins);
+    // A block containing any locked member is pinned: it keeps its current
+    // world position (the "rough the remaining" base layout), arrangeMacros
+    // anchors its centre there and never pushes it, stampMacros skips it, and
+    // the composed legalizer shoves free blocks away from it instead.
+    const pinned = try arena.alloc(bool, macros.items.len);
+    @memset(pinned, false);
+    for (macros.items, 0..) |m, mi| {
+        for (m.members) |pi| {
+            if (parts[pi].locked) pinned[mi] = true;
+        }
+    }
+    const part_pinned = try arena.alloc(bool, parts.len);
+    for (part_pinned, 0..) |*pp, pi| pp.* = if (macro_of[pi]) |mi| pinned[mi] else parts[pi].locked;
+
+    const origins = try arrangeMacros(arena, macros.items, macro_of, nets, &prep.idx_of, parts, pinned);
+    stampMacros(parts, macros.items, origins, pinned);
     // Final hard de-overlap: push whole blocks apart on grid (same legalizer the
     // spec-composition path uses). A residual touch is acceptable for a rough seed.
-    legalizeComposed(parts, macro_of);
+    legalizeComposed(parts, macro_of, part_pinned);
     return true;
 }
 
 /// Drop each rigid block at its arranged origin: every member lands at
 /// `origin + (lx,ly)` with the block's rotation, so the module's internal layout
 /// is preserved exactly and only the block as a whole has moved.
-fn stampMacros(parts: []Part, macros: []const Macro, origins: []const [2]f64) void {
+fn stampMacros(parts: []Part, macros: []const Macro, origins: []const [2]f64, pinned: []const bool) void {
     for (macros, 0..) |m, mi| {
+        if (pinned[mi]) continue; // a pinned block's members already sit at their poses
         for (m.members, 0..) |pi, k| {
             parts[pi].x = origins[mi][0] + m.lx[k];
             parts[pi].y = origins[mi][1] + m.ly[k];
@@ -2522,6 +2564,7 @@ fn assignSides(
     var net_next: std.AutoHashMapUnmanaged(usize, usize) = .empty;
     for (parts, 0..) |p, pi| {
         if (pi == hi) continue; // only the anchor hub is fixed; other hubs (a TCXO) ring it too
+        if (p.locked) continue; // pinned by the caller — never re-bucketed onto a side
         // Classify this part's IC nets into the most-signal-like (fewest hub pads,
         // ≤2) and the widest rail (most hub pads).
         var sig: ?[2]f64 = null;
@@ -3034,9 +3077,9 @@ fn polishCrossings(
     while (best > 0 and pass < ROUGH_POLISH_PASSES) : (pass += 1) {
         var improved = false;
         for (parts, 0..) |_, i| {
-            if (i == hi) continue;
+            if (i == hi or parts[i].locked) continue;
             for (i + 1..parts.len) |j| {
-                if (j == hi) continue;
+                if (j == hi or parts[j].locked) continue;
                 if (@abs(parts[i].hw - parts[j].hw) > 1e-6 or @abs(parts[i].hh - parts[j].hh) > 1e-6) continue;
                 // i would move to j's spot and vice versa — skip if that lands a
                 // side-constrained part on the wrong side of the anchor.
@@ -3116,6 +3159,7 @@ fn orientPadsToIC(
 ) void {
     for (parts, 0..) |*p, pi| {
         if (pi == hi or p.kind == .hub or p.pads.len != 2) continue;
+        if (p.locked) continue; // a pinned pose keeps its hand-set orientation
         const lp = importantPadLocal(p.*, pi, hi, nets, idx_of) orelse continue;
         const off = rotateLocal(lp[0], lp[1], p.rot);
         // Inward = from the part toward the IC; flip when the pad points outward.
@@ -3194,6 +3238,12 @@ fn packPadAnchored(
     }
     if (!found) return false;
 
+    // The ring math runs in the anchor-at-origin frame. A locked anchor (the
+    // "rough the remaining parts" mode pins the hand-placed MCU) must not move:
+    // remember its real pose, solve at the origin as usual, and rigid-transform
+    // the newly-ringed parts into its frame at the end.
+    const a_locked = parts[hi].locked;
+    const a_pose = [3]f64{ parts[hi].x, parts[hi].y, parts[hi].rot };
     parts[hi].x = 0;
     parts[hi].y = 0;
     parts[hi].rot = 0;
@@ -3318,8 +3368,28 @@ fn packPadAnchored(
     // bypass cap toward the IC power pin, signal pad of a resistor toward the IC).
     orientPadsToIC(parts, hi, nets, &prep.idx_of);
 
+    if (a_locked) {
+        parts[hi].x = a_pose[0];
+        parts[hi].y = a_pose[1];
+        parts[hi].rot = a_pose[2];
+        transformRingToAnchor(parts, hi, a_pose[0], a_pose[1], a_pose[2]);
+    }
     legalizeFinal(parts); // resolve any corner / cross-side overlaps
     return true;
+}
+
+/// Rigid-transform every free part out of the ring's anchor-at-origin frame
+/// into the anchor's real pose: rotate each ring position by `arot`, translate
+/// by (ax, ay), and add `arot` to the part's own rotation. Locked parts are
+/// already in world coordinates and stay put.
+fn transformRingToAnchor(parts: []Part, hi: usize, ax: f64, ay: f64, arot: f64) void {
+    for (parts, 0..) |*p, pi| {
+        if (pi == hi or p.locked) continue;
+        const r = rotateLocal(p.x, p.y, arot);
+        p.x = ax + r.x;
+        p.y = ay + r.y;
+        p.rot = @mod(p.rot + arot, 360);
+    }
 }
 
 /// Place rigid blocks by connectivity: a coarse spring relaxation on block centres
@@ -3334,6 +3404,8 @@ fn arrangeMacros(
     macro_of: []const ?usize,
     nets: []const FlatNet,
     idx_of: *const std.StringHashMap(usize),
+    parts: []const Part,
+    pinned: []const bool,
 ) std.mem.Allocator.Error![][2]f64 {
     const n = macros.len;
     // Pairwise shared-net weights: a net touching k distinct blocks adds 1 to each
@@ -3384,6 +3456,11 @@ fn arrangeMacros(
     const cols: usize = @max(1, @as(usize, @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(n)))))));
     const spacing = max_span + ROUGH_BLOCK_GAP_MM;
     for (0..n) |i| {
+        if (pinned[i]) { // a pinned block anchors at its members' current centre
+            const b = membersBox(parts, macros[i].members);
+            centers[i] = .{ (b[0] + b[2]) / 2, (b[1] + b[3]) / 2 };
+            continue;
+        }
         const r: f64 = @floatFromInt(i / cols);
         const c: f64 = @floatFromInt(i % cols);
         centers[i] = .{ c * spacing, r * spacing };
@@ -3433,6 +3510,7 @@ fn arrangeMacros(
             }
         }
         for (0..n) |a| {
+            if (pinned[a]) continue; // pinned blocks push others but never move
             centers[a][0] += @max(-ROUGH_MAX_STEP_MM, @min(ROUGH_MAX_STEP_MM, force[a][0] * ROUGH_STEP));
             centers[a][1] += @max(-ROUGH_MAX_STEP_MM, @min(ROUGH_MAX_STEP_MM, force[a][1] * ROUGH_STEP));
         }
@@ -3628,6 +3706,48 @@ fn scrubClaimed(
 /// Realize a `(board …)` form on an already-solved interior placement. Mutates
 /// only the claimed (edge/corner) parts and the staging band; returns the
 /// outline rectangle for the renderers.
+/// Dock the `(corners …)` hardware flush into the four outline corners (TL,
+/// TR, BR, BL in authored order), returning each one's world keepout so the
+/// edge lanes dodge it. A locked corner part stays where the hand put it —
+/// its box is still recorded so the edges keep clear.
+fn dockCorners(parts: []Part, corner_parts: []const usize, x0: f64, y0: f64, x1: f64, y1: f64) [4]?Rect {
+    var corner_box = [4]?Rect{ null, null, null, null };
+    for (corner_parts, 0..) |pi, k| {
+        if (k >= 4) break;
+        const p = &parts[pi];
+        if (!p.locked) {
+            p.rot = 0;
+            const kb = keepBoxOf(p.*);
+            switch (@as(CornerSlot, @enumFromInt(k))) {
+                .tl => {
+                    p.x = gridRound(x0 + kb.hw - kb.cxo);
+                    p.y = gridRound(y0 + kb.hh - kb.cyo);
+                },
+                .tr => {
+                    p.x = gridRound(x1 - kb.hw - kb.cxo);
+                    p.y = gridRound(y0 + kb.hh - kb.cyo);
+                },
+                .br => {
+                    p.x = gridRound(x1 - kb.hw - kb.cxo);
+                    p.y = gridRound(y1 - kb.hh - kb.cyo);
+                },
+                .bl => {
+                    p.x = gridRound(x0 + kb.hw - kb.cxo);
+                    p.y = gridRound(y1 - kb.hh - kb.cyo);
+                },
+            }
+        }
+        const kb = keepBoxOf(p.*);
+        corner_box[k] = .{
+            .x0 = p.x + kb.cxo - kb.hw,
+            .y0 = p.y + kb.cyo - kb.hh,
+            .x1 = p.x + kb.cxo + kb.hw,
+            .y1 = p.y + kb.cyo + kb.hh,
+        };
+    }
+    return corner_box;
+}
+
 fn packBoard(
     arena: std.mem.Allocator,
     parts: []Part,
@@ -3688,37 +3808,7 @@ fn packBoard(
 
     // Corners first (TL, TR, BR, BL in authored order) — they bound the edge
     // spans. Track each one's world keepout so the edges dodge it.
-    var corner_box = [4]?Rect{ null, null, null, null };
-    for (bc.corner_parts, 0..) |pi, k| {
-        if (k >= 4) break;
-        const p = &parts[pi];
-        p.rot = 0;
-        const kb = keepBoxOf(p.*);
-        switch (@as(CornerSlot, @enumFromInt(k))) {
-            .tl => {
-                p.x = gridRound(x0 + kb.hw - kb.cxo);
-                p.y = gridRound(y0 + kb.hh - kb.cyo);
-            },
-            .tr => {
-                p.x = gridRound(x1 - kb.hw - kb.cxo);
-                p.y = gridRound(y0 + kb.hh - kb.cyo);
-            },
-            .br => {
-                p.x = gridRound(x1 - kb.hw - kb.cxo);
-                p.y = gridRound(y1 - kb.hh - kb.cyo);
-            },
-            .bl => {
-                p.x = gridRound(x0 + kb.hw - kb.cxo);
-                p.y = gridRound(y1 - kb.hh - kb.cyo);
-            },
-        }
-        corner_box[k] = .{
-            .x0 = p.x + kb.cxo - kb.hw,
-            .y0 = p.y + kb.cyo - kb.hh,
-            .x1 = p.x + kb.cxo + kb.hw,
-            .y1 = p.y + kb.cyo + kb.hh,
-        };
-    }
+    const corner_box = dockCorners(parts, bc.corner_parts, x0, y0, x1, y1);
 
     // Each edge: rotation (pads inward unless overridden) → cross-axis flush
     // inside the edge → desired slide position (attachment centroid) → 1-D
@@ -3740,9 +3830,11 @@ fn packBoard(
         if (corner_at[1]) |cb| span_max = @min(span_max, (if (vertical) cb.y0 else cb.x0) - BOARD_EDGE_GAP_MM);
 
         const Entry = struct { pi: usize, want: f64, half: f64 };
-        var entries = try arena.alloc(Entry, list.len);
-        for (list, 0..) |sr, i| {
+        var entries_buf = try arena.alloc(Entry, list.len);
+        var live: usize = 0;
+        for (list) |sr| {
             const p = &parts[sr.pi];
+            if (p.locked) continue; // a pinned connector keeps its hand-set dock
             p.rot = if (sr.rot) |r| @mod(@round(r / 90.0) * 90.0, 360.0) else edgeInwardRot(p.*, edge);
             const kb = keepBoxOf(p.*);
             switch (edge) {
@@ -3755,12 +3847,15 @@ fn packBoard(
                 (if (vertical) c.y else c.x)
             else
                 (span_min + span_max) / 2;
-            entries[i] = .{
+            entries_buf[live] = .{
                 .pi = sr.pi,
                 .want = std.math.clamp(want, span_min, span_max),
                 .half = if (vertical) kb.hh else kb.hw,
             };
+            live += 1;
         }
+        const entries = entries_buf[0..live];
+        if (entries.len == 0) continue;
         std.mem.sort(Entry, entries, {}, struct {
             fn less(_: void, a: Entry, b: Entry) bool {
                 return a.want < b.want;
@@ -3941,6 +4036,10 @@ pub fn solve(
 
     const generated = !applyCached(parts, cached);
     if (generated) {
+        // "Rough the remaining": pin every part the base layout covers, then
+        // place only the uncovered ones around them. (When the base covered
+        // everything cleanly, applyCached above already took the verbatim path.)
+        if (params.remaining) _ = partialApplyLock(parts, cached);
         try runPlacement(arena, parts, &prep, nets, built, params);
         // Stream the first arrangement to a watching live-regen browser (no-op
         // for a synchronous page solve, which never installs a sink). Pure
@@ -4935,6 +5034,30 @@ fn routedSubsetWeighted(
     return weighted;
 }
 
+/// Partial cousin of `applyCached` for the "rough the remaining parts" mode
+/// (`Params.remaining`): apply every matching pose AND lock the part, leaving
+/// unmatched parts free for the placer. Never rejects on coverage or overlap —
+/// the caller wants the base layout pinned exactly as saved. Returns how many
+/// parts matched.
+fn partialApplyLock(parts: []Part, cached: ?[]const RefPose) usize {
+    const poses = cached orelse return 0;
+    var matched: usize = 0;
+    for (parts) |*p| {
+        for (poses) |rp| {
+            if (std.mem.eql(u8, rp.ref, p.ref_des)) {
+                p.x = rp.x;
+                p.y = rp.y;
+                p.rot = rp.rot;
+                p.side = rp.side;
+                p.locked = true;
+                matched += 1;
+                break;
+            }
+        }
+    }
+    return matched;
+}
+
 /// Apply a cached layout to `parts` when it covers every one (matched by
 /// ref-des) *and* the result has no courtyard overlap. Returns true on a clean
 /// hit (positions applied, optimizer skipped); false on a miss, a partial/
@@ -5010,6 +5133,7 @@ fn tightenPriorityLoops(arena: std.mem.Allocator, parts: []Part, loops: []const 
     for (order) |li| {
         const lp = loops[li];
         if (lp.cap >= priority.len or priority[lp.cap] == 0) continue;
+        if (parts[lp.cap].locked) continue; // pinned cap keeps its hand pose
         const p = &parts[lp.cap];
         const sx = p.x;
         const sy = p.y;
@@ -5219,7 +5343,7 @@ fn routedPolish(
     while (sweep < ROUTED_POLISH_SWEEPS) : (sweep += 1) {
         var improved = false;
         for (parts, 0..) |*p, i| {
-            if (p.kind == .hub or !in_loop[i]) continue;
+            if (p.kind == .hub or !in_loop[i] or p.locked) continue;
             if (routedPolishPart(&scratch, parts, idx_of, nets, loops, i, params)) improved = true;
         }
         if (!improved) break;
@@ -5333,6 +5457,7 @@ fn overlapsAny(parts: []const Part, p: *const Part) bool {
 /// positions are grid-aligned (the interactive page drags on the same grid).
 fn snapToGrid(parts: []Part) void {
     for (parts) |*p| {
+        if (p.locked) continue; // a pinned hand pose keeps its exact coordinates
         p.x = @round(p.x / GRID_MM) * GRID_MM;
         p.y = @round(p.y / GRID_MM) * GRID_MM;
     }
@@ -6840,6 +6965,7 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
 
         var maxdisp: f64 = 0;
         for (0..n) |i| {
+            if (parts[i].locked) continue; // pinned by the caller — forces flow around it
             const mass = if (parts[i].kind == .hub) HUB_MASS else PASSIVE_MASS;
             const dx = clampDisp(step * ax[i] / mass);
             const dy = clampDisp(step * ay[i] / mass);
@@ -6968,6 +7094,7 @@ fn legalize(parts: []Part, clearance: f64) void {
         const moved = accumulateRepulsion(parts, boxes[0..n], &ax, &ay, clearance);
         if (!moved) break;
         for (0..n) |i| {
+            if (parts[i].locked) continue; // the free side of a pair absorbs the push
             parts[i].x += ax[i];
             parts[i].y += ay[i];
         }
@@ -6993,12 +7120,14 @@ fn legalizeOnGrid(parts: []Part) void {
                 const ox = (keepHw(parts[i]) + keepHw(parts[j])) - @abs(dx);
                 const oy = (keepHh(parts[i]) + keepHh(parts[j])) - @abs(dy);
                 if (ox <= 0 or oy <= 0) continue;
+                if (parts[i].locked and parts[j].locked) continue; // both pinned — leave as saved
                 any = true;
-                // Move the higher-index part one cell away on the tight axis.
+                // Move the higher-index part one cell away on the tight axis —
+                // unless it's locked, in which case the free partner steps back.
                 if (ox < oy) {
-                    parts[j].x -= signNudge(dx, i, j) * GRID_MM;
+                    if (parts[j].locked) parts[i].x += signNudge(dx, i, j) * GRID_MM else parts[j].x -= signNudge(dx, i, j) * GRID_MM;
                 } else {
-                    parts[j].y -= signNudge(dy, i, j) * GRID_MM;
+                    if (parts[j].locked) parts[i].y += signNudge(dy, i, j) * GRID_MM else parts[j].y -= signNudge(dy, i, j) * GRID_MM;
                 }
             }
         }
@@ -7125,6 +7254,7 @@ fn seedRing(parts: []Part, start: usize) void {
     var placed_hubs: usize = 0;
     var pord: usize = 0;
     for (parts) |*p| {
+        if (p.locked) continue; // pinned — the relax flows around it
         if (p.kind == .hub) {
             const col = placed_hubs % hub_cols;
             const row = placed_hubs / hub_cols;
@@ -7152,6 +7282,7 @@ fn seedGrid(parts: []Part) void {
     cell += SEED_GAP_MM;
     const cols = @max(1, @as(usize, @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(n)))))));
     for (parts, 0..) |*p, i| {
+        if (p.locked) continue; // pinned — the relax flows around it
         p.x = @as(f64, @floatFromInt(i % cols)) * cell;
         p.y = @as(f64, @floatFromInt(i / cols)) * cell;
     }
@@ -8071,7 +8202,7 @@ test "legalizeComposed moves the free part, not the macro members" {
         .{ .ref_des = "R1", .kind = .passive, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 6, .y = 0.5 },
     };
     const macro_of = [_]?usize{ 0, 0, null };
-    legalizeComposed(&parts, &macro_of);
+    legalizeComposed(&parts, &macro_of, &.{ false, false, false });
     // Macro members never moved relative to each other (or at all).
     try testing.expectApproxEqAbs(@as(f64, 0), parts[0].x, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 4), parts[1].x, 1e-9);
@@ -8088,7 +8219,7 @@ test "legalizeComposed shifts the later macro rigidly" {
         .{ .ref_des = "b/C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 7, .y = 0.5 },
     };
     const macro_of = [_]?usize{ 0, 1, 1 };
-    legalizeComposed(&parts, &macro_of);
+    legalizeComposed(&parts, &macro_of, &.{ false, false, false });
     // Macro b moved as a unit: the b members' relative offset is preserved.
     try testing.expectApproxEqAbs(@as(f64, 4), parts[2].x - parts[1].x, 1e-9);
     try testing.expectApproxEqAbs(parts[2].y, parts[1].y, 1e-9);
@@ -8171,9 +8302,9 @@ test "arrangeMacros + legalize keep modules intact and disjoint" {
     try idx_of.put("b/U1", 2);
     try idx_of.put("b/C1", 3);
 
-    const origins = try arrangeMacros(arena, &macros, &macro_of, &nets, &idx_of);
-    stampMacros(&parts, &macros, origins);
-    legalizeComposed(&parts, &macro_of);
+    const origins = try arrangeMacros(arena, &macros, &macro_of, &nets, &idx_of, &parts, &.{ false, false });
+    stampMacros(&parts, &macros, origins, &.{ false, false });
+    legalizeComposed(&parts, &macro_of, &.{ false, false, false, false });
 
     // Rigidity: each module's internal member offset survived the arrange + legalize
     // (a module moves only as a whole block). finishMacro snapped both to dx = 12.
@@ -8526,4 +8657,59 @@ test "pickAnchorHub picks the wired MCU over a big-courtyard button" {
     try testing.expectEqual(@as(?usize, 1), pickAnchorHub(&parts, &.{}));
     // No hub anywhere: null.
     try testing.expectEqual(@as(?usize, null), pickAnchorHub(parts[2..], &nets));
+}
+
+// spec: placement/optimizer - partial apply locks every covered part and leaves the rest free
+test "partialApplyLock pins matched parts only" {
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "C9", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+    };
+    const poses = [_]RefPose{.{ .ref = "U1", .x = 10, .y = 5, .rot = 90 }};
+    try testing.expectEqual(@as(usize, 1), partialApplyLock(&parts, &poses));
+    try testing.expect(parts[0].locked);
+    try testing.expectEqual(@as(f64, 10), parts[0].x);
+    try testing.expect(!parts[1].locked);
+}
+
+// spec: placement/optimizer - legalization never moves a locked part; the free side absorbs the push
+test "legalizeOnGrid and snapToGrid leave locked parts untouched" {
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 0.03, .y = 0, .locked = true },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 1, .y = 0.5 },
+    };
+    snapToGrid(&parts);
+    try testing.expectEqual(@as(f64, 0.03), parts[0].x); // locked keeps its off-grid pose
+    legalizeOnGrid(&parts);
+    try testing.expectEqual(@as(f64, 0.03), parts[0].x); // never pushed
+    try testing.expectEqual(@as(f64, 0), parts[0].y);
+    try testing.expect(!anyOverlap(&parts)); // the free part moved clear instead
+}
+
+// spec: placement/optimizer - a locked anchor keeps its pose and the ring transforms into its frame
+test "transformRingToAnchor maps ring coordinates into the anchor pose" {
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 10, .y = 20, .rot = 90, .locked = true },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 5, .y = 0, .rot = 0 },
+    };
+    transformRingToAnchor(&parts, 0, 10, 20, 90);
+    // Ring position (5,0) rotated 90° → (0,5)… in this codebase's rotateLocal
+    // convention; verify via rotateLocal itself so the test can't drift.
+    const r = rotateLocal(5, 0, 90);
+    try testing.expectEqual(@as(f64, 10 + r.x), parts[1].x);
+    try testing.expectEqual(@as(f64, 20 + r.y), parts[1].y);
+    try testing.expectEqual(@as(f64, 90), parts[1].rot);
+}
+
+// spec: placement/optimizer - a pinned block pushes free blocks aside and never moves
+test "separateComposedPair shoves the free block away from a pinned one" {
+    var parts = [_]Part{
+        .{ .ref_des = "a/U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 0, .y = 0, .locked = true },
+        .{ .ref_des = "b/U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 3, .y = 0.5 },
+    };
+    const macro_of = [_]?usize{ 0, 1 };
+    legalizeComposed(&parts, &macro_of, &.{ true, false });
+    try testing.expectEqual(@as(f64, 0), parts[0].x); // pinned block never moved
+    try testing.expectEqual(@as(f64, 0), parts[0].y);
+    try testing.expect(!anyOverlap(&parts)); // the free block got pushed clear
 }

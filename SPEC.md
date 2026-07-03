@@ -94,6 +94,10 @@ Public functions: solve
 
 - classifies hub vs passive ref-des, handling hierarchical paths
 - anchor pick prefers net degree over courtyard area, area only breaks ties
+- partial apply locks every covered part and leaves the rest free
+- legalization never moves a locked part; the free side absorbs the push
+- a locked anchor keeps its pose and the ring transforms into its frame
+- a pinned block pushes free blocks aside and never moves
 - excludes ground nets from spring forces
 - multi-pin wirelength uses the rectilinear MST, which equals span when collinear and exceeds HPWL otherwise
 - loop inductance floors at the via mounting inductance and rises with conductor length
