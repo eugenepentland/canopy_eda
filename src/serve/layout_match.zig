@@ -23,6 +23,7 @@ const std = @import("std");
 const httpz = @import("httpz");
 const optimizer = @import("../placement/optimizer.zig");
 const pcb_describe = @import("pcb_describe.zig");
+const style_score = @import("style_score.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const modules_mod = @import("modules.zig");
@@ -62,35 +63,6 @@ pub const PInfo = struct {
     class: []const u8,
 };
 
-/// Build a part's interchangeable-class key: kind + value + footprint half-size
-/// (0.1 mm buckets) + the sorted set of nets it touches. Two parts with the same
-/// key serve the same role and are fungible when matching positions.
-fn classKey(alloc: std.mem.Allocator, p: optimizer.Placement, idx: usize) std.mem.Allocator.Error![]const u8 {
-    const part = p.parts[idx];
-    var nets: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer nets.deinit(alloc);
-    for (p.nets) |net| {
-        for (net.pins) |pin| {
-            if (std.mem.eql(u8, pin.ref_des, part.ref_des)) {
-                try nets.append(alloc, net.name);
-                break;
-            }
-        }
-    }
-    std.mem.sort([]const u8, nets.items, {}, struct {
-        fn lt(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.order(u8, a, b) == .lt;
-        }
-    }.lt);
-    var joined: std.ArrayListUnmanaged(u8) = .empty;
-    defer joined.deinit(alloc);
-    for (nets.items) |n| {
-        try joined.appendSlice(alloc, n);
-        try joined.append(alloc, ',');
-    }
-    return std.fmt.allocPrint(alloc, "{s}|{s}|{d:.1}x{d:.1}|{s}", .{ @tagName(part.kind), part.value, part.hw, part.hh, joined.items });
-}
-
 /// Analyze every non-anchor part of `p` into a `PInfo` (edge + class),
 /// skipping refs in `excluded` (parts the starred reference doesn't cover —
 /// scoring those would charge the rough seed for reference staleness).
@@ -106,7 +78,7 @@ pub fn analyze(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: ?*con
             if (ex.contains(part.ref_des)) continue;
         }
         const side = pcb_describe.sideOf(part.x - anchor.x, part.y - anchor.y, a_half, pcb_describe.aabbHalf(part));
-        try out.append(alloc, .{ .side = side, .class = try classKey(alloc, p, i) });
+        try out.append(alloc, .{ .side = side, .class = try style_score.classKey(alloc, p, i) });
     }
     return out.toOwnedSlice(alloc);
 }
@@ -199,7 +171,11 @@ pub fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: 
         m.eval.deinit();
         alloc.destroy(m.eval);
     };
-    const rough = try pcb_layout_page.solveForRequest(alloc, project_dir, name, .{ .rough = true }, &eval1, &mr1);
+    // `.regen` forces a FRESH rough solve — without it `solveForRequest` reads the
+    // auto-cache sidecar (some earlier, possibly stale, solve), which would make
+    // the match/score describe a cached layout rather than the rough engine's
+    // current output.
+    const rough = try pcb_layout_page.solveForRequest(alloc, project_dir, name, .{ .rough = true, .regen = true }, &eval1, &mr1);
 
     var eval2 = Evaluator.init(alloc, project_dir);
     defer eval2.deinit();
@@ -237,6 +213,10 @@ pub fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: 
     }
 
     const res = compare(alloc, rough.placement, star.placement, &excluded) catch return error.BuildFailed;
+    // Dense hand-likeness (edge + gap-band overlap, D4-symmetric) alongside the
+    // side-only area_match — the graded signal a hybrid score / candidate rank
+    // can act on.
+    const style = style_score.compareStyle(alloc, rough.placement, star.placement, &excluded) catch return error.BuildFailed;
 
     w.writeAll("{\"name\":") catch return error.BuildFailed;
     pcb_layout_page.writeJsonStr(w, name) catch return error.BuildFailed;
@@ -252,6 +232,21 @@ pub fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: 
     if (res.n == 0) {
         w.writeAll(",\"note\":\"no anchor hub or no scorable parts — area match not applicable\"") catch return error.BuildFailed;
     }
+    w.print(
+        ",\"style_match_pct\":{d:.1},\"style_terms\":{{\"edge\":{d:.1},\"gap\":{d:.1},\"rot_k\":{d}}}",
+        .{ style.style_pct, style.edge_pct, style.gap_pct, style.rot_k },
+    ) catch return error.BuildFailed;
+    // Hybrid: physics objective of the rough relative to the starred layout's own
+    // objective, penalized by the style gap. `star_obj` = the hand layout's
+    // surrogate objective (its verbatim `breakdown`), so `obj_rel` is unitless.
+    // The raw objectives are emitted too so an offline λ sweep can recompute.
+    const rough_obj = rough.placement.breakdown.objective;
+    const star_obj = star.placement.breakdown.objective;
+    const hyb = style_score.hybridScore(rough_obj, star_obj, style.style_pct, style_score.LAMBDA_DEFAULT);
+    w.print(
+        ",\"rough_obj\":{d:.2},\"star_obj\":{d:.2},\"obj_rel\":{d:.3},\"hybrid\":{d:.3},\"lambda\":{d:.2}",
+        .{ rough_obj, star_obj, hyb.obj_rel, hyb.hybrid, style_score.LAMBDA_DEFAULT },
+    ) catch return error.BuildFailed;
     w.print(",\"n\":{d},\"area_match_pct\":{d:.1},\"classes\":[", .{ res.n, res.area_match_pct }) catch return error.BuildFailed;
     for (res.classes, 0..) |cd, i| {
         if (i > 0) w.writeAll(",") catch return error.BuildFailed;

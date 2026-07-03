@@ -29,6 +29,7 @@ const editor_page = @import("serve/editor_page.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
 const pcb_describe = @import("serve/pcb_describe.zig");
 const layout_match = @import("serve/layout_match.zig");
+const rough_best = @import("serve/rough_best.zig");
 const modules_page = @import("serve/modules.zig");
 const auth = @import("serve/auth.zig");
 const mcp = @import("serve/mcp.zig");
@@ -365,7 +366,6 @@ pub fn serve(
     router.post("/auth/credentials/delete", auth.deleteCredentialApi, .{});
     router.post("/auth/invite/create", auth.createInviteApi, .{});
     router.get("/auth/invite/*", auth.invitePage, .{});
-
     // Pages
     router.get("/", pages.indexPage, .{});
     router.get("/style.css", pages.cssPage, .{});
@@ -379,6 +379,8 @@ pub fn serve(
     router.get("/api/pcb-png/:name", pcb_layout_page.pcbPngApi, .{});
     router.get("/api/pcb-describe/:name", pcb_describe.pcbDescribeApi, .{});
     router.get("/api/layout-match/:name", layout_match.layoutMatchApi, .{});
+    router.get("/api/rough-best/:name", rough_best.bestRoughApi, .{});
+    router.get("/api/rough-best-png/:name", rough_best.bestRoughPngApi, .{});
     router.get("/api/pcb-centroid/:name", pcb_layout_page.pcbCentroidApi, .{});
     router.get("/api/pcb-drill/:name", pcb_layout_page.pcbDrillApi, .{});
     router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
@@ -394,7 +396,6 @@ pub fn serve(
     router.get("/modules", modules_page.modulesListPage, .{});
     router.get("/modules/:name", modules_page.moduleViewPage, .{});
     router.get("/mcp-tools", mcp_docs.mcpDocsPage, .{});
-
     // API
     router.post("/api/push/:name", api.pushApi, .{});
     router.get("/api/module-source", modules_page.moduleSourceApi, .{});

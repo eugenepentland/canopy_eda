@@ -1105,12 +1105,31 @@ src/serve/rate_limiter.zig::cse value
 src/serve/rate_limiter.zig::digikey value
 src/serve/rate_limiter.zig::init | fn init(min_interval_ms: u64, max_in_flight: u32) RateLimiter
 src/serve/rate_limiter.zig::release | fn release(self: *RateLimiter) void
+src/serve/rough_best.zig::bestRoughApi | fn bestRoughApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
+src/serve/rough_best.zig::bestRoughJson | fn bestRoughJson(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) pcb_layout_page.PngError![]u8
+src/serve/rough_best.zig::bestRoughPngApi | fn bestRoughPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
 src/serve/schematic_page.zig::HandlerError value
 src/serve/schematic_page.zig::schematicPage | fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/schematic_viewer_js.zig::SCHEMATIC_VIEWER_JS value
 src/serve/static_assets.zig::HandlerError value
 src/serve/static_assets.zig::editorJsVersion | fn editorJsVersion(buf: []u8) []const u8
 src/serve/static_assets.zig::staticAsset | fn staticAsset(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/style_score.zig::GAP_BANDS value
+src/serve/style_score.zig::HybridScore struct_
+src/serve/style_score.zig::LAMBDA_DEFAULT value
+src/serve/style_score.zig::N_BANDS value
+src/serve/style_score.zig::N_SIDES value
+src/serve/style_score.zig::SInfo struct_
+src/serve/style_score.zig::StyleResult struct_
+src/serve/style_score.zig::W_EDGE value
+src/serve/style_score.zig::W_GAP value
+src/serve/style_score.zig::analyzeStyle | fn analyzeStyle(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: ?*const std.StringHashMap(void)) std.mem.Allocator.Error![]SInfo
+src/serve/style_score.zig::classKey | fn classKey(alloc: std.mem.Allocator, p: optimizer.Placement, idx: usize) std.mem.Allocator.Error![]const u8
+src/serve/style_score.zig::compareStyle | fn compareStyle( alloc: std.mem.Allocator, rough: optimizer.Placement, starred: optimizer.Placement, excluded: ?*const std.StringHashMap(void), ) std.mem.Allocator.Error!StyleResult
+src/serve/style_score.zig::gapBand | fn gapBand(gap_mm: f64) usize
+src/serve/style_score.zig::hybridScore | fn hybridScore(cand_obj: f64, ref_obj: f64, style_pct: f64, lambda: f64) HybridScore
+src/serve/style_score.zig::rotSide | fn rotSide(side: Side, k: usize) Side
+src/serve/style_score.zig::styleScore | fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []const SInfo) std.mem.Allocator.Error!StyleResult
 src/serve/sync.zig::BoardFp struct_
 src/serve/sync.zig::HandlerError value
 src/serve/sync.zig::PadAssign struct_
