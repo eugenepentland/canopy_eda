@@ -133,6 +133,8 @@ Public functions: solve
 - series rotations are applied and pinned; authored spec rotations win
 - synthesizes an aggressor-avoidance keep-out for a feedback passive
 - the surrogate objective ranks a tighter layout below a spread one
+- a passive belongs to the hub its decoupling loop or most local signal net serves; power rails carry no locality
+- a satellite hub's circuit solves in its own frame and docks rigidly at the anchor pads that tie it in
 
 ## placement/router
 
