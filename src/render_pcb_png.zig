@@ -38,6 +38,7 @@ const TRACK_TOP = Rgb.hex("#ef4444"); // F.Cu trace
 const TRACK_BOT = Rgb.hex("#3b82f6"); // B.Cu trace
 const VIA_COL = Rgb.hex("#d8b048");
 const VIA_HOLE = Rgb.hex("#0d1117");
+const PAD_HOLE = Rgb.hex("#0d1117"); // drilled bore punched through a thru/npth pad
 const DRC_COL = Rgb.hex("#f85149");
 const ACCENT = Rgb.hex("#f5c542"); // focus highlight
 const TEXT_COL = Rgb.hex("#c9d1d9");
@@ -605,6 +606,13 @@ const Ctx = struct {
                     self.lp(part, pad.x + hw, pad.y + hh), self.lp(part, pad.x - hw, pad.y + hh),
                 };
                 self.cv.fillPoly(&quad, col, a);
+            }
+            // Drilled bore: punch a board-coloured hole through thru/npth pads so
+            // through-hole parts and mounting holes read as holes, not solid copper.
+            if (pad.drill > 0) {
+                const c = self.lp(part, pad.x, pad.y);
+                const hr = @max(self.len(pad.drill / 2), self.pw(0.6));
+                self.cv.disc(c[0], c[1], hr, PAD_HOLE, a);
             }
         }
     }

@@ -150,6 +150,9 @@ function paintParts(ctx,k){
    if(hoverNet&&pd.net===hoverNet)fill="#f85149";
    ctx.fillStyle=fill;
    padPath(ctx,pd);ctx.fill();
+   // Drilled bore: board-coloured hole through thru/npth pads.
+   if(pd.drill>0){ctx.fillStyle="#0d1117";ctx.beginPath();
+    ctx.arc(pd.x*S,pd.y*S,Math.max(pd.drill/2*S,0.6),0,6.2832);ctx.fill();}
    if(selNetCur&&pd.net===selNetCur){
     var pin=!!loopPin[i+":"+pd.x.toFixed(2)+":"+pd.y.toFixed(2)];
     ctx.strokeStyle=pin?"#f85149":"#ffd33d";ctx.lineWidth=1.8;
