@@ -859,3 +859,8 @@ Public functions: designSourcePath, designSiblingPath
 
 - Resolves <name>.sexp via designSourcePath, falling back to flat layout when missing
 - Resolves sibling artifacts via designSiblingPath using the supplied extension
+
+## Web Server
+
+- Stamped module copper keeps its group tag through the sidecar so rigid-group moves carry it
+- Stamped module copper maps its net names onto the parent design via the origin-key bridge, slug-prefixing private nets

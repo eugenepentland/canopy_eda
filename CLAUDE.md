@@ -601,11 +601,25 @@ Local dev still uses `http://localhost:7050`.
   annular-ring (0.1 mm floor) + board-edge checks. **Routes persist**: saved
   layouts capture their routed copper (net-NAME keyed) in the sidecar;
   Load/page-open restores it and DRC re-checks it against current poses;
-  moving a part invalidates only its own nets' copper. **Rigid
-  sub-circuits**: parts sharing a sub-block prefix drag/rotate as one unit
-  (G explodes/re-coheres; per-design localStorage), and the sidebar
-  Sub-circuits palette **Stamp**s a whole module ★ layout onto the board via
-  the same origin_key bridge KiCad sync seeds from (`PCB.subseeds`).
+  moving a part invalidates only its own nets' copper. **Hand routing**: the
+  ✎ Draw button (key **X**) draws tracks/vias onto the same model — click a
+  pad to start (net/layer/width from pad + Route panel's track-width), click
+  to fix 45°/grid-snapped corners (Shift = free angle), **V** drops a via +
+  flips layer, finish on a same-net pad / double-click / Enter, Backspace
+  steps back, right-click deletes copper under the cursor; Save/Update
+  persists it like any routed copper (works on module pages → the module's
+  `.layouts.json`). **Rigid sub-circuits**: parts sharing a sub-block prefix
+  drag/rotate as one unit (G explodes/re-coheres; per-design localStorage),
+  and the sidebar Sub-circuits palette **Stamp**s a whole module ★ layout
+  onto the board via the same origin_key bridge KiCad sync seeds from
+  (`PCB.subseeds`). **Stamped copper**: Stamp also carries the module ★
+  snapshot's saved routes onto the board (`PCB.subroutes`, built server-side
+  with module net names mapped to parent nets over the origin-key pin bridge;
+  unbridged private nets get the `slug/NET` flatten spelling). Stamped copper
+  is tagged with its group slug (`g` on tracks/vias, persisted through the
+  sidecar), so rigid-group drags/rotates carry it along; it's dropped only
+  when its group is broken apart (a member moved alone), and a re-Stamp
+  replaces it. Nets touching a locked (not-moved) member are skipped.
 - **Single-layout designs (2026-07-02)**: a top-level DESIGN keeps exactly one
   layout — no saved-layouts panel; the toolbar's "Save layout" overwrites the
   single auto-starred snapshot (KiCad sync + fab outputs read it). Modules and
