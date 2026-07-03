@@ -9,7 +9,7 @@
  *
  * Data shape (from GET /api/footprint/:name):
  *   { bbox:{x,y,w,h},
- *     pads:[{id,x,y,w,h,shape,poly?}],
+ *     pads:[{id,x,y,w,h,shape,poly?,drill?,npth?}],
  *     silk:{lines:[[x1,y1,x2,y2]…],circles:[[cx,cy,r]…],rects:[[x0,y0,x1,y1]…],polys:[[[x,y]…]…]},
  *     fab:{ …same… },
  *     courtyard:{rects:[[x0,y0,x1,y1]…],circles:[[cx,cy,r]…]} }
@@ -60,6 +60,19 @@ window.FP = (function () {
     a.width = n3(pw); a.height = n3(ph);
     a.rx = pad.shape === "oval" ? n3(Math.min(pw, ph) / 2) : n3(0.03 * sc);
     return el("rect", a);
+  }
+
+  // The drilled bore of a through-hole / NPTH pad: a board-coloured disc (with a
+  // faint outline so it reads as a hole, not missing copper) centred on the pad.
+  // Returns null for SMD pads (no drill). Honours the same `scale` as padShape.
+  function padHole(pad, opts) {
+    opts = opts || {};
+    var sc = opts.scale || 1;
+    if (!(pad.drill > 0)) return null;
+    return el("circle", {
+      cx: n3(pad.x * sc), cy: n3(pad.y * sc), r: n3(pad.drill / 2 * sc),
+      fill: opts.holeFill || C.bg, stroke: "#0a0d12", "stroke-width": n3(0.05 * sc),
+    });
   }
 
   // The pad-id label, centred on the pad and scaled to its short side (multi-
@@ -131,10 +144,12 @@ window.FP = (function () {
 
     (data.pads || []).forEach(function (p) {
       svg.appendChild(padShape(p, { scale: 1 }));
+      var hole = padHole(p, { scale: 1 });
+      if (hole) svg.appendChild(hole);
       var lbl = padLabel(p, 1);
       if (lbl) svg.appendChild(lbl);
     });
   }
 
-  return { drawFootprint: drawFootprint, padShape: padShape, padLabel: padLabel, el: el, colors: C, NS: NS };
+  return { drawFootprint: drawFootprint, padShape: padShape, padHole: padHole, padLabel: padLabel, el: el, colors: C, NS: NS };
 })();

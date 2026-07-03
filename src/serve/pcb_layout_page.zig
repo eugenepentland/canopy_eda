@@ -4212,6 +4212,11 @@ fn writePadsJson(
             }
             try w.writeAll("]");
         }
+        // Drilled bore (mm) so the viewer punches a hole through thru/npth pads.
+        if (pad.drill > 0) {
+            try w.print(",\"drill\":{d}", .{pad.drill});
+            if (pad.npth) try w.writeAll(",\"npth\":true");
+        }
         const pkey = try std.fmt.allocPrint(alloc, "{s}|{s}", .{ pt.ref_des, pad.number });
         if (pin_net.get(pkey)) |nk| {
             try w.writeAll(",\"net\":");

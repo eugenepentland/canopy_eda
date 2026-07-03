@@ -31,7 +31,7 @@ const Layer = enum { silk, fab };
 
 // `pts` carries a custom pad's real copper outline (footprint coords); when
 // present it's drawn as a filled polygon instead of the pos/size rectangle.
-const Pad = struct { id: []const u8, x: f64, y: f64, w: f64, h: f64, shape: []const u8, pts: ?[]const Point = null };
+const Pad = struct { id: []const u8, x: f64, y: f64, w: f64, h: f64, shape: []const u8, pts: ?[]const Point = null, drill: f64 = 0, npth: bool = false };
 const Point = struct { x: f64, y: f64 };
 const Seg = struct { x1: f64, y1: f64, x2: f64, y2: f64, layer: Layer };
 const Circ = struct { cx: f64, cy: f64, r: f64, layer: Layer };
@@ -136,11 +136,15 @@ fn parsePad(allocator: std.mem.Allocator, child: Node) ?Pad {
         const n = cl[1].asNumber() orelse break :blk "";
         break :blk std.fmt.allocPrint(allocator, "{d}", .{@as(i64, @intFromFloat(n))}) catch "";
     };
+    // Pad type keyword (cl[2]): "smd" (default), "thru", or "npth" (non-plated).
+    const ptype: []const u8 = cl[2].asAtom() orelse "smd";
+    const npth = std.mem.eql(u8, ptype, "npth");
     const shape: []const u8 = cl[3].asAtom() orelse "rect";
     var px: f64 = 0;
     var py: f64 = 0;
     var pw: f64 = 0;
     var ph: f64 = 0;
+    var drill: f64 = 0;
     var pts: ?[]const Point = null;
     for (cl[4..]) |sub| {
         if (sub.isForm("pos")) {
@@ -157,9 +161,16 @@ fn parsePad(allocator: std.mem.Allocator, child: Node) ?Pad {
                 ph = sl[2].asNumber() orelse 0;
             }
         }
+        if (sub.isForm("drill")) {
+            // `(drill D)` scalar or `(drill oval X Y)` — take the largest axis.
+            const dl = sub.asList().?;
+            for (dl[1..]) |dn| {
+                if (dn.asNumber()) |d| drill = @max(drill, d);
+            }
+        }
         if (sub.isForm("poly")) pts = readPolyPts(allocator, sub) catch null;
     }
-    return .{ .id = id, .x = px, .y = py, .w = pw, .h = ph, .shape = shape, .pts = pts };
+    return .{ .id = id, .x = px, .y = py, .w = pw, .h = ph, .shape = shape, .pts = pts, .drill = drill, .npth = npth };
 }
 
 /// Parse the children of a `(silkscreen …)` or `(fab …)` block: `(line …)`,
@@ -314,6 +325,10 @@ fn emitFootprintJson(w: anytype, shapes: Shapes) HandlerError!void {
         if (p.pts) |pts| {
             try w.writeAll(",\"poly\":");
             try writePtsJson(w, pts);
+        }
+        if (p.drill > 0) {
+            try w.print(",\"drill\":{d:.3}", .{p.drill});
+            if (p.npth) try w.writeAll(",\"npth\":true");
         }
         try w.writeAll("}");
     }
