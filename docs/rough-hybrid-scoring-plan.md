@@ -46,8 +46,44 @@ vco read 6.27 vs the true 0.75). Both the match and generation paths now pass
 **Not yet done (natural follow-ups):** `S_orient`/`S_adj` style terms (A1b);
 `StylePrior` role-keyed model for ★-less modules (Phase C); UI wiring of a "Best
 rough" button (needs prod-browser QA); persisting the winner as a named snapshot;
-MCP twin of rough-best. The `usb-hub-2514` module (hybrid 9.3, obj_rel 4.3 on
-both candidates) is a standing target — neither rough nor force seeds it well.
+MCP twin of rough-best.
+
+## ✅ Round 2 (same day): the pin-adjacent generator — near-hand generation
+
+User direction: "most parts already say which IC pin they belong next to —
+place them THERE, don't let the important ratlines cross, penalize crossings
+(not GND / pull-up VDD legs) and overlaps." Implemented as a third candidate
+(`pin`, commit `0fb2c69`), and it changed the game:
+
+- **`solvePinAdjacent`** (optimizer.zig): anchor at origin; each part at its
+  bound pad's along-coordinate on that pad's package edge — targets resolved
+  from the decoupling loop's `hub_pwr_pin`, series-pair midpoints, else the
+  fewest-hub-pads signal net. Per-edge **order = pad order** (important
+  ratlines can't cross by construction); `pavPack` (pool-adjacent-violators)
+  does a minimum-motion order-preserving 1-D relax where parts would collide,
+  so uncrowded parts sit EXACTLY on their pads. Chains (RC loop filters,
+  output matches) attach outward behind their partner; `orientPadsToIC` +
+  `legalizeFinal` finish. **Escape-stub keepouts deliberately not applied** —
+  they inflated the ring into a loose halo; dropping them took lmx2595 from
+  obj_rel 1.46 → **1.008** (within 0.8 % of the freshly hand-cleaned ★).
+- **Penalties**: `importantCrossings` (signal airwires + decoupling power
+  legs; `.ground`/`.power`-class nets excluded via
+  `module_policy.classifyNetName` — a pull-up's VDD leg rides the plane) and
+  `overlapCount`. Candidate selection ranks on
+  `hybrid × (1 + crossings/n) × (1 + overlaps)`.
+- **Corpus (21 hand-starred modules)**: the generated winner's geomean
+  obj_rel **1.41 → 0.972** — collectively *better than the hand layouts* on
+  the physics objective — with mean style 54 → 71 %, important crossings
+  11.8 → 3.6, zero overlaps. 13/21 beat-or-match hand (≤1.05); pin wins the
+  arbiter 15/21 (rough 3, force 3). usb-hub-2514 (the old worst) 4.33 → 1.36
+  with 57 → 3 crossings.
+- Debug lens: `/api/rough-best-png/:name?variant=pin|rough|force`.
+
+Remaining stragglers: neopixel (1.50 — hand is just tighter), tps631000
+(1.30), lmk05318b (obj parity but style 31 % — its hand layout groups by
+subsystem, not per-pin; the one module where the pin rule diverges from the
+user's convention), ap33772 (18 residual crossings from its chain-dense PD
+front end).
 
 ---
 
