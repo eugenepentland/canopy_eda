@@ -158,14 +158,25 @@ pub const SavedLayout = struct {
 /// One persisted routed-copper segment of a saved layout. Field names match
 /// the live route JSON (`l` layer, `w` width; net by NAME — net indices shift
 /// across flattens), so the client draws stored and live copper identically.
-const SavedTrack = struct { x1: f64, y1: f64, x2: f64, y2: f64, l: u8 = 0, w: f64, net: []const u8 = "" };
+/// `g` is the stamp group tag: copper stamped from a sub-block module layout
+/// carries its group slug so a rigid-group drag moves it along instead of
+/// invalidating it ("" = untagged hand-drawn / autorouted copper).
+const SavedTrack = struct { x1: f64, y1: f64, x2: f64, y2: f64, l: u8 = 0, w: f64, net: []const u8 = "", g: []const u8 = "" };
 
 /// One persisted via of a saved layout (same shape as the live route JSON).
-const SavedVia = struct { x: f64, y: f64, d: f64, drill: f64 = 0, net: []const u8 = "" };
+const SavedVia = struct { x: f64, y: f64, d: f64, drill: f64 = 0, net: []const u8 = "", g: []const u8 = "" };
 
 /// A saved layout's persisted copper — the routed tracks/vias captured with
 /// the poses, so a Save → reload → Load round-trips the routing too.
 const SavedRoutes = struct { tracks: []const SavedTrack, vias: []const SavedVia };
+
+/// Shared JSON fragments for copper serialization — the sidecar, the page
+/// blob, and the Stamp subroutes all write the identical track/via shape.
+const TRACK_JSON_FMT = "{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d},\"net\":";
+const VIA_JSON_FMT = "{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":";
+const VIAS_ARR_OPEN = "],\"vias\":[";
+/// "ref\x00pad" / "prefix\x00origin" composite hash keys.
+const PIN_KEY_FMT = "{s}\x00{s}";
 
 /// A user-DRAWN board outline rectangle (world mm) captured with a saved
 /// layout — the interactive counterpart of the authored `(board (size W H))`
@@ -416,8 +427,6 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const rv = resolveShownView(ctx, req, &placement, layouts, if (sub == null) (refine_name orelse starred_name) else null);
     const ro = rv.ro;
     const routed = rv.routed;
-    const violations = rv.violations;
-    const outline_drawn = rv.outline_drawn;
 
     const view = View.init(placement);
 
@@ -440,7 +449,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         // clearance/DRC toggles (initial state mirrors the page's globals).
         const tg = parseToggles(req);
         try writeEmbedBar(w, if (sub_block) |sb| sb.source else "");
-        try writeEmbedRoute(w, ro.params, routed, violations.len, tg.clr, tg.drc);
+        try writeEmbedRoute(w, ro.params, routed, rv.violations.len, tg.clr, tg.drc);
     } else {
         // Header row: title + the Schematic ⇄ PCB Layout switcher (PCB active).
         // `name` resolves as a design under src/ first, else a reusable module —
@@ -460,7 +469,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
             );
             try w.writeAll("</div>");
         }
-        try writeEditControls(w, placement, name, src_class, grid_only, routed, shown, ro.params, violations.len, single);
+        try writeEditControls(w, placement, name, src_class, grid_only, routed, shown, ro.params, rv.violations.len, single);
     }
     if (embed and !edit_embed) try writeLegend(w, placement, false);
     try w.print(
@@ -501,7 +510,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         layouts,
         routed,
         ro.params.clearance,
-        violations,
+        rv.violations,
         .{
             .read_only = embed and !edit_embed,
             .embed = embed,
@@ -509,8 +518,10 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
             .subseeds_json = subseeds.poses,
             .subseedinfo_json = subseeds.info,
             .submodules_json = subseeds.mods,
-            .outline_drawn = outline_drawn,
+            .outline_drawn = rv.outline_drawn,
             .single = single,
+            .saved_routes = rv.saved,
+            .subroutes_json = subseeds.routes,
         },
     );
     // Shared footprint engine (FP.padShape) must load before the board script
@@ -601,7 +612,7 @@ fn persistGeneratedLayout(ctx: *Handler, name: []const u8, placement: optimizer.
 /// module snapshot supplied the poses (`{layout, starred, n}`) so the button
 /// can say what a Stamp will pull and how much of the group it covers, and
 /// `mods` maps every sub-block name → its module source (palette name links).
-const SubSeedsJson = struct { poses: []const u8 = "{}", info: []const u8 = "{}", mods: []const u8 = "{}" };
+const SubSeedsJson = struct { poses: []const u8 = "{}", info: []const u8 = "{}", mods: []const u8 = "{}", routes: []const u8 = "{}" };
 
 /// JSON map of sub-block name → module source ("mcu" → "w55rp20"), for the
 /// palette's name links to each module's own /pcb-layout page — emitted for
@@ -639,18 +650,27 @@ fn buildSubSeedsJson(
     const w = &aw.writer;
     var iw_buf: std.Io.Writer.Allocating = .init(alloc);
     const iw = &iw_buf.writer;
+    var rw_buf: std.Io.Writer.Allocating = .init(alloc);
+    const rw = &rw_buf.writer;
     w.writeByte('{') catch return .{};
     iw.writeByte('{') catch return .{};
+    rw.writeByte('{') catch return .{};
     var first = true;
     var ifirst = true;
+    var rfirst = true;
+    // Lazily-built parent "ref\x00pad" → net-name map (only when some module
+    // snapshot actually carries copper to stamp).
+    var dpin_net: ?std.StringHashMap([]const u8) = null;
     for (block.sub_blocks) |sb| {
         var s = subBlockPoseByOriginKey(alloc, project_dir, sb) orelse continue;
+        var ok_ref = std.StringHashMap([]const u8).init(alloc);
         var n: usize = 0;
         for (p.instances) |inst| {
             if (inst.ref_des.len <= sb.name.len) continue;
             if (!std.mem.startsWith(u8, inst.ref_des, sb.name) or inst.ref_des[sb.name.len] != '/') continue;
             if (inst.origin_key.len == 0) continue;
             const pose = s.map.get(inst.origin_key) orelse continue;
+            ok_ref.put(inst.origin_key, inst.ref_des) catch return .{};
             if (!first) w.writeByte(',') catch return .{};
             first = false;
             n += 1;
@@ -672,10 +692,93 @@ fn buildSubSeedsJson(
             iw.print(",\"alt_n\":{d}", .{s.alt_n}) catch return .{};
         }
         iw.writeByte('}') catch return .{};
+        // The snapshot's copper, net names mapped onto this design's nets so
+        // Stamp can carry the module's hand routing onto the board.
+        if (s.routes) |sr| {
+            if (dpin_net == null) dpin_net = designPinNetMap(alloc, p);
+            const dm = if (dpin_net) |*m| m else continue;
+            if (!rfirst) rw.writeByte(',') catch return .{};
+            rfirst = false;
+            writeJsonStr(rw, sb.name) catch return .{};
+            rw.writeByte(':') catch return .{};
+            writeSubRoutesJson(rw, alloc, sb.name, sr, s.pin_nets, &ok_ref, dm) catch return .{};
+        }
     }
     w.writeByte('}') catch return .{};
     iw.writeByte('}') catch return .{};
-    return .{ .poses = aw.written(), .info = iw_buf.written(), .mods = buildSubModulesJson(alloc, block) };
+    rw.writeByte('}') catch return .{};
+    return .{
+        .poses = aw.written(),
+        .info = iw_buf.written(),
+        .mods = buildSubModulesJson(alloc, block),
+        .routes = rw_buf.written(),
+    };
+}
+
+/// Parent placement "ref\x00pad" → net NAME (raw flattened names, matching
+/// the net names routed copper carries). Null on allocation failure.
+fn designPinNetMap(alloc: std.mem.Allocator, p: optimizer.Placement) ?std.StringHashMap([]const u8) {
+    var m = std.StringHashMap([]const u8).init(alloc);
+    for (p.nets) |net| {
+        for (net.pins) |pin| {
+            const key = std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ pin.ref_des, pin.pin }) catch return null;
+            m.put(key, net.name) catch return null;
+        }
+    }
+    return m;
+}
+
+/// Serialize one module snapshot's copper for the Stamp palette: coordinates
+/// stay module-local (the same frame as the seed poses — the client
+/// translates by the stamp offset), net names are mapped module → parent via
+/// the origin-key bridge, falling back to the "slug/NET" spelling a
+/// module-private net flattens to in the parent anyway.
+fn writeSubRoutesJson(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    slug: []const u8,
+    sr: SavedRoutes,
+    pin_nets: []const SubPinNet,
+    ok_ref: *const std.StringHashMap([]const u8),
+    dpin_net: *const std.StringHashMap([]const u8),
+) std.Io.Writer.Error!void {
+    var net_map = std.StringHashMap([]const u8).init(alloc);
+    for (pin_nets) |ps| {
+        if (net_map.contains(ps.net)) continue;
+        const dref = ok_ref.get(ps.origin_key) orelse continue;
+        const key = std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ dref, ps.pad }) catch continue;
+        const dn = dpin_net.get(key) orelse continue;
+        net_map.put(ps.net, dn) catch break;
+    }
+    try w.writeAll("{\"tracks\":[");
+    for (sr.tracks, 0..) |t, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print(TRACK_JSON_FMT, .{ t.x1, t.y1, t.x2, t.y2, t.l, t.w });
+        try writeJsonStr(w, mappedNet(alloc, &net_map, slug, t.net));
+        try w.writeAll("}");
+    }
+    try w.writeAll(VIAS_ARR_OPEN);
+    for (sr.vias, 0..) |vi, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print(VIA_JSON_FMT, .{ vi.x, vi.y, vi.d, vi.drill });
+        try writeJsonStr(w, mappedNet(alloc, &net_map, slug, vi.net));
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
+}
+
+/// A stamped-copper net name in the parent design's namespace: the bridged
+/// parent net when a module pin on the net resolved, else "slug/NET" (the
+/// flatten's stitching spelling for a module-private net), else "".
+fn mappedNet(
+    alloc: std.mem.Allocator,
+    net_map: *const std.StringHashMap([]const u8),
+    slug: []const u8,
+    net: []const u8,
+) []const u8 {
+    if (net.len == 0) return "";
+    if (net_map.get(net)) |m| return m;
+    return std.fmt.allocPrint(alloc, "{s}/{s}", .{ slug, net }) catch net;
 }
 
 /// Initial state of the embed preview's show-clearance / show-DRC toggles,
@@ -1604,7 +1707,7 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
     try w.writeAll("{");
-    try writeRoutedArrays(w, routed, violations, placement.nets);
+    try writeRoutedArrays(w, routed, violations, placement.nets, null);
     try w.print(",\"routed\":{d},\"total\":{d},\"return_path\":{d}}}", .{ routed.routed, routed.total, rp_warn });
     res.content_type = .JSON;
     res.body = aw.written();
@@ -2282,7 +2385,7 @@ fn rekeyPosesByOrigin(
     for (flat.items) |fi| {
         live.put(fi.ref_des, {}) catch return null;
         if (fi.origin_key.len == 0) continue;
-        const key = std.fmt.allocPrint(alloc, "{s}\x00{s}", .{ refPrefix(fi.ref_des), fi.origin_key }) catch return null;
+        const key = std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ refPrefix(fi.ref_des), fi.origin_key }) catch return null;
         ref_of.put(key, fi.ref_des) catch return null;
     }
     const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
@@ -2290,7 +2393,7 @@ fn rekeyPosesByOrigin(
         const ref = if (live.contains(pp.ref))
             pp.ref
         else if (pp.origin.len > 0) blk: {
-            const key = std.fmt.allocPrint(alloc, "{s}\x00{s}", .{ refPrefix(pp.ref), pp.origin }) catch return null;
+            const key = std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ refPrefix(pp.ref), pp.origin }) catch return null;
             break :blk ref_of.get(key) orelse pp.ref;
         } else pp.ref;
         out[i] = .{ .ref = ref, .x = pp.x, .y = pp.y, .rot = pp.rot, .side = pp.side, .locked = pp.locked };
@@ -2464,6 +2567,7 @@ fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedRoutes {
                 .l = if (jsonNum(it.object.get("l")) >= 1) 1 else 0,
                 .w = jsonNum(it.object.get("w")),
                 .net = jsonStrField(it.object.get("net")),
+                .g = jsonStrField(it.object.get("g")),
             }) catch return null;
         }
     };
@@ -2477,6 +2581,7 @@ fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedRoutes {
                 .d = jsonNum(it.object.get("d")),
                 .drill = jsonNum(it.object.get("drill")),
                 .net = jsonStrField(it.object.get("net")),
+                .g = jsonStrField(it.object.get("g")),
             }) catch return null;
         }
     };
@@ -2513,15 +2618,23 @@ fn writeSavedRoutesJson(w: *std.Io.Writer, sr: SavedRoutes) std.Io.Writer.Error!
     try w.writeAll("{\"tracks\":[");
     for (sr.tracks, 0..) |t, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d},\"net\":", .{ t.x1, t.y1, t.x2, t.y2, t.l, t.w });
+        try w.print(TRACK_JSON_FMT, .{ t.x1, t.y1, t.x2, t.y2, t.l, t.w });
         try writeJsonStr(w, t.net);
+        if (t.g.len > 0) {
+            try w.writeAll(",\"g\":");
+            try writeJsonStr(w, t.g);
+        }
         try w.writeAll("}");
     }
-    try w.writeAll("],\"vias\":[");
+    try w.writeAll(VIAS_ARR_OPEN);
     for (sr.vias, 0..) |vi, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":", .{ vi.x, vi.y, vi.d, vi.drill });
+        try w.print(VIA_JSON_FMT, .{ vi.x, vi.y, vi.d, vi.drill });
         try writeJsonStr(w, vi.net);
+        if (vi.g.len > 0) {
+            try w.writeAll(",\"g\":");
+            try writeJsonStr(w, vi.g);
+        }
         try w.writeAll("}");
     }
     try w.writeAll("]}");
@@ -2564,6 +2677,10 @@ const ShownView = struct {
     routed: ?router.RouteResult,
     violations: []const drc.Violation,
     outline_drawn: bool,
+    /// The SavedRoutes the shown copper was restored from (null when the
+    /// copper is a fresh ?route=1 result) — index-aligned with `routed`, so
+    /// the blob writer can re-emit per-segment stamp group tags (`g`).
+    saved: ?SavedRoutes = null,
 };
 
 /// Resolve everything the shown saved layout contributes to the page: apply
@@ -2585,13 +2702,16 @@ fn resolveShownView(
     // layout's persisted copper is restored (see shownSavedRoutes).
     const ro = parseRoute(req);
     var routed: ?router.RouteResult = if (ro.run) (router.route(ctx.allocator, placement.*, ro.params) catch null) else null;
-    if (routed == null)
-        routed = shownSavedRoutes(ctx.allocator, layouts, shown, placement.*);
+    var saved: ?SavedRoutes = null;
+    if (routed == null) {
+        saved = shownSavedRoutes(layouts, shown);
+        if (saved) |sr| routed = restoreRoutes(ctx.allocator, sr, placement.nets);
+    }
     const violations: []const drc.Violation = if (routed) |r|
         (drc.check(ctx.allocator, placement.*, r, ro.params.clearance) catch &.{})
     else
         &.{};
-    return .{ .ro = ro, .routed = routed, .violations = violations, .outline_drawn = outline_drawn };
+    return .{ .ro = ro, .routed = routed, .violations = violations, .outline_drawn = outline_drawn, .saved = saved };
 }
 
 /// Apply the shown saved layout's user-drawn outline (if any) onto the
@@ -2613,21 +2733,16 @@ fn applyShownOutline(placement: *optimizer.Placement, layouts: []const SavedLayo
     return false;
 }
 
-/// The shown saved layout's persisted copper, rebuilt against the current
-/// netlist — the page draws it when no fresh ?route=1 ran, and DRC re-checks
-/// it against the CURRENT poses so copper gone stale after a part move shows
-/// violations. Null when nothing is shown or the layout carries no routes.
-fn shownSavedRoutes(
-    alloc: std.mem.Allocator,
-    layouts: []const SavedLayout,
-    shown: ?[]const u8,
-    placement: optimizer.Placement,
-) ?router.RouteResult {
+/// The shown saved layout's persisted copper — the page draws it when no
+/// fresh ?route=1 ran (rebuilt against the current netlist by the caller via
+/// `restoreRoutes`, which DRC re-checks it against the CURRENT poses so
+/// copper gone stale after a part move shows violations). Null when nothing
+/// is shown or the layout carries no routes.
+fn shownSavedRoutes(layouts: []const SavedLayout, shown: ?[]const u8) ?SavedRoutes {
     const sn = shown orelse return null;
     for (layouts) |L| {
         if (!std.mem.eql(u8, L.name, sn)) continue;
-        const sr = L.routes orelse return null;
-        return restoreRoutes(alloc, sr, placement.nets);
+        return L.routes;
     }
     return null;
 }
@@ -3196,7 +3311,18 @@ pub const SubBlockSeeds = struct {
     starred: bool,
     alt_name: []const u8 = "",
     alt_n: usize = 0,
+    /// The chosen snapshot's persisted copper (module-local coordinates and
+    /// module-local net names) — Stamp carries it onto the parent board.
+    routes: ?SavedRoutes = null,
+    /// One entry per flattened module pin (net, origin_key, pad) — the bridge
+    /// buildSubSeedsJson uses to map module net names to parent nets. Only
+    /// populated when the snapshot carries routes.
+    pin_nets: []const SubPinNet = &.{},
 };
+
+/// A flattened module pin sample: which module-local net the pad at
+/// (origin_key, pad) sits on. See `SubBlockSeeds.pin_nets`.
+const SubPinNet = struct { net: []const u8, origin_key: []const u8, pad: []const u8 };
 
 /// The sub-block's saved module layout — the starred (★) snapshot when one
 /// bridges, else best current-flatten coverage (`chooseModuleSnapshot`) — keyed
@@ -3241,7 +3367,32 @@ pub fn subBlockPoseByOriginKey(
         .starred = choice.chosen.default,
         .alt_name = if (choice.alt) |a| a.name else "",
         .alt_n = choice.alt_n,
+        .routes = choice.chosen.routes,
+        .pin_nets = if (choice.chosen.routes != null) modulePinNets(alloc, resolved.block, &ok_of) else &.{},
     };
+}
+
+/// Flatten the module's nets the same way its instances were flattened and
+/// sample every pin as (net, origin_key, pad) — the module side of the
+/// stamped-copper net-name bridge. Empty on any failure (copper then falls
+/// back to slug-prefixed net names, which is what a module-private net
+/// flattens to in the parent anyway).
+fn modulePinNets(
+    alloc: std.mem.Allocator,
+    block: *const env_mod.DesignBlock,
+    ok_of: *const std.StringHashMap([]const u8),
+) []const SubPinNet {
+    var fnets: std.ArrayListUnmanaged(export_kicad.FlatNet) = .empty;
+    netlist.collectNets(alloc, block, "", &fnets, .hierarchical) catch return &.{};
+    var pn: std.ArrayListUnmanaged(SubPinNet) = .empty;
+    for (fnets.items) |net| {
+        for (net.pins) |pin| {
+            const ok = ok_of.get(pin.ref_des) orelse continue;
+            if (ok.len == 0) continue;
+            pn.append(alloc, .{ .net = net.name, .origin_key = ok, .pad = pin.pin }) catch return &.{};
+        }
+    }
+    return pn.toOwnedSlice(alloc) catch &.{};
 }
 
 /// Layout ref → origin_key → pose (null when nothing bridges).
@@ -3565,6 +3716,10 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     try w.writeAll("<button class=\"btn\" id=\"pcb-outline\" title=\"Draw the board outline: click, then drag a rectangle " ++
         "on the board (a plain click clears it). Grid-snapped; saved with the layout (Save/Update); becomes the board edge " ++
         "the renderers draw and the board-edge DRC checks.\">\u{25AD} Outline</button>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-draw\" title=\"Hand-route (X): click a pad to start a trace, click to " ++
+        "fix corners (45\u{b0}/grid snapped, Shift = free angle), V drops a via and flips layer, click a same-net pad or " ++
+        "double-click to finish, Backspace steps back, Esc ends. Right-click deletes the track/via under the cursor. " ++
+        "Copper is saved with the layout (Save/Update).\">\u{270E} Draw</button>");
     try w.writeAll(BAR_GRP_END);
     try w.writeAll("<span class=\"zoom-grp\"><button class=\"btn\" id=\"z-out\" title=\"Zoom out\">−</button>");
     try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");
@@ -4138,6 +4293,13 @@ const PcbDataOpts = struct {
     /// Top-level design (not a module / ?sub page): exactly ONE layout — the
     /// viewer saves straight to it (no name prompt, no saved-layouts panel).
     single: bool = false,
+    /// SavedRoutes the shown copper was restored from (ShownView.saved) —
+    /// lets writeRoutedArrays re-emit per-segment stamp group tags.
+    saved_routes: ?SavedRoutes = null,
+    /// Per-group module copper for Stamp (`buildSubSeedsJson`): the ★ module
+    /// snapshot's tracks/vias in module-local coordinates with net names
+    /// mapped to this design's nets.
+    subroutes_json: []const u8 = "{}",
 };
 
 /// World position of the GND-plane via covering the pad centred at (`cx`,`cy`),
@@ -4390,7 +4552,7 @@ fn writePcbData(
 
     // Routed copper + DRC markers — emitted in the same shape the
     // /api/pcb-route endpoint returns so drawRoute/drawClr/drawDrc read either.
-    try writeRoutedArrays(w, routed, violations, p.nets);
+    try writeRoutedArrays(w, routed, violations, p.nets, opts.saved_routes);
 
     // Per-footprint STEP-model references (URL + KiCad offset/rotation) for the
     // 3D-view tab. Only the full page needs it; the embedded preview has no 3D
@@ -4452,19 +4614,31 @@ fn writeRoutedArrays(
     routed: ?router.RouteResult,
     violations: []const drc.Violation,
     nets: []const export_kicad.FlatNet,
+    saved: ?SavedRoutes,
 ) std.Io.Writer.Error!void {
     try w.writeAll("\"tracks\":[");
     if (routed) |r| for (r.tracks, 0..) |t, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d},\"net\":", .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.width });
+        try w.print(TRACK_JSON_FMT, .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.width });
         try writeJsonStr(w, netNameOf(nets, t.net));
+        // Stamp group tag — restoreRoutes maps SavedRoutes 1:1, so the source
+        // entry at the same index carries this segment's tag (fresh ?route=1
+        // copper has no source and stays untagged).
+        if (saved) |sr| if (i < sr.tracks.len and sr.tracks[i].g.len > 0) {
+            try w.writeAll(",\"g\":");
+            try writeJsonStr(w, sr.tracks[i].g);
+        };
         try w.writeAll("}");
     };
-    try w.writeAll("],\"vias\":[");
+    try w.writeAll(VIAS_ARR_OPEN);
     if (routed) |r| for (r.vias, 0..) |vi, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":", .{ vi.x, vi.y, vi.dia, vi.drill });
+        try w.print(VIA_JSON_FMT, .{ vi.x, vi.y, vi.dia, vi.drill });
         try writeJsonStr(w, netNameOf(nets, vi.net));
+        if (saved) |sr| if (i < sr.vias.len and sr.vias[i].g.len > 0) {
+            try w.writeAll(",\"g\":");
+            try writeJsonStr(w, sr.vias[i].g);
+        };
         try w.writeAll("}");
     };
     try w.writeAll("],\"drc\":[");
@@ -4513,6 +4687,9 @@ fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placem
     try w.writeAll(if (opts.subseedinfo_json.len > 0) opts.subseedinfo_json else "{}");
     try w.writeAll(",\"submodules\":");
     try w.writeAll(if (opts.submodules_json.len > 0) opts.submodules_json else "{}");
+    // Per-group module copper (net-mapped, module-local coords) for Stamp.
+    try w.writeAll(",\"subroutes\":");
+    try w.writeAll(if (opts.subroutes_json.len > 0) opts.subroutes_json else "{}");
     try w.writeAll(",");
 }
 
@@ -4869,6 +5046,7 @@ const PAGE_CSS =
     \\/* Outline-draw mode: crosshair + a lit toolbar button while armed. */
     \\.pcb-svg.outline-mode{cursor:crosshair}
     \\#pcb-outline.on{color:#7ee787;border-color:#2ea043;box-shadow:0 0 0 1px #2ea04366}
+    \\#pcb-draw.on{color:#f0c674;border-color:#b08800;box-shadow:0 0 0 1px #b0880066}
     \\/* Rigid sub-circuit hover: every member of the group glows together, so
     \\   "this whole block drags as one" is visible before you grab it. */
     \\.part.grp-hl .court{stroke:#7ee787!important;stroke-width:2!important}
@@ -5227,6 +5405,66 @@ test "layouts sidecar round-trips saved routes" {
     const restored = restoreRoutes(alloc, sr, &nets) orelse return error.TestParseFailed;
     try std.testing.expectEqual(@as(i32, 1), restored.tracks[0].net);
     try std.testing.expectEqual(@as(i32, 1), restored.vias[0].net);
+}
+
+// spec: Web Server - Stamped module copper keeps its group tag through the sidecar so rigid-group moves carry it
+test "layouts sidecar round-trips the copper stamp group tag" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const parts = [_]PartPose{.{ .ref = "buck/U1", .x = 0, .y = 0, .rot = 0 }};
+    const tracks = [_]SavedTrack{
+        .{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .w = 0.3, .net = "VOUT", .g = "buck" },
+        .{ .x1 = 3, .y1 = 0, .x2 = 5, .y2 = 0, .w = 0.3, .net = "VOUT" },
+    };
+    const vias = [_]SavedVia{.{ .x = 1, .y = 0, .d = 0.6, .drill = 0.3, .net = "GND", .g = "buck" }};
+    const layouts = [_]SavedLayout{.{
+        .name = "routed",
+        .kind = KIND_MANUAL,
+        .ts = 1,
+        .score = null,
+        .parts = &parts,
+        .routes = .{ .tracks = &tracks, .vias = &vias },
+    }};
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJson(&aw.writer, &layouts, null);
+    const got = parseLayouts(alloc, aw.written()) orelse return error.TestParseFailed;
+    const sr = got[0].routes orelse return error.TestParseFailed;
+    try std.testing.expectEqualStrings("buck", sr.tracks[0].g);
+    try std.testing.expectEqualStrings("", sr.tracks[1].g);
+    try std.testing.expectEqualStrings("buck", sr.vias[0].g);
+}
+
+// spec: Web Server - Stamped module copper maps its net names onto the parent design via the origin-key bridge, slug-prefixing private nets
+test "stamped copper nets map to parent nets with slug fallback" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    // Module side: pin (origin U1, pad 2) sits on module net "VOUT".
+    const pin_nets = [_]SubPinNet{.{ .net = "VOUT", .origin_key = "U1", .pad = "2" }};
+    // Bridge: module origin "U1" is design part "buck/U11".
+    var ok_ref = std.StringHashMap([]const u8).init(alloc);
+    try ok_ref.put("U1", "buck/U11");
+    // Parent side: design pad buck/U11.2 is on parent net "5V0".
+    var dpin = std.StringHashMap([]const u8).init(alloc);
+    try dpin.put(try std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ "buck/U11", "2" }), "5V0");
+
+    const tracks = [_]SavedTrack{
+        .{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .w = 0.3, .net = "VOUT" },
+        .{ .x1 = 0, .y1 = 1, .x2 = 3, .y2 = 1, .w = 0.2, .net = "FB" },
+    };
+    const sr = SavedRoutes{ .tracks = &tracks, .vias = &.{} };
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeSubRoutesJson(&aw.writer, alloc, "buck", sr, &pin_nets, &ok_ref, &dpin);
+    const out = aw.written();
+    // Bridged net → the parent's name; unbridged private net → slug-prefixed.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"5V0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"buck/FB\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"VOUT\"") == null);
 }
 
 // spec: Web Server - A saved layout round-trips each part's board side and lock flag through the sidecar
