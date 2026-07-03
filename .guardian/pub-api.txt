@@ -945,8 +945,8 @@ src/serve/history.zig::snapshot | fn snapshot( allocator: std.mem.Allocator, pro
 src/serve/layout_match.zig::ClassDist struct_
 src/serve/layout_match.zig::MatchResult struct_
 src/serve/layout_match.zig::PInfo struct_
-src/serve/layout_match.zig::analyze | fn analyze(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]PInfo
-src/serve/layout_match.zig::compare | fn compare(alloc: std.mem.Allocator, rough: optimizer.Placement, starred: optimizer.Placement) std.mem.Allocator.Error!MatchResult
+src/serve/layout_match.zig::analyze | fn analyze(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: ?*const std.StringHashMap(void)) std.mem.Allocator.Error![]PInfo
+src/serve/layout_match.zig::compare | fn compare( alloc: std.mem.Allocator, rough: optimizer.Placement, starred: optimizer.Placement, excluded: ?*const std.StringHashMap(void), ) std.mem.Allocator.Error!MatchResult
 src/serve/layout_match.zig::layoutMatchApi | fn layoutMatchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
 src/serve/layout_match.zig::layoutMatchJson | fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) pcb_layout_page.PngError![]u8
 src/serve/layout_match.zig::matchInfos | fn matchInfos(alloc: std.mem.Allocator, rough: []const PInfo, starred: []const PInfo) std.mem.Allocator.Error!MatchResult
@@ -1068,6 +1068,7 @@ src/serve/pcb_layout_page.zig::SubBlockSeeds struct_
 src/serve/pcb_layout_page.zig::SyncPose struct_
 src/serve/pcb_layout_page.zig::SyncVia struct_
 src/serve/pcb_layout_page.zig::deleteNamedLayoutApi | fn deleteNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::layoutCoverage | fn layoutCoverage(L: SavedLayout, p: optimizer.Placement) usize
 src/serve/pcb_layout_page.zig::loadSubBlockPoses | fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock) ?[]const optimizer.RefPose
 src/serve/pcb_layout_page.zig::loadSyncLayout | fn loadSyncLayout( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ?std.StringHashMap(SyncPose)
 src/serve/pcb_layout_page.zig::loadSyncVias | fn loadSyncVias( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, name: []const u8, ) ?[]const SyncVia

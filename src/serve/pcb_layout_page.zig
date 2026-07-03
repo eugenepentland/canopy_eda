@@ -474,7 +474,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
             .objective = placement.breakdown.objective,
         };
         try w.writeAll("<aside class=\"pcb-rside\">");
-        try writeLayoutsPanel(w, layouts, auto_score);
+        try writeLayoutsPanel(w, layouts, auto_score, placement);
         try w.writeAll("</aside>");
     }
     try w.writeAll("</div>");
@@ -3536,7 +3536,29 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
 /// optimizer runs), newest first, each row showing its kind, score, and delta
 /// of (HPWL+loop) versus the layout currently on screen (`auto`). The Load /
 /// delete buttons carry the layout name in data attributes for BOARD_JS.
-fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: LayoutScore) std.Io.Writer.Error!void {
+/// How many of the placement's parts a saved layout covers, matched the same
+/// way a Load applies poses: by ref-des, else by module-local origin key. A
+/// count below the part total means the design grew since the layout was
+/// saved (a stale ★) — the uncovered parts would sit at the origin on Load.
+pub fn layoutCoverage(L: SavedLayout, p: optimizer.Placement) usize {
+    var covered: usize = 0;
+    for (p.parts, 0..) |part, i| {
+        const origin = if (i < p.instances.len and p.instances[i].origin_key.len > 0)
+            p.instances[i].origin_key
+        else
+            part.ref_des;
+        for (L.parts) |pt| {
+            const by_origin = pt.origin.len > 0 and std.mem.eql(u8, pt.origin, origin);
+            if (by_origin or std.mem.eql(u8, pt.ref, part.ref_des)) {
+                covered += 1;
+                break;
+            }
+        }
+    }
+    return covered;
+}
+
+fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: LayoutScore, placement: optimizer.Placement) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-saved\"><div class=\"saved-h\"><span>Saved layouts <span class=\"saved-n\">");
     try w.print("{d}</span></span>", .{layouts.len});
     if (layouts.len > 0) {
@@ -3566,6 +3588,14 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
         try w.writeAll("</span><span class=\"lay-name\">");
         try writeEscaped(w, L.name);
         try w.writeAll("</span>");
+        const cov = layoutCoverage(L, placement);
+        if (cov < placement.parts.len) {
+            try w.print(
+                "<span class=\"lay-cover\" title=\"Covers {d} of {d} current parts — the design grew since " ++
+                    "this layout was saved; re-save (or Rough remaining) to refresh it\">{d}/{d}</span>",
+                .{ cov, placement.parts.len, cov, placement.parts.len },
+            );
+        }
         if (L.score) |s| {
             try writeLayDelta(w, s, auto);
         } else try w.writeAll("<span class=\"lay-d\"></span>");
@@ -4688,6 +4718,7 @@ const PAGE_CSS =
     \\.lay-kind.k-man{background:#14365c;color:#79c0ff}
     \\.lay-kind.k-auto{background:#21262d;color:#8b949e}
     \\.lay-name{font-weight:600;color:#e6edf3;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\.lay-cover{font-size:9.5px;font-weight:700;border-radius:3px;padding:1px 5px;flex:none;background:#3a2c12;color:#d29922;cursor:help}
     \\.lay-score{color:#8b949e;font-size:11px;flex:1;min-width:0}
     \\.lay-d{font-weight:600;min-width:36px;text-align:right;flex:none}
     \\.lay-d.up{color:#f85149}

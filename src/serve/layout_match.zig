@@ -91,15 +91,20 @@ fn classKey(alloc: std.mem.Allocator, p: optimizer.Placement, idx: usize) std.me
     return std.fmt.allocPrint(alloc, "{s}|{s}|{d:.1}x{d:.1}|{s}", .{ @tagName(part.kind), part.value, part.hw, part.hh, joined.items });
 }
 
-/// Analyze every non-anchor part of `p` into a `PInfo` (edge + class). Returns an
-/// empty slice if the placement has no anchor hub.
-pub fn analyze(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Allocator.Error![]PInfo {
+/// Analyze every non-anchor part of `p` into a `PInfo` (edge + class),
+/// skipping refs in `excluded` (parts the starred reference doesn't cover —
+/// scoring those would charge the rough seed for reference staleness).
+/// Returns an empty slice if the placement has no anchor hub.
+pub fn analyze(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: ?*const std.StringHashMap(void)) std.mem.Allocator.Error![]PInfo {
     const ai = pcb_describe.anchorIndex(p.parts, p.nets) orelse return &.{};
     const anchor = p.parts[ai];
     const a_half = pcb_describe.aabbHalf(anchor);
     var out: std.ArrayListUnmanaged(PInfo) = .empty;
     for (p.parts, 0..) |part, i| {
         if (i == ai) continue;
+        if (excluded) |ex| {
+            if (ex.contains(part.ref_des)) continue;
+        }
         const side = pcb_describe.sideOf(part.x - anchor.x, part.y - anchor.y, a_half, pcb_describe.aabbHalf(part));
         try out.append(alloc, .{ .side = side, .class = try classKey(alloc, p, i) });
     }
@@ -148,9 +153,15 @@ pub fn matchInfos(alloc: std.mem.Allocator, rough: []const PInfo, starred: []con
 }
 
 /// Convenience: analyze both placements and match. `rough` is the `?rough=1`
-/// seed; `starred` the blessed reference.
-pub fn compare(alloc: std.mem.Allocator, rough: optimizer.Placement, starred: optimizer.Placement) std.mem.Allocator.Error!MatchResult {
-    return matchInfos(alloc, try analyze(alloc, rough), try analyze(alloc, starred));
+/// seed; `starred` the blessed reference. `excluded` names refs the reference
+/// doesn't cover — dropped from BOTH tallies so staleness isn't scored.
+pub fn compare(
+    alloc: std.mem.Allocator,
+    rough: optimizer.Placement,
+    starred: optimizer.Placement,
+    excluded: ?*const std.StringHashMap(void),
+) std.mem.Allocator.Error!MatchResult {
+    return matchInfos(alloc, try analyze(alloc, rough, excluded), try analyze(alloc, starred, excluded));
 }
 
 /// Build the `/api/layout-match/:name` JSON: score the `?rough=1` seed against
@@ -164,13 +175,14 @@ pub fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: 
     // The starred reference = the saved layout flagged "default" (the ★ a user
     // sets in /pcb-layout to bless their hand-finished layout).
     const layouts = pcb_layout_page.readLayouts(alloc, project_dir, name);
-    var starred_name: ?[]const u8 = null;
+    var starred_layout: ?pcb_layout_page.SavedLayout = null;
     for (layouts) |L| {
         if (L.default) {
-            starred_name = L.name;
+            starred_layout = L;
             break;
         }
     }
+    const starred_name: ?[]const u8 = if (starred_layout) |L| L.name else null;
     if (starred_name == null) {
         w.writeAll("{\"name\":") catch return error.BuildFailed;
         pcb_layout_page.writeJsonStr(w, name) catch return error.BuildFailed;
@@ -198,12 +210,48 @@ pub fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: 
     };
     const star = try pcb_layout_page.solveForRequest(alloc, project_dir, name, .{ .layout = starred_name.? }, &eval2, &mr2);
 
-    const res = compare(alloc, rough.placement, star.placement) catch return error.BuildFailed;
+    // Reference coverage: parts the starred layout doesn't cover (added after
+    // the save) sit at the origin in the verbatim render — exclude them from
+    // BOTH tallies and report them, so a stale ★ reads as "stale", not as a
+    // rough-seed failure.
+    var excluded = std.StringHashMap(void).init(alloc);
+    var unmatched: std.ArrayListUnmanaged([]const u8) = .empty;
+    const sp = star.placement;
+    for (sp.parts, 0..) |part, i| {
+        const origin = if (i < sp.instances.len and sp.instances[i].origin_key.len > 0)
+            sp.instances[i].origin_key
+        else
+            part.ref_des;
+        var hit = false;
+        for (starred_layout.?.parts) |pt| {
+            const by_origin = pt.origin.len > 0 and std.mem.eql(u8, pt.origin, origin);
+            if (by_origin or std.mem.eql(u8, pt.ref, part.ref_des)) {
+                hit = true;
+                break;
+            }
+        }
+        if (!hit) {
+            excluded.put(part.ref_des, {}) catch return error.BuildFailed;
+            unmatched.append(alloc, part.ref_des) catch return error.BuildFailed;
+        }
+    }
+
+    const res = compare(alloc, rough.placement, star.placement, &excluded) catch return error.BuildFailed;
 
     w.writeAll("{\"name\":") catch return error.BuildFailed;
     pcb_layout_page.writeJsonStr(w, name) catch return error.BuildFailed;
     w.writeAll(",\"starred\":") catch return error.BuildFailed;
     pcb_layout_page.writeJsonStr(w, starred_name.?) catch return error.BuildFailed;
+    const covered_n = sp.parts.len - unmatched.items.len;
+    w.print(",\"coverage\":{{\"parts\":{d},\"covered\":{d},\"unmatched\":[", .{ sp.parts.len, covered_n }) catch return error.BuildFailed;
+    for (unmatched.items, 0..) |ref, i| {
+        if (i > 0) w.writeAll(",") catch return error.BuildFailed;
+        pcb_layout_page.writeJsonStr(w, ref) catch return error.BuildFailed;
+    }
+    w.writeAll("]}") catch return error.BuildFailed;
+    if (res.n == 0) {
+        w.writeAll(",\"note\":\"no anchor hub or no scorable parts — area match not applicable\"") catch return error.BuildFailed;
+    }
     w.print(",\"n\":{d},\"area_match_pct\":{d:.1},\"classes\":[", .{ res.n, res.area_match_pct }) catch return error.BuildFailed;
     for (res.classes, 0..) |cd, i| {
         if (i > 0) w.writeAll(",") catch return error.BuildFailed;
