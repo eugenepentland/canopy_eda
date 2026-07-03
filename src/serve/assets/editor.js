@@ -295,6 +295,43 @@
     fitTo({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, 0.08);
     return true;
   }
+  // ── Two-window live cross-probe (BroadcastChannel) ───────────────────
+  // The KiCad two-monitor workflow: a /pcb-layout or /schematics page of the
+  // same design open in another tab/window highlights whatever part is
+  // clicked here, and clicking a part there frames + selects it on this map.
+  // Refs resolve exact-then-leaf both ways (a board's "pwr/U2" lands on this
+  // map's U2 cell and vice versa). xpMuted stops a highlight applied for a
+  // received message from echoing back as a new broadcast.
+  function xpFocusRef(want) {
+    const full = String(want || "").trim().toLowerCase(); if (!full || !M) return false;
+    const lf = (r) => { const i = r.lastIndexOf("/"); return i < 0 ? r : r.slice(i + 1); };
+    const wl = lf(full);
+    const hubs = (M.hubs || []).filter((h) => !h.ghost), passes = M.passes || [];
+    let hub = hubs.find((h) => h.ref.toLowerCase() === full) || null;
+    let pas = hub ? null : (passes.find((p) => p.ref.toLowerCase() === full) || null);
+    if (!hub && !pas) hub = hubs.find((h) => lf(h.ref.toLowerCase()) === wl) || null;
+    if (!hub && !pas) pas = passes.find((p) => lf(p.ref.toLowerCase()) === wl) || null;
+    const it = hub || pas;
+    if (!it) return focusTarget(want);   // canon inline part / net name — frame only
+    // Frame the whole cell holding the part (its chain context), like focusTarget.
+    const sec = (M.secs || []).find((s) => it.cx >= s.x && it.cx <= s.x + s.w && it.cy >= s.y && it.cy <= s.y + s.h);
+    if (sec) fitTo(sec, 0.08);
+    else if (hub) fitTo(hub, 0.12);
+    else fitTo({ x: pas.x - 90, y: pas.top - 60, w: pas.w + 180, h: pas.h + 120 }, 0.08);
+    select(hub ? "hub" : "pass", it.ref);
+    return true;
+  }
+  let xpc = null, xpMuted = false;
+  try { xpc = new BroadcastChannel("netlisp-xprobe"); } catch (e) { xpc = null; }
+  if (xpc) xpc.onmessage = (ev) => {
+    const m = ev.data || {};
+    if (m.from === "ed" || m.design !== DESIGN || !m.ref) return;
+    xpMuted = true; try { xpFocusRef(m.ref); } finally { xpMuted = false; }
+  };
+  function xpSend(ref) {
+    if (!xpc || xpMuted) return;
+    try { xpc.postMessage({ from: "ed", design: DESIGN, ref: ref }); } catch (e) {}
+  }
   function worldFromEvent(e) {
     const r = rectOf();
     return [cam.x + ((e.clientX - r.left) / r.width) * cam.w, cam.y + ((e.clientY - r.top) / r.height) * cam.h];
@@ -870,7 +907,7 @@
 
   // Part and net are mutually exclusive in the inspector: selecting one clears
   // the other so the panel always reflects a single subject.
-  function select(kind, ref) { selection = { kind, ref }; hotNet = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
+  function select(kind, ref) { selection = { kind, ref }; hotNet = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); xpSend(ref); }
   function deselect() { selection = null; hotNet = null; deleteArmed = false; pinnedChips.clear(); renderInspector(); updateStatus(); scheduleDraw(); }
   function highlightNetToggle(net) { if (!net) return; hotNet = hotNet === net ? null : net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
   // Click a net-partner chip → pin its reveal wire on (survives mouse-move); click again to
