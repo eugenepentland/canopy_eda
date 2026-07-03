@@ -2152,6 +2152,148 @@ fn jsonSideOf(v: ?std.json.Value) Side {
     return .top;
 }
 
+/// Partition the loose (non-sub-block) parts around the loose hubs they serve
+/// and freeze each hub + its satellites as ONE rigid pad-anchored block. This
+/// is what keeps a design's top-level MCU and its decoupling bank looking like
+/// a hand cluster inside the hierarchical arrangement, instead of a hundred
+/// independent singleton blocks spring-scattered across the board. A loose
+/// part picks the loose hub on its most specific (fewest-pin, non-ground)
+/// shared net; parts with no such hub stay singletons and land by
+/// connectivity as before. Locked parts are left alone (they are pinned).
+fn buildGlueMacros(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    macro_of: []?usize,
+    macros: *std.ArrayListUnmanaged(Macro),
+) std.mem.Allocator.Error!void {
+    const hub_of = try arena.alloc(?usize, parts.len);
+    @memset(hub_of, null);
+    for (parts, 0..) |p, pi| {
+        if (macro_of[pi] != null or p.locked or p.kind == .hub) continue;
+        var best_hub: ?usize = null;
+        var best_pins: usize = std.math.maxInt(usize);
+        for (nets) |net| {
+            if (pin_roles.isGroundFn(shortName(net.name))) continue;
+            if (net.pins.len >= best_pins) continue; // want the most specific net
+            if (!netHasPart(net, pi, &prep.idx_of)) continue;
+            for (net.pins) |pin| {
+                const qi = prep.idx_of.get(pin.ref_des) orelse continue;
+                if (qi == pi or parts[qi].kind != .hub) continue;
+                if (macro_of[qi] != null or parts[qi].locked) continue;
+                best_hub = qi;
+                best_pins = net.pins.len;
+                break;
+            }
+        }
+        hub_of[pi] = best_hub;
+    }
+    for (parts, 0..) |p, hpi| {
+        if (macro_of[hpi] != null or p.kind != .hub or p.locked) continue;
+        var members: std.ArrayListUnmanaged(usize) = .empty;
+        for (hub_of, 0..) |h, pi| {
+            if (h != null and h.? == hpi) try members.append(arena, pi);
+        }
+        if (members.items.len == 0) continue; // a bare hub stays a singleton
+        const m = try ringGlueMacro(arena, parts, prep, nets, hpi, members.items);
+        macro_of[hpi] = macros.items.len;
+        for (members.items) |pi| macro_of[pi] = macros.items.len;
+        try macros.append(arena, m);
+    }
+}
+
+/// Pad-anchored mini-ring for one loose hub and its glue satellites, frozen
+/// as a rigid block: the same side/lane machinery the flat seed uses, run on
+/// a local copy with the hub at the origin, so the cluster reads like a hand
+/// layout before `arrangeMacros` places the whole block by connectivity.
+fn ringGlueMacro(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    hpi: usize,
+    members: []const usize,
+) std.mem.Allocator.Error!Macro {
+    const n = members.len + 1;
+    const local = try arena.alloc(Part, n);
+    var idx_of = std.StringHashMap(usize).init(arena);
+    local[0] = parts[hpi];
+    local[0].x = 0;
+    local[0].y = 0;
+    local[0].rot = 0;
+    local[0].locked = false;
+    try idx_of.put(parts[hpi].ref_des, 0);
+    for (members, 0..) |pi, k| {
+        local[k + 1] = parts[pi];
+        local[k + 1].locked = false;
+        try idx_of.put(parts[pi].ref_des, k + 1);
+    }
+    const hkb = keepBoxOf(local[0]);
+    const roles = pin_roles.load(arena, prep.project_dir, if (hpi < prep.instances.len) prep.instances[hpi].component else "");
+    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
+    var leftover: std.ArrayListUnmanaged(usize) = .empty;
+    const ci = try buildClusters(arena, local, 0, nets, &idx_of);
+    const tier_of = try arena.alloc(usize, n);
+    @memset(tier_of, 0);
+    const sig_side = try arena.alloc(u8, n);
+    @memset(sig_side, 255);
+    const cohere_side = try arena.alloc(u8, n);
+    @memset(cohere_side, 255);
+    // Per-cap served decoupling pad, same as the flat rough path — glue bypass
+    // caps dock on the edge of the pin they serve.
+    const served_pad = try arena.alloc(?[2]f64, n);
+    @memset(served_pad, null);
+    for (members, 0..) |pi, k| {
+        var tok: []const u8 = "";
+        if (pi < prep.instances.len) {
+            const inst = prep.instances[pi];
+            if (inst.decouple_pin.len > 0) {
+                tok = inst.decouple_pin;
+            } else if (decouplePinFromOrigin(inst.origin_key)) |dp| {
+                tok = dp;
+            }
+        }
+        served_pad[k + 1] = servedPadLocal(local, 0, k + 1, tok, nets, &idx_of);
+    }
+    const saved_ic_gap = g_rough_ic_gap;
+    const saved_part_gap = g_rough_part_gap;
+    g_rough_ic_gap = FINAL_CLEAR;
+    g_rough_part_gap = FINAL_CLEAR;
+    defer {
+        g_rough_ic_gap = saved_ic_gap;
+        g_rough_part_gap = saved_part_gap;
+    }
+    try assignSides(arena, local, 0, nets, &idx_of, roles, ci, tier_of, sig_side, served_pad, &sides, &leftover);
+    dockSidesByTier(local, &sides, hkb);
+    if (leftover.items.len > 0) {
+        var x: f64 = -hkb.hw;
+        const y = gridRound(hkb.hh + 6);
+        for (leftover.items) |pi| {
+            const pkb = keepBoxOf(local[pi]);
+            x += pkb.hw;
+            local[pi].x = gridRound(x);
+            local[pi].y = y;
+            x += pkb.hw + PAD_ANCHOR_PART_GAP_MM;
+        }
+    }
+    try refineSidesByPull(arena, local, 0, nets, &idx_of, tier_of, cohere_side, &sides, hkb);
+    orientPadsToIC(local, 0, nets, &idx_of);
+    legalizeFinal(local);
+    const g_members = try arena.alloc(usize, n);
+    const xs = try arena.alloc(f64, n);
+    const ys = try arena.alloc(f64, n);
+    const rots = try arena.alloc(f64, n);
+    g_members[0] = hpi;
+    for (members, 0..) |pi, k| g_members[k + 1] = pi;
+    for (local, 0..) |lp, k| {
+        xs[k] = lp.x;
+        ys[k] = lp.y;
+        rots[k] = lp.rot;
+    }
+    return finishMacro(g_members, xs, ys, rots, parts, null);
+}
+
 /// Penetration-driven separation after the macro re-stamp: a free part
 /// overlapping a macro member moves away; two distinct macros overlapping
 /// move the later one as a unit (the first stays — stamped order). Free-vs-
@@ -2247,6 +2389,11 @@ const ROUGH_STEP: f64 = 0.5;
 const ROUGH_MAX_STEP_MM: f64 = 4.0;
 /// Breathing room left between blocks during the relaxation (mm).
 const ROUGH_BLOCK_GAP_MM: f64 = 2.0;
+/// Cap on the residual overlap-only settling sweeps after the spring
+/// relaxation — a short cleanup for the last touching pairs, not the main
+/// separation mechanism (that's the scaled spring/repulsion loop, which
+/// keeps adjacency while it separates).
+const ROUGH_SEPARATE_ITERS: usize = 150;
 /// Coarse grid the block centres snap to — legible + easy to grab (5× base grid).
 const ROUGH_ORIGIN_GRID_MM: f64 = 1.0;
 /// Courtyard spacing forced on a FLAT rough seed so the compaction pass spreads the
@@ -2292,16 +2439,20 @@ fn runRough(
 
     // No sub-block macros means a FLAT design/module (or a grouped-refdes board
     // whose members didn't map): there are no modules to cluster, so hierarchical
-    // arrangement adds nothing. Bail to the caller, which runs the pad-aware force
-    // relax instead (parts settle toward the hub pad they connect to, not clumped).
-    if (macros.items.len < 2) return false;
+    // arrangement adds nothing. Bail to the caller, which runs the pad-aware ring
+    // instead (parts settle toward the hub pad they connect to, not clumped).
+    if (macros.items.len == 0) return false;
 
     const macro_of = try arena.alloc(?usize, parts.len);
     @memset(macro_of, null);
     for (macros.items, 0..) |m, mi| {
         for (m.members) |pi| macro_of[pi] = mi;
     }
-    // Every top-level part with no module home becomes its own block, so it lands
+    // Glue: each loose hub and the loose parts that serve it ring together as
+    // one rigid block, so the top-level MCU + its bypass bank arranges as a
+    // hand-like cluster instead of a hundred spring-scattered singletons.
+    try buildGlueMacros(arena, parts, prep, nets, macro_of, &macros);
+    // Every remaining part with no home becomes its own block, so it lands
     // by connectivity (a bare bypass cap beside the IC module it wires to).
     for (0..parts.len) |pi| {
         if (macro_of[pi] != null) continue;
@@ -3571,8 +3722,12 @@ fn arrangeMacros(
 
     const nf: f64 = @floatFromInt(n);
     const force = try arena.alloc([2]f64, n);
+    // Iteration budget scales with block count: 240 settles a dozen modules,
+    // but a 100+-block board (labstation) needs several times that for the
+    // spring/repulsion pair to finish separating while keeping adjacency.
+    const iters = ROUGH_ITERS + 8 * n;
     var it: usize = 0;
-    while (it < ROUGH_ITERS) : (it += 1) {
+    while (it < iters) : (it += 1) {
         @memset(force, [2]f64{ 0, 0 });
         var gx: f64 = 0;
         var gy: f64 = 0;
@@ -3617,6 +3772,38 @@ fn arrangeMacros(
             centers[a][0] += @max(-ROUGH_MAX_STEP_MM, @min(ROUGH_MAX_STEP_MM, force[a][0] * ROUGH_STEP));
             centers[a][1] += @max(-ROUGH_MAX_STEP_MM, @min(ROUGH_MAX_STEP_MM, force[a][1] * ROUGH_STEP));
         }
+    }
+
+    // Overlap-only settling: the springs above place blocks by connectivity but
+    // on a dense board (100+ blocks) 240 iterations rarely finish separating
+    // them, and the composed legalizer downstream can only shove interleaved
+    // boxes locally. Keep pushing overlapping pairs apart (no springs, so the
+    // arrangement's shape is preserved) until every pair of block boxes is
+    // disjoint or the pass caps out.
+    var sit: usize = 0;
+    while (sit < ROUGH_SEPARATE_ITERS) : (sit += 1) {
+        var any = false;
+        for (0..n) |a| {
+            for (a + 1..n) |b| {
+                const dx = centers[b][0] - centers[a][0];
+                const dy = centers[b][1] - centers[a][1];
+                const ox = hw[a] + hw[b] + ROUGH_BLOCK_GAP_MM - @abs(dx);
+                const oy = hh[a] + hh[b] + ROUGH_BLOCK_GAP_MM - @abs(dy);
+                if (ox <= 0 or oy <= 0) continue;
+                any = true;
+                const half: f64 = if (pinned[a] or pinned[b]) 1.0 else 0.5;
+                if (ox <= oy) {
+                    const push = half * ox * (if (dx >= 0) @as(f64, 1) else -1);
+                    if (!pinned[a]) centers[a][0] -= push;
+                    if (!pinned[b]) centers[b][0] += push;
+                } else {
+                    const push = half * oy * (if (dy >= 0) @as(f64, 1) else -1);
+                    if (!pinned[a]) centers[a][1] -= push;
+                    if (!pinned[b]) centers[b][1] += push;
+                }
+            }
+        }
+        if (!any) break;
     }
 
     const origins = try arena.alloc([2]f64, n);
