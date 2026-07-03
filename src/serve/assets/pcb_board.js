@@ -468,7 +468,7 @@ function updatePropLive(){if(!selRef)return;var p=partByRef(selRef);if(!p)return
  if(ex)ex.textContent=pMm(p.x)+" mm";if(ey)ey.textContent=pMm(p.y)+" mm";
  if(er)er.textContent=((((p.rot||0)%360)+360)%360)+"°";}
 function markSelPart(){paintSoon();}
-function selectComp(ref){selRef=ref;renderProps();markGrpRow();markSelPart();}
+function selectComp(ref){selRef=ref;renderProps();markGrpRow();markSelPart();xpSend(ref);}
 function clearSel(){if(!selRef)return;selRef=null;renderProps();markGrpRow();markSelPart();}
 // ── Rigid sub-circuits (top-level: hover glow + paint read them in RO too) ─
 // Each sub-block's parts share a ref prefix ("buck/C3" → group "buck").
@@ -1369,20 +1369,36 @@ markUnplaced(PCB.placement&&PCB.placement.unplaced);
 //    zoom/centre the view on it, flash its courtyard, and reveal it in the
 //    component sidebar. Exact ref first, then the bare sub-block leaf
 //    (focus=U2 matches ldo/U2), mirroring the PNG renderer's ?refs= rule.
-(function(){
- var want="";
- try{want=new URLSearchParams(location.search).get("focus")||"";}catch(e){}
- if(!want&&location.hash.length>1)want=decodeURIComponent(location.hash.slice(1));
- if(!want)return;
+function focusPart(want){
  function leaf(r){var i=r.lastIndexOf("/");return i<0?r:r.slice(i+1);}
  var idx=-1;
  P.forEach(function(p,i){if(idx<0&&p.ref===want)idx=i;});
  if(idx<0)P.forEach(function(p,i){if(idx<0&&leaf(p.ref)===want)idx=i;});
- if(idx<0)return;
+ if(idx<0)return false;
  var p=P[idx],cx=X(p.x),cy=Y(p.y);
  var fw=Math.min(VBW,Math.max(VBW*0.35,(2*p.hw+14)*S*4));
  vb={x:cx-fw/2,y:cy-fw*(VBH/VBW)/2,w:fw,h:fw*(VBH/VBW)};setVB();
  flashIdx=idx;flashUntil=Date.now()+2600;paintSoon();
  if(!RO)selectComp(p.ref);
+ return true;}
+// ── Two-window live cross-probe ─────────────────────────────────────────
+// The KiCad two-monitor workflow, browser-native: keep /schematics/<name>
+// open in another tab/window and clicking a part here highlights it there;
+// selecting a component there zooms/flashes it here. Pages of the SAME
+// design in the SAME browser find each other over a BroadcastChannel — no
+// server round-trip, nothing to configure. xpMuted stops a highlight we
+// apply on behalf of a received message from echoing back as a new one.
+var xpc=null,xpMuted=false;
+try{xpc=new BroadcastChannel("netlisp-xprobe");}catch(e){}
+if(xpc)xpc.onmessage=function(ev){var m=ev.data||{};
+ if(m.from==="pcb"||m.design!==PCB.name||!m.ref)return;
+ xpMuted=true;try{focusPart(m.ref);}finally{xpMuted=false;}};
+function xpSend(ref){if(!xpc||xpMuted)return;
+ try{xpc.postMessage({from:"pcb",design:PCB.name,ref:ref});}catch(e){}}
+(function(){
+ var want="";
+ try{want=new URLSearchParams(location.search).get("focus")||"";}catch(e){}
+ if(!want&&location.hash.length>1)want=decodeURIComponent(location.hash.slice(1));
+ if(want)focusPart(want);
 })();
 })();
