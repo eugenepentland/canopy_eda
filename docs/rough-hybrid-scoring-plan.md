@@ -4,6 +4,53 @@
 
 ---
 
+## ✅ Round 3 (2026-07-03): multi-IC modules — satellite owner groups
+
+User review feedback after Round 2 shipped as the default: on modules with
+more than one IC the non-anchor ICs got mangled — bcuda-pll-adf4159's TXB0104
+level shifter had its `(decouples "U_LS" …)` caps placed around the ADF4159,
+and rp2350b-core's crystal load caps and flash decoupling were dragged to the
+RP2350's pads. Root cause: `pinTargets` resolved every part against the
+*anchor* hub only, so a loop whose `hub` was a satellite fell through to the
+fewest-anchor-pads rule.
+
+Implemented per the user's proposal ("a separate solver per IC + its
+passives, then place each around the main IC as a group"):
+
+- **`pinOwners`**: partition parts by the hub they serve — decoupling loop's
+  hub first (authoritative), series pair's hub, else fewest-pads over ALL
+  hubs on the part's most local **signal** net (`.power`/`.ground` classes
+  carry no locality — the anchor has *more* rail pads precisely because it's
+  the main consumer, so counting them would hand its pull-ups to whichever
+  satellite shares the rail). Count ties prefer the satellite (crystal load
+  caps stay with the crystal). Childless satellites dissolve back into plain
+  anchor-ring parts.
+- **`buildPinGroups`**: each satellite owner's circuit is solved with the
+  same machinery the anchor gets (`ringOwner` — the extracted per-edge
+  ring/pavPack pass — plus scoped `pinChainAttach` and `orientPadsToIC`) in
+  its own owner-at-origin frame.
+- **`dockGroups`**: each group docks rigidly outside the anchor's first ring
+  band on the edge where its connecting nets land (`groupAnchorTarget`:
+  anchor-pad centroid over the group's signal ties — the level shifter docks
+  at the SPI pins, the flash at the QSPI bank, the crystal at XIN/XOUT), in a
+  second band deep enough to clear the ring (`ring_ext`). Groups sharing an
+  edge pavPack in pad order (non-crossing preserved at group granularity);
+  each group's rotation is chosen by minimizing the manhattan length of its
+  anchor ties over the four right angles (`groupDockRot`), so the shifter's
+  translated side faces the PLL it drives.
+
+Corpus after (27 starred modules, `?rough=1&regen=1`): obj_rel geomean
+0.972 → **0.939**, beats-hand 13/26; **bcuda-pll-adf4159 0.853 → 0.677**,
+**rp2350b-core 1.039 → 0.730** (area match 79 → 90 %), usb-hub-2514
+1.358 → 1.064 *and* style 78 → 90, w55rp20 3.34 → 2.49, lm74610-or
+1.62 → 1.19, neopixel 1.41 → 1.24. Style dipped on a few small modules
+(neopixel 70 → 45, lm74610 60 → 42) where the grouped layout is tighter than
+the hand arrangement but uses different edges — objective improved in every
+one of those cases. Boards regression-checked (labstation 347p, 0 unplaced,
+0 lint errors; board path never enters the arbiter).
+
+---
+
 ## ✅ Implementation status (2026-07-03, subcircuits/modules only)
 
 Scoped to **module-level layouts** (`lib/modules/`) per direction — full boards

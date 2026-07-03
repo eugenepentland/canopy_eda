@@ -2295,7 +2295,7 @@ fn ringGlueMacro(
         }
     }
     try refineSidesByPull(arena, local, 0, nets, &idx_of, tier_of, cohere_side, &sides, hkb);
-    orientPadsToIC(local, 0, nets, &idx_of);
+    orientPadsToIC(local, 0, null, nets, &idx_of);
     legalizeFinal(local);
     const g_members = try arena.alloc(usize, n);
     const xs = try arena.alloc(f64, n);
@@ -3422,14 +3422,21 @@ fn importantPadLocal(
 /// toward the IC. A 180° flip of a symmetric 2-pad part keeps its bbox, so it can
 /// never introduce an overlap; hubs/connectors and odd-pad parts keep their
 /// rotation. Runs last, so "inner" is measured from each part's final position.
+/// With `owner_of` (the pin-adjacent seed's ownership map) only parts owned by
+/// `hi` are touched — a satellite group's members were already oriented toward
+/// their own hub in the group frame and must not be re-flipped at the anchor.
 fn orientPadsToIC(
     parts: []Part,
     hi: usize,
+    owner_of: ?[]const usize,
     nets: []const FlatNet,
     idx_of: *std.StringHashMap(usize),
 ) void {
     for (parts, 0..) |*p, pi| {
         if (pi == hi or p.kind == .hub or p.pads.len != 2) continue;
+        if (owner_of) |ow| {
+            if (ow[pi] != hi) continue;
+        }
         if (p.locked) continue; // a pinned pose keeps its hand-set orientation
         const lp = importantPadLocal(p.*, pi, hi, nets, idx_of) orelse continue;
         const off = rotateLocal(lp[0], lp[1], p.rot);
@@ -3659,7 +3666,7 @@ fn packPadAnchored(
 
     // Orient each 2-pad passive so its important pad faces the IC (power pad of a
     // bypass cap toward the IC power pin, signal pad of a resistor toward the IC).
-    orientPadsToIC(parts, hi, nets, &prep.idx_of);
+    orientPadsToIC(parts, hi, null, nets, &prep.idx_of);
 
     if (a_locked) {
         parts[hi].x = a_pose[0];
@@ -3716,43 +3723,46 @@ fn pinTargetFromPad(hkb: KeepBox, px: f64, py: f64) PinTarget {
     return .{ .edge = e, .along = if (vert) py else px };
 }
 
-/// Resolve each part's bound anchor pad, most-authoritative source first:
-/// its decoupling loop's target supply pad (`hugToHub` already resolved the
-/// explicit `(decouples …)` / per-pin binding or chose the pad), a series
-/// pair's two-pad midpoint (the buck inductor across LX1/LX2), else the hub-pad
-/// centroid of its most signal-like shared net (fewest hub pads, ground
-/// skipped — the same rule that puts a pull-up on its signal pin, not its
-/// rail). Null = no direct anchor binding (chain or leftover part).
+/// Resolve each part's bound pad on `owner`'s package, most-authoritative
+/// source first: its decoupling loop's target supply pad (`hugToHub` already
+/// resolved the explicit `(decouples …)` / per-pin binding or chose the pad),
+/// a series pair's two-pad midpoint (the buck inductor across LX1/LX2), else
+/// the owner-pad centroid of its most signal-like shared net (fewest owner
+/// pads, ground skipped — the same rule that puts a pull-up on its signal pin,
+/// not its rail). Only parts assigned to `owner` in `owner_of` get a target —
+/// a satellite hub's caps bind in the satellite's own frame, never the
+/// anchor's. Null = no direct binding (chain or leftover part).
 fn pinTargets(
     arena: std.mem.Allocator,
     parts: []const Part,
-    hi: usize,
+    owner: usize,
+    owner_of: []const usize,
     nets: []const FlatNet,
     idx_of: *std.StringHashMap(usize),
     built: Built,
 ) std.mem.Allocator.Error![]?PinTarget {
-    const hkb = keepBoxOf(parts[hi]);
+    const hkb = keepBoxOf(parts[owner]);
     const tgt = try arena.alloc(?PinTarget, parts.len);
     @memset(tgt, null);
     for (built.loops) |lp| {
-        if (lp.hub != hi or tgt[lp.cap] != null) continue;
+        if (lp.hub != owner or owner_of[lp.cap] != owner or tgt[lp.cap] != null) continue;
         if (lp.hub_pwr_pin.w == 0 and lp.hub_pwr_pin.h == 0) continue;
         tgt[lp.cap] = pinTargetFromPad(hkb, lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
     }
     for (built.series) |sp| {
-        if (sp.hub != hi or tgt[sp.part] != null) continue;
+        if (sp.hub != owner or owner_of[sp.part] != owner or tgt[sp.part] != null) continue;
         const mx = (sp.a.hub_pad.x + sp.b.hub_pad.x) / 2;
         const my = (sp.a.hub_pad.y + sp.b.hub_pad.y) / 2;
         tgt[sp.part] = pinTargetFromPad(hkb, mx, my);
     }
     for (parts, 0..) |_, pi| {
-        if (pi == hi or tgt[pi] != null) continue;
+        if (pi == owner or owner_of[pi] != owner or tgt[pi] != null) continue;
         var best: ?[2]f64 = null;
         var best_cnt: usize = std.math.maxInt(usize);
         for (nets) |net| {
             if (pin_roles.isGroundFn(shortName(net.name))) continue;
             if (!netHasPart(net, pi, idx_of)) continue;
-            const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+            const pads = try hubPadsOnNet(arena, parts[owner], owner, net, idx_of);
             if (pads.len == 0 or pads.len >= best_cnt) continue;
             var cx: f64 = 0;
             var cy: f64 = 0;
@@ -3826,10 +3836,13 @@ fn freeTwoPad(p: Part) bool {
 /// extends away from the IC exactly the way a hand layout chains it. Children
 /// of one parent stack further out in discovery order. Iterates so a chain of
 /// depth k lands in k passes. Anything never reached is left for the caller's
-/// leftover row.
+/// leftover row. With `owner_of` (a satellite group's local solve) both the
+/// child and its parent must belong to `hi`'s group, so a chain never escapes
+/// the group frame or grabs a part that isn't in it.
 fn pinChainAttach(
     parts: []Part,
     hi: usize,
+    owner_of: ?[]const usize,
     nets: []const FlatNet,
     idx_of: *std.StringHashMap(usize),
     placed: []bool,
@@ -3840,6 +3853,9 @@ fn pinChainAttach(
         var progressed = false;
         for (parts, 0..) |*p, pi| {
             if (placed[pi] or pi == hi) continue;
+            if (owner_of) |ow| {
+                if (ow[pi] != hi) continue;
+            }
             var parent: ?usize = null;
             var best_pins: usize = std.math.maxInt(usize);
             for (nets) |net| {
@@ -3849,6 +3865,9 @@ fn pinChainAttach(
                 for (net.pins) |pr| {
                     const qi = idx_of.get(pr.ref_des) orelse continue;
                     if (qi == pi or qi == hi or !placed[qi]) continue;
+                    if (owner_of) |ow| {
+                        if (ow[qi] != hi) continue;
+                    }
                     parent = qi;
                     best_pins = net.pins.len;
                     break;
@@ -3886,32 +3905,94 @@ fn pinChainAttach(
     }
 }
 
-/// The pin-adjacent seed: anchor at the origin, every bound part at its pad's
-/// along-coordinate one gap outside its edge (order-preserving 1-D relax where
-/// parts would collide), chains outward, ground-only leftovers in a row below,
-/// important pads facing the IC. False when the module has no anchor hub.
-fn runPinAdjacent(
+/// Owner per part for the pin-adjacent seed. Every hub is its own owner; each
+/// passive belongs to the hub whose local circuit it serves — its decoupling
+/// loop's hub (a `(decouples "U2" 8)` flash cap must not be dragged to the
+/// anchor's rail pads), its series pair's hub, else the hub with the fewest
+/// pads on the part's most local signal net (power rails carry no locality:
+/// the anchor has MORE supply pads precisely because it's the main consumer,
+/// so counting them would hand its pull-ups to whichever satellite shares the
+/// rail). A count tie prefers the satellite — a crystal's load caps sit with
+/// the crystal, which itself docks at the anchor's XTAL pins. A satellite hub
+/// that ends up owning nothing dissolves back into an anchor ring part.
+fn pinOwners(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    built: Built,
+) std.mem.Allocator.Error![]usize {
+    const owner_of = try arena.alloc(usize, parts.len);
+    for (parts, 0..) |p, pi| owner_of[pi] = if (p.kind == .hub) pi else hi;
+    const bound = try arena.alloc(bool, parts.len);
+    @memset(bound, false);
+    for (built.loops) |lp| {
+        if (parts[lp.cap].kind == .hub or bound[lp.cap]) continue;
+        owner_of[lp.cap] = lp.hub;
+        bound[lp.cap] = true;
+    }
+    for (built.series) |sp| {
+        if (parts[sp.part].kind == .hub or bound[sp.part]) continue;
+        owner_of[sp.part] = sp.hub;
+        bound[sp.part] = true;
+    }
+    for (parts, 0..) |p, pi| {
+        if (p.kind == .hub or bound[pi]) continue;
+        var best: usize = hi;
+        var best_cnt: usize = std.math.maxInt(usize);
+        for (nets) |net| {
+            if (pin_roles.isGroundFn(shortName(net.name))) continue;
+            const cls = module_policy.classifyNetName(net.name);
+            if (cls == .ground or cls == .power) continue;
+            if (!netHasPart(net, pi, idx_of)) continue;
+            for (parts, 0..) |h, hidx| {
+                if (h.kind != .hub) continue;
+                const pads = try hubPadsOnNet(arena, h, hidx, net, idx_of);
+                const tie_satellite = pads.len == best_cnt and best == hi and hidx != hi;
+                if (pads.len == 0 or (pads.len >= best_cnt and !tie_satellite)) continue;
+                best = hidx;
+                best_cnt = pads.len;
+            }
+        }
+        owner_of[pi] = best;
+    }
+    for (parts, 0..) |p, oi| {
+        if (p.kind != .hub or oi == hi) continue;
+        var owns = false;
+        for (owner_of, 0..) |o, qi| {
+            if (qi != oi and o == oi) owns = true;
+        }
+        if (!owns) owner_of[oi] = hi;
+    }
+    return owner_of;
+}
+
+/// Ring `owner`'s owned parts around its keepbox at their bound-pad
+/// along-coordinates (owner assumed at the local origin, rot 0), marking each
+/// ringed part placed. Per-edge order = pad order (the non-crossing
+/// invariant), `pavPack` relaxes crowded runs. Returns the band extent each
+/// edge's ring consumes beyond the owner keepbox, so a second band (the
+/// satellite groups) can dock outside the first without overlapping it.
+fn ringOwner(
     arena: std.mem.Allocator,
     parts: []Part,
-    prep: *Prepared,
+    owner: usize,
+    owner_of: []const usize,
     nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
     built: Built,
-) std.mem.Allocator.Error!bool {
-    const hi = pickAnchorHub(parts, nets) orelse return false;
-    parts[hi].x = 0;
-    parts[hi].y = 0;
-    parts[hi].rot = 0;
-    const hkb = keepBoxOf(parts[hi]);
+    placed: []bool,
+) std.mem.Allocator.Error![4]f64 {
+    const hkb = keepBoxOf(parts[owner]);
     const gap = FINAL_CLEAR;
-    const tgt = try pinTargets(arena, parts, hi, nets, &prep.idx_of, built);
-    const placed = try arena.alloc(bool, parts.len);
-    @memset(placed, false);
-    placed[hi] = true;
+    const tgt = try pinTargets(arena, parts, owner, owner_of, nets, idx_of, built);
+    var ext = [4]f64{ 0, 0, 0, 0 };
 
     var edges = [_]std.ArrayListUnmanaged(PinItem){ .empty, .empty, .empty, .empty };
     for (parts, 0..) |*p, pi| {
         const t = tgt[pi] orelse continue;
-        if (pi == hi) continue;
+        if (pi == owner) continue;
         if (freeTwoPad(p.*)) p.rot = if (t.edge < 2) 0 else 90;
         try edges[t.edge].append(arena, .{ .i = pi, .along = t.along });
         placed[pi] = true;
@@ -3939,6 +4020,7 @@ fn runPinAdjacent(
             const pkb = keepBoxOf(parts[it.i]);
             const depth = if (vert) pkb.hw else pkb.hh;
             const off = base + gap + depth;
+            ext[e] = @max(ext[e], gap + 2 * depth);
             switch (e) {
                 0 => {
                     parts[it.i].x = gridRound(-off);
@@ -3959,8 +4041,303 @@ fn runPinAdjacent(
             }
         }
     }
+    return ext;
+}
 
-    pinChainAttach(parts, hi, nets, &prep.idx_of, placed, gap);
+/// A satellite hub plus the passives it owns — the level shifter with its two
+/// bypass caps, the QSPI flash with its decoupling, the crystal with its load
+/// caps — solved in its own owner-at-origin frame and docked around the anchor
+/// as one rigid unit. `members` excludes the owner; `bbox` spans the owner's
+/// and members' keepboxes in the local frame.
+const PinGroup = struct { owner: usize, members: []const usize, bbox: [4]f64 };
+
+/// Grow `bb` (minx, miny, maxx, maxy) to cover `p`'s keepout box.
+fn growKeepBBox(bb: *[4]f64, p: Part) void {
+    const kb = keepBoxOf(p);
+    bb[0] = @min(bb[0], p.x + kb.cxo - kb.hw);
+    bb[1] = @min(bb[1], p.y + kb.cyo - kb.hh);
+    bb[2] = @max(bb[2], p.x + kb.cxo + kb.hw);
+    bb[3] = @max(bb[3], p.y + kb.cyo + kb.hh);
+}
+
+/// Solve every satellite owner's local circuit with the same pin-adjacent
+/// machinery the anchor gets: ring its owned parts at its own pads, chain the
+/// rest within the group, orient pads toward the owner. On return the group
+/// parts HOLD their local-frame poses (owner at the origin) — `dockGroups`
+/// rigid-transforms them to their final spot. A member that never places (no
+/// target, no in-group partner) is handed back to the anchor's chain/leftover
+/// passes via `owner_of`.
+fn buildPinGroups(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    owner_of: []usize,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    built: Built,
+) std.mem.Allocator.Error![]PinGroup {
+    var groups: std.ArrayListUnmanaged(PinGroup) = .empty;
+    for (parts, 0..) |p, oi| {
+        if (p.kind != .hub or oi == hi) continue;
+        var owns = false;
+        for (owner_of, 0..) |o, qi| {
+            if (qi != oi and o == oi) owns = true;
+        }
+        if (!owns) continue;
+        parts[oi].x = 0;
+        parts[oi].y = 0;
+        parts[oi].rot = 0;
+        const placed = try arena.alloc(bool, parts.len);
+        @memset(placed, false);
+        placed[oi] = true;
+        _ = try ringOwner(arena, parts, oi, owner_of, nets, idx_of, built, placed);
+        pinChainAttach(parts, oi, owner_of, nets, idx_of, placed, FINAL_CLEAR);
+        orientPadsToIC(parts, oi, owner_of, nets, idx_of);
+        var members: std.ArrayListUnmanaged(usize) = .empty;
+        var bb = [4]f64{ 1e18, 1e18, -1e18, -1e18 };
+        growKeepBBox(&bb, parts[oi]);
+        for (parts, 0..) |q, qi| {
+            if (qi == oi or owner_of[qi] != oi) continue;
+            if (!placed[qi]) {
+                owner_of[qi] = hi; // fall back to the anchor's chain/leftover passes
+                continue;
+            }
+            try members.append(arena, qi);
+            growKeepBBox(&bb, q);
+        }
+        try groups.append(arena, .{ .owner = oi, .members = try members.toOwnedSlice(arena), .bbox = bb });
+    }
+    return groups.toOwnedSlice(arena);
+}
+
+/// True when `net` lands on the group — on its owner hub or any owned member.
+fn netTouchesGroup(net: FlatNet, owner: usize, owner_of: []const usize, idx_of: *std.StringHashMap(usize)) bool {
+    for (net.pins) |pr| {
+        const qi = idx_of.get(pr.ref_des) orelse continue;
+        if (qi == owner or owner_of[qi] == owner) return true;
+    }
+    return false;
+}
+
+/// Where a satellite group docks on the anchor package: the centroid of the
+/// anchor's pads on the nets that tie the group to the anchor. Signal/clock
+/// nets decide when any exist (the level shifter docks at the SPI pins it
+/// translates, the flash at the QSPI bank, the crystal at XIN/XOUT — not at
+/// whatever rail they happen to share); only a group with no signal tie falls
+/// back to shared power nets. Null = no shared net at all.
+fn groupAnchorTarget(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    hi: usize,
+    g: PinGroup,
+    owner_of: []const usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    hkb: KeepBox,
+) std.mem.Allocator.Error!?PinTarget {
+    var cx: f64 = 0;
+    var cy: f64 = 0;
+    var n: f64 = 0;
+    var pass: usize = 0;
+    while (pass < 2 and n == 0) : (pass += 1) {
+        for (nets) |net| {
+            if (pin_roles.isGroundFn(shortName(net.name))) continue;
+            const cls = module_policy.classifyNetName(net.name);
+            if (cls == .ground) continue;
+            if (pass == 0 and cls == .power) continue;
+            if (!netTouchesGroup(net, g.owner, owner_of, idx_of)) continue;
+            const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+            for (pads) |q| {
+                cx += q[0];
+                cy += q[1];
+                n += 1;
+            }
+        }
+    }
+    if (n == 0) return null;
+    return pinTargetFromPad(hkb, cx / n, cy / n);
+}
+
+/// Pick the group's docking rotation (0/90/180/270): the one that minimizes
+/// the manhattan length of the airwires tying the group to the anchor with the
+/// group's bbox centre held at `dock` — so the level shifter's translated side
+/// faces the PLL it drives, not the bus it came from. Group parts must still
+/// hold their local-frame poses (owner at the origin, anchor at the world
+/// origin rot 0, so anchor footprint-local == world).
+fn groupDockRot(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    hi: usize,
+    g: PinGroup,
+    owner_of: []const usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    dock: Pt,
+) std.mem.Allocator.Error!f64 {
+    const c = Pt{ .x = (g.bbox[0] + g.bbox[2]) / 2, .y = (g.bbox[1] + g.bbox[3]) / 2 };
+    var best_rot: f64 = 0;
+    var best_cost = std.math.floatMax(f64);
+    var k: usize = 0;
+    while (k < 4) : (k += 1) {
+        const rot: f64 = @floatFromInt(k * 90);
+        var cost: f64 = 0;
+        for (nets) |net| {
+            if (pin_roles.isGroundFn(shortName(net.name))) continue;
+            const cls = module_policy.classifyNetName(net.name);
+            if (cls == .ground or cls == .power) continue;
+            const apads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+            if (apads.len == 0) continue;
+            var acx: f64 = 0;
+            var acy: f64 = 0;
+            for (apads) |q| {
+                acx += q[0];
+                acy += q[1];
+            }
+            const an: f64 = @floatFromInt(apads.len);
+            acx /= an;
+            acy /= an;
+            for (net.pins) |pr| {
+                const qi = idx_of.get(pr.ref_des) orelse continue;
+                if (qi != g.owner and owner_of[qi] != g.owner) continue;
+                const pad = padLocal(parts[qi], pr.pin);
+                if (pad.w == 0 and pad.h == 0) continue;
+                const pl = worldPt(parts[qi], pad.x, pad.y); // group-local pad point
+                const rl = rotateLocal(pl.x - c.x, pl.y - c.y, rot);
+                cost += @abs(dock.x + rl.x - acx) + @abs(dock.y + rl.y - acy);
+            }
+        }
+        if (cost < best_cost) {
+            best_cost = cost;
+            best_rot = rot;
+        }
+    }
+    return best_rot;
+}
+
+/// One group awaiting its final along-slot on an anchor edge.
+const GroupDock = struct { gi: usize, along: f64, rot: f64, half_along: f64, half_depth: f64 };
+
+/// Dock each satellite group rigidly around the anchor: outside the anchor's
+/// first ring band on the edge its connecting nets land, at their along-
+/// coordinate, in a second band — groups on one edge are `pavPack`ed in pad
+/// order like ring parts, so group-to-anchor airwires stay non-crossing. Each
+/// group is rotated as one unit (`groupDockRot`) and its members transformed
+/// out of the owner-at-origin frame in place.
+fn dockGroups(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    hi: usize,
+    groups: []const PinGroup,
+    owner_of: []const usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    ring_ext: [4]f64,
+    placed: []bool,
+) std.mem.Allocator.Error!void {
+    if (groups.len == 0) return;
+    const hkb = keepBoxOf(parts[hi]);
+    const gap = FINAL_CLEAR;
+    var edges = [_]std.ArrayListUnmanaged(GroupDock){ .empty, .empty, .empty, .empty };
+    for (groups, 0..) |g, gi| {
+        // A group with no net to the anchor still needs a home: bottom edge.
+        const t = (try groupAnchorTarget(arena, parts, hi, g, owner_of, nets, idx_of, hkb)) orelse
+            PinTarget{ .edge = 3, .along = 0 };
+        const vert = t.edge < 2;
+        const base = if (vert) hkb.hw else hkb.hh;
+        const bhw = (g.bbox[2] - g.bbox[0]) / 2;
+        const bhh = (g.bbox[3] - g.bbox[1]) / 2;
+        // Preliminary dock point (at the raw along, before the pack) just to
+        // pick the rotation; the depth uses the unrotated bbox as an estimate.
+        const est_depth = base + ring_ext[t.edge] + gap + (if (vert) bhw else bhh);
+        const est = switch (t.edge) {
+            0 => Pt{ .x = -est_depth, .y = t.along },
+            1 => Pt{ .x = est_depth, .y = t.along },
+            2 => Pt{ .x = t.along, .y = -est_depth },
+            else => Pt{ .x = t.along, .y = est_depth },
+        };
+        const rot = try groupDockRot(arena, parts, hi, g, owner_of, nets, idx_of, est);
+        const quarter = @mod(rot, 180) == 90;
+        const rhw = if (quarter) bhh else bhw; // rotated bbox half-extents
+        const rhh = if (quarter) bhw else bhh;
+        try edges[t.edge].append(arena, .{
+            .gi = gi,
+            .along = t.along,
+            .rot = rot,
+            .half_along = if (vert) rhh else rhw,
+            .half_depth = if (vert) rhw else rhh,
+        });
+    }
+    for (&edges, 0..) |*list, e| {
+        if (list.items.len == 0) continue;
+        std.mem.sort(GroupDock, list.items, {}, struct {
+            fn lt(_: void, a: GroupDock, b: GroupDock) bool {
+                if (a.along != b.along) return a.along < b.along;
+                return a.gi < b.gi;
+            }
+        }.lt);
+        const vert = e < 2;
+        const base = if (vert) hkb.hw else hkb.hh;
+        const des = try arena.alloc(f64, list.items.len);
+        const half = try arena.alloc(f64, list.items.len);
+        for (list.items, 0..) |gd, k| {
+            des[k] = gd.along;
+            half[k] = gd.half_along;
+        }
+        const pos = try pavPack(arena, des, half, gap);
+        for (list.items, 0..) |gd, k| {
+            const g = groups[gd.gi];
+            const off = base + ring_ext[e] + gap + gd.half_depth;
+            const dock = switch (e) {
+                0 => Pt{ .x = -off, .y = pos[k] },
+                1 => Pt{ .x = off, .y = pos[k] },
+                2 => Pt{ .x = pos[k], .y = -off },
+                else => Pt{ .x = pos[k], .y = off },
+            };
+            const c = Pt{ .x = (g.bbox[0] + g.bbox[2]) / 2, .y = (g.bbox[1] + g.bbox[3]) / 2 };
+            const idxs = try arena.alloc(usize, g.members.len + 1);
+            idxs[0] = g.owner;
+            @memcpy(idxs[1..], g.members);
+            for (idxs) |pi| {
+                const p = &parts[pi];
+                const rl = rotateLocal(p.x - c.x, p.y - c.y, gd.rot);
+                p.x = gridRound(dock.x + rl.x);
+                p.y = gridRound(dock.y + rl.y);
+                p.rot = @mod(p.rot + gd.rot, 360);
+                placed[pi] = true;
+            }
+        }
+    }
+}
+
+/// The pin-adjacent seed: anchor at the origin, every anchor-bound part at its
+/// pad's along-coordinate one gap outside its edge (order-preserving 1-D relax
+/// where parts would collide), each satellite hub solved as its own local
+/// pin-adjacent group and docked rigidly outside the ring at the anchor pads
+/// that tie it in, chains outward, ground-only leftovers in a row below,
+/// important pads facing the IC each part serves. False when the module has no
+/// anchor hub.
+fn runPinAdjacent(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    built: Built,
+) std.mem.Allocator.Error!bool {
+    const hi = pickAnchorHub(parts, nets) orelse return false;
+    const owner_of = try pinOwners(arena, parts, hi, nets, &prep.idx_of, built);
+    const groups = try buildPinGroups(arena, parts, owner_of, hi, nets, &prep.idx_of, built);
+
+    parts[hi].x = 0;
+    parts[hi].y = 0;
+    parts[hi].rot = 0;
+    const hkb = keepBoxOf(parts[hi]);
+    const placed = try arena.alloc(bool, parts.len);
+    @memset(placed, false);
+    placed[hi] = true;
+    const ring_ext = try ringOwner(arena, parts, hi, owner_of, nets, &prep.idx_of, built, placed);
+    try dockGroups(arena, parts, hi, groups, owner_of, nets, &prep.idx_of, ring_ext, placed);
+
+    pinChainAttach(parts, hi, null, nets, &prep.idx_of, placed, FINAL_CLEAR);
 
     // Ground-only / unconnected leftovers: one row below the board.
     var lx: f64 = -hkb.hw;
@@ -3973,7 +4350,7 @@ fn runPinAdjacent(
         lx += pkb.hw + PAD_ANCHOR_PART_GAP_MM;
     }
 
-    orientPadsToIC(parts, hi, nets, &prep.idx_of);
+    orientPadsToIC(parts, hi, owner_of, nets, &prep.idx_of);
     legalizeFinal(parts);
     return true;
 }
@@ -9380,11 +9757,11 @@ test "orientPadsToIC turns the important pad toward the anchor" {
     var idx_of = std.StringHashMap(usize).init(arena);
     try idx_of.put("U1", 0);
     try idx_of.put("C1", 1);
-    orientPadsToIC(&parts, 0, &nets, &idx_of);
+    orientPadsToIC(&parts, 0, null, &nets, &idx_of);
     // Flipped 180 → 0 so pad "1" (power, not GND) sits at world +x, toward the IC.
     try testing.expectEqual(@as(f64, 0), parts[1].rot);
     // A part already oriented right is left untouched.
-    orientPadsToIC(&parts, 0, &nets, &idx_of);
+    orientPadsToIC(&parts, 0, null, &nets, &idx_of);
     try testing.expectEqual(@as(f64, 0), parts[1].rot);
 }
 
@@ -9664,6 +10041,110 @@ test "pinTargetFromPad edges and along" {
     const t = pinTargetFromPad(hkb, 0.5, -1.9);
     try testing.expectEqual(@as(u2, 2), t.edge);
     try testing.expectApproxEqAbs(@as(f64, 0.5), t.along, 1e-9);
+}
+
+// spec: placement/optimizer - a passive belongs to the hub its decoupling loop or most local signal net serves; power rails carry no locality
+test "pinOwners assigns passives to the hub they serve" {
+    var astate = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    const u1_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -1.5, .y = 0, .w = 0.3, .h = 0.3 },
+        .{ .number = "2", .x = 1.5, .y = 0, .w = 0.3, .h = 0.3 },
+        .{ .number = "3", .x = 1.5, .y = 1, .w = 0.3, .h = 0.3 },
+    };
+    const u2_pads = [_]geometry.Pad{
+        .{ .number = "8", .x = 0.5, .y = 0, .w = 0.3, .h = 0.3 },
+        .{ .number = "1", .x = -0.5, .y = 0, .w = 0.3, .h = 0.3 },
+    };
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &u1_pads, .fallback = false },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &u2_pads, .fallback = false },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "U3", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+    };
+    const rail = [_]export_kicad.FlatPin{
+        .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "U2", .pin = "8" },
+        .{ .ref_des = "C1", .pin = "1" }, .{ .ref_des = "C2", .pin = "1" },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "V_3V3", .pins = &rail },
+        .{ .name = "CS", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "U2", .pin = "1" }, .{ .ref_des = "R1", .pin = "1" } } },
+        .{ .name = "RUN", .pins = &.{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "R2", .pin = "1" } } },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("U2", 1);
+    try idx_of.put("C1", 2);
+    try idx_of.put("R1", 3);
+    try idx_of.put("R2", 4);
+    try idx_of.put("C2", 5);
+    try idx_of.put("U3", 6);
+    const zero = PadRect{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    // C1's `(decouples "U2" 8)` loop is authoritative even though it sits on the shared rail.
+    const loops = try arena.alloc(Loop, 1);
+    loops[0] = .{ .cap = 2, .hub = 1, .cap_pwr = zero, .cap_gnd = zero, .hub_pwr = &.{}, .hub_gnd = &.{} };
+    const built = Built{ .springs = &.{}, .loops = loops, .series = &.{} };
+    const owner_of = try pinOwners(arena, &parts, 0, &nets, &idx_of, built);
+    try testing.expectEqual(@as(usize, 1), owner_of[2]); // loop-bound cap → its hub
+    try testing.expectEqual(@as(usize, 1), owner_of[3]); // CS pull-up: 1-pad tie → satellite
+    try testing.expectEqual(@as(usize, 0), owner_of[4]); // RUN pull-up: anchor-only net
+    // C2 rides only the power rail: no locality — anchor, even though U2 has fewer rail pads.
+    try testing.expectEqual(@as(usize, 0), owner_of[5]);
+    try testing.expectEqual(@as(usize, 0), owner_of[6]); // childless satellite dissolves to the anchor
+}
+
+// spec: placement/optimizer - a satellite hub's circuit solves in its own frame and docks rigidly at the anchor pads that tie it in
+test "buildPinGroups + dockGroups keep a satellite's cap with its owner at the anchor tie pins" {
+    var astate = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    const u1_pads = [_]geometry.Pad{.{ .number = "9", .x = 1.9, .y = 0, .w = 0.2, .h = 0.2 }};
+    const x1_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -0.6, .y = 0, .w = 0.2, .h = 0.2 },
+        .{ .number = "2", .x = 0.6, .y = 0, .w = 0.2, .h = 0.2 },
+    };
+    const c_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -0.4, .y = 0, .w = 0.2, .h = 0.2 },
+        .{ .number = "2", .x = 0.4, .y = 0, .w = 0.2, .h = 0.2 },
+    };
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &u1_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "X1", .kind = .hub, .hw = 0.8, .hh = 0.6, .pads = &x1_pads, .fallback = false, .x = 9, .y = 9 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &c_pads, .fallback = false, .x = 9, .y = 9 },
+    };
+    // XIN ties the crystal to the anchor's pad 9 (right edge); XOUT is crystal-local.
+    const nets = [_]FlatNet{
+        .{ .name = "XIN", .pins = &.{ .{ .ref_des = "U1", .pin = "9" }, .{ .ref_des = "X1", .pin = "2" } } },
+        .{ .name = "XOUT", .pins = &.{ .{ .ref_des = "X1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("X1", 1);
+    try idx_of.put("C1", 2);
+    const built = Built{ .springs = &.{}, .loops = &.{}, .series = &.{} };
+    const owner_of = try pinOwners(arena, &parts, 0, &nets, &idx_of, built);
+    try testing.expectEqual(@as(usize, 1), owner_of[2]); // the load cap belongs to the crystal
+    const groups = try buildPinGroups(arena, &parts, owner_of, 0, &nets, &idx_of, built);
+    try testing.expectEqual(@as(usize, 1), groups.len);
+    try testing.expectEqual(@as(usize, 1), groups[0].members.len);
+    const placed = try arena.alloc(bool, parts.len);
+    @memset(placed, false);
+    placed[0] = true;
+    const ring_ext = try ringOwner(arena, &parts, 0, owner_of, &nets, &idx_of, built, placed);
+    try dockGroups(arena, &parts, 0, groups, owner_of, &nets, &idx_of, ring_ext, placed);
+    try testing.expect(placed[1] and placed[2]);
+    // The group docked on the anchor's RIGHT edge (where XIN lands), owner outside it.
+    try testing.expect(parts[1].x > 2);
+    // The cap stays with its owner, not the anchor: nearer the crystal than U1.
+    const dxo = parts[2].x - parts[1].x;
+    const dyo = parts[2].y - parts[1].y;
+    const dxa = parts[2].x - parts[0].x;
+    const dya = parts[2].y - parts[0].y;
+    try testing.expect(dxo * dxo + dyo * dyo < dxa * dxa + dya * dya);
 }
 
 // spec: placement/optimizer - importantCrossings counts crossing signal airwires but ignores rails, ground, and shared pads
