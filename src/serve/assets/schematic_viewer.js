@@ -853,6 +853,7 @@
   function showComponent(ref, doScroll) {
     var c = compByRef[ref];
     if (!c) return;
+    xpSend(ref);
     if (doScroll) {
       // Hubs (U/J/…) are HTML `.sch-hub` cards; passives are inline
       // `<g class="component">` symbols nested *inside* a hub's SVG. Flash
@@ -3607,10 +3608,7 @@
   // scrolls to that component and flashes it, reusing the search-result
   // selection path. Exact ref first, then bare sub-block leaf (U2 matches
   // pwr/U2). Also handles in-page hash changes.
-  function componentFromHash() {
-    var h = location.hash || '';
-    if (h.indexOf('#comp-') !== 0) return null;
-    var want = decodeURIComponent(h.slice(6));
+  function resolveCompRef(want) {
     if (compByRef[want]) return want;
     var found = null;
     (SCH_INDEX.components || []).forEach(function (c) {
@@ -3621,12 +3619,43 @@
     });
     return found;
   }
+  function componentFromHash() {
+    var h = location.hash || '';
+    if (h.indexOf('#comp-') !== 0) return null;
+    return resolveCompRef(decodeURIComponent(h.slice(6)));
+  }
   function applyHashFocus() {
     var ref = componentFromHash();
     if (ref) showComponent(ref, true);
     return !!ref;
   }
   window.addEventListener('hashchange', applyHashFocus);
+
+  // ---- Two-window live cross-probe (BroadcastChannel) ----
+  // The KiCad two-monitor workflow: keep /pcb-layout/<name> open in another
+  // tab/window and clicking a part on the board highlights the component
+  // here without navigating; selecting a component here (canvas click,
+  // search result, sidebar list) zooms/flashes it on the board. Pages of the
+  // SAME design in the SAME browser find each other over a BroadcastChannel
+  // — no server round-trip. Refs resolve exact-then-leaf so a sub-scoped
+  // board view's module-local "U2" still lands on "pwr/U2" here. xpMuted
+  // stops a highlight applied for a received message from echoing back.
+  var xpc = null, xpMuted = false;
+  try { xpc = new BroadcastChannel('netlisp-xprobe'); } catch (e) { xpc = null; }
+  if (xpc) {
+    xpc.onmessage = function (ev) {
+      var m = ev.data || {};
+      if (m.from === 'sch' || m.design !== DESIGN_NAME || !m.ref) return;
+      var ref = resolveCompRef(m.ref);
+      if (!ref) return;
+      xpMuted = true;
+      try { showComponent(ref, true); } finally { xpMuted = false; }
+    };
+  }
+  function xpSend(ref) {
+    if (!xpc || xpMuted) return;
+    try { xpc.postMessage({ from: 'sch', design: DESIGN_NAME, ref: ref }); } catch (e) { }
+  }
 
   // ---- Revision changelog popover ----
   // The header "Rev <id>" pill (rendered by render_html.zig when the design
