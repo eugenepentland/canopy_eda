@@ -1,2 +1,1 @@
 # guardian-snapshot v1
-src/serve/oauth.zig:110: magic number `200` (extract a named const)
