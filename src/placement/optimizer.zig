@@ -2009,7 +2009,20 @@ fn buildSubMacro(
     // `courtyard_overlap` / `route_gap`.
     const saved_shrink = g_collide_shrink;
     const saved_gap = g_route_gap;
-    const sp = try solve(arena, sub.block, project_dir, null, params, .place);
+    // A starred (★) module layout is the user's blessed arrangement — use it as
+    // the block's internal layout instead of re-solving from scratch. Partial
+    // coverage (the module grew since the save) pins what the ★ covers and
+    // places only the new parts around it (`Params.remaining`); no ★ ⇒ the
+    // nested fast solve below behaves exactly as before.
+    var child_params = params;
+    var cached: ?[]const RefPose = null;
+    if (try starredModulePoses(arena, project_dir, sub.source, sub.name, prep.instances)) |sposes| {
+        if (!sub.reflow) {
+            cached = sposes;
+            child_params.remaining = true;
+        }
+    }
+    const sp = try solve(arena, sub.block, project_dir, cached, child_params, .place);
     // Design-side lookup: refs compose as `slug/<module ref>` when the flatten
     // kept the module's numbering, but a design-level renumber shifts it
     // (design `buck/U2` vs module `U1`) — fall back to the renumber-proof
@@ -2047,6 +2060,96 @@ fn buildSubMacro(
     g_collide_shrink = saved_shrink;
     g_route_gap = saved_gap;
     return finishMacro(members.items, xs.items, ys.items, rots.items, prep.parts, rot_override);
+}
+
+/// The module's starred (★ "default") saved layout, translated into this
+/// sub-block instantiation's ref-des namespace: each parent instance under
+/// `slug/` maps back to its module-local origin key (renumber-proof), falling
+/// back to the saved ref for legacy poses that predate origin recording. Null
+/// when the sub-block has no module source, no sidecar, no starred entry, or
+/// nothing matches — the caller then solves the module from scratch as before.
+fn starredModulePoses(
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    source: []const u8,
+    slug: []const u8,
+    instances: []const export_kicad.FlatInstance,
+) std.mem.Allocator.Error!?[]RefPose {
+    if (source.len == 0) return null;
+    const rel = if (std.mem.endsWith(u8, source, ".sexp"))
+        try std.fmt.allocPrint(arena, "{s}.layouts.json", .{source[0 .. source.len - 5]})
+    else
+        try std.fmt.allocPrint(arena, "lib/modules/{s}.layouts.json", .{source});
+    const path = try std.fs.path.join(arena, &.{ project_dir, rel });
+    const raw = infra_fs.cwd().readFileAlloc(arena, path, 4 * 1024 * 1024) catch return null;
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, raw, .{}) catch return null;
+    if (root != .object) return null;
+    const def = root.object.get("default") orelse return null;
+    if (def != .string or def.string.len == 0) return null;
+    const lays = root.object.get("layouts") orelse return null;
+    if (lays != .array) return null;
+    var star: ?std.json.Value = null;
+    for (lays.array.items) |l| {
+        if (l != .object) continue;
+        const nm = l.object.get("name") orelse continue;
+        if (nm == .string and std.mem.eql(u8, nm.string, def.string)) star = l;
+    }
+    const sv = star orelse return null;
+    const pv = sv.object.get("parts") orelse return null;
+    if (pv != .array) return null;
+    // Saved poses keyed by module-local origin, plus by saved ref for
+    // origin-less legacy entries.
+    var by_origin = std.StringHashMap(RefPose).init(arena);
+    var by_ref = std.StringHashMap(RefPose).init(arena);
+    for (pv.array.items) |it| {
+        if (it != .object) continue;
+        const rv = it.object.get("ref") orelse continue;
+        if (rv != .string) continue;
+        const pose = RefPose{
+            .ref = rv.string,
+            .x = jsonF(it.object.get("x")),
+            .y = jsonF(it.object.get("y")),
+            .rot = jsonF(it.object.get("rot")),
+            .side = jsonSideOf(it.object.get("side")),
+        };
+        const ov = it.object.get("origin");
+        if (ov != null and ov.? == .string and ov.?.string.len > 0) {
+            try by_origin.put(ov.?.string, pose);
+        } else {
+            try by_ref.put(rv.string, pose);
+        }
+    }
+    // Translate into the child's current refs via the parent's first-level
+    // `slug/<ref>` instances (their origin keys are the module-local keys).
+    const prefix = try std.fmt.allocPrint(arena, "{s}/", .{slug});
+    var out: std.ArrayListUnmanaged(RefPose) = .empty;
+    for (instances) |inst| {
+        if (!std.mem.startsWith(u8, inst.ref_des, prefix)) continue;
+        const child_ref = inst.ref_des[prefix.len..];
+        if (std.mem.indexOfScalar(u8, child_ref, '/') != null) continue;
+        const saved = (if (inst.origin_key.len > 0) by_origin.get(inst.origin_key) else null) orelse
+            by_ref.get(child_ref) orelse continue;
+        var pose = saved;
+        pose.ref = child_ref;
+        try out.append(arena, pose);
+    }
+    if (out.items.len == 0) return null;
+    return out.items;
+}
+
+/// JSON number → f64 (0 when absent/not a number) for the layouts sidecar.
+fn jsonF(v: ?std.json.Value) f64 {
+    const val = v orelse return 0;
+    if (val == .float) return val.float;
+    if (val == .integer) return @floatFromInt(val.integer);
+    return 0;
+}
+
+/// JSON `"side"` string → board side (top unless explicitly "bottom").
+fn jsonSideOf(v: ?std.json.Value) Side {
+    const val = v orelse return .top;
+    if (val == .string and std.mem.eql(u8, val.string, "bottom")) return .bottom;
+    return .top;
 }
 
 /// Penetration-driven separation after the macro re-stamp: a free part
@@ -8712,4 +8815,39 @@ test "separateComposedPair shoves the free block away from a pinned one" {
     try testing.expectEqual(@as(f64, 0), parts[0].x); // pinned block never moved
     try testing.expectEqual(@as(f64, 0), parts[0].y);
     try testing.expect(!anyOverlap(&parts)); // the free block got pushed clear
+}
+
+// spec: placement/optimizer - a starred module layout seeds the sub-block macro, matched by origin key
+test "starredModulePoses translates the starred layout into child refs" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var td = std.testing.tmpDir(.{});
+    defer td.cleanup();
+    try td.dir.makePath("lib/modules");
+    try td.dir.writeFile(.{ .sub_path = "lib/modules/x.layouts.json", .data = 
+        \\{"default":"hand","layouts":[{"name":"hand","parts":[
+        \\ {"ref":"U1","x":3,"y":4,"rot":90,"origin":"U1"},
+        \\ {"ref":"C7","x":1,"y":2,"rot":0,"origin":"100nF@5#0"},
+        \\ {"ref":"R9","x":8,"y":9,"rot":0}]}]}
+    });
+    const project_dir = try td.dir.realpathAlloc(arena, ".");
+    // Parent flatten renumbered the module: U1→U4, cap→C12; R9 kept its ref
+    // but recorded no origin (legacy pose → ref fallback).
+    const instances = [_]export_kicad.FlatInstance{
+        .{ .ref_des = "m/U4", .origin_key = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "m/C12", .origin_key = "100nF@5#0", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "m/R9", .origin_key = "", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "other/U1", .origin_key = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+    };
+    const poses = (try starredModulePoses(arena, project_dir, "x", "m", &instances)).?;
+    try testing.expectEqual(@as(usize, 3), poses.len);
+    try testing.expectEqualStrings("U4", poses[0].ref);
+    try testing.expectEqual(@as(f64, 3), poses[0].x);
+    try testing.expectEqual(@as(f64, 90), poses[0].rot);
+    try testing.expectEqualStrings("C12", poses[1].ref);
+    try testing.expectEqualStrings("R9", poses[2].ref);
+    try testing.expectEqual(@as(f64, 8), poses[2].x);
+    // No starred sidecar for an unknown module → null.
+    try testing.expectEqual(@as(?[]RefPose, null), try starredModulePoses(arena, project_dir, "nope", "m", &instances));
 }
