@@ -821,6 +821,12 @@ fn runPlacement(
     // arrangement — the point is a predictable, legible module-clustered start.
     if (params.rough) {
         if (try runRough(arena, parts, prep, nets, params)) return;
+        // Module (subcircuit) blocks: arbitrate the pin-adjacent seed against
+        // the legacy rough (zone rows / pad ring) and keep the better on the
+        // surrogate objective × important-crossing × overlap rank. Returns
+        // false (fall through unchanged) for design roots, locked parts, or
+        // hubless boards.
+        if (try arbitratePinSeed(arena, parts, prep, nets, built, params)) return;
         // Discrete switcher module: the hand layout is a VIN│IC│L│VOUT flow
         // row, which a radial ring structurally can't express. Try the
         // constructive zone floorplan first — it self-gates on topology
@@ -4039,6 +4045,147 @@ pub fn importantCrossings(arena: std.mem.Allocator, p: Placement) std.mem.Alloca
         }
     }
     return count;
+}
+
+/// `importantCrossings` for a mid-solve candidate: same segment set built from
+/// the raw springs (what `finalize` will later turn into links) instead of a
+/// finished `Placement`, so the module arbiter can rank candidates before
+/// finalize runs. Signal springs use their pad-draw offsets (`dax…`) exactly
+/// like the link conversion, so the two counters agree.
+fn crossingsOfSprings(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    springs: []const Spring,
+    loops: []const Loop,
+) std.mem.Allocator.Error!usize {
+    var segs: std.ArrayListUnmanaged([4]f64) = .empty;
+    for (springs) |s| {
+        if (s.kind == .ground) continue;
+        if (s.net.len > 0) {
+            const cls = module_policy.classifyNetName(s.net);
+            if (cls == .ground or cls == .power) continue;
+        }
+        const pads = s.kind == .signal;
+        const a = worldPt(parts[s.a], if (pads) s.dax else s.ax, if (pads) s.day else s.ay);
+        const b = worldPt(parts[s.b], if (pads) s.dbx else s.bx, if (pads) s.dby else s.by);
+        try segs.append(arena, .{ a.x, a.y, b.x, b.y });
+    }
+    for (loops) |lp| {
+        const a = worldPt(parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
+        const b = worldPt(parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
+        try segs.append(arena, .{ a.x, a.y, b.x, b.y });
+    }
+    if (segs.items.len > 2048) return 0; // board-scale: skip the O(S²) sweep
+    var count: usize = 0;
+    for (segs.items, 0..) |s1, i| {
+        for (segs.items[i + 1 ..]) |s2| {
+            if (sharesEndpoint(s1, s2)) continue;
+            if (segsCross(.{ s1[0], s1[1] }, .{ s1[2], s1[3] }, .{ s2[0], s2[1] }, .{ s2[2], s2[3] })) count += 1;
+        }
+    }
+    return count;
+}
+
+/// Overlapping keep-box pairs on a raw parts slice (the mid-solve twin of
+/// `overlapCount`, which takes a finished `Placement`).
+fn overlapPairs(parts: []const Part) usize {
+    var n: usize = 0;
+    for (parts, 0..) |a, i| {
+        const ka = keepBoxOf(a);
+        for (parts[i + 1 ..]) |b| {
+            if (a.side != b.side) continue;
+            const kb = keepBoxOf(b);
+            const dx = @abs((b.x + kb.cxo) - (a.x + ka.cxo));
+            const dy = @abs((b.y + kb.cyo) - (a.y + ka.cyo));
+            if (dx < ka.hw + kb.hw - 0.01 and dy < ka.hh + kb.hh - 0.01) n += 1;
+        }
+    }
+    return n;
+}
+
+/// The module-arbiter rank for the current arrangement of `parts`: surrogate
+/// objective scaled up by the important-ratline crossing rate and any courtyard
+/// overlap. Lower is better. This encodes the review rule directly — important
+/// nets may not cross, parts may never sit on each other — without needing the
+/// starred reference (which the ★-aware `/api/rough-best` rank adds on top).
+fn roughRank(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    built: Built,
+    params: Params,
+) std.mem.Allocator.Error!f64 {
+    const obj = surrogateObjective(parts, &prep.idx_of, nets, built.loops, params);
+    const cross = try crossingsOfSprings(arena, parts, built.springs, built.loops);
+    const ovl = overlapPairs(parts);
+    const n: f64 = @floatFromInt(@max(parts.len, 1));
+    return obj *
+        (1.0 + @as(f64, @floatFromInt(cross)) / n) *
+        (1.0 + @as(f64, @floatFromInt(ovl)));
+}
+
+/// The default-path module arbiter: for an embedded (`defmodule`) block, lay
+/// the board out BOTH ways — the pin-adjacent seed (each part at the pin it
+/// serves, escape-stub keepouts ignored so the ring packs flush like a hand
+/// layout) and the legacy rough (switcher flow rows, else the pad-anchored
+/// ring) — rank each with `roughRank`, and keep the winner. Returns false
+/// without touching anything for design roots (boards keep the existing
+/// pipeline), locked/remaining solves (the pin seed would move pinned parts),
+/// or hubless blocks, so those paths are byte-identical to before.
+fn arbitratePinSeed(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    built: Built,
+    params: Params,
+) std.mem.Allocator.Error!bool {
+    if (prep.block.origin != .embedded) return false;
+    for (parts) |p| {
+        if (p.locked) return false;
+    }
+    if (pickAnchorHub(parts, nets) == null) return false;
+
+    const orig = try capturePoses(arena, parts);
+
+    // Candidate A: pin-adjacent, with escape-stub keepouts suspended — a hand
+    // layout packs flush at the pins and routes the escapes afterwards; the
+    // 2 mm port corridors otherwise inflate the ring into a loose halo.
+    const keeps = try arena.alloc(Keepout, parts.len);
+    for (parts, 0..) |p, i| keeps[i] = p.keep;
+    for (parts) |*p| p.keep = .{};
+    var pin_rank = std.math.floatMax(f64);
+    var pin_snap: ?[]Pose = null;
+    if (try runPinAdjacent(arena, parts, prep, nets, built)) {
+        pin_rank = try roughRank(arena, parts, prep, nets, built, params);
+        pin_snap = try capturePoses(arena, parts);
+    }
+    for (parts, 0..) |*p, i| p.keep = keeps[i];
+    restorePoses(parts, orig);
+
+    // Candidate B: the legacy rough exactly as the dispatch would have run it.
+    var legacy_ok = false;
+    if (isSwitcherBoard(parts, nets, &prep.idx_of) and try packZoned(arena, parts, prep, nets, built, params)) {
+        tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+        legacy_ok = true;
+    } else {
+        legacy_ok = try packPadAnchored(arena, parts, prep, nets, true);
+    }
+    const legacy_rank: f64 = if (legacy_ok) try roughRank(arena, parts, prep, nets, built, params) else std.math.floatMax(f64);
+
+    if (pin_snap == null and !legacy_ok) {
+        restorePoses(parts, orig);
+        return false; // let the caller's declump fallback handle it
+    }
+    if (pin_snap != null and pin_rank < legacy_rank) {
+        restorePoses(parts, pin_snap.?);
+        // The winning arrangement was legalized flush (no stub keepouts) —
+        // keep them suspended so the later polish passes judge collisions the
+        // same way this layout was packed.
+        for (parts) |*p| p.keep = .{};
+    }
+    return true;
 }
 
 /// True when two segments share an endpoint (within a grid epsilon) — two
