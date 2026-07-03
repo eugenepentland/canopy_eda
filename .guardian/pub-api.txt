@@ -546,9 +546,11 @@ src/placement/optimizer.zig::faceRotation | fn faceRotation(pwr: PadRect, edge: 
 src/placement/optimizer.zig::fromStr | fn fromStr(s: []const u8) Side
 src/placement/optimizer.zig::fullRoutedScorePoses | fn fullRoutedScorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!?FullRouted
 src/placement/optimizer.zig::gridPlace | fn gridPlace( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, params: Params, ) std.mem.Allocator.Error!Placement
+src/placement/optimizer.zig::importantCrossings | fn importantCrossings(arena: std.mem.Allocator, p: Placement) std.mem.Allocator.Error!usize
 src/placement/optimizer.zig::isGroundName | fn isGroundName(name: []const u8) bool
 src/placement/optimizer.zig::label | fn label(self: ProgressPass) []const u8
 src/placement/optimizer.zig::loopNh | fn loopNh(parts: []const Part, lp: Loop) f64
+src/placement/optimizer.zig::overlapCount | fn overlapCount(p: Placement) usize
 src/placement/optimizer.zig::perPartBlame | fn perPartBlame(p: Placement, params: Params, out: []f64) void
 src/placement/optimizer.zig::pickAnchorHub | fn pickAnchorHub(parts: []const Part, nets: []const FlatNet) ?usize
 src/placement/optimizer.zig::placeFromPoses | fn placeFromPoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!Placement
@@ -557,6 +559,7 @@ src/placement/optimizer.zig::routedScorePoses | fn routedScorePoses( arena: std.
 src/placement/optimizer.zig::scorePoses | fn scorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!Breakdown
 src/placement/optimizer.zig::setProgressSink | fn setProgressSink(sink: ?ProgressSink) void
 src/placement/optimizer.zig::solve | fn solve( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, cached: ?[]const RefPose, params: Params, mode: SeedMode, ) std.mem.Allocator.Error!Placement
+src/placement/optimizer.zig::solvePinAdjacent | fn solvePinAdjacent( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, params: Params, ) std.mem.Allocator.Error!?Placement
 src/placement/optimizer.zig::validateConstraints | fn validateConstraints( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, params: Params, ) std.mem.Allocator.Error![]const []const u8
 src/placement/optimizer.zig::worldPadCenter | fn worldPadCenter(p: Part, lx: f64, ly: f64) [2]f64
 src/placement/pad_shape.zig::Shape struct_

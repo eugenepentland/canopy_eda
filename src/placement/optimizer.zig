@@ -3679,6 +3679,400 @@ fn transformRingToAnchor(parts: []Part, hi: usize, ax: f64, ay: f64, arot: f64) 
     }
 }
 
+// ── Pin-adjacent seed ("the part goes AT the pin it serves") ─────────────────
+//
+// The strict form of the pad-anchored ring, built from the observation that a
+// hand module layout is almost fully determined by the pin bindings the design
+// already declares: every decoupling cap sits directly outside the supply pad
+// its loop targets, every signal passive outside its IC pad, chained parts (an
+// RC loop filter, an output match) extend outward from their partner — and the
+// per-edge ORDER equals the pad order, which makes the important ratlines
+// non-crossing by construction. Unlike `packPadAnchored` there is no greedy
+// cursor packing (which shifts a crowded part off its pad), no
+// `refineSidesByPull` (whose neighbour pull drags caps off their pins), no lane
+// wrap (which flings overflow far), and no crossing hill-climb (unneeded when
+// order is already pad order): position IS the binding, with a minimum-motion
+// order-preserving 1-D relax where parts would collide.
+
+/// Where a part is bound on the anchor package: edge (0 L, 1 R, 2 T, 3 B) and
+/// the bound pad's coordinate along that edge (anchor-local, anchor at origin
+/// rot 0).
+const PinTarget = struct { edge: u2, along: f64 };
+
+/// Classify a footprint-local anchor pad into the edge it sits on + its
+/// along-edge coordinate, normalizing by the package half-extents so wide flat
+/// packages don't read every pad as left/right.
+fn pinTargetFromPad(hkb: KeepBox, px: f64, py: f64) PinTarget {
+    const nx = px / @max(hkb.hw, 0.001);
+    const ny = py / @max(hkb.hh, 0.001);
+    const vert = @abs(nx) >= @abs(ny);
+    const e: u2 = if (vert) (if (px < 0) 0 else 1) else (if (py < 0) 2 else 3);
+    return .{ .edge = e, .along = if (vert) py else px };
+}
+
+/// Resolve each part's bound anchor pad, most-authoritative source first:
+/// its decoupling loop's target supply pad (`hugToHub` already resolved the
+/// explicit `(decouples …)` / per-pin binding or chose the pad), a series
+/// pair's two-pad midpoint (the buck inductor across LX1/LX2), else the hub-pad
+/// centroid of its most signal-like shared net (fewest hub pads, ground
+/// skipped — the same rule that puts a pull-up on its signal pin, not its
+/// rail). Null = no direct anchor binding (chain or leftover part).
+fn pinTargets(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    built: Built,
+) std.mem.Allocator.Error![]?PinTarget {
+    const hkb = keepBoxOf(parts[hi]);
+    const tgt = try arena.alloc(?PinTarget, parts.len);
+    @memset(tgt, null);
+    for (built.loops) |lp| {
+        if (lp.hub != hi or tgt[lp.cap] != null) continue;
+        if (lp.hub_pwr_pin.w == 0 and lp.hub_pwr_pin.h == 0) continue;
+        tgt[lp.cap] = pinTargetFromPad(hkb, lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
+    }
+    for (built.series) |sp| {
+        if (sp.hub != hi or tgt[sp.part] != null) continue;
+        const mx = (sp.a.hub_pad.x + sp.b.hub_pad.x) / 2;
+        const my = (sp.a.hub_pad.y + sp.b.hub_pad.y) / 2;
+        tgt[sp.part] = pinTargetFromPad(hkb, mx, my);
+    }
+    for (parts, 0..) |_, pi| {
+        if (pi == hi or tgt[pi] != null) continue;
+        var best: ?[2]f64 = null;
+        var best_cnt: usize = std.math.maxInt(usize);
+        for (nets) |net| {
+            if (pin_roles.isGroundFn(shortName(net.name))) continue;
+            if (!netHasPart(net, pi, idx_of)) continue;
+            const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
+            if (pads.len == 0 or pads.len >= best_cnt) continue;
+            var cx: f64 = 0;
+            var cy: f64 = 0;
+            for (pads) |q| {
+                cx += q[0];
+                cy += q[1];
+            }
+            const n: f64 = @floatFromInt(pads.len);
+            best = .{ cx / n, cy / n };
+            best_cnt = pads.len;
+        }
+        if (best) |b| tgt[pi] = pinTargetFromPad(hkb, b[0], b[1]);
+    }
+    return tgt;
+}
+
+/// Minimum-motion 1-D packing that PRESERVES the given order: pool-adjacent-
+/// violators on the gap-transformed coordinates. `des[i]` is item i's desired
+/// centre and `half[i]` its half-extent; the result satisfies
+/// `pos[i+1] − pos[i] ≥ half[i] + gap + half[i+1]` with items only pooled (and
+/// their pool centred on the mean of its desired spots) where they'd collide —
+/// so an uncrowded part sits EXACTLY on its pad and a crowded run spreads
+/// symmetrically around its pads instead of racheting off to one side the way
+/// a greedy cursor does.
+fn pavPack(arena: std.mem.Allocator, des: []const f64, half: []const f64, gap: f64) std.mem.Allocator.Error![]f64 {
+    const n = des.len;
+    const pos = try arena.alloc(f64, n);
+    if (n == 0) return pos;
+    const off = try arena.alloc(f64, n);
+    off[0] = 0;
+    for (1..n) |i| off[i] = off[i - 1] + half[i - 1] + gap + half[i];
+    // Pool adjacent violators on q[i] = des[i] − off[i] (nondecreasing target).
+    const val = try arena.alloc(f64, n);
+    const cnt = try arena.alloc(f64, n);
+    var m: usize = 0;
+    for (0..n) |i| {
+        val[m] = des[i] - off[i];
+        cnt[m] = 1;
+        m += 1;
+        while (m > 1 and val[m - 1] < val[m - 2]) {
+            const w = cnt[m - 2] + cnt[m - 1];
+            val[m - 2] = (val[m - 2] * cnt[m - 2] + val[m - 1] * cnt[m - 1]) / w;
+            cnt[m - 2] = w;
+            m -= 1;
+        }
+    }
+    var i: usize = 0;
+    for (0..m) |b| {
+        var k: f64 = 0;
+        while (k < cnt[b]) : (k += 1) {
+            pos[i] = val[b] + off[i];
+            i += 1;
+        }
+    }
+    return pos;
+}
+
+/// One ring entry during pin-adjacent packing: part index + desired along.
+const PinItem = struct { i: usize, along: f64 };
+
+/// A 2-pad passive whose rotation the pin-adjacent seed may choose — not a hub,
+/// not pinned by a series pairing (`rot_pin`), not hand-locked.
+fn freeTwoPad(p: Part) bool {
+    if (p.kind == .hub or p.pads.len != 2) return false;
+    return p.rot_pin == .none and !p.locked;
+}
+
+/// Attach parts with no direct anchor binding to the placed partner they share
+/// their most local net with (fewest total pins, ground skipped), directly
+/// OUTWARD of that partner on its edge — an RC loop filter or output match
+/// extends away from the IC exactly the way a hand layout chains it. Children
+/// of one parent stack further out in discovery order. Iterates so a chain of
+/// depth k lands in k passes. Anything never reached is left for the caller's
+/// leftover row.
+fn pinChainAttach(
+    parts: []Part,
+    hi: usize,
+    nets: []const FlatNet,
+    idx_of: *std.StringHashMap(usize),
+    placed: []bool,
+    gap: f64,
+) void {
+    var pass: usize = 0;
+    while (pass < parts.len) : (pass += 1) {
+        var progressed = false;
+        for (parts, 0..) |*p, pi| {
+            if (placed[pi] or pi == hi) continue;
+            var parent: ?usize = null;
+            var best_pins: usize = std.math.maxInt(usize);
+            for (nets) |net| {
+                if (pin_roles.isGroundFn(shortName(net.name))) continue;
+                if (net.pins.len >= best_pins or net.pins.len > CLUSTER_MAX_NET_PARTS) continue;
+                if (!netHasPart(net, pi, idx_of)) continue;
+                for (net.pins) |pr| {
+                    const qi = idx_of.get(pr.ref_des) orelse continue;
+                    if (qi == pi or qi == hi or !placed[qi]) continue;
+                    parent = qi;
+                    best_pins = net.pins.len;
+                    break;
+                }
+            }
+            const par = parent orelse continue;
+            const edge = posSide(0, 0, parts[par].x, parts[par].y);
+            const vert = edge < 2;
+            if (freeTwoPad(p.*)) p.rot = if (vert) 0 else 90;
+            const pkb = keepBoxOf(p.*);
+            const kb = keepBoxOf(parts[par]);
+            const step = gap + (if (vert) kb.hw + pkb.hw else kb.hh + pkb.hh);
+            switch (edge) {
+                0 => {
+                    p.x = gridRound(parts[par].x - step);
+                    p.y = parts[par].y;
+                },
+                1 => {
+                    p.x = gridRound(parts[par].x + step);
+                    p.y = parts[par].y;
+                },
+                2 => {
+                    p.y = gridRound(parts[par].y - step);
+                    p.x = parts[par].x;
+                },
+                else => {
+                    p.y = gridRound(parts[par].y + step);
+                    p.x = parts[par].x;
+                },
+            }
+            placed[pi] = true;
+            progressed = true;
+        }
+        if (!progressed) break;
+    }
+}
+
+/// The pin-adjacent seed: anchor at the origin, every bound part at its pad's
+/// along-coordinate one gap outside its edge (order-preserving 1-D relax where
+/// parts would collide), chains outward, ground-only leftovers in a row below,
+/// important pads facing the IC. False when the module has no anchor hub.
+fn runPinAdjacent(
+    arena: std.mem.Allocator,
+    parts: []Part,
+    prep: *Prepared,
+    nets: []const FlatNet,
+    built: Built,
+) std.mem.Allocator.Error!bool {
+    const hi = pickAnchorHub(parts, nets) orelse return false;
+    parts[hi].x = 0;
+    parts[hi].y = 0;
+    parts[hi].rot = 0;
+    const hkb = keepBoxOf(parts[hi]);
+    const gap = FINAL_CLEAR;
+    const tgt = try pinTargets(arena, parts, hi, nets, &prep.idx_of, built);
+    const placed = try arena.alloc(bool, parts.len);
+    @memset(placed, false);
+    placed[hi] = true;
+
+    var edges = [_]std.ArrayListUnmanaged(PinItem){ .empty, .empty, .empty, .empty };
+    for (parts, 0..) |*p, pi| {
+        const t = tgt[pi] orelse continue;
+        if (pi == hi) continue;
+        if (freeTwoPad(p.*)) p.rot = if (t.edge < 2) 0 else 90;
+        try edges[t.edge].append(arena, .{ .i = pi, .along = t.along });
+        placed[pi] = true;
+    }
+    for (&edges, 0..) |*list, e| {
+        if (list.items.len == 0) continue;
+        // Pad order along the edge IS the part order — the non-crossing invariant.
+        std.mem.sort(PinItem, list.items, {}, struct {
+            fn lt(_: void, a: PinItem, b: PinItem) bool {
+                if (a.along != b.along) return a.along < b.along;
+                return a.i < b.i; // deterministic tie-break: flatten order
+            }
+        }.lt);
+        const vert = e < 2;
+        const des = try arena.alloc(f64, list.items.len);
+        const half = try arena.alloc(f64, list.items.len);
+        for (list.items, 0..) |it, k| {
+            const pkb = keepBoxOf(parts[it.i]);
+            des[k] = it.along;
+            half[k] = if (vert) pkb.hh else pkb.hw;
+        }
+        const pos = try pavPack(arena, des, half, gap);
+        const base = if (vert) hkb.hw else hkb.hh;
+        for (list.items, 0..) |it, k| {
+            const pkb = keepBoxOf(parts[it.i]);
+            const depth = if (vert) pkb.hw else pkb.hh;
+            const off = base + gap + depth;
+            switch (e) {
+                0 => {
+                    parts[it.i].x = gridRound(-off);
+                    parts[it.i].y = gridRound(pos[k]);
+                },
+                1 => {
+                    parts[it.i].x = gridRound(off);
+                    parts[it.i].y = gridRound(pos[k]);
+                },
+                2 => {
+                    parts[it.i].y = gridRound(-off);
+                    parts[it.i].x = gridRound(pos[k]);
+                },
+                else => {
+                    parts[it.i].y = gridRound(off);
+                    parts[it.i].x = gridRound(pos[k]);
+                },
+            }
+        }
+    }
+
+    pinChainAttach(parts, hi, nets, &prep.idx_of, placed, gap);
+
+    // Ground-only / unconnected leftovers: one row below the board.
+    var lx: f64 = -hkb.hw;
+    for (parts, 0..) |*p, pi| {
+        if (placed[pi]) continue;
+        const pkb = keepBoxOf(p.*);
+        lx += pkb.hw;
+        p.x = gridRound(lx);
+        p.y = gridRound(hkb.hh + 6);
+        lx += pkb.hw + PAD_ANCHOR_PART_GAP_MM;
+    }
+
+    orientPadsToIC(parts, hi, nets, &prep.idx_of);
+    legalizeFinal(parts);
+    return true;
+}
+
+/// Solve `block` with the pin-adjacent seed alone (no force relax, no polish) —
+/// the candidate generator behind `/api/rough-best`. Same model/scoring path as
+/// `scorePoses`/`solve`; null when the design has no anchor hub to ring.
+pub fn solvePinAdjacent(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    params: Params,
+) std.mem.Allocator.Error!?Placement {
+    g_solve_depth += 1;
+    defer {
+        g_solve_depth -= 1;
+        resetArenaGlobals();
+    }
+    var prep = try prepare(arena, block, project_dir, params);
+    // Escape stubs are built for the RENDER (finalize draws the breakout hints)
+    // but deliberately NOT applied as collision keepouts here: a hand layout
+    // packs parts flush at the pins and routes the escapes afterwards, and the
+    // 2 mm corridors (one per module-port net on the anchor) inflate the whole
+    // ring into a loose halo — the opposite of the hand-tight seed this path is
+    // for. The force solve keeps its keepouts (it must place around them).
+    const stubs = try buildEscapeStubs(arena, prep.nets, prep.parts, &prep.idx_of);
+    if (!try runPinAdjacent(arena, prep.parts, &prep, prep.nets, prep.built)) return null;
+    const score = scoreLayout(prep.parts, &prep.idx_of, prep.nets, prep.built.loops);
+    const lsum = surrogateLoops(prep.parts, prep.built.loops);
+    const bd = breakdownWith(prep.parts, &prep.idx_of, prep.nets, params, score, lsum);
+    return try finalize(arena, prep.parts, prep.built.springs, prep.built.loops, stubs, prep.instances, prep.nets, prep.priority, score, bd, true);
+}
+
+/// Count pairwise crossings among the IMPORTANT ratsnest segments: signal /
+/// proximity airwires whose net is neither ground nor a supply rail (a
+/// pull-up's VDD leg and every ground return can ride the plane, so their
+/// airwires don't constrain placement), plus each decoupling loop's power leg
+/// (cap → its bound hub pad). The hand-layout property a rough seed should
+/// preserve is that these lines don't cross; exposed so candidate selection
+/// can penalize layouts where they do. Segments sharing an endpoint (a common
+/// pad) aren't crossings. O(S²) — module scale only.
+pub fn importantCrossings(arena: std.mem.Allocator, p: Placement) std.mem.Allocator.Error!usize {
+    var segs: std.ArrayListUnmanaged([4]f64) = .empty;
+    for (p.links) |l| {
+        if (l.kind == .ground) continue;
+        // Net-NAME classes (not pin functions): `.ground` and `.power` legs (a
+        // pull-up's VDD side, any V_3V3-style rail) ride the plane/pour, so
+        // their airwires don't constrain placement. Everything else is
+        // "important" and its crossings cost.
+        if (l.net.len > 0) {
+            const cls = module_policy.classifyNetName(l.net);
+            if (cls == .ground or cls == .power) continue;
+        }
+        const a = worldPt(p.parts[l.a], l.ax, l.ay);
+        const b = worldPt(p.parts[l.b], l.bx, l.by);
+        try segs.append(arena, .{ a.x, a.y, b.x, b.y });
+    }
+    for (p.loops) |lp| {
+        const a = worldPt(p.parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
+        const b = worldPt(p.parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
+        try segs.append(arena, .{ a.x, a.y, b.x, b.y });
+    }
+    if (segs.items.len > 2048) return 0; // board-scale: skip the O(S²) sweep
+    var count: usize = 0;
+    for (segs.items, 0..) |s1, i| {
+        for (segs.items[i + 1 ..]) |s2| {
+            if (sharesEndpoint(s1, s2)) continue;
+            if (segsCross(.{ s1[0], s1[1] }, .{ s1[2], s1[3] }, .{ s2[0], s2[1] }, .{ s2[2], s2[3] })) count += 1;
+        }
+    }
+    return count;
+}
+
+/// True when two segments share an endpoint (within a grid epsilon) — two
+/// airwires meeting at the same pad legitimately touch, never "cross".
+fn sharesEndpoint(a: [4]f64, b: [4]f64) bool {
+    const eps = 1e-6;
+    const pts_a = [2][2]f64{ .{ a[0], a[1] }, .{ a[2], a[3] } };
+    const pts_b = [2][2]f64{ .{ b[0], b[1] }, .{ b[2], b[3] } };
+    for (pts_a) |pa| {
+        for (pts_b) |pb| {
+            if (@abs(pa[0] - pb[0]) < eps and @abs(pa[1] - pb[1]) < eps) return true;
+        }
+    }
+    return false;
+}
+
+/// Count part pairs whose keepout boxes overlap (rotation-aware, same side
+/// only) beyond a small tolerance — the "parts may not sit on each other"
+/// penalty for candidate selection. A legalized layout scores 0.
+pub fn overlapCount(p: Placement) usize {
+    var n: usize = 0;
+    for (p.parts, 0..) |a, i| {
+        const ka = keepBoxOf(a);
+        for (p.parts[i + 1 ..]) |b| {
+            if (a.side != b.side) continue;
+            const kb = keepBoxOf(b);
+            const dx = @abs((b.x + kb.cxo) - (a.x + ka.cxo));
+            const dy = @abs((b.y + kb.cyo) - (a.y + ka.cyo));
+            if (dx < ka.hw + kb.hw - 0.01 and dy < ka.hh + kb.hh - 0.01) n += 1;
+        }
+    }
+    return n;
+}
+
 /// Place rigid blocks by connectivity: a coarse spring relaxation on block centres
 /// (springs weighted by how many nets cross each block pair) with box repulsion and
 /// a weak centering pull, then snap each centre to a coarse grid. Returns one world
@@ -9096,4 +9490,92 @@ test "isSwitcherBoard detects the buck signature and rejects ferrite-on-rail" {
         .{ .name = "V_3V3D", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "L1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
     };
     try testing.expect(!isSwitcherBoard(&parts, &clk_nets, &idx_of));
+}
+
+// spec: placement/optimizer - pavPack keeps order and leaves uncrowded parts exactly on their pads
+test "pavPack: uncrowded exact, crowded pooled symmetrically" {
+    var astate = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    // Two far-apart parts keep their exact desired spots.
+    const p1 = try pavPack(arena, &.{ -3, 3 }, &.{ 0.5, 0.5 }, 0.2);
+    try testing.expectApproxEqAbs(@as(f64, -3), p1[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 3), p1[1], 1e-9);
+    // Two parts wanting the SAME spot split symmetrically around it, keeping order.
+    const p2 = try pavPack(arena, &.{ 0, 0 }, &.{ 0.5, 0.5 }, 0.2);
+    try testing.expectApproxEqAbs(@as(f64, -0.6), p2[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.6), p2[1], 1e-9);
+    try testing.expect(p2[0] < p2[1]);
+}
+
+// spec: placement/optimizer - pinTargetFromPad buckets a pad onto its package edge with its along coordinate
+test "pinTargetFromPad edges and along" {
+    const hkb = KeepBox{ .cxo = 0, .cyo = 0, .hw = 3, .hh = 2 };
+    const l = pinTargetFromPad(hkb, -2.9, 0.5);
+    try testing.expectEqual(@as(u2, 0), l.edge);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), l.along, 1e-9);
+    const t = pinTargetFromPad(hkb, 0.5, -1.9);
+    try testing.expectEqual(@as(u2, 2), t.edge);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), t.along, 1e-9);
+}
+
+// spec: placement/optimizer - importantCrossings counts crossing signal airwires but ignores rails, ground, and shared pads
+test "importantCrossings counts an X, skips ground/supply and shared endpoints" {
+    var astate = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &.{}, .fallback = false, .x = 4, .y = 4 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.25, .pads = &.{}, .fallback = false, .x = 4, .y = -4 },
+    };
+    // Two X-crossing signal links (U1 top-left→R2 low, U1 bottom-left→R1 high) + one ground link through the X.
+    var links = [_]Link{
+        .{ .a = 0, .b = 2, .ax = -1, .ay = 1, .bx = 0, .by = 0, .kind = .signal, .net = "FB" },
+        .{ .a = 0, .b = 1, .ax = -1, .ay = -1, .bx = 0, .by = 0, .kind = .signal, .net = "SW" },
+        .{ .a = 0, .b = 1, .ax = 0, .ay = 0, .bx = 0.2, .by = 0, .kind = .ground, .net = "GND" },
+    };
+    const pl: Placement = .{
+        .parts = &parts,
+        .links = &links,
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 0,
+        .maxy = 0,
+        .generated = true,
+    };
+    try testing.expectEqual(@as(usize, 1), try importantCrossings(arena, pl));
+    // Re-labelling one of the crossing links as a supply rail removes the crossing.
+    links[0].net = "V_3V3";
+    try testing.expectEqual(@as(usize, 0), try importantCrossings(arena, pl));
+}
+
+// spec: placement/optimizer - overlapCount reports overlapping courtyard pairs and a clean layout scores zero
+test "overlapCount sees an overlapping pair, clean pair scores 0" {
+    var parts = [_]Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 0.4, .y = 0 },
+    };
+    const pl: Placement = .{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 0,
+        .maxy = 0,
+        .generated = true,
+    };
+    try testing.expectEqual(@as(usize, 1), overlapCount(pl));
+    parts[1].x = 2;
+    try testing.expectEqual(@as(usize, 0), overlapCount(pl));
 }

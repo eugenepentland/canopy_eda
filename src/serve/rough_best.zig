@@ -43,6 +43,15 @@ const Candidate = struct {
     rot_k: usize,
     hybrid: f64,
     obj_rel: f64,
+    /// Crossings among important ratlines (signal airwires + decoupling power
+    /// legs; ground/rails excluded — see `optimizer.importantCrossings`).
+    crossings: usize,
+    /// Overlapping courtyard pairs (see `optimizer.overlapCount`); 0 when clean.
+    overlaps: usize,
+    /// The selection key: `hybrid` scaled up by the crossing rate and any
+    /// overlap — a layout whose important ratlines cross, or whose parts sit on
+    /// each other, must beat the clean ones by that much more to win.
+    rank: f64,
 };
 
 /// Build the set of refs the starred reference doesn't cover (added after the
@@ -84,6 +93,12 @@ fn scoreCandidate(
     const st = try style_score.compareStyle(alloc, cand, star, excluded);
     const obj = cand.breakdown.objective;
     const hyb = style_score.hybridScore(obj, star_obj, st.style_pct, style_score.LAMBDA_DEFAULT);
+    const crossings = try optimizer.importantCrossings(alloc, cand);
+    const overlaps = optimizer.overlapCount(cand);
+    const n: f64 = @floatFromInt(@max(cand.parts.len, 1));
+    const rank = hyb.hybrid *
+        (1.0 + @as(f64, @floatFromInt(crossings)) / n) *
+        (1.0 + @as(f64, @floatFromInt(overlaps)));
     return .{
         .name = label,
         .placement = cand,
@@ -92,6 +107,9 @@ fn scoreCandidate(
         .rot_k = st.rot_k,
         .hybrid = hyb.hybrid,
         .obj_rel = hyb.obj_rel,
+        .crossings = crossings,
+        .overlaps = overlaps,
+        .rank = rank,
     };
 }
 
@@ -148,6 +166,7 @@ fn computeBest(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
+    variant: ?[]const u8,
     eval_s: *Evaluator,
     mr_s: *?modules_mod.ResolvedBlock,
     eval_c: *Evaluator,
@@ -169,22 +188,32 @@ fn computeBest(
     var excluded = try coverageExclusions(alloc, star.placement, saved.?);
     defer excluded.deinit();
 
-    // Candidate family — one evaluator/block reused for the rough + force solves.
+    // Candidate family — one evaluator/block reused for all solves.
     // `.regen` forces a FRESH rough (else `solveForRequest` returns the auto-cache
     // sidecar, a stale earlier solve, so the "rough" candidate wouldn't be the
     // engine's current output).
     const rough = try pcb_layout_page.solveForRequest(alloc, project_dir, name, .{ .rough = true, .regen = true }, eval_c, mr_c);
     const block = rough.block;
     const force_pl = optimizer.solve(alloc, block, project_dir, null, .{ .rough = false }, .place) catch return error.BuildFailed;
+    const pin_pl = optimizer.solvePinAdjacent(alloc, block, project_dir, .{}) catch return error.BuildFailed;
 
     var cands: std.ArrayListUnmanaged(Candidate) = .empty;
     cands.append(alloc, try scoreCandidate(alloc, "rough", rough.placement, star.placement, star_obj, &excluded)) catch return error.BuildFailed;
     cands.append(alloc, try scoreCandidate(alloc, "force", force_pl, star.placement, star_obj, &excluded)) catch return error.BuildFailed;
+    if (pin_pl) |pp| cands.append(alloc, try scoreCandidate(alloc, "pin", pp, star.placement, star_obj, &excluded)) catch return error.BuildFailed;
 
-    // Winner = lowest hybrid; rebuild it rigidly rotated to the ★ orientation.
+    // Winner = lowest rank (hybrid × crossing × overlap penalties); rebuild it
+    // rigidly rotated to the ★ orientation.
     var best: usize = 0;
     for (cands.items, 0..) |c, i| {
-        if (c.hybrid < cands.items[best].hybrid) best = i;
+        if (c.rank < cands.items[best].rank) best = i;
+    }
+    // An explicit `variant` overrides the arbiter — the debugging lens for
+    // viewing one candidate ("show me the pin layout even where force won").
+    if (variant) |v| {
+        for (cands.items, 0..) |c, i| {
+            if (std.mem.eql(u8, c.name, v)) best = i;
+        }
     }
     const winner = cands.items[best];
     const poses = try rotatePoses(alloc, winner.placement, winner.rot_k);
@@ -219,7 +248,7 @@ pub fn bestRoughJson(alloc: std.mem.Allocator, project_dir: []const u8, name: []
         m.eval.deinit();
         alloc.destroy(m.eval);
     };
-    const best = try computeBest(alloc, project_dir, name, &eval_s, &mr_s, &eval_c, &mr_c);
+    const best = try computeBest(alloc, project_dir, name, null, &eval_s, &mr_s, &eval_c, &mr_c);
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
@@ -244,8 +273,8 @@ pub fn bestRoughJson(alloc: std.mem.Allocator, project_dir: []const u8, name: []
         w.writeAll("{\"variant\":") catch return error.BuildFailed;
         pcb_layout_page.writeJsonStr(w, c.name) catch return error.BuildFailed;
         w.print(
-            ",\"obj\":{d:.2},\"obj_rel\":{d:.3},\"style_pct\":{d:.1},\"rot_k\":{d},\"hybrid\":{d:.3}}}",
-            .{ c.obj, c.obj_rel, c.style_pct, c.rot_k, c.hybrid },
+            ",\"obj\":{d:.2},\"obj_rel\":{d:.3},\"style_pct\":{d:.1},\"rot_k\":{d},\"hybrid\":{d:.3},\"crossings\":{d},\"overlaps\":{d},\"rank\":{d:.3}}}",
+            .{ c.obj, c.obj_rel, c.style_pct, c.rot_k, c.hybrid, c.crossings, c.overlaps, c.rank },
         ) catch return error.BuildFailed;
     }
     w.writeAll("],\"poses\":[") catch return error.BuildFailed;
@@ -281,7 +310,8 @@ pub fn bestRoughPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         m.eval.deinit();
         alloc.destroy(m.eval);
     };
-    const best = computeBest(alloc, ctx.project_dir, name, &eval_s, &mr_s, &eval_c, &mr_c) catch |e| {
+    const variant: ?[]const u8 = if (req.query()) |q| q.get("variant") else |_| null;
+    const best = computeBest(alloc, ctx.project_dir, name, variant, &eval_s, &mr_s, &eval_c, &mr_c) catch |e| {
         res.status = if (e == error.BlockNotFound or e == error.SubNotFound) 404 else 500;
         res.body = "best-of-family render failed";
         return;
