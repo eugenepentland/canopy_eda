@@ -16,8 +16,13 @@ unlinked tag: Web Server - Module-layout status reads rough and starred flags fr
 unlinked tag: Web Server - Module-layout status reports neither rough nor starred when none recorded in ./src/layout_status.zig
 unlinked tag: Web Server - The /pcb-layout page defaults to the design's starred (★) saved layout, below an explicit ?refine= snapshot and a (placement …) spec in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - The layouts sidecar round-trips snapshots and the optimizer cache slot through one file in ./src/serve/pcb_layout_page.zig
+unlinked tag: Web Server - hybrid score ranks the reference layout at exactly 1.0 and penalizes stylistic deviation in ./src/serve/style_score.zig
 unlinked tag: Web Server - layout-match counts a wrong-edge proportion as a partial area mismatch in ./src/serve/layout_match.zig
 unlinked tag: Web Server - layout-match credits interchangeable parts by per-edge count, ignoring which fungible part is where in ./src/serve/layout_match.zig
+unlinked tag: Web Server - rough-best rotatePoses rigidly rotates a placement about the anchor in ./src/serve/rough_best.zig
+unlinked tag: Web Server - style score credits interchangeable parts by per-edge count and rewards matching tightness in ./src/serve/style_score.zig
+unlinked tag: Web Server - style score gap term penalizes correct-edge but wrong-tightness placement in ./src/serve/style_score.zig
+unlinked tag: Web Server - style score is invariant to a whole-module 90-degree rotation in ./src/serve/style_score.zig
 unlinked tag: bom-resolve - A property value containing a quote/backslash round-trips through the .bom without corrupting it in ./src/bom_resolve.zig
 unlinked tag: commands - --output-dir writes a file without a network push in ./src/commands.zig
 unlinked tag: commands - --push with an explicit name pushes that design in ./src/commands.zig
@@ -68,7 +73,11 @@ unlinked tag: placement/optimizer - composed macros overlapping each other move 
 unlinked tag: placement/optimizer - composed module macros push free parts away and stay rigid in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - decouplePinFromOrigin reads the decoupled pad from a per-pin cap's structural key in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - finishMacro turns the whole macro in quarter steps about its centroid in ./src/placement/optimizer.zig
+unlinked tag: placement/optimizer - importantCrossings counts crossing signal airwires but ignores rails, ground, and shared pads in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - orientPadsToIC flips a 2-pad part so its important pad faces the IC in ./src/placement/optimizer.zig
+unlinked tag: placement/optimizer - overlapCount reports overlapping courtyard pairs and a clean layout scores zero in ./src/placement/optimizer.zig
+unlinked tag: placement/optimizer - pavPack keeps order and leaves uncrowded parts exactly on their pads in ./src/placement/optimizer.zig
+unlinked tag: placement/optimizer - pinTargetFromPad buckets a pad onto its package edge with its along coordinate in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - posSide buckets a point into the anchor quadrant it lies in in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - refineSidesByPull moves a part to the IC side its real connections pull toward in ./src/placement/optimizer.zig
 unlinked tag: placement/optimizer - segsCross flags interior airwire crossings, not shared endpoints in ./src/placement/optimizer.zig
