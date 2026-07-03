@@ -821,6 +821,17 @@ fn runPlacement(
     // arrangement — the point is a predictable, legible module-clustered start.
     if (params.rough) {
         if (try runRough(arena, parts, prep, nets, params)) return;
+        // Discrete switcher module: the hand layout is a VIN│IC│L│VOUT flow
+        // row, which a radial ring structurally can't express. Try the
+        // constructive zone floorplan first — it self-gates on topology
+        // (single-IC group orbit) and returns false for anything it can't lay
+        // out cleanly, so non-switchers fall through to the ring unchanged.
+        if (isSwitcherBoard(parts, nets, &prep.idx_of) and
+            try packZoned(arena, parts, prep, nets, built, params))
+        {
+            tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
+            return;
+        }
         // Flat module/design: ring the anchor IC with each part on the side of the
         // pad it connects to (GND ignored; cap→VDD pad, R→signal pad), hugging the
         // edge. This is the pad-anchored hand-layout seed.
@@ -3421,6 +3432,28 @@ fn orientPadsToIC(
         const iny = parts[hi].y - p.y;
         if (off.x * inx + off.y * iny < 0) p.rot = @mod(p.rot + 180, 360);
     }
+}
+
+/// Discrete-switcher test for the rough dispatch, mirroring module_policy's
+/// buck signature on the anchor hub: an L-prefix inductor shares one of the
+/// hub's non-ground nets AND the hub touches an input-rail or switch-node
+/// class net. A clock module's ferrite beads don't ride VIN/SW-class nets,
+/// so it doesn't qualify.
+fn isSwitcherBoard(parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) bool {
+    const hi = pickAnchorHub(parts, nets) orelse return false;
+    var has_ind = false;
+    var has_hot = false;
+    for (nets) |net| {
+        if (!netHasPart(net, hi, idx_of)) continue;
+        const cls = module_policy.classifyNetName(net.name);
+        if (cls == .ground) continue;
+        if (cls == .input_rail or cls == .switch_node) has_hot = true;
+        for (net.pins) |pin| {
+            const qi = idx_of.get(pin.ref_des) orelse continue;
+            if (qi != hi and leafRefPrefix(parts[qi].ref_des) == 'L') has_ind = true;
+        }
+    }
+    return has_ind and has_hot;
 }
 
 /// Anchor pick for the pad-anchored ring and for spatial attribution: the hub
@@ -9037,4 +9070,30 @@ test "starredModulePoses translates the starred layout into child refs" {
     try testing.expectEqual(@as(f64, 8), poses[2].x);
     // No starred sidecar for an unknown module → null.
     try testing.expectEqual(@as(?[]RefPose, null), try starredModulePoses(arena, project_dir, "nope", "m", &instances));
+}
+
+// spec: placement/optimizer - a switcher board tries the zone floorplan before the ring; ferrites on plain rails do not qualify
+test "isSwitcherBoard detects the buck signature and rejects ferrite-on-rail" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "L1", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    try idx_of.put("L1", 1);
+    try idx_of.put("C1", 2);
+    const buck_nets = [_]FlatNet{
+        .{ .name = "VIN", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
+        .{ .name = "SW", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "L1", .pin = "1" } } },
+    };
+    try testing.expect(isSwitcherBoard(&parts, &buck_nets, &idx_of));
+    // A clock module's ferrite bead rides a plain 3V3 rail — no VIN/SW class.
+    const clk_nets = [_]FlatNet{
+        .{ .name = "V_3V3D", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "L1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
+    };
+    try testing.expect(!isSwitcherBoard(&parts, &clk_nets, &idx_of));
 }
