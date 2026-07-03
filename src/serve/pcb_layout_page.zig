@@ -280,11 +280,23 @@ fn chooseLayout(
         defaultLayoutName(alloc, project_dir, name, sub)
     else
         null;
-    const cached = if (refine_name) |rn|
+    var cached = if (refine_name) |rn|
         readLayoutPosesFor(alloc, project_dir, name, rn, eff_block, sub)
     else if (starred_name) |sn|
         readLayoutPosesFor(alloc, project_dir, name, sn, eff_block, sub)
     else if (tune.regen) null else if (sub == null) readAutoPoses(alloc, project_dir, name) else null;
+    // "Rough remaining" is a regen, but one seeded with a base to pin: the ★
+    // layout preferred, else the auto cache. The solve locks what the base
+    // covers and places only the uncovered parts (`Params.remaining`); with
+    // no base at all it degrades to a plain fresh rough.
+    if (tune.params.remaining and refine_name == null) {
+        const star_base = if (defaultLayoutName(alloc, project_dir, name, sub)) |dn|
+            readLayoutPosesFor(alloc, project_dir, name, dn, eff_block, sub)
+        else
+            null;
+        const fallback = cached orelse (if (sub == null) readAutoPoses(alloc, project_dir, name) else null);
+        cached = star_base orelse fallback;
+    }
     // No layout to show and nothing asked for one: place the parts on a plain grid
     // instead of running the (potentially expensive) optimizer on page open.
     // (Sub circuits always solve fresh instead — there's no grid placeholder.)
@@ -779,6 +791,9 @@ pub const PngRequest = struct {
     group_loop_relief: f64 = -1,
     /// Constructive zone-then-pack floorplan (crisp VIN│IC│L│VOUT rows).
     zone_pack: bool = false,
+    /// "Rough remaining": pin what the base layout (★ else auto cache) covers,
+    /// rough-place only the uncovered parts (`Params.remaining`).
+    remaining: bool = false,
     /// Rough hierarchical / pad-anchored seed (`?rough=1`): cluster each module
     /// into a rigid block, or — for a flat module — ring the anchor IC with each
     /// passive on the side of the pad it serves. A legible, module-intact start
@@ -852,22 +867,34 @@ pub fn solveForRequest(
     // PNG / describe / MCP views describe what the user sees, not a stale auto
     // cache. The layout_match rough/starred probes pass ?rough / ?layout and so
     // skip this, keeping their own seeds.
-    const want_default = opts.sub == null and opts.layout == null and !opts.regen and !opts.rough;
+    const want_default = opts.sub == null and opts.layout == null and !opts.regen and !opts.rough and !opts.remaining;
     const starred_name: ?[]const u8 = if (want_default)
         defaultLayoutName(alloc, project_dir, name, null)
     else
         null;
-    const cached = if (opts.sub != null) null else if (opts.layout) |ln|
+    var cached = if (opts.sub != null) null else if (opts.layout) |ln|
         readLayoutPosesFor(alloc, project_dir, name, ln, eff_block, null)
     else if (starred_name) |sn|
         readLayoutPosesFor(alloc, project_dir, name, sn, eff_block, null)
     else if (opts.regen) null else readAutoPoses(alloc, project_dir, name);
+    // "Rough remaining": a fresh solve seeded with the ★ (else the auto cache)
+    // as its pinned base — the solve locks what it covers, places only the
+    // rest. The ★ is preferred explicitly: without this, an existing auto
+    // cache (some earlier rough) would win and get pinned instead.
+    if (opts.remaining and opts.sub == null and opts.layout == null) {
+        const star_base = if (defaultLayoutName(alloc, project_dir, name, null)) |dn|
+            readLayoutPosesFor(alloc, project_dir, name, dn, eff_block, null)
+        else
+            null;
+        cached = star_base orelse (cached orelse readAutoPoses(alloc, project_dir, name));
+    }
     const grid_only = opts.sub == null and opts.layout == null and !opts.regen and cached == null;
     var params = optimizer.Params{ .courtyard_overlap = opts.court_overlap, .route_gap = opts.route_gap };
     if (opts.group_w >= 0) params.group_w = opts.group_w;
     if (opts.group_zone_w >= 0) params.group_zone_w = opts.group_zone_w;
     if (opts.group_loop_relief >= 0) params.group_loop_relief = opts.group_loop_relief;
     if (opts.zone_pack) params.zone_pack = true;
+    if (opts.remaining) params.remaining = true;
     // Rough is the default top-level engine — a fresh solve always seeds rough.
     // (`?rough` is now redundant with this; left functional as a harmless alias.)
     params.rough = true;
@@ -988,6 +1015,7 @@ pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngReq
         .group_loop_relief = pngFloatOpt(req, "group_loop_relief"),
         .zone_pack = queryFlag(req, "zone_pack"),
         .rough = queryFlag(req, "rough"),
+        .remaining = queryFlag(req, "remaining"),
         .blame = queryFlag(req, "blame"),
         .loop_labels = queryFlag(req, "loops"),
         .dims = queryFlag(req, "dims"),
@@ -1271,7 +1299,15 @@ fn regenThread(job: *RegenJob) void {
         optimizer.setProgressSink(.{ .ctx = &prog, .onBest = regenOnBest });
         defer optimizer.setProgressSink(null);
 
-        const placement = optimizer.solve(a, block, job.project_dir, null, job.params, .place) catch break :run;
+        // "Rough remaining": pin the base layout (★ else auto cache) and place
+        // only the parts it doesn't cover.
+        const cached: ?[]const optimizer.RefPose = if (job.params.remaining) blk: {
+            if (defaultLayoutName(a, job.project_dir, job.name, null)) |dn| {
+                if (readLayoutPosesFor(a, job.project_dir, job.name, dn, block, null)) |ps| break :blk ps;
+            }
+            break :blk readAutoPoses(a, job.project_dir, job.name);
+        } else null;
+        const placement = optimizer.solve(a, block, job.project_dir, cached, job.params, .place) catch break :run;
         if (placement.generated) {
             writeAutoCache(a, job.project_dir, job.name, placement, job.params);
             recordAutoLayout(a, job.project_dir, job.name, placement, job.params);
@@ -3386,6 +3422,13 @@ fn parseTuning(req: *httpz.Request) Tuning {
         p.rough = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
         if (p.rough) tuned = true;
     }
+    // `?remaining=1` — "Rough remaining": pin every part the base layout (the
+    // ★, else the auto cache) covers and rough-place only the uncovered/new
+    // parts around them. The incremental button for a hand-finished board.
+    if (q.get("remaining")) |v| {
+        p.remaining = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
+        if (p.remaining) tuned = true;
+    }
     return .{ .params = p, .tuned = tuned, .regen = regen or tuned, .show_cache = show_cache };
 }
 
@@ -3494,8 +3537,9 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     try w.writeAll("?regen=1\" title=\"Re-run the optimizer and watch it converge live\">Regenerate</a>");
     try w.writeAll("<a class=\"btn\" id=\"pcb-rough\" href=\"/pcb-layout/");
     try writeAttr(w, name);
-    try w.writeAll("?rough=1\" title=\"Rough module-clustered seed: every module kept intact " ++
-        "and grid-aligned (not metric-optimal) — a legible start to hand-finish\">Rough</a>");
+    try w.writeAll("?remaining=1\" title=\"Keep every part the \u{2605} (or last auto) layout already places, " ++
+        "and rough-place only the new/uncovered parts around them — the incremental rough for a " ++
+        "hand-finished board that grew\">Rough remaining</a>");
     try w.writeAll(BAR_GRP_END);
     // Save group: Save as… mints a new snapshot; Update overwrites the loaded one
     // in place (disabled until a saved layout is the active edit target).
