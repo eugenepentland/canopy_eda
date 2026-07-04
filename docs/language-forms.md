@@ -94,7 +94,7 @@ where each is accepted: **D** = design-block top level,
 | Form | Scope | Summary |
 | --- | --- | --- |
 | `(instance "REF" component pin…)` | DSs | Place a component with inline pin-to-net bindings. |
-| `(port "name" [net] dir [(rated lo hi)])` | DSs | Declare a block boundary signal. |
+| `(port "name" [net] dir [kind] [(rated lo hi)] [(side left\|right\|top\|bottom)])` | DSs | Declare a block boundary signal. A power/rf port's direction (or an explicit (side …)) tells the PCB rough placer where the net enters/leaves the module — in → left, out → right. |
 | `(bus-port "prefix" width dir …)` | DSs | Declare a multi-bit boundary bus that expands to one port per lane. |
 | `(note "id" "text" [(ref …)])` | DSs | Attach a design-time note to the surrounding scope. |
 | `(section "name" ["subtitle"] form…)` | DSs | Functional subsystem card. Inside `(section …)` nests one level into a sub-section. |

@@ -736,6 +736,11 @@ fn isSignalTypeKeyword(s: []const u8) bool {
         std.mem.eql(u8, s, "differential") or std.mem.eql(u8, s, "rf");
 }
 
+fn isBoardSideKeyword(s: []const u8) bool {
+    return std.mem.eql(u8, s, "left") or std.mem.eql(u8, s, "right") or
+        std.mem.eql(u8, s, "top") or std.mem.eql(u8, s, "bottom");
+}
+
 /// Parse a `(port "NAME" [net] dir ...)` form into a `Port`. Accepts the
 /// short form (net = name) and the long form with explicit net string, plus
 /// the optional `(rated …)`, `(nominal …)`, `(current …)`, `(efficiency …)`,
@@ -810,6 +815,8 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
     var efficiency_linear: bool = false;
     var enable_net: []const u8 = "";
     var is_optional: bool = false;
+    var kind: []const u8 = "";
+    var side: []const u8 = "";
     var elec: ?env_mod.ElectricalDecl = null;
     // `role`/`protocol`/`class` take the following token as their value (as in
     // the section-port form); skip it so it isn't flagged as an unknown option.
@@ -864,6 +871,16 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
                 const en_val = try self.evalNode(ec[1], env);
                 enable_net = en_val.asString() orelse (ec[1].asAtom() orelse "");
             }
+        } else if (arg.isForm("side")) {
+            // (side left|right|top|bottom) — where this port's net enters or
+            // leaves the module; the PCB rough placer's explicit flow hint.
+            const sc = arg.asList().?;
+            const word = if (sc.len >= 2) sc[1].asAtom() orelse "" else "";
+            if (isBoardSideKeyword(word)) {
+                side = word;
+            } else {
+                self.warnFmt(arg.span, "(side …) in (port \"{s}\" …) expects left|right|top|bottom", .{name});
+            }
         } else if (arg.asAtom()) |kw| {
             if (std.mem.eql(u8, kw, "optional")) {
                 is_optional = true;
@@ -871,9 +888,11 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
                 // Metadata keywords mirror the section-port form; consume their
                 // following value token (parsePort doesn't store them on Port).
                 skip_kw_value = true;
-            } else if (!isSignalTypeKeyword(kw)) {
-                // Signal-type words (power/clock/rf/…) are valid in the section
-                // twin and tolerated here; anything else is a likely typo.
+            } else if (isSignalTypeKeyword(kw)) {
+                // Signal-type words (power/clock/rf/…): kept as the port's kind
+                // so the placer can read flow context off power/rf ports.
+                kind = kw;
+            } else {
                 self.warnFmt(arg.span, "unknown port option '{s}' in (port …)", .{kw});
             }
         } else if (arg.asNumber()) |n| {
@@ -900,6 +919,8 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
         .efficiency_linear = efficiency_linear,
         .enable_net = enable_net,
         .optional = is_optional,
+        .kind = kind,
+        .side = side,
         .electrical = elec,
     };
 }

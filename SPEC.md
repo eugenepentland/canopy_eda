@@ -135,6 +135,9 @@ Public functions: solve
 - the surrogate objective ranks a tighter layout below a spread one
 - a passive belongs to the hub its decoupling loop or most local signal net serves; power rails carry no locality
 - a satellite hub's circuit solves in its own frame and docks rigidly at the anchor pads that tie it in
+- an authored (group ...) islands its members around the group core
+- port directions are the flow compass: in enters left, out leaves right
+- differential twins mirror the P lane onto the N lane at the pads' pitch
 
 ## placement/router
 

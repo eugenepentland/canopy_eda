@@ -135,6 +135,15 @@ pub const Port = struct {
     enable_net: []const u8 = "",
     /// Whether this port is optional (no ERC error if unconnected).
     optional: bool = false,
+    /// Signal-type keyword from the port form (`power`, `rf`, `clock`, …), ""
+    /// when none was written. The PCB rough placer reads it as flow context:
+    /// a `power`/`rf` port's direction orients the module (in → left edge,
+    /// out → right edge).
+    kind: []const u8 = "",
+    /// Explicit board-edge hint from `(side left|right|top|bottom)` — the
+    /// author's override for where this port's net enters/leaves the module.
+    /// "" = unset (the placer falls back to the direction convention above).
+    side: []const u8 = "",
     /// Optional electrical character carried by this port — declared via an
     /// `(electrical (type ...) (v-oh-typ ...) ...)` sub-clause on a top-level
     /// `(port …)`. Used by `checkVoltageDomainCompat` as a virtual
