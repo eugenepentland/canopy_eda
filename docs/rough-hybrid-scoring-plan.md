@@ -4,6 +4,44 @@
 
 ---
 
+## ✅ Round 4 (2026-07-04): consume the authored context — groups, flow, pairs
+
+The three highest-leverage items from `docs/layout-context-audit.md`, all
+"consume what's already written":
+
+- **Authored `(group …)` islands** (`overlayAuthoredGroups`): a group with
+  structure of its own — a hub member or a satellite-owned part — becomes one
+  island solved and docked like a Round-3 satellite (ap33772's "Pass Switch"
+  Q1+Q2+gate/sense block now moves as a unit; obj_rel 1.262 → 1.145). Two
+  guard rails learned the hard way: a group of anchor-bound passives (rp2350's
+  "IOVDD Bypass" bank, mp8859's "Input Decoupling") must NOT island — ripping
+  loop-bound caps off their pads cost 3× on the first attempt — and hub-ness
+  must be checked against the module-local ORIGIN name, not the flattened
+  ref-des (rp2350's L_VREG inductor flattens to "U3", which made a fake hub
+  and islanded the whole VREG bank around an inductor; `trueHub`). The pin
+  seed also honors `(rough (anchor …))` now (`resolveRoughAnchor`, shared
+  with the legacy ring).
+- **Port-direction flow compass** (`portCompass`): `in power` → left edge,
+  `out power`/`rf` → right, explicit `(port … (side left|right|top|bottom))`
+  wins (new DSL, stored on `Port.kind`/`Port.side`). Consumed as a tiebreak
+  only: rail-pad selection when a rail lands on several owner pads across
+  edges (`pinTargets`), and group docking for corner-ambiguous ties — where
+  power-class nets are excluded entirely, because a rail carried *through* a
+  group (neopixel's output connector carries 5 V to the strip) must not drag
+  it to the rail's entry edge.
+- **Differential-pair twins** (`mirrorDiffTwins`): `X_P`/`X_N` and `DP`/`DM`
+  net pairs; the N-side part mirrors its value/body-matched P twin at the
+  anchor pads' pitch, lane vectors inherited down chains through bridging
+  parts (ETH_TX_IC_P → ETH_TX_P). w55rp20's eight ethernet lane passives now
+  run as parallel mirrored lanes: obj_rel 2.492 → 2.119, style 27 → 30.
+
+Corpus (25 starred): obj geomean 0.936 → **0.926**, style ~flat (69.1 → 68.8;
+ap33772 trades −10.7 style for the better objective, lmk05318b −3.4 style
+from the XO_P/XO_N mirror — the intended convention). Everything else
+byte-stable; boards regression-clean (labstation 347p, 0 unplaced).
+
+---
+
 ## ✅ Round 3 (2026-07-03): multi-IC modules — satellite owner groups
 
 User review feedback after Round 2 shipped as the default: on modules with

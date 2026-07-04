@@ -372,8 +372,9 @@ pub const scope_form_docs = blk: {
         .summary = "Place a component with inline pin-to-net bindings.",
     } };
     t[@intFromEnum(ScopeForm.port)] = .{ .scope = all, .doc = .{
-        .syntax = "(port \"name\" [net] dir [(rated lo hi)])",
-        .summary = "Declare a block boundary signal.",
+        .syntax = "(port \"name\" [net] dir [kind] [(rated lo hi)] [(side left|right|top|bottom)])",
+        .summary = "Declare a block boundary signal. A power/rf port's direction (or an explicit (side …)) tells the PCB " ++
+            "rough placer where the net enters/leaves the module — in → left, out → right.",
     } };
     t[@intFromEnum(ScopeForm.bus_port)] = .{ .scope = all, .doc = .{
         .syntax = "(bus-port \"prefix\" width dir …)",
