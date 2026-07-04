@@ -1978,10 +1978,10 @@ test "applyOpsToSource swap_footprint preserves attr flags" {
     try std.testing.expect(std.mem.indexOf(u8, out, "(attr smd)") == null);
 }
 
-// spec: kicad_pcb/writer - swap_footprint mirrors a kmod onto the back for a footprint on B.Cu (layers F→B, local Y negated)
 // pcbnew stores flipped footprints with local Y negated — verified against a
 // hand-flipped board where a B.Cu connector's pads sit at (x, -y) of the
 // front-authored library, X identical.
+// spec: kicad_pcb/writer - swap_footprint mirrors a kmod onto the back for a footprint on B.Cu (layers F→B, local Y negated)
 test "applyOpsToSource swap_footprint mirrors kmod layers and Y for a back-side footprint" {
     const a = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(a);
@@ -2056,8 +2056,8 @@ test "applyOpsToSource swap_footprint folds footprint rotation into pad angles" 
     try std.testing.expect(std.mem.indexOf(u8, out, "(layers \"F.Cu\" \"F.Paste\" \"F.Mask\")") != null);
 }
 
+// In-element net forms stay name-only, no top-level declarations invented, header stays first.
 // spec: kicad_pcb/writer - preserves pcbnew-style boards: in-element net forms
-// stay name-only, no top-level declarations invented, header stays first.
 test "applyOpsToSource preserves pcbnew v20260206 format (no header corruption)" {
     const a = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(a);

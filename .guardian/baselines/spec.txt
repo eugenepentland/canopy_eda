@@ -2,8 +2,6 @@
 tag not on a test: ./src/kicad_pcb/format.zig:119: // spec: kicad_pcb/format - padNumberText reads quoted, bare-atom, and bare-int pad numbers
 tag not on a test: ./src/kicad_pcb/format.zig:79: // spec: kicad_pcb/format - sexprUnescape inverts sexprEscape so a load→save round-trip does not double-escape
 tag not on a test: ./src/kicad_pcb/format.zig:91: // spec: kicad_pcb/format - sexprEscape escapes embedded quotes and trailing backslash so the printed token round-trips
-tag not on a test: ./src/kicad_pcb/writer.zig:1981: // spec: kicad_pcb/writer - swap_footprint mirrors a kmod onto the back for a footprint on B.Cu (layers F→B, local Y negated)
-tag not on a test: ./src/kicad_pcb/writer.zig:2059: // spec: kicad_pcb/writer - preserves pcbnew-style boards: in-element net forms
 tag not on a test: ./src/serve/users.zig:251: // spec: serve/users - The user/role store persists to and resolves from auth_dir, not the project dir (users.json lives at <auth_dir>/users.json)
 unlinked tag: Web Server - A rough-seeded saved layout round-trips its rough flag through the sidecar in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - A saved layout round-trips each part's board side and lock flag through the sidecar in ./src/serve/pcb_layout_page.zig
@@ -97,8 +95,6 @@ unlinked tag: serve/diag_format - caretLine pads to the 1-based column (preservi
 unlinked tag: sexpr/parser - Rejects input nested past MAX_PARSE_DEPTH with TooDeep instead of overflowing the stack in ./src/sexpr/parser.zig
 unverified: eval/design_block - placement-group expands into a placement-order (pins) and a group (cohesion)
 unverified: kicad_pcb/format - padNumberText reads quoted, bare-atom, and bare-int pad numbers
-unverified: kicad_pcb/writer - preserves pcbnew-style boards: in-element net forms
-unverified: kicad_pcb/writer - swap_footprint mirrors a kmod onto the back for a footprint on B.Cu (layers F→B, local Y negated)
 unverified: lint - flags a duplicate id token within one design
 unverified: lint - flags a nested (id (id …)) residue form
 unverified: lint - flags a token that is not 8 hex chars starting a-f
