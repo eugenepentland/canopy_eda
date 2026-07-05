@@ -5228,7 +5228,12 @@ const PAGE_CSS =
     \\   finger-sized padding. */
     \\@media (max-width:920px){
     \\  .pcb-layout{flex-direction:column;gap:12px;padding:8px 10px}
-    \\  .pcb-main{width:100%}
+    \\  /* Stack order: board first, then the part-properties panel (it fills on
+    \\     tap), then the saved-layouts history — regardless of DOM order (the
+    \\     properties aside precedes the board for the desktop left column). */
+    \\  .pcb-main{width:100%;order:1}
+    \\  .pcb-side{order:2}
+    \\  .pcb-rside{order:3}
     \\  .pcb-rside,.pcb-side{width:100%;position:static;max-height:none}
     \\  .pcb-bar .btn,.pcb-panel .btn,.pcb-tabs .tab-chip,.pcb-tabs .view-chip{padding:6px 12px}
     \\  .pcb-bar{gap:8px}
