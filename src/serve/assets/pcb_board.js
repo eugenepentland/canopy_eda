@@ -1358,7 +1358,8 @@ if(rgo)rgo.addEventListener("click",function(){
            overlay drops its preview GND vias and only the router's real vias
            remain — no preview+routed via doubling on the bypass caps. */
     var ok=(j.routed===j.total);
-    setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+" nets · "+((j.vias||[]).length)+" vias");
+    var miss=(j.unrouted&&j.unrouted.length)?(" · missing: "+j.unrouted.join(", ")):"";
+    setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+" nets · "+((j.vias||[]).length)+" vias"+miss);
     setStat("r-drc",(j.drc||[]).length?"err":"ok",(j.drc||[]).length?(j.drc.length+" DRC violation(s)"):"DRC clean ✓");
     var rp=j.return_path||0; setStat("r-rp",rp?"warn":"ok",rp?(rp+" return-path warning(s)"):"return paths ✓");
     rgo.disabled=false;})

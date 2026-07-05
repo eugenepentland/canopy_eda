@@ -516,6 +516,7 @@ src/placement/module_policy.zig::PartRole enum_
 src/placement/module_policy.zig::analyze | fn analyze(alloc: Allocator, p: Placement) Allocator.Error!ModulePolicy
 src/placement/module_policy.zig::classifyNetName | fn classifyNetName(name: []const u8) NetClass
 src/placement/module_policy.zig::deinit | fn deinit(self: *ModulePolicy, alloc: Allocator) void
+src/placement/module_policy.zig::isInductor | fn isInductor(ref: []const u8) bool
 src/placement/module_policy.zig::isInterestingClass | fn isInterestingClass(c: NetClass) bool
 src/placement/optimizer.zig::BoardRect struct_
 src/placement/optimizer.zig::BoardRules struct_

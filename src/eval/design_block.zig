@@ -1719,8 +1719,9 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
 }
 
 /// Parse one top-level `(net-class "name" (width MM) (clearance MM)
-/// (via DIA DRILL) (nets "A" …))` form. Null (with a warning) when the name or
-/// the `(nets …)` list is missing — a class that names no nets can't apply.
+/// (via DIA DRILL) (priority 0-7) (nets "A" …))` form. Null (with a warning)
+/// when the name or the `(nets …)` list is missing — a class that names no
+/// nets can't apply.
 fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_mod.NetClassSpec {
     if (form_children.len < 2) {
         self.warnFmt(form_children[0].span, "(net-class …) needs a name, e.g. (net-class \"power\" …)", .{});
@@ -1743,6 +1744,12 @@ fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_m
         } else if (std.mem.eql(u8, head, "via")) {
             if (c.len >= 2) spec.via_dia = c[1].asNumber() orelse 0;
             if (c.len >= 3) spec.via_drill = c[2].asNumber() orelse 0;
+        } else if (std.mem.eql(u8, head, "priority")) {
+            if (c.len >= 2) {
+                const n = c[1].asNumber() orelse 0;
+                if (n < 0 or n > 7) self.warnFmt(c[1].span, "(net-class …) (priority …) is 0-7; clamping {d}", .{n});
+                spec.priority = @intFromFloat(std.math.clamp(n, 0, 7));
+            }
         } else if (std.mem.eql(u8, head, "nets")) {
             for (c[1..]) |net_node| {
                 const net = net_node.asString() orelse net_node.asAtom() orelse continue;
@@ -1840,12 +1847,14 @@ test "design-block captures a plane-less (stackup 2)" {
     try testing.expect(!block.stackup.hasPlanes());
 }
 
-// spec: eval/design_block - net-class forms capture width/clearance/via geometry for their listed nets
+// spec: eval/design_block - net-class forms capture width/clearance/via geometry and routing priority for their listed nets
 test "design-block captures (net-class …) rules" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
         \\  (net-class "power" (width 0.3) (clearance 0.2) (via 0.5 0.3) (nets "VBUS" "+5V"))
+        \\  (net-class "hot" (priority 3) (nets "SW"))
+        \\  (net-class "over" (priority 99) (nets "CLK"))
         \\  (net-class "broken-no-nets" (width 1.0)))
     ;
     const nodes = try sexpr_parser.parse(a, src);
@@ -1859,16 +1868,20 @@ test "design-block captures (net-class …) rules" {
         .design_block => |b| b,
         else => return error.TestUnexpectedResult,
     };
-    // The nets-less class is dropped (warned), the valid one is kept intact.
-    try testing.expectEqual(@as(usize, 1), block.net_classes.len);
+    // The nets-less class is dropped (warned), the valid ones are kept intact.
+    try testing.expectEqual(@as(usize, 3), block.net_classes.len);
     const nc = block.net_classes[0];
     try testing.expectEqualStrings("power", nc.name);
     try testing.expectEqual(@as(f64, 0.3), nc.width);
     try testing.expectEqual(@as(f64, 0.2), nc.clearance);
     try testing.expectEqual(@as(f64, 0.5), nc.via_dia);
     try testing.expectEqual(@as(f64, 0.3), nc.via_drill);
+    try testing.expectEqual(@as(u32, 0), nc.priority); // no (priority …) ⇒ baseline tier
     try testing.expectEqual(@as(usize, 2), nc.nets.len);
     try testing.expectEqualStrings("VBUS", nc.nets[0]);
+    // Routing-order tier is captured, and an out-of-range value clamps to 7.
+    try testing.expectEqual(@as(u32, 3), block.net_classes[1].priority);
+    try testing.expectEqual(@as(u32, 7), block.net_classes[2].priority);
 }
 
 // spec: eval/design_block - net ties merge transitively so a chained tie collapses all three nets into one

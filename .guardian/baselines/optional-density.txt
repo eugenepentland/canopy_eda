@@ -1,3 +1,2 @@
 # guardian-snapshot v1
-src/eval/env.zig:110: pub struct 'Port' is 53% optional (7/13 fields)
-src/eval/env.zig:891: pub struct 'ElectricalDecl' is 77% optional (7/9 fields)
+src/eval/env.zig:900: pub struct 'ElectricalDecl' is 77% optional (7/9 fields)

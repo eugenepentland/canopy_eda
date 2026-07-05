@@ -3,10 +3,13 @@
 //! than the clearance rule — the common offender being a ground via dropped on
 //! a pad whose copper then crowds a neighbouring pad of another net.
 //!
-//! Scope (v1): via↔pad, via↔via, via↔track, and pad↔pad (across parts). The
-//! router already enforces track↔track and track↔pad spacing through its grid
-//! pitch + obstacle halo, so those aren't re-checked here. Coordinates are
-//! millimetres; gaps are edge-to-edge (0 ⇒ touching, negative ⇒ overlapping).
+//! Scope: via↔pad, via↔via, via↔track, track↔track, and pad↔pad (across
+//! parts). Track↔track is checked geometrically because not all copper comes
+//! from the maze grid — breakout/escape stubs, hand-drawn tracks, and stamped
+//! module copper are all drawn at arbitrary points, so the grid-pitch spacing
+//! guarantee doesn't cover them. Track↔pad stays grid-enforced (every maze
+//! node keeps `reach` from foreign pads). Coordinates are millimetres; gaps
+//! are edge-to-edge (0 ⇒ touching, negative ⇒ overlapping).
 
 const std = @import("std");
 const optimizer = @import("optimizer.zig");
@@ -20,7 +23,7 @@ const FlatNet = export_kicad.FlatNet;
 /// `annular` = a via's copper ring around its drill is thinner than the
 /// fab minimum; `board_edge` = copper closer to the board outline than the
 /// clearance rule.
-pub const Kind = enum { via_pad, via_via, via_track, pad_pad, annular, board_edge };
+pub const Kind = enum { via_pad, via_via, via_track, track_track, pad_pad, annular, board_edge };
 
 /// Minimum via annular ring (copper radius minus drill radius, mm) — the
 /// JLC-class proto-fab floor. The router's default via (0.4 ⌀ / 0.2 drill)
@@ -87,6 +90,22 @@ pub fn check(
             const gap = segPointDist(t.x1, t.y1, t.x2, t.y2, v.x, v.y) - vr - t.width / 2;
             if (gap < clearance - EPS) {
                 try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = clearance, .kind = .via_track });
+            }
+        }
+    }
+    // track ↔ track (same layer, different nets). Maze copper satisfies this
+    // by grid construction (adjacent occupied lines are width + clearance
+    // apart, and diagonal corner cells are reserved), so what this really
+    // polices is copper drawn OFF the grid: escape/breakout stubs, hand-drawn
+    // tracks, stamped module copper. A crossing shows up as gap = −(w_a+w_b)/2.
+    for (tracks, 0..) |a, i| {
+        for (tracks[i + 1 ..]) |b| {
+            if (a.layer != b.layer or sameNet(a.net, b.net)) continue;
+            const gap = segSegDist(a.x1, a.y1, a.x2, a.y2, b.x1, b.y1, b.x2, b.y2) - a.width / 2 - b.width / 2;
+            if (gap < clearance - EPS) {
+                const mx = (a.x1 + a.x2 + b.x1 + b.x2) / 4;
+                const my = (a.y1 + a.y2 + b.y1 + b.y2) / 4;
+                try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = clearance, .kind = .track_track });
             }
         }
     }
@@ -201,6 +220,25 @@ fn segPointDist(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) f64 {
     if (len2 < EPS) return std.math.hypot(px - ax, py - ay);
     const t = std.math.clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1);
     return std.math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+/// Shortest distance between two segments (0 when they properly cross).
+fn segSegDist(ax1: f64, ay1: f64, ax2: f64, ay2: f64, bx1: f64, by1: f64, bx2: f64, by2: f64) f64 {
+    const d1x = ax2 - ax1;
+    const d1y = ay2 - ay1;
+    const d2x = bx2 - bx1;
+    const d2y = by2 - by1;
+    const den = d1x * d2y - d1y * d2x;
+    if (@abs(den) > 1e-12) {
+        const t = ((bx1 - ax1) * d2y - (by1 - ay1) * d2x) / den;
+        const u = ((bx1 - ax1) * d1y - (by1 - ay1) * d1x) / den;
+        if (t >= 0 and t <= 1 and u >= 0 and u <= 1) return 0;
+    }
+    var d = segPointDist(ax1, ay1, ax2, ay2, bx1, by1);
+    d = @min(d, segPointDist(ax1, ay1, ax2, ay2, bx2, by2));
+    d = @min(d, segPointDist(bx1, by1, bx2, by2, ax1, ay1));
+    d = @min(d, segPointDist(bx1, by1, bx2, by2, ax2, ay2));
+    return d;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -390,4 +428,69 @@ test "route then check is clean when a ground pad abuts a foreign pad" {
     // …and the routed module has zero clearance violations.
     const v = try check(arena, placement, routed, 0.127);
     try testing.expectEqual(@as(usize, 0), v.len);
+}
+
+// spec: placement/drc - flags same-layer track crossings and sub-clearance pairs between nets
+test "check flags track-to-track crossings but not exact-pitch neighbours" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    var parts = [_]optimizer.Part{};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+    };
+    const w = 0.127;
+    const clearance = 0.127;
+
+    // An X crossing between two nets on the top layer — the escape-stub short
+    // this check exists to expose. Gap comes out negative (overlap).
+    const crossing = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 2, .layer = 0, .width = w, .net = 0 },
+        .{ .x1 = 0, .y1 = 2, .x2 = 2, .y2 = 0, .layer = 0, .width = w, .net = 1 },
+    };
+    const crossed = router.RouteResult{ .tracks = &crossing, .vias = &.{}, .routed = 2, .total = 2 };
+    const v1 = try check(arena, placement, crossed, clearance);
+    try testing.expectEqual(@as(usize, 1), v1.len);
+    try testing.expectEqual(Kind.track_track, v1[0].kind);
+    try testing.expect(v1[0].gap < 0);
+
+    // The same two tracks on DIFFERENT layers never interact.
+    const stacked = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 2, .layer = 0, .width = w, .net = 0 },
+        .{ .x1 = 0, .y1 = 2, .x2 = 2, .y2 = 0, .layer = 1, .width = w, .net = 1 },
+    };
+    const layered = router.RouteResult{ .tracks = &stacked, .vias = &.{}, .routed = 2, .total = 2 };
+    try testing.expectEqual(@as(usize, 0), (try check(arena, placement, layered, clearance)).len);
+
+    // Two parallel tracks at exactly grid pitch (width + clearance centre to
+    // centre) are the router's legal adjacency — must NOT flag.
+    const pitch = w + clearance;
+    const parallel = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 5, .y2 = 0, .layer = 0, .width = w, .net = 0 },
+        .{ .x1 = 0, .y1 = pitch, .x2 = 5, .y2 = pitch, .layer = 0, .width = w, .net = 1 },
+    };
+    const legal = router.RouteResult{ .tracks = &parallel, .vias = &.{}, .routed = 2, .total = 2 };
+    try testing.expectEqual(@as(usize, 0), (try check(arena, placement, legal, clearance)).len);
+
+    // Nudge one inside the clearance rule → sub-clearance pair flags.
+    const close = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 5, .y2 = 0, .layer = 0, .width = w, .net = 0 },
+        .{ .x1 = 0, .y1 = pitch * 0.7, .x2 = 5, .y2 = pitch * 0.7, .layer = 0, .width = w, .net = 1 },
+    };
+    const tight = router.RouteResult{ .tracks = &close, .vias = &.{}, .routed = 2, .total = 2 };
+    const v2 = try check(arena, placement, tight, clearance);
+    try testing.expectEqual(@as(usize, 1), v2.len);
+    try testing.expectEqual(Kind.track_track, v2[0].kind);
 }
