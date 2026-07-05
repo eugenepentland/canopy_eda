@@ -5218,6 +5218,24 @@ const PAGE_CSS =
     \\.pcb-live-msg{font-weight:600}
     \\.pcb-live-sub{color:#8b949e;font-size:12px;font-variant-numeric:tabular-nums}
     \\@keyframes pcb-live-rot{to{transform:rotate(360deg)}}
+    \\/* Touch: the board owns its gestures (one finger pans, two pinch-zoom —
+    \\   see BOARD_JS) — without this the browser scrolls/zooms the page instead
+    \\   and every touch drag dies as a pointercancel. */
+    \\.pcb-svg{touch-action:none}
+    \\/* Phone / narrow-tablet layout: the three columns (board · saved layouts ·
+    \\   findings sidebar) stack vertically — board first, panels below — and the
+    \\   sidebars lose their sticky/viewport-height framing. Buttons and chips get
+    \\   finger-sized padding. */
+    \\@media (max-width:920px){
+    \\  .pcb-layout{flex-direction:column;gap:12px;padding:8px 10px}
+    \\  .pcb-main{width:100%}
+    \\  .pcb-rside,.pcb-side{width:100%;position:static;max-height:none}
+    \\  .pcb-bar .btn,.pcb-panel .btn,.pcb-tabs .tab-chip,.pcb-tabs .view-chip{padding:6px 12px}
+    \\  .pcb-bar{gap:8px}
+    \\  .pcb-bar .score{min-width:0}
+    \\  .pcb-head h1{font-size:16px}
+    \\  .pcb-live{top:56px;width:calc(100vw - 20px)}
+    \\}
 ;
 
 /// Extra rules layered on top of PAGE_CSS only when `?embed=1` — the body gets

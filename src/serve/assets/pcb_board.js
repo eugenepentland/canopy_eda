@@ -954,14 +954,47 @@ function outlineArm(on){outlineMode=on;
 // synthetic/test pointer can't be captured and used to throw NotFoundError
 // out of the pointerdown handler, killing the drag before it started).
 function pcap(ev){try{svg.setPointerCapture(ev.pointerId);}catch(e){}}
-function startPan(ev){pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:false};
+function startPan(ev){pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:false,
+ slop:ev.pointerType==="touch"?8:3,tapi:-1};
  pcap(ev);svg.style.cursor="grabbing";}
 var clickCand=null; // pressed a part but won't drag (RO page / locked part)
+// Touch gestures (phones/tablets): one finger anywhere = pan the board, a tap
+// (no movement) = select the part/pad under it, two fingers = pinch zoom.
+// Part dragging and marquee select stay pointer-precise (mouse/pen) — a finger
+// panning across a dense board must never yank components along with it.
+var tpts={},pinch=null;
+function touchCount(){return Object.keys(tpts).length;}
+function touchDown(ev){
+ tpts[ev.pointerId]={x:ev.clientX,y:ev.clientY};pcap(ev);
+ if(touchCount()===2){ // second finger: whatever gesture ran becomes a pinch
+  pan=null;
+  if(marq){if(marqEl&&marqEl.parentNode)marqEl.parentNode.removeChild(marqEl);marqEl=null;marq=null;}
+  var ids=Object.keys(tpts),a=tpts[ids[0]],b=tpts[ids[1]];
+  pinch={d:Math.hypot(a.x-b.x,a.y-b.y),mx:(a.x+b.x)/2,my:(a.y+b.y)/2};
+  svg.style.cursor="";return;}
+ var m=mm(ev);startPan(ev);pan.tapi=partAt(m.x,m.y);}
+function touchMove(ev){
+ if(!tpts[ev.pointerId])return false;
+ tpts[ev.pointerId]={x:ev.clientX,y:ev.clientY};
+ if(!pinch||touchCount()<2)return false; // single finger: fall through to pan
+ var ids=Object.keys(tpts),a=tpts[ids[0]],b=tpts[ids[1]];
+ var d=Math.hypot(a.x-b.x,a.y-b.y),mx=(a.x+b.x)/2,my=(a.y+b.y)/2;
+ if(d>1)zoomAt(mx,my,pinch.d/d);
+ var r=svg.getBoundingClientRect();
+ vb.x-=(mx-pinch.mx)*(vb.w/r.width);vb.y-=(my-pinch.my)*(vb.h/r.height);setVB();
+ pinch.d=d;pinch.mx=mx;pinch.my=my;return true;}
+function touchUp(ev){
+ if(!tpts[ev.pointerId])return;
+ delete tpts[ev.pointerId];
+ if(pinch&&touchCount()<2)pinch=null;}
+svg.addEventListener("pointercancel",function(ev){touchUp(ev);
+ if(ev.pointerType==="touch"&&touchCount()===0){pan=null;pinch=null;svg.style.cursor="";}});
 svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.preventDefault();
  if(outlineMode){var om=mm(ev);outDraw={x0:om.x,y0:om.y,x1:om.x,y1:om.y};
   pcap(ev);return;}
  if(SPACE||ev.button===1){startPan(ev);return;}
  if(drawMode&&ev.button===0){drawClick(mm(ev),ev.shiftKey);return;}
+ if(ev.pointerType==="touch"){touchDown(ev);return;}
  var m=mm(ev),hi=partAt(m.x,m.y);
  if(hi<0){
   marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false};pcap(ev);
@@ -975,12 +1008,13 @@ svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.pre
  if(gi){gdrag=gdragStart(m,hi,gi);svg.style.cursor="grabbing";return;}
  drag={i:hi,ox:P[hi].x-m.x,oy:P[hi].y-m.y,m0:m,snap:snapPoses()};svg.style.cursor="grabbing";});
 svg.addEventListener("pointermove",function(ev){
+ if(ev.pointerType==="touch"&&touchMove(ev))return; // active pinch consumed it
  if(outDraw){var om=mm(ev);outDraw.x1=om.x;outDraw.y1=om.y;
   drawBoardRect({x:Math.min(outDraw.x0,outDraw.x1),y:Math.min(outDraw.y0,outDraw.y1),
    w:Math.abs(outDraw.x1-outDraw.x0),h:Math.abs(outDraw.y1-outDraw.y0)});return;}
- if(pan){var r=svg.getBoundingClientRect();
-  if(Math.abs(ev.clientX-pan.cx)>3||Math.abs(ev.clientY-pan.cy)>3)pan.moved=true;
-  vb.x=pan.vx-(ev.clientX-pan.cx)*(vb.w/r.width);vb.y=pan.vy-(ev.clientY-pan.cy)*(vb.h/r.height);setVB();return;}
+ if(pan){var r=svg.getBoundingClientRect(),slop=pan.slop||3;
+  if(Math.abs(ev.clientX-pan.cx)>slop||Math.abs(ev.clientY-pan.cy)>slop)pan.moved=true;
+  if(pan.moved){vb.x=pan.vx-(ev.clientX-pan.cx)*(vb.w/r.width);vb.y=pan.vy-(ev.clientY-pan.cy)*(vb.h/r.height);setVB();}return;}
  if(drawMode){drawShift=ev.shiftKey;drawCur=mm(ev);if(dtrace)ovPaintSoon();return;}
  if(marq){var m=mm(ev);marq.x1=m.x;marq.y1=m.y;
   if(Math.abs(m.x-marq.x0)>0.2||Math.abs(m.y-marq.y0)>0.2)marq.moved=true;
@@ -1010,6 +1044,7 @@ function clickPart(ev,i){var m=mm(ev),pd=padAt(i,m.x,m.y);
  if(pd&&pd.net)selNet(pd.net);
  if(!RO)selectComp(P[i].ref);}
 svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.pointerId);}catch(e){}
+ if(ev.pointerType==="touch")touchUp(ev);
  if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap,gdn=gdrag.down;gdrag=null;svg.style.cursor="";
   // No movement = a plain click on a rigid-group / multi-selected part —
   // select it like any other part instead of swallowing the click.
@@ -1027,7 +1062,8 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
   if(msg){msg.style.color="#8b949e";
    msg.textContent=PCB.outline?"outline set — Save/Update to keep":"outline cleared — Save/Update to keep";}
   return;}
- if(pan){var click=!pan.moved;pan=null;svg.style.cursor="";if(click){selClear();clearSel();selNet(null);}return;}
+ if(pan){var click=!pan.moved,tapi=pan.tapi;pan=null;svg.style.cursor="";
+  if(click){if(tapi>=0)clickPart(ev,tapi);else{selClear();clearSel();selNet(null);}}return;}
  if(marq){var box=marq,mv=marq.moved;if(marqEl&&marqEl.parentNode)marqEl.parentNode.removeChild(marqEl);marqEl=null;marq=null;
   if(mv){var ax=Math.min(box.x0,box.x1),ay=Math.min(box.y0,box.y1),bx=Math.max(box.x0,box.x1),by=Math.max(box.y0,box.y1);
    var pick=[];P.forEach(function(p,i){if(p.x>=ax&&p.x<=bx&&p.y>=ay&&p.y<=by)pick.push(i);});

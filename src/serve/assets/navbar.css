@@ -12,3 +12,9 @@
 .viewtoggle a:hover{color:#e6edf3;background:#1c2230;text-decoration:none;}
 .viewtoggle a.active{color:#fff;background:#1f6feb;}
 .viewtoggle a.active:hover{background:#388bfd;color:#fff;}
+/* Narrow screens: the tab row scrolls sideways instead of wrapping or
+   overflowing the viewport — shared by every page that embeds the navbar. */
+@media (max-width:920px){
+  .navbar{overflow-x:auto;-webkit-overflow-scrolling:touch;padding:0 0.6rem;gap:0.7rem;}
+  .navbar a{white-space:nowrap;flex:none;}
+}
