@@ -844,15 +844,51 @@
   const SNAP_PX = 16;
   let mode = null, down = null, drag = null;
 
+  // Touch gestures (phones/tablets): one finger pans wherever it lands — a tap
+  // (no movement) still clicks/selects — and two fingers pinch-zoom around
+  // their midpoint. Pin/part dragging stays pointer-precise (mouse/pen): a
+  // finger panning across the map must never tear off a part or a wire.
+  const tpts = new Map();
+  let pinch = null;
+  function pinchFrom() {
+    const [a, b] = [...tpts.values()];
+    return { d: Math.max(1, Math.hypot(a[0] - b[0], a[1] - b[1])), mx: (a[0] + b[0]) / 2, my: (a[1] + b[1]) / 2 };
+  }
+
   canvas.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "touch") {
+      tpts.set(e.pointerId, [e.clientX, e.clientY]);
+      try { canvas.setPointerCapture(e.pointerId); } catch (x) {}
+      if (tpts.size === 2) {                 // second finger: any pan becomes a pinch
+        down = null; mode = "pinch"; pinch = pinchFrom();
+        canvas.classList.remove("panning");
+        return;
+      }
+    }
     const w = worldFromEvent(e);
-    down = { mx: e.clientX, my: e.clientY, world: w, camx: cam.x, camy: cam.y, hit: pick(w[0], w[1]) };
+    down = { mx: e.clientX, my: e.clientY, world: w, camx: cam.x, camy: cam.y, hit: pick(w[0], w[1]), touch: e.pointerType === "touch" };
     try { canvas.setPointerCapture(e.pointerId); } catch (x) {}
   });
   canvas.addEventListener("pointermove", (e) => {
+    if (e.pointerType === "touch" && tpts.has(e.pointerId)) {
+      tpts.set(e.pointerId, [e.clientX, e.clientY]);
+      if (mode === "pinch" && tpts.size >= 2) {
+        const p = pinchFrom(), r = rectOf();
+        const mx = (p.mx - r.left) / r.width, my = (p.my - r.top) / r.height;
+        const wx = cam.x + mx * cam.w, wy = cam.y + my * cam.h, f = pinch.d / p.d;
+        cam.w = Math.min(Math.max(cam.w * f, 20), scene.viewBox.w * 4);
+        cam.h = Math.min(Math.max(cam.h * f, 16), scene.viewBox.h * 4);
+        cam.x = wx - mx * cam.w; cam.y = wy - my * cam.h;
+        cam.x -= ((p.mx - pinch.mx) / r.width) * cam.w;
+        cam.y -= ((p.my - pinch.my) / r.height) * cam.h;
+        pinch = p; scheduleDraw(); return;
+      }
+    }
     if (!down) return;
-    if (!mode && (Math.abs(e.clientX - down.mx) + Math.abs(e.clientY - down.my) > 5)) {
-      if (down.hit.t === "pin") { mode = "drag"; startDrag("pin", down.hit); }
+    const slop = down.touch ? 9 : 5;
+    if (!mode && (Math.abs(e.clientX - down.mx) + Math.abs(e.clientY - down.my) > slop)) {
+      if (down.touch) { mode = "pan"; canvas.classList.add("panning"); } // fingers pan, never drag
+      else if (down.hit.t === "pin") { mode = "drag"; startDrag("pin", down.hit); }
       else if (down.hit.t === "part" && startDrag("part", down.hit)) { mode = "drag"; }
       else { mode = "pan"; canvas.classList.add("panning"); }
     }
@@ -861,6 +897,13 @@
   });
   canvas.addEventListener("pointerup", (e) => {
     try { canvas.releasePointerCapture(e.pointerId); } catch (x) {}
+    if (e.pointerType === "touch") {
+      tpts.delete(e.pointerId);
+      if (mode === "pinch") {                // pinch ends when a finger lifts
+        if (tpts.size < 2) { mode = null; pinch = null; }
+        return;
+      }
+    }
     if (mode === "pan") canvas.classList.remove("panning");
     else if (mode === "drag") endDrag();
     else if (down) {                                   // click (no movement)
@@ -873,10 +916,17 @@
     }
     mode = null; down = null;
   });
+  canvas.addEventListener("pointercancel", (e) => {
+    tpts.delete(e.pointerId);
+    if (mode === "pinch" && tpts.size < 2) { mode = null; pinch = null; return; }
+    if (mode === "pan") canvas.classList.remove("panning");
+    else if (mode === "drag") endDrag();
+    mode = null; down = null;
+  });
   // Hover (no button down): light the net-partner chip under the cursor so its reveal
   // wire draws. Cheap box-scan, only when the map has chips.
   canvas.addEventListener("pointermove", (e) => {
-    if (down) return;
+    if (down || e.pointerType === "touch") return;
     const w = (M && M.chips && M.chips.length) ? worldFromEvent(e) : null;
     const c = w ? pickChip(w[0], w[1]) : null;
     if (c !== hoverChip) { hoverChip = c; canvas.style.cursor = c ? "pointer" : ""; scheduleDraw(); }

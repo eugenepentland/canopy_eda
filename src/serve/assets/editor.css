@@ -10,6 +10,11 @@ body {
   flex-direction: column;
   overflow: hidden;
 }
+/* Mobile browsers: 100vh includes the collapsed URL bar, clipping the bottom
+   of the app shell; the dynamic viewport unit tracks the real visible height. */
+@supports (height: 100dvh) {
+  body { height: 100dvh; }
+}
 
 .ed-top {
   display: flex;
@@ -264,3 +269,41 @@ kbd {
 .ed-erc-row.info .dot { background: #6e7681; }
 .ed-erc-row .tgt { flex: 0 0 auto; color: #79c0ff; font-weight: 600; }
 .ed-erc-row .msg { flex: 1 1 auto; color: #adbac7; }
+
+/* ── Phone / narrow-tablet layout ───────────────────────────────────────
+   The desktop shell is three columns (sheets · inspector · canvas). Under
+   920px the canvas keeps the screen: sheets become a horizontal chip strip
+   across the top, and the inspector drops to a bottom sheet (capped height,
+   scrollable) so selecting a part slides its properties up under your thumb
+   without burying the map. Touch gestures live in editor.js (one finger
+   pans, two pinch-zoom; drags stay mouse/pen-only). */
+@media (max-width: 920px) {
+  #ed-app { flex-direction: column; }
+  #ed-sheets {
+    flex: 0 0 auto; order: 1; max-height: 96px;
+    border-right: 0; border-bottom: 1px solid #21262d;
+  }
+  .ed-sheets-h { display: none; }
+  #ed-sheet-list {
+    display: flex; overflow-x: auto; overflow-y: hidden;
+    -webkit-overflow-scrolling: touch; padding: 5px 6px; gap: 2px;
+  }
+  .ed-sheet {
+    flex: 0 0 auto; padding: 8px 11px;
+    border-left: 0; border-bottom: 3px solid transparent;
+  }
+  .ed-sheet.active { border-left-color: transparent; border-bottom-color: #58a6ff; }
+  .ed-sheet .ct { margin-left: 6px; }
+  .ed-sheet-tools { display: flex; }        /* no hover on touch — keep tools visible */
+  .ed-iso { padding: 6px 12px; border-top: 0; }
+  #ed-canvas-wrap { order: 2; flex: 1 1 auto; min-height: 0; }
+  #ed-inspector {
+    order: 3; flex: 0 0 auto; max-height: 42vh;
+    border-right: 0; border-top: 1px solid #21262d;
+  }
+  .ed-top { flex-wrap: wrap; gap: 8px 10px; padding: 6px 10px; }
+  .ed-hint { display: none; }               /* keyboard cheat-sheet hint is desktop-only */
+  .ed-erc-panel { left: 8px; right: 8px; width: auto; }
+  #ed-tools button { padding: 8px 12px; }
+  .ed-btn { padding: 9px 14px; }
+}
