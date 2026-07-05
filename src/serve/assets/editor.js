@@ -829,7 +829,17 @@
     for (const c of (M.chips || [])) if (x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h) return { t: "chip", chip: c };
     for (const p of M.passes) if (x >= p.x && x <= p.x + p.w && y >= p.top && y <= p.top + p.h) return { t: "part", ref: p.ref, kind: "pass" };
     for (const w of M.wires) for (let i = 1; i < w.pts.length; i++) if (distToSeg(x, y, w.pts[i - 1], w.pts[i]) < tw) return { t: "net", net: w.net };
-    for (const l of M.labels) if (Math.hypot(l.x - x, l.y - y) < tl) return l.busKey ? { t: "bus", key: l.busKey } : { t: "net", net: l.net };
+    for (const l of M.labels) {
+      // A bus/aggregate label is a click target along its WHOLE text (the
+      // anchor point alone is a needle for "FLASH_IO[0:7]"-length text).
+      if (l.busKey) {
+        const est = String(l.text || "").length * 6.4;
+        const x0 = l.anchor === "start" ? l.x : l.anchor === "end" ? l.x - est : l.x - est / 2;
+        if (x >= x0 - tw && x <= x0 + est + tw && Math.abs(y - l.y) < tl) return { t: "bus", key: l.busKey };
+        continue;
+      }
+      if (Math.hypot(l.x - x, l.y - y) < tl) return { t: "net", net: l.net };
+    }
     return { t: "empty" };
   }
   // Resolve a chip's partner device → its hub box + the pin (on the chip's net) the reveal
