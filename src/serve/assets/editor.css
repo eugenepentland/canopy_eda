@@ -280,13 +280,14 @@ kbd {
 @media (max-width: 920px) {
   #ed-app { flex-direction: column; }
   #ed-sheets {
-    flex: 0 0 auto; order: 1; max-height: 96px;
+    flex: 0 0 auto; order: 1;
     border-right: 0; border-bottom: 1px solid #21262d;
   }
   .ed-sheets-h { display: none; }
   #ed-sheet-list {
-    display: flex; overflow-x: auto; overflow-y: hidden;
-    -webkit-overflow-scrolling: touch; padding: 5px 6px; gap: 2px;
+    flex: 0 0 auto; display: flex; align-items: stretch;
+    overflow-x: auto; overflow-y: hidden;
+    -webkit-overflow-scrolling: touch; padding: 5px 6px 0; gap: 2px;
   }
   .ed-sheet {
     flex: 0 0 auto; padding: 8px 11px;
