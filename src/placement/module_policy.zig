@@ -291,7 +291,9 @@ fn isPowerRail(lf: []const u8) bool {
 
 // ── Small helpers ────────────────────────────────────────────────────────────
 
-fn isInductor(ref: []const u8) bool {
+/// Ref-des heuristic for an inductor (`L…` leaf). Pub because the router's
+/// hub+inductor switch-node bridge rule shares it.
+pub fn isInductor(ref: []const u8) bool {
     const s = leafName(ref);
     return s.len > 0 and (s[0] == 'L' or s[0] == 'l');
 }

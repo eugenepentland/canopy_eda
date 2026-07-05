@@ -153,7 +153,12 @@ Public functions: route, returnPathViolations
 - stitches each signal via's return path with a nearby GND plane via
 - escapes a single-pin breakout to an inner layer with a short stub and a via
 - elevates only the switching hot loop above the baseline routing tier
-- lets explicit (placement-order …) priority dominate the intrinsic net-class rank
+- lets authored (net-class (priority …)) dominate the intrinsic net-class rank
+- auto-elevates a bare hub-to-inductor bridge net to the hot-loop tier
+- names the nets that failed to route in RouteResult.failed
+- escape stubs keep clearance from routed tracks and leave at 45-degree headings
+- reserves diagonal corner cells so later nets keep trace-to-trace clearance
+- escapes a fine-pitch pad through an off-grid gateway stub when no grid lane clears
 
 ## placement/drc
 
@@ -164,10 +169,11 @@ Public functions: check
 - a routed module with a crowded ground pad has no clearance violations
 - flags a via whose annular ring is under the fab minimum
 - flags copper crowding the board outline and skips the off-board staging band
+- flags same-layer track crossings and sub-clearance pairs between nets
 
 ## placement/module_policy
 
-Public functions: analyze, classifyNetName
+Public functions: analyze, classifyNetName, isInductor
 
 - classifies ground, input-rail, switch-node and feedback nets by name
 - infers a buck module from an inductor on the input rail and tags the input cap
@@ -597,7 +603,7 @@ Public functions: analyze
 - kicad-pcb form captures the literal path on the design block
 - stackup form captures layer count and plane assignments on the design block
 - a bare 2-layer stackup declares no planes so ground routes as copper
-- net-class forms capture width/clearance/via geometry for their listed nets
+- net-class forms capture width/clearance/via geometry and routing priority for their listed nets
 - layout form parses (anchor "name") roots and (place "name" (rel "ref")) directives
 - layout place resolves right-of/left-of/above/below into a relative offset from the referenced block
 - layout place collects multiple constraints so a block is positioned by several references

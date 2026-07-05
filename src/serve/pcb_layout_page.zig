@@ -857,7 +857,7 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         const v = drc.check(ctx.allocator, placement, r, ro.params.clearance) catch &.{};
         var trace: f64 = 0;
         for (r.tracks) |t| trace += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
-        break :blk .{ .trace_mm = trace, .tracks = r.tracks.len, .vias = r.vias.len, .drc = v.len };
+        break :blk .{ .trace_mm = trace, .tracks = r.tracks.len, .vias = r.vias.len, .drc = v.len, .routed = r.routed, .total = r.total, .unrouted = r.failed };
     } else null;
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
@@ -867,8 +867,17 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 }
 
 /// Summary of a routed board for the JSON API (`?route=1`): total copper length,
-/// track/via counts, and DRC-violation count — the machine-readable comparison key.
-const RoutedMetrics = struct { trace_mm: f64, tracks: usize, vias: usize, drc: usize };
+/// track/via counts, DRC-violation count, net-completion counts, and the names
+/// of the nets that failed — the machine-readable comparison key.
+const RoutedMetrics = struct {
+    trace_mm: f64,
+    tracks: usize,
+    vias: usize,
+    drc: usize,
+    routed: usize = 0,
+    total: usize = 0,
+    unrouted: []const []const u8 = &.{},
+};
 
 const PNG_DEFAULT_WIDTH: u32 = 1200;
 
@@ -1287,7 +1296,15 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
     }
     try w.writeAll("]");
     if (routed) |r| {
-        try w.print(",\"routed\":{{\"trace_mm\":{d:.1},\"tracks\":{d},\"vias\":{d},\"drc\":{d}}}", .{ r.trace_mm, r.tracks, r.vias, r.drc });
+        try w.print(
+            ",\"routed\":{{\"trace_mm\":{d:.1},\"tracks\":{d},\"vias\":{d},\"drc\":{d},\"routed\":{d},\"total\":{d},\"unrouted\":[",
+            .{ r.trace_mm, r.tracks, r.vias, r.drc, r.routed, r.total },
+        );
+        for (r.unrouted, 0..) |name_s, i| {
+            if (i > 0) try w.writeAll(",");
+            try writeJsonStr(w, name_s);
+        }
+        try w.writeAll("]}");
     }
     // Report any parts the solve left staged below the board (the `(board …)`
     // edge-dock / force path) and the ones autofill pulled back out. Read straight
@@ -4217,7 +4234,15 @@ fn writeEmbedRoute(
     try w.print("<label class=\"tune-chk\"><input id=\"r-drc-show\" type=\"checkbox\"{s}> show DRC</label>", .{if (show_drc) CHECKED else ""});
     if (routed) |r| {
         const cls = if (r.routed == r.total) "ok" else "warn";
-        try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">routed {d}/{d} nets · {d} vias</span>", .{ cls, r.routed, r.total, r.vias.len });
+        try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">routed {d}/{d} nets · {d} vias", .{ cls, r.routed, r.total, r.vias.len });
+        if (r.failed.len > 0) {
+            try w.writeAll(" · missing: ");
+            for (r.failed, 0..) |fname, i| {
+                if (i > 0) try w.writeAll(", ");
+                try writeHtmlText(w, fname);
+            }
+        }
+        try w.writeAll("</span>");
         if (n_drc == 0) {
             try w.writeAll("<span class=\"route-stat ok\" id=\"r-drc\">DRC clean ✓</span>");
         } else {
@@ -4646,6 +4671,14 @@ fn writeRoutedArrays(
         if (i > 0) try w.writeAll(",");
         try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\"}}", .{ vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind) });
     }
+    // Names of the nets the router could NOT fully connect — the actionable
+    // half of the routed/total count (which connections are missing, not just
+    // how many). Empty when everything routed or no route ran.
+    try w.writeAll("],\"unrouted\":[");
+    if (routed) |r| for (r.failed, 0..) |name, i| {
+        if (i > 0) try w.writeAll(",");
+        try writeJsonStr(w, name);
+    };
     try w.writeAll("]");
 }
 
@@ -4705,6 +4738,7 @@ fn drcKindStr(k: drc.Kind) []const u8 {
         .via_pad => "via↔pad",
         .via_via => "via↔via",
         .via_track => "via↔track",
+        .track_track => "track↔track",
         .pad_pad => "pad↔pad",
         .annular => "annular ring",
         .board_edge => "board edge",
@@ -4825,6 +4859,17 @@ fn writeAttr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
         '<' => try w.writeAll("&lt;"),
         '>' => try w.writeAll("&gt;"),
         '"' => try w.writeAll("&quot;"),
+        else => try w.writeByte(c),
+    };
+}
+
+/// Emit `s` as HTML text content: `&`, `<`, `>` escaped, nothing else — for
+/// interpolating net/ref names into server-rendered markup.
+fn writeHtmlText(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
+    for (s) |c| switch (c) {
+        '&' => try w.writeAll("&amp;"),
+        '<' => try w.writeAll("&lt;"),
+        '>' => try w.writeAll("&gt;"),
         else => try w.writeByte(c),
     };
 }

@@ -72,7 +72,15 @@ pub fn describeDesign(
         const v = drc.check(alloc, solved.placement, r, route_params.clearance) catch &.{};
         var trace: f64 = 0;
         for (r.tracks) |t| trace += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
-        break :blk .{ .trace_mm = trace, .tracks = r.tracks.len, .vias = r.vias.len, .drc = v.len };
+        break :blk .{
+            .trace_mm = trace,
+            .tracks = r.tracks.len,
+            .vias = r.vias.len,
+            .drc = v.len,
+            .routed = r.routed,
+            .total = r.total,
+            .unrouted = r.failed,
+        };
     } else null;
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -81,7 +89,7 @@ pub fn describeDesign(
     return aw.written();
 }
 
-const RoutedSummary = struct { trace_mm: f64, tracks: usize, vias: usize, drc: usize };
+const RoutedSummary = struct { trace_mm: f64, tracks: usize, vias: usize, drc: usize, routed: usize = 0, total: usize = 0, unrouted: []const []const u8 = &.{} };
 
 /// Errors the facts writer can hit: allocation (scratch maps/lists) + writer.
 pub const DescribeError = std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -251,10 +259,18 @@ pub fn writeDescribeJson(
     const findings = try layout_lint.lint(alloc, p, policy);
     defer layout_lint.freeFindings(alloc, findings);
     try writeModulePolicy(w, p, policy);
-    try writeLint(w, alloc, p, spec, wrong_side.items, findings);
+    try writeLint(w, alloc, p, spec, wrong_side.items, findings, routed);
 
     if (routed) |r| {
-        try w.print(",\"routed\":{{\"trace_mm\":{d:.1},\"tracks\":{d},\"vias\":{d},\"drc\":{d}}}", .{ r.trace_mm, r.tracks, r.vias, r.drc });
+        try w.print(
+            ",\"routed\":{{\"trace_mm\":{d:.1},\"tracks\":{d},\"vias\":{d},\"drc\":{d},\"routed\":{d},\"total\":{d},\"unrouted\":[",
+            .{ r.trace_mm, r.tracks, r.vias, r.drc, r.routed, r.total },
+        );
+        for (r.unrouted, 0..) |name_s, i| {
+            if (i > 0) try w.writeAll(",");
+            try pcb_layout_page.writeJsonStr(w, name_s);
+        }
+        try w.writeAll("]}");
     }
     try w.writeAll("}");
 }
@@ -393,6 +409,7 @@ fn writeModulePolicy(
 /// Placement lint: machine-checkable rules an agent should fix before trusting
 /// the layout. Spec coverage problems are errors; geometric smells are warns.
 /// `findings` are the Phase-1 layout gates, appended after the built-in rules.
+/// With `?route=1`, nets the router could not fully connect are errors too.
 fn writeLint(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
@@ -400,6 +417,7 @@ fn writeLint(
     spec: ?render_pcb_png.SpecStatus,
     wrong_side: []const []const u8,
     findings: []const layout_lint.Finding,
+    routed: ?RoutedSummary,
 ) DescribeError!void {
     try w.writeAll(",\"lint\":[");
     var first = true;
@@ -408,6 +426,13 @@ fn writeLint(
     if (spec) |sp| {
         if (sp.unplaced.len > 0) {
             try lintItem(w, &first, "unplaced", sev_err, sp.unplaced, "parts still in the staging band below the board; free up room");
+        }
+    }
+    if (routed) |r| {
+        if (r.unrouted.len > 0) {
+            const msg = "the autorouter could not fully connect these nets; free routing room " ++
+                "near their pads or raise them with (net-class … (priority N))";
+            try lintItem(w, &first, "unrouted-net", sev_err, r.unrouted, msg);
         }
     }
     if (wrong_side.len > 0) {

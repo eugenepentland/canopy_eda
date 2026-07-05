@@ -520,7 +520,7 @@ pub const BoardRules = struct {
 
 /// One net's routing geometry override (mm) resolved from `(net-class …)`.
 /// Zero = keep the router default for that quantity.
-pub const NetRule = struct { width: f64 = 0, clearance: f64 = 0, via_dia: f64 = 0, via_drill: f64 = 0 };
+pub const NetRule = struct { width: f64 = 0, clearance: f64 = 0, via_dia: f64 = 0, via_drill: f64 = 0, priority: u32 = 0 };
 
 /// A `(board …)` outline rectangle in world mm (top-left + size).
 pub const BoardRect = struct { minx: f64, miny: f64, w: f64, h: f64 };
@@ -5505,7 +5505,7 @@ fn netRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []const
                 const hit = std.ascii.eqlIgnoreCase(cn, net.name) or
                     std.ascii.eqlIgnoreCase(cn, shortName(net.name));
                 if (hit) {
-                    out[i] = .{ .width = nc.width, .clearance = nc.clearance, .via_dia = nc.via_dia, .via_drill = nc.via_drill };
+                    out[i] = .{ .width = nc.width, .clearance = nc.clearance, .via_dia = nc.via_dia, .via_drill = nc.via_drill, .priority = nc.priority };
                     break :outer;
                 }
             }

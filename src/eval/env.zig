@@ -1102,15 +1102,20 @@ pub const StackupSpec = struct {
 };
 
 /// One routing rule from a top-level `(net-class "name" (width MM)
-/// (clearance MM) (via DIA DRILL) (nets "A" "B" …))` form: trace geometry for
-/// the named nets. A zero field keeps the router's default; `nets` entries
-/// match flattened net names exactly (case-insensitive).
+/// (clearance MM) (via DIA DRILL) (priority 0-7) (nets "A" "B" …))` form:
+/// trace geometry + routing order for the named nets. A zero field keeps the
+/// router's default; `nets` entries match flattened net names exactly
+/// (case-insensitive). `priority` is the routing-order tier — the router
+/// routes higher tiers first, so a critical net (crystal, flash bus, SMPS
+/// loop) claims its short path before a bulk rail can block it (the maze
+/// router has no rip-up; first-routed wins).
 pub const NetClassSpec = struct {
     name: []const u8 = "",
     width: f64 = 0,
     clearance: f64 = 0,
     via_dia: f64 = 0,
     via_drill: f64 = 0,
+    priority: u32 = 0,
     nets: []const []const u8 = &.{},
 };
 

@@ -512,11 +512,14 @@ pub const scope_form_docs = blk: {
             "router keeps its legacy implicit model (4 layers with assumed GND+PWR inner planes).",
     } };
     t[@intFromEnum(ScopeForm.net_class)] = .{ .scope = tl, .doc = .{
-        .syntax = "(net-class \"name\" [(width MM)] [(clearance MM)] [(via DIA DRILL)] (nets \"A\" \"B\"…))",
-        .summary = "Routing geometry for the named nets: trace width, copper clearance, and via size " ++
-            "(diameter + drill) in mm. Omitted numbers keep the router defaults; net names match the " ++
-            "flattened netlist case-insensitively. The first class naming a net wins. Repeat the form " ++
-            "for more classes (e.g. a wide \"power\" class and a tight \"rf\" class).",
+        .syntax = "(net-class \"name\" [(width MM)] [(clearance MM)] [(via DIA DRILL)] [(priority 0-7)] (nets \"A\" \"B\"…))",
+        .summary = "Routing geometry + routing order for the named nets: trace width, copper clearance, " ++
+            "and via size (diameter + drill) in mm, plus a routing-priority tier — the autorouter " ++
+            "routes higher tiers first, so a critical net (crystal, flash bus, a switcher's hot loop) " ++
+            "claims its short path before a bulk rail can wall it off (the maze router has no rip-up; " ++
+            "first-routed wins). Omitted numbers keep the router defaults (priority 0 = baseline); net " ++
+            "names match the flattened netlist case-insensitively. The first class naming a net wins. " ++
+            "Repeat the form for more classes (e.g. a wide \"power\" class and a tight \"rf\" class).",
     } };
     t[@intFromEnum(ScopeForm.revision)] = .{ .scope = tl, .doc = .{
         .syntax = "(revision \"ID\" [(date \"YYYY-MM-DD\")] [(change \"ID\" \"summary\")…])",
