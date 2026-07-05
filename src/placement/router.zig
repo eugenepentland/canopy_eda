@@ -776,26 +776,25 @@ fn segClearsTracks(ctx: *Ctx, tracks: []const Track, a: [2]f64, b: [2]f64, net: 
     return true;
 }
 
-/// True if point `p` (a `track_width` trace's centreline) keeps clearance from
-/// every foreign pad.
-fn ptClearsPads(ctx: *Ctx, p: [2]f64, net: i32) bool {
-    const need = ctx.params.track_width / 2 + ctx.params.clearance;
-    for (ctx.obs) |o| {
-        if (o.net == net) continue;
-        if (pad_shape.pointDist(o.x0, o.y0, o.x1, o.y1, o.poly, p[0], p[1], need) < need - 1e-9) return false;
-    }
-    return true;
-}
-
 /// True if the same-net stub segment a→b (a real `track_width` trace) keeps
-/// clearance from every foreign pad along its length (sampled).
+/// clearance from every foreign pad along its length. Sampled at a tenth of
+/// the grid pitch with the requirement inflated by half a sample step (the
+/// Lipschitz bound: any point sits within step/2 of a sample), so a
+/// between-sample dip can't slip a sub-clearance approach past the sampling —
+/// the stub provably meets the DRC rule at a ~13 um routability cost.
 fn segClearsPads(ctx: *Ctx, a: [2]f64, b: [2]f64, net: i32) bool {
     const len = std.math.hypot(b[0] - a[0], b[1] - a[1]);
-    const steps: usize = @max(1, @as(usize, @intFromFloat(@ceil(len / (ctx.grid.g * 0.5)))));
+    const step = ctx.grid.g * 0.1;
+    const steps: usize = @max(1, @as(usize, @intFromFloat(@ceil(len / step))));
+    const need = ctx.params.track_width / 2 + ctx.params.clearance + step / 2;
     var i: usize = 0;
     while (i <= steps) : (i += 1) {
         const t = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps));
-        if (!ptClearsPads(ctx, .{ a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]) }, net)) return false;
+        const p = [2]f64{ a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]) };
+        for (ctx.obs) |o| {
+            if (o.net == net) continue;
+            if (pad_shape.pointDist(o.x0, o.y0, o.x1, o.y1, o.poly, p[0], p[1], need) < need - 1e-9) return false;
+        }
     }
     return true;
 }
@@ -854,31 +853,28 @@ const ESCAPE_VIA_RINGS: usize = 12;
 /// Find the *nearest* DRC-safe spot for a single-pin breakout's escape via — the
 /// in-tool version of hand-routing a pin that has nothing to land on: drop a via
 /// next to the pad and let the signal leave on an inner layer, with a short trace
-/// from the pad to the via. Two tiers: first the nearest spot whose pad→via stub
-/// also stays clear of foreign pads (a clean hand-route, the normal case); then,
-/// if the pad is so hemmed in that *no* straight stub stays clear — the dense
-/// power-module case that is exactly why you'd escape to an inner layer — the
-/// nearest spot where at least the via itself is DRC-safe, accepting the short
-/// stub crossing the relieved thermal/EP copper beside the pad. In both tiers the
-/// stub must clear routed *tracks* on its layer — an escape stub may never cross
-/// live copper. Null only when no DRC-safe via spot exists in the search window
-/// at all (caller keeps the trimmed surface stub).
+/// from the pad to the via. Both the via AND the straight pad→via stub must be
+/// fully DRC-safe: clear of foreign pads, placed vias, and routed tracks on the
+/// stub's layer. There is deliberately NO relaxed tier that lets the stub cross
+/// foreign copper — that used to draw breakout stubs straight across the
+/// neighbouring pad of a fine-pitch QFN. A breakout carries no connection, so
+/// when the pad is hemmed in the caller's trimmed surface stub (which stops at
+/// clearance) is strictly better than pad-crossing copper. Null when no clean
+/// spot exists in the search window.
 fn findEscapeVia(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, dir: [2]f64, net: i32, layer: u8) ?[2]f64 {
-    return escapeFan(ctx, placed, tracks, a, dir, net, layer, true) orelse
-        escapeFan(ctx, placed, tracks, a, dir, net, layer, false);
+    return escapeFan(ctx, placed, tracks, a, dir, net, layer);
 }
 
 /// One fan of the escape-via search (see `findEscapeVia`). Fans outward from the
 /// pad `a` in growing rings along the eight 45° compass headings — nearest the
 /// reserved corridor heading `dir` first, then swivelling to either side — and
 /// returns the first spot where a via of the configured size clears every
-/// foreign pad, via and routed track, and the straight pad→via stub clears every
-/// foreign via and routed track on `layer`. Candidates sit exactly on the 45°
-/// ray from the pad centre (NOT grid-snapped: the escape pass runs after the
-/// maze, so nothing consults the occupancy grid afterwards, and the unsnapped
-/// spot is what keeps the stub octilinear). When `clear_stub` is set the stub
-/// must additionally clear every foreign pad.
-fn escapeFan(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, dir: [2]f64, net: i32, layer: u8, clear_stub: bool) ?[2]f64 {
+/// foreign pad, via and routed track, and the straight pad→via stub clears
+/// every foreign pad, via, and routed track on `layer`. Candidates sit exactly
+/// on the 45° ray from the pad centre (NOT grid-snapped: the escape pass runs
+/// after the maze, so nothing consults the occupancy grid afterwards, and the
+/// unsnapped spot is what keeps the stub octilinear).
+fn escapeFan(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, dir: [2]f64, net: i32, layer: u8) ?[2]f64 {
     const grid = ctx.grid;
     const ang0 = std.math.atan2(dir[1], dir[0]);
     var ring: usize = 1;
@@ -891,12 +887,12 @@ fn escapeFan(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, d
             if (!viaClearsPads(ctx, s[0], s[1], net)) continue;
             if (!viaClearsVias(ctx, placed, s[0], s[1], net)) continue;
             if (!viaClearsTracks(ctx, tracks, s[0], s[1], net)) continue;
-            // The stub itself must clear every already-placed via and every
-            // routed track — both are fixed and won't re-check this later
+            // The stub itself must clear every foreign pad, placed via, and
+            // routed track — all are fixed and won't re-check this later
             // trace, so the pair would fail DRC (or short outright).
             if (!segClearsVias(ctx, placed, a, s, net)) continue;
             if (!segClearsTracks(ctx, tracks, a, s, net, layer)) continue;
-            if (clear_stub and !segClearsPads(ctx, a, s, net)) continue;
+            if (!segClearsPads(ctx, a, s, net)) continue;
             return s;
         }
     }
@@ -1389,9 +1385,14 @@ fn routeNet(ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayListUnman
     // Seed the net with its first pad's access node, on that pad's own layer,
     // plus that pad's gateways as extra Dijkstra sources until real copper
     // exists (a gateway only becomes copper when a path actually uses it —
-    // stamping them all up-front would fake connectivity).
+    // stamping them all up-front would fake connectivity). A BLOCKED access
+    // node (a fine-pitch pad whose nearest grid node fell inside a
+    // neighbour's clearance — or onto the neighbour itself) is never seeded:
+    // copper growing from it would sit on/inside the foreign pad. Such pads
+    // enter the maze through their gateways only.
     const p0 = ctx.grid.nearest(pts[0].x, pts[0].y);
-    ctx.occ[pts[0].layer][ctx.grid.node(p0[0], p0[1])] = net;
+    const p0n = ctx.grid.node(p0[0], p0[1]);
+    if (!blocked(ctx, pts[0].layer, p0n, net)) ctx.occ[pts[0].layer][p0n] = net;
     var seed_gates: std.ArrayListUnmanaged(usize) = .empty;
     try padGateways(ctx, tracks.items, vias.items, pts[0], net, &seed_gates);
 
@@ -1414,8 +1415,10 @@ fn routeNet(ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayListUnman
             }
         } else {
             all_ok = false;
-            // Still mark the goal pad as occupied so later pads can target it.
-            ctx.occ[pt.layer][goal_key % nodes] = net;
+            // Still mark the goal pad as occupied so later pads can target it
+            // — but never a blocked node (see the seed guard above): copper
+            // grown from it later would violate the neighbour's clearance.
+            if (!blocked(ctx, pt.layer, goal_key % nodes, net)) ctx.occ[pt.layer][goal_key % nodes] = net;
         }
     }
     return all_ok;
@@ -2419,6 +2422,60 @@ test "pad gateway routes a pad whose flanking grid columns are inside neighbour 
     try testing.expectEqual(@as(usize, 2), r.total);
     try testing.expectEqual(@as(usize, 2), r.routed);
     try testing.expectEqual(@as(usize, 0), r.failed.len);
+}
+
+// spec: placement/router - a hemmed breakout keeps its stub clear of foreign pads instead of crossing them
+test "escape stub falls back to a trimmed clear stub when every heading is pad-blocked" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const G = @import("geometry.zig");
+    // A breakout pad at the origin ringed by eight foreign pads, one on each
+    // 45° compass heading at 0.7 mm — every escape ray passes through foreign
+    // copper, so no DRC-safe stub+via exists. The old relaxed tier would have
+    // dropped a via beyond the ring with the stub crossing a ring pad (the
+    // QFN-neighbour overlap bug); now the breakout must keep a short trimmed
+    // stub that stays fully clear, and the routed board must be DRC-clean.
+    // Ring pads are 0.3 mm wide so adjacent ring pads keep pad↔pad clearance
+    // between THEMSELVES — the only thing under test is the escape stub.
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    const ring_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.3, .h = 0.3 }};
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.3, .hh = 0.3, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &ring_pad, .fallback = false, .x = 0.7, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &ring_pad, .fallback = false, .x = 0.495, .y = 0.495 },
+        .{ .ref_des = "R3", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &ring_pad, .fallback = false, .x = 0, .y = 0.7 },
+        .{ .ref_des = "R4", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &ring_pad, .fallback = false, .x = -0.495, .y = 0.495 },
+        .{ .ref_des = "R5", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &ring_pad, .fallback = false, .x = -0.7, .y = 0 },
+        .{ .ref_des = "R6", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &ring_pad, .fallback = false, .x = -0.495, .y = -0.495 },
+        .{ .ref_des = "R7", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &ring_pad, .fallback = false, .x = 0, .y = -0.7 },
+        .{ .ref_des = "R8", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &ring_pad, .fallback = false, .x = 0.495, .y = -0.495 },
+    };
+    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const nets = [_]FlatNet{.{ .name = "EN", .pins = &pins }};
+    const stubs = [_]optimizer.Stub{.{ .part = 0, .ax = 0, .ay = 0, .bx = 2, .by = 0, .net = 0 }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &stubs,
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 2,
+        .maxy = 2,
+        .generated = true,
+    };
+    const r = try route(arena, placement, .{});
+    // No DRC-safe escape exists — no via may be dropped…
+    try testing.expectEqual(@as(usize, 0), r.vias.len);
+    // …and whatever trimmed stub remains keeps full clearance from every
+    // foreign pad (this is the assertion the old pad-crossing tier failed).
+    const viol = try @import("drc.zig").check(arena, placement, r, 0.127);
+    try testing.expectEqual(@as(usize, 0), viol.len);
 }
 
 // spec: placement/router - reserves diagonal corner cells so later nets keep trace-to-trace clearance

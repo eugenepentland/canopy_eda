@@ -4739,6 +4739,7 @@ fn drcKindStr(k: drc.Kind) []const u8 {
         .via_via => "via↔via",
         .via_track => "via↔track",
         .track_track => "track↔track",
+        .track_pad => "track↔pad",
         .pad_pad => "pad↔pad",
         .annular => "annular ring",
         .board_edge => "board edge",
