@@ -159,6 +159,7 @@ Public functions: route, returnPathViolations
 - escape stubs keep clearance from routed tracks and leave at 45-degree headings
 - reserves diagonal corner cells so later nets keep trace-to-trace clearance
 - escapes a fine-pitch pad through an off-grid gateway stub when no grid lane clears
+- a hemmed breakout keeps its stub clear of foreign pads instead of crossing them
 
 ## placement/drc
 
@@ -170,6 +171,7 @@ Public functions: check
 - flags a via whose annular ring is under the fab minimum
 - flags copper crowding the board outline and skips the off-board staging band
 - flags same-layer track crossings and sub-clearance pairs between nets
+- flags a track crossing a foreign pad on its layer; other-layer SMD pads don't clash
 
 ## placement/module_policy
 

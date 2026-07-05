@@ -3,12 +3,13 @@
 //! than the clearance rule — the common offender being a ground via dropped on
 //! a pad whose copper then crowds a neighbouring pad of another net.
 //!
-//! Scope: via↔pad, via↔via, via↔track, track↔track, and pad↔pad (across
-//! parts). Track↔track is checked geometrically because not all copper comes
-//! from the maze grid — breakout/escape stubs, hand-drawn tracks, and stamped
-//! module copper are all drawn at arbitrary points, so the grid-pitch spacing
-//! guarantee doesn't cover them. Track↔pad stays grid-enforced (every maze
-//! node keeps `reach` from foreign pads). Coordinates are millimetres; gaps
+//! Scope: via↔pad, via↔via, via↔track, track↔track, track↔pad, and pad↔pad
+//! (across parts). Track↔track and track↔pad are checked geometrically
+//! because not all copper comes from the maze grid — breakout/escape stubs,
+//! hand-drawn tracks, and stamped module copper are all drawn at arbitrary
+//! points, so the grid-pitch spacing guarantee doesn't cover them. Both are
+//! layer-aware: an SMD pad only clashes with copper on its own side;
+//! through-hole pads clash on every layer. Coordinates are millimetres; gaps
 //! are edge-to-edge (0 ⇒ touching, negative ⇒ overlapping).
 
 const std = @import("std");
@@ -23,7 +24,7 @@ const FlatNet = export_kicad.FlatNet;
 /// `annular` = a via's copper ring around its drill is thinner than the
 /// fab minimum; `board_edge` = copper closer to the board outline than the
 /// clearance rule.
-pub const Kind = enum { via_pad, via_via, via_track, track_track, pad_pad, annular, board_edge };
+pub const Kind = enum { via_pad, via_via, via_track, track_track, track_pad, pad_pad, annular, board_edge };
 
 /// Minimum via annular ring (copper radius minus drill radius, mm) — the
 /// JLC-class proto-fab floor. The router's default via (0.4 ⌀ / 0.2 drill)
@@ -41,9 +42,11 @@ pub const Violation = struct {
 };
 
 /// A pad reduced to its world bounding box, its real copper outline (`poly`;
-/// empty ⇒ the box is exact), the net it carries, and its part index (so two
-/// pads of the same part are never checked against each other).
-const PadBox = struct { x0: f64, y0: f64, x1: f64, y1: f64, poly: []const [2]f64 = &.{}, net: i32, part: usize };
+/// empty ⇒ the box is exact), the net it carries, its part index (so two
+/// pads of the same part are never checked against each other), and the
+/// signal layer its copper lives on (0 = top, 1 = bottom — the part's side;
+/// `thru` pads exist on every layer).
+const PadBox = struct { x0: f64, y0: f64, x1: f64, y1: f64, poly: []const [2]f64 = &.{}, net: i32, part: usize, layer: u8 = 0, thru: bool = false };
 
 const EPS: f64 = 1e-6;
 
@@ -106,6 +109,26 @@ pub fn check(
                 const mx = (a.x1 + a.x2 + b.x1 + b.x2) / 4;
                 const my = (a.y1 + a.y2 + b.y1 + b.y2) / 4;
                 try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = clearance, .kind = .track_track });
+            }
+        }
+    }
+    // track ↔ pad (layer-aware). The maze keeps every grid NODE `reach` from
+    // foreign pads, but stubs, hand-drawn tracks, and stamped copper are
+    // off-grid — this is what catches a breakout stub drawn across a QFN
+    // neighbour pad. Sampled along the track against the pad's real outline.
+    for (tracks) |t| {
+        const need = t.width / 2 + clearance;
+        for (pads) |p| {
+            if (sameNet(t.net, p.net)) continue;
+            if (!p.thru and p.layer != t.layer) continue;
+            // Cheap reject: track bbox vs pad bbox inflated by the rule.
+            if (@min(t.x1, t.x2) > p.x1 + need or @max(t.x1, t.x2) < p.x0 - need or
+                @min(t.y1, t.y2) > p.y1 + need or @max(t.y1, t.y2) < p.y0 - need) continue;
+            const gap = segShapeDist(t, p, need) - t.width / 2;
+            if (gap < clearance - EPS) {
+                const mx = std.math.clamp((p.x0 + p.x1) / 2, @min(t.x1, t.x2), @max(t.x1, t.x2));
+                const my = std.math.clamp((p.y0 + p.y1) / 2, @min(t.y1, t.y2), @max(t.y1, t.y2));
+                try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = clearance, .kind = .track_pad });
             }
         }
     }
@@ -192,11 +215,22 @@ fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Al
     }
     var list: std.ArrayListUnmanaged(PadBox) = .empty;
     for (placement.parts, 0..) |part, pi| {
+        const layer: u8 = if (part.side == .bottom) 1 else 0;
         for (part.pads) |pad| {
             const sh = try pad_shape.worldShape(arena, part, pad);
             const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ part.ref_des, pad.number });
             const net = pin_net.get(key) orelse -1;
-            try list.append(arena, .{ .x0 = sh.x0, .y0 = sh.y0, .x1 = sh.x1, .y1 = sh.y1, .poly = sh.poly, .net = net, .part = pi });
+            try list.append(arena, .{
+                .x0 = sh.x0,
+                .y0 = sh.y0,
+                .x1 = sh.x1,
+                .y1 = sh.y1,
+                .poly = sh.poly,
+                .net = net,
+                .part = pi,
+                .layer = layer,
+                .thru = pad.thru,
+            });
         }
     }
     return list.toOwnedSlice(arena);
@@ -220,6 +254,44 @@ fn segPointDist(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) f64 {
     if (len2 < EPS) return std.math.hypot(px - ax, py - ay);
     const t = std.math.clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1);
     return std.math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+/// Shortest distance from a track's centreline to a pad's copper (0 when the
+/// centreline enters the pad), or +inf when the whole segment stays farther
+/// than `win` from the pad's bbox (can't violate a `win` rule). The sampled
+/// span is slab-clipped to the pad's `win`-inflated bbox first, so a long rail
+/// passing one small pad samples only the short stretch beside it. 0.05 mm
+/// steps against the pad's real outline via `pad_shape.pointDist` — exact
+/// enough for a pass/fail against a 0.127 mm rule, and it handles polygon
+/// (thermal/EP) pads the same way the router's stub checks do.
+fn segShapeDist(t: router.Track, p: PadBox, win: f64) f64 {
+    const dx = t.x2 - t.x1;
+    const dy = t.y2 - t.y1;
+    var f0: f64 = 0;
+    var f1: f64 = 1;
+    if (@abs(dx) > 1e-12) {
+        const a = (p.x0 - win - t.x1) / dx;
+        const b = (p.x1 + win - t.x1) / dx;
+        f0 = @max(f0, @min(a, b));
+        f1 = @min(f1, @max(a, b));
+    } else if (t.x1 < p.x0 - win or t.x1 > p.x1 + win) return std.math.inf(f64);
+    if (@abs(dy) > 1e-12) {
+        const a = (p.y0 - win - t.y1) / dy;
+        const b = (p.y1 + win - t.y1) / dy;
+        f0 = @max(f0, @min(a, b));
+        f1 = @min(f1, @max(a, b));
+    } else if (t.y1 < p.y0 - win or t.y1 > p.y1 + win) return std.math.inf(f64);
+    if (f0 > f1) return std.math.inf(f64);
+    const len = std.math.hypot(dx, dy) * (f1 - f0);
+    const steps: usize = @max(1, @as(usize, @intFromFloat(@ceil(len / 0.05))));
+    var best = std.math.inf(f64);
+    var i: usize = 0;
+    while (i <= steps) : (i += 1) {
+        const f = f0 + (f1 - f0) * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps));
+        const d = pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, t.x1 + f * dx, t.y1 + f * dy, best);
+        if (d < best) best = d;
+    }
+    return best;
 }
 
 /// Shortest distance between two segments (0 when they properly cross).
@@ -493,4 +565,63 @@ test "check flags track-to-track crossings but not exact-pitch neighbours" {
     const v2 = try check(arena, placement, tight, clearance);
     try testing.expectEqual(@as(usize, 1), v2.len);
     try testing.expectEqual(Kind.track_track, v2[0].kind);
+}
+
+// spec: placement/drc - flags a track crossing a foreign pad on its layer; other-layer SMD pads don't clash
+test "check flags track-to-pad clashes layer-aware" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // One top-side part with an SMD pad on net PAD (index 0) at the origin,
+    // plus a through-hole pad on the same part further out.
+    const pads = [_]@import("geometry.zig").Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .{ .number = "2", .x = 3, .y = 0, .w = 0.6, .h = 0.6, .thru = true },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 0.5, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+    };
+    const p1 = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const p2 = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "2" }};
+    const nets = [_]FlatNet{ .{ .name = "PAD", .pins = &p1 }, .{ .name = "SIG", .pins = &.{} }, .{ .name = "THRU", .pins = &p2 } };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -5,
+        .miny = -5,
+        .maxx = 5,
+        .maxy = 5,
+        .generated = true,
+    };
+
+    // A SIG track slicing across the SMD pad on the pad's own layer → flagged.
+    const across = [_]router.Track{.{ .x1 = -1, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.127, .net = 1 }};
+    const top = router.RouteResult{ .tracks = &across, .vias = &.{}, .routed = 1, .total = 1 };
+    const v1 = try check(arena, placement, top, 0.127);
+    try testing.expectEqual(@as(usize, 1), v1.len);
+    try testing.expectEqual(Kind.track_pad, v1[0].kind);
+    try testing.expect(v1[0].gap < 0);
+
+    // The same track on the BOTTOM layer passes under the top SMD pad — legal.
+    const under = [_]router.Track{.{ .x1 = -1, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 1, .width = 0.127, .net = 1 }};
+    const bot = router.RouteResult{ .tracks = &under, .vias = &.{}, .routed = 1, .total = 1 };
+    try testing.expectEqual(@as(usize, 0), (try check(arena, placement, bot, 0.127)).len);
+
+    // A through-hole pad clashes on EVERY layer — the bottom track under it flags.
+    const under_thru = [_]router.Track{.{ .x1 = 2, .y1 = 0, .x2 = 4, .y2 = 0, .layer = 1, .width = 0.127, .net = 1 }};
+    const bt = router.RouteResult{ .tracks = &under_thru, .vias = &.{}, .routed = 1, .total = 1 };
+    const v2 = try check(arena, placement, bt, 0.127);
+    try testing.expectEqual(@as(usize, 1), v2.len);
+    try testing.expectEqual(Kind.track_pad, v2[0].kind);
+
+    // A track on the pad's OWN net may touch it — never flagged.
+    const own = [_]router.Track{.{ .x1 = -1, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 }};
+    const ok = router.RouteResult{ .tracks = &own, .vias = &.{}, .routed = 1, .total = 1 };
+    try testing.expectEqual(@as(usize, 0), (try check(arena, placement, ok, 0.127)).len);
 }
