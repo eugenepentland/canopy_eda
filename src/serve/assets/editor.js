@@ -55,6 +55,7 @@
   let clip = null;               // copy/paste clipboard: {ref, src}
   let hoverChip = null;          // net-partner chip under the cursor (draws its reveal wire)
   const pinnedChips = new Set(); // chips clicked to keep their reveal wire on
+  const expandedBuses = new Set(); // collapsed bus/aggregate rows the user expanded (keys survive rebuilds)
   let sheets = [];               // navigable pages: design (group …) lists, else per-section
   let deleteArmed = false;       // inspector Delete needs a 2nd click to confirm
   let libIndex = null;
@@ -179,14 +180,14 @@
       const pins = [];
       (h.leftPins || []).forEach((pn) => addPin(pins, h, pn, "left"));
       (h.rightPins || []).forEach((pn) => addPin(pins, h, pn, "right"));
-      m.hubs.push({ ref: h.ref, src: h.src || 0, component: h.component || "", x: h.x, y: h.y, w: h.w, h: h.h, label: h.label || h.ref, cx: h.x + h.w / 2, cy: h.y + h.h / 2, pins });
+      m.hubs.push({ ref: h.ref, src: h.src || 0, component: h.component || "", sec: h.sec || "", part: h.part || "", x: h.x, y: h.y, w: h.w, h: h.h, label: h.label || h.ref, cx: h.x + h.w / 2, cy: h.y + h.h / 2, pins });
     });
     // The connection map IS the view: rebuild the board as a grid of
     // self-contained per-IC cells (throwing the derived base layout away).
     buildGlobalMap(m);
     // Connection ports for snap (net-bearing): pins, labels, wire vertices.
     // Ghost proxies are view-only — exclude them from snap targets.
-    m.hubs.forEach((h) => { if (h.ghost) return; h.pins.forEach((p) => { if (p.net) addPort(m, p.x, p.y, p.net, "pin", h.ref, p.pin); }); });
+    m.hubs.forEach((h) => { if (h.ghost) return; h.pins.forEach((p) => { if (p.net && !p.noPort) addPort(m, p.x, p.y, p.net, "pin", h.ref, p.pin); }); });
     m.labels.forEach((l) => { if (l.net) addPort(m, l.x, l.y, l.net, "label"); });
     m.wires.forEach((w) => { if (w.net) w.pts.forEach((p) => addPort(m, p[0], p[1], w.net, "wire")); });
     addStaged(m);                // just-added, not-yet-wired parts stay visible + draggable on the map
@@ -239,7 +240,7 @@
     // `net` is the wire-geometry-derived net the base view already uses; `anet` is the
     // pin's authoritative net from the scene (present for label-rendered power/ground
     // pins that have no wire) — read by the power layer, leaves base-view logic alone.
-    pins.push({ pin: (pn.pins || "").split(",")[0], pins: pn.pins || "", name: pn.name || pn.pins, side, x: ex, y: pn.y, net: v ? v.net : "", anet: pn.net || "", vx: v ? v.x : null, vy: v ? v.y : null });
+    pins.push({ pin: (pn.pins || "").split(",")[0], pins: pn.pins || "", name: pn.name || pn.pins, side, x: ex, y: pn.y, net: v ? v.net : "", anet: pn.net || "", role: pn.role || "", grp: pn.grp || "", vx: v ? v.x : null, vy: v ? v.y : null });
   }
   function addPort(m, x, y, net, t, ref, pin) {
     const port = { x, y, net, t, ref, pin };
@@ -379,7 +380,7 @@
       roundRect(b.x, b.y, b.w, b.h, 10); ctx.stroke();
       ctx.fillStyle = b.power ? C.rail : C.secLabel; ctx.font = "600 " + fs + "px sans-serif";
       ctx.textAlign = "left"; ctx.textBaseline = "middle";
-      ctx.fillText(b.name, b.x + 16, b.y + Math.max(24, fs * 0.75));
+      ctx.fillText((b.num ? b.num + " · " : "") + b.name, b.x + 16, b.y + Math.max(24, fs * 0.75));
     });
 
     // Far-zoom glance: the whole board as titled bands + one chip per cell —
@@ -456,11 +457,15 @@
         }
         return;
       }
-      ctx.strokeStyle = hot ? C.hot : (w.link ? C.link : (w.bus ? C.bus : C.wire));
-      ctx.lineWidth = sw(hot ? 2.4 : (w.link ? 1.8 : (w.bus ? 3 : 1.5)));
+      ctx.strokeStyle = hot ? C.hot : (w.bus ? C.bus : (w.link ? C.link : C.wire));
+      ctx.lineWidth = sw(hot ? 2.4 : (w.bus ? 3 : (w.link ? 1.8 : 1.5)));
       ctx.beginPath(); ctx.moveTo(w.pts[0][0], w.pts[0][1]);
       for (let i = 1; i < w.pts.length; i++) ctx.lineTo(w.pts[i][0], w.pts[i][1]);
       ctx.stroke();
+      if (w.bus && w.link && w.pts.length === 2) {     // collapsed-bus slash mark near the IC end
+        const p0 = w.pts[0], p1 = w.pts[1], tx2 = p0[0] + (p1[0] - p0[0]) * 0.22, ty2 = p0[1];
+        ctx.beginPath(); ctx.moveTo(tx2 - 5, ty2 + 6); ctx.lineTo(tx2 + 5, ty2 - 6); ctx.stroke();
+      }
     });
     ctx.globalAlpha = 1;
     // Passive branches hanging off a mapped net: the passive's symbol (resistor /
@@ -523,8 +528,13 @@
         const hot = hotNet && l.net === hotNet;
         if (l.ground) { drawGround(l.x, l.y, hot, sw, showText && !/^gnd$/i.test(l.text || ""), l.text); return; }
         if (!showText) return;
+        if (l.dim) {                                                // muted run heading (authored pin-group label)
+          ctx.fillStyle = "#54637a"; ctx.font = "600 9px sans-serif";
+          ctx.textAlign = l.anchor === "start" ? "left" : l.anchor === "end" ? "right" : "center";
+          ctx.fillText(l.text, l.x, l.y); return;
+        }
         const lev = ercByNet.get(l.net);                            // ERC-flagged net → tint its label
-        ctx.fillStyle = hot ? C.hot : lev ? ercColor(lev) : l.diff ? C.diff : l.link ? C.link : l.port ? C.labelPort : C.labelNet;
+        ctx.fillStyle = hot ? C.hot : lev ? ercColor(lev) : l.diff ? C.diff : l.busKey ? C.bus : l.link ? C.link : l.port ? C.labelPort : C.labelNet;
         ctx.textAlign = l.anchor === "start" ? "left" : l.anchor === "end" ? "right" : "center";
         ctx.textBaseline = "middle";
         if (l.w) fitFont(l.text, l.w, 11, 6); else ctx.font = "11px sans-serif";   // shrink a net label wider than its line
@@ -802,7 +812,7 @@
   }
   function pick(x, y) {
     const s = scale(), tp = 7 / s, tw = 5 / s, tl = 9 / s;
-    for (const h of M.hubs) { if (h.ghost) continue; for (const p of h.pins) if (Math.hypot(p.x - x, p.y - y) < tp) return { t: "pin", ref: h.ref, pin: p.pin, net: p.net, x: p.x, y: p.y }; }
+    for (const h of M.hubs) { if (h.ghost) continue; for (const p of h.pins) if (Math.hypot(p.x - x, p.y - y) < tp) return { t: "pin", ref: h.ref, pin: p.pin, net: p.net, x: p.x, y: p.y, noDrag: !!p.noPort }; }
     // In-line passives on the map are small precise targets — a series symbol riding
     // a link wire's midpoint, a pull resistor hanging just below it — so hit-test them
     // before the big ghost-block areas. Each carries its ref → select + edit like any part.
@@ -819,7 +829,7 @@
     for (const c of (M.chips || [])) if (x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h) return { t: "chip", chip: c };
     for (const p of M.passes) if (x >= p.x && x <= p.x + p.w && y >= p.top && y <= p.top + p.h) return { t: "part", ref: p.ref, kind: "pass" };
     for (const w of M.wires) for (let i = 1; i < w.pts.length; i++) if (distToSeg(x, y, w.pts[i - 1], w.pts[i]) < tw) return { t: "net", net: w.net };
-    for (const l of M.labels) if (Math.hypot(l.x - x, l.y - y) < tl) return { t: "net", net: l.net };
+    for (const l of M.labels) if (Math.hypot(l.x - x, l.y - y) < tl) return l.busKey ? { t: "bus", key: l.busKey } : { t: "net", net: l.net };
     return { t: "empty" };
   }
   // Resolve a chip's partner device → its hub box + the pin (on the chip's net) the reveal
@@ -888,7 +898,7 @@
     const slop = down.touch ? 9 : 5;
     if (!mode && (Math.abs(e.clientX - down.mx) + Math.abs(e.clientY - down.my) > slop)) {
       if (down.touch) { mode = "pan"; canvas.classList.add("panning"); } // fingers pan, never drag
-      else if (down.hit.t === "pin") { mode = "drag"; startDrag("pin", down.hit); }
+      else if (down.hit.t === "pin" && !down.hit.noDrag) { mode = "drag"; startDrag("pin", down.hit); }
       else if (down.hit.t === "part" && startDrag("part", down.hit)) { mode = "drag"; }
       else { mode = "pan"; canvas.classList.add("panning"); }
     }
@@ -911,6 +921,7 @@
       if (h.t === "pin") highlightNetToggle(h.net);
       else if (h.t === "part") { if (h.ghost) revealGhostBus(h.ref); else pinnedChips.clear(); select(h.kind, h.ref); }
       else if (h.t === "chip") toggleChipPin(h.chip);
+      else if (h.t === "bus") toggleBus(h.key);
       else if (h.t === "net") highlightNetToggle(h.net);
       else deselect();
     }
@@ -953,6 +964,7 @@
     if (h.t === "net" || (h.t === "pin" && h.net)) { setHotNet(h.net); focusInspectorPrimary(); }
     else if (h.t === "part" && h.ghost) { select(h.kind, h.ref); focusTarget(h.ref); }   // proxy → frame the part's own region
     else if (h.t === "part") { select(h.kind, h.ref); focusInspectorPrimary(); }         // real part → focus its value for editing
+    else if (h.t === "chip" && h.chip && h.chip.target) focusTarget(h.chip.target);      // partner chip → jump to its cell
   });
 
   // Part and net are mutually exclusive in the inspector: selecting one clears
@@ -962,6 +974,14 @@
   function highlightNetToggle(net) { if (!net) return; hotNet = hotNet === net ? null : net; selection = null; deleteArmed = false; renderInspector(); updateStatus(); scheduleDraw(); }
   // Click a net-partner chip → pin its reveal wire on (survives mouse-move); click again to
   // unpin. The "+N" overflow chip has no single target, so it just highlights the whole net.
+  // Click a collapsed bus / aggregate row's label → expand it into individual
+  // pin rows; click the expanded run's "▾" head label → collapse it back. The
+  // key survives rebuilds (ref + partner/family), so the state sticks.
+  function toggleBus(key) {
+    if (!key) return;
+    if (expandedBuses.has(key)) expandedBuses.delete(key); else expandedBuses.add(key);
+    buildModel(); scheduleDraw(); updateStatus();
+  }
   function toggleChipPin(c) {
     if (!c) return;
     if (c.overflow) { highlightNetToggle(c.net); return; }
@@ -1080,7 +1100,7 @@
   // A power rail (Vdd/Vcc/Vsys/3V3/+5V/AVDD…), excluded from device↔device line
   // drawing along with grounds. A control net like V1/V2 (V + digit) is NOT a
   // rail, so it still gets a connection line.
-  function isPowerName(n) { return /^(?:[ad]?v[a-z]|\+?\d+v)/i.test(netLeaf(n)); }
+  function isPowerName(n) { return /^(?:[ad]?v[a-z]|\+?\d+v|v\d+[pv]\d)/i.test(netLeaf(n)); }
   function bbOf(pts) { let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; for (const p of pts) { if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0]; if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1]; } return [x0, y0, x1, y1]; }
   // Unit normal at vertex i of a polyline (for drawing offset twin lines).
   function segNormal(pts, i) { const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)]; const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1; return [-dy / L, dx / L]; }
@@ -1141,6 +1161,14 @@
     let p = xs[0];
     for (const s of xs) { let k = 0; while (k < p.length && k < s.length && p[k] === s[k]) k++; p = p.slice(0, k); if (!p) break; }
     return p.replace(/[_\-]+$/, "") || xs[0];
+  }
+  // "FLASH_IO0…FLASH_IO7" → "FLASH_IO[0:7]": the bus-range label for a collapsed
+  // indexed net family (all members share one prefix; lo/hi are the index span).
+  function famRangeLabel(nets) {
+    let pre = null, lo = Infinity, hi = -Infinity;
+    nets.forEach((n) => { const m = /^(.*?)(\d+)$/.exec(netLeaf(n)); if (!m) return; pre = m[1]; const v = +m[2]; if (v < lo) lo = v; if (v > hi) hi = v; });
+    if (!(hi >= lo)) return lcpLabel(nets.map(netLeaf));
+    return (pre || "").replace(/[_\-]+$/, "") + "[" + lo + ":" + hi + "]";
   }
   function icLinks(m) {
     const real = m.hubs.filter((h) => !h.ghost && !h.synthetic);
@@ -1308,11 +1336,16 @@
     if (!real.length) return;                            // hub-less design — keep the base layout
     const labelOf = new Map(), compOf = new Map();
     real.forEach((h) => { if (!labelOf.has(h.ref)) { labelOf.set(h.ref, h.label); compOf.set(h.ref, h.component || ""); } });
-    // The authored (section …) each IC sits in (looked up in the BASE layout,
-    // before this rebuild discards it) names what the cell is for — it becomes
-    // part of the cell's title above the dashed box.
+    // The authored (section …) each IC files under names what the cell is for —
+    // it becomes part of the cell's title and picks the band. The scene emits it
+    // per hub (`sec`, sub-block-aware: a module's parts carry the section their
+    // sub-block attaches to); geometric containment in the BASE layout stays as
+    // the fallback for scenes without it.
     const baseSecs = m.secs.filter((sc) => sc.name);
-    const secNameOf = (h) => { const sc = baseSecs.find((b) => h.cx >= b.x && h.cx <= b.x + b.w && h.cy >= b.y && h.cy <= b.y + b.h); return sc ? sc.name : ""; };
+    const secNameOf = (h) => {
+      if (h.sec) return h.sec;
+      const sc = baseSecs.find((b) => h.cx >= b.x && h.cx <= b.x + b.w && h.cy >= b.y && h.cy <= b.y + b.h); return sc ? sc.name : "";
+    };
     // Test points collapse into one compact "Test points" card (a TP glyph per
     // row) instead of a full cell each; they never anchor or ghost a link.
     const isTPRef = (r) => /^tp\d*$/i.test(String(r).split("/").pop() || "");
@@ -1585,6 +1618,11 @@
     };
     const depthGuard = new Set();
     cellRefs.sort((a, b) => (producerRefs.has(a) ? depthOf(a, depthGuard) : 1e9) - (producerRefs.has(b) ? depthOf(b, depthGuard) : 1e9));
+    // Each passive is drawn in exactly ONE cell board-wide (not once per cell
+    // touching its net): cells build power-first, so a rail's cap bank lands on
+    // its producer's row and every consumer cell shows the rail as a bare pin +
+    // producer chip instead of re-drawing the same parts.
+    const passClaimed = new Set();
     cellRefs.forEach((ref) => {
       const parts = byIC.get(ref) || new Map();
       const groups = [...parts.entries()].map(([pref, items]) => ({ pref, label: labelOf.get(pref) || pref, items })).sort((a, b) => b.items.length - a.items.length);
@@ -1602,7 +1640,6 @@
       const boxes = real.filter((h) => h.ref === ref);     // ALL the IC's boxes — a multi-part hub splits per (part …)
       const partnerNets = new Set();
       groups.forEach((g) => g.items.forEach((it) => { if (it.busPin) return; [it.net, it.outNet, it.farNet].forEach((n) => n && partnerNets.add(n)); }));
-      const passClaimed = new Set();                 // each passive lands on at most one pin of this cell
       const rowHt = (e) => Math.max(EXTRA_PITCH, (e.ps || []).length * PASSROW);
       const extras = [], seenE = new Set();
       boxes.forEach((bx) => bx.pins.forEach((p) => {
@@ -1620,13 +1657,52 @@
         // past the series parts, drawn in the owner's cell) — chip the owner instead.
         let targets = (netICs.get(net) || []).filter((r) => r !== ref);
         if (!targets.length) { const lp = linkPartner.get(ref + "\0" + p.pin); if (lp) targets = [lp]; }
-        extras.push({ net, name: p.name, ps, targets });
+        // A consumed rail names its producer first — the "fed from" reference.
+        if (rr && rr.producer !== ref) targets = [rr.producer].concat(targets.filter((t) => t !== rr.producer));
+        const role = p.role || (isGroundName(net) ? "gnd" : (rr || isPowerName(net)) ? "pwr" : "");
+        extras.push({ net, name: p.name, ps, targets, role, grp: p.grp || bx.part || "" });
       }));
-      // Build each bare pin's partner-chip model (skip pins that already spoke to passives).
-      const partnerPinLabel = (net, r) => { const mm = netRefPin.get(net); return mm ? (mm.get(r) || "") : ""; };
+      // Deflate: signal rows whose links all point at ONE other cell (≥3 pins →
+      // that partner owns the drawings) and port-only indexed families (≥4
+      // GPIO7-style nets with no partner at all) collapse into a single
+      // expandable row, so a hub cell keeps in full only what it owns. Clicking
+      // the row's label re-expands it into real, wirable pins.
+      const aggKeyOf = (e) => {
+        if (e.ps.length || e.role === "gnd" || e.role === "pwr") return null;
+        if (e.targets.length === 1) return "t\0" + e.targets[0];
+        if (!e.targets.length) { const fm = /^(.*?)\d+$/.exec(netLeaf(e.net)); if (fm && fm[1]) return "f\0" + fm[1]; }
+        return null;
+      };
+      const byAgg = new Map();
+      extras.forEach((e) => { const k = aggKeyOf(e); if (!k) return; let a = byAgg.get(k); if (!a) { a = []; byAgg.set(k, a); } a.push(e); });
+      const rows = [], aggDone = new Set();
       extras.forEach((e) => {
-        if (e.ps.length || isGroundName(e.net)) return;   // GND touches everything — chips there are pure noise
-        const tg = e.targets || [], showPin = tg.length > 0 && tg.length <= CHIP_CAP;
+        const k = aggKeyOf(e);
+        const fam = k && byAgg.get(k);
+        if (!fam || fam.length < (k.charAt(0) === "t" ? 3 : 4)) { rows.push(e); return; }
+        const akey = ref + "\0" + k;
+        if (expandedBuses.has(akey)) {               // expanded: real rows; the first carries the collapse handle
+          if (!aggDone.has(k)) { aggDone.add(k); e.busHead = akey; }
+          rows.push(e); return;
+        }
+        if (aggDone.has(k)) return;
+        aggDone.add(k);
+        const nets = fam.map((x) => x.net);
+        const label = k.charAt(0) === "f" ? famRangeLabel(nets)
+          : ((lcpLabel(nets.map(netLeaf)) || netLeaf(nets[0])).replace(/[_\-]+$/, "") || netLeaf(nets[0])) + " ×" + fam.length;
+        rows.push({ net: nets[0], name: "", ps: [], targets: k.charAt(0) === "t" ? [k.slice(2)] : [], role: "", grp: e.grp || "", agg: { key: akey, count: fam.length, label } });
+      });
+      // Build each bare pin's partner-chip model. Spoke rows only chip a consumed
+      // rail's producer (the "fed from" pointer); GND chips everywhere are noise.
+      const partnerPinLabel = (net, r) => { const mm = netRefPin.get(net); return mm ? (mm.get(r) || "") : ""; };
+      rows.forEach((e) => {
+        if (isGroundName(e.net)) return;
+        if (e.ps.length) {
+          const rr2 = railByNet.get(e.net);
+          if (rr2 && rr2.producer !== ref) e.chips = [{ text: rr2.producer, target: rr2.producer, w: chipW(rr2.producer), overflow: false }];
+          return;
+        }
+        const tg = e.targets || [], showPin = !e.agg && tg.length > 0 && tg.length <= CHIP_CAP;
         e.chips = tg.slice(0, CHIP_CAP).map((r) => {
           let text = r;
           if (showPin) { const pn = partnerPinLabel(e.net, r); if (pn) text = r + "·" + pn; }
@@ -1634,19 +1710,40 @@
         });
         if (tg.length > CHIP_CAP) { const t = "+" + (tg.length - CHIP_CAP); e.chips.push({ text: t, target: null, w: chipW(t), overflow: true, hidden: tg.slice(CHIP_CAP) }); }
       });
-      // Outboard room a side needs: a passive spoke is EXTRA_SPAN; a bare pin is its
-      // stub + net name + chip row (so wide bus pins don't collide with the next cell).
+      // Outboard room a side needs: a passive spoke is EXTRA_SPAN (+ its rail
+      // chip); a bare pin is its stub + net/aggregate label + chip row.
       const extraOutboard = (e) => {
-        if (e.ps.length) return EXTRA_SPAN;
-        const base = EXTRA_STUB + 6 + netLeaf(e.net).length * NETLBL_CHARW;
         const chips = e.chips || [];
-        if (!chips.length) return base + 8;
-        let w = base + CHIP_LEADGAP;
-        chips.forEach((c, i) => { w += c.w + (i ? CHIP_GAP : 0); });
-        return w + 8;
+        let cw = 0; chips.forEach((c, i) => { cw += c.w + (i ? CHIP_GAP : 0); });
+        if (e.ps.length) return EXTRA_SPAN + (cw ? CHIP_LEADGAP + cw + 8 : 0);
+        const text = e.agg ? e.agg.label + " ▸" : netLeaf(e.net);
+        const base = EXTRA_STUB + 6 + text.length * NETLBL_CHARW;
+        if (!cw) return base + 8;
+        return base + CHIP_LEADGAP + cw + 8;
       };
+      // Hand-schematic vertical order: supplies top, signals middle, grounds
+      // bottom; an authored pin group's rows stay contiguous and land on one
+      // side together (stable within each group).
+      const roleRank = (e) => e.role === "pwr" ? 0 : e.role === "gnd" ? 2 : 1;
+      const grpFirst = new Map();
+      rows.forEach((e, i) => { const k2 = roleRank(e) + "\0" + (e.grp || ""); if (!grpFirst.has(k2)) grpFirst.set(k2, i); });
+      const rows2 = rows.map((e, i) => ({ e, i })).sort((a, b) =>
+        (roleRank(a.e) - roleRank(b.e)) ||
+        (grpFirst.get(roleRank(a.e) + "\0" + (a.e.grp || "")) - grpFirst.get(roleRank(b.e) + "\0" + (b.e.grp || ""))) ||
+        (a.i - b.i)).map((x) => x.e);
       const eLeft = [], eRight = []; let ehL = 0, ehR = 0;
-      extras.forEach((e) => { if (ehL <= ehR) { eLeft.push(e); ehL += rowHt(e); } else { eRight.push(e); ehR += rowHt(e); } });
+      const grpRuns = [];
+      rows2.forEach((e) => {
+        const key2 = e.grp ? roleRank(e) + "\0" + e.grp : null;
+        const lastRun = grpRuns[grpRuns.length - 1];
+        if (key2 && lastRun && lastRun.key === key2) { lastRun.items.push(e); return; }
+        grpRuns.push({ key: key2, items: [e] });
+      });
+      grpRuns.forEach((r2) => {
+        const hSum = r2.items.reduce((a, e) => a + rowHt(e), 0);
+        if (ehL <= ehR) { r2.items.forEach((e) => eLeft.push(e)); ehL += hSum; }
+        else { r2.items.forEach((e) => eRight.push(e)); ehR += hSum; }
+      });
       const extraSideW = (es) => es.length ? Math.max.apply(null, es.map(extraOutboard)) : 0;
       const leftW = Math.max(sideW(side.left, leftMid), extraSideW(eLeft));
       const rightW = Math.max(sideW(side.right, rightMid), extraSideW(eRight)), icX = leftW;
@@ -1660,7 +1757,13 @@
       // whole map reads uniformly instead of one resistor hanging straight down. `dir`
       // points the spoke toward open space (away from the IC). Returns the room used.
       const pullsOn = (net, x0, x1, y, dir) => {
-        const ps = pullByNet.get(net); if (!ps || !ps.length) return 0;
+        // A pull draws ONCE board-wide (first cell that renders its net — the
+        // earliest link owner); other cells keep the plain net label. Without
+        // the claim a 4-hub NRST would re-draw its pull-up in every owner cell.
+        const all = pullByNet.get(net); if (!all || !all.length) return 0;
+        const ps = all.filter((pl) => !passClaimed.has(pl.ref));
+        if (!ps.length) return 0;
+        ps.forEach((pl) => passClaimed.add(pl.ref));
         const mx0 = (x0 + x1) / 2, jy = y + PULL_DROP, d = dir || 1;
         ps.forEach((pl, k) => {
           const mx = mx0 + (k - (ps.length - 1) / 2) * 46;
@@ -1688,8 +1791,34 @@
           const ghX = gmid > 0 ? (onRight ? icEdge + LEAD + gmid + LEAD : icEdge - LEAD - gmid - LEAD - GW)
             : (onRight ? icEdge + OUT : icEdge - OUT - GW);
           const ghIn = onRight ? ghX : ghX + GW;
+          // Bus collapse: ≥4 plain direct links to this partner whose nets form one
+          // indexed family (FLASH_IO0…7) fold into a single thick bus row with a
+          // range label. Clicking the label expands the family back into real rows
+          // (the first expanded row carries the ▾ collapse handle).
+          let items2 = g.items.slice();
+          {
+            const famOf = (it) => {
+              if (it.through || it.chain || it.via || it.busPin || it.terminal || it.diff) return null;
+              if (it.outNet || it.farNet || pullByNet.has(it.net)) return null;
+              const fm = /^(.*?)\d+$/.exec(netLeaf(it.net || "")); return fm && fm[1] ? fm[1] : null;
+            };
+            const fams = new Map();
+            g.items.forEach((it) => { const f = famOf(it); if (!f) return; let a = fams.get(f); if (!a) { a = []; fams.set(f, a); } a.push(it); });
+            fams.forEach((fam, f) => {
+              if (fam.length < 4) return;
+              const bkey = ref + "\0" + g.pref + "\0" + f;
+              if (expandedBuses.has(bkey)) { fam.forEach((it, k2) => { if (!k2) it.busHead = bkey; }); return; }
+              const nets = fam.map((it) => it.net);
+              const busIt = { net: fam[0].net, outNet: null, farNet: null, through: null, via: null, tail: null,
+                icPinName: "", ghostPinName: "×" + fam.length, diff: false, terminal: !!fam[0].terminal,
+                bus: { key: bkey, count: fam.length, label: famRangeLabel(nets), nets } };
+              const at = items2.indexOf(fam[0]);
+              items2 = items2.filter((it) => fam.indexOf(it) < 0);
+              items2.splice(Math.max(0, Math.min(at, items2.length)), 0, busIt);
+            });
+          }
           // Order items so each shifter's channels are a contiguous run (direct first).
-          const ordered = g.items.slice().sort((p, q) => {
+          const ordered = items2.slice().sort((p, q) => {
             const sp = p.through ? p.through.ref : "", sq = q.through ? q.through.ref : "";
             return sp === sq ? 0 : !sp ? -1 : !sq ? 1 : sp < sq ? -1 : 1;
           });
@@ -1698,7 +1827,7 @@
           ordered.forEach((it) => {
             const s = it.through ? it.through.ref : null;
             if (s !== curS) { if (s) y += SHEAD; curS = s; }       // header room before a shifter run
-            if (!it.busPin) (onRight ? cell.rightPins : cell.leftPins).push({ name: it.icPinName, x: icEdge, y, net: it.net });
+            if (!it.busPin) (onRight ? cell.rightPins : cell.leftPins).push({ name: it.icPinName, x: icEdge, y, net: it.net, noPort: it.bus ? true : undefined });
             const gnet = it.farNet || it.outNet || it.net;
             gpins.push({ pin: gnet, name: it.busPin ? "" : (it.ghostPinName === it.icPinName ? "" : it.ghostPinName), side: onRight ? "left" : "right", x: ghIn, y, net: gnet, vx: it.busPin ? ghIn - dir * BUS_LEAD : null, vy: it.busPin ? y : null });
             rows.push({ it, y, s });
@@ -1733,6 +1862,11 @@
               if (prevNet) cell.labels.push({ text: prevNet, x: (prevX + ghIn) / 2, y: r.y - 9, w: segW(prevX, ghIn) });
               i++; continue;
             }
+            if (r.it.bus) {                                        // collapsed bus family: one thick wire + range label ("FLASH_IO[0:7] ▸")
+              cell.wires.push({ net: r.it.net, busw: true, pts: [[icEdge, r.y], [ghIn, r.y]] });
+              cell.labels.push({ text: r.it.bus.label + " ▸", x: (icEdge + ghIn) / 2, y: r.y - 10, w: segW(icEdge, ghIn), busKey: r.it.bus.key });
+              i++; continue;
+            }
             if (r.it.busPin) {                                     // bus pin ON the ghost: dot + a lead (the gpin's vx/vy stub) + net label ABOVE the lead; the yellow reveal connects to the lead end
               // Align the label to the ghost edge, reading outward along the lead: left-aligned
               // when the pin is on the ghost's RIGHT edge (dir<0), right-aligned on the LEFT edge.
@@ -1757,7 +1891,7 @@
                 pullsOn(r.it.outNet, ghEnd, ghIn, r.y, onRight ? 1 : -1);
               } else {
                 cell.wires.push({ net: r.it.net, diff: r.it.diff, via: r.it.via, pts: [[icEdge, r.y], [ghIn, r.y]] });
-                cell.labels.push({ text: r.it.net, x: (icEdge + ghIn) / 2, y: r.y - 10, diff: r.it.diff, w: segW(icEdge, ghIn) });
+                cell.labels.push({ text: r.it.busHead ? "▾ " + r.it.net : r.it.net, x: (icEdge + ghIn) / 2, y: r.y - 10, diff: r.it.diff, w: segW(icEdge, ghIn), busKey: r.it.busHead || undefined });
                 pullsOn(r.it.net, icEdge, ghIn, r.y, onRight ? 1 : -1);
               }
               i++; continue;
@@ -1800,15 +1934,19 @@
           if (!es.length) return 0;
           const dir = onRight ? 1 : -1, edge = onRight ? icX + ICW : icX;
           const dst = (k) => edge + dir * k;
-          let ey = baseY + EXTRA_TOP;
+          let ey = baseY + EXTRA_TOP, prevGrp = null;
           es.forEach((e) => {
             const nP = e.ps.length, rowH = rowHt(e), pinY = ey + rowH / 2;
-            (onRight ? cell.rightPins : cell.leftPins).push({ name: e.name, x: edge, y: pinY, net: e.net });
-            if (!nP) {                                   // bare pin → stub + net name (grounds draw the earth symbol) + partner chips
-              cell.wires.push({ net: e.net, pts: [[edge, pinY], [dst(EXTRA_STUB), pinY]] });
+            // authored pin-group run label — a small muted heading at the run's first row
+            if (e.grp && e.grp !== prevGrp) cell.labels.push({ text: e.grp, x: dst(6), y: ey + 4, anchor: onRight ? "start" : "end", dim: true });
+            prevGrp = e.grp || null;
+            (onRight ? cell.rightPins : cell.leftPins).push({ name: e.name, x: edge, y: pinY, net: e.net, noPort: e.agg ? true : undefined });
+            if (!nP) {                                   // bare pin → stub + net/aggregate label (grounds draw the earth symbol) + partner chips
+              const ltext = e.agg ? e.agg.label + " ▸" : (e.busHead ? "▾ " + netLeaf(e.net) : netLeaf(e.net));
+              cell.wires.push({ net: e.net, busw: !!e.agg, pts: [[edge, pinY], [dst(EXTRA_STUB), pinY]] });
               if (isGroundName(e.net)) cell.labels.push({ text: netLeaf(e.net), x: dst(EXTRA_STUB), y: pinY, ground: true });
-              else cell.labels.push({ text: netLeaf(e.net), x: dst(EXTRA_STUB + 6), y: pinY, anchor: onRight ? "start" : "end" });
-              let k = EXTRA_STUB + 6 + netLeaf(e.net).length * NETLBL_CHARW + CHIP_LEADGAP;
+              else cell.labels.push({ text: ltext, x: dst(EXTRA_STUB + 6), y: pinY, anchor: onRight ? "start" : "end", busKey: e.agg ? e.agg.key : (e.busHead || undefined) });
+              let k = EXTRA_STUB + 6 + ltext.length * NETLBL_CHARW + CHIP_LEADGAP;
               (e.chips || []).forEach((cm) => {
                 const x0 = dst(k), x1 = dst(k + cm.w);
                 cell.chips.push({ x: Math.min(x0, x1), y: pinY - CHIP_H / 2, w: cm.w, h: CHIP_H, text: cm.text, net: e.net,
@@ -1825,6 +1963,13 @@
                 cell.pulls.push({ axis: "h", dir, y: y0 + k * PASSROW, jx,
                   x: dst(EXTRA_LEAD + SYM_LEAD + SPOKE_SYM / 2), tx: dst(EXTRA_LEAD + SYM_LEAD + SPOKE_SYM + TERM_LEAD),
                   ref: pp.ref, value: pp.value, type: pp.type || "resistor", term: og ? "gnd" : op ? "rail" : "net", rail: netLeaf(pp.other) });
+              });
+              let k2 = EXTRA_SPAN + CHIP_LEADGAP;        // a consumed rail's producer chip sits past the spokes
+              (e.chips || []).forEach((cm) => {
+                const x0 = dst(k2), x1 = dst(k2 + cm.w);
+                cell.chips.push({ x: Math.min(x0, x1), y: pinY - CHIP_H / 2, w: cm.w, h: CHIP_H, text: cm.text, net: e.net,
+                  target: cm.target, overflow: cm.overflow, hidden: cm.hidden || null, side: onRight ? "right" : "left", hx: edge, hy: pinY });
+                k2 += cm.w + CHIP_GAP;
               });
             }
             ey += rowH;
@@ -1882,9 +2027,27 @@
       if (gi === undefined) { gi = bgroups.length; bgIdx.set(nm, gi); bgroups.push({ name: nm, cells: [] }); }
       bgroups[gi].cells.push(c);
     });
+    // Canonical reading order: Power first, then core → memory → clocks → comms →
+    // sensors → analog → peripherals → protection → connectors; test points last.
+    // Categories come from the scene's sheet_meta (the same classifier that colors
+    // the system-overview diagram); authored order breaks ties (stable sort).
+    const catRank = { power: 0, mcu: 1, memory: 2, clock: 3, comms: 4, sensor: 5, analog: 6, peripheral: 7, protection: 8, connector: 9 };
+    const catOf = new Map(); (scene.sheet_meta || []).forEach((sm) => catOf.set(sm.name, sm.cat));
+    const bandRank = (g) => {
+      if (g.name === "Power") return -1;
+      if (g.name === " tp") return 99;
+      if (!g.name) return 7;
+      const r = catRank[catOf.get(g.name)];
+      return r === undefined ? 7 : r;
+    };
+    bgroups.sort((a, b) => bandRank(a) - bandRank(b));
     const packs = [];
     bgroups.forEach((g) => {
-      if (g.name === "Power" || (g.name && g.name !== " tp" && g.cells.length >= 2)) { packs.push({ name: g.name, cells: g.cells }); return; }
+      // Every authored section bands — even with one cell — so the canvas and
+      // sheet list mirror the authored structure ("Boot NOR Flash" is a page
+      // whether the module holds one IC or five). Only unsectioned cells and
+      // the test-point card merge into unnamed runs.
+      if (g.name === "Power" || (g.name && g.name !== " tp")) { packs.push({ name: g.name, cells: g.cells }); return; }
       const last = packs[packs.length - 1];
       if (last && !last.name) last.cells.push.apply(last.cells, g.cells);
       else packs.push({ name: null, cells: g.cells });
@@ -1903,7 +2066,7 @@
       });
       cy += rowH;
       if (p.name) {
-        m.bands.push({ name: p.name, x: -BAND_PAD, y: top, w: right + 2 * BAND_PAD, h: (cy - top) + BAND_PAD, count: p.cells.length, power: p.name === "Power" });
+        m.bands.push({ name: p.name, num: m.bands.length + 1, x: -BAND_PAD, y: top, w: right + 2 * BAND_PAD, h: (cy - top) + BAND_PAD, count: p.cells.length, power: p.name === "Power" });
         cy += BAND_PAD + BAND_GAP;
       } else cy += CGY;
       bx1 = Math.max(bx1, right);
@@ -1920,7 +2083,7 @@
           m.hubs.push({ ref: t.ref, label: t.ref, part: "", x, y: y - 8, w: 16, h: 16, cx: x + 8, cy: y, pins: [{ pin: "1", name: "", side: "right", x: x + 16, y, net: t.net, vx: null, vy: null }], tp: true });
         });
       } else {
-        const mk = (p, side) => ({ pin: p.name, name: p.name, side, x: ox + p.x, y: oy + p.y, net: p.net, vx: null, vy: null });
+        const mk = (p, side) => ({ pin: p.name, name: p.name, side, x: ox + p.x, y: oy + p.y, net: p.net, noPort: p.noPort, vx: null, vy: null });
         const pins = c.leftPins.map((p) => mk(p, "left")).concat(c.rightPins.map((p) => mk(p, "right")));
         m.hubs.push({ ref: c.ref, label: c.ref, part: compOf.get(c.ref) || "", x: ox + c.icX, y: oy, w: ICW, h: c.ch, cx: ox + c.icX + ICW / 2, cy: oy + c.ch / 2, pins });
       }
@@ -1928,8 +2091,8 @@
         const pins2 = g.pins.map((p) => ({ ...p, x: ox + p.x, y: oy + p.y, vx: p.vx != null ? ox + p.vx : null, vy: p.vy != null ? oy + p.vy : null }));
         m.hubs.push({ ref: g.ref, label: g.label, part: g.part, canon: !!g.canon, gnd: !!g.gnd, x: ox + g.x, y: oy + g.y, w: g.w, h: g.h, cx: ox + g.x + g.w / 2, cy: oy + g.y + g.h / 2, pins: pins2, synthetic: true, ghost: true, terminal: !!g.terminal, partnerRef: g.terminal ? null : g.ref });
       });
-      c.wires.forEach((w) => { const pts = w.pts.map((pt) => [ox + pt[0], oy + pt[1]]); m.wires.push({ net: w.net, bus: false, link: true, diff: w.diff, via: w.via, pts, bb: bbOf(pts) }); });
-      c.labels.forEach((l) => m.labels.push({ text: l.text, x: ox + l.x, y: oy + l.y, anchor: l.anchor || "center", ground: !!l.ground, port: false, net: l.text, link: true, diff: l.diff, w: l.w }));
+      c.wires.forEach((w) => { const pts = w.pts.map((pt) => [ox + pt[0], oy + pt[1]]); m.wires.push({ net: w.net, bus: !!w.busw, link: true, diff: w.diff, via: w.via, pts, bb: bbOf(pts) }); });
+      c.labels.forEach((l) => m.labels.push({ text: l.text, x: ox + l.x, y: oy + l.y, anchor: l.anchor || "center", ground: !!l.ground, port: false, net: l.busKey ? "" : l.text, link: true, diff: l.diff, w: l.w, busKey: l.busKey, dim: !!l.dim }));
       c.pulls.forEach((p) => m.pulls.push({ x: ox + p.x, y: oy + p.y, ref: p.ref, value: p.value, rail: p.rail, up: p.up, type: p.type, term: p.term, axis: p.axis, dir: p.dir, jx: p.jx != null ? ox + p.jx : null, tx: p.tx != null ? ox + p.tx : null }));
       if (c.chips) c.chips.forEach((ch) => m.chips.push({ x: ox + ch.x, y: oy + ch.y, w: ch.w, h: ch.h, text: ch.text, net: ch.net, target: ch.target, overflow: ch.overflow, hidden: ch.hidden, side: ch.side, hx: ox + ch.hx, hy: oy + ch.hy, hostRef: c.ref }));
       bx1 = Math.max(bx1, c.x + c.w); by1 = Math.max(by1, c.y + c.h);

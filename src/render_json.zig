@@ -18,6 +18,9 @@ const hub_mod = @import("render_svg/hub.zig");
 const connection = @import("render_svg/connection.zig");
 const draw = @import("render_svg/draw.zig");
 const branch_mod = @import("render_svg/branch.zig");
+const membership = @import("diagram/membership.zig");
+const rb_types = @import("render_block_types.zig");
+const pin_roles = @import("placement/pin_roles.zig");
 
 const hub_width = draw.hub_width;
 const hub_x = draw.hub_x;
@@ -88,6 +91,15 @@ const JsonPin = struct {
     /// connection map. Emitting it lets the map see power/ground and each pin's true
     /// net. Grouping is net-based, so one net covers the whole group.
     net: []const u8 = "",
+    /// Electrical role of the pin group — "pwr" (supply), "gnd" (ground), or ""
+    /// (signal). From the pinout function name (falling back to the net name),
+    /// so the editor's map can order supplies top / grounds bottom without
+    /// re-deriving the heuristics client-side.
+    role: []const u8 = "",
+    /// Feature-group label from the enclosing `(pins ref (group "X") …)`
+    /// declaration; empty for ungrouped pins. Lets the map keep an authored
+    /// pin group contiguous and label the run.
+    pgroup: []const u8 = "",
 };
 
 const JsonHub = struct {
@@ -103,6 +115,12 @@ const JsonHub = struct {
     h: f64,
     icon: ?[]const u8,
     src_offset: u32 = 0,
+    /// Authored sheet this hub files under: its `(section …)` name, with
+    /// sub-block hubs folded into the section their sub-block attaches to
+    /// (membership.computeSubBlockAttachments). The editor's map groups
+    /// cells into bands by this instead of geometric containment, so a
+    /// module's parts land on the author's sheet, not a module-title one.
+    sec: []const u8 = "",
     left_pins: std.ArrayListUnmanaged(JsonPin),
     right_pins: std.ArrayListUnmanaged(JsonPin),
 };
@@ -310,6 +328,13 @@ fn buildPowerRails(allocator: Allocator, block: *const DesignBlock) Allocator.Er
     return out.toOwnedSlice(allocator);
 }
 
+/// One authored sheet (section, sub-section, or unattached sub-block) with the
+/// coarse `render_block_types.Category` its name/instances classify to.
+const SheetMeta = struct {
+    name: []const u8,
+    cat: []const u8,
+};
+
 const SceneGraph = struct {
     allocator: Allocator,
     vb_w: f64 = 0,
@@ -328,6 +353,11 @@ const SceneGraph = struct {
     /// The design's top-level boundary `(port …)` forms, so the editor can list /
     /// add / remove them (the design-level interface view).
     ports: []const env_mod.Port = &.{},
+    /// Authored sheets with their block-diagram category (same classifier as
+    /// the system overview), in authored order. The editor orders its bands
+    /// canonically (power → mcu → memory → …) and colors glance chips from
+    /// this without duplicating the keyword tables client-side.
+    sheet_meta: []const SheetMeta = &.{},
     /// Sub-block-sourced power rails with their producer IC resolved — the
     /// editor's map draws the power tree from these.
     power_rails: []const ScenePowerRail = &.{},
@@ -644,13 +674,37 @@ fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, par
 /// forms (and their sub-sections) plus `(sub-block …)`s. These are what the
 /// editor pages by; when the list is empty the design has no explicit sections
 /// and the editor shows a single whole-design sheet.
-fn collectAuthoredSections(allocator: Allocator, block: *const DesignBlock) ![]const []const u8 {
+fn collectAuthoredSections(allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize) ![]const []const u8 {
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
     for (block.sections) |sec| {
         try list.append(allocator, sec.name);
         for (sec.sub_sections) |sub| try list.append(allocator, sub.name);
     }
-    for (block.sub_blocks) |sb| try list.append(allocator, sb.block.name);
+    // A sub-block that attaches to an authored section files its cells under
+    // that section, so listing its module title too would page an empty
+    // duplicate sheet. Only unattached sub-blocks stay their own sheet.
+    for (block.sub_blocks, 0..) |sb, sb_idx| {
+        if (sub_attachments[sb_idx] != null) continue;
+        try list.append(allocator, sb.block.name);
+    }
+    return list.items;
+}
+
+/// Build the scene's `sheet_meta`: one entry per authored sheet (same set and
+/// order as `collectAuthoredSections`), each classified with the system-
+/// overview category heuristics so the editor can order bands canonically.
+fn buildSheetMeta(allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize) ![]const SheetMeta {
+    var list: std.ArrayListUnmanaged(SheetMeta) = .empty;
+    for (block.sections) |sec| {
+        try list.append(allocator, .{ .name = sec.name, .cat = @tagName(rb_types.classifySection(sec)) });
+        for (sec.sub_sections) |sub| {
+            try list.append(allocator, .{ .name = sub.name, .cat = @tagName(rb_types.classifySection(sub)) });
+        }
+    }
+    for (block.sub_blocks, 0..) |sb, sb_idx| {
+        if (sub_attachments[sb_idx] != null) continue;
+        try list.append(allocator, .{ .name = sb.block.name, .cat = @tagName(rb_types.classifyByName(sb.block.name, sb.block.instances)) });
+    }
     return list.items;
 }
 
@@ -668,7 +722,10 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
 
     var scene = SceneGraph.init(allocator);
     scene.design_name = block.name;
-    scene.authored_sections = try collectAuthoredSections(allocator, block);
+    const sub_attachments = try membership.computeSubBlockAttachments(allocator, block);
+    defer allocator.free(sub_attachments);
+    scene.authored_sections = try collectAuthoredSections(allocator, block, sub_attachments);
+    scene.sheet_meta = try buildSheetMeta(allocator, block, sub_attachments);
     scene.ports = block.ports;
     scene.power_rails = try buildPowerRails(allocator, block);
 
@@ -686,6 +743,10 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
         name: []const u8,
         description: []const u8,
         notes: []const env_mod.SectionNote,
+        /// Authored sheet the cells file under (differs from `name` only for a
+        /// sub-block attached to a section: `name` stays the module title the
+        /// card is drawn with, `sheet` is the adopting section).
+        sheet: []const u8,
         cell_indices: std.ArrayListUnmanaged(usize),
     };
     var section_grid: std.ArrayListUnmanaged(SectionInfo) = .empty;
@@ -693,22 +754,25 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
 
     for (block.sections) |sec| {
         const sec_idx = section_grid.items.len;
-        try section_grid.append(allocator, .{ .name = sec.name, .description = sec.description, .notes = sec.notes, .cell_indices = .empty });
+        try section_grid.append(allocator, .{ .name = sec.name, .description = sec.description, .notes = sec.notes, .sheet = sec.name, .cell_indices = .empty });
         for (sec.instances) |inst| {
             try ref_to_section.put(inst.ref_des, sec_idx);
         }
         for (sec.sub_sections) |sub| {
             const sub_idx = section_grid.items.len;
-            try section_grid.append(allocator, .{ .name = sub.name, .description = sub.description, .notes = sub.notes, .cell_indices = .empty });
+            try section_grid.append(allocator, .{ .name = sub.name, .description = sub.description, .notes = sub.notes, .sheet = sub.name, .cell_indices = .empty });
             for (sub.instances) |inst| {
                 try ref_to_section.put(inst.ref_des, sub_idx);
             }
         }
     }
-    // Add sub-blocks as sections
-    for (block.sub_blocks) |sb| {
+    // Add sub-blocks as sections. An attached sub-block keeps its own card
+    // (name/geometry unchanged) but its cells file under the adopting
+    // section's sheet, so the editor's bands match the authored structure.
+    for (block.sub_blocks, 0..) |sb, sb_idx| {
         const sec_idx = section_grid.items.len;
-        try section_grid.append(allocator, .{ .name = sb.block.name, .description = "", .notes = &.{}, .cell_indices = .empty });
+        const sheet: []const u8 = if (sub_attachments[sb_idx]) |att| block.sections[att].name else sb.block.name;
+        try section_grid.append(allocator, .{ .name = sb.block.name, .description = "", .notes = &.{}, .sheet = sheet, .cell_indices = .empty });
         for (sb.block.instances) |inst| {
             try ref_to_section.put(inst.ref_des, sec_idx);
         }
@@ -737,7 +801,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
                     if (std.mem.eql(u8, sg.name, hub_inst.component)) break :blk si;
                 }
                 const si = section_grid.items.len;
-                try section_grid.append(allocator, .{ .name = hub_inst.component, .description = "", .notes = &.{}, .cell_indices = .empty });
+                try section_grid.append(allocator, .{ .name = hub_inst.component, .description = "", .notes = &.{}, .sheet = hub_inst.component, .cell_indices = .empty });
                 break :blk si;
             };
             const ci = cells.items.len;
@@ -847,7 +911,8 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
             const h = cell_heights[ci];
 
             // Collect hub data
-            const json_hub = try collectHubData(&ctx, allocator, cell.hub_inst, cell.part, x_offset, content_y, &alt_map, &asserted_fns);
+            var json_hub = try collectHubData(&ctx, allocator, cell.hub_inst, cell.part, x_offset, content_y, &alt_map, &asserted_fns);
+            json_hub.sec = sg.sheet;
             try scene.hubs.append(allocator, json_hub);
 
             // Collect connections for this hub (writes wires/passives straight
@@ -1021,6 +1086,7 @@ fn collectHubData(
         const height = left_heights[gi];
         const pin_cy = py_left + height / HALF_DIVISOR;
         const enrich = pinEnrichment(allocator, group, hub.ref_des, hub.symbol, alt_map, asserted_fns);
+        const gnet = hubPinGroupNet(ctx, allocator, hub.ref_des, group);
         try json_hub.left_pins.append(allocator, .{
             .pin_numbers = group.pin_numbers,
             .display_name = group.display_name,
@@ -1028,7 +1094,9 @@ fn collectHubData(
             .side = "left",
             .alts = enrich.alts,
             .active_fn = enrich.active_fn,
-            .net = hubPinGroupNet(ctx, allocator, hub.ref_des, group),
+            .net = gnet,
+            .role = pinGroupRole(group, gnet),
+            .pgroup = group.group,
         });
         py_left += height;
     }
@@ -1039,6 +1107,7 @@ fn collectHubData(
         const height = right_heights[gi];
         const pin_cy = py_right + height / HALF_DIVISOR;
         const enrich = pinEnrichment(allocator, group, hub.ref_des, hub.symbol, alt_map, asserted_fns);
+        const gnet = hubPinGroupNet(ctx, allocator, hub.ref_des, group);
         try json_hub.right_pins.append(allocator, .{
             .pin_numbers = group.pin_numbers,
             .display_name = group.display_name,
@@ -1046,12 +1115,36 @@ fn collectHubData(
             .side = "right",
             .alts = enrich.alts,
             .active_fn = enrich.active_fn,
-            .net = hubPinGroupNet(ctx, allocator, hub.ref_des, group),
+            .net = gnet,
+            .role = pinGroupRole(group, gnet),
+            .pgroup = group.group,
         });
         py_right += height;
     }
 
     return json_hub;
+}
+
+/// Strip the "_(N)" fold-count suffix a collapsed stub label carries
+/// ("VSS_(9)" → "VSS") so the role heuristics see the bare function name.
+fn stripFoldCount(name: []const u8) []const u8 {
+    if (name.len < 4 or name[name.len - 1] != ')') return name;
+    const open = std.mem.lastIndexOf(u8, name, "_(") orelse return name;
+    for (name[open + 2 .. name.len - 1]) |c| {
+        if (c < '0' or c > '9') return name;
+    }
+    return name[0..open];
+}
+
+/// Classify a pin group's electrical role for the scene: "gnd", "pwr", or ""
+/// (signal). Function name first (the display name is the pinout function when
+/// one exists), net name as fallback so unlabeled power pins still classify.
+fn pinGroupRole(group: PinGroup, net: []const u8) []const u8 {
+    const name = stripFoldCount(group.display_name);
+    if (pin_roles.isGroundFn(name) or isGroundNet(net)) return "gnd";
+    if (pin_roles.isSupplyFn(name)) return "pwr";
+    if (net.len > 0 and pin_roles.isSupplyFn(net)) return "pwr";
+    return "";
 }
 
 const PinEnrichment = struct {
@@ -1814,6 +1907,10 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
             try w.writeAll(",\"icon\":null");
         }
         try w.print(",\"src\":{d}", .{h.src_offset});
+        if (h.sec.len > 0) {
+            try w.writeAll(",");
+            try writeJsonString(w, "sec", h.sec);
+        }
 
         // Left pins
         try w.writeAll(",\"leftPins\":[");
@@ -1919,6 +2016,19 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
     }
     try w.writeAll("]");
 
+    // Sheet categories (same names as authored_sections, classified) — the
+    // editor orders bands canonically and colors glance chips from these.
+    try w.writeAll(",\"sheet_meta\":[");
+    for (scene.sheet_meta, 0..) |sm, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try json_writer.writeString(w, sm.name);
+        try w.writeAll(",\"cat\":");
+        try json_writer.writeString(w, sm.cat);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+
     // Top-level boundary ports (the editor's design-interface list).
     try w.writeAll(",\"ports\":[");
     for (scene.ports, 0..) |p, i| {
@@ -1969,6 +2079,14 @@ fn writeJsonPin(w: anytype, pin: JsonPin) !void {
         try w.writeAll(",");
         try writeJsonString(w, "activeFn", pin.active_fn);
     }
+    if (pin.role.len > 0) {
+        try w.writeAll(",");
+        try writeJsonString(w, "role", pin.role);
+    }
+    if (pin.pgroup.len > 0) {
+        try w.writeAll(",");
+        try writeJsonString(w, "grp", pin.pgroup);
+    }
     if (pin.alts.len > 0) {
         try w.writeAll(",\"alts\":[");
         for (pin.alts, 0..) |alt, ai| {
@@ -2006,4 +2124,94 @@ test "serializeScene escapes a quote/backslash in the design name" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"\\\"},\\\"evil\\\":\\\"x\\\\\"") != null);
     // No injected top-level "evil" key with an unescaped colon leaked out.
     try std.testing.expect(std.mem.indexOf(u8, out, ",\"evil\":\"x") == null);
+}
+
+/// Test-only pin group with just the fields the role classifier reads.
+fn testPinGroup(display_name: []const u8) PinGroup {
+    return .{ .display_name = display_name, .pin_numbers = "1", .conns = &.{} };
+}
+
+// spec: render_svg - Pin groups classify supply and ground roles from function or net names
+test "pinGroupRole classifies supplies, grounds, and signals" {
+    try std.testing.expectEqualStrings("gnd", pinGroupRole(testPinGroup("VSS_(9)"), ""));
+    try std.testing.expectEqualStrings("gnd", pinGroupRole(testPinGroup("3"), "GND"));
+    try std.testing.expectEqualStrings("pwr", pinGroupRole(testPinGroup("VDDA18_USB"), ""));
+    try std.testing.expectEqualStrings("pwr", pinGroupRole(testPinGroup("7"), "VBUS"));
+    try std.testing.expectEqualStrings("", pinGroupRole(testPinGroup("PA3"), "SPI_SCK"));
+}
+
+/// Assemble the minimal block for the attached-sub-block sheet tests: one
+/// authored section plus two sub-blocks (their inner blocks passed in so the
+/// pointers outlive the call).
+fn testAttachBlock(inner_a: *DesignBlock, inner_b: *DesignBlock) DesignBlock {
+    return .{
+        .name = "t",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sections = &[_]env_mod.Section{.{ .name = "Boot NOR Flash" }},
+        .sub_blocks = &[_]env_mod.SubBlock{
+            .{ .name = "flash", .block = inner_a },
+            .{ .name = "aux", .block = inner_b },
+        },
+    };
+}
+
+// spec: render_svg - An attached sub-block folds into its host section instead of paging its module title
+test "collectAuthoredSections drops attached sub-block module titles" {
+    const alloc = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var inner_a = DesignBlock{ .name = "MX66UW Flash", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+    var inner_b = DesignBlock{ .name = "Aux Module", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+    const block = testAttachBlock(&inner_a, &inner_b);
+    const attachments = [_]?usize{ 0, null };
+    const names = try collectAuthoredSections(arena, &block, &attachments);
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expectEqualStrings("Boot NOR Flash", names[0]);
+    try std.testing.expectEqualStrings("Aux Module", names[1]);
+}
+
+// spec: render_svg - Sheet metadata classifies each authored sheet with the system-overview category
+test "buildSheetMeta categorizes sections and unattached sub-blocks" {
+    const alloc = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var inner_a = DesignBlock{ .name = "MX66UW Flash", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+    var inner_b = DesignBlock{ .name = "USB-C 2.0 HS", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+    const block = testAttachBlock(&inner_a, &inner_b);
+    const attachments = [_]?usize{ 0, null };
+    const metas = try buildSheetMeta(arena, &block, &attachments);
+    try std.testing.expectEqual(@as(usize, 2), metas.len);
+    try std.testing.expectEqualStrings("memory", metas[0].cat); // "Boot NOR Flash" → Flash keyword
+    try std.testing.expectEqualStrings("comms", metas[1].cat); // "USB-C 2.0 HS" → USB keyword
+}
+
+// spec: render_svg - Scene hubs serialize their authored sheet and the scene lists sheet categories
+test "serializeScene emits hub sec, pin role, and sheet_meta" {
+    const alloc = std.testing.allocator;
+    var scene = SceneGraph.init(alloc);
+    defer {
+        scene.sections.deinit(alloc);
+        scene.hubs.deinit(alloc);
+        scene.wires.deinit(alloc);
+        scene.passives.deinit(alloc);
+        scene.labels.deinit(alloc);
+        scene.staged.deinit(alloc);
+    }
+    var hub = JsonHub{ .ref = "U1", .component = "c", .value = "", .symbol = "s", .part = null, .label = "U1", .x = 0, .y = 0, .w = 10, .h = 10, .icon = null, .sec = "Boot NOR Flash", .left_pins = .empty, .right_pins = .empty };
+    try hub.left_pins.append(alloc, .{ .pin_numbers = "1", .display_name = "VSS", .y = 0, .side = "left", .net = "GND", .role = "gnd", .pgroup = "Power" });
+    defer scene.hubs.items[0].left_pins.deinit(alloc);
+    try scene.hubs.append(alloc, hub);
+    scene.sheet_meta = &[_]SheetMeta{.{ .name = "Boot NOR Flash", .cat = "memory" }};
+    const out = try serializeScene(alloc, &scene);
+    defer alloc.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"sec\":\"Boot NOR Flash\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"role\":\"gnd\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"grp\":\"Power\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"sheet_meta\":[{\"name\":\"Boot NOR Flash\",\"cat\":\"memory\"}]") != null);
 }

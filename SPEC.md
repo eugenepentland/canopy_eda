@@ -516,6 +516,10 @@ Public functions: renderBlockDiagramTabs, renderSystemSvg
 Public functions: renderSchematic
 
 - Docks a (decouples ...) bypass cap on the bound hub pad instead of every pin of the rail
+- Pin groups classify supply and ground roles from function or net names
+- An attached sub-block folds into its host section instead of paging its module title
+- Sheet metadata classifies each authored sheet with the system-overview category
+- Scene hubs serialize their authored sheet and the scene lists sheet categories
 
 ## erc
 
