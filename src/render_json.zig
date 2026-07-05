@@ -708,6 +708,121 @@ fn buildSheetMeta(allocator: Allocator, block: *const DesignBlock, sub_attachmen
     return list.items;
 }
 
+/// A hub (or one `(part …)` of a multi-part hub) assigned to a section slot.
+const GridCell = struct {
+    hub_inst: FlatInst,
+    part: ?env_mod.Part,
+    section_idx: usize,
+};
+
+/// One grid slot per authored section / sub-section / sub-block card. `sheet`
+/// is the authored page the slot's cells file under — it differs from `name`
+/// only for a sub-block attached to a section (the card keeps the module
+/// title; the sheet is the adopting section).
+const SectionInfo = struct {
+    name: []const u8,
+    description: []const u8,
+    notes: []const env_mod.SectionNote,
+    sheet: []const u8,
+    cell_indices: std.ArrayListUnmanaged(usize),
+};
+
+const SectionGridState = struct {
+    grid: std.ArrayListUnmanaged(SectionInfo),
+    ref_to_section: std.StringHashMap(usize),
+};
+
+/// Build the section grid (one slot per authored section, sub-section, and
+/// sub-block card) plus the instance-ref → slot map. An attached sub-block
+/// keeps its own card but files under the adopting section's sheet, so the
+/// editor's bands match the authored structure.
+fn buildSectionGrid(allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize) !SectionGridState {
+    var st = SectionGridState{ .grid = .empty, .ref_to_section = std.StringHashMap(usize).init(allocator) };
+    for (block.sections) |sec| {
+        const sec_idx = st.grid.items.len;
+        try st.grid.append(allocator, .{
+            .name = sec.name,
+            .description = sec.description,
+            .notes = sec.notes,
+            .sheet = sec.name,
+            .cell_indices = .empty,
+        });
+        for (sec.instances) |inst| try st.ref_to_section.put(inst.ref_des, sec_idx);
+        for (sec.sub_sections) |sub| {
+            const sub_idx = st.grid.items.len;
+            try st.grid.append(allocator, .{
+                .name = sub.name,
+                .description = sub.description,
+                .notes = sub.notes,
+                .sheet = sub.name,
+                .cell_indices = .empty,
+            });
+            for (sub.instances) |inst| try st.ref_to_section.put(inst.ref_des, sub_idx);
+        }
+    }
+    for (block.sub_blocks, 0..) |sb, sb_idx| {
+        const sec_idx = st.grid.items.len;
+        const sheet: []const u8 = if (sub_attachments[sb_idx]) |att| block.sections[att].name else sb.block.name;
+        try st.grid.append(allocator, .{
+            .name = sb.block.name,
+            .description = "",
+            .notes = &.{},
+            .sheet = sheet,
+            .cell_indices = .empty,
+        });
+        for (sb.block.instances) |inst| try st.ref_to_section.put(inst.ref_des, sec_idx);
+    }
+    return st;
+}
+
+/// Assign every hub (or hub part) to a section slot: declared membership
+/// first, then a component-name match, else a synthetic slot minted from the
+/// component name (also its sheet).
+fn collectGridCells(
+    allocator: Allocator,
+    ctx: *RenderCtx,
+    section_grid: *std.ArrayListUnmanaged(SectionInfo),
+    ref_to_section: *const std.StringHashMap(usize),
+) !std.ArrayListUnmanaged(GridCell) {
+    var cells: std.ArrayListUnmanaged(GridCell) = .empty;
+    for (ctx.hub_order.items) |hub_ref| {
+        const hub_inst = ctx.inst_map.get(hub_ref) orelse continue;
+        if (hub_inst.parts.len > 0) {
+            for (hub_inst.parts) |part| {
+                var sec_idx: usize = 0;
+                for (section_grid.items, 0..) |sg, si| {
+                    if (std.mem.eql(u8, sg.name, part.name)) {
+                        sec_idx = si;
+                        break;
+                    }
+                }
+                const ci = cells.items.len;
+                try cells.append(allocator, .{ .hub_inst = hub_inst, .part = part, .section_idx = sec_idx });
+                try section_grid.items[sec_idx].cell_indices.append(allocator, ci);
+            }
+        } else {
+            const sec_idx = ref_to_section.get(hub_inst.ref_des) orelse blk: {
+                for (section_grid.items, 0..) |sg, si| {
+                    if (std.mem.eql(u8, sg.name, hub_inst.component)) break :blk si;
+                }
+                const si = section_grid.items.len;
+                try section_grid.append(allocator, .{
+                    .name = hub_inst.component,
+                    .description = "",
+                    .notes = &.{},
+                    .sheet = hub_inst.component,
+                    .cell_indices = .empty,
+                });
+                break :blk si;
+            };
+            const ci = cells.items.len;
+            try cells.append(allocator, .{ .hub_inst = hub_inst, .part = null, .section_idx = sec_idx });
+            try section_grid.items[sec_idx].cell_indices.append(allocator, ci);
+        }
+    }
+    return cells;
+}
+
 /// Build the editor / live-push scene-graph JSON for `block`: flatten + classify,
 /// lay hubs out into section cells, collect spokes/wires/labels, and serialize.
 pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project_dir: []const u8) RenderError![]const u8 {
@@ -732,83 +847,9 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     var alt_map: PinoutAltMap = .empty;
     var asserted_fns = try asserted_fns_mod.buildMap(allocator, block);
 
-    // Build grid cells from sections (same as render_svg.zig)
-    const GridCell = struct {
-        hub_inst: FlatInst,
-        part: ?env_mod.Part,
-        section_idx: usize,
-    };
-
-    const SectionInfo = struct {
-        name: []const u8,
-        description: []const u8,
-        notes: []const env_mod.SectionNote,
-        /// Authored sheet the cells file under (differs from `name` only for a
-        /// sub-block attached to a section: `name` stays the module title the
-        /// card is drawn with, `sheet` is the adopting section).
-        sheet: []const u8,
-        cell_indices: std.ArrayListUnmanaged(usize),
-    };
-    var section_grid: std.ArrayListUnmanaged(SectionInfo) = .empty;
-    var ref_to_section = std.StringHashMap(usize).init(allocator);
-
-    for (block.sections) |sec| {
-        const sec_idx = section_grid.items.len;
-        try section_grid.append(allocator, .{ .name = sec.name, .description = sec.description, .notes = sec.notes, .sheet = sec.name, .cell_indices = .empty });
-        for (sec.instances) |inst| {
-            try ref_to_section.put(inst.ref_des, sec_idx);
-        }
-        for (sec.sub_sections) |sub| {
-            const sub_idx = section_grid.items.len;
-            try section_grid.append(allocator, .{ .name = sub.name, .description = sub.description, .notes = sub.notes, .sheet = sub.name, .cell_indices = .empty });
-            for (sub.instances) |inst| {
-                try ref_to_section.put(inst.ref_des, sub_idx);
-            }
-        }
-    }
-    // Add sub-blocks as sections. An attached sub-block keeps its own card
-    // (name/geometry unchanged) but its cells file under the adopting
-    // section's sheet, so the editor's bands match the authored structure.
-    for (block.sub_blocks, 0..) |sb, sb_idx| {
-        const sec_idx = section_grid.items.len;
-        const sheet: []const u8 = if (sub_attachments[sb_idx]) |att| block.sections[att].name else sb.block.name;
-        try section_grid.append(allocator, .{ .name = sb.block.name, .description = "", .notes = &.{}, .sheet = sheet, .cell_indices = .empty });
-        for (sb.block.instances) |inst| {
-            try ref_to_section.put(inst.ref_des, sec_idx);
-        }
-    }
-
-    var cells: std.ArrayListUnmanaged(GridCell) = .empty;
-
-    for (ctx.hub_order.items) |hub_ref| {
-        const hub_inst = ctx.inst_map.get(hub_ref) orelse continue;
-        if (hub_inst.parts.len > 0) {
-            for (hub_inst.parts) |part| {
-                var sec_idx: usize = 0;
-                for (section_grid.items, 0..) |sg, si| {
-                    if (std.mem.eql(u8, sg.name, part.name)) {
-                        sec_idx = si;
-                        break;
-                    }
-                }
-                const ci = cells.items.len;
-                try cells.append(allocator, .{ .hub_inst = hub_inst, .part = part, .section_idx = sec_idx });
-                try section_grid.items[sec_idx].cell_indices.append(allocator, ci);
-            }
-        } else {
-            const sec_idx = ref_to_section.get(hub_inst.ref_des) orelse blk: {
-                for (section_grid.items, 0..) |sg, si| {
-                    if (std.mem.eql(u8, sg.name, hub_inst.component)) break :blk si;
-                }
-                const si = section_grid.items.len;
-                try section_grid.append(allocator, .{ .name = hub_inst.component, .description = "", .notes = &.{}, .sheet = hub_inst.component, .cell_indices = .empty });
-                break :blk si;
-            };
-            const ci = cells.items.len;
-            try cells.append(allocator, .{ .hub_inst = hub_inst, .part = null, .section_idx = sec_idx });
-            try section_grid.items[sec_idx].cell_indices.append(allocator, ci);
-        }
-    }
+    var grid_state = try buildSectionGrid(allocator, block, sub_attachments);
+    var section_grid = grid_state.grid;
+    const cells = try collectGridCells(allocator, &ctx, &section_grid, &grid_state.ref_to_section);
 
     // Auto grid dimensions
     const n_sections = section_grid.items.len;
@@ -1883,50 +1924,7 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
     try w.writeAll(",\"hubs\":[");
     for (scene.hubs.items, 0..) |h, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll("{");
-        try writeJsonString(w, "ref", h.ref);
-        try w.writeAll(",");
-        try writeJsonString(w, "component", h.component);
-        try w.writeAll(",");
-        try writeJsonString(w, "value", h.value);
-        try w.writeAll(",");
-        try writeJsonString(w, "symbol", h.symbol);
-        try w.writeAll(",");
-        if (h.part) |p| {
-            try writeJsonString(w, "part", p);
-        } else {
-            try w.writeAll("\"part\":null");
-        }
-        try w.writeAll(",");
-        try writeJsonString(w, "label", h.label);
-        try w.print(",\"x\":{d:.1},\"y\":{d:.1},\"w\":{d:.0},\"h\":{d:.1}", .{ h.x, h.y, h.w, h.h });
-        if (h.icon) |ic| {
-            try w.writeAll(",");
-            try writeJsonString(w, "icon", ic);
-        } else {
-            try w.writeAll(",\"icon\":null");
-        }
-        try w.print(",\"src\":{d}", .{h.src_offset});
-        if (h.sec.len > 0) {
-            try w.writeAll(",");
-            try writeJsonString(w, "sec", h.sec);
-        }
-
-        // Left pins
-        try w.writeAll(",\"leftPins\":[");
-        for (h.left_pins.items, 0..) |pin, pi| {
-            if (pi > 0) try w.writeAll(",");
-            try writeJsonPin(w, pin);
-        }
-        try w.writeAll("]");
-
-        // Right pins
-        try w.writeAll(",\"rightPins\":[");
-        for (h.right_pins.items, 0..) |pin, pi| {
-            if (pi > 0) try w.writeAll(",");
-            try writeJsonPin(w, pin);
-        }
-        try w.writeAll("]}");
+        try writeJsonHub(w, h);
     }
     try w.writeAll("]");
 
@@ -2065,6 +2063,50 @@ fn writePinNets(w: anytype, pin_nets: []const PinNet) !void {
 
 const writeJsonString = json_writer.writeField;
 
+/// Serialize one hub box (identity, geometry, authored sheet, both pin columns).
+fn writeJsonHub(w: anytype, h: JsonHub) !void {
+    try w.writeAll("{");
+    try writeJsonString(w, "ref", h.ref);
+    try w.writeAll(",");
+    try writeJsonString(w, "component", h.component);
+    try w.writeAll(",");
+    try writeJsonString(w, "value", h.value);
+    try w.writeAll(",");
+    try writeJsonString(w, "symbol", h.symbol);
+    try w.writeAll(",");
+    if (h.part) |p| {
+        try writeJsonString(w, "part", p);
+    } else {
+        try w.writeAll("\"part\":null");
+    }
+    try w.writeAll(",");
+    try writeJsonString(w, "label", h.label);
+    try w.print(",\"x\":{d:.1},\"y\":{d:.1},\"w\":{d:.0},\"h\":{d:.1}", .{ h.x, h.y, h.w, h.h });
+    if (h.icon) |ic| {
+        try w.writeAll(",");
+        try writeJsonString(w, "icon", ic);
+    } else {
+        try w.writeAll(",\"icon\":null");
+    }
+    try w.print(",\"src\":{d}", .{h.src_offset});
+    if (h.sec.len > 0) {
+        try w.writeAll(",");
+        try writeJsonString(w, "sec", h.sec);
+    }
+    try w.writeAll(",\"leftPins\":[");
+    for (h.left_pins.items, 0..) |pin, pi| {
+        if (pi > 0) try w.writeAll(",");
+        try writeJsonPin(w, pin);
+    }
+    try w.writeAll("]");
+    try w.writeAll(",\"rightPins\":[");
+    for (h.right_pins.items, 0..) |pin, pi| {
+        if (pi > 0) try w.writeAll(",");
+        try writeJsonPin(w, pin);
+    }
+    try w.writeAll("]}");
+}
+
 fn writeJsonPin(w: anytype, pin: JsonPin) !void {
     try w.writeAll("{");
     try writeJsonString(w, "pins", pin.pin_numbers);
@@ -2141,9 +2183,10 @@ test "pinGroupRole classifies supplies, grounds, and signals" {
 }
 
 /// Assemble the minimal block for the attached-sub-block sheet tests: one
-/// authored section plus two sub-blocks (their inner blocks passed in so the
-/// pointers outlive the call).
-fn testAttachBlock(inner_a: *DesignBlock, inner_b: *DesignBlock) DesignBlock {
+/// authored section plus the caller-owned sub-blocks. The slice must live in
+/// the caller's frame — a runtime-valued array literal here would be a stack
+/// temporary of this function and dangle in the returned block.
+fn testAttachBlock(subs: []const env_mod.SubBlock) DesignBlock {
     return .{
         .name = "t",
         .instances = &.{},
@@ -2152,10 +2195,7 @@ fn testAttachBlock(inner_a: *DesignBlock, inner_b: *DesignBlock) DesignBlock {
         .notes = &.{},
         .groups = &.{},
         .sections = &[_]env_mod.Section{.{ .name = "Boot NOR Flash" }},
-        .sub_blocks = &[_]env_mod.SubBlock{
-            .{ .name = "flash", .block = inner_a },
-            .{ .name = "aux", .block = inner_b },
-        },
+        .sub_blocks = subs,
     };
 }
 
@@ -2167,7 +2207,8 @@ test "collectAuthoredSections drops attached sub-block module titles" {
     const arena = arena_state.allocator();
     var inner_a = DesignBlock{ .name = "MX66UW Flash", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
     var inner_b = DesignBlock{ .name = "Aux Module", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
-    const block = testAttachBlock(&inner_a, &inner_b);
+    const subs = [_]env_mod.SubBlock{ .{ .name = "flash", .block = &inner_a }, .{ .name = "aux", .block = &inner_b } };
+    const block = testAttachBlock(&subs);
     const attachments = [_]?usize{ 0, null };
     const names = try collectAuthoredSections(arena, &block, &attachments);
     try std.testing.expectEqual(@as(usize, 2), names.len);
@@ -2183,7 +2224,8 @@ test "buildSheetMeta categorizes sections and unattached sub-blocks" {
     const arena = arena_state.allocator();
     var inner_a = DesignBlock{ .name = "MX66UW Flash", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
     var inner_b = DesignBlock{ .name = "USB-C 2.0 HS", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
-    const block = testAttachBlock(&inner_a, &inner_b);
+    const subs = [_]env_mod.SubBlock{ .{ .name = "flash", .block = &inner_a }, .{ .name = "aux", .block = &inner_b } };
+    const block = testAttachBlock(&subs);
     const attachments = [_]?usize{ 0, null };
     const metas = try buildSheetMeta(arena, &block, &attachments);
     try std.testing.expectEqual(@as(usize, 2), metas.len);
@@ -2203,7 +2245,22 @@ test "serializeScene emits hub sec, pin role, and sheet_meta" {
         scene.labels.deinit(alloc);
         scene.staged.deinit(alloc);
     }
-    var hub = JsonHub{ .ref = "U1", .component = "c", .value = "", .symbol = "s", .part = null, .label = "U1", .x = 0, .y = 0, .w = 10, .h = 10, .icon = null, .sec = "Boot NOR Flash", .left_pins = .empty, .right_pins = .empty };
+    var hub = JsonHub{
+        .ref = "U1",
+        .component = "c",
+        .value = "",
+        .symbol = "s",
+        .part = null,
+        .label = "U1",
+        .x = 0,
+        .y = 0,
+        .w = 10,
+        .h = 10,
+        .icon = null,
+        .sec = "Boot NOR Flash",
+        .left_pins = .empty,
+        .right_pins = .empty,
+    };
     try hub.left_pins.append(alloc, .{ .pin_numbers = "1", .display_name = "VSS", .y = 0, .side = "left", .net = "GND", .role = "gnd", .pgroup = "Power" });
     defer scene.hubs.items[0].left_pins.deinit(alloc);
     try scene.hubs.append(alloc, hub);
