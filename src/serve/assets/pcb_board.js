@@ -57,6 +57,9 @@ const CV=document.createElement("canvas");CV.className="pcb-scene";
 (function(){var par=svg.parentNode;if(!par)return;
  if(getComputedStyle(par).position==="static")par.style.position="relative";
  par.insertBefore(CV,svg);})();
+// One context for the canvas' lifetime. alpha:false — scenePaint always
+// fills the full background, so opaque compositing is free speed.
+const CTX=CV.getContext("2d",{alpha:false});
 // Physical outline, under everything: the layout's user-DRAWN outline when
 // one exists (PCB.outline, editable via the ▭ Outline tool and saved with
 // the layout), else the authored (board (size W H) …) rectangle.
@@ -144,26 +147,90 @@ function padAt(i,wx,wy){var p=P[i],a=-(p.rot||0)*Math.PI/180,c=Math.cos(a),sn=Ma
 var paintQueued=false;
 function paintSoon(){if(paintQueued)return;paintQueued=true;
  (window.requestAnimationFrame||setTimeout)(scenePaint);}
+// ── Drag-time static-scene cache ────────────────────────────────────────
+// While a part/group drag is in flight the untouched rest of the board is
+// repainted identically every frame — on a big board that's thousands of
+// pads for a one-part move. So the first dragged frame renders the static
+// remainder ONCE into an offscreen bitmap; each following frame blits it
+// and repaints only the moving parts, their airwires, their group boxes
+// and any copper the drag carries. Keyed on viewport+size+moving-set;
+// dropped on pan/zoom (setVB), copper changes (drawRoute), heat re-tints
+// (applyHeat) and gesture end — anything that can restyle a static part.
+var dragCache=null;
+function dragCacheDrop(){dragCache=null;}
+function dragIdxSet(){ // moving part index set, or null when no drag is live
+ if(typeof drag!=="undefined"&&drag&&drag.moved){var s={};s[drag.i]=1;return s;}
+ if(typeof gdrag!=="undefined"&&gdrag&&gdrag.moved){var s2={};
+  gdrag.orig.forEach(function(o){s2[o.i]=1;});return s2;}
+ return null;}
+// Viewport-busy window: pad-number labels (the most expensive paint pass —
+// a font set + fillText per pad) are skipped while a drag is live or the
+// viewport moved in the last 150 ms (wheel/trackpad pan+zoom, pinch); the
+// trailing repaint brings them back once the gesture goes quiet.
+var vbQuiet=0,vbTimer=0;
+function vbBusy(){vbQuiet=Date.now()+150;dragCacheDrop();
+ clearTimeout(vbTimer);vbTimer=setTimeout(paintSoon,170);}
+function gestureBusy(){return dragIdxSet()!==null||Date.now()<vbQuiet;}
 function scenePaint(){paintQueued=false;
+ if(loopDirty){for(var lk in loopDirty)drawLoop(+lk);loopDirty=null;}
  var r=svg.getBoundingClientRect();if(!r.width)return;
  var dpr=window.devicePixelRatio||1,w=Math.round(r.width*dpr),h=Math.round(r.height*dpr);
  if(CV.width!==w||CV.height!==h){CV.width=w;CV.height=h;
   CV.style.width=r.width+"px";CV.style.height=r.height+"px";}
  CV.style.left=svg.offsetLeft+"px";CV.style.top=svg.offsetTop+"px";
- var ctx=CV.getContext("2d");
- ctx.setTransform(1,0,0,1,0,0);
- ctx.fillStyle="#010409";ctx.fillRect(0,0,w,h);
+ var ctx=CTX;
  var k=(r.width/vb.w);            // CSS px per svg-unit (label gating)
  var kk=k*dpr;
- ctx.setTransform(kk,0,0,kk,-vb.x*kk,-vb.y*kk);   // draw in svg-unit coords
- paintPours(ctx,k);
- paintGroupBoxes(ctx,k);
- paintParts(ctx,k);
- paintLinks(ctx);
- paintClr(ctx);
- paintTracks(ctx);
- paintTexts(ctx,k); // silkscreen text sits above copper, under the draw overlay
- paintDraw(ctx);
+ var mov=dragIdxSet();
+ if(!mov){dragCache=null;
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.fillStyle="#010409";ctx.fillRect(0,0,w,h);
+  ctx.setTransform(kk,0,0,kk,-vb.x*kk,-vb.y*kk);   // draw in svg-unit coords
+  paintPours(ctx,k);
+  paintGroupBoxes(ctx,k);
+  paintParts(ctx,k);
+  paintLinks(ctx);
+  paintClr(ctx);
+  paintTracks(ctx);
+  paintTexts(ctx,k); // silkscreen text sits above copper, under the draw overlay
+  paintDraw(ctx);}
+ else{
+  // Copper a rigid-group drag translates live (stamped tracks/vias) is
+  // dynamic; everything else stays in the bitmap.
+  var cop=null;
+  if(typeof gdrag!=="undefined"&&gdrag&&gdrag.moved&&(gdrag.ct.length||gdrag.cv.length)){
+   cop=new Set();
+   gdrag.ct.forEach(function(o){cop.add(o.t);});
+   gdrag.cv.forEach(function(o){cop.add(o.v);});}
+  var movG={};for(var mi in mov){var mg=grpOf(P[mi].ref);if(mg)movG[mg]=1;}
+  var key=w+"|"+h+"|"+vb.x+"|"+vb.y+"|"+vb.w+"|"+Object.keys(mov).join(",");
+  if(!dragCache||dragCache.key!==key){
+   var oc=(dragCache&&dragCache.cv.width===w&&dragCache.cv.height===h)?dragCache.cv:document.createElement("canvas");
+   if(oc.width!==w)oc.width=w;if(oc.height!==h)oc.height=h;
+   var c2=oc.getContext("2d",{alpha:false});
+   c2.setTransform(1,0,0,1,0,0);
+   c2.fillStyle="#010409";c2.fillRect(0,0,w,h);
+   c2.setTransform(kk,0,0,kk,-vb.x*kk,-vb.y*kk);
+   paintPours(c2,k);
+   paintGroupBoxes(c2,k,movG,false);
+   paintParts(c2,k,mov,false);
+   paintLinks(c2,mov,false);
+   paintClr(c2,mov,false,cop);
+   paintTracks(c2,cop,false);
+   paintTexts(c2,k);
+   dragCache={cv:oc,key:key};}
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.drawImage(dragCache.cv,0,0);
+  ctx.setTransform(kk,0,0,kk,-vb.x*kk,-vb.y*kk);
+  // Moving content on top. Z-order differs from the static scene (the
+  // dragged part paints over copper/texts for the drag's duration) —
+  // acceptable, arguably better feedback while holding a part.
+  paintGroupBoxes(ctx,k,movG,true);
+  paintParts(ctx,k,mov,true);
+  paintLinks(ctx,mov,true);
+  paintClr(ctx,mov,true,cop);
+  if(cop)paintTracks(ctx,cop,true);
+  paintDraw(ctx);}
  if(flashIdx>=0&&Date.now()<flashUntil){var fp=P[flashIdx];
   var fc=wpt(flashIdx,fp.ccx||0,fp.ccy||0);
   ctx.strokeStyle="#f0b72f";ctx.lineWidth=2.6;
@@ -177,9 +244,28 @@ function partStroke(i,p){
  if(sel&&sel.indexOf&&sel.indexOf(i)>=0)return {c:"#d2a8ff",w:2};
  if(hoverGrpName&&grpOf(p.ref)===hoverGrpName)return {c:"#7ee787",w:2};
  return {c:p.kind=="hub"?"#58a6ff":"#8b949e",w:1.3};}
-function paintParts(ctx,k){
- var labels=k>=1.15;      // pad numbers are sub-pixel noise below this
+// Per-part Path2D cache: silk strokes + drill bores are static geometry in
+// part-local coords — build once, then each frame is a single stroke()/fill()
+// under the part's transform instead of hundreds of path-segment calls.
+// (Pad fills stay per-pad: their colour varies by net/side/hover. Courtyard
+// edits touch p.hw/hh only, never pads/silk, so entries never go stale.)
+var partPaths=[];
+function partPath(i){var c=partPaths[i];if(c)return c;
+ var p=P[i],silk=null,bore=null;
+ if(p.silk&&((p.silk.l&&p.silk.l.length)||(p.silk.c&&p.silk.c.length))){silk=new Path2D();
+  p.silk.l.forEach(function(sl){silk.moveTo(sl[0]*S,sl[1]*S);silk.lineTo(sl[2]*S,sl[3]*S);});
+  p.silk.c.forEach(function(sc){var cr=Math.max(sc[2]*S,1);
+   silk.moveTo(sc[0]*S+cr,sc[1]*S);silk.arc(sc[0]*S,sc[1]*S,cr,0,6.2832);});}
+ (p.pads||[]).forEach(function(pd){if(pd.drill>0){var br=Math.max(pd.drill/2*S,0.6);
+  if(!bore)bore=new Path2D();bore.moveTo(pd.x*S+br,pd.y*S);bore.arc(pd.x*S,pd.y*S,br,0,6.2832);}});
+ c={silk:silk,bore:bore};partPaths[i]=c;return c;}
+// mov/only: the drag-cache split — mov = moving part index set; only=false
+// paints the static remainder, only=true just the movers. mov null = all.
+function paintParts(ctx,k,mov,only){
+ var labels=k>=1.15&&!gestureBusy(); // pad numbers are sub-pixel noise below this
+ var lastFont="";
  for(var i=0;i<P.length;i++){var p=P[i];
+  if(mov&&(!!mov[i])!==only)continue;
   var bot=(p.side==="bottom"),unp=!!unplacedSet[p.ref];
   ctx.save();
   ctx.translate(X(p.x),Y(p.y));ctx.rotate((p.rot||0)*Math.PI/180);
@@ -202,27 +288,25 @@ function paintParts(ctx,k){
   if(unp){ctx.strokeStyle="#f85149";ctx.lineWidth=1;
    ctx.beginPath();ctx.moveTo(ccx-hw,ccy-hh);ctx.lineTo(ccx+hw,ccy+hh);
    ctx.moveTo(ccx+hw,ccy-hh);ctx.lineTo(ccx-hw,ccy+hh);ctx.globalAlpha=0.8;ctx.stroke();ctx.globalAlpha=1;}
+  var pp=partPath(i);
   // silk
-  if(p.silk&&viewSt.vis.silk){ctx.strokeStyle="#8b949e";ctx.lineWidth=0.8;ctx.lineCap="round";
-   ctx.beginPath();
-   p.silk.l.forEach(function(sl){ctx.moveTo(sl[0]*S,sl[1]*S);ctx.lineTo(sl[2]*S,sl[3]*S);});
-   ctx.stroke();
-   p.silk.c.forEach(function(sc){ctx.beginPath();
-    ctx.arc(sc[0]*S,sc[1]*S,Math.max(sc[2]*S,1),0,6.2832);ctx.stroke();});
+  if(pp.silk&&viewSt.vis.silk){ctx.strokeStyle="#8b949e";ctx.lineWidth=0.8;ctx.lineCap="round";
+   ctx.stroke(pp.silk);
    ctx.lineCap="butt";}
-  // pads (in the same part frame)
+  // pads (in the same part frame) — fillStyle set only when it changes
+  var lastFill=null;
   (p.pads||[]).forEach(function(pd){
    var fill=bot?"#5b8dd6":(netColOn?(pd.net?(netColorOf(pd.net)||"#b08d57"):"#ffffff"):"#b08d57");
    if(hoverNet&&pd.net===hoverNet)fill="#f85149";
-   ctx.fillStyle=fill;
+   if(fill!==lastFill){ctx.fillStyle=fill;lastFill=fill;}
    padPath(ctx,pd);ctx.fill();
-   // Drilled bore: board-coloured hole through thru/npth pads.
-   if(pd.drill>0){ctx.fillStyle="#0d1117";ctx.beginPath();
-    ctx.arc(pd.x*S,pd.y*S,Math.max(pd.drill/2*S,0.6),0,6.2832);ctx.fill();}
    if(selNetCur&&pd.net===selNetCur){
     var pin=!!loopPin[i+":"+pd.x.toFixed(2)+":"+pd.y.toFixed(2)];
     ctx.strokeStyle=pin?"#f85149":"#ffd33d";ctx.lineWidth=1.8;
     padPath(ctx,pd);ctx.stroke();}});
+  // Drilled bores: board-coloured holes through thru/npth pads, one batched
+  // fill per part (cached path) instead of a beginPath/arc per pad.
+  if(pp.bore){ctx.fillStyle="#0d1117";ctx.fill(pp.bore);}
   ctx.restore();
   // upright labels (outside the rotated/mirrored frame)
   if(labels&&(p.pads||[]).length){ctx.fillStyle="#0d1117";
@@ -230,13 +314,16 @@ function paintParts(ctx,k){
    p.pads.forEach(function(pd){if(!pd.num)return;
     var fs=Math.min(pd.w,pd.h)*S*0.55;if(fs*k<5.5)return;
     var c=wpt(i,pd.x,pd.y);
-    ctx.font="600 "+fs.toFixed(1)+"px system-ui,sans-serif";
+    // Font assignment forces a re-parse + shaping reset — pads overwhelmingly
+    // share sizes (all 0402s alike), so set it only when the size changes.
+    var f="600 "+fs.toFixed(1)+"px system-ui,sans-serif";
+    if(f!==lastFont){ctx.font=f;lastFont=f;}
     ctx.fillText(pd.num,X(c.x),Y(c.y));});}
   // Ref labels only where they carry signal — the hovered part, the selected/
   // cross-probed part, and red-flagged staged parts. Sub-circuits are named by
   // their group box (paintGroupBoxes) instead of a per-part refdes cloud.
   if(i===cur||unp||(selRef&&p.ref===selRef)){
-   ctx.font="600 9px system-ui,sans-serif";
+   ctx.font="600 9px system-ui,sans-serif";lastFont="";
    ctx.textAlign="center";ctx.textBaseline="alphabetic";
    ctx.fillStyle=unp?"#f85149":(p.kind=="hub"?"#58a6ff":"#8b949e");
    var lc=wpt(i,p.ccx||0,p.ccy||0);
@@ -274,9 +361,12 @@ function paintPours(ctx,k){
   ctx.fillStyle=top?"rgba(248,81,73,0.9)":"rgba(56,139,253,0.9)";
   ctx.fillText(q.net+" pour · "+(top?"F.Cu":"B.Cu"),X(q.x)+5*ik,Y(q.y+q.h)-(5+n*14)*ik);
   n++;});}
-function paintGroupBoxes(ctx,k){
+// movG/only: drag-cache split — a group box is dynamic when any member moves
+// (its bounding box follows the drag).
+function paintGroupBoxes(ctx,k,movG,only){
  var ik=1/Math.max(k,0.01);
  for(var g in GRPS){var idxs=GRPS[g];if(idxs.length<2)continue;
+  if(movG&&(!!movG[g])!==only)continue;
   var x0=1/0,y0=1/0,x1=-1/0,y1=-1/0,n=0;
   idxs.forEach(function(i){var p=P[i];if(unplacedSet[p.ref])return;
    var a=(p.rot||0)*Math.PI/180,ca=Math.abs(Math.cos(a)),sa=Math.abs(Math.sin(a));
@@ -332,8 +422,10 @@ function refreshUnplaced(){
 // (The former separate overlay canvas is merged into the scene canvas —
 // paintLinks/paintClr/paintTracks below are called by scenePaint in order.)
 function ovPaintSoon(){paintSoon();}
-function paintLinks(ctx){if(!ratsOn||!viewSt.vis.rats)return;
+// mov/only: drag-cache split — a link is dynamic when EITHER endpoint moves.
+function paintLinks(ctx,mov,only){if(!ratsOn||!viewSt.vis.rats)return;
  (PCB.links||[]).forEach(function(l){
+  if(mov&&(!!(mov[l.a]||mov[l.b]))!==only)return;
   var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
   ctx.strokeStyle=linkCol(l);
   ctx.globalAlpha=(l.k=="signal")?0.55:0.9;
@@ -346,9 +438,13 @@ function paintLinks(ctx){if(!ratsOn||!viewSt.vis.rats)return;
 function layerAlpha(layer){if(!viewSt.vis[visKey(layer)])return 0;
  if(drawMode&&layer!==activeLayer)return 0.30;return 0.85;}
 function anyCopperVisible(){for(var i=0;i<LYR.length;i++)if(viewSt.vis[visKey(LYR[i].l)])return true;return false;}
-function paintTracks(ctx){
+// cop/only: drag-cache split — cop is the Set of tracks/vias a rigid-group
+// drag translates live; only=false paints the rest, only=true just those.
+function paintTracks(ctx,cop,only){
  ctx.lineCap="round";
- (PCB.tracks||[]).forEach(function(t){var a=layerAlpha(t.l||0);if(a<=0)return;ctx.globalAlpha=a;
+ (PCB.tracks||[]).forEach(function(t){
+  if(cop&&cop.has(t)!==(only||false))return;
+  var a=layerAlpha(t.l||0);if(a<=0)return;ctx.globalAlpha=a;
   ctx.strokeStyle=layerColor(t.l||0);
   ctx.lineWidth=Math.max(t.w*S,1.2);
   ctx.beginPath();ctx.moveTo(X(t.x1),Y(t.y1));ctx.lineTo(X(t.x2),Y(t.y2));ctx.stroke();});
@@ -356,22 +452,28 @@ function paintTracks(ctx){
  // Vias span every copper layer — hide only when ALL of them are hidden.
  if(!anyCopperVisible())return;
  (PCB.vias||[]).forEach(function(v){
+  if(cop&&cop.has(v)!==(only||false))return;
   var rr=Math.max(v.d/2*S,2.5),dr=(v.drill>0)?v.drill:viaGeo().drill;
   var rh=Math.min(Math.max(dr/2*S,1),rr*0.7);
   ctx.fillStyle="#ca8a04";ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rr,0,6.2832);ctx.fill();
   ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rh,0,6.2832);ctx.fill();});}
-function paintClr(ctx){
+// mov/only/cop: drag-cache split — moving parts' halos are dynamic; via/track
+// halos follow the copper the drag carries (cop, a Set of live objects).
+function paintClr(ctx,mov,only,cop){
  var cb=document.getElementById("r-clr-show");if(!cb||!cb.checked)return;
  var clr=clrVal();
  ctx.strokeStyle="#d29922";ctx.lineWidth=0.8;ctx.fillStyle="rgba(210,153,34,0.13)";
  ctx.setLineDash([3,2]);
- P.forEach(function(p,i){p.pads.forEach(function(pad){var r=wrect(i,pad);
+ P.forEach(function(p,i){if(mov&&(!!mov[i])!==only)return;
+  p.pads.forEach(function(pad){var r=wrect(i,pad);
   ctx.beginPath();ctx.rect(X(r.x0-clr),Y(r.y0-clr),(r.x1-r.x0+2*clr)*S,(r.y1-r.y0+2*clr)*S);
   ctx.fill();ctx.stroke();});});
  (PCB.vias||[]).forEach(function(v){
+  if(mov&&(!!(cop&&cop.has(v)))!==only)return;
   ctx.beginPath();ctx.arc(X(v.x),Y(v.y),(v.d/2+clr)*S,0,6.2832);ctx.fill();ctx.stroke();});
  ctx.setLineDash([]);ctx.globalAlpha=0.20;ctx.lineCap="round";
  (PCB.tracks||[]).forEach(function(t){
+  if(mov&&(!!(cop&&cop.has(t)))!==only)return;
   ctx.lineWidth=(t.w+2*clr)*S;
   ctx.beginPath();ctx.moveTo(X(t.x1),Y(t.y1));ctx.lineTo(X(t.x2),Y(t.y2));ctx.stroke();});
  ctx.globalAlpha=1;ctx.lineCap="butt";}
@@ -407,20 +509,24 @@ function drawLoop(k){var L=PCB.loops[k],g=loopGs[k];if(!L||!g)return;
                  if(dReal)drawVia(g,D.x,D.y,viaGeo().dia,viaGeo().drill); }}
 function rats(){
  while(gRP.firstChild)gRP.removeChild(gRP.firstChild);
- loopGs=[];
+ loopGs=[];loopDirty=null; // full rebuild supersedes any pending per-loop redraws
  ovPaintSoon();   // airwires live on the canvas overlay
  if(!ratsOn)return;
  (PCB.loops||[]).forEach(function(L,k){var g=document.createElementNS(NS,"g");
    gRP.appendChild(g);loopGs.push(g);drawLoop(k);});
 }
 // Update only the airwires + loop overlays touching the given part indices —
-// the per-pointermove path. O(links-on-moved-parts), not O(board).
+// the per-pointermove path. O(links-on-moved-parts), not O(board). The SVG
+// rebuilds are only MARKED here and flushed once per rAF frame by scenePaint:
+// pointermove can fire far above the frame rate (high-poll-rate mice), and
+// rebuilding DOM nodes per event was measurable churn on hub/group drags.
+var loopDirty=null;
 function ratsUpdate(idxs){
  if(!ratsOn)return;
  ovPaintSoon();   // airwires: one cheap full canvas repaint per frame
- var seenK={};
+ loopDirty=loopDirty||{};
  idxs.forEach(function(i){
-  (partLoops[i]||[]).forEach(function(k){if(seenK[k])return;seenK[k]=1;drawLoop(k);});});
+  (partLoops[i]||[]).forEach(function(k){loopDirty[k]=1;});});
 }
 function delta(id,cur,base){
  var e=document.getElementById(id);if(!e)return;var d=cur-base;
@@ -1035,6 +1141,7 @@ function setVB(){svg.setAttribute("viewBox",vb.x.toFixed(1)+" "+vb.y.toFixed(1)+
  // out anyway, so drop them from rendering entirely below ~1.15 px/unit.
  var r=svg.getBoundingClientRect();
  svg.classList.toggle("zoomed-out",r.width>0&&(r.width/vb.w)<1.15);
+ vbBusy(); // viewport moved: drop the drag cache + defer pad labels briefly
  ovPaintSoon();}
 function zoomAt(cx,cy,f){if((f<1&&vb.w<VBW*0.08)||(f>1&&vb.w>VBW*8))return;
  var r=svg.getBoundingClientRect();
@@ -1255,9 +1362,11 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
  if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap,gdn=gdrag.down;gdrag=null;svg.style.cursor="";
   // No movement = a plain click on a rigid-group / multi-selected part —
   // select it like any other part instead of swallowing the click.
-  if(gmv){recordUndo(gsnap);fetchScore();}else if(gdn!=null&&gdn>=0)clickPart(ev,gdn);return;}
+  // Post-drag repaint drops the drag cache and restores pad labels.
+  if(gmv){recordUndo(gsnap);fetchScore();dragCacheDrop();paintSoon();}
+  else if(gdn!=null&&gdn>=0)clickPart(ev,gdn);return;}
  if(typeof drag!=="undefined"&&drag){var dmv=drag.moved,dsnap=drag.snap,di2=drag.i;drag=null;svg.style.cursor="";
-  if(dmv){recordUndo(dsnap);fetchScore();return;}
+  if(dmv){recordUndo(dsnap);fetchScore();dragCacheDrop();paintSoon();return;}
   clickPart(ev,di2);return;}
  if(clickCand){var cc=clickCand;clickCand=null;clickPart(ev,cc.i);return;}
  if(outDraw){var d=outDraw;outDraw=null;outlineArm(false);var og=snapG();
@@ -1401,7 +1510,7 @@ function clearRouteFor(idxs,keepG){
   if(v.g)return !gs[v.g];
   return !(v.net&&nets[v.net]);});
  PCB.drc=[];drawRoute();drawDrc();}
-function drawRoute(){ovPaintSoon();} // routed copper lives on the canvas overlay
+function drawRoute(){dragCacheDrop();ovPaintSoon();} // routed copper lives on the canvas overlay
 function clrVal(){var ci=document.getElementById("r-cl"),c=ci?parseFloat(ci.value):NaN;
  return (c>0)?c:(PCB.clr||0.127);}
 function drawClr(){ovPaintSoon();} // clearance halos live on the canvas overlay
@@ -2087,7 +2196,7 @@ var heatOn=false;
 var heatScale=0;
 function heatMax(){var mx=0;
  P.forEach(function(p){if(p.ref!==anchorRef){var b=p.blame||0;if(b>mx)mx=b;}});return mx;}
-function applyHeat(){paintSoon();} // paint reads heatOn/heatScale/p.blame
+function applyHeat(){dragCacheDrop();paintSoon();} // paint reads heatOn/heatScale/p.blame
 var heatCb=document.getElementById("v-heat");
 if(heatCb)heatCb.addEventListener("change",function(){heatOn=heatCb.checked;
  if(heatOn)heatScale=heatMax();
