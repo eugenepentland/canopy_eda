@@ -157,6 +157,19 @@ pub fn writeDescribeJson(
         try w.print(",\"outline\":{{\"w_mm\":{d:.2},\"h_mm\":{d:.2}", .{ br.w, br.h });
         try w.print(",\"minx\":{d:.2},\"miny\":{d:.2}}}", .{ br.minx, br.miny });
     }
+    // Declared outer-layer copper pours — the textual twin of the PNG's
+    // translucent wash, so an agent reading the facts knows a face is a pour
+    // (its net's same-face pads connect with no via and draw no airwire).
+    var pour_open = false;
+    for ([_]optimizer.Side{ .top, .bottom }) |side| {
+        const pn = p.rules.pourNetOnSide(side) orelse continue;
+        try w.writeAll(if (pour_open) "," else ",\"pours\":[");
+        pour_open = true;
+        try w.print("{{\"side\":\"{s}\",\"net\":", .{if (side == .top) "top" else "bottom"});
+        try pcb_layout_page.writeJsonStr(w, pn);
+        try w.writeAll("}");
+    }
+    if (pour_open) try w.writeAll("]");
     try w.writeAll("}");
     const b = p.breakdown;
     try w.print(",\"score\":{{\"objective\":{d:.1},\"hpwl\":{d:.1},\"loop_nh\":{d:.1}}}", .{ b.objective, b.hpwl, b.loop_nh });

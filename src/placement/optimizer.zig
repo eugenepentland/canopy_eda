@@ -524,6 +524,29 @@ pub const BoardRules = struct {
     /// (same data as `plane_nets` but keeping WHERE each plane sits, for the
     /// Gerber export's inner-layer files).
     planes: []const PlaneAt = &.{},
+
+    /// True when a DECLARED `(plane IDX "NET")` / `(pour …)` entry carries
+    /// `name` (case-insensitive, full flattened name or its `/`-leaf). The
+    /// legacy implicit model declares nothing here — its assumed ground
+    /// planes are matched by ground NAME in the router, not by this.
+    pub fn carriesPlane(self: BoardRules, name: []const u8) bool {
+        for (self.planes) |pl| {
+            if (std.ascii.eqlIgnoreCase(pl.net, name) or std.ascii.eqlIgnoreCase(pl.net, shortName(name))) return true;
+        }
+        return false;
+    }
+
+    /// The net a declared plane pours on the OUTER copper face of `side`
+    /// (stack index 1 = top/F.Cu, `copper_layers` = bottom/B.Cu), or null
+    /// when that face is a plain signal layer. Inner planes never match, and
+    /// a single-layer stack has no bottom face to pour.
+    pub fn pourNetOnSide(self: BoardRules, side: Side) ?[]const u8 {
+        const want: u8 = if (side == .top) 1 else (if (self.copper_layers >= 2) self.copper_layers else return null);
+        for (self.planes) |pl| {
+            if (pl.index == want) return pl.net;
+        }
+        return null;
+    }
 };
 
 /// One declared copper plane: 1-based stack index + the net it carries.
@@ -9045,6 +9068,30 @@ test "isGroundName matches common ground rails" {
     try testing.expect(!isGroundName("GND_SENSE"));
     try testing.expect(!isGroundName("GNDSW"));
     try testing.expect(!isGroundName("VINGND")); // doesn't start with a ground token
+}
+
+// spec: placement/optimizer - board rules resolve declared pours by outer face and plane membership by net name
+test "BoardRules pour/plane lookups" {
+    const planes = [_]PlaneAt{ .{ .index = 2, .net = "GND" }, .{ .index = 3, .net = "PWR" } };
+    const four = BoardRules{ .plane_nets = &.{}, .copper_layers = 4, .planes = &planes };
+    // Inner planes carry their nets (leaf + case-insensitive) but pour no outer face.
+    try testing.expect(four.carriesPlane("GND"));
+    try testing.expect(four.carriesPlane("pwr/gnd"));
+    try testing.expect(!four.carriesPlane("VIN"));
+    try testing.expect(four.pourNetOnSide(.top) == null);
+    try testing.expect(four.pourNetOnSide(.bottom) == null);
+
+    // (stackup 2 (pour bottom "GND")): index 2 IS the bottom outer face.
+    const bot = [_]PlaneAt{.{ .index = 2, .net = "GND" }};
+    const two = BoardRules{ .plane_nets = &.{}, .copper_layers = 2, .planes = &bot };
+    try testing.expect(two.pourNetOnSide(.top) == null);
+    try testing.expectEqualStrings("GND", two.pourNetOnSide(.bottom).?);
+
+    // Index 1 is the top face; a 1-layer stack has no bottom face at all.
+    const top = [_]PlaneAt{.{ .index = 1, .net = "GND" }};
+    const one = BoardRules{ .plane_nets = &.{}, .copper_layers = 1, .planes = &top };
+    try testing.expectEqualStrings("GND", one.pourNetOnSide(.top).?);
+    try testing.expect(one.pourNetOnSide(.bottom) == null);
 }
 
 // spec: placement/optimizer - legalization separates two overlapping courtyards

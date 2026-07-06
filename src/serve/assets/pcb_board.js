@@ -93,6 +93,7 @@ function scenePaint(){paintQueued=false;
  var k=(r.width/vb.w);            // CSS px per svg-unit (label gating)
  var kk=k*dpr;
  ctx.setTransform(kk,0,0,kk,-vb.x*kk,-vb.y*kk);   // draw in svg-unit coords
+ paintPours(ctx,k);
  paintGroupBoxes(ctx,k);
  paintParts(ctx,k);
  paintLinks(ctx);
@@ -189,6 +190,26 @@ function padPath(ctx,pd){
 // cloud. Solid while rigid (drags as a unit), dashed when exploded; the name
 // label above the box stays a constant screen size across zoom. Staged
 // (unplaced) members are excluded so the box doesn't stretch to the band.
+// Declared outer-layer copper pours ((stackup …)/(pour …) on an outer face,
+// PCB.pours from the server): a translucent wash + dashed rim + "NET pour ·
+// F.Cu/B.Cu" label UNDER everything, in the layer's track colour (red top /
+// blue bottom) — so a poured face reads as copper instead of being invisible.
+function paintPours(ctx,k){
+ var ik=1/Math.max(k||1,0.01),n=0;
+ (PCB.pours||[]).forEach(function(q){
+  if(!(q.w>0&&q.h>0))return;
+  var top=(q.side==="top");
+  ctx.fillStyle=top?"rgba(248,81,73,0.10)":"rgba(56,139,253,0.12)";
+  ctx.fillRect(X(q.x),Y(q.y),q.w*S,q.h*S);
+  ctx.strokeStyle=top?"rgba(248,81,73,0.45)":"rgba(56,139,253,0.5)";
+  ctx.lineWidth=1;ctx.setLineDash([5,4]);
+  ctx.strokeRect(X(q.x),Y(q.y),q.w*S,q.h*S);
+  ctx.setLineDash([]);
+  ctx.font="600 "+(11*ik).toFixed(2)+"px system-ui,sans-serif";
+  ctx.textAlign="left";ctx.textBaseline="alphabetic";
+  ctx.fillStyle=top?"rgba(248,81,73,0.9)":"rgba(56,139,253,0.9)";
+  ctx.fillText(q.net+" pour · "+(top?"F.Cu":"B.Cu"),X(q.x)+5*ik,Y(q.y+q.h)-(5+n*14)*ik);
+  n++;});}
 function paintGroupBoxes(ctx,k){
  var ik=1/Math.max(k,0.01);
  for(var g in GRPS){var idxs=GRPS[g];if(idxs.length<2)continue;

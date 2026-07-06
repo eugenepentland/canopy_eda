@@ -1696,33 +1696,70 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
         const head = c[0].asAtom() orelse continue;
-        if (!std.mem.eql(u8, head, "plane")) {
-            self.warnFmt(c[0].span, "unknown (stackup …) sub-form ({s} …) — expected (plane IDX \"NET\")", .{head});
-            continue;
-        }
-        if (c.len < 3) {
-            self.warnFmt(c[0].span, "(plane …) needs a layer index and a net name", .{});
-            continue;
-        }
-        const idx_raw = c[1].asNumber() orelse {
-            self.warnFmt(c[1].span, "(plane …) layer index must be a number", .{});
-            continue;
+        const entry = if (std.mem.eql(u8, head, "plane"))
+            parsePlaneEntry(self, c, layers)
+        else if (std.mem.eql(u8, head, "pour"))
+            parsePourEntry(self, c, layers)
+        else blk: {
+            self.warnFmt(c[0].span, "unknown (stackup …) sub-form ({s} …) — expected (plane IDX \"NET\") or (pour top|bottom \"NET\")", .{head});
+            break :blk null;
         };
-        if (idx_raw < 1 or idx_raw > n_raw or idx_raw != @floor(idx_raw)) {
-            self.warnFmt(c[1].span, "(plane …) layer index out of range for this stackup", .{});
-            continue;
-        }
-        const net = c[2].asString() orelse c[2].asAtom() orelse {
-            self.warnFmt(c[2].span, "(plane …) net must be a name", .{});
-            continue;
-        };
-        planes.append(self.allocator, .{ .index = @intFromFloat(idx_raw), .net = net }) catch return EvalError.OutOfMemory;
+        if (entry) |pl| planes.append(self.allocator, pl) catch return EvalError.OutOfMemory;
     }
     return .{
         .layers = layers,
         .planes = planes.toOwnedSlice(self.allocator) catch &.{},
         .present = true,
     };
+}
+
+/// Parse one `(plane IDX "NET")` entry of a `(stackup …)` form. Null (with a
+/// warning) when the index is malformed / out of range or the net unnamed.
+fn parsePlaneEntry(self: *Evaluator, c: []const Node, layers: u8) ?env_mod.StackupPlane {
+    if (c.len < 3) {
+        self.warnFmt(c[0].span, "(plane …) needs a layer index and a net name", .{});
+        return null;
+    }
+    const idx_raw = c[1].asNumber() orelse {
+        self.warnFmt(c[1].span, "(plane …) layer index must be a number", .{});
+        return null;
+    };
+    if (idx_raw < 1 or idx_raw > @as(f64, @floatFromInt(layers)) or idx_raw != @floor(idx_raw)) {
+        self.warnFmt(c[1].span, "(plane …) layer index out of range for this stackup", .{});
+        return null;
+    }
+    const net = c[2].asString() orelse c[2].asAtom() orelse {
+        self.warnFmt(c[2].span, "(plane …) net must be a name", .{});
+        return null;
+    };
+    return .{ .index = @intFromFloat(idx_raw), .net = net };
+}
+
+/// Parse one `(pour top|bottom "NET")` entry — sugar for a `(plane …)` on the
+/// matching OUTER copper layer (top = 1, bottom = the stackup's layer count),
+/// so a 2-layer board can say `(pour bottom "GND")` instead of counting
+/// indices. Null (with a warning) on a malformed side/net.
+fn parsePourEntry(self: *Evaluator, c: []const Node, layers: u8) ?env_mod.StackupPlane {
+    if (c.len < 3) {
+        self.warnFmt(c[0].span, "(pour …) needs a side (top|bottom) and a net name", .{});
+        return null;
+    }
+    const side = c[1].asAtom() orelse {
+        self.warnFmt(c[1].span, "(pour …) side must be top or bottom", .{});
+        return null;
+    };
+    var index: ?u8 = null;
+    if (std.mem.eql(u8, side, "top")) index = 1;
+    if (std.mem.eql(u8, side, "bottom")) index = layers;
+    const idx = index orelse {
+        self.warnFmt(c[1].span, "(pour …) side must be top or bottom, got {s}", .{side});
+        return null;
+    };
+    const net = c[2].asString() orelse c[2].asAtom() orelse {
+        self.warnFmt(c[2].span, "(pour …) net must be a name", .{});
+        return null;
+    };
+    return .{ .index = idx, .net = net };
 }
 
 /// Parse one top-level `(net-class "name" (width MM) (clearance MM)
@@ -1829,6 +1866,32 @@ test "design-block captures (stackup …)" {
     try testing.expectEqual(@as(u8, 2), block.stackup.planes[0].index);
     try testing.expectEqualStrings("GND", block.stackup.planes[0].net);
     try testing.expectEqualStrings("PWR", block.stackup.planes[1].net);
+}
+
+// spec: eval/design_block - (pour top|bottom "NET") is stackup sugar for a plane on the matching outer layer
+test "design-block maps (pour …) onto outer-layer planes" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stackup 2 (pour bottom "GND") (pour top "VDD") (pour sideways "X")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const value = try evalDesignBlock(&eval, form_children[1..], &env);
+    const block = value.design_block;
+    try testing.expect(block.stackup.present);
+    try testing.expectEqual(@as(u8, 2), block.stackup.layers);
+    // The malformed side is warned + dropped; the two pours land on the
+    // outer indices (bottom = layer count, top = 1).
+    try testing.expectEqual(@as(usize, 2), block.stackup.planes.len);
+    try testing.expectEqual(@as(u8, 2), block.stackup.planes[0].index);
+    try testing.expectEqualStrings("GND", block.stackup.planes[0].net);
+    try testing.expectEqual(@as(u8, 1), block.stackup.planes[1].index);
+    try testing.expectEqualStrings("VDD", block.stackup.planes[1].net);
 }
 
 // spec: eval/design_block - a bare 2-layer stackup declares no planes so ground routes as copper

@@ -558,6 +558,7 @@ src/placement/optimizer.zig::Score struct_
 src/placement/optimizer.zig::SeedMode enum_
 src/placement/optimizer.zig::Side enum_
 src/placement/optimizer.zig::Stub struct_
+src/placement/optimizer.zig::carriesPlane | fn carriesPlane(self: BoardRules, name: []const u8) bool
 src/placement/optimizer.zig::effAlignW | fn effAlignW(params: Params) f64
 src/placement/optimizer.zig::faceRotation | fn faceRotation(pwr: PadRect, edge: Edge) f64
 src/placement/optimizer.zig::fromStr | fn fromStr(s: []const u8) Side
@@ -572,6 +573,7 @@ src/placement/optimizer.zig::perPartBlame | fn perPartBlame(p: Placement, params
 src/placement/optimizer.zig::pickAnchorHub | fn pickAnchorHub(parts: []const Part, nets: []const FlatNet) ?usize
 src/placement/optimizer.zig::placeFromPoses | fn placeFromPoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!Placement
 src/placement/optimizer.zig::placementDiag | fn placementDiag() PlacementDiag
+src/placement/optimizer.zig::pourNetOnSide | fn pourNetOnSide(self: BoardRules, side: Side) ?[]const u8
 src/placement/optimizer.zig::routedScorePoses | fn routedScorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!f64
 src/placement/optimizer.zig::scorePoses | fn scorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!Breakdown
 src/placement/optimizer.zig::setProgressSink | fn setProgressSink(sink: ?ProgressSink) void

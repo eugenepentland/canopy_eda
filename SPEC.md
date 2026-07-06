@@ -101,6 +101,7 @@ Public functions: solve
 - a starred module layout seeds the sub-block macro, matched by origin key
 - a switcher board tries the zone floorplan before the ring; ferrites on plain rails do not qualify
 - excludes ground nets from spring forces
+- board rules resolve declared pours by outer face and plane membership by net name
 - multi-pin wirelength uses the rectilinear MST, which equals span when collinear and exceeds HPWL otherwise
 - loop inductance floors at the via mounting inductance and rises with conductor length
 - the scored loop term is the smooth analytic surrogate, continuous in part position (no routing cliffs)
@@ -146,6 +147,7 @@ Public functions: route, returnPathViolations
 - maze-routes a two-pad net into connected track segments
 - a net spanning the two board sides routes through a via, each leg on its part's layer
 - a plane-less stackup routes ground as real copper instead of dropping plane vias
+- an outer-layer pour connects same-side pads directly; only opposite-face pads get a stitching via
 - a net-class rule sets its nets' trace width and via size; unruled nets keep defaults
 - routes corners as 45° diagonals rather than 90° bends
 - LoopRouter measures a real per-leg trace length that detours foreign pads
@@ -396,6 +398,7 @@ Public functions: planLayers, writeLayer
 - outer copper flashes side-correct pads and draws routed tracks/vias in the y-up frame
 - mask openings expand pads and tent vias; paste covers only same-side SMD pads
 - an inner plane pours solid copper and antipads only foreign holes
+- an outer-layer pour paints the copper file solid and isolates only foreign same-face features
 - the edge layer closes the board outline; silk strokes footprint art and ref-des text
 
 ## zipfile
@@ -625,6 +628,7 @@ Public functions: analyze
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block
 - stackup form captures layer count and plane assignments on the design block
+- (pour top|bottom "NET") is stackup sugar for a plane on the matching outer layer
 - a bare 2-layer stackup declares no planes so ground routes as copper
 - net-class forms capture width/clearance/via geometry and routing priority for their listed nets
 - layout form parses (anchor "name") roots and (place "name" (rel "ref")) directives

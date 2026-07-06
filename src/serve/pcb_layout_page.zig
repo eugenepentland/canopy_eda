@@ -4076,11 +4076,16 @@ fn netColorHex(name: []const u8, buf: *[7]u8, pi: *usize, si: *usize) []const u8
 
 /// Emit `"links":[ {a,ax,ay,b,bx,by,k,net?}, … ]` — the ratsnest airwires. Each
 /// carries its collapsed `netKey` (when known) so the Net-colours view can tint
-/// it by class.
-fn writeLinks(w: *std.Io.Writer, links: []const optimizer.Link) std.Io.Writer.Error!void {
+/// it by class. Links on a net a DECLARED plane/pour carries are dropped: the
+/// copper sheet is the connection, so an airwire is noise — the same treatment
+/// the implicit model has always given ground (which never springs at all).
+fn writeLinks(w: *std.Io.Writer, links: []const optimizer.Link, rules: optimizer.BoardRules) std.Io.Writer.Error!void {
     try w.writeAll("\"links\":[");
-    for (links, 0..) |l, i| {
-        if (i > 0) try w.writeAll(",");
+    var first = true;
+    for (links) |l| {
+        if (l.net.len > 0 and rules.carriesPlane(l.net)) continue;
+        if (!first) try w.writeAll(",");
+        first = false;
         try w.print("{{\"a\":{d},\"ax\":{d},\"ay\":{d},", .{ l.a, l.ax, l.ay });
         try w.print("\"b\":{d},\"bx\":{d},\"by\":{d},\"k\":\"{s}\"", .{ l.b, l.bx, l.by, kindStr(l.kind) });
         if (l.net.len > 0) {
@@ -4586,7 +4591,7 @@ fn writePcbData(
     try w.writeAll("],");
 
     // Airwires (each tagged with its collapsed net name for the Net-colours view).
-    try writeLinks(w, p.links);
+    try writeLinks(w, p.links, p.rules);
 
     // Per-net colour map the "Net colours" view paints pads + airwires from.
     try writeNetColors(w, alloc, p);
@@ -4784,6 +4789,23 @@ fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placem
     } else {
         try w.writeAll("\"board\":null,");
     }
+    // Declared outer-layer copper pours ((stackup …) planes on an outer
+    // face): net + the rect the Gerber pour fills (board outline, or the
+    // parts-bbox fallback), so the viewer paints the poured face under the
+    // parts instead of leaving it invisible copper.
+    try w.writeAll("\"pours\":[");
+    var pfirst = true;
+    for ([_]optimizer.Side{ .top, .bottom }) |side| {
+        const pn = p.rules.pourNetOnSide(side) orelse continue;
+        const r = export_fab.outlineRect(p);
+        if (!pfirst) try w.writeByte(',');
+        pfirst = false;
+        const side_word: []const u8 = if (side == .top) "top" else "bottom";
+        try w.print("{{\"side\":\"{s}\",\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"net\":", .{ side_word, r.minx, r.miny, r.w, r.h });
+        try writeJsonStr(w, pn);
+        try w.writeByte('}');
+    }
+    try w.writeAll("],");
     // Read-only flag for the embedded per-sub-block preview — BOARD_JS skips all
     // edit wiring (drag/rotate/route/save) when set, leaving a pan/zoom viewer.
     try w.print("\"ro\":{s},", .{if (opts.read_only) "true" else "false"});
