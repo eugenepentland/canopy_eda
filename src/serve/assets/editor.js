@@ -1836,10 +1836,16 @@
         if (rr && rr.producer !== ref) targets = [rr.producer].concat(targets.filter((t) => t !== rr.producer));
         const role = p.role || (isGroundName(net) ? "gnd" : (rr || isPowerName(net)) ? "pwr" : "");
         // A pin the scene folded into this one by shared net keeps its function
-        // name visible ("GND · OE_N" says the enable strap is tied low). Numeric
-        // and pad-like tokens (27, B12) are pad numbers, not functions — skip.
+        // name visible ("OE_N" on the GND row says the enable strap is tied
+        // low; "VCCA" on the VDD3V3 row names the supply pin). When the pin's
+        // display name is just the net (stub power pins), the function REPLACES
+        // it — the net is already the spoke's outboard label, and repeating it
+        // inside the box collides with the opposite side's row. Numeric and
+        // pad-like tokens (27, B12) are pad numbers, not functions — skip.
         const foldFns = String(p.pins || "").split(",").filter((t) => t && t !== p.name && !/^\d+$/.test(t) && !/^[A-Za-z]{1,2}\d{1,3}$/.test(t));
-        extras.push({ net, name: foldFns.length ? p.name + " · " + foldFns.join(" · ") : p.name, ps, targets, role, grp: p.grp || bx.part || "" });
+        const dispName = !foldFns.length ? p.name
+          : (p.name === netLeaf(net) ? foldFns.join(" · ") : p.name + " · " + foldFns.join(" · "));
+        extras.push({ net, name: dispName, ps, targets, role, grp: p.grp || bx.part || "" });
       }));
       // Deflate: signal rows whose links all point at ONE other cell (≥3 pins →
       // that partner owns the drawings) and port-only indexed families (≥4
