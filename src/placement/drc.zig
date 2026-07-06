@@ -179,10 +179,15 @@ pub fn check(
     try checkDrillRules(arena, &out, pads, vias, rules);
     try checkBoardEdge(arena, &out, placement, tracks, vias, rules.edgeClearance());
     try checkCourtyards(arena, &out, placement);
-    // pad ↔ pad (different parts)
+    // pad ↔ pad (different parts, layer-aware): two SMD pads clash only when
+    // their copper shares a face; a through pad's barrel reaches every layer,
+    // so it clashes with anything. Opposite-face SMD pads may overlap in 2D
+    // freely — that's the whole point of a two-sided board.
     for (pads, 0..) |a, i| {
         for (pads[i + 1 ..]) |b| {
             if (a.part == b.part or sameNet(a.net, b.net)) continue;
+            const share_face = a.thru or b.thru or a.layer == b.layer;
+            if (!share_face) continue;
             const gap = pad_shape.shapeGap(
                 .{ .x0 = a.x0, .y0 = a.y0, .x1 = a.x1, .y1 = a.y1, .poly = a.poly },
                 .{ .x0 = b.x0, .y0 = b.y0, .x1 = b.x1, .y1 = b.y1, .poly = b.poly },
@@ -898,6 +903,100 @@ test "check flags track-to-pad clashes layer-aware" {
     const own = [_]router.Track{.{ .x1 = -1, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 }};
     const ok = router.RouteResult{ .tracks = &own, .vias = &.{}, .routed = 1, .total = 1 };
     try testing.expectEqual(@as(usize, 0), (try check(arena, placement, ok, 0.127)).len);
+}
+
+// spec: placement/drc - inner signal layers get the same same-layer checks; through pads clash on every inner layer
+test "check is layer-generalized across inner signal layers" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    var parts = [_]optimizer.Part{};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+    };
+    const w = 0.127;
+
+    // Two INNER tracks (layer 2) crossing between nets — flagged like any
+    // same-layer crossing.
+    const inner_cross = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 2, .layer = 2, .width = w, .net = 0 },
+        .{ .x1 = 0, .y1 = 2, .x2 = 2, .y2 = 0, .layer = 2, .width = w, .net = 1 },
+    };
+    const crossed = router.RouteResult{ .tracks = &inner_cross, .vias = &.{}, .routed = 2, .total = 2 };
+    const v1 = try check(arena, placement, crossed, w);
+    try testing.expectEqual(@as(usize, 1), v1.len);
+    try testing.expectEqual(Kind.track_track, v1[0].kind);
+
+    // The same geometry split across two DIFFERENT inner layers never clashes.
+    const inner_stacked = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 2, .layer = 2, .width = w, .net = 0 },
+        .{ .x1 = 0, .y1 = 2, .x2 = 2, .y2 = 0, .layer = 3, .width = w, .net = 1 },
+    };
+    const layered = router.RouteResult{ .tracks = &inner_stacked, .vias = &.{}, .routed = 2, .total = 2 };
+    try testing.expectEqual(@as(usize, 0), (try check(arena, placement, layered, w)).len);
+
+    // A through-hole pad's barrel clashes with an inner-layer track too.
+    const pads = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6, .thru = true, .drill = 0.3 }};
+    var thru_parts = [_]optimizer.Part{
+        .{ .ref_des = "J1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 5, .y = 5 },
+    };
+    const jp = [_]export_kicad.FlatPin{.{ .ref_des = "J1", .pin = "1" }};
+    const tnets = [_]FlatNet{ .{ .name = "THRU", .pins = &jp }, .{ .name = "SIG", .pins = &.{} } };
+    var thru_pl = placement;
+    thru_pl.parts = &thru_parts;
+    thru_pl.nets = &tnets;
+    const under = [_]router.Track{.{ .x1 = 4, .y1 = 5, .x2 = 6, .y2 = 5, .layer = 2, .width = w, .net = 1 }};
+    const bt = router.RouteResult{ .tracks = &under, .vias = &.{}, .routed = 1, .total = 1 };
+    const v2 = try check(arena, thru_pl, bt, w);
+    try testing.expectEqual(@as(usize, 1), v2.len);
+    try testing.expectEqual(Kind.track_pad, v2[0].kind);
+}
+
+// spec: placement/drc - SMD pads on opposite board faces may overlap in 2D; sharing a face or a through barrel still clashes
+test "check pad-to-pad is layer-aware across board faces" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    const smd = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const thru = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6, .thru = true, .drill = 0.3 }};
+
+    // Same spot, opposite faces, both SMD: no copper shares a layer — clean.
+    // (The parts sit far enough apart in courtyard terms? No — same spot, but
+    // courtyards on opposite sides never clash either.)
+    var mirror = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &smd, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &smd, .fallback = false, .x = 0, .y = 0, .side = .bottom },
+    };
+    try testing.expectEqual(@as(usize, 0), (try check(arena, partsOnly(&mirror), routed, 0.127)).len);
+
+    // Same face: flags as before.
+    var same_face = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &smd, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R3", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &smd, .fallback = false, .x = 0.3, .y = 3, .side = .bottom },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &smd, .fallback = false, .x = 0.3, .y = 3.2, .side = .bottom },
+    };
+    try testing.expectEqual(@as(usize, 1), countKind(try check(arena, partsOnly(&same_face), routed, 0.127), .pad_pad));
+
+    // A through pad reaches every layer, so it clashes with a bottom SMD pad.
+    var thru_pair = [_]optimizer.Part{
+        .{ .ref_des = "J1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &thru, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &smd, .fallback = false, .x = 0.3, .y = 0, .side = .bottom },
+    };
+    try testing.expectEqual(@as(usize, 1), countKind(try check(arena, partsOnly(&thru_pair), routed, 0.127), .pad_pad));
 }
 
 /// A bare `Placement` around `parts` with default rules — the common shell for

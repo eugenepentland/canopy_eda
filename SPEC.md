@@ -102,6 +102,7 @@ Public functions: solve
 - a switcher board tries the zone floorplan before the ring; ferrites on plain rails do not qualify
 - excludes ground nets from spring forces
 - board rules resolve declared pours by outer face and plane membership by net name
+- derives the routable signal-layer set from the stackup: outer faces always, inner layers only when no plane claims them
 - multi-pin wirelength uses the rectilinear MST, which equals span when collinear and exceeds HPWL otherwise
 - loop inductance floors at the via mounting inductance and rises with conductor length
 - the scored loop term is the smooth analytic surrogate, continuous in part position (no routing cliffs)
@@ -148,6 +149,8 @@ Public functions: route, returnPathViolations
 - maze-routes a two-pad net into connected track segments
 - a net spanning the two board sides routes through a via, each leg on its part's layer
 - a plane-less stackup routes ground as real copper instead of dropping plane vias
+- routes through a plane-free inner signal layer when both outer faces are blocked; a 2-signal stackup never emits inner copper
+- reports a grid too large to route via RouteResult.grid_overflow instead of a silent empty result
 - an outer-layer pour connects same-side pads directly; only opposite-face pads get a stitching via
 - a net-class rule sets its nets' trace width and via size; unruled nets keep defaults
 - routes corners as 45° diagonals rather than 90° bends
@@ -177,6 +180,8 @@ Public functions: check, countKind
 - the polygon board-edge inset is measured against the copper-edge design rule
 - flags same-layer track crossings and sub-clearance pairs between nets
 - flags a track crossing a foreign pad on its layer; other-layer SMD pads don't clash
+- inner signal layers get the same same-layer checks; through pads clash on every inner layer
+- SMD pads on opposite board faces may overlap in 2D; sharing a face or a through barrel still clashes
 - flags two placed parts whose courtyards overlap, but not disjoint or opposite-side ones
 - flags two drilled holes whose walls sit closer than the hole-to-hole rule
 - flags a drilled hole below the minimum drill diameter (pads and vias); SMD pads exempt
@@ -414,6 +419,7 @@ Public functions: planLayers, writeLayer
 - outer copper flashes side-correct pads and draws routed tracks/vias in the y-up frame
 - mask openings expand pads and tent vias; paste covers only same-side SMD pads
 - an inner plane pours solid copper and antipads only foreign holes
+- an inner signal layer emits its routed tracks, via lands, and through-pad barrels; other layers' tracks stay off it
 - an outer-layer pour paints the copper file solid and isolates only foreign same-face features
 - the edge layer closes the board outline; silk strokes footprint art and ref-des text
 - the mask margin comes from (design-rules …), defaulting byte-identically to 0.05 mm
@@ -923,5 +929,16 @@ Public functions: designSourcePath, designSiblingPath
 ## Web Server
 
 - A saved layout round-trips a polygon board outline; the rect fields are re-derived as its bbox
+- Inner-layer copper (l ≥ 2) round-trips the sidecar; legacy entries without an l stay top copper
 - Stamped module copper keeps its group tag through the sidecar so rigid-group moves carry it
 - Stamped module copper maps its net names onto the parent design via the origin-key bridge, slug-prefixing private nets
+
+## fab_readiness
+
+Public functions: check, writeJson
+
+- a routed net is connected; an unrouted multi-pad net is flagged
+- connectivity propagates across an inner-signal-layer chain through its vias
+- a ground plane connects its pads without routed copper
+- a missing outline, off-board part, drill-less via, and DNP all surface
+- a clean board produces no errors and reports ok

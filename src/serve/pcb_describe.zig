@@ -81,6 +81,7 @@ pub fn describeDesign(
             .routed = r.routed,
             .total = r.total,
             .unrouted = r.failed,
+            .grid_overflow = r.grid_overflow,
         };
     } else null;
 
@@ -90,7 +91,16 @@ pub fn describeDesign(
     return aw.written();
 }
 
-const RoutedSummary = struct { trace_mm: f64, tracks: usize, vias: usize, drc: usize, routed: usize = 0, total: usize = 0, unrouted: []const []const u8 = &.{} };
+const RoutedSummary = struct {
+    trace_mm: f64,
+    tracks: usize,
+    vias: usize,
+    drc: usize,
+    routed: usize = 0,
+    total: usize = 0,
+    unrouted: []const []const u8 = &.{},
+    grid_overflow: bool = false,
+};
 
 /// Errors the facts writer can hit: allocation (scratch maps/lists) + writer.
 pub const DescribeError = std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -296,7 +306,9 @@ pub fn writeDescribeJson(
             if (i > 0) try w.writeAll(",");
             try pcb_layout_page.writeJsonStr(w, name_s);
         }
-        try w.writeAll("]}");
+        try w.writeAll("]");
+        if (r.grid_overflow) try w.writeAll(",\"grid_overflow\":true");
+        try w.writeAll("}");
     }
     try w.writeAll("}");
 }
@@ -459,6 +471,11 @@ fn writeLint(
             const msg = "the autorouter could not fully connect these nets; free routing room " ++
                 "near their pads or raise them with (net-class … (priority N))";
             try lintItem(w, &first, "unrouted-net", sev_err, r.unrouted, msg);
+        }
+        if (r.grid_overflow) {
+            const msg = "the board exceeds the router's per-layer grid cap, so routing was " ++
+                "skipped entirely (empty copper); shrink the board or widen the net-class geometry";
+            try lintItem(w, &first, "router-grid-overflow", sev_err, &.{}, msg);
         }
     }
     if (wrong_side.len > 0) {

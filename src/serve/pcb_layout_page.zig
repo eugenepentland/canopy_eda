@@ -2909,7 +2909,10 @@ fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedRoutes {
                 .y1 = jsonNum(it.object.get("y1")),
                 .x2 = jsonNum(it.object.get("x2")),
                 .y2 = jsonNum(it.object.get("y2")),
-                .l = if (jsonNum(it.object.get("l")) >= 1) 1 else 0,
+                // Signal-layer index (0=top, 1=bottom, 2..=inner). Legacy
+                // entries with no "l" stay top copper; out-of-range values
+                // clamp defensively rather than wrapping.
+                .l = layerIndexFromJson(it.object.get("l")),
                 .w = jsonNum(it.object.get("w")),
                 .net = jsonStrField(it.object.get("net")),
                 .g = jsonStrField(it.object.get("g")),
@@ -2935,6 +2938,15 @@ fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedRoutes {
         .tracks = tracks.toOwnedSlice(alloc) catch return null,
         .vias = vias.toOwnedSlice(alloc) catch return null,
     };
+}
+
+/// A JSON `l` field → signal-layer index: absent/negative ⇒ 0 (top, the
+/// legacy meaning), clamped into u8 so a corrupt sidecar can't wrap.
+fn layerIndexFromJson(v: ?std.json.Value) u8 {
+    const n = jsonNum(v);
+    if (!(n >= 1)) return 0;
+    if (n >= 255) return 255;
+    return @intFromFloat(@floor(n));
 }
 
 /// Parse an `{"x","y","w","h"[,"pts":[[x,y],…]]}` outline object; null when
@@ -4634,8 +4646,12 @@ fn writeRoutePanel(
     // Status spans, updated in place by the Route button's POST (no reload, so
     // the on-screen layout stays put); pre-filled here for a direct ?route=1 GET.
     if (routed) |r| {
-        const cls = if (r.routed == r.total) "ok" else "warn";
-        try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">routed {d}/{d} nets · {d} vias</span>", .{ cls, r.routed, r.total, r.vias.len });
+        if (r.grid_overflow) {
+            try w.writeAll("<span class=\"route-stat err\" id=\"r-stat\">board exceeds the routing grid cap — not routed</span>");
+        } else {
+            const cls = if (r.routed == r.total) "ok" else "warn";
+            try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">routed {d}/{d} nets · {d} vias</span>", .{ cls, r.routed, r.total, r.vias.len });
+        }
         if (n_drc == 0) {
             try w.writeAll("<span class=\"route-stat ok\" id=\"r-drc\">DRC clean ✓</span>");
         } else {
@@ -4737,6 +4753,17 @@ fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement, hidden: bool) std.Io.W
     try w.writeAll("<span class=\"sw l2gnd\"></span> GND return (images under trace, L2 plane)");
     try w.writeAll("<span class=\"sw viadot\"></span> GND via (L1↔L2, Ø from route params)");
     try w.writeAll("<span class=\"sw sig\"></span> signal");
+    // Inner routable copper layers (a stackup with >2 signal layers): one
+    // swatch per layer in its canonical track colour.
+    const n_sig = p.rules.signalLayerCount();
+    var lname_buf: [16]u8 = undefined;
+    var sig: u8 = 2;
+    while (sig < n_sig) : (sig += 1) {
+        try w.print("<span class=\"sw\" style=\"border-color:{s}\"></span> {s} track", .{
+            optimizer.signalLayerColor(sig),
+            p.rules.signalLayerName(sig, &lname_buf),
+        });
+    }
     if (fallback_count > 0) {
         try w.print("<span class=\"note\">{d} part(s) using a placeholder box (no library footprint) — shown dashed</span>", .{fallback_count});
     }
@@ -5155,6 +5182,10 @@ fn writeRoutedArrays(
         try writeJsonStr(w, name);
     };
     try w.writeAll("]");
+    // The router bailed without trying (board bigger than the per-layer grid
+    // cap) — surfaced so the viewer can SAY so instead of showing an
+    // inexplicably empty route.
+    if (routed) |r| if (r.grid_overflow) try w.writeAll(",\"grid_overflow\":true");
 }
 
 /// The PCB blob's leading scalar/flag fields: projection, grid, board rect
@@ -5199,6 +5230,23 @@ fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placem
         try w.print("{{\"side\":\"{s}\",\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"net\":", .{ side_word, r.minx, r.miny, r.w, r.h });
         try writeJsonStr(w, pn);
         try w.writeByte('}');
+    }
+    try w.writeAll("],");
+    // The board's SIGNAL-layer table (from the `(stackup …)` rules): index
+    // (the `Track.layer` / sidecar `l` encoding: 0=top, 1=bottom, 2..=inner
+    // in stack order), display name, and canonical colour — so nothing
+    // client-side hard-codes the layer count or palette.
+    try w.writeAll("\"layers\":[");
+    const n_sig = p.rules.signalLayerCount();
+    var lname_buf: [16]u8 = undefined;
+    var sig: u8 = 0;
+    while (sig < n_sig) : (sig += 1) {
+        if (sig > 0) try w.writeByte(',');
+        try w.print("{{\"l\":{d},\"name\":\"{s}\",\"c\":\"{s}\"}}", .{
+            sig,
+            p.rules.signalLayerName(sig, &lname_buf),
+            optimizer.signalLayerColor(sig),
+        });
     }
     try w.writeAll("],");
     // Read-only flag for the embedded per-sub-block preview — BOARD_JS skips all
@@ -6132,6 +6180,52 @@ test "layouts sidecar round-trips saved routes" {
     const restored = restoreRoutes(alloc, sr, &nets) orelse return error.TestParseFailed;
     try std.testing.expectEqual(@as(i32, 1), restored.tracks[0].net);
     try std.testing.expectEqual(@as(i32, 1), restored.vias[0].net);
+}
+
+// spec: Web Server - Inner-layer copper (l ≥ 2) round-trips the sidecar; legacy entries without an l stay top copper
+test "layouts sidecar round-trips inner-layer copper and legacy layer defaults" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
+    const tracks = [_]SavedTrack{
+        .{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .l = 3, .w = 0.3, .net = "SIG" }, // inner signal layer
+        .{ .x1 = 3, .y1 = 0, .x2 = 5, .y2 = 0, .l = 0, .w = 0.3, .net = "SIG" }, // top
+    };
+    const layouts = [_]SavedLayout{.{
+        .name = "routed",
+        .kind = KIND_MANUAL,
+        .ts = 1,
+        .score = null,
+        .parts = &parts,
+        .routes = .{ .tracks = &tracks, .vias = &.{} },
+    }};
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJson(&aw.writer, &layouts, null);
+    const got = parseLayouts(alloc, aw.written()) orelse return error.TestParseFailed;
+    const sr = got[0].routes orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(u8, 3), sr.tracks[0].l);
+    try std.testing.expectEqual(@as(u8, 0), sr.tracks[1].l);
+    // …and the restored router copper carries the same layer indices.
+    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const nets = [_]export_kicad.FlatNet{.{ .name = "SIG", .pins = &pins }};
+    const restored = restoreRoutes(alloc, sr, &nets) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(u8, 3), restored.tracks[0].layer);
+
+    // A LEGACY sidecar entry with no "l" at all parses as top copper (0) —
+    // the meaning every existing sidecar was written with.
+    const legacy_json =
+        \\{"layouts":[{"name":"old","kind":"manual","ts":1,
+        \\"routes":{"tracks":[{"x1":0,"y1":0,"x2":1,"y2":0,"w":0.2,"net":"SIG"},
+        \\{"x1":1,"y1":0,"x2":2,"y2":0,"l":1,"w":0.2,"net":"SIG"}],"vias":[]},
+        \\"parts":{"U1":{"x":0,"y":0,"rot":0}}}]}
+    ;
+    const old = parseLayouts(alloc, legacy_json) orelse return error.TestParseFailed;
+    const osr = old[0].routes orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(u8, 0), osr.tracks[0].l);
+    try std.testing.expectEqual(@as(u8, 1), osr.tracks[1].l);
 }
 
 // spec: Web Server - Stamped module copper keeps its group tag through the sidecar so rigid-group moves carry it

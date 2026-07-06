@@ -562,7 +562,77 @@ pub const BoardRules = struct {
         }
         return null;
     }
+
+    /// Is copper stack index `idx` (1-based) claimed by a declared
+    /// `(plane …)`/`(pour …)` entry?
+    fn planeAtIndex(self: BoardRules, idx: u8) bool {
+        for (self.planes) |pl| {
+            if (pl.index == idx) return true;
+        }
+        return false;
+    }
+
+    /// How many ROUTABLE signal layers this board has. Signal-layer index
+    /// encoding (the persisted-sidecar meaning of `Track.layer` / `l`):
+    /// 0 = top/F.Cu and 1 = bottom/B.Cu — always routable (SMD pads live on
+    /// the outer faces; a poured outer face stays usable at `POUR_COST_MULT`)
+    /// — then 2.. = each INNER copper layer not claimed by a `(plane …)`, in
+    /// top→bottom stack order. No `(stackup …)` form (`copper_layers == 0`)
+    /// keeps the legacy implicit model: exactly 2 (the two inners are assumed
+    /// planes), so existing boards and sidecar copper are unchanged.
+    pub fn signalLayerCount(self: BoardRules) u8 {
+        if (self.copper_layers <= 2) return 2;
+        var n: u8 = 2;
+        var idx: u8 = 2;
+        while (idx < self.copper_layers) : (idx += 1) {
+            if (!self.planeAtIndex(idx)) n += 1;
+        }
+        return n;
+    }
+
+    /// The 1-based copper STACK index signal layer `sig` lives on: 0 → 1
+    /// (F.Cu), 1 → the bottom copper (4 on the legacy implicit stack), 2.. →
+    /// the matching plane-free inner layer in stack order. Out-of-range
+    /// indices fall back to the bottom copper (defensive; callers pass
+    /// `sig < signalLayerCount()`).
+    pub fn signalStackIndex(self: BoardRules, sig: u8) u8 {
+        if (sig == 0) return 1;
+        const bottom: u8 = if (self.copper_layers >= 2) self.copper_layers else if (self.copper_layers == 1) 1 else 4;
+        if (sig == 1) return bottom;
+        var s: u8 = 2;
+        var idx: u8 = 2;
+        while (idx < self.copper_layers) : (idx += 1) {
+            if (self.planeAtIndex(idx)) continue;
+            if (s == sig) return idx;
+            s += 1;
+        }
+        return bottom;
+    }
+
+    /// Display name of signal layer `sig` ("F.Cu" / "B.Cu" / "In1.Cu" …,
+    /// KiCad naming — In<k> is stack index k+1). Inner names are rendered
+    /// into `buf` (needs ~8 bytes).
+    pub fn signalLayerName(self: BoardRules, sig: u8, buf: []u8) []const u8 {
+        if (sig == 0) return "F.Cu";
+        if (sig == 1) return "B.Cu";
+        const stack = self.signalStackIndex(sig);
+        return std.fmt.bufPrint(buf, "In{d}.Cu", .{stack - 1}) catch "In?.Cu";
+    }
 };
+
+/// Canonical display colours for signal layers, shared by every render
+/// surface (viewer blob, page legend, PNG mirrors these hexes) so
+/// inner-layer copper paints identically everywhere: index 0 = top red,
+/// 1 = bottom blue, then the KiCad-ish inner palette cycling for 2.. .
+pub const SIGNAL_LAYER_COLORS = [_][]const u8{ "#f85149", "#388bfd" };
+pub const INNER_LAYER_COLORS = [_][]const u8{ "#d4aa00", "#cc66cc", "#26c6a8", "#e0824e" };
+
+/// The display colour (hex) of signal layer `sig` — outer pair, then the
+/// inner palette cycling.
+pub fn signalLayerColor(sig: u8) []const u8 {
+    if (sig < SIGNAL_LAYER_COLORS.len) return SIGNAL_LAYER_COLORS[sig];
+    return INNER_LAYER_COLORS[(sig - 2) % INNER_LAYER_COLORS.len];
+}
 
 /// Board-level default design rules as concrete millimetre values — the
 /// resolved form of a `(design-rules …)` form (or the built-in defaults when
@@ -9192,6 +9262,59 @@ test "BoardRules pour/plane lookups" {
     const one = BoardRules{ .plane_nets = &.{}, .copper_layers = 1, .planes = &top };
     try testing.expectEqualStrings("GND", one.pourNetOnSide(.top).?);
     try testing.expect(one.pourNetOnSide(.bottom) == null);
+}
+
+// spec: placement/optimizer - derives the routable signal-layer set from the stackup: outer faces always, inner layers only when no plane claims them
+test "BoardRules signal-layer derivation across stackups" {
+    var buf: [16]u8 = undefined;
+
+    // No (stackup …) form: the legacy implicit 4-layer model — exactly the two
+    // outer signal faces (indices 0/1 keep their sidecar meaning).
+    const legacy = BoardRules{};
+    try testing.expectEqual(@as(u8, 2), legacy.signalLayerCount());
+    try testing.expectEqual(@as(u8, 1), legacy.signalStackIndex(0));
+    try testing.expectEqual(@as(u8, 4), legacy.signalStackIndex(1)); // implicit bottom = L4
+    try testing.expectEqualStrings("F.Cu", legacy.signalLayerName(0, &buf));
+    try testing.expectEqualStrings("B.Cu", legacy.signalLayerName(1, &buf));
+
+    // (stackup 2): plane-less two-layer — still 2 signal layers.
+    const two = BoardRules{ .plane_nets = &.{}, .copper_layers = 2 };
+    try testing.expectEqual(@as(u8, 2), two.signalLayerCount());
+    try testing.expectEqual(@as(u8, 2), two.signalStackIndex(1));
+
+    // (stackup 4 (plane 2 "GND") (plane 3 "PWR")): both inners are planes — 2 signal.
+    const full4 = [_]PlaneAt{ .{ .index = 2, .net = "GND" }, .{ .index = 3, .net = "PWR" } };
+    const four_planes = BoardRules{ .plane_nets = &.{}, .copper_layers = 4, .planes = &full4 };
+    try testing.expectEqual(@as(u8, 2), four_planes.signalLayerCount());
+
+    // (stackup 4 (plane 2 "GND")): L3 is a free inner — 3 signal layers, and
+    // signal index 2 maps to stack index 3 = In2.Cu.
+    const one4 = [_]PlaneAt{.{ .index = 2, .net = "GND" }};
+    const four_one = BoardRules{ .plane_nets = &.{}, .copper_layers = 4, .planes = &one4 };
+    try testing.expectEqual(@as(u8, 3), four_one.signalLayerCount());
+    try testing.expectEqual(@as(u8, 3), four_one.signalStackIndex(2));
+    try testing.expectEqual(@as(u8, 4), four_one.signalStackIndex(1));
+    try testing.expectEqualStrings("In2.Cu", four_one.signalLayerName(2, &buf));
+
+    // (stackup 6 (plane 2 "GND") (plane 5 "3V3")): inners 3+4 free — 4 signal;
+    // signal 2 → stack 3 (In2.Cu), signal 3 → stack 4 (In3.Cu).
+    const six = [_]PlaneAt{ .{ .index = 2, .net = "GND" }, .{ .index = 5, .net = "3V3" } };
+    const six_two = BoardRules{ .plane_nets = &.{}, .copper_layers = 6, .planes = &six };
+    try testing.expectEqual(@as(u8, 4), six_two.signalLayerCount());
+    try testing.expectEqual(@as(u8, 3), six_two.signalStackIndex(2));
+    try testing.expectEqual(@as(u8, 4), six_two.signalStackIndex(3));
+    try testing.expectEqualStrings("In3.Cu", six_two.signalLayerName(3, &buf));
+
+    // An OUTER pour never removes a routable face: (stackup 2 (pour bottom "GND")).
+    const pourb = [_]PlaneAt{.{ .index = 2, .net = "GND" }};
+    const two_pour = BoardRules{ .plane_nets = &.{}, .copper_layers = 2, .planes = &pourb };
+    try testing.expectEqual(@as(u8, 2), two_pour.signalLayerCount());
+
+    // Colours: the outer pair stays red/blue; inners cycle the palette.
+    try testing.expectEqualStrings("#f85149", signalLayerColor(0));
+    try testing.expectEqualStrings("#388bfd", signalLayerColor(1));
+    try testing.expectEqualStrings("#d4aa00", signalLayerColor(2));
+    try testing.expectEqualStrings("#cc66cc", signalLayerColor(3));
 }
 
 // spec: placement/optimizer - legalization separates two overlapping courtyards
