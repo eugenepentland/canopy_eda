@@ -339,6 +339,7 @@ fn registerPcbRoutes(router: anytype) void {
     router.post("/api/pcb-score/:name", pcb_layout_page.pcbScoreApi, .{});
     router.post("/api/pcb-score-batch/:name", pcb_layout_page.pcbScoreBatchApi, .{});
     router.post("/api/pcb-route/:name", pcb_layout_page.pcbRouteApi, .{});
+    router.post("/api/pcb-drc/:name", pcb_layout_page.pcbDrcApi, .{});
     router.post("/api/pcb-regen-start/:name", pcb_layout_page.pcbRegenStartApi, .{});
     router.get("/api/pcb-progress/:name", pcb_layout_page.pcbProgressApi, .{});
     router.post("/api/courtyard/:name", pcb_layout_page.savePcbCourtyardApi, .{});

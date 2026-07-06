@@ -66,6 +66,8 @@ const CT_HDR = "content-type";
 const NO_SUB_MSG = "No sub-block by that name";
 const BAD_JSON_MSG = "bad json";
 const PLACEMENT_ERR_MSG = "Placement error";
+/// JSON body/query key for the copper-to-copper clearance rule (mm).
+const CLEARANCE_KEY = "clearance";
 
 /// Success body returned by the mutating layout/courtyard endpoints.
 const OK_JSON_TRUE = "{\"ok\":true}";
@@ -1680,7 +1682,7 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     var rp = router.RouteParams{};
     const tw = jsonNum(root.object.get("track_width"));
     if (tw > 0) rp.track_width = tw;
-    const cl = jsonNum(root.object.get("clearance"));
+    const cl = jsonNum(root.object.get(CLEARANCE_KEY));
     if (cl > 0) rp.clearance = cl;
     const vd = jsonNum(root.object.get("via_drill"));
     if (vd > 0) rp.via_drill = vd;
@@ -1730,6 +1732,120 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     try w.writeAll("{");
     try writeRoutedArrays(w, routed, violations, placement.nets, null);
     try w.print(",\"routed\":{d},\"total\":{d},\"return_path\":{d}}}", .{ routed.routed, routed.total, rp_warn });
+    res.content_type = .JSON;
+    res.body = aw.written();
+}
+
+/// POST /api/pcb-drc/:name — DRC-check the *submitted* copper (never route).
+/// Body is the route endpoint's `{"parts":[{ref,x,y,rot,side}, …]}` plus the
+/// on-screen copper `{"tracks":[…],"vias":[…]}` (the same SavedRoutes shape the
+/// layout sidecar stores) and optional `clearance`/`outline`. It builds the
+/// placement at those poses, restores the copper into the current netlist, runs
+/// `drc.check` against it, and returns `{"drc":[…],"n":N}`. This lets the viewer
+/// verify hand-drawn copper continuously (debounced after any copper edit + on
+/// Save) instead of only when the user clicks Route.
+pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const body = req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return;
+    };
+    const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
+        res.status = 400;
+        res.body = BAD_JSON_MSG;
+        return;
+    };
+    if (root != .object) {
+        res.status = 400;
+        return;
+    }
+    const parts_v = root.object.get("parts") orelse {
+        res.status = 400;
+        return;
+    };
+    if (parts_v != .array) {
+        res.status = 400;
+        return;
+    }
+    var poses: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
+    for (parts_v.array.items) |it| {
+        if (it != .object) continue;
+        const ref = it.object.get("ref") orelse continue;
+        if (ref != .string) continue;
+        try poses.append(ctx.allocator, .{
+            .ref = ref.string,
+            .x = jsonNum(it.object.get("x")),
+            .y = jsonNum(it.object.get("y")),
+            .rot = jsonNum(it.object.get("rot")),
+            .side = jsonSide(it.object.get("side")),
+            .locked = jsonFlag(it.object.get("locked")),
+        });
+    }
+
+    // Copper-to-copper clearance rule the check measures against — the body's
+    // `clearance` (mm), else the router default (matches ?route=1 and the
+    // client's PCB.clr).
+    const default_rp = router.RouteParams{};
+    var clearance = default_rp.clearance;
+    const cl = jsonNum(root.object.get(CLEARANCE_KEY));
+    if (cl > 0) clearance = cl;
+
+    var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        ctx.allocator.destroy(mr.eval);
+    };
+    const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
+        res.status = 500;
+        res.body = NO_BLOCK_MSG;
+        return;
+    };
+    const eff_block = if (subSlug(req)) |s|
+        (descendToSub(ctx.allocator, block, s) orelse {
+            res.status = 404;
+            res.body = NO_SUB_MSG;
+            return;
+        }).block
+    else
+        block;
+
+    var placement = optimizer.placeFromPoses(ctx.allocator, eff_block, ctx.project_dir, poses.items, optimizer.Params{}) catch {
+        res.status = 500;
+        res.body = PLACEMENT_ERR_MSG;
+        return;
+    };
+    // A submitted outline becomes the board edge so the board-edge DRC check
+    // sees it (mirrors resolveShownView applying the shown layout's outline).
+    if (parseSavedOutline(root.object.get("outline"))) |o| {
+        placement.board_rect = .{ .minx = o.x, .miny = o.y, .w = o.w, .h = o.h };
+    }
+
+    // Restore the client's copper into the current netlist (net NAME → index),
+    // exactly as a saved layout's persisted copper is restored on page open.
+    // `parseSavedRoutes` reads `tracks`/`vias` off the passed object, and the
+    // client sends them at the request-body top level — so pass `root`.
+    const empty_rr: router.RouteResult = .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    const rr: router.RouteResult = if (parseSavedRoutes(ctx.allocator, root)) |sr|
+        (restoreRoutes(ctx.allocator, sr, placement.nets) orelse empty_rr)
+    else
+        empty_rr;
+
+    const violations: []const drc.Violation = drc.check(ctx.allocator, placement, rr, clearance) catch &.{};
+
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &aw.writer;
+    try w.writeAll("{\"drc\":[");
+    for (violations, 0..) |vio, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\"}}", .{ vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind) });
+    }
+    try w.print("],\"n\":{d}}}", .{violations.len});
     res.content_type = .JSON;
     res.body = aw.written();
 }
@@ -3691,7 +3807,7 @@ fn parseRoute(req: *httpz.Request) RouteOpts {
     var p = router.RouteParams{};
     const q = req.query() catch return .{ .params = p, .run = false };
     if (q.get("track_width")) |v| p.track_width = parseF(v, p.track_width);
-    if (q.get("clearance")) |v| p.clearance = parseF(v, p.clearance);
+    if (q.get(CLEARANCE_KEY)) |v| p.clearance = parseF(v, p.clearance);
     if (q.get("via_drill")) |v| p.via_drill = parseF(v, p.via_drill);
     if (q.get("via_dia")) |v| p.via_dia = parseF(v, p.via_dia);
     return .{ .params = p, .run = q.get("route") != null };
@@ -3981,6 +4097,22 @@ fn writeTabsRow(w: *std.Io.Writer, route_open: bool) std.Io.Writer.Error!void {
         "<input type=\"checkbox\" id=\"v-heat\"> Heatmap</label>");
     try w.writeAll(VIEW_CHIP_OPEN ++ "title=\"Show the trace / via colour key\">" ++
         "<input type=\"checkbox\" id=\"v-legend\"> Legend</label>");
+    try w.writeAll("<span class=\"tabs-sep\"></span>");
+    // Layers / grid / units / ruler controls (audit 1.5). Populated + wired in
+    // pcb_board.js; the layers popover is built client-side so it can read the
+    // persisted per-design visibility state.
+    try w.writeAll("<button class=\"tab-chip\" id=\"pcb-layers-btn\" " ++
+        "title=\"Layer visibility + active draw layer — ( / ) or PgUp/PgDn switch the active layer\">\u{25A4} Layers</button>");
+    try w.writeAll("<label class=\"view-chip\" title=\"Snap grid for placement, hand routing, and the outline tool\">" ++
+        "Grid <select id=\"pcb-grid-sel\">" ++
+        "<option value=\"0.5\">0.5 mm</option><option value=\"0.25\">0.25 mm</option>" ++
+        "<option value=\"0.1\">0.1 mm</option><option value=\"0.05\">0.05 mm</option>" ++
+        "<option value=\"0\">off</option></select></label>");
+    try w.writeAll("<button class=\"tab-chip\" id=\"pcb-units-btn\" " ++
+        "title=\"Toggle coordinate / dimension display between mm and mil (display only)\">mm</button>");
+    try w.writeAll("<button class=\"tab-chip\" id=\"pcb-ruler-btn\" " ++
+        "title=\"Ruler / measure (M): drag to measure dx / dy / distance in the current units; Esc exits\">\u{1F4CF} Ruler</button>");
+    try w.writeAll("<div class=\"pcb-layers-pop\" id=\"pcb-layers-pop\" hidden></div>");
     try w.writeAll("</div>");
 }
 
@@ -4810,7 +4942,23 @@ fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placem
     // Per-group module copper (net-mapped, module-local coords) for Stamp.
     try w.writeAll(",\"subroutes\":");
     try w.writeAll(if (opts.subroutes_json.len > 0) opts.subroutes_json else "{}");
-    try w.writeAll(",");
+    // Per-net clearance overrides (collapsed net key → mm) for the client's
+    // live hand-routing DRC preview, so a drawn segment on a wider-clearance
+    // net class is judged against that class, not the board default (`clr`).
+    // Only nets whose `(net-class …)` sets a positive clearance appear; the
+    // rest fall back to `clr`. Keyed the same collapsed way pad `net` tags are.
+    try w.writeAll(",\"netclr\":{");
+    var nc_first = true;
+    for (p.nets, 0..) |net, i| {
+        if (i >= p.rules.net.len) break;
+        const c = p.rules.net[i].clearance;
+        if (!(c > 0)) continue;
+        if (!nc_first) try w.writeAll(",");
+        nc_first = false;
+        try writeJsonStr(w, netKey(net.name));
+        try w.print(":{d}", .{c});
+    }
+    try w.writeAll("},");
 }
 
 /// A routed feature's net NAME for the persistable route JSON ("" for −1).
@@ -5104,6 +5252,19 @@ const PAGE_CSS =
     \\.pcb-tabs .view-chip{display:inline-flex;gap:5px;align-items:center;font-size:12px;color:#c9d1d9;
     \\  border:1px solid #30363d;background:#161b22;border-radius:14px;padding:3px 11px;cursor:pointer}
     \\.pcb-tabs .view-chip:hover{border-color:#58a6ff;color:#e6edf3}
+    \\.pcb-tabs .tab-chip.active{background:rgba(31,111,235,.22);border-color:#58a6ff;color:#e6edf3}
+    \\.pcb-tabs #pcb-grid-sel{font:inherit;font-size:12px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:1px 3px}
+    \\.pcb-layers-pop{position:absolute;z-index:40;background:#161b22;border:1px solid #30363d;border-radius:8px;
+    \\  padding:8px 12px;box-shadow:0 6px 20px rgba(0,0,0,.5);font-size:12px;color:#c9d1d9;min-width:150px}
+    \\.pcb-layers-pop[hidden]{display:none}
+    \\.pcb-layers-pop .lp-h{font-weight:700;color:#f0f6fc;margin:2px 0 6px}
+    \\.pcb-layers-pop label{display:flex;gap:6px;align-items:center;padding:2px 0;cursor:pointer}
+    \\.pcb-layers-pop .lp-sep{height:1px;background:#30363d;margin:6px 0}
+    \\.pcb-layers-pop .lp-swatch{width:10px;height:10px;border-radius:2px;display:inline-block}
+    \\.pcb-layers-pop select{font:inherit;font-size:12px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:1px 4px}
+    \\.pcb-ruler-line{stroke:#e3b341;stroke-width:1.4;stroke-dasharray:4 3;pointer-events:none}
+    \\.pcb-ruler-lbl{fill:#e3b341;font-size:12px;font-weight:600;paint-order:stroke;stroke:#010409;stroke-width:3;pointer-events:none}
+    \\svg.ruler-mode{cursor:crosshair}
     \\.pcb-panel{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:8px 12px}
     \\.pcb-panel[hidden]{display:none}
     \\.pcb-panel .btn{font:inherit;font-size:12px;border:1px solid #30363d;background:#21262d;border-radius:5px;
