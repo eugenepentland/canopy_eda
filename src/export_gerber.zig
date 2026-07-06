@@ -171,12 +171,15 @@ fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
 
 /// Write one complete Gerber file for `layer`. `copper` is the saved
 /// layout's persisted routed copper (empty is fine — pads still flash);
-/// `frame` must be the same package frame every sibling file uses.
+/// `texts` are the saved layout's board-level silkscreen labels (only the
+/// silk layers consume them); `frame` must be the same package frame every
+/// sibling file uses.
 pub fn writeLayer(
     w: *std.Io.Writer,
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     copper: Copper,
+    texts: []const font.BoardText,
     frame: export_fab.Frame,
     layer: Layer,
     function: []const u8,
@@ -193,7 +196,7 @@ pub fn writeLayer(
         .inner_blank => try g.w.writeAll("G04 inner signal layer unused by the 2-signal-layer router*\n"),
         .mask => |side| try writeMask(&g, placement, side),
         .paste => |side| try writePaste(&g, placement, side),
-        .silk => |side| try writeSilk(&g, placement, side),
+        .silk => |side| try writeSilk(&g, placement, side, texts),
         .edge => try writeEdge(&g, placement),
     }
 
@@ -330,9 +333,10 @@ fn writePaste(g: *Gx, placement: optimizer.Placement, side: optimizer.Side) Erro
 }
 
 /// Silkscreen: each same-side part's footprint art (lines + circles) plus
-/// its ref-des in 5x7 strokes above the courtyard. Bottom-side text mirrors
-/// so it reads correctly when the board is flipped.
-fn writeSilk(g: *Gx, placement: optimizer.Placement, side: optimizer.Side) Error!void {
+/// its ref-des in 5x7 strokes above the courtyard, then any board-level user
+/// text on this side. Bottom-side text mirrors so it reads correctly when the
+/// board is flipped.
+fn writeSilk(g: *Gx, placement: optimizer.Placement, side: optimizer.Side, texts: []const font.BoardText) Error!void {
     for (placement.parts) |p| {
         if (p.side != side) continue;
         try g.use(.c, SILK_W_MM, 0);
@@ -346,6 +350,12 @@ fn writeSilk(g: *Gx, placement: optimizer.Placement, side: optimizer.Side) Error
             try strokeCircle(g, c[0], c[1], ci.r);
         }
         try drawRefDes(g, p);
+    }
+    // Board-level user silkscreen text (Text tool / sidecar `texts[]`).
+    const bottom = side == .bottom;
+    for (texts) |t| {
+        if (t.bottom != bottom) continue;
+        try drawBoardText(g, t);
     }
 }
 
@@ -504,39 +514,77 @@ fn drawRefDes(g: *Gx, p: optimizer.Part) Error!void {
     const hh = if (q) p.hw else p.hh;
     const cc = optimizer.worldPadCenter(p, p.ccx, p.ccy);
     const ty = cc[1] - hh - (font.GH * TEXT_PX_MM) / 2 - 0.2;
-    try drawText(g, cc[0], ty, p.ref_des, p.side == .bottom);
+    // Ref-des uppercases (its font predates lowercase) at the fixed 0.15 mm
+    // pitch — kept byte-identical (see TextGeom defaults).
+    try drawText(g, cc[0], ty, p.ref_des, .{ .mirror = p.side == .bottom, .upper = true });
+}
+
+/// How a silkscreen string is laid out: the per-pixel pitch (mm), whether x
+/// mirrors about the anchor (bottom side), quarter-turn rotation, and whether
+/// the source is uppercased first (ref-des only, for byte-identical legacy).
+const TextGeom = struct {
+    pitch: f64 = TEXT_PX_MM,
+    mirror: bool = false,
+    rot: f64 = 0,
+    upper: bool = false,
+};
+
+/// Stroke a board-level user text at its world anchor, scaled to its cap
+/// height and rotated to its quarter turn. Bottom-side mirrors like ref-des.
+fn drawBoardText(g: *Gx, t: font.BoardText) Error!void {
+    // Cap height → pixel pitch (glyph is GH pixels tall). Guard non-positive.
+    const pitch = if (t.size > 0) t.size / @as(f64, @floatFromInt(font.GH)) else TEXT_PX_MM;
+    try drawText(g, t.x, t.y, t.text, .{ .pitch = pitch, .mirror = t.bottom, .rot = t.rot });
 }
 
 /// Stroke `s` centred at (cx,cy) in placement coordinates: each glyph row's
 /// runs of lit pixels become one horizontal segment (single pixels flash a
-/// dot). `mirror` flips x about the centre.
-fn drawText(g: *Gx, cx: f64, cy: f64, s: []const u8, mirror: bool) Error!void {
-    const P = TEXT_PX_MM;
+/// dot) — walked once per glyph via `font.glyphRuns` in the same row-then-
+/// column order the old inline loop used, so ref-des output is byte-identical.
+/// `geom.mirror` flips x about the centre (bottom-side readability);
+/// `geom.rot` rotates the whole string about the anchor.
+fn drawText(g: *Gx, cx: f64, cy: f64, s: []const u8, geom: TextGeom) Error!void {
+    const P = geom.pitch;
     const adv = @as(f64, @floatFromInt(font.GW + 1)) * P;
     const total = @as(f64, @floatFromInt(s.len)) * adv - P;
-    try g.use(.c, SILK_W_MM, 0);
-    for (s, 0..) |ch, k| {
-        const gx0 = -total / 2 + @as(f64, @floatFromInt(k)) * adv;
-        const cols = font.cols(std.ascii.toUpper(ch));
-        var r: u5 = 0;
-        while (r < font.GH) : (r += 1) {
-            const wy = cy + (@as(f64, @floatFromInt(r)) - 3.0) * P;
-            var c: usize = 0;
-            while (c < font.GW) {
-                if (cols[c] & (@as(u8, 1) << @intCast(r)) == 0) {
-                    c += 1;
-                    continue;
-                }
-                var e = c;
-                while (e + 1 < font.GW and cols[e + 1] & (@as(u8, 1) << @intCast(r)) != 0) e += 1;
-                const lx1 = gx0 + (@as(f64, @floatFromInt(c)) + 0.5) * P;
-                const lx2 = gx0 + (@as(f64, @floatFromInt(e)) + 0.5) * P;
-                const wx1 = if (mirror) cx - lx1 else cx + lx1;
-                const wx2 = if (mirror) cx - lx2 else cx + lx2;
-                if (c == e) try g.flash(wx1, wy) else try g.line(wx1, wy, wx2, wy);
-                c = e + 1;
-            }
+    // Rotation of the local (lx,ly) frame about the anchor (0 = the fast path
+    // where ca/sa are exactly 1/0, so unrotated text is byte-identical).
+    const a = @mod(geom.rot, 360.0) * std.math.pi / 180.0;
+    const ca = @cos(a);
+    const sa = @sin(a);
+    const Emit = struct {
+        g: *Gx,
+        cx: f64,
+        cy: f64,
+        gx0: f64,
+        p: f64,
+        mirror: bool,
+        rotated: bool,
+        ca: f64,
+        sa: f64,
+        // (lx,ly) local px → world mm: mirror x, then rotate about the anchor.
+        fn place(self: @This(), lxpx: f64, ly: f64) [2]f64 {
+            const lx = if (self.mirror) -lxpx else lxpx;
+            if (!self.rotated) return .{ self.cx + lx, self.cy + ly };
+            return .{ self.cx + lx * self.ca - ly * self.sa, self.cy + lx * self.sa + ly * self.ca };
         }
+        fn emit(self: @This(), run: font.Run) Error!void {
+            const ly = (@as(f64, @floatFromInt(run.r)) - 3.0) * self.p;
+            const lx1 = self.gx0 + (@as(f64, @floatFromInt(run.c0)) + 0.5) * self.p;
+            const lx2 = self.gx0 + (@as(f64, @floatFromInt(run.c1)) + 0.5) * self.p;
+            const w1 = self.place(lx1, ly);
+            if (run.c0 == run.c1) return self.g.flash(w1[0], w1[1]);
+            const w2 = self.place(lx2, ly);
+            try self.g.line(w1[0], w1[1], w2[0], w2[1]);
+        }
+    };
+    const rotated = geom.rot != 0;
+    try g.use(.c, SILK_W_MM, 0);
+    for (s, 0..) |ch0, k| {
+        const ch = if (geom.upper) std.ascii.toUpper(ch0) else ch0;
+        const gx0 = -total / 2 + @as(f64, @floatFromInt(k)) * adv;
+        const em = Emit{ .g = g, .cx = cx, .cy = cy, .gx0 = gx0, .p = P, .mirror = geom.mirror, .rotated = rotated, .ca = ca, .sa = sa };
+        try font.glyphRuns(ch, Error, em, Emit.emit);
     }
 }
 
@@ -725,7 +773,8 @@ test "writeLayer emits top copper with pads, tracks, and via lands" {
     const vias = [_]router.Via{.{ .x = 5, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 }};
 
     var aw: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&aw.writer, arena, placement, .{ .tracks = &tracks, .vias = &vias }, export_fab.frameFor(placement), .{ .copper = .top }, "Copper,L1,Top");
+    const top_copper = Copper{ .tracks = &tracks, .vias = &vias };
+    try writeLayer(&aw.writer, arena, placement, top_copper, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, "Copper,L1,Top");
     const out = aw.written();
 
     try testing.expect(std.mem.indexOf(u8, out, "%FSLAX46Y46*%") != null);
@@ -744,7 +793,7 @@ test "writeLayer emits top copper with pads, tracks, and via lands" {
     // is footprint-local; a centred pad stays at the part centre).
     var bw: std.Io.Writer.Allocating = .init(arena);
     const bot_copper = Copper{ .tracks = &tracks, .vias = &vias };
-    try writeLayer(&bw.writer, arena, placement, bot_copper, export_fab.frameFor(placement), .{ .copper = .bottom }, "Copper,L4,Bot");
+    try writeLayer(&bw.writer, arena, placement, bot_copper, &.{}, export_fab.frameFor(placement), .{ .copper = .bottom }, "Copper,L4,Bot");
     const bot = bw.written();
     try testing.expect(std.mem.indexOf(u8, bot, "X4000000Y6000000D03*") != null);
     try testing.expect(std.mem.indexOf(u8, bot, "X1000000Y9000000D02*\nX2000000Y9000000D01*") != null);
@@ -767,14 +816,14 @@ test "mask expands pads and skips vias; paste skips through-hole" {
     const vias = [_]router.Via{.{ .x = 5, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 }};
 
     var mw: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&mw.writer, arena, placement, .{ .vias = &vias }, export_fab.frameFor(placement), .{ .mask = .top }, "Soldermask,Top");
+    try writeLayer(&mw.writer, arena, placement, .{ .vias = &vias }, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, "Soldermask,Top");
     const mask = mw.written();
     try testing.expect(std.mem.indexOf(u8, mask, "%TF.FilePolarity,Negative*%") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "R,1.100000X0.600000*%") != null); // 0.05/side expansion
     try testing.expect(std.mem.indexOf(u8, mask, "X5000000Y5000000D03*") == null); // via tented
 
     var pw: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&pw.writer, arena, placement, .{}, export_fab.frameFor(placement), .{ .paste = .top }, "Paste,Top");
+    try writeLayer(&pw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .paste = .top }, "Paste,Top");
     const paste = pw.written();
     try testing.expect(std.mem.indexOf(u8, paste, "R,1.000000X0.500000*%") != null); // SMD at 1:1
     try testing.expect(std.mem.indexOf(u8, paste, "1.400000") == null); // thru pad has no paste
@@ -795,7 +844,7 @@ test "mask margin reads from the design rules" {
     // legacy constant produced (the byte-identical regression).
     const base = testPlacement(&parts, &.{});
     var mw: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&mw.writer, arena, base, .{}, export_fab.frameFor(base), .{ .mask = .top }, "Soldermask,Top");
+    try writeLayer(&mw.writer, arena, base, .{}, &.{}, export_fab.frameFor(base), .{ .mask = .top }, "Soldermask,Top");
     try testing.expect(std.mem.indexOf(u8, mw.written(), "R,1.100000X0.600000*%") != null);
 
     // A (design-rules (mask-margin 0.1)) widens the opening to 0.1/side ⇒
@@ -803,7 +852,7 @@ test "mask margin reads from the design rules" {
     var wide = testPlacement(&parts, &.{});
     wide.rules = .{ .design = .{ .mask_margin = 0.1 } };
     var ww: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&ww.writer, arena, wide, .{}, export_fab.frameFor(wide), .{ .mask = .top }, "Soldermask,Top");
+    try writeLayer(&ww.writer, arena, wide, .{}, &.{}, export_fab.frameFor(wide), .{ .mask = .top }, "Soldermask,Top");
     try testing.expect(std.mem.indexOf(u8, ww.written(), "R,1.200000X0.700000*%") != null);
 }
 
@@ -834,7 +883,7 @@ test "plane layer clears foreign holes and connects same-net barrels" {
 
     var aw: std.Io.Writer.Allocating = .init(arena);
     const inner: Layer = .{ .plane = .{ .index = 2, .net = .ground } };
-    try writeLayer(&aw.writer, arena, placement, .{ .vias = &vias }, export_fab.frameFor(placement), inner, "Copper,L2,Inner");
+    try writeLayer(&aw.writer, arena, placement, .{ .vias = &vias }, &.{}, export_fab.frameFor(placement), inner, "Copper,L2,Inner");
     const out = aw.written();
 
     try testing.expect(std.mem.indexOf(u8, out, "G36*") != null); // the solid pour
@@ -875,7 +924,7 @@ test "outer pour fills bottom copper and antipads foreign features" {
     placement.rules = .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = &planes };
 
     var bw: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&bw.writer, arena, placement, .{}, export_fab.frameFor(placement), .{ .copper = .bottom }, "Copper,L2,Bot");
+    try writeLayer(&bw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .bottom }, "Copper,L2,Bot");
     const bot = bw.written();
     // The solid pour region + a clear-polarity pass, then back to dark.
     try testing.expect(std.mem.indexOf(u8, bot, "G36*") != null);
@@ -890,7 +939,7 @@ test "outer pour fills bottom copper and antipads foreign features" {
 
     // The un-poured top face keeps plain pads-only copper: no pour region.
     var tw: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&tw.writer, arena, placement, .{}, export_fab.frameFor(placement), .{ .copper = .top }, "Copper,L1,Top");
+    try writeLayer(&tw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, "Copper,L1,Top");
     try testing.expect(std.mem.indexOf(u8, tw.written(), "G36*") == null);
 }
 
@@ -932,7 +981,7 @@ test "edge closes the outline and silk carries the ref-des" {
     const placement = testPlacement(&parts, &.{});
 
     var ew: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&ew.writer, arena, placement, .{}, export_fab.frameFor(placement), .edge, "Profile,NP");
+    try writeLayer(&ew.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .edge, "Profile,NP");
     const edge = ew.written();
     try testing.expect(std.mem.indexOf(u8, edge, "C,0.100000*%") != null);
     // All four outline corners appear ((0,0)→(20,10) in the y-up frame).
@@ -940,7 +989,7 @@ test "edge closes the outline and silk carries the ref-des" {
     try testing.expect(std.mem.indexOf(u8, edge, "X20000000Y0D01*") != null);
 
     var sw: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&sw.writer, arena, placement, .{}, export_fab.frameFor(placement), .{ .silk = .top }, "Legend,Top");
+    try writeLayer(&sw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .silk = .top }, "Legend,Top");
     const silk_out = sw.written();
     try testing.expect(std.mem.indexOf(u8, silk_out, "C,0.150000*%") != null);
     // The footprint silk line at world y=4 → y-up 6.
@@ -966,7 +1015,7 @@ test "edge layer traces the outline polygon when the board is non-rectangular" {
     placement.board_poly = &l_poly;
 
     var ew: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&ew.writer, arena, placement, .{}, export_fab.frameFor(placement), .edge, "Profile,NP");
+    try writeLayer(&ew.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .edge, "Profile,NP");
     const edge = ew.written();
     // The notch corner (6,4) → y-up (6,6) is drawn to from (10,4) → (10,6).
     try testing.expect(std.mem.indexOf(u8, edge, "X10000000Y6000000D02*\nX6000000Y6000000D01*") != null);
@@ -977,4 +1026,87 @@ test "edge layer traces the outline polygon when the board is non-rectangular" {
     // The plain bbox rectangle's notched corner (10,10 y-down → 10,0 y-up)
     // never appears as a draw target.
     try testing.expect(std.mem.indexOf(u8, edge, "X10000000Y0D01*") == null);
+}
+
+// spec: export_gerber - board-level silkscreen text strokes onto the silk layer at its world anchor, and only on its own side
+test "silk layer strokes board-level text at its anchor" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // Empty ref-des so the only silk strokes are the board text (no ref-des
+    // glyphs to muddy the flash counts).
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 10, .y = 5 },
+    };
+    const placement = testPlacement(&parts, &.{});
+    // A top-side "T" at world (10,5). "T" = a 5-wide top bar (one line run) plus
+    // a 1-wide stem down the middle (six single-pixel dot flashes).
+    const texts = [_]font.BoardText{
+        .{ .x = 10, .y = 5, .size = 1.05, .text = "T", .bottom = false },
+        .{ .x = 3, .y = 3, .size = 1.05, .text = "B", .bottom = true }, // wrong side
+    };
+
+    var tw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&tw.writer, arena, placement, .{}, &texts, export_fab.frameFor(placement), .{ .silk = .top }, "Legend,Top");
+    const out = tw.written();
+    // "T"'s top-bar run is a horizontal segment; its stem is exactly 6 dot
+    // flashes. The bottom "B" is filtered out of the top layer, so the counts
+    // are the glyph's alone.
+    try testing.expect(std.mem.count(u8, out, "D01*") >= 1); // the top-bar stroke
+    try testing.expectEqual(@as(usize, 6), std.mem.count(u8, out, "D03*")); // "T" stem dots only
+
+    // The same "B" on the BOTTOM silk layer does render (and mirrors); the top
+    // "T" is filtered off the bottom layer, so "B"'s own strokes are all that show.
+    var bw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&bw.writer, arena, placement, .{}, &texts, export_fab.frameFor(placement), .{ .silk = .bottom }, "Legend,Bot");
+    const bout = bw.written();
+    try testing.expect(std.mem.count(u8, bout, "D01*") >= 1);
+    // "B" flashes/strokes exist; "T"'s 6 stem dots are absent (wrong side).
+    try testing.expect(std.mem.count(u8, bout, "D03*") + std.mem.count(u8, bout, "D01*") >= 3);
+}
+
+// spec: export_gerber - silkscreen text scales with its cap-height size (2x size gives 2x glyph extent)
+test "board text extent scales with cap height" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // Empty ref-des so the measured strokes are the board text alone (a fixed
+    // ref-des would add size-independent x-extent and break the ratio).
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 10, .y = 5 },
+    };
+    const placement = testPlacement(&parts, &.{});
+
+    // Measure the x-span of the flashed "H" strokes at 1× vs 2× cap height. A
+    // taller cap is a proportionally wider glyph, so the span doubles.
+    const span = struct {
+        fn measure(a2: std.mem.Allocator, pl: optimizer.Placement, size: f64) !f64 {
+            const ts = [_]font.BoardText{.{ .x = 10, .y = 5, .size = size, .text = "H" }};
+            var wbuf: std.Io.Writer.Allocating = .init(a2);
+            try writeLayer(&wbuf.writer, a2, pl, .{}, &ts, export_fab.frameFor(pl), .{ .silk = .top }, "Legend,Top");
+            const s = wbuf.written();
+            var minx: f64 = 1e18;
+            var maxx: f64 = -1e18;
+            var it = std.mem.tokenizeScalar(u8, s, '\n');
+            while (it.next()) |line| {
+                if (line.len == 0 or line[0] != 'X') continue;
+                const yi = std.mem.indexOfScalar(u8, line, 'Y') orelse continue;
+                const xv = std.fmt.parseInt(i64, line[1..yi], 10) catch continue;
+                const xf: f64 = @floatFromInt(xv);
+                minx = @min(minx, xf);
+                maxx = @max(maxx, xf);
+            }
+            return maxx - minx;
+        }
+    }.measure;
+
+    const s1 = try span(arena, placement, 1.0);
+    const s2 = try span(arena, placement, 2.0);
+    try testing.expect(s1 > 0);
+    // 2× cap height → 2× x-extent (within a small tolerance for the half-pixel
+    // stroke offsets being scaled too).
+    const ratio = s2 / s1;
+    try testing.expect(ratio > 1.9 and ratio < 2.1);
 }

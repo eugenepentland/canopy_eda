@@ -399,7 +399,7 @@ test "round-trip: writeLayer then verifyCopperLayer matches every pad and track"
     const frame = export_fab.frameFor(placement);
 
     var aw: std.Io.Writer.Allocating = .init(arena);
-    try export_gerber.writeLayer(&aw.writer, arena, placement, .{ .tracks = &tracks }, frame, .{ .copper = .top }, "Copper,L1,Top");
+    try export_gerber.writeLayer(&aw.writer, arena, placement, .{ .tracks = &tracks }, &.{}, frame, .{ .copper = .top }, "Copper,L1,Top");
 
     // Pad 1 is a rect at world (9,5) — 1.0x0.5. Pad 2 a circle at (11,5), 1.4.
     // The track is a 0.2-wide segment from (9,5) to (12,5).
@@ -429,7 +429,7 @@ test "verify reports a mislocated pad" {
     const placement = testPlacement(&parts, &.{});
     const frame = export_fab.frameFor(placement);
     var aw: std.Io.Writer.Allocating = .init(arena);
-    try export_gerber.writeLayer(&aw.writer, arena, placement, .{}, frame, .{ .copper = .top }, "Copper,L1,Top");
+    try export_gerber.writeLayer(&aw.writer, arena, placement, .{}, &.{}, frame, .{ .copper = .top }, "Copper,L1,Top");
 
     // Expect the pad at the WRONG place (off by 5 mm) → a miss.
     const ef = [_]ExpectFlash{.{ .x = 15, .y = 5, .kind = .r, .w = 1.0, .h = 1.0 }};
@@ -455,12 +455,12 @@ test "round-trip covers both board sides" {
     const frame = export_fab.frameFor(placement);
 
     var tw: std.Io.Writer.Allocating = .init(arena);
-    try export_gerber.writeLayer(&tw.writer, arena, placement, .{}, frame, .{ .copper = .top }, "Copper,L1,Top");
+    try export_gerber.writeLayer(&tw.writer, arena, placement, .{}, &.{}, frame, .{ .copper = .top }, "Copper,L1,Top");
     const top_flash = [_]ExpectFlash{.{ .x = 6, .y = 4, .kind = .r, .w = 0.8, .h = 0.8 }};
     try testing.expect((try verifyCopperLayer(arena, tw.written(), frame, &top_flash, &.{})).ok());
 
     var bw: std.Io.Writer.Allocating = .init(arena);
-    try export_gerber.writeLayer(&bw.writer, arena, placement, .{}, frame, .{ .copper = .bottom }, "Copper,L4,Bot");
+    try export_gerber.writeLayer(&bw.writer, arena, placement, .{}, &.{}, frame, .{ .copper = .bottom }, "Copper,L4,Bot");
     const bot_flash = [_]ExpectFlash{.{ .x = 14, .y = 6, .kind = .r, .w = 0.6, .h = 0.6 }};
     try testing.expect((try verifyCopperLayer(arena, bw.written(), frame, &bot_flash, &.{})).ok());
 }

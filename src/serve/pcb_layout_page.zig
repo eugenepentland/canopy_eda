@@ -31,6 +31,7 @@ const export_kicad = @import("../export_kicad.zig");
 const export_kicad_footprint = @import("../export_kicad_footprint.zig");
 const review = @import("../review.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
+const font5x7 = @import("../font5x7.zig");
 const png_mod = @import("../png.zig");
 const assets_css = @import("assets_css.zig");
 const pages_tmpl = @import("templates/pages.zig");
@@ -60,6 +61,9 @@ const PARTS_OPEN = "\"parts\":[";
 /// JSON `,"origin":` key shared by the part records that carry the renumber-
 /// stable origin key (saved-layout disk + page JSON, live PCB.parts).
 const ORIGIN_OPEN = ",\"origin\":";
+/// JSON `,"texts":` key shared by the sidecar, the page blob, and the
+/// per-layout Load records (board-level silkscreen text array).
+const TEXTS_OPEN = ",\"texts\":";
 /// Error bodies shared across the layout handlers.
 const NO_BLOCK_MSG = "No design or module by that name";
 /// Response header name the fab-output endpoints set their MIME type on.
@@ -161,6 +165,10 @@ pub const SavedLayout = struct {
     routes: ?SavedRoutes = null,
     /// User-drawn board outline captured with the poses (null = none drawn).
     outline: ?SavedOutline = null,
+    /// Board-level silkscreen text labels placed by the Text tool (empty when
+    /// none). Persisted with the layout so a Save → reload round-trips them,
+    /// and the ★ layout's set is what the Gerber silk / PNG render.
+    texts: []const font5x7.BoardText = &.{},
 };
 
 /// One persisted routed-copper segment of a saved layout. Field names match
@@ -372,7 +380,6 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         res.body = NO_BLOCK_MSG;
         return;
     };
-
     // A `?sub=<slug>` request scopes the layout to a single sub-block — the
     // schematic page's per-sub-block preview — so only that sub-block's parts
     // are placed, never the whole design. `?embed=1` trims the page chrome
@@ -535,6 +542,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
             .single = single,
             .saved_routes = rv.saved,
             .subroutes_json = subseeds.routes,
+            .texts = rv.texts,
         },
     );
     // Shared footprint engine (FP.padShape) must load before the board script
@@ -963,6 +971,9 @@ pub const SolvedRequest = struct {
     /// The (possibly sub-scoped) design block the placement was solved from —
     /// callers needing a second solve (e.g. the compare overlay) reuse it.
     block: *env_mod.DesignBlock,
+    /// Board-level silkscreen texts from the shown/starred layout (empty when
+    /// none) — the PNG draws them so screenshots match the Gerber silk.
+    texts: []const font5x7.BoardText = &.{},
 };
 
 /// Resolve `name` and apply the request's placement-selection rules: a named
@@ -1052,7 +1063,11 @@ pub fn solveForRequest(
         .{ .unplaced = diag.unplaced, .auto_filled = diag.auto_filled }
     else
         null;
-    return .{ .placement = placement, .spec_status = spec_status, .params = params, .title = eff_block.name, .block = eff_block };
+    // Board-level silkscreen texts of the layout being shown (the named ?layout=,
+    // else the starred default) — drawn on the PNG so screenshots match fab silk.
+    const shown_name: ?[]const u8 = opts.layout orelse starred_name;
+    const texts = layoutTextsFor(alloc, project_dir, name, shown_name, opts.sub);
+    return .{ .placement = placement, .spec_status = spec_status, .params = params, .title = eff_block.name, .block = eff_block, .texts = texts };
 }
 
 /// allocation goes through `alloc`; the returned bytes are owned by it.
@@ -1111,6 +1126,7 @@ pub fn renderDesignPng(
         .crop = opts.crop,
         .crop_r = opts.crop_r,
         .critique = opts.critique,
+        .texts = solved.texts,
     };
     if (opts.sheet) return render_pcb_png.renderSheet(alloc, placement, ropts);
     return render_pcb_png.render(alloc, placement, ropts);
@@ -1903,6 +1919,7 @@ const FabView = struct {
     placement: optimizer.Placement,
     tracks: []const router.Track = &.{},
     vias: []const router.Via = &.{},
+    texts: []const font5x7.BoardText = &.{},
     frame: export_fab.Frame,
     /// True when the blessed poses came from a saved snapshot (★ default →
     /// newest manual → any named), false when they fell back to the bare
@@ -1935,6 +1952,7 @@ fn blessedFabView(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, name
     var tracks: []const router.Track = &.{};
     var vias: []const router.Via = &.{};
     var from_saved = false;
+    var texts: []const font5x7.BoardText = &.{};
     if (blessedLayout(readLayouts(req.arena, ctx.project_dir, name))) |L| {
         from_saved = true;
         if (L.outline) |o| {
@@ -1947,8 +1965,9 @@ fn blessedFabView(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, name
                 vias = r.vias;
             }
         }
+        texts = L.texts;
     }
-    return .{ .placement = placement, .tracks = tracks, .vias = vias, .frame = export_fab.frameFor(placement), .from_saved = from_saved };
+    return .{ .placement = placement, .tracks = tracks, .vias = vias, .texts = texts, .frame = export_fab.frameFor(placement), .from_saved = from_saved };
 }
 
 /// GET /api/pcb-centroid/:name — the pick-and-place centroid CSV at the
@@ -2046,7 +2065,7 @@ pub fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const layers = try export_gerber.planLayers(req.arena, fv.placement);
     for (layers) |f| {
         var aw: std.Io.Writer.Allocating = .init(req.arena);
-        try export_gerber.writeLayer(&aw.writer, req.arena, fv.placement, copper, fv.frame, f.layer, f.function);
+        try export_gerber.writeLayer(&aw.writer, req.arena, fv.placement, copper, fv.texts, fv.frame, f.layer, f.function);
         try entries.append(req.arena, .{
             .name = try std.fmt.allocPrint(req.arena, "{s}-{s}", .{ name, f.suffix }),
             .data = aw.written(),
@@ -2160,6 +2179,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         .parts = parts,
         .routes = parseSavedRoutes(req.arena, root.object.get("routes")),
         .outline = parseSavedOutline(req.arena, root.object.get("outline")),
+        .texts = parseSavedTexts(req.arena, root.object.get("texts")),
     };
     // A top-level DESIGN keeps exactly one layout: the save replaces the whole
     // list with this snapshot, auto-starred so KiCad sync + the fab outputs
@@ -2781,6 +2801,21 @@ fn readLayoutsSub(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
     return &[_]SavedLayout{};
 }
 
+/// The board-level silkscreen texts of `name`'s shown layout: the layout named
+/// `want` when given, else the starred (★ default) one — empty when nothing
+/// matches or the layout carries no texts. Used by the PNG/describe path so a
+/// screenshot draws the same legend the fab silk will (parallels `shownTexts`,
+/// which reads the already-loaded list the page render holds).
+fn layoutTextsFor(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, want: ?[]const u8, sub: ?[]const u8) []const font5x7.BoardText {
+    const layouts = readLayoutsSub(alloc, project_dir, name, sub);
+    for (layouts) |L| {
+        if (want) |wn| {
+            if (std.mem.eql(u8, L.name, wn)) return L.texts;
+        } else if (L.default) return L.texts;
+    }
+    return &.{};
+}
+
 /// Parse a `.layouts.json` body (`{"layouts":[…]}`) into a slice of
 /// `SavedLayout`. Each entry needs a `name`; `kind` defaults to auto, `score`
 /// is present only when an `hpwl` field is. Null on malformed top-level JSON.
@@ -2826,6 +2861,7 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
             .rough = rough,
             .routes = parseSavedRoutes(alloc, it.object.get("routes")),
             .outline = parseSavedOutline(alloc, it.object.get("outline")),
+            .texts = parseSavedTexts(alloc, it.object.get("texts")),
         }) catch return list.items;
     }
     return list.toOwnedSlice(alloc) catch null;
@@ -2959,6 +2995,47 @@ fn parseOutlinePts(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const [2]f64
     return pts;
 }
 
+/// Parse a `[{"x","y","rot","side","size","text"}, …]` board-text array. Empty
+/// slice when absent/malformed; entries with an empty `text` are dropped (a
+/// blank label has nothing to stroke). `side` is "bottom" ⇒ bottom silk; `size`
+/// defaults to the ~1 mm ref-des cap height; `rot` snaps to 0/90/180/270.
+fn parseSavedTexts(alloc: std.mem.Allocator, v: ?std.json.Value) []const font5x7.BoardText {
+    const arr = v orelse return &.{};
+    if (arr != .array) return &.{};
+    var list: std.ArrayListUnmanaged(font5x7.BoardText) = .empty;
+    for (arr.array.items) |it| {
+        if (it != .object) continue;
+        const tv = it.object.get("text") orelse continue;
+        if (tv != .string or tv.string.len == 0) continue;
+        const side = jsonStrField(it.object.get("side"));
+        const size = jsonNum(it.object.get("size"));
+        list.append(alloc, .{
+            .x = jsonNum(it.object.get("x")),
+            .y = jsonNum(it.object.get("y")),
+            .rot = @mod(@round(jsonNum(it.object.get("rot")) / 90) * 90, 360),
+            .bottom = std.mem.eql(u8, side, "bottom"),
+            .size = if (size > 0) size else font5x7.DEFAULT_SIZE_MM,
+            .text = tv.string,
+        }) catch return list.items;
+    }
+    return list.toOwnedSlice(alloc) catch &.{};
+}
+
+/// Serialize a board-text array as `[{"x","y","rot","side","size","text"}, …]`
+/// (the shape `parseSavedTexts` reads and the client `PCB.texts` consumes).
+fn writeSavedTextsJson(w: *std.Io.Writer, texts: []const font5x7.BoardText) std.Io.Writer.Error!void {
+    try w.writeAll("[");
+    for (texts, 0..) |t, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("{{\"x\":{d},\"y\":{d},\"rot\":{d},\"side\":\"{s}\",\"size\":{d},\"text\":", .{
+            t.x, t.y, t.rot, if (t.bottom) "bottom" else "top", t.size,
+        });
+        try writeJsonStr(w, t.text);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+}
+
 /// A pose/route JSON string field, or "" when absent/not a string.
 fn jsonStrField(v: ?std.json.Value) []const u8 {
     const sv = v orelse return "";
@@ -3033,6 +3110,9 @@ const ShownView = struct {
     /// copper is a fresh ?route=1 result) — index-aligned with `routed`, so
     /// the blob writer can re-emit per-segment stamp group tags (`g`).
     saved: ?SavedRoutes = null,
+    /// The shown layout's board-level silkscreen texts (empty when none) —
+    /// the blob emits them as `PCB.texts` so the viewer draws them on load.
+    texts: []const font5x7.BoardText = &.{},
 };
 
 /// Resolve everything the shown saved layout contributes to the page: apply
@@ -3063,7 +3143,17 @@ fn resolveShownView(
         (drc.check(ctx.allocator, placement.*, r, ro.params.clearance) catch &.{})
     else
         &.{};
-    return .{ .ro = ro, .routed = routed, .violations = violations, .outline_drawn = outline_drawn, .saved = saved };
+    return .{ .ro = ro, .routed = routed, .violations = violations, .outline_drawn = outline_drawn, .saved = saved, .texts = shownTexts(layouts, shown) };
+}
+
+/// The shown saved layout's board-level silkscreen texts (empty when the
+/// layout isn't found or carries none). Mirrors `shownSavedRoutes`.
+fn shownTexts(layouts: []const SavedLayout, shown: ?[]const u8) []const font5x7.BoardText {
+    const sn = shown orelse return &.{};
+    for (layouts) |L| {
+        if (std.mem.eql(u8, L.name, sn)) return L.texts;
+    }
+    return &.{};
 }
 
 /// Apply the shown saved layout's user-drawn outline (if any) onto the
@@ -3233,6 +3323,10 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: 
         if (L.outline) |o| {
             try w.writeAll(",\"outline\":");
             try writeSavedOutlineJson(w, o);
+        }
+        if (L.texts.len > 0) {
+            try w.writeAll(TEXTS_OPEN);
+            try writeSavedTextsJson(w, L.texts);
         }
         if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}", .{ s.hpwl, s.loop, s.caps, s.objective });
         try w.writeAll(",\"parts\":[");
@@ -4081,6 +4175,10 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
         "fix corners (45\u{b0}/grid snapped, Shift = free angle), V drops a via and flips layer, click a same-net pad or " ++
         "double-click to finish, Backspace steps back, Esc ends. Right-click deletes the track/via under the cursor. " ++
         "Copper is saved with the layout (Save/Update).\">\u{270E} Draw</button>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-text\" title=\"Silkscreen text (T): click on the board to place a label " ++
+        "(grid-snapped, on the active side). Click an existing label to edit its content / size / rotation / side, drag to " ++
+        "move it, R rotates 90\u{b0}, Del or right-click deletes. Saved with the layout (Save/Update); emitted on the silk " ++
+        "Gerber.\">T Text</button>");
     try w.writeAll(BAR_GRP_END);
     // Fab handoff: the complete manufacturing package at the saved (★) layout.
     // A button (not a plain link) so it can run the pre-fab readiness gate
@@ -4699,6 +4797,9 @@ const PcbDataOpts = struct {
     /// snapshot's tracks/vias in module-local coordinates with net names
     /// mapped to this design's nets.
     subroutes_json: []const u8 = "{}",
+    /// The shown layout's board-level silkscreen texts (ShownView.texts) —
+    /// emitted as `PCB.texts` so the viewer draws + edits them.
+    texts: []const font5x7.BoardText = &.{},
 };
 
 /// World position of the GND-plane via covering the pad centred at (`cx`,`cy`),
@@ -5142,7 +5243,11 @@ fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placem
         try writeJsonStr(w, netKey(net.name));
         try w.print(":{d}", .{c});
     }
-    try w.writeAll("},");
+    try w.writeAll("}");
+    // Board-level silkscreen texts the shown layout carries (Text tool state).
+    try w.writeAll(TEXTS_OPEN);
+    try writeSavedTextsJson(w, opts.texts);
+    try w.writeAll(",");
 }
 
 /// A routed feature's net NAME for the persistable route JSON ("" for −1).
@@ -5192,6 +5297,10 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
         if (L.outline) |o| {
             try w.writeAll(",\"outline\":");
             try writeSavedOutlineJson(w, o);
+        }
+        if (L.texts.len > 0) {
+            try w.writeAll(TEXTS_OPEN);
+            try writeSavedTextsJson(w, L.texts);
         }
         try w.writeAll(",\"parts\":{");
         for (L.parts, 0..) |pt, j| {
@@ -5544,8 +5653,10 @@ const PAGE_CSS =
     \\.part.plocked .court{stroke-dasharray:2 2!important;opacity:.92}
     \\/* Outline-draw mode: crosshair + a lit toolbar button while armed. */
     \\.pcb-svg.outline-mode{cursor:crosshair}
+    \\.pcb-svg.text-mode{cursor:text}
     \\#pcb-outline.on{color:#7ee787;border-color:#2ea043;box-shadow:0 0 0 1px #2ea04366}
     \\#pcb-draw.on{color:#f0c674;border-color:#b08800;box-shadow:0 0 0 1px #b0880066}
+    \\#pcb-text.on{color:#d6a94e;border-color:#b08800;box-shadow:0 0 0 1px #b0880066}
     \\/* Rigid sub-circuit hover: every member of the group glows together, so
     \\   "this whole block drags as one" is visible before you grab it. */
     \\.part.grp-hl .court{stroke:#7ee787!important;stroke-width:2!important}
@@ -5946,6 +6057,44 @@ test "layouts sidecar round-trips a polygon outline" {
     const bo = bad[0].outline orelse return error.TestParseFailed;
     try std.testing.expect(bo.pts == null);
     try std.testing.expectEqual(@as(f64, 30), bo.w);
+}
+
+// spec: Web Server - A saved layout round-trips its board-level silkscreen texts through the sidecar
+test "layouts sidecar round-trips board texts" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
+    const texts = [_]font5x7.BoardText{
+        .{ .x = 3.5, .y = 7.0, .rot = 90, .bottom = true, .size = 1.5, .text = "Rev C" },
+        .{ .x = -2, .y = 0, .text = "v1" }, // top side, default size
+    };
+    const layouts = [_]SavedLayout{.{
+        .name = "labelled",
+        .kind = KIND_MANUAL,
+        .ts = 1,
+        .score = null,
+        .parts = &parts,
+        .texts = &texts,
+    }};
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJson(&aw.writer, &layouts, null);
+    const got = parseLayouts(alloc, aw.written()) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(usize, 2), got[0].texts.len);
+    const t0 = got[0].texts[0];
+    try std.testing.expectEqualStrings("Rev C", t0.text);
+    try std.testing.expectEqual(@as(f64, 3.5), t0.x);
+    try std.testing.expectEqual(@as(f64, 90), t0.rot);
+    try std.testing.expect(t0.bottom);
+    try std.testing.expectEqual(@as(f64, 1.5), t0.size);
+    // The second entry defaults: top side, ~1 mm cap height.
+    try std.testing.expect(!got[0].texts[1].bottom);
+    try std.testing.expectEqualStrings("v1", got[0].texts[1].text);
+    // A blank-text entry is dropped, and a missing array parses as empty.
+    try std.testing.expectEqual(@as(usize, 0), parseSavedTexts(alloc, null).len);
+    const blank = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "[{\"x\":1,\"y\":2,\"text\":\"\"}]", .{});
+    try std.testing.expectEqual(@as(usize, 0), parseSavedTexts(alloc, blank).len);
 }
 
 // spec: Web Server - A saved layout round-trips its routed copper (tracks + vias, net-name keyed) through the sidecar

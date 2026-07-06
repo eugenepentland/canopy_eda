@@ -403,7 +403,7 @@ src/export_gerber.zig::PlaneLayer struct_
 src/export_gerber.zig::PlaneNet union_
 src/export_gerber.zig::planLayers | fn planLayers(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]const LayerFile
 src/export_gerber.zig::writeJobFile | fn writeJobFile( w: *std.Io.Writer, placement: optimizer.Placement, files: []const LayerFile, name_prefix: []const u8, ) std.Io.Writer.Error!void
-src/export_gerber.zig::writeLayer | fn writeLayer( w: *std.Io.Writer, arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, frame: export_fab.Frame, layer: Layer, function: []const u8, ) Error!void
+src/export_gerber.zig::writeLayer | fn writeLayer( w: *std.Io.Writer, arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, texts: []const font.BoardText, frame: export_fab.Frame, layer: Layer, function: []const u8, ) Error!void
 src/export_kicad.zig::ExportError value
 src/export_kicad.zig::FlatInstance struct_
 src/export_kicad.zig::FlatNet struct_
@@ -452,9 +452,13 @@ src/fab_readiness.zig::Stats struct_
 src/fab_readiness.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ctx: Context, ) std.mem.Allocator.Error!Report
 src/fab_readiness.zig::ok | fn ok(self: Report) bool
 src/fab_readiness.zig::writeJson | fn writeJson(w: *std.Io.Writer, report: Report) std.Io.Writer.Error!void
+src/font5x7.zig::BoardText struct_
+src/font5x7.zig::DEFAULT_SIZE_MM value
 src/font5x7.zig::GH value
 src/font5x7.zig::GW value
+src/font5x7.zig::Run struct_
 src/font5x7.zig::cols | fn cols(c: u8) [GW]u8
+src/font5x7.zig::glyphRuns | fn glyphRuns(ch: u8, comptime E: type, ctx: anytype, emit: fn (@TypeOf(ctx), Run) E!void) E!void
 src/gerber_verify.zig::ApKind enum_
 src/gerber_verify.zig::Aperture struct_
 src/gerber_verify.zig::EPS_MM value

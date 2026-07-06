@@ -417,6 +417,8 @@ Public functions: planLayers, writeLayer
 - the edge layer closes the board outline; silk strokes footprint art and ref-des text
 - the mask margin comes from (design-rules …), defaulting byte-identically to 0.05 mm
 - a non-rectangular board emits its exact outline polygon on the edge layer
+- board-level silkscreen text strokes onto the silk layer at its world anchor, and only on its own side
+- silkscreen text scales with its cap-height size (2x size gives 2x glyph extent)
 
 ## zipfile
 
