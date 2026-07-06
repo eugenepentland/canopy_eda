@@ -195,3 +195,154 @@ count — Core↔PSRAM 20, Core↔Expansion 18 on stm32n6), drawn under the boxe
   already there. All read-only, no DSL change, no design-file edits.
 - Everything degrades gracefully on designs with no pinout files /
   no sections (rp2350b-core: buses + off-sheet refs still apply).
+
+---
+
+# Glance → system block diagram audit (2026-07-06)
+
+Goal (user): from a bird's-eye view, *understand what the system does*,
+then zoom in for the parts. The P2 glance is a good **floorplan** — colored,
+named, packed — but a floorplan answers "where is everything", not "what is
+this machine". This audit lists what separates the two, and ideas.
+
+## What the glance draws today
+
+At `s < GLANCE_S (0.30)` — a hard cutover, no intermediate level — the map
+draws: the band boxes (the literal detail-layout rectangles, washed +
+numbered colored titles), one chip per cell (ref + part name), and
+`bandLinks` edges: **undirected, unlabeled** grey lines, straight
+center-to-center, width ∝ raw count of point-to-point signal links; power
+is excluded entirely (editor.js ~2159-2173, draw ~395-425).
+
+## Findings
+
+### G1 — Geometry is inherited from the edit layout, not designed
+
+Glance boxes are the detail rectangles, so box **area ∝ editing detail**
+(pin rows, extras stacks), not system importance. The MCU band is huge
+because it has many pins; a 3-part RF front-end is a sliver. Bands are
+column-width and tall; block diagrams use squarish normalized blocks.
+Zoomed out, visual weight is essentially noise.
+
+### G2 — Edges say "talks to", never *what* or *which way*
+
+No arrowheads (who drives whom), no labels (which interface — "XSPI",
+"USB HS", "SWD"), no class distinction (power / clock / control / RF).
+And power edges don't exist at all — the single most useful
+system-understanding relation ("what powers what, at which voltage") is
+invisible, even though `rails[]` in the scene already carries
+producer hub + nominal voltage + aliases. Straight center-to-center lines
+also cross through unrelated boxes (no routing).
+
+### G3 — No purpose captions
+
+A band shows only the section *name*. The authored **subtitle** — the
+one-line spec the author already writes (`"TPS62823 12V-to-3.3V, 2A"`,
+`"USB 2.0 HS via USB-C"`) — is not in the editor scene (`sheet_meta` is
+`{name, cat}` only; `Section.description` + explicit `Section.category`
+override exist server-side and go unused here). Chips show part numbers;
+part numbers tell an expert what a block is, but *function* is the
+subtitle's job.
+
+### G4 — No system boundary / external world
+
+A block diagram shows what crosses the board edge: connectors as
+outward-facing stubs ("USB-C ▸ host", "SWD ▸ debugger"), antennas,
+off-board loads. Here connector bands are ordinary boxes in the last
+column, and the boundary endpoints the diagram engine synthesizes
+(antennas / EMVS cells, `Node.is_boundary`) don't exist in the editor
+scene at all.
+
+### G5 — The server already computes the real block diagram; the client re-derives a worse one
+
+`src/diagram/collect.zig` builds a directed `Graph` from the flattened
+netlist for the /schematics Layout tab (page being **phased out**):
+nodes carry label, **subtitle**, category, headline `parts`, rails,
+`maturity`, `is_boundary`; edges carry **driver direction**, **class**
+(power/clock/control/RF + designer-declared), a **derived bus label**,
+voltage, and fanout (diff pairs + parallel nets collapsed). GND dropped,
+net-ties merged, section↔sub-block attachment applied. The editor glance
+uses none of it — it recounts raw links client-side. Migrating this graph
+into the editor scene is also how the Layout tab's capability survives
+the /schematics phase-out.
+
+### G6 — Zoom is a cliff, not a ladder
+
+One threshold flips full detail ↔ glance. No intermediate "subsystem"
+level (band-internal mini-diagram), no cross-fade, no minimap for
+orientation while zoomed in. The schematic Layout tab's LOD ladder
+(glance → blocks → detail) is the working precedent.
+
+### G7 — Column packing is categorical, not connective
+
+Category-family columns give left→right reading order, but nothing inside
+or between columns responds to actual connectivity: a sensor that talks
+only to the MCU can land far from it; two unrelated peripheral bands sit
+adjacent. (This is the un-shipped half of old item 8 — connectivity-scored
+placement; column packing was the shipped simplification.)
+
+## Ideas
+
+### B0 · Client-only quick wins (scene already has the data)
+
+1. **Power-flow edges from `rails[]`.** Producer band → consumer bands in
+   the rail color, labeled with the voltage ("3V3", "1V8"), arrowhead at
+   the consumer. Distinct style from signal edges (signal grey, power
+   gold). Instantly answers "what powers what".
+2. **Label signal edges by dominant net family / pin group.** The
+   bus-collapse family logic (`famOf`) and per-pin `grp` names already
+   identify interfaces; when one family dominates a band pair, label the
+   edge ("FLASH_IO[0:7]", "XSPIM_P2"), else "×N".
+3. **Direction heuristics + arrowheads.** Rail producer→consumer; band of
+   category mcu = master toward peripherals; connector bands point
+   outward. (Superseded by B1.6's real directions when that lands.)
+4. **Orthogonal edge routing in the column gutters.** COL_GAP already
+   reserves 150 wu between columns; route edges as 3-segment Manhattan
+   paths through the gutters instead of center-to-center diagonals
+   crossing boxes. Power enters a block's top edge, signals its sides.
+
+### B1 · Small scene additions (render_json.zig)
+
+5. **`sheet_meta` += subtitle + explicit category.** Emit
+   `Section.description` and the `(category …)` override; glance bands
+   render the subtitle as a caption line under the title — the author's
+   own one-line spec becomes the block caption (same as the /schematics
+   overview chips).
+6. **Emit the diagram `Graph` as `block_graph`.** Compact nodes
+   (sec-name-keyed so the client joins them to bands) + edges
+   `{a,b,dir,class,label,voltage,fanout}`. Subsumes ideas 1–3 with
+   authored truth (port classes, protocols, net-tie merges, diff-pair
+   collapse) and brings `is_boundary` endpoints (antennas) in.
+7. **Maturity dots on glance bands.** `Node.maturity` (amber concept /
+   blue schematic / green done) already exists — one colored dot per band
+   title makes the glance double as a project-status board.
+
+### B2 · Dedicated glance geometry (bigger)
+
+8. **Decouple glance geometry from edit geometry.** At far zoom draw
+   *normalized* blocks — grid-snapped, near-square, sized by importance
+   tier (MCU large, subsystems medium, single-part utilities small) — at
+   positions derived from (but not equal to) the detail layout, each
+   block's center kept inside its band's detail rect so zooming in lands
+   where expected. Cross-fade between the two representations instead of
+   the hard swap.
+9. **Connectivity-driven glance placement.** MCU center, power column
+   feeding from the left as a rail bus, connectors pinned to the outer
+   edge as boundary stubs, peripherals clustered by their bus. Band
+   granularity, deterministic — the PCB rough engine's anchor+satellite
+   idea, one level up.
+10. **Interface pills on block borders.** Small labeled tabs where edges
+    attach ("USB", "SWD", "I²C") from pin `grp` names — reads like ports
+    on a hand-drawn block diagram; click = jump to those pins.
+11. **Legend + title block + minimap.** Category color legend, design
+    title with the rail list (name + voltage), and a minimap inset while
+    zoomed in (G6's orientation gap).
+
+## Recommendation
+
+Highest understanding-per-effort: **B0.1 + B0.2 + B1.5** (power arrows
+with voltages, labeled bus edges, authored captions) — the glance then
+states what feeds what, what talks over what, and what each block is for.
+Then **B1.6** as the structural fix: one source of truth for the block
+diagram, and the migration path for phasing out /schematics. **B2.8** is
+the visual-quality leap that makes it look hand-drawn rather than packed.
