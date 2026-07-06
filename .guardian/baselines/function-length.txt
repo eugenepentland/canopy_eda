@@ -1,7 +1,6 @@
 # guardian-snapshot v1
 src/eval/power_budget.zig:82: fn analyze is 266 lines (cap 200)
 src/kicad_pcb/writer.zig:249: fn applyOpsCounted is 201 lines (cap 200)
-src/render_json.zig:659: fn renderSceneGraph is 245 lines (cap 200)
 src/serve/auth.zig:1056: fn registerCompletePage is 339 lines (cap 200)
 src/serve/auth.zig:1441: fn loginCompletePage is 236 lines (cap 200)
 src/serve/templates/pages.zig:302: fn _render is 202 lines (cap 200)

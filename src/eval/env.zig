@@ -584,6 +584,19 @@ pub const Group = struct {
     members: []const []const u8,
 };
 
+/// A hand-authored functional super-block for the top-level system view:
+/// `(function "name" "caption" [(stack N)] (hosts "Section A" "Section B" …))`.
+/// `hosts` names authored sections / sheet titles (the same keys the editor's
+/// bands use — the synthetic "Power" band is a valid host too). `caption` is
+/// the what-it-does verb/spec line ("0–18 V · 3 A per channel"); `stack` > 1
+/// renders as N offset cards ("×N identical channels").
+pub const FunctionSpec = struct {
+    name: []const u8,
+    caption: []const u8 = "",
+    stack: u8 = 1,
+    hosts: []const []const u8 = &.{},
+};
+
 /// A part grouping within an instance (for multi-part symbols).
 pub const Part = struct {
     name: []const u8,
@@ -1198,6 +1211,10 @@ pub const DesignBlock = struct {
     groups: []const Group,
     sub_blocks: []const SubBlock,
     sections: []const Section = &.{},
+    /// Hand-authored functional super-blocks (`(function …)` forms) — the
+    /// top-level "what the system does" layer above sections. Empty for
+    /// designs that don't author them.
+    functions: []const FunctionSpec = &.{},
     /// Provenance: `.embedded` when this block is the body of a `(defmodule …)`
     /// application — a `(sub-block …)` instantiation, a standalone module
     /// preview, or a zero-arg resolve — vs `.design_root` for a top-level

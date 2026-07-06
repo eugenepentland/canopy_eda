@@ -93,6 +93,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
 
     var net_ties: std.ArrayListUnmanaged(NetTie) = .empty;
     var sub_blocks: std.ArrayListUnmanaged(SubBlock) = .empty;
+    var functions: std.ArrayListUnmanaged(env_mod.FunctionSpec) = .empty;
     var verifications: std.ArrayListUnmanaged(env_mod.Verification) = .empty;
     var test_points: std.ArrayListUnmanaged(env_mod.TestPoint) = .empty;
     var parts: std.ArrayListUnmanaged(env_mod.PlaceholderPart) = .empty;
@@ -172,6 +173,10 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
                 const group = try builders.buildGroup(self, form_children[1..], env);
                 try groups.append(self.allocator, group);
             },
+            .function => {
+                const f = try builders.buildFunction(self, form_children[1..], env);
+                try functions.append(self.allocator, f);
+            },
             .sub_block => {
                 const sb = try builders.buildSubBlock(self, form_children, env);
                 try evalSubBlockBridges(self, form_children, sb.name, &net_ties);
@@ -238,6 +243,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .groups = groups.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .sub_blocks = sub_blocks.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .sections = sections.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+        .functions = functions.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .net_ties = block_ties.toOwnedSlice(self.allocator) catch &.{},
         .verifications = verifications.toOwnedSlice(self.allocator) catch &.{},
         .test_points = test_points.toOwnedSlice(self.allocator) catch &.{},
@@ -822,6 +828,7 @@ fn evalSection(
             // silent skip is visible).
             .description, .note, .port, .protocol, .calc => {},
             .group,
+            .function,
             .sub_block,
             .verifies,
             .test_point,

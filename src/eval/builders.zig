@@ -979,6 +979,61 @@ pub fn buildGroup(self: *Evaluator, args: []const Node, env: *Env) EvalError!Gro
     };
 }
 
+/// Build a `(function "name" ["caption"] [(stack N)] (hosts "A" "B" …))` form
+/// into a `FunctionSpec` — the hand-authored top-level system-view block. The
+/// bare string after the name is the what-it-does caption; `hosts` members
+/// name authored sections / sheet titles (matched by the editor's bands).
+pub fn buildFunction(self: *Evaluator, args: []const Node, env: *Env) EvalError!env_mod.FunctionSpec {
+    if (args.len == 0) {
+        self.setError(ast.Span.zero, "(function …) expects a name — (function \"PSU\" \"0-18V, 3A\" (hosts \"Channel 1 PSU\"))");
+        return EvalError.ArityError;
+    }
+    const name_val = try self.evalNode(args[0], env);
+    var spec = env_mod.FunctionSpec{
+        .name = name_val.asString() orelse {
+            self.setError(args[0].span, "(function …) name must be a string");
+            return EvalError.TypeError;
+        },
+    };
+    var hosts: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (args[1..]) |arg| {
+        const sub = arg.asList() orelse {
+            const cap_val = try self.evalNode(arg, env);
+            spec.caption = cap_val.asString() orelse {
+                self.setError(arg.span, "(function …) caption must be a string");
+                return EvalError.TypeError;
+            };
+            continue;
+        };
+        if (sub.len == 0) continue;
+        const head = sub[0].asAtom() orelse "";
+        if (std.mem.eql(u8, head, "stack")) {
+            if (sub.len != 2) {
+                self.setError(arg.span, "(stack N) expects one count");
+                return EvalError.ArityError;
+            }
+            const v = try self.evalNode(sub[1], env);
+            const n = v.asNumber() orelse {
+                self.setError(sub[1].span, "(stack N) count must be a number");
+                return EvalError.TypeError;
+            };
+            spec.stack = if (n < 1) 1 else if (n > 99) 99 else @intFromFloat(n);
+        } else if (std.mem.eql(u8, head, "hosts")) {
+            for (sub[1..]) |m| {
+                const s = m.asString() orelse {
+                    self.setError(m.span, "(hosts …) members must be section-name strings");
+                    return EvalError.TypeError;
+                };
+                try hosts.append(self.allocator, s);
+            }
+        } else {
+            self.warnFmt(arg.span, "unknown sub-form ({s} …) in (function …)", .{head});
+        }
+    }
+    spec.hosts = hosts.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+    return spec;
+}
+
 /// Build a `(sub-block "name" <expr>)` reference, evaluating the expression
 /// either as a `.sexp` file path or a module call that returns a DesignBlock,
 /// then re-deriving every nested instance ID from the sub-block's name so

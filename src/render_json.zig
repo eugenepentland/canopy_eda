@@ -361,6 +361,9 @@ const SceneGraph = struct {
     /// canonically (power → mcu → memory → …) and colors glance chips from
     /// this without duplicating the keyword tables client-side.
     sheet_meta: []const SheetMeta = &.{},
+    /// Hand-authored `(function …)` super-blocks — the editor map's outermost
+    /// zoom level. Borrowed from the DesignBlock.
+    functions: []const env_mod.FunctionSpec = &.{},
     /// Sub-block-sourced power rails with their producer IC resolved — the
     /// editor's map draws the power tree from these.
     power_rails: []const ScenePowerRail = &.{},
@@ -844,6 +847,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     defer allocator.free(sub_attachments);
     scene.authored_sections = try collectAuthoredSections(allocator, block, sub_attachments);
     scene.sheet_meta = try buildSheetMeta(allocator, block, sub_attachments);
+    scene.functions = block.functions;
     scene.ports = block.ports;
     scene.power_rails = try buildPowerRails(allocator, block);
 
@@ -2017,12 +2021,15 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
     }
     try w.writeAll("]");
 
+    // Shared opener for {"name":…} objects (sheet_meta / functions / ports).
+    const obj_name_open = "{\"name\":";
+
     // Sheet categories (same names as authored_sections, classified) — the
     // editor orders bands canonically and colors glance chips from these.
     try w.writeAll(",\"sheet_meta\":[");
     for (scene.sheet_meta, 0..) |sm, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"name\":");
+        try w.writeAll(obj_name_open);
         try json_writer.writeString(w, sm.name);
         try w.writeAll(",\"cat\":");
         try json_writer.writeString(w, sm.cat);
@@ -2034,11 +2041,34 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
     }
     try w.writeAll("]");
 
+    // Hand-authored (function …) super-blocks — the map's outermost zoom
+    // level. Omitted entirely when the design authors none.
+    if (scene.functions.len > 0) {
+        try w.writeAll(",\"functions\":[");
+        for (scene.functions, 0..) |f, i| {
+            if (i > 0) try w.writeAll(",");
+            try w.writeAll(obj_name_open);
+            try json_writer.writeString(w, f.name);
+            if (f.caption.len > 0) {
+                try w.writeAll(",\"cap\":");
+                try json_writer.writeString(w, f.caption);
+            }
+            if (f.stack > 1) try w.print(",\"stack\":{d}", .{f.stack});
+            try w.writeAll(",\"hosts\":[");
+            for (f.hosts, 0..) |h, j| {
+                if (j > 0) try w.writeAll(",");
+                try json_writer.writeString(w, h);
+            }
+            try w.writeAll("]}");
+        }
+        try w.writeAll("]");
+    }
+
     // Top-level boundary ports (the editor's design-interface list).
     try w.writeAll(",\"ports\":[");
     for (scene.ports, 0..) |p, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"name\":");
+        try w.writeAll(obj_name_open);
         try json_writer.writeString(w, p.name);
         try w.writeAll(",\"net\":");
         try json_writer.writeString(w, p.net);
@@ -2277,6 +2307,10 @@ test "serializeScene emits hub sec, pin role, and sheet_meta" {
         .{ .name = "Boot NOR Flash", .cat = "memory", .sub = "MX66UW 1Gb OctoSPI" },
         .{ .name = "Aux", .cat = "peripheral" },
     };
+    const hosts = [_][]const u8{ "Boot NOR Flash", "Aux" };
+    scene.functions = &[_]env_mod.FunctionSpec{
+        .{ .name = "Storage", .caption = "1Gb NOR boot + scratch", .stack = 2, .hosts = &hosts },
+    };
     const out = try serializeScene(alloc, &scene);
     defer alloc.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"sec\":\"Boot NOR Flash\"") != null);
@@ -2286,4 +2320,8 @@ test "serializeScene emits hub sec, pin role, and sheet_meta" {
     const want_meta = "\"sheet_meta\":[{\"name\":\"Boot NOR Flash\",\"cat\":\"memory\"," ++
         "\"sub\":\"MX66UW 1Gb OctoSPI\"},{\"name\":\"Aux\",\"cat\":\"peripheral\"}]";
     try std.testing.expect(std.mem.indexOf(u8, out, want_meta) != null);
+    // Authored (function …) super-blocks ride along for the map's top level.
+    const want_fns = "\"functions\":[{\"name\":\"Storage\",\"cap\":\"1Gb NOR boot + scratch\"," ++
+        "\"stack\":2,\"hosts\":[\"Boot NOR Flash\",\"Aux\"]}]";
+    try std.testing.expect(std.mem.indexOf(u8, out, want_fns) != null);
 }

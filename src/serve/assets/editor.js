@@ -45,6 +45,7 @@
   const GRID = 60; // spatial-hash cell size (world units)
   const SPOKE_SYM = 22; // side-spoke passive symbol length (shared by map layout + draw + hit-test)
   const GLANCE_S = 0.30; // world→px scale below which the map draws as glance chips (bands + one chip per cell)
+  const FN_S = 0.18; // below this scale, designs that author (function …) blocks draw the function tier (super-blocks + rolled-up edges)
 
   // ── State ────────────────────────────────────────────────────────────
   let cam = { x: 0, y: 0, w: 1000, h: 800 };
@@ -374,12 +375,13 @@
     const ptVis = (x, y) => x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1;
 
     // Band containers (Power / multi-cell sections) — the wayfinding layer.
-    const drawBands = (fs, wash) => (M.bands || []).forEach((b) => {
+    const drawBands = (fs, wash, hideClaimed) => (M.bands || []).forEach((b) => {
       if (!boxVis(b.x, b.y, b.x + b.w, b.y + b.h)) return;
       const col = b.col || (b.power ? C.rail : "");
       if (wash && col) { ctx.fillStyle = col + "14"; roundRect(b.x, b.y, b.w, b.h, 10); ctx.fill(); }
       ctx.strokeStyle = col ? col + "55" : "#1d2733"; ctx.lineWidth = sw(1.6);
       roundRect(b.x, b.y, b.w, b.h, 10); ctx.stroke();
+      if (hideClaimed && b.fn != null) return;   // function tier: the super-block speaks for its members
       ctx.fillStyle = col || C.secLabel;
       ctx.textAlign = "left"; ctx.textBaseline = "middle";
       // Titles must FIT the band now that bands are column-width, not
@@ -400,10 +402,47 @@
       }
     });
 
+    // (function …) super-blocks: strong cards at the function tier, faint
+    // outlines at the band tier so the grouping stays visible while reading.
+    const drawFnBoxes = (faint) => (M.fnBoxes || []).forEach((fb) => {
+      if (!boxVis(fb.x - 90, fb.y - 90, fb.x + fb.w + 90, fb.y + fb.h + 90)) return;
+      const title = fb.name + (fb.stack > 1 ? "  ×" + fb.stack : "");
+      if (!faint && fb.stack > 1) {                  // ×N channels → offset cards behind
+        const off = Math.min(30, 9 / s);
+        ctx.strokeStyle = "#58708f"; ctx.globalAlpha = 0.55; ctx.lineWidth = sw(1.4);
+        for (let i = Math.min(3, fb.stack - 1); i >= 1; i--) { roundRect(fb.x + off * i, fb.y - off * i, fb.w, fb.h, 14); ctx.stroke(); }
+        ctx.globalAlpha = 1;
+      }
+      if (!faint) { ctx.fillStyle = "rgba(230,237,243,0.03)"; roundRect(fb.x, fb.y, fb.w, fb.h, 14); ctx.fill(); }
+      ctx.strokeStyle = faint ? "#58708f66" : "#9fb4cf"; ctx.lineWidth = sw(faint ? 1.4 : 2.4);
+      roundRect(fb.x, fb.y, fb.w, fb.h, 14); ctx.stroke();
+      ctx.textAlign = "left"; ctx.textBaseline = "middle";
+      ctx.fillStyle = faint ? "#8ea3bd" : "#e6edf3";
+      const f2 = fitFont(title, fb.w - 44, faint ? Math.min(34, 12 / s) : Math.min(88, 24 / s), 10, "700");
+      const ty = fb.y + Math.max(26, f2 * 0.8);
+      ctx.fillText(title, fb.x + 22, ty);
+      if (!faint && fb.cap) {
+        ctx.fillStyle = "#adbac7"; ctx.globalAlpha = 0.9;
+        const f3 = fitFont(fb.cap, fb.w - 44, Math.min(44, 13 / s), 9);
+        ctx.fillText(fb.cap, fb.x + 22, ty + f3 * 1.3);
+        ctx.globalAlpha = 1;
+      }
+    });
+
     // Far-zoom glance: the whole board as titled bands + one chip per cell —
     // "fit all" reads like a block diagram; zoom in (or double-click a chip)
     // for the full detail.
     if (s < GLANCE_S && M.mapBox) {
+      // Function tier: zoomed out past FN_S with authored (function …) blocks,
+      // the map draws the super-blocks + one rolled-up edge per relationship —
+      // the what-the-system-does story. Edges resolve to the super-block box
+      // for claimed bands ("f<i>") and the band box for standalone ones ("b<i>").
+      const fnTier = fnTierActive();
+      const fnBoxOf = []; (M.fnBoxes || []).forEach((fb) => { fnBoxOf[fb.fn] = fb; });
+      const entBoxOf = (id) => (typeof id === "string" && id.charAt(0) === "f") ? fnBoxOf[+id.slice(1)]
+        : (M.bands || [])[typeof id === "string" ? +id.slice(1) : id];
+      const railList = fnTier ? (M.fnRail || []) : (M.railLinks || []);
+      const sigList = fnTier ? (M.fnSig || []) : (M.bandLinks || []);
       // Segment A→B clipped to the two band boxes' borders, so arrowheads and
       // labels land in the corridor BETWEEN the blocks, not under them.
       // Returns null when the boxes touch/overlap along the line.
@@ -436,8 +475,8 @@
       // band in rail gold, arrowhead at the consumer. The voltage tag docks
       // just before the arrowhead — an entry tag on the consumer block — so
       // a producer's wide fan-out never piles its labels at one point.
-      (M.railLinks || []).forEach((e) => {
-        const A = (M.bands || [])[e.a], B = (M.bands || [])[e.b];
+      railList.forEach((e) => {
+        const A = entBoxOf(e.a), B = entBoxOf(e.b);
         if (!A || !B) return;
         const p = edgePts(A, B); if (!p) return;
         ctx.strokeStyle = C.rail; ctx.fillStyle = C.rail; ctx.globalAlpha = 0.55;
@@ -453,8 +492,8 @@
       });
       // Signal edges: which subsystems talk — width by link count, caption by
       // the dominant bus family ("FLASH_IO[0:7]"), the single net, or "×9".
-      (M.bandLinks || []).forEach((e) => {
-        const A = (M.bands || [])[e.a], B = (M.bands || [])[e.b];
+      sigList.forEach((e) => {
+        const A = entBoxOf(e.a), B = entBoxOf(e.b);
         if (!A || !B) return;
         const p = edgePts(A, B);
         ctx.strokeStyle = "#3d5573"; ctx.globalAlpha = 0.5;
@@ -466,7 +505,8 @@
         ctx.globalAlpha = 1;
         if (p && e.label) edgeText(e.label, (p.x0 + p.x1) / 2, (p.y0 + p.y1) / 2, efs * 0.8, "#9fb4cf");
       });
-      drawBands(Math.min(150, 20 / s), true);
+      drawBands(Math.min(150, 20 / s), true, fnTier);
+      if ((M.fnBoxes || []).length) drawFnBoxes(!fnTier);
       const cfs = 14 / s;
       M.secs.forEach((sc) => {
         if (!boxVis(sc.x, sc.y, sc.x + sc.w, sc.y + sc.h)) return;
@@ -891,8 +931,24 @@
     const c2 = vx * vx + vy * vy; if (c2 <= c1) return Math.hypot(px - b[0], py - b[1]);
     const t = c1 / c2; return Math.hypot(px - (a[0] + t * vx), py - (a[1] + t * vy));
   }
+  // The function ("system story") tier is active when the design authors
+  // (function …) blocks and the camera is looking at (nearly) the whole
+  // board — viewport-independent, so "Fit" shows the story on any monitor —
+  // or is zoomed out past FN_S regardless.
+  function fnTierActive() {
+    if (!M || !(M.fnBoxes || []).length || !M.mapBox) return false;
+    const s = scale();
+    if (s >= GLANCE_S) return false;
+    return s < FN_S || (cam.w > M.mapBox.w * 0.77 && cam.h > M.mapBox.h * 0.77);
+  }
   function pick(x, y) {
     const s = scale(), tp = 7 / s, tw = 5 / s, tl = 9 / s;
+    // Function tier: the super-blocks ARE the targets (click frames one) —
+    // everything inside is sub-pixel at this zoom, so don't hit-test it.
+    if (fnTierActive()) {
+      for (const fb of M.fnBoxes) if (x >= fb.x && x <= fb.x + fb.w && y >= fb.y && y <= fb.y + fb.h) return { t: "fn", fb };
+      return { t: "empty" };
+    }
     for (const h of M.hubs) { if (h.ghost) continue; for (const p of h.pins) if (Math.hypot(p.x - x, p.y - y) < tp) return { t: "pin", ref: h.ref, pin: p.pin, net: p.net, x: p.x, y: p.y, noDrag: !!p.noPort }; }
     // In-line passives on the map are small precise targets — a series symbol riding
     // a link wire's midpoint, a pull resistor hanging just below it — so hit-test them
@@ -1013,6 +1069,7 @@
       else if (h.t === "part") { if (h.ghost) revealGhostBus(h.ref); else pinnedChips.clear(); select(h.kind, h.ref); }
       else if (h.t === "chip") toggleChipPin(h.chip);
       else if (h.t === "bus") toggleBus(h.key);
+      else if (h.t === "fn") fitTo(h.fb, 0.06);          // frame the function → band tier
       else if (h.t === "net") highlightNetToggle(h.net);
       else deselect();
     }
@@ -1056,6 +1113,7 @@
     else if (h.t === "part" && h.ghost) { select(h.kind, h.ref); focusTarget(h.ref); }   // proxy → frame the part's own region
     else if (h.t === "part") { select(h.kind, h.ref); focusInspectorPrimary(); }         // real part → focus its value for editing
     else if (h.t === "chip" && h.chip && h.chip.target) focusTarget(h.chip.target);      // partner chip → jump to its cell
+    else if (h.t === "fn") fitTo(h.fb, 0.06);                                            // function block → frame it
   });
 
   // Part and net are mutually exclusive in the inspector: selecting one clears
@@ -2178,10 +2236,37 @@
       pk.fam = famRankOf(pk);
       pk.cat = pk.name === "Power" ? "power" : (pk.name ? catOf.get(pk.name) : null);
     });
+    // ── (function …) mega-packs ─────────────────────────────────────
+    // A hand-authored function groups its member bands into one rigid unit:
+    // members stack vertically under the function's header, so the function
+    // box is exactly the bbox of its bands at every zoom level — zooming in
+    // always lands inside the block you were looking at. Unclaimed bands
+    // stay standalone units and read as their own blocks at the top level.
+    const FN_PAD = 30, FN_HEAD = 150;
+    const fnDefs = scene.functions || [];
+    const fnOfBand = new Map();
+    fnDefs.forEach((f, i) => (f.hosts || []).forEach((hn) => fnOfBand.set(hn, i)));
+    const megas = [];
+    { const byFn = new Map();
+      packs.forEach((pk) => {
+        const fi = pk.name ? fnOfBand.get(pk.name) : undefined;
+        if (fi === undefined) { megas.push({ fn: null, packs: [pk] }); return; }
+        let mg = byFn.get(fi);
+        if (!mg) { mg = { fn: fi, packs: [] }; byFn.set(fi, mg); megas.push(mg); }
+        mg.packs.push(pk);
+      });
+      megas.forEach((mg) => {
+        if (mg.fn === null) { const pk = mg.packs[0]; mg.w = pk.w + 2 * BAND_PAD; mg.h = pk.h + BAND_PAD; mg.fam = pk.fam; return; }
+        let fy = FN_HEAD, fw = 0;
+        mg.packs.forEach((pk) => { pk.my = fy; fy += pk.h + BAND_PAD + BAND_GAP; fw = Math.max(fw, pk.w + 2 * BAND_PAD); });
+        mg.w = fw + 2 * FN_PAD; mg.h = fy - BAND_GAP + FN_PAD;
+        mg.fam = Math.min.apply(null, mg.packs.map((p) => p.fam));
+      });
+    }
     let area = 0, tallest = 0;
-    packs.forEach((pk) => {
-      area += (pk.w + 2 * BAND_PAD + COL_GAP) * (pk.h + BAND_PAD + BAND_GAP);
-      tallest = Math.max(tallest, pk.h + BAND_PAD + BAND_GAP);
+    megas.forEach((mg) => {
+      area += (mg.w + COL_GAP) * (mg.h + BAND_GAP);
+      tallest = Math.max(tallest, mg.h + BAND_GAP);
     });
     const HBUDGET = Math.max(tallest, Math.sqrt(area / 2.2));   // aim near a 2:1-ish landscape
     const cols = [];
@@ -2191,33 +2276,44 @@
     { let cur = null;
       for (let fam = 0; fam <= 4; fam++) {
         let famNew = true;
-        packs.forEach((pk) => {
-          if (pk.fam !== fam) return;
-          const ph = pk.h + BAND_PAD + BAND_GAP;
+        megas.forEach((mg) => {
+          if (mg.fam !== fam) return;
+          const ph = mg.h + BAND_GAP;
           const famBreak = famNew && cur && cur.y > HBUDGET * 0.5;
           if (!cur || famBreak || (cur.y > 0 && cur.y + ph > HBUDGET)) { cur = { w: 0, y: 0, items: [] }; cols.push(cur); }
           famNew = false;
-          cur.items.push({ pk, y: cur.y });
+          cur.items.push({ mg, y: cur.y });
           cur.y += ph;
-          cur.w = Math.max(cur.w, pk.w + 2 * BAND_PAD);
+          cur.w = Math.max(cur.w, mg.w);
         });
       }
     }
     let bx1 = 0, by1 = 0, colX = 0;
-    m.bands = [];
+    m.bands = []; m.fnBoxes = [];
     cols.forEach((col) => {
       col.items.forEach((it) => {
-        const pk = it.pk;
-        const bcol = (pk.name && CAT_COL[pk.cat]) || "";
-        pk.cells.forEach((c) => { c.x = colX + BAND_PAD + c.bx; c.y = it.y + c.by; c.bcol = bcol; });
-        if (pk.name) {
-          pk.bandIdx = m.bands.length;
-          m.bands.push({ name: pk.name, num: m.bands.length + 1, x: colX, y: it.y, w: pk.w + 2 * BAND_PAD, h: pk.h + BAND_PAD,
-            count: pk.cells.length, power: pk.name === "Power", cat: pk.cat || "", col: CAT_COL[pk.cat] || "",
-            sub: subOf.get(pk.name) || "" });
+        const mg = it.mg;
+        const inner = mg.fn === null ? [{ pk: mg.packs[0], ox: 0, oy: 0 }]
+          : mg.packs.map((pk) => ({ pk, ox: FN_PAD, oy: pk.my }));
+        inner.forEach((ent) => {
+          const pk = ent.pk, bx0 = colX + ent.ox, by0 = it.y + ent.oy;
+          const bcol = (pk.name && CAT_COL[pk.cat]) || "";
+          pk.cells.forEach((c) => { c.x = bx0 + BAND_PAD + c.bx; c.y = by0 + c.by; c.bcol = bcol; });
+          if (pk.name) {
+            pk.bandIdx = m.bands.length;
+            m.bands.push({ name: pk.name, num: m.bands.length + 1, x: bx0, y: by0, w: pk.w + 2 * BAND_PAD, h: pk.h + BAND_PAD,
+              count: pk.cells.length, power: pk.name === "Power", cat: pk.cat || "", col: CAT_COL[pk.cat] || "",
+              sub: subOf.get(pk.name) || "", fn: mg.fn });
+          }
+          bx1 = Math.max(bx1, bx0 + pk.w + 2 * BAND_PAD);
+          by1 = Math.max(by1, by0 + pk.h + BAND_PAD);
+        });
+        if (mg.fn !== null) {
+          const f = fnDefs[mg.fn];
+          m.fnBoxes.push({ fn: mg.fn, name: f.name, cap: f.cap || "", stack: f.stack || 1,
+            x: colX, y: it.y, w: mg.w, h: mg.h, bands: mg.packs.filter((p) => p.name).map((p) => p.bandIdx) });
+          bx1 = Math.max(bx1, colX + mg.w); by1 = Math.max(by1, it.y + mg.h);
         }
-        bx1 = Math.max(bx1, colX + pk.w + 2 * BAND_PAD);
-        by1 = Math.max(by1, it.y + pk.h + BAND_PAD);
       });
       colX += col.w + COL_GAP;
     });
@@ -2287,6 +2383,43 @@
       });
       m.railLinks = [];
       ra.forEach((e) => m.railLinks.push({ a: e.a, b: e.b, label: e.tags.slice(0, 3).join(" · ") + (e.tags.length > 3 ? " +" + (e.tags.length - 3) : "") }));
+      // Function-tier rollup: collapse the band edges onto (function …)
+      // entities — "f<idx>" for a claimed band's function, "b<idx>" for a
+      // standalone band — so the top level draws one edge per relationship.
+      m.fnRail = []; m.fnSig = [];
+      if (fnDefs.length && m.fnBoxes.length) {
+        const entOf = (bi) => { const f = (m.bands[bi] || {}).fn; return f == null ? "b" + bi : "f" + f; };
+        const ragg = new Map();
+        m.railLinks.forEach((e) => {
+          const A = entOf(e.a), B = entOf(e.b);
+          if (A === B) return;
+          const k = A + ">" + B;
+          let g = ragg.get(k); if (!g) { g = { a: A, b: B, tags: [] }; ragg.set(k, g); }
+          String(e.label || "").split(" · ").forEach((t) => { if (t && g.tags.indexOf(t) < 0) g.tags.push(t); });
+        });
+        ragg.forEach((g) => m.fnRail.push({ a: g.a, b: g.b, label: g.tags.slice(0, 3).join(" · ") + (g.tags.length > 3 ? " +" + (g.tags.length - 3) : "") }));
+        const sagg = new Map();
+        m.bandLinks.forEach((e) => {
+          const A = entOf(e.a), B = entOf(e.b);
+          if (A === B) return;
+          const k = A < B ? A + ":" + B : B + ":" + A;
+          let g = sagg.get(k); if (!g) { g = { a: A, b: B, n: 0, cnt: 0, best: "", bn: 0, last: "" }; sagg.set(k, g); }
+          g.n += e.n; g.cnt++; g.last = e.label || "";
+          if (e.label && e.label.charAt(0) !== "×" && e.n > g.bn) { g.best = e.label; g.bn = e.n; }
+        });
+        sagg.forEach((g) => {
+          let label;
+          if (g.cnt === 1) label = g.last;                        // one edge → verbatim
+          else if (g.best && g.bn >= 3) {                          // a real bus dominates
+            const base = g.best.replace(/ \+\d+$/, "");
+            const mm = /\[(\d+):(\d+)\]$/.exec(base);
+            const fam = mm ? (+mm[2] - +mm[1] + 1) : g.bn;
+            const extra = g.n - fam;
+            label = base + (extra > 0 ? " +" + extra : "");
+          } else label = g.n > 1 ? "×" + g.n : g.last;
+          m.fnSig.push({ a: g.a, b: g.b, n: g.n, label });
+        });
+      }
     }
     // Emit the synthesized model (replacing the real layout).
     m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = []; m.chips = [];
