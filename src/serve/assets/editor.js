@@ -160,7 +160,7 @@
         if (!rp && free.length) { rnet = free.shift(); rDangle = true; }
       }
       m.passes.push({
-        ref: p.ref, src: p.src || 0, x: p.x, top, w: p.w, h: p.h, cx: p.x + p.w / 2, cy: cyc, flip: !!p.flip,
+        ref: p.ref, src: p.src || 0, slot: p.slot, x: p.x, top, w: p.w, h: p.h, cx: p.x + p.w / 2, cy: cyc, flip: !!p.flip,
         type: passType(p.ref, p.component, p.value, p.symbol),
         label: (p.count > 1 ? p.count + "× " : "") + (p.value || p.ref),
         term: [{ pin: "1", x: p.x, y: cyc, net: lnet }, { pin: "2", x: p.x + p.w, y: cyc, net: rnet }],
@@ -181,7 +181,7 @@
       const pins = [];
       (h.leftPins || []).forEach((pn) => addPin(pins, h, pn, "left"));
       (h.rightPins || []).forEach((pn) => addPin(pins, h, pn, "right"));
-      m.hubs.push({ ref: h.ref, src: h.src || 0, component: h.component || "", sec: h.sec || "", part: h.part || "", x: h.x, y: h.y, w: h.w, h: h.h, label: h.label || h.ref, cx: h.x + h.w / 2, cy: h.y + h.h / 2, pins });
+      m.hubs.push({ ref: h.ref, src: h.src || 0, component: h.component || "", sec: h.sec || "", slot: h.slot, part: h.part || "", x: h.x, y: h.y, w: h.w, h: h.h, label: h.label || h.ref, cx: h.x + h.w / 2, cy: h.y + h.h / 2, pins });
     });
     // The connection map IS the view: rebuild the board as a grid of
     // self-contained per-IC cells (throwing the derived base layout away).
@@ -1633,7 +1633,7 @@
       const g = nets.find((n) => isGroundName(n)), r = nets.find((n) => !isGroundName(n));
       if (!g || !r || !railByNet.has(r)) return;
       let a = railCapsByNet.get(r); if (!a) { a = []; railCapsByNet.set(r, a); }
-      if (!a.some((x) => x.ref === p.ref)) a.push({ ref: p.ref, type: "capacitor", value: (p.count > 1 ? p.count + "× " : "") + (p.value || p.ref), other: g });
+      if (!a.some((x) => x.ref === p.ref)) a.push({ ref: p.ref, slot: p.slot, type: "capacitor", value: (p.count > 1 ? p.count + "× " : "") + (p.value || p.ref), other: g });
     });
     const byRef = new Map();                              // ref -> [link index…]
     links.forEach((lk, i) => [lk.a.ref, lk.b.ref].forEach((r) => {
@@ -1778,6 +1778,25 @@
     // its producer's row and every consumer cell shows the rail as a bare pin +
     // producer chip instead of re-drawing the same parts.
     const passClaimed = new Set();
+    // Slot docking: a rail-level cap emitted by the SAME section-grid card as
+    // an anchor IC on its rail is that IC's own decoupling (a module's C_VCCA)
+    // — it draws on that IC's rail row, like the schematic page's combined
+    // power nets. The producer keeps only the caps no card claims (the true
+    // rail-level bank).
+    const slotOfRef = new Map();
+    real.forEach((h) => { if (h.slot != null && !slotOfRef.has(h.ref)) slotOfRef.set(h.ref, h.slot); });
+    const dockCaps = new Map(), dockedAway = new Set();   // "ref\0net" → caps; cap refs pulled off the producer bank
+    railCapsByNet.forEach((caps, net) => {
+      caps.forEach((x) => {
+        if (x.slot == null) return;
+        const home = (netICs.get(net) || []).find((r) => slotOfRef.get(r) === x.slot);
+        if (!home) return;
+        const k = home + "\0" + net;
+        let a = dockCaps.get(k); if (!a) { a = []; dockCaps.set(k, a); } a.push(x);
+        const rrd = railByNet.get(net);
+        if (!rrd || rrd.producer !== home) dockedAway.add(x.ref);
+      });
+    });
     cellRefs.forEach((ref) => {
       const parts = byIC.get(ref) || new Map();
       const groups = [...parts.entries()].map(([pref, items]) => ({ pref, label: labelOf.get(pref) || pref, items })).sort((a, b) => b.items.length - a.items.length);
@@ -1804,9 +1823,10 @@
         const pads = String(p.pins || p.pin || "").split(",").filter(Boolean);
         const ps = [], seenP = new Set();            // bypass caps bound to a pad (decoupByPin) + series/pulls on the net
         pads.forEach((pad) => (decoupByPin.get(ref + " " + pad) || []).forEach((x) => { if (!seenP.has(x.ref)) { seenP.add(x.ref); ps.push(x); } }));
+        (dockCaps.get(ref + "\0" + net) || []).forEach((x) => { if (!seenP.has(x.ref) && !passClaimed.has(x.ref)) { seenP.add(x.ref); ps.push(x); } });
         (passByNet.get(net) || []).forEach((x) => { if (!seenP.has(x.ref) && !passClaimed.has(x.ref) && !inlinePass.has(x.ref)) { seenP.add(x.ref); ps.push(x); } });
         const rr = railByNet.get(net);               // rail-level cap bank rides its producer's rail row
-        if (rr && rr.producer === ref) (railCapsByNet.get(net) || []).forEach((x) => { if (!seenP.has(x.ref) && !passClaimed.has(x.ref)) { seenP.add(x.ref); ps.push(x); } });
+        if (rr && rr.producer === ref) (railCapsByNet.get(net) || []).forEach((x) => { if (!seenP.has(x.ref) && !passClaimed.has(x.ref) && !dockedAway.has(x.ref)) { seenP.add(x.ref); ps.push(x); } });
         ps.forEach((x) => passClaimed.add(x.ref));
         // A chain-connected pin has no IC directly on its own net (the partner sits
         // past the series parts, drawn in the owner's cell) — chip the owner instead.
@@ -1815,7 +1835,11 @@
         // A consumed rail names its producer first — the "fed from" reference.
         if (rr && rr.producer !== ref) targets = [rr.producer].concat(targets.filter((t) => t !== rr.producer));
         const role = p.role || (isGroundName(net) ? "gnd" : (rr || isPowerName(net)) ? "pwr" : "");
-        extras.push({ net, name: p.name, ps, targets, role, grp: p.grp || bx.part || "" });
+        // A pin the scene folded into this one by shared net keeps its function
+        // name visible ("GND · OE_N" says the enable strap is tied low). Numeric
+        // and pad-like tokens (27, B12) are pad numbers, not functions — skip.
+        const foldFns = String(p.pins || "").split(",").filter((t) => t && t !== p.name && !/^\d+$/.test(t) && !/^[A-Za-z]{1,2}\d{1,3}$/.test(t));
+        extras.push({ net, name: foldFns.length ? p.name + " · " + foldFns.join(" · ") : p.name, ps, targets, role, grp: p.grp || bx.part || "" });
       }));
       // Deflate: signal rows whose links all point at ONE other cell (≥3 pins →
       // that partner owns the drawings) and port-only indexed families (≥4
@@ -1852,9 +1876,18 @@
       const partnerPinLabel = (net, r) => { const mm = netRefPin.get(net); return mm ? (mm.get(r) || "") : ""; };
       rows.forEach((e) => {
         if (isGroundName(e.net)) return;
-        if (e.ps.length) {
-          const rr2 = railByNet.get(e.net);
-          if (rr2 && rr2.producer !== ref) e.chips = [{ text: rr2.producer, target: rr2.producer, w: chipW(rr2.producer), overflow: false }];
+        const rr2 = railByNet.get(e.net);
+        // Power rows are DIRECTION-aware: a sink chips only the rail's source
+        // ("fed from U18"), never the other 8 sinks; the source's own row
+        // lists every consumer it feeds (uncapped — that list IS the story).
+        if (rr2 && rr2.producer !== ref) {
+          e.chips = [{ text: rr2.producer, target: rr2.producer, w: chipW(rr2.producer), overflow: false }];
+          return;
+        }
+        if (e.ps.length && !rr2) return;
+        if (rr2) {                                   // producer === ref
+          const tgp = (e.targets || []).filter((r) => r !== ref);
+          e.chips = tgp.map((r) => ({ text: r, target: r, w: chipW(r), overflow: false }));
           return;
         }
         const tg = e.targets || [], showPin = !e.agg && tg.length > 0 && tg.length <= CHIP_CAP;
