@@ -1667,12 +1667,14 @@
     // For a fanout net whose target is ALREADY a ghost in an anchor's cell (e.g. the LMX2595
     // is a ghost in J1's cell via its SPI_MISO/CSN links), add a "bus pin" to that ghost so it
     // shows the net as a dot + stub + label at rest — the connecting line is drawn on hover
-    // (the chip reveal lands on this pin). Multi-drop only (deg-2 is a normal link); GND skipped.
+    // (the chip reveal lands on this pin). Multi-drop only (deg-2 is a normal link); GND and
+    // rails skipped — every IC shares the rails, and the rail story is told by the rail rows'
+    // producer/consumer chips, so a floating "VDD3V3" dot on a signal ghost is pure noise.
     byIC.forEach((parts, anchorRef) => {
       const seen = new Set();
       real.forEach((bx) => { if (bx.ref !== anchorRef) return; bx.pins.forEach((p) => {
         const net = p.anet || p.net;
-        if (!net || seen.has(net) || isGroundName(net)) return;
+        if (!net || seen.has(net) || isGroundName(net) || railByNet.has(net) || isPowerName(net)) return;
         seen.add(net);
         if ((netICs.get(net) || []).length < 3) return;
         (netICs.get(net) || []).forEach((tgt) => {
@@ -1745,6 +1747,11 @@
     const EXTRA_TOP = 16, EXTRA_PITCH = 30, PASSROW = 30;          // band top inset; bare-pin row height; parallel-spoke pitch
     const EXTRA_LEAD = 18, SYM_LEAD = 12, TERM_LEAD = 14, EXTRA_STUB = 56, EXTRA_LABELW = 90;
     const EXTRA_SPAN = EXTRA_LEAD + SYM_LEAD + SPOKE_SYM + TERM_LEAD + EXTRA_LABELW;   // outboard room a spoke side needs
+    // Bus bracket — a collapsed net family still draws EVERY member pin (the
+    // schematic page's rule: all pins on the device, grouped): tight stub rows
+    // joining a vertical spine, one shared family label. BUSROW is tighter than
+    // EXTRA_PITCH because members carry no label or chips of their own.
+    const BUSROW = 22, BUS_JOIN = 18, BUS_TAIL = 16;
     // Net-partner chips: for a bare pin on a high-fanout / multi-drop net, its OTHER devices
     // are drawn as small hoverable ghost chips hanging off the pin (same side), capped at
     // CHIP_CAP with a "+N" overflow. Hover / click-to-pin a chip → drawChips draws the real
@@ -1814,7 +1821,7 @@
       const boxes = real.filter((h) => h.ref === ref);     // ALL the IC's boxes — a multi-part hub splits per (part …)
       const partnerNets = new Set();
       groups.forEach((g) => g.items.forEach((it) => { if (it.busPin) return; [it.net, it.outNet, it.farNet].forEach((n) => n && partnerNets.add(n)); }));
-      const rowHt = (e) => Math.max(EXTRA_PITCH, (e.ps || []).length * PASSROW);
+      const rowHt = (e) => e.members ? 10 + e.members.length * BUSROW : Math.max(EXTRA_PITCH, (e.ps || []).length * PASSROW);
       const extras = [], seenE = new Set();
       boxes.forEach((bx) => bx.pins.forEach((p) => {
         const net = p.anet || p.net;
@@ -1845,13 +1852,18 @@
         const foldFns = String(p.pins || "").split(",").filter((t) => t && t !== p.name && !/^\d+$/.test(t) && !/^[A-Za-z]{1,2}\d{1,3}$/.test(t));
         const dispName = !foldFns.length ? p.name
           : (p.name === netLeaf(net) ? foldFns.join(" · ") : p.name + " · " + foldFns.join(" · "));
-        extras.push({ net, name: dispName, ps, targets, role, grp: p.grp || bx.part || "" });
+        // In-box label when this row rides a bus bracket: the pin FUNCTION ("B1",
+        // "PA5"), not the net — pad-like tokens are genuine channel names there.
+        const padToks = pads.filter((t) => !/^\d+$/.test(t));
+        const pinlbl = (p.name && p.name !== netLeaf(net)) ? p.name : (padToks[0] || "");
+        extras.push({ net, name: dispName, pinlbl, ps, targets, role, grp: p.grp || bx.part || "" });
       }));
       // Deflate: signal rows whose links all point at ONE other cell (≥3 pins →
       // that partner owns the drawings) and port-only indexed families (≥4
-      // GPIO7-style nets with no partner at all) collapse into a single
-      // expandable row, so a hub cell keeps in full only what it owns. Clicking
-      // the row's label re-expands it into real, wirable pins.
+      // GPIO7-style nets with no partner at all) collapse into one bus-bracket
+      // row — but every member pin still draws (tight stub into the shared
+      // spine), so the device's full pin roster stays visible like the
+      // schematic page. Clicking the label expands to full independent rows.
       const aggKeyOf = (e) => {
         if (e.ps.length || e.role === "gnd" || e.role === "pwr") return null;
         if (e.targets.length === 1) return "t\0" + e.targets[0];
@@ -1875,7 +1887,8 @@
         const nets = fam.map((x) => x.net);
         const label = k.charAt(0) === "f" ? famRangeLabel(nets)
           : ((lcpLabel(nets.map(netLeaf)) || netLeaf(nets[0])).replace(/[_\-]+$/, "") || netLeaf(nets[0])) + " ×" + fam.length;
-        rows.push({ net: nets[0], name: "", ps: [], targets: k.charAt(0) === "t" ? [k.slice(2)] : [], role: "", grp: e.grp || "", agg: { key: akey, count: fam.length, label } });
+        const mnum = (x) => { const dm = /(\d+)(?!.*\d)/.exec(netLeaf(x.net)); return dm ? +dm[1] : 1e9; };   // bracket members in index order, not scene fold order
+        rows.push({ net: nets[0], name: "", ps: [], members: fam.slice().sort((a, b) => mnum(a) - mnum(b)), targets: k.charAt(0) === "t" ? [k.slice(2)] : [], role: "", grp: e.grp || "", agg: { key: akey, count: fam.length, label } });
       });
       // Build each bare pin's partner-chip model. Spoke rows only chip a consumed
       // rail's producer (the "fed from" pointer); GND chips everywhere are noise.
@@ -1904,12 +1917,14 @@
         });
         if (tg.length > CHIP_CAP) { const t = "+" + (tg.length - CHIP_CAP); e.chips.push({ text: t, target: null, w: chipW(t), overflow: true, hidden: tg.slice(CHIP_CAP) }); }
       });
-      // Outboard room a side needs: a passive spoke is EXTRA_SPAN (+ its rail
-      // chip); a bare pin is its stub + net/aggregate label + chip row.
+      // Outboard room a side needs: a passive spoke is EXTRA_SPAN + its net
+      // label (+ chips); a bus bracket is join + spine tail + family label; a
+      // bare pin is its stub + net/aggregate label + chip row.
       const extraOutboard = (e) => {
         const chips = e.chips || [];
         let cw = 0; chips.forEach((c, i) => { cw += c.w + (i ? CHIP_GAP : 0); });
-        if (e.ps.length) return EXTRA_SPAN + (cw ? CHIP_LEADGAP + cw + 8 : 0);
+        if (e.members) return BUS_JOIN + BUS_TAIL + 6 + (e.agg.label + " ▸").length * NETLBL_CHARW + (cw ? CHIP_LEADGAP + cw + 8 : 8);
+        if (e.ps.length) return EXTRA_SPAN + 4 + netLeaf(e.net).length * NETLBL_CHARW + (cw ? CHIP_LEADGAP + cw + 8 : 8);
         const text = e.agg ? e.agg.label + " ▸" : netLeaf(e.net);
         const base = EXTRA_STUB + 6 + text.length * NETLBL_CHARW;
         if (!cw) return base + 8;
@@ -2134,8 +2149,28 @@
             // authored pin-group run label — a small muted heading at the run's first row
             if (e.grp && e.grp !== prevGrp) cell.labels.push({ text: e.grp, x: dst(6), y: ey + 4, anchor: onRight ? "start" : "end", dim: true });
             prevGrp = e.grp || null;
-            (onRight ? cell.rightPins : cell.leftPins).push({ name: e.name, x: edge, y: pinY, net: e.net, noPort: e.agg ? true : undefined });
-            if (!nP) {                                   // bare pin → stub + net/aggregate label (grounds draw the earth symbol) + partner chips
+            if (!e.members) (onRight ? cell.rightPins : cell.leftPins).push({ name: e.name, x: edge, y: pinY, net: e.net, noPort: e.agg ? true : undefined });
+            if (e.members) {                             // bus bracket — EVERY member pin drawn as a stub row into a shared spine
+              const busX = dst(BUS_JOIN);
+              let my = pinY - (e.members.length - 1) / 2 * BUSROW;
+              const yTop = my, yBot = my + (e.members.length - 1) * BUSROW;
+              e.members.forEach((mm) => {
+                (onRight ? cell.rightPins : cell.leftPins).push({ name: mm.pinlbl || "", x: edge, y: my, net: mm.net });
+                cell.wires.push({ net: mm.net, pts: [[edge, my], [busX, my]] });
+                my += BUSROW;
+              });
+              if (e.members.length > 1) cell.wires.push({ net: e.net, busw: true, pts: [[busX, yTop], [busX, yBot]] });   // the spine
+              cell.wires.push({ net: e.net, busw: true, pts: [[busX, pinY], [dst(BUS_JOIN + BUS_TAIL), pinY]] });         // spine → label tail
+              const btext = e.agg.label + " ▸";
+              cell.labels.push({ text: btext, x: dst(BUS_JOIN + BUS_TAIL + 6), y: pinY, anchor: onRight ? "start" : "end", busKey: e.agg.key });
+              let kb = BUS_JOIN + BUS_TAIL + 6 + btext.length * NETLBL_CHARW + CHIP_LEADGAP;
+              (e.chips || []).forEach((cm) => {
+                const x0 = dst(kb), x1 = dst(kb + cm.w);
+                cell.chips.push({ x: Math.min(x0, x1), y: pinY - CHIP_H / 2, w: cm.w, h: CHIP_H, text: cm.text, net: e.net,
+                  target: cm.target, overflow: cm.overflow, hidden: cm.hidden || null, side: onRight ? "right" : "left", hx: edge, hy: pinY });
+                kb += cm.w + CHIP_GAP;
+              });
+            } else if (!nP) {                            // bare pin → stub + net/aggregate label (grounds draw the earth symbol) + partner chips
               const ltext = e.agg ? e.agg.label + " ▸" : (e.busHead ? "▾ " + netLeaf(e.net) : netLeaf(e.net));
               cell.wires.push({ net: e.net, busw: !!e.agg, pts: [[edge, pinY], [dst(EXTRA_STUB), pinY]] });
               if (isGroundName(e.net)) cell.labels.push({ text: netLeaf(e.net), x: dst(EXTRA_STUB), y: pinY, ground: true });
@@ -2158,7 +2193,13 @@
                   x: dst(EXTRA_LEAD + SYM_LEAD + SPOKE_SYM / 2), tx: dst(EXTRA_LEAD + SYM_LEAD + SPOKE_SYM + TERM_LEAD),
                   ref: pp.ref, value: pp.value, type: pp.type || "resistor", term: og ? "gnd" : op ? "rail" : "net", rail: netLeaf(pp.other) });
               });
-              let k2 = EXTRA_SPAN + CHIP_LEADGAP;        // a consumed rail's producer chip sits past the spokes
+              // The row's own net gets named at the outboard end (grounds keep
+              // the earth symbol) — a cap spoke alone says "decoupled", not on
+              // WHICH rail; the schematic page always names the combined net.
+              const ntext = netLeaf(e.net);
+              if (isGroundName(e.net)) cell.labels.push({ text: ntext, x: dst(EXTRA_SPAN + 4), y: pinY, ground: true });
+              else cell.labels.push({ text: ntext, x: dst(EXTRA_SPAN + 4), y: pinY, anchor: onRight ? "start" : "end" });
+              let k2 = EXTRA_SPAN + 4 + ntext.length * NETLBL_CHARW + CHIP_LEADGAP;   // a consumed rail's producer chip sits past the net label
               (e.chips || []).forEach((cm) => {
                 const x0 = dst(k2), x1 = dst(k2 + cm.w);
                 cell.chips.push({ x: Math.min(x0, x1), y: pinY - CHIP_H / 2, w: cm.w, h: CHIP_H, text: cm.text, net: e.net,
