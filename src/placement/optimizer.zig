@@ -623,9 +623,10 @@ pub const BoardRules = struct {
 /// Canonical display colours for signal layers, shared by every render
 /// surface (viewer blob, page legend, PNG mirrors these hexes) so
 /// inner-layer copper paints identically everywhere: index 0 = top red,
-/// 1 = bottom blue, then the KiCad-ish inner palette cycling for 2.. .
-pub const SIGNAL_LAYER_COLORS = [_][]const u8{ "#f85149", "#388bfd" };
-pub const INNER_LAYER_COLORS = [_][]const u8{ "#d4aa00", "#cc66cc", "#26c6a8", "#e0824e" };
+/// 1 = bottom blue, then the inner palette cycling for 2.. — KiCad pcbnew's
+/// default layer colours (F.Cu/B.Cu/In1..In4).
+pub const SIGNAL_LAYER_COLORS = [_][]const u8{ "#C83434", "#4D7FC4" };
+pub const INNER_LAYER_COLORS = [_][]const u8{ "#C2C200", "#C200C2", "#C2C2C2", "#00C2C2" };
 
 /// The display colour (hex) of signal layer `sig` — outer pair, then the
 /// inner palette cycling.
@@ -9310,11 +9311,12 @@ test "BoardRules signal-layer derivation across stackups" {
     const two_pour = BoardRules{ .plane_nets = &.{}, .copper_layers = 2, .planes = &pourb };
     try testing.expectEqual(@as(u8, 2), two_pour.signalLayerCount());
 
-    // Colours: the outer pair stays red/blue; inners cycle the palette.
-    try testing.expectEqualStrings("#f85149", signalLayerColor(0));
-    try testing.expectEqualStrings("#388bfd", signalLayerColor(1));
-    try testing.expectEqualStrings("#d4aa00", signalLayerColor(2));
-    try testing.expectEqualStrings("#cc66cc", signalLayerColor(3));
+    // Colours: the outer pair stays red/blue (KiCad F.Cu/B.Cu); inners cycle
+    // KiCad's In1../In4 palette.
+    try testing.expectEqualStrings("#C83434", signalLayerColor(0));
+    try testing.expectEqualStrings("#4D7FC4", signalLayerColor(1));
+    try testing.expectEqualStrings("#C2C200", signalLayerColor(2));
+    try testing.expectEqualStrings("#C200C2", signalLayerColor(3));
 }
 
 // spec: placement/optimizer - legalization separates two overlapping courtyards

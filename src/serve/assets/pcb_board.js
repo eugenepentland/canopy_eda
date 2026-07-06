@@ -8,8 +8,23 @@ var RO=!!PCB.ro;
 // 0=top(F.Cu), 1=bottom(B.Cu), 2..=plane-free inner layers in stack order.
 // Nothing below hard-codes the layer count; older blobs fall back to the
 // classic two-layer table.
-var LYR=(PCB.layers&&PCB.layers.length)?PCB.layers:[{l:0,name:"F.Cu",c:"#f85149"},{l:1,name:"B.Cu",c:"#388bfd"}];
+var LYR=(PCB.layers&&PCB.layers.length)?PCB.layers:[{l:0,name:"F.Cu",c:"#C83434"},{l:1,name:"B.Cu",c:"#4D7FC4"}];
 var NSIG=LYR.length;
+// ── KiCad pcbnew board theme ─────────────────────────────────────────────
+// One palette object for everything the canvas paints; the copper layer
+// colours themselves come from PCB.layers (server-shared with the PNG).
+var TH={bg:"#001023",            // canvas: KiCad dark navy
+ gridDot:"#2a3a4a",              // grid-dot overlay
+ court:"rgba(216,100,255,0.35)", // courtyard: dim KiCad magenta outline
+ padTop:"#C83434",padBot:"#4D7FC4", // SMD pads in their face's copper colour
+ pth:"#d0a028",                  // plated through-hole annulus gold
+ npth:"#26323e",                 // non-plated hole rim (no copper)
+ hole:"#001023",                 // drilled bore
+ silk:"#F0F0F0",silkBot:"#E8B2C8", // F./B. silkscreen
+ edge:"#D0D2CD",                 // committed board outline (Edge.Cuts)
+ via:"#B2B27A",viaHole:"#001023",  // via annulus / hole
+ rats:"rgba(255,255,255,0.35)",  // ratsnest: thin solid white
+ drc:"#f4432c"};                 // DRC markers (red-orange)
 function layerName(l){for(var i=0;i<LYR.length;i++)if(LYR[i].l===l)return LYR[i].name;return "L"+l;}
 function layerColor(l){for(var i=0;i<LYR.length;i++)if(LYR[i].l===l)return LYR[i].c;return "#8b949e";}
 // Visibility key for a copper layer ("top"/"bottom" keep their legacy
@@ -18,7 +33,7 @@ function visKey(l){return l===0?"top":(l===1?"bottom":("l"+l));}
 // ── Live view state (layers / grid / units) — audit 1.5 ─────────────────
 // Persisted per design in localStorage alongside the existing "pcb-rigid-off:"
 // key. `G` stays the footprint-editor grid constant; snap uses gridMM (0 = off).
-var viewKey="pcb-view:"+PCB.name,viewSt={grid:G,units:"mm",vis:{top:1,bottom:1,silk:1,rats:1,drc:1}};
+var viewKey="pcb-view:"+PCB.name,viewSt={grid:G,units:"mm",vis:{top:1,bottom:1,silk:1,rats:1,drc:1,edge:1}};
 for(var _li=2;_li<NSIG;_li++)viewSt.vis["l"+_li]=1; // inner copper defaults visible
 try{var _vs=JSON.parse(localStorage.getItem(viewKey)||"null");if(_vs){
  if(typeof _vs.grid==="number")viewSt.grid=_vs.grid;
@@ -30,10 +45,30 @@ function viewSave(){try{localStorage.setItem(viewKey,JSON.stringify(viewSt));}ca
 function snapG(){return viewSt.grid>0?viewSt.grid:0.001;}
 var activeLayer=0; // signal-layer index (see LYR) — draw layer for vias/free tracks
 function syncActiveLayer(){var s=document.getElementById("pcb-actlayer");if(s)s.value=String(activeLayer);
+ if(PCB.apSync)PCB.apSync(); // Appearance panel active-layer row (full page)
+ statusLayer();
  var b=document.getElementById("pcb-draw");/* drawBtnSync fills the label */ if(b&&typeof drawBtnSync==="function")drawBtnSync();}
+// ── KiCad status bar (full page only — the ids are absent on embeds) ────
+function stSet(id,t){var e=document.getElementById(id);if(e)e.textContent=t;}
+function statusLayer(){var sw=document.getElementById("st-layer-sw");
+ if(sw)sw.style.background=layerColor(activeLayer);
+ stSet("st-layer-nm",layerName(activeLayer));}
 // mm↔mil display formatting (display only — the model stays mm).
 function fmtLen(mm){if(viewSt.units==="mil")return (mm/0.0254).toFixed(1)+" mil";return mm.toFixed(2)+" mm";}
 function fmtLen2(mm){if(viewSt.units==="mil")return (mm/0.0254).toFixed(0)+" mil";return mm.toFixed(2)+" mm";}
+// Status-bar live segments: cursor position, drag delta, zoom %, hovered part.
+function statusXY(m){stSet("st-xy","x "+fmtLen(m.x)+"   y "+fmtLen(m.y));}
+function statusZoom(){stSet("st-zoom","zoom "+Math.round(100*VBW/vb.w)+"%");}
+function statusDelta(m){var t="";
+ if(typeof drag!=="undefined"&&drag&&drag.m0)t="dx "+fmtLen(m.x-drag.m0.x)+"  dy "+fmtLen(m.y-drag.m0.y);
+ else if(typeof gdrag!=="undefined"&&gdrag)t="dx "+fmtLen(m.x-gdrag.sx)+"  dy "+fmtLen(m.y-gdrag.sy);
+ stSet("st-dxdy",t);}
+function statusHover(m){var t="";
+ if(cur>=0&&P[cur]){t=P[cur].ref;
+  var pd=m?padAt(cur,m.x,m.y):null;
+  if(pd&&pd.net)t+=" · "+pd.net;
+  else if(P[cur].val)t+=" · "+P[cur].val;}
+ stSet("st-hover",t);}
 // `?sub=` query for a sub-circuit page so layout save/delete/star/rescore POST
 // to the per-sub sidecar (<design>.<sub>.layouts.json) instead of the design's.
 // Empty on a normal design/module page.
@@ -70,24 +105,28 @@ function drawBoardRect(tmp){
  while(gB.firstChild)gB.removeChild(gB.firstChild);
  if(polyPts&&polyPts.length){polySketch();return;} // ⬡ Poly in progress
  var br=tmp||PCB.outline||PCB.board;if(!br||!(br.w>0)||!(br.h>0))return;
+ if(!tmp&&!viewSt.vis.edge)return; // Edge.Cuts hidden in the Appearance panel
  var drawn=!!(tmp||PCB.outline);
+ // Committed outlines draw in KiCad's Edge.Cuts grey; the in-progress drag
+ // rectangle keeps the green dashed tool feedback.
+ var EC=tmp?"#7ee787":TH.edge;
  // Exact polygon outline (drawn ⬡ Poly pts, or the authored corner-radius
  // shape the server sends as PCB.board_poly); rectangles keep the rect path.
  var pts=tmp?null:(PCB.outline?(PCB.outline.pts||null):(PCB.board_poly||null));
  if(pts&&pts.length>=3){
   var str=pts.map(function(p){return X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1);}).join(" ");
-  gB.appendChild(el("polygon",{points:str,fill:"none",stroke:"#7ee787","stroke-width":1.6,opacity:0.85}));
+  gB.appendChild(el("polygon",{points:str,fill:"none",stroke:EC,"stroke-width":1.4,opacity:0.9}));
   // A drawn polygon's vertices stay editable: square handles, dragged in the
   // pointer handlers (gB is pointer-events:none; hits are coordinate-tested).
   if(drawn&&!RO)pts.forEach(function(p){gB.appendChild(el("rect",{
     x:(X(p[0])-3.5).toFixed(1),y:(Y(p[1])-3.5).toFixed(1),width:7,height:7,
-    fill:"#0d1117",stroke:"#7ee787","stroke-width":1.2,opacity:0.9}));});
+    fill:TH.bg,stroke:EC,"stroke-width":1.2,opacity:0.9}));});
  }else{
   gB.appendChild(el("rect",{x:X(br.x).toFixed(1),y:Y(br.y).toFixed(1),width:(br.w*S).toFixed(1),
-    height:(br.h*S).toFixed(1),fill:"none",stroke:"#7ee787","stroke-width":1.6,opacity:0.85,
+    height:(br.h*S).toFixed(1),fill:"none",stroke:EC,"stroke-width":tmp?1.6:1.4,opacity:0.9,
     "stroke-dasharray":tmp?"6 4":"0"}));
  }
- var bt=el("text",{x:(X(br.x)+6).toFixed(1),y:(Y(br.y)+14).toFixed(1),fill:"#7ee787","font-size":"11",opacity:0.85});
+ var bt=el("text",{x:(X(br.x)+6).toFixed(1),y:(Y(br.y)+14).toFixed(1),fill:EC,"font-size":"11",opacity:0.8});
  bt.textContent=fmtLen2(br.w)+"×"+fmtLen2(br.h)+(drawn?" (drawn)":""); gB.appendChild(bt);
 }
 // The in-progress ⬡ Poly sketch: placed vertices as a dashed open path, a
@@ -184,8 +223,9 @@ function scenePaint(){paintQueued=false;
  var mov=dragIdxSet();
  if(!mov){dragCache=null;
   ctx.setTransform(1,0,0,1,0,0);
-  ctx.fillStyle="#010409";ctx.fillRect(0,0,w,h);
+  ctx.fillStyle=TH.bg;ctx.fillRect(0,0,w,h);
   ctx.setTransform(kk,0,0,kk,-vb.x*kk,-vb.y*kk);   // draw in svg-unit coords
+  paintGridDots(ctx,k);
   paintPours(ctx,k);
   paintGroupBoxes(ctx,k);
   paintParts(ctx,k);
@@ -209,8 +249,9 @@ function scenePaint(){paintQueued=false;
    if(oc.width!==w)oc.width=w;if(oc.height!==h)oc.height=h;
    var c2=oc.getContext("2d",{alpha:false});
    c2.setTransform(1,0,0,1,0,0);
-   c2.fillStyle="#010409";c2.fillRect(0,0,w,h);
+   c2.fillStyle=TH.bg;c2.fillRect(0,0,w,h);
    c2.setTransform(kk,0,0,kk,-vb.x*kk,-vb.y*kk);
+   paintGridDots(c2,k); // static during a drag — cached with the rest
    paintPours(c2,k);
    paintGroupBoxes(c2,k,movG,false);
    paintParts(c2,k,mov,false);
@@ -238,12 +279,34 @@ function scenePaint(){paintQueued=false;
   ctx.strokeRect(X(fc.x)-fp.hw*S,Y(fc.y)-fp.hh*S,2*fp.hw*S,2*fp.hh*S);
   ctx.globalAlpha=1;setTimeout(paintSoon,60);}
  else if(flashIdx>=0){flashIdx=-1;}}
+// Grid-dot overlay at the current snap pitch, only when the dots are at
+// least ~8 screen px apart (KiCad shows dots, not a mesh, and hides them
+// when they'd blur together). Count-capped as a safety net.
+function paintGridDots(ctx,k){
+ var g=viewSt.grid;if(!(g>0))return;
+ if(g*S*k<8)return;
+ // Pan/zoom bursts repaint every frame — skip the dot grid until quiet (the
+ // trailing repaint restores it). Part drags keep it: it lives in the static
+ // drag-cache bitmap, rendered once per gesture.
+ if(Date.now()<vbQuiet)return;
+ var wx0=vb.x/S+MX-M,wx1=(vb.x+vb.w)/S+MX-M;
+ var wy0=vb.y/S+MY-M,wy1=(vb.y+vb.h)/S+MY-M;
+ var gx0=Math.ceil(wx0/g)*g,gy0=Math.ceil(wy0/g)*g;
+ var nx=Math.floor((wx1-gx0)/g)+1,ny=Math.floor((wy1-gy0)/g)+1;
+ if(nx<=0||ny<=0||nx*ny>60000)return;
+ var d=1.4/k; // ~1.4 css px dot
+ ctx.fillStyle=TH.gridDot;
+ for(var ix=0;ix<nx;ix++){var px=X(gx0+ix*g)-d/2;
+  for(var iy=0;iy<ny;iy++)ctx.fillRect(px,Y(gy0+iy*g)-d/2,d,d);}}
+// KiCad-style highlight ladder: hover/selection brighten to white; marquee
+// and rigid-group glows keep their accents; everything else is the dim
+// courtyard magenta.
 function partStroke(i,p){
- if(i===cur&&!RO)return {c:"#58a6ff",w:2};
- if(selRef&&p.ref===selRef)return {c:"#58a6ff",w:2.4};
+ if(i===cur&&!RO)return {c:"#ffffff",w:2};
+ if(selRef&&p.ref===selRef)return {c:"#ffffff",w:2.4};
  if(sel&&sel.indexOf&&sel.indexOf(i)>=0)return {c:"#d2a8ff",w:2};
  if(hoverGrpName&&grpOf(p.ref)===hoverGrpName)return {c:"#7ee787",w:2};
- return {c:p.kind=="hub"?"#58a6ff":"#8b949e",w:1.3};}
+ return {c:TH.court,w:1};}
 // Per-part Path2D cache: silk strokes + drill bores are static geometry in
 // part-local coords — build once, then each frame is a single stroke()/fill()
 // under the part's transform instead of hundreds of path-segment calls.
@@ -271,12 +334,15 @@ function paintParts(ctx,k,mov,only){
   ctx.translate(X(p.x),Y(p.y));ctx.rotate((p.rot||0)*Math.PI/180);
   if(bot)ctx.scale(-1,1);
   // courtyard (box centre can be offset from the part origin — asymmetric
-  // library rects; the local frame already carries rotation + mirror)
+  // library rects; the local frame already carries rotation + mirror).
+  // KiCad-style: a thin dim magenta outline, NO body fill — parts read from
+  // their pads + silk. The heatmap tint and the staged-part red wash are the
+  // two deliberate exceptions.
   var hw=p.hw*S,hh=p.hh*S,ccx=(p.ccx||0)*S,ccy=(p.ccy||0)*S;
-  ctx.fillStyle=(heatOn&&p.ref!==anchorRef)?blameColor(heatScale>0?(p.blame||0)/heatScale:0)
-    :(bot?"#122036":"#161b22");
-  if(unp)ctx.fillStyle="rgba(248,81,73,.12)";
-  ctx.fillRect(ccx-hw,ccy-hh,2*hw,2*hh);
+  if(heatOn&&p.ref!==anchorRef){
+   ctx.fillStyle=blameColor(heatScale>0?(p.blame||0)/heatScale:0);
+   ctx.fillRect(ccx-hw,ccy-hh,2*hw,2*hh);}
+  if(unp){ctx.fillStyle="rgba(248,81,73,.12)";ctx.fillRect(ccx-hw,ccy-hh,2*hw,2*hh);}
   var st=partStroke(i,p);
   ctx.strokeStyle=unp?"#f85149":st.c;ctx.lineWidth=unp?1.6:st.w;
   if(unp)ctx.setLineDash([4,3]);
@@ -289,14 +355,20 @@ function paintParts(ctx,k,mov,only){
    ctx.beginPath();ctx.moveTo(ccx-hw,ccy-hh);ctx.lineTo(ccx+hw,ccy+hh);
    ctx.moveTo(ccx+hw,ccy-hh);ctx.lineTo(ccx-hw,ccy+hh);ctx.globalAlpha=0.8;ctx.stroke();ctx.globalAlpha=1;}
   var pp=partPath(i);
-  // silk
-  if(pp.silk&&viewSt.vis.silk){ctx.strokeStyle="#8b949e";ctx.lineWidth=0.8;ctx.lineCap="round";
+  // silk — F.Silk white / B.Silk pink (KiCad), one cached-Path2D stroke
+  if(pp.silk&&viewSt.vis.silk){ctx.strokeStyle=bot?TH.silkBot:TH.silk;ctx.lineWidth=0.8;ctx.lineCap="round";
    ctx.stroke(pp.silk);
    ctx.lineCap="butt";}
-  // pads (in the same part frame) — fillStyle set only when it changes
+  // pads (in the same part frame) — fillStyle set only when it changes.
+  // Default: layer-coloured, KiCad-style — SMD pads in their face's copper
+  // colour, plated through-holes gold, NPTH a copper-free rim. The opt-in
+  // Net-colours view keeps per-net fills.
   var lastFill=null;
   (p.pads||[]).forEach(function(pd){
-   var fill=bot?"#5b8dd6":(netColOn?(pd.net?(netColorOf(pd.net)||"#b08d57"):"#ffffff"):"#b08d57");
+   var fill;
+   if(netColOn)fill=pd.net?(netColorOf(pd.net)||TH.pth):"#ffffff";
+   else if(pd.drill>0)fill=pd.npth?TH.npth:TH.pth;
+   else fill=bot?TH.padBot:TH.padTop;
    if(hoverNet&&pd.net===hoverNet)fill="#f85149";
    if(fill!==lastFill){ctx.fillStyle=fill;lastFill=fill;}
    padPath(ctx,pd);ctx.fill();
@@ -306,10 +378,11 @@ function paintParts(ctx,k,mov,only){
     padPath(ctx,pd);ctx.stroke();}});
   // Drilled bores: board-coloured holes through thru/npth pads, one batched
   // fill per part (cached path) instead of a beginPath/arc per pad.
-  if(pp.bore){ctx.fillStyle="#0d1117";ctx.fill(pp.bore);}
+  if(pp.bore){ctx.fillStyle=TH.hole;ctx.fill(pp.bore);}
   ctx.restore();
-  // upright labels (outside the rotated/mirrored frame)
-  if(labels&&(p.pads||[]).length){ctx.fillStyle="#0d1117";
+  // upright pad-number labels (outside the rotated/mirrored frame) — light
+  // on the copper-coloured pads, dark on the bright net-colour fills.
+  if(labels&&(p.pads||[]).length){ctx.fillStyle=netColOn?"#0d1117":"rgba(240,240,244,.92)";
    ctx.textAlign="center";ctx.textBaseline="middle";
    p.pads.forEach(function(pd){if(!pd.num)return;
     var fs=Math.min(pd.w,pd.h)*S*0.55;if(fs*k<5.5)return;
@@ -319,15 +392,21 @@ function paintParts(ctx,k,mov,only){
     var f="600 "+fs.toFixed(1)+"px system-ui,sans-serif";
     if(f!==lastFont){ctx.font=f;lastFont=f;}
     ctx.fillText(pd.num,X(c.x),Y(c.y));});}
-  // Ref labels only where they carry signal — the hovered part, the selected/
-  // cross-probed part, and red-flagged staged parts. Sub-circuits are named by
-  // their group box (paintGroupBoxes) instead of a per-part refdes cloud.
-  if(i===cur||unp||(selRef&&p.ref===selRef)){
-   ctx.font="600 9px system-ui,sans-serif";lastFont="";
+  // Ref-des labels, KiCad-style: always drawn in silk colour above the
+  // courtyard once the part is big enough on screen to carry one (hovered /
+  // selected / staged parts always label; the rest pause during drags/zooms
+  // like the pad numbers, so gestures stay O(movers)). Size tracks zoom
+  // within clamps so labels stay legible without blanketing the board.
+  var wantRef=(i===cur)||unp||(selRef&&p.ref===selRef);
+  if(wantRef||(!gestureBusy()&&viewSt.vis.silk&&p.hw*2*S*k>=14)){
+   var rpx=Math.max(7,Math.min(11,p.hw*2*S*k*0.22)); // screen px, clamped
+   ctx.font="600 "+(rpx/k).toFixed(2)+"px system-ui,sans-serif";lastFont="";
    ctx.textAlign="center";ctx.textBaseline="alphabetic";
-   ctx.fillStyle=unp?"#f85149":(p.kind=="hub"?"#58a6ff":"#8b949e");
+   ctx.fillStyle=unp?"#f85149":((i===cur||(selRef&&p.ref===selRef))?"#ffffff":(bot?TH.silkBot:TH.silk));
+   if(!wantRef)ctx.globalAlpha=0.85;
    var lc=wpt(i,p.ccx||0,p.ccy||0);
-   ctx.fillText(p.ref,X(lc.x),Y(lc.y)-p.hh*S-2);}}}
+   ctx.fillText(p.ref,X(lc.x),Y(lc.y)-p.hh*S-2/k);
+   ctx.globalAlpha=1;}}}
 function padPath(ctx,pd){
  ctx.beginPath();
  if(pd.poly&&pd.poly.length>=3){
@@ -350,15 +429,15 @@ function paintPours(ctx,k){
  (PCB.pours||[]).forEach(function(q){
   if(!(q.w>0&&q.h>0))return;
   var top=(q.side==="top");
-  ctx.fillStyle=top?"rgba(248,81,73,0.10)":"rgba(56,139,253,0.12)";
+  ctx.fillStyle=top?"rgba(200,52,52,0.10)":"rgba(77,127,196,0.12)";
   ctx.fillRect(X(q.x),Y(q.y),q.w*S,q.h*S);
-  ctx.strokeStyle=top?"rgba(248,81,73,0.45)":"rgba(56,139,253,0.5)";
+  ctx.strokeStyle=top?"rgba(200,52,52,0.45)":"rgba(77,127,196,0.5)";
   ctx.lineWidth=1;ctx.setLineDash([5,4]);
   ctx.strokeRect(X(q.x),Y(q.y),q.w*S,q.h*S);
   ctx.setLineDash([]);
   ctx.font="600 "+(11*ik).toFixed(2)+"px system-ui,sans-serif";
   ctx.textAlign="left";ctx.textBaseline="alphabetic";
-  ctx.fillStyle=top?"rgba(248,81,73,0.9)":"rgba(56,139,253,0.9)";
+  ctx.fillStyle=top?"rgba(220,90,90,0.9)":"rgba(110,155,215,0.9)";
   ctx.fillText(q.net+" pour · "+(top?"F.Cu":"B.Cu"),X(q.x)+5*ik,Y(q.y+q.h)-(5+n*14)*ik);
   n++;});}
 // movG/only: drag-cache split — a group box is dynamic when any member moves
@@ -422,14 +501,20 @@ function refreshUnplaced(){
 // (The former separate overlay canvas is merged into the scene canvas —
 // paintLinks/paintClr/paintTracks below are called by scenePaint in order.)
 function ovPaintSoon(){paintSoon();}
+// Ratsnest: KiCad's thin SOLID white at ~35% alpha by default; the opt-in
+// Net-colours view restores per-net-coloured airwires (with the classic
+// stronger alphas so the colours read).
 // mov/only: drag-cache split — a link is dynamic when EITHER endpoint moves.
 function paintLinks(ctx,mov,only){if(!ratsOn||!viewSt.vis.rats)return;
  (PCB.links||[]).forEach(function(l){
   if(mov&&(!!(mov[l.a]||mov[l.b]))!==only)return;
   var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
-  ctx.strokeStyle=linkCol(l);
-  ctx.globalAlpha=(l.k=="signal")?0.55:0.9;
-  ctx.lineWidth=(l.k=="signal")?0.7:1.3;
+  if(netColOn){ctx.strokeStyle=linkCol(l);
+   ctx.globalAlpha=(l.k=="signal")?0.55:0.9;
+   ctx.lineWidth=(l.k=="signal")?0.7:1.3;}
+  else{ctx.strokeStyle="#ffffff";
+   ctx.globalAlpha=0.35;
+   ctx.lineWidth=(l.k=="signal")?0.7:1.1;}
   ctx.beginPath();ctx.moveTo(X(a.x),Y(a.y));ctx.lineTo(X(b.x),Y(b.y));ctx.stroke();});
  ctx.globalAlpha=1;}
 // Per-layer copper visibility + a dim of the INACTIVE copper layer while
@@ -455,8 +540,8 @@ function paintTracks(ctx,cop,only){
   if(cop&&cop.has(v)!==(only||false))return;
   var rr=Math.max(v.d/2*S,2.5),dr=(v.drill>0)?v.drill:viaGeo().drill;
   var rh=Math.min(Math.max(dr/2*S,1),rr*0.7);
-  ctx.fillStyle="#ca8a04";ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rr,0,6.2832);ctx.fill();
-  ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rh,0,6.2832);ctx.fill();});}
+  ctx.fillStyle=TH.via;ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rr,0,6.2832);ctx.fill();
+  ctx.fillStyle=TH.viaHole;ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rh,0,6.2832);ctx.fill();});}
 // mov/only/cop: drag-cache split — moving parts' halos are dynamic; via/track
 // halos follow the copper the drag carries (cop, a Set of live objects).
 function paintClr(ctx,mov,only,cop){
@@ -1142,7 +1227,25 @@ function setVB(){svg.setAttribute("viewBox",vb.x.toFixed(1)+" "+vb.y.toFixed(1)+
  var r=svg.getBoundingClientRect();
  svg.classList.toggle("zoomed-out",r.width>0&&(r.width/vb.w)<1.15);
  vbBusy(); // viewport moved: drop the drag cache + defer pad labels briefly
+ statusZoom();
  ovPaintSoon();}
+// The SVG now fills its flex container (app-frame layout), so the viewBox
+// must always MATCH the container's aspect ratio — mm(ev) maps x and y
+// through vb.w/r.width and vb.h/r.height independently, and a mismatched
+// pair would skew picking. fitVB frames the whole board centred; vbResize
+// re-derives vb.h about the current centre when the window reflows.
+function hostAspect(){var r=svg.getBoundingClientRect();
+ return (r.width>0&&r.height>0)?(r.height/r.width):(VBH/VBW);}
+function fitVB(){var ar=hostAspect(),w=VBW,h=VBW*ar;
+ if(h<VBH){h=VBH;w=VBH/ar;}
+ vb={x:(VBW-w)/2,y:(VBH-h)/2,w:w,h:h};setVB();}
+function vbResize(){var ar=hostAspect(),cy=vb.y+vb.h/2,h=vb.w*ar;
+ vb.y=cy-h/2;vb.h=h;setVB();}
+window.addEventListener("resize",function(){vbResize();paintSoon();});
+// The stage also reflows WITHOUT a window resize (legend toggles, panels
+// opening) — observe the svg itself so the aspect never drifts from the box.
+if(window.ResizeObserver){try{
+ new ResizeObserver(function(){vbResize();paintSoon();}).observe(svg);}catch(e){}}
 function zoomAt(cx,cy,f){if((f<1&&vb.w<VBW*0.08)||(f>1&&vb.w>VBW*8))return;
  var r=svg.getBoundingClientRect();
  var px=vb.x+(cx-r.left)*(vb.w/r.width),py=vb.y+(cy-r.top)*(vb.h/r.height);
@@ -1166,7 +1269,7 @@ svg.addEventListener("wheel",function(ev){ev.preventDefault();
 function zc(f){var r=svg.getBoundingClientRect();zoomAt(r.left+r.width/2,r.top+r.height/2,f);}
 var zi=document.getElementById("z-in");if(zi)zi.addEventListener("click",function(){zc(0.8);});
 var zo=document.getElementById("z-out");if(zo)zo.addEventListener("click",function(){zc(1.25);});
-var zf=document.getElementById("z-fit");if(zf)zf.addEventListener("click",function(){vb={x:0,y:0,w:VBW,h:VBH};setVB();});
+var zf=document.getElementById("z-fit");if(zf)zf.addEventListener("click",function(){fitVB();});
 // Empty-space drag = marquee select (pick every part whose centre lands in the
 // box); Space-held or middle-button drag = pan instead. A no-move click clears
 // the selection. The rubber-band rect lives in the top layer (pointer-events
@@ -1188,7 +1291,8 @@ function outlineArm(on){
  var msg=document.getElementById("pcb-savemsg");
  if(msg&&on){msg.style.color="#7ee787";
   msg.textContent="outline: drag a rectangle on the board (plain click clears, Esc cancels)";}
- else if(msg&&!outDraw){msg.textContent="";}}
+ else if(msg&&!outDraw){msg.textContent="";}
+ toolSync();}
 // ⬡ Poly tool: click to place polygon-outline vertices (grid-snapped); click
 // the first vertex or press Enter to close, Backspace removes the last
 // vertex, Esc cancels. The closed polygon becomes PCB.outline
@@ -1208,6 +1312,7 @@ function polyArm(on){if(RO&&on)return;
  if(msg&&on){msg.style.color="#7ee787";
   msg.textContent="polygon outline: click to place vertices — click the first vertex or Enter closes, Backspace undoes, Esc cancels";}
  else if(msg&&!on){msg.textContent="";}
+ toolSync();
  drawBoardRect();}
 function outlineMsg(txt){var msg=document.getElementById("pcb-savemsg");
  if(msg){msg.style.color="#8b949e";msg.textContent=txt;}}
@@ -1311,6 +1416,8 @@ svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.pre
  drag={i:hi,ox:P[hi].x-m.x,oy:P[hi].y-m.y,m0:m,snap:snapAll()};svg.style.cursor="grabbing";});
 svg.addEventListener("pointermove",function(ev){
  if(ev.pointerType==="touch"&&touchMove(ev))return; // active pinch consumed it
+ // Status bar: live cursor position, drag delta, hovered part/net.
+ var stm=mm(ev);statusXY(stm);statusDelta(stm);statusHover(stm);
  if(vdrag){var vv=mm(ev),vgx=Math.round(vv.x/G)*G,vgy=Math.round(vv.y/G)*G,vo=PCB.outline;
   if(vo&&vo.pts&&vdrag.i<vo.pts.length&&(vo.pts[vdrag.i][0]!==vgx||vo.pts[vdrag.i][1]!==vgy)){
    vo.pts[vdrag.i]=[vgx,vgy];vdrag.moved=true;outlineBboxSync();drawBoardRect();}
@@ -1395,7 +1502,7 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
 // with the layout (PCB.texts → persistLayout) and emitted on the silk Gerber.
 PCB.texts=PCB.texts||[];
 var textMode=false,txSel=-1,txDrag=null;
-var TX_COL="#d6a94e"; // silk-legend gold, distinct from ref-des grey/blue
+var TX_COL=TH.silk; // board text is silkscreen — F.Silk white / B.Silk pink
 function txArm(on){textMode=on;if(RO)textMode=false;
  var b=document.getElementById("pcb-text");if(b)b.classList.toggle("on",textMode);
  svg.classList.toggle("text-mode",textMode);
@@ -1408,6 +1515,7 @@ function txArm(on){textMode=on;if(RO)textMode=false;
   msg.textContent="text: click the board to place a label (click a label to edit, R rotates, Del deletes, Esc ends)";}
  else if(msg&&!textMode&&txSel<0){msg.textContent="";}
  if(!textMode)txPopClose();
+ toolSync();
  paintSoon();}
 // The rendered box of a text label in world mm (axis-aligned bbox after its
 // quarter-turn), used for hit-testing and the selection outline.
@@ -1426,7 +1534,7 @@ function paintTexts(ctx){
   ctx.translate(X(t.x),Y(t.y));ctx.rotate((t.rot||0)*Math.PI/180);
   if(bot)ctx.scale(-1,1);
   var px=(t.size>0?t.size:1.0)*S; // cap height in svg-units
-  ctx.fillStyle=bot?"#5b8dd6":TX_COL;
+  ctx.fillStyle=bot?TH.silkBot:TX_COL;
   ctx.font="600 "+px.toFixed(1)+"px ui-monospace,Menlo,Consolas,monospace";
   ctx.textAlign="center";ctx.textBaseline="middle";
   ctx.fillText(t.text,0,0);
@@ -1443,27 +1551,27 @@ function txPopOpen(i){txPopClose();var t=PCB.texts[i];if(!t)return;
  // pushed on the FIRST mutating control event (typing more keeps amending).
  var pre=snapAll();function txOnce(){if(pre){recordUndo(pre);pre=null;}}
  txPop=document.createElement("div");txPop.className="tx-pop";
- txPop.style.cssText="position:absolute;z-index:20;background:#161b22;border:1px solid #30363d;"+
-  "border-radius:6px;padding:8px;font:12px system-ui;color:#c9d1d9;box-shadow:0 4px 16px rgba(0,0,0,.5);min-width:190px";
+ txPop.style.cssText="position:absolute;z-index:20;background:#232428;border:1px solid #3a3b40;"+
+  "border-radius:6px;padding:8px;font:12px system-ui;color:#d6d7db;box-shadow:0 4px 16px rgba(0,0,0,.5);min-width:190px";
  var b=txBox(t),sx=svg.getBoundingClientRect(),vb2=svg.viewBox.baseVal;
  var kx=sx.width/vb2.w,ky=sx.height/vb2.h;
  txPop.style.left=(svg.offsetLeft+(X(b.x0)-vb2.x)*kx)+"px";
  txPop.style.top=(svg.offsetTop+(Y(b.y1)-vb2.y)*ky+6)+"px";
  function row(label,node){var r=document.createElement("label");
   r.style.cssText="display:flex;align-items:center;gap:6px;margin:3px 0";
-  var s=document.createElement("span");s.textContent=label;s.style.cssText="width:44px;color:#8b949e";
+  var s=document.createElement("span");s.textContent=label;s.style.cssText="width:44px;color:#9b9ca3";
   r.appendChild(s);r.appendChild(node);return r;}
  var ti=document.createElement("input");ti.type="text";ti.value=t.text;
- ti.style.cssText="flex:1;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:2px 4px";
+ ti.style.cssText="flex:1;background:#1a1b1e;border:1px solid #3a3b40;color:#d6d7db;border-radius:4px;padding:2px 4px";
  ti.addEventListener("input",function(){txOnce();t.text=ti.value;paintSoon();});
  var si=document.createElement("input");si.type="number";si.step="0.1";si.min="0.3";si.value=(t.size||1).toString();
- si.style.cssText="width:64px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:2px 4px";
+ si.style.cssText="width:64px;background:#1a1b1e;border:1px solid #3a3b40;color:#d6d7db;border-radius:4px;padding:2px 4px";
  si.addEventListener("input",function(){var v=parseFloat(si.value);if(v>0){txOnce();t.size=v;paintSoon();txPopReposition(i);}});
  var ro=document.createElement("select");["0","90","180","270"].forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v+"°";ro.appendChild(o);});
- ro.value=String(((t.rot||0)%360+360)%360);ro.style.cssText="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:2px";
+ ro.value=String(((t.rot||0)%360+360)%360);ro.style.cssText="background:#1a1b1e;border:1px solid #3a3b40;color:#d6d7db;border-radius:4px;padding:2px";
  ro.addEventListener("change",function(){txOnce();t.rot=parseInt(ro.value,10)||0;paintSoon();txPopReposition(i);});
  var sd=document.createElement("select");[["top","Top"],["bottom","Bottom"]].forEach(function(p){var o=document.createElement("option");o.value=p[0];o.textContent=p[1];sd.appendChild(o);});
- sd.value=(t.side==="bottom")?"bottom":"top";sd.style.cssText="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:2px";
+ sd.value=(t.side==="bottom")?"bottom":"top";sd.style.cssText="background:#1a1b1e;border:1px solid #3a3b40;color:#d6d7db;border-radius:4px;padding:2px";
  sd.addEventListener("change",function(){txOnce();t.side=sd.value;paintSoon();});
  var del=document.createElement("button");del.textContent="Delete";del.className="btn";
  del.addEventListener("click",function(){txDelete(i);});
@@ -1488,8 +1596,8 @@ if(textBtn&&!RO)textBtn.addEventListener("click",function(){txArm(!textMode);});
 function viaGeo(){var va=parseFloat((document.getElementById("r-va")||{}).value),
  vd=parseFloat((document.getElementById("r-vd")||{}).value);return {dia:va>0?va:0.4,drill:vd>0?vd:0.2};}
 function drawVia(g,wx,wy,dia,drill){var r=Math.max(dia/2*S,2.5),rh=Math.min(Math.max(drill/2*S,1),r*0.7);
- g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:r.toFixed(1),fill:"#ca8a04"}));
- g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:rh.toFixed(1),fill:"#fff"}));}
+ g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:r.toFixed(1),fill:TH.via}));
+ g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:rh.toFixed(1),fill:TH.viaHole}));}
 // Drop only the copper belonging to the given parts' nets (a moved part
 // invalidates its own routing, everything else stays drawn). Falls back to
 // keeping legacy net-less copper ("" — old saves) untouched.
@@ -1529,10 +1637,25 @@ if(clrIn)clrIn.addEventListener("input",drawClr);
 // its own page is exactly what Stamp later carries onto a parent board.
 var drawMode=false,dtrace=null,drawCur=null,drawShift=false;
 function trackW(){var v=parseFloat((document.getElementById("r-tw")||{}).value);return v>0?v:0.25;}
+// Tool-strip radio state + the status bar's tool segment. The Select tool
+// lights up whenever no drawing mode is armed.
+function toolSync(){
+ var ruler=!!PCB.rulerOn;
+ var any=drawMode||textMode||polyMode||outlineMode||ruler;
+ var sb=document.getElementById("tool-select");if(sb)sb.classList.toggle("on",!any);
+ stSet("st-tool",drawMode?(dtrace?("route "+nLeaf(dtrace.net)+" · "+layerName(dtrace.l)):("route · "+layerName(activeLayer)))
+  :(textMode?"text":(polyMode?"poly outline":(outlineMode?"outline":(ruler?"measure":""))))); }
 function drawBtnSync(){var b=document.getElementById("pcb-draw");if(!b)return;
  b.classList.toggle("on",drawMode);
  var al=layerName(activeLayer);
- b.textContent=drawMode?(dtrace?("✎ "+nLeaf(dtrace.net)+" · "+layerName(dtrace.l)):("✎ click a pad… ["+al+"]")):"✎ Draw";}
+ var lbl=drawMode?(dtrace?("✎ "+nLeaf(dtrace.net)+" · "+layerName(dtrace.l)):("✎ click a pad… ["+al+"]")):"✎ Draw";
+ // Icon button (tool strip): fixed glyph, live state in the tooltip + status
+ // bar. Text button (embed action bar): the classic swapping label.
+ if(b.classList.contains("ts-btn")){
+  if(!b.getAttribute("data-tip"))b.setAttribute("data-tip",b.title||"");
+  b.title=drawMode?lbl:b.getAttribute("data-tip");}
+ else b.textContent=lbl;
+ toolSync();}
 function drawModeSet(on){if(RO)return;drawMode=on;if(!on)dtrace=null;
  if(on&&outlineMode)outlineArm(false);
  if(on&&polyMode)polyArm(false);
@@ -1658,7 +1781,8 @@ function viaViolation(x,y,net,dia){var clr=netClrFor(net),vr=(dia||0.4)/2;
 // radius override the grid snap so a trace lands exactly on copper. Shift
 // (free angle) keeps grid-only. Returns {x,y,mag:true} on a magnet hit.
 function magSnap(m,net){var pxr=9; // screen-px capture radius
- var wr=pxr/S*(vb.w/VBW); // convert px→world mm at current zoom
+ var mr=svg.getBoundingClientRect();
+ var wr=pxr*(vb.w/Math.max(mr.width,1))/S; // convert px→world mm at current zoom
  var best=null,bd=wr;
  // pad centres (prefer same-net, but any pad is a useful anchor)
  P.forEach(function(p,i){(p.pads||[]).forEach(function(pd){var c=wpt(i,pd.x,pd.y);
@@ -1758,9 +1882,9 @@ function drawDrc(){while(gD.firstChild)gD.removeChild(gD.firstChild);
  var cb=document.getElementById("r-drc-show"); if(cb&&!cb.checked)return;
  (PCB.drc||[]).forEach(function(d){var cx=X(d.x),cy=Y(d.y);
    var t=el("title",{}); t.textContent=d.k+" — gap "+d.gap.toFixed(3)+" mm < "+d.clr+" mm";
-   var c=el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:8,fill:"none",stroke:"#ef4444","stroke-width":2}); c.appendChild(t);
+   var c=el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:8,fill:"none",stroke:TH.drc,"stroke-width":2}); c.appendChild(t);
    gD.appendChild(c);
-   gD.appendChild(el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:2.4,fill:"#ef4444"}));});}
+   gD.appendChild(el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:2.4,fill:TH.drc}));});}
 var drcCb=document.getElementById("r-drc-show");
 if(drcCb)drcCb.addEventListener("change",drawDrc);
 // ── Auto-DRC after copper edits (debounced ~800 ms) ─────────────────────
@@ -2072,7 +2196,7 @@ if(rgh)rgh.addEventListener("click",function(ev){ev.preventDefault();if(onSub())
    anchor.parentNode.insertBefore(el,anchor.nextSibling);
   }).catch(function(){});
 })();
-setVB(); // initial overlay paint + zoom-dependent label visibility
+fitVB(); // initial fit to the container + overlay paint + label visibility
 // ── Layers / grid / units / ruler controls (audit 1.5) ──────────────────
 (function(){
  // Grid selector — feeds snapG(); persists per design.
@@ -2120,6 +2244,60 @@ setVB(); // initial overlay paint + zoom-dependent label visibility
  function popClose(){if(pop)pop.hidden=true;if(lb)lb.classList.remove("active");}
  if(lb)lb.addEventListener("click",function(ev){ev.stopPropagation();if(pop.hidden)popOpen();else popClose();});
  document.addEventListener("click",function(ev){if(pop&&!pop.hidden&&ev.target!==lb&&!pop.contains(ev.target))popClose();});
+ // ── Appearance panel (full page): the right-docked Layers/Objects dock ──
+ // The Layers tab lists every copper layer of the stackup (swatch + name +
+ // visibility eye, active row highlighted; click a row = active draw layer)
+ // plus the non-copper board layers (F.Silkscreen, Edge.Cuts, Ratsnest, DRC).
+ // The Objects tab's checkboxes are server markup wired by their classic ids.
+ var apBox=document.getElementById("ap-layers");
+ function apEyeBtn(key,on){return '<button class="ap-eye'+(on?'':' off')+'" data-ap-eye="'+key+
+  '" title="Show / hide">\u{1F441}</button>';}
+ function apBuild(){if(!apBox)return;
+  var h="";
+  LYR.forEach(function(L){var key=visKey(L.l);
+   h+='<div class="ap-lrow'+(L.l===activeLayer?' cur':'')+'" data-ap-layer="'+L.l+
+    '" title="Click = set the active draw layer ( ( / ) or PgUp/PgDn cycle )">'+
+    '<span class="ap-sw" style="background:'+L.c+'"></span><span class="ap-name">'+L.name+'</span>'+
+    apEyeBtn(key,!!viewSt.vis[key])+'</div>';});
+  h+='<div class="ap-h">Board</div>';
+  [["silk","F.Silkscreen","#F0F0F0"],["edge","Edge.Cuts","#D0D2CD"],
+   ["rats","Ratsnest","#9aa7b4"],["drc","DRC markers","#f4432c"]].forEach(function(rw){
+   h+='<div class="ap-lrow" data-ap-fixed="'+rw[0]+'">'+
+    '<span class="ap-sw" style="background:'+rw[2]+'"></span><span class="ap-name">'+rw[1]+'</span>'+
+    apEyeBtn(rw[0],!!viewSt.vis[rw[0]])+'</div>';});
+  apBox.innerHTML=h;
+  apBox.querySelectorAll("[data-ap-layer]").forEach(function(r){
+   r.addEventListener("click",function(ev){
+    if(ev.target&&ev.target.getAttribute&&ev.target.getAttribute("data-ap-eye"))return;
+    var nl=parseInt(r.getAttribute("data-ap-layer"),10);
+    activeLayer=(nl>=0&&nl<NSIG)?nl:0;if(dtrace)dtrace.l=activeLayer;
+    syncActiveLayer();paintSoon();});});
+  apBox.querySelectorAll("[data-ap-eye]").forEach(function(b){
+   b.addEventListener("click",function(ev){ev.stopPropagation();
+    var kv=b.getAttribute("data-ap-eye");
+    viewSt.vis[kv]=viewSt.vis[kv]?0:1;viewSave();
+    b.classList.toggle("off",!viewSt.vis[kv]);
+    paintSoon();drawDrc();rats();drawBoardRect();});});}
+ PCB.apSync=function(){if(!apBox)return;
+  apBox.querySelectorAll("[data-ap-layer]").forEach(function(r){
+   r.classList.toggle("cur",parseInt(r.getAttribute("data-ap-layer"),10)===activeLayer);});};
+ apBuild();
+ document.querySelectorAll(".ap-tab").forEach(function(t){
+  t.addEventListener("click",function(){
+   document.querySelectorAll(".ap-tab").forEach(function(x){x.classList.toggle("active",x===t);});
+   document.querySelectorAll(".ap-pane").forEach(function(pn){pn.hidden=(pn.id!==t.getAttribute("data-aptab"));});});});
+ // Tool strip: Select disarms every drawing mode; ? opens the shortcut help.
+ var selToolBtn=document.getElementById("tool-select");
+ if(selToolBtn)selToolBtn.addEventListener("click",function(){
+  if(drawMode)drawModeSet(false);
+  if(textMode)txArm(false);
+  if(polyMode)polyArm(false);
+  if(outlineMode)outlineArm(false);
+  if(PCB.rulerOff)PCB.rulerOff();
+  toolSync();});
+ var helpBtn=document.getElementById("pcb-help");
+ if(helpBtn)helpBtn.addEventListener("click",function(){kbdToggle();});
+ statusLayer(); // initial active-layer segment
  // Active-layer keys: ( / PgUp step back, ) / PgDn step forward — cycling
  // through EVERY signal layer of the stackup (top → bottom → inners → top).
  document.addEventListener("keydown",function(ev){if(kbTyping(ev.target))return;
@@ -2127,8 +2305,8 @@ setVB(); // initial overlay paint + zoom-dependent label visibility
    ev.preventDefault();
    var step=(ev.key===")"||ev.key==="PageDown")?1:(NSIG-1);
    activeLayer=(activeLayer+step)%NSIG;if(dtrace)dtrace.l=activeLayer;
-   var al=document.getElementById("pcb-actlayer");if(al)al.value=String(activeLayer);
-   paintSoon();drawBtnSync();routeStatMsg("active layer: "+layerName(activeLayer));}});
+   syncActiveLayer();
+   paintSoon();routeStatMsg("active layer: "+layerName(activeLayer));}});
  // ── Ruler / measure tool (M) ──────────────────────────────────────────
  var rulerMode=false,rulerDraw=null,rgRuler=null;
  var rulerBtn=document.getElementById("pcb-ruler-btn");
@@ -2136,8 +2314,9 @@ setVB(); // initial overlay paint + zoom-dependent label visibility
   if(on){if(drawMode)drawModeSet(false);if(textMode)txArm(false);
    if(polyMode)polyArm(false);if(outlineMode)outlineArm(false);}
   if(rulerBtn)rulerBtn.classList.toggle("active",on);
-  if(!on){rulerClear();var msg=document.getElementById("pcb-savemsg");if(msg&&/measure/.test(msg.textContent))msg.textContent="";}
-  else{var m2=document.getElementById("pcb-savemsg");if(m2){m2.style.color="#e3b341";m2.textContent="measure: drag to measure (Esc exits)";}}}
+  if(!on){rulerClear();stSet("st-dxdy","");var msg=document.getElementById("pcb-savemsg");if(msg&&/measure/.test(msg.textContent))msg.textContent="";}
+  else{var m2=document.getElementById("pcb-savemsg");if(m2){m2.style.color="#e3b341";m2.textContent="measure: drag to measure (Esc exits)";}}
+  toolSync();}
  function rulerClear(){if(rgRuler&&rgRuler.parentNode)rgRuler.parentNode.removeChild(rgRuler);rgRuler=null;rulerDraw=null;}
  function rulerDrawNow(a,b){rulerClear();rgRuler=el("g",{});gU.appendChild(rgRuler);
   var dx=b.x-a.x,dy=b.y-a.y,dist=Math.hypot(dx,dy);
@@ -2147,7 +2326,9 @@ setVB(); // initial overlay paint + zoom-dependent label visibility
   rgRuler.appendChild(el("line",{"class":"pcb-ruler-line",x1:X(b.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),opacity:0.5}));
   var lt=el("text",{"class":"pcb-ruler-lbl",x:(X(b.x)+8).toFixed(1),y:(Y(b.y)-6).toFixed(1)});
   lt.textContent="d="+fmtLen2(dist)+"  dx="+fmtLen2(Math.abs(dx))+"  dy="+fmtLen2(Math.abs(dy));
-  rgRuler.appendChild(lt);}
+  rgRuler.appendChild(lt);
+  // Mirror the measurement into the status bar's delta segment.
+  stSet("st-dxdy","d "+fmtLen2(dist)+"  dx "+fmtLen2(Math.abs(dx))+"  dy "+fmtLen2(Math.abs(dy)));}
  PCB.rulerOff=function(){if(rulerMode)rulerArm(false);};
  if(rulerBtn)rulerBtn.addEventListener("click",function(){rulerArm(!rulerMode);});
  document.addEventListener("keydown",function(ev){if(kbTyping(ev.target))return;
@@ -2211,7 +2392,10 @@ if(legCb)legCb.addEventListener("change",function(){var l=document.getElementByI
 //    pin → white; off, pads go back to copper. Orthogonal to the heatmap
 //    (which tints courtyards). rats() honours the flag, so re-drawing the
 //    ratsnest re-applies the airwire colours.
-var netColOn=true;
+//    OPT-IN (KiCad default look is layer-coloured pads): initial state reads
+//    the checkbox, which the server now emits unchecked; pages without the
+//    toggle (read-only embeds) stay in the layer-coloured default.
+var netColOn=(function(){var e=document.getElementById("v-netcol");return e?e.checked:false;})();
 // ── Ratsnest toggle: the airwires + decoupling-loop overlays live in gR;
 //    rats() honours this flag (early-returns after clearing), so once off they
 //    stay hidden through drags/rotations until toggled back on.
@@ -2242,7 +2426,8 @@ function focusPart(want){
  if(idx<0)return false;
  var p=P[idx],cx=X(p.x),cy=Y(p.y);
  var fw=Math.min(VBW,Math.max(VBW*0.35,(2*p.hw+14)*S*4));
- vb={x:cx-fw/2,y:cy-fw*(VBH/VBW)/2,w:fw,h:fw*(VBH/VBW)};setVB();
+ var far=hostAspect();
+ vb={x:cx-fw/2,y:cy-fw*far/2,w:fw,h:fw*far};setVB();
  flashIdx=idx;flashUntil=Date.now()+2600;paintSoon();
  if(!RO)selectComp(p.ref);
  return true;}
