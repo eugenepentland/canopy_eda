@@ -618,6 +618,61 @@ test "connectivity flags an unrouted net and passes a routed one" {
     try testing.expect(hasError(gapped, "unrouted-net"));
 }
 
+// spec: fab_readiness - connectivity propagates across an inner-signal-layer chain through its vias
+test "an inner-layer route chain counts as connected" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const u_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const c_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &u_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &c_pads, .fallback = false, .x = 10, .y = 0 },
+    };
+    const pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]export_kicad.FlatNet{.{ .name = "SIG", .pins = &pins }};
+    // (stackup 4 (plane 2 "GND")): SIG must be real copper; the run crosses on
+    // the inner signal layer (index 2), reached through two vias.
+    const gnd_names = [_][]const u8{"GND"};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 12,
+        .maxy = 2,
+        .generated = false,
+        .board_rect = .{ .minx = -2, .miny = -2, .w = 16, .h = 6 },
+        .rules = .{ .plane_nets = &gnd_names, .copper_layers = 4, .planes = &planes },
+    };
+
+    // Top stub → via → INNER (l=2) run → via → top stub: one connected group.
+    const chain = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 2, .y1 = 0, .x2 = 8, .y2 = 0, .layer = 2, .width = 0.2, .net = 0 },
+        .{ .x1 = 8, .y1 = 0, .x2 = 10, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const cvias = [_]router.Via{
+        .{ .x = 2, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 8, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 },
+    };
+    const linked = try check(arena, placement, .{ .tracks = &chain, .vias = &cvias }, .{});
+    try testing.expect(!hasError(linked, "unrouted-net"));
+    try testing.expectEqual(@as(usize, 1), linked.stats.connected_nets);
+
+    // The same chain WITHOUT the vias must stay three islands — the inner run
+    // never touches the top stubs on its own layer.
+    const cut = try check(arena, placement, .{ .tracks = &chain }, .{});
+    try testing.expect(hasError(cut, "unrouted-net"));
+}
+
 // spec: fab_readiness - a ground plane connects its pads without routed copper
 test "a plane-carried net counts as connected" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);

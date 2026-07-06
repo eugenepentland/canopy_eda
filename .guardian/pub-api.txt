@@ -397,6 +397,7 @@ src/export_fab.zig::outlineRect | fn outlineRect(placement: optimizer.Placement)
 src/export_fab.zig::pt | fn pt(self: Frame, x: f64, y: f64) [2]f64
 src/export_gerber.zig::Copper struct_
 src/export_gerber.zig::Error value
+src/export_gerber.zig::InnerSignal struct_
 src/export_gerber.zig::Layer union_
 src/export_gerber.zig::LayerFile struct_
 src/export_gerber.zig::PlaneLayer struct_
@@ -570,6 +571,7 @@ src/placement/optimizer.zig::Edge enum_
 src/placement/optimizer.zig::FlatNet value
 src/placement/optimizer.zig::FullRouted struct_
 src/placement/optimizer.zig::GRID_MM value
+src/placement/optimizer.zig::INNER_LAYER_COLORS value
 src/placement/optimizer.zig::Link struct_
 src/placement/optimizer.zig::Loop struct_
 src/placement/optimizer.zig::NetRule struct_
@@ -584,6 +586,7 @@ src/placement/optimizer.zig::ProgressPass enum_
 src/placement/optimizer.zig::ProgressSink struct_
 src/placement/optimizer.zig::RatKind enum_
 src/placement/optimizer.zig::RefPose struct_
+src/placement/optimizer.zig::SIGNAL_LAYER_COLORS value
 src/placement/optimizer.zig::Score struct_
 src/placement/optimizer.zig::SeedMode enum_
 src/placement/optimizer.zig::Side enum_
@@ -609,6 +612,10 @@ src/placement/optimizer.zig::pourNetOnSide | fn pourNetOnSide(self: BoardRules, 
 src/placement/optimizer.zig::routedScorePoses | fn routedScorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!f64
 src/placement/optimizer.zig::scorePoses | fn scorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!Breakdown
 src/placement/optimizer.zig::setProgressSink | fn setProgressSink(sink: ?ProgressSink) void
+src/placement/optimizer.zig::signalLayerColor | fn signalLayerColor(sig: u8) []const u8
+src/placement/optimizer.zig::signalLayerCount | fn signalLayerCount(self: BoardRules) u8
+src/placement/optimizer.zig::signalLayerName | fn signalLayerName(self: BoardRules, sig: u8, buf: []u8) []const u8
+src/placement/optimizer.zig::signalStackIndex | fn signalStackIndex(self: BoardRules, sig: u8) u8
 src/placement/optimizer.zig::solve | fn solve( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, cached: ?[]const RefPose, params: Params, mode: SeedMode, ) std.mem.Allocator.Error!Placement
 src/placement/optimizer.zig::solvePinAdjacent | fn solvePinAdjacent( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, params: Params, ) std.mem.Allocator.Error!?Placement
 src/placement/optimizer.zig::validateConstraints | fn validateConstraints( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, params: Params, ) std.mem.Allocator.Error![]const []const u8

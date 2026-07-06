@@ -74,10 +74,17 @@ pub const RouteResult = struct {
     routed: usize,
     total: usize,
     failed: []const []const u8 = &.{},
+    /// True when the board was too large to grid at all (`MAX_NODES`
+    /// exceeded) and the router returned WITHOUT attempting any net — so
+    /// callers can tell "nothing needed routing" apart from "the grid bailed"
+    /// instead of silently showing an empty route.
+    grid_overflow: bool = false,
 };
 
-/// Largest grid (nodes per layer) the router will attempt — keeps a huge board
-/// from allocating an enormous grid; modules stay far under this.
+/// Largest grid (nodes per SIGNAL LAYER) the router will attempt — keeps a
+/// huge board from allocating an enormous grid; modules stay far under this.
+/// Total node count scales with the stackup's signal-layer count (the cap is
+/// per layer), and a bail is reported via `RouteResult.grid_overflow`.
 const MAX_NODES: usize = 200_000;
 const EMPTY: i32 = -1;
 const VIA_COST_MULT: f64 = 4.0; // a layer change costs ~4 grid steps
@@ -99,6 +106,14 @@ const SQRT2: f64 = 1.4142135623730951; // diagonal step length vs. orthogonal
 /// is walled off (the Gerber emission carves clearance around whatever lands
 /// there, so the result is legal either way).
 const POUR_COST_MULT: f64 = 1.5;
+/// Step-cost multiplier for maze moves on an INNER signal layer (index ≥ 2,
+/// from a `(stackup …)` with more than two plane-free copper layers). Kept
+/// mild: an inner dive already pays two via costs, so this only breaks the
+/// tie against equal-length inner paths — a trivially routable board keeps
+/// all its copper on the outer faces (identical to the 2-layer result), while
+/// a congested crossing still dives inner the moment the surface detour
+/// exceeds ~25% of the path. No-op on ≤2-signal boards (no such layer exists).
+const INNER_COST_MULT: f64 = 1.25;
 
 /// Pass 1 of `route`: ground/plane nets. Each pad of a plane-carrying net
 /// drops a via to its plane — except pads already sitting IN an outer-layer
@@ -181,20 +196,19 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     const nx: usize = @intFromFloat(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
     const ny: usize = @intFromFloat(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
     if (nx * ny == 0 or nx * ny > MAX_NODES) {
-        return .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+        return .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0, .grid_overflow = nx * ny > MAX_NODES };
     }
     const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
 
-    // Routed-copper occupancy per signal layer (one net per grid line ⇒
-    // adjacent lines are track+clearance apart, satisfying trace-to-trace DRC).
-    const occ = [2][]i32{ try arena.alloc(i32, nx * ny), try arena.alloc(i32, nx * ny) };
-    @memset(occ[0], EMPTY);
-    @memset(occ[1], EMPTY);
+    // Routed-copper occupancy per SIGNAL layer (one net per grid line ⇒
+    // adjacent lines are track+clearance apart, satisfying trace-to-trace
+    // DRC). The layer count comes from the stackup: the two outer faces plus
+    // every plane-free inner copper layer (legacy no-form boards stay at 2).
+    const n_signal: usize = placement.rules.signalLayerCount();
+    const occ = try allocLayerGrids(arena, n_signal, nx * ny);
     // Diagonal corner reservations (see `emitPath`) — cells no foreign copper
     // may enter, but which are NOT the net's own copper (never Dijkstra sources).
-    const resv = [2][]i32{ try arena.alloc(i32, nx * ny), try arena.alloc(i32, nx * ny) };
-    @memset(resv[0], EMPTY);
-    @memset(resv[1], EMPTY);
+    const resv = try allocLayerGrids(arena, n_signal, nx * ny);
 
     // Pad obstacles: *every* pad's rectangle + its net — including pads on no
     // net (net −1), so a via/trace keeps clearance from NC/mechanical pads too.
@@ -332,8 +346,8 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     if (placement.parts.len <= STITCH_MAX_PARTS) {
         if (firstGroundNet(placement)) |gnet| {
             setNetParams(&ctx, placement, @intCast(gnet));
-            const n_signal = vias.items.len;
-            for (0..n_signal) |i| {
+            const n_before = vias.items.len;
+            for (0..n_before) |i| {
                 const v = vias.items[i];
                 if (isGndVia(placement, v.net)) continue; // already a ground/plane via
                 var stitched = false;
@@ -386,12 +400,9 @@ pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, para
     if (nx * ny == 0 or nx * ny > MAX_NODES) return &.{};
     const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
 
-    const occ = [2][]i32{ try arena.alloc(i32, nx * ny), try arena.alloc(i32, nx * ny) };
-    @memset(occ[0], EMPTY);
-    @memset(occ[1], EMPTY);
-    const resv = [2][]i32{ try arena.alloc(i32, nx * ny), try arena.alloc(i32, nx * ny) };
-    @memset(resv[0], EMPTY);
-    @memset(resv[1], EMPTY);
+    const n_signal: usize = placement.rules.signalLayerCount();
+    const occ = try allocLayerGrids(arena, n_signal, nx * ny);
+    const resv = try allocLayerGrids(arena, n_signal, nx * ny);
     const obs = try buildObstacles(arena, placement.parts, placement.nets);
     const reach = params.track_width / 2 + params.clearance;
     const maxp = maxRouteParams(placement, params);
@@ -480,8 +491,11 @@ pub const LoopRouter = struct {
         if (nx * ny == 0 or nx * ny > MAX_NODES) return .{ .ctx = undefined, .ready = false };
         const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
 
-        const occ = [2][]i32{ try arena.alloc(i32, nx * ny), try arena.alloc(i32, nx * ny) };
-        const resv = [2][]i32{ try arena.alloc(i32, nx * ny), try arena.alloc(i32, nx * ny) };
+        // The loop surrogate always measures on the two OUTER faces — it
+        // scores a decoupling leg, not a full route, so inner layers would
+        // only slow the placement loop without changing the ordering.
+        const occ = try allocLayerGrids(arena, 2, nx * ny);
+        const resv = try allocLayerGrids(arena, 2, nx * ny);
 
         // Every pad is an obstacle tagged with its net — same indexing as `route`
         // (absolute position in `nets`), so a leg routed on net N treats N's pads
@@ -511,10 +525,8 @@ pub const LoopRouter = struct {
     /// can't connect them (boxed in) or the router isn't ready.
     pub fn legLen(self: *LoopRouter, cap_c: [2]f64, hub_c: [2]f64, net_id: i32) std.mem.Allocator.Error!?f64 {
         if (!self.ready or net_id < 0) return null;
-        @memset(self.ctx.occ[0], EMPTY);
-        @memset(self.ctx.occ[1], EMPTY);
-        @memset(self.ctx.resv[0], EMPTY);
-        @memset(self.ctx.resv[1], EMPTY);
+        for (self.ctx.occ) |l| @memset(l, EMPTY);
+        for (self.ctx.resv) |l| @memset(l, EMPTY);
         var tracks: std.ArrayListUnmanaged(Track) = .empty;
         var vias: std.ArrayListUnmanaged(Via) = .empty;
         const pts = [_]NetPt{
@@ -561,6 +573,17 @@ const Grid = struct {
 };
 
 const Rect = struct { x0: f64, y0: f64, x1: f64, y1: f64 };
+
+/// Allocate `n_layers` per-signal-layer node grids of `nodes` cells each,
+/// all initialised EMPTY — the shape `Ctx.occ`/`Ctx.resv` carry.
+fn allocLayerGrids(arena: std.mem.Allocator, n_layers: usize, nodes: usize) std.mem.Allocator.Error![][]i32 {
+    const out = try arena.alloc([]i32, n_layers);
+    for (out) |*l| {
+        l.* = try arena.alloc(i32, nodes);
+        @memset(l.*, EMPTY);
+    }
+    return out;
+}
 
 /// Distance from a point to an axis-aligned rect (0 if inside).
 fn distPointRect(px: f64, py: f64, r: Rect) f64 {
@@ -1125,9 +1148,10 @@ fn firstGroundNet(placement: optimizer.Placement) ?i32 {
 }
 
 /// Claim every empty grid node within `dist` (mm) of (x,y) for `net` — on
-/// signal layer `layer`, or on both layers when `both`. Existing copper is
-/// never overwritten. Used to reserve a via/stub's clearance halo so the maze
-/// pass keeps foreign copper away from it.
+/// signal layer `layer`, or on EVERY signal layer when `both` (a through
+/// via's barrel reaches them all). Existing copper is never overwritten.
+/// Used to reserve a via/stub's clearance halo so the maze pass keeps
+/// foreign copper away from it.
 fn stampDisc(ctx: *Ctx, x: f64, y: f64, net: i32, dist: f64, layer: u8, both: bool) void {
     const grid = ctx.grid;
     const r_nodes: i64 = @intFromFloat(@ceil(dist / grid.g));
@@ -1145,8 +1169,10 @@ fn stampDisc(ctx: *Ctx, x: f64, y: f64, net: i32, dist: f64, layer: u8, both: bo
             const wy = grid.worldY(@intCast(iy));
             if (std.math.hypot(wx - x, wy - y) > dist) continue;
             const n = @as(usize, @intCast(iy)) * grid.nx + @as(usize, @intCast(ix));
-            if ((both or layer == 0) and ctx.occ[0][n] == EMPTY) ctx.occ[0][n] = net;
-            if ((both or layer == 1) and ctx.occ[1][n] == EMPTY) ctx.occ[1][n] = net;
+            for (ctx.occ, 0..) |occ_l, li| {
+                if (!both and li != layer) continue;
+                if (occ_l[n] == EMPTY) occ_l[n] = net;
+            }
         }
     }
 }
@@ -1161,7 +1187,8 @@ fn copperHalo(ctx: *Ctx) f64 {
     return @sqrt(d * d + ctx.grid.g * ctx.grid.g * 0.5);
 }
 
-/// Reserve a placed via's clearance halo on both signal layers.
+/// Reserve a placed via's clearance halo on every signal layer (vias are
+/// through-only — the barrel blocks them all).
 fn stampViaOcc(ctx: *Ctx, x: f64, y: f64, net: i32) void {
     stampDisc(ctx, x, y, net, copperHalo(ctx), 0, true);
 }
@@ -1182,8 +1209,8 @@ fn stampStubOcc(ctx: *Ctx, a: [2]f64, b: [2]f64, net: i32, layer: u8) void {
 
 /// May a layer-changing via be dropped at node `n` for net `net`? It must clear
 /// foreign pads by the via clearance and have no foreign copper within its halo
-/// on either layer — so a maze via can never crowd a pad or an already-routed
-/// foreign track/via.
+/// on ANY signal layer (vias are through-only, so the barrel meets them all) —
+/// so a maze via can never crowd a pad or an already-routed foreign track/via.
 fn viaAllowed(ctx: *Ctx, n: usize, net: i32) bool {
     const grid = ctx.grid;
     const x = grid.worldX(n % grid.nx);
@@ -1204,10 +1231,10 @@ fn viaAllowed(ctx: *Ctx, n: usize, net: i32) bool {
             const wy = grid.worldY(@intCast(iy));
             if (std.math.hypot(wx - x, wy - y) > dist) continue;
             const m = @as(usize, @intCast(iy)) * grid.nx + @as(usize, @intCast(ix));
-            if (ctx.occ[0][m] != EMPTY and ctx.occ[0][m] != net) return false;
-            if (ctx.occ[1][m] != EMPTY and ctx.occ[1][m] != net) return false;
-            if (ctx.resv[0][m] != EMPTY and ctx.resv[0][m] != net) return false;
-            if (ctx.resv[1][m] != EMPTY and ctx.resv[1][m] != net) return false;
+            for (ctx.occ, ctx.resv) |occ_l, resv_l| {
+                if (occ_l[m] != EMPTY and occ_l[m] != net) return false;
+                if (resv_l[m] != EMPTY and resv_l[m] != net) return false;
+            }
         }
     }
     return true;
@@ -1220,7 +1247,11 @@ const Ctx = struct {
     grid: Grid,
     obs: []const PadObs,
     reach: f64,
-    occ: [2][]i32,
+    /// Routed-copper occupancy, one node grid per SIGNAL layer (`occ.len` is
+    /// the board's signal-layer count — 2 on legacy/2-layer boards, more when
+    /// the stackup declares plane-free inner layers). Index 0 = top, 1 =
+    /// bottom, 2.. = inner signal layers in stack order.
+    occ: []const []i32,
     /// Diagonal corner reservations, per signal layer. When a path takes a 45°
     /// step, the two orthogonal cells it squeezes past sit only `g/√2` from the
     /// diagonal's centreline — closer than the `g = width + clearance` the grid
@@ -1228,7 +1259,7 @@ const Ctx = struct {
     /// them to foreign nets exactly like copper, but they are NOT the owning
     /// net's copper: Dijkstra never seeds from them, so a later same-net leg
     /// can't "connect" to a cell that carries no track.
-    resv: [2][]i32,
+    resv: []const []i32,
     /// The *effective* geometry for the net currently being routed —
     /// `base` overlaid with that net's `(net-class …)` rule (see
     /// `setNetParams`). Every clearance/width/via read goes through this.
@@ -1547,11 +1578,11 @@ fn gateStub(ctx: *Ctx, net: i32, pt: NetPt, key: usize, tracks: *std.ArrayListUn
 /// net only ever stamps its own index, clearing `occ == net` (and its diagonal
 /// corner reservations) leaves every other net's copper untouched.
 fn clearNetOcc(ctx: *Ctx, net: i32) void {
-    for (0..2) |layer| {
-        for (ctx.occ[layer]) |*c| {
+    for (ctx.occ, ctx.resv) |occ_l, resv_l| {
+        for (occ_l) |*c| {
             if (c.* == net) c.* = EMPTY;
         }
-        for (ctx.resv[layer]) |*c| {
+        for (resv_l) |*c| {
             if (c.* == net) c.* = EMPTY;
         }
     }
@@ -1576,14 +1607,15 @@ fn dijkstra(
 ) std.mem.Allocator.Error!?DijkstraHit {
     const grid = ctx.grid;
     const nodes = grid.nx * grid.ny;
-    const dist = try ctx.arena.alloc(f64, 2 * nodes);
-    const prev = try ctx.arena.alloc(i64, 2 * nodes);
+    const n_layers = ctx.occ.len;
+    const dist = try ctx.arena.alloc(f64, n_layers * nodes);
+    const prev = try ctx.arena.alloc(i64, n_layers * nodes);
     @memset(dist, std.math.inf(f64));
     @memset(prev, -1);
 
     var pq = std.PriorityQueue(QItem, void, qLess).init(ctx.arena, {});
-    // Sources: every node already owned by this net, on either signal layer…
-    for (0..2) |layer| {
+    // Sources: every node already owned by this net, on any signal layer…
+    for (0..n_layers) |layer| {
         for (0..nodes) |n| {
             if (ctx.occ[layer][n] == net) {
                 const k = layer * nodes + n;
@@ -1621,11 +1653,17 @@ fn dijkstra(
         try relaxDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, 1, -1);
         try relaxDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, -1, 1);
         try relaxDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, -1, -1);
-        // Via to the other signal layer at the same (ix,iy) — only where a via
-        // of the configured size keeps clearance from foreign pads and copper,
-        // and only when this pass permits layer changes at all.
-        if (ctx.allow_vias and viaAllowed(ctx, n, net))
-            try relaxStep(ctx, &pq, dist, prev, net, it.key, 1 - layer, n, grid.g * VIA_COST_MULT);
+        // Via to every OTHER signal layer at the same (ix,iy) — vias are
+        // through-only, so one drill reaches them all at the same cost. Only
+        // where a via of the configured size keeps clearance from foreign
+        // pads and copper, and only when this pass permits layer changes.
+        // (On a 2-signal board this is exactly the old `1 - layer` step.)
+        if (ctx.allow_vias and n_layers > 1 and viaAllowed(ctx, n, net)) {
+            for (0..n_layers) |to_layer| {
+                if (to_layer == layer) continue;
+                try relaxStep(ctx, &pq, dist, prev, net, it.key, to_layer, n, grid.g * VIA_COST_MULT);
+            }
+        }
     }
 
     const goal = found_key orelse return null;
@@ -1658,8 +1696,15 @@ fn relaxStep(
     if (blocked(ctx, to_layer, tn, net)) return;
     const nodes = ctx.grid.nx * ctx.grid.ny;
     const to_key = to_layer * nodes + tn;
-    // Stepping onto a poured outer layer costs extra — see `POUR_COST_MULT`.
-    const eff = if (ctx.pour[to_layer]) step * POUR_COST_MULT else step;
+    // Stepping onto a poured outer layer costs extra (`POUR_COST_MULT`);
+    // steps on an inner signal layer carry the mild `INNER_COST_MULT` bias
+    // so equal-length paths stay on the outer faces.
+    const eff = if (to_layer >= 2)
+        step * INNER_COST_MULT
+    else if (ctx.pour[to_layer])
+        step * POUR_COST_MULT
+    else
+        step;
     const nd = dist[from_key] + eff;
     if (nd < dist[to_key]) {
         dist[to_key] = nd;
@@ -1962,6 +2007,120 @@ test "plane-less stackup maze-routes the ground net" {
     var gnd_len: f64 = 0;
     for (flat.tracks) |t| gnd_len += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
     try testing.expect(gnd_len >= 2.5); // the ~3 mm pad-to-pad run exists as copper
+}
+
+// spec: placement/router - routes through a plane-free inner signal layer when both outer faces are blocked; a 2-signal stackup never emits inner copper
+test "congested net dives to the inner signal layer on a 3-signal stackup" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const G = @import("geometry.zig");
+    // Net A joins two through-hole pads at x = ±3. Two SMD "wall" pads (on no
+    // net) at x = 0 span the whole gridded height — one on the TOP face, one
+    // on the BOTTOM face — so both outer signal layers are cut in half and no
+    // 2-layer path exists. On a (stackup 4 (plane 2 "GND")) board the third
+    // signal layer (index 2 = stack L3/In2.Cu) is plane-free and SMD walls
+    // don't exist there, so the route must dive inner through vias.
+    const thru_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.8, .h = 0.8, .thru = true, .drill = 0.4 }};
+    const wall_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 8.0 }};
+    var parts = [_]Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &thru_pad, .fallback = false, .x = -3, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &thru_pad, .fallback = false, .x = 3, .y = 0 },
+        .{ .ref_des = "W1", .kind = .hub, .hw = 0.3, .hh = 4.0, .pads = &wall_pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "W2", .kind = .hub, .hw = 0.3, .hh = 4.0, .pads = &wall_pad, .fallback = false, .x = 0, .y = 0, .side = .bottom },
+    };
+    const a_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "A", .pins = &a_pins }};
+    const gnd_names = [_][]const u8{"GND"};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    var placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -3.5,
+        .miny = -1,
+        .maxx = 3.5,
+        .maxy = 1,
+        .generated = true,
+        .rules = .{ .plane_nets = &gnd_names, .copper_layers = 4, .planes = &planes },
+    };
+
+    const r = try route(arena, placement, .{});
+    try testing.expectEqual(@as(usize, 1), r.total);
+    try testing.expectEqual(@as(usize, 1), r.routed);
+    try testing.expectEqual(@as(usize, 0), r.failed.len);
+    try testing.expect(!r.grid_overflow);
+    // The crossing itself lives on the inner layer, reached through vias.
+    try testing.expect(trackLenOnLayer(r.tracks, 2) > 1.0);
+    try testing.expect(r.vias.len >= 2);
+    // …and the inner-layer copper introduces no clearance violations.
+    const viol = try @import("drc.zig").check(arena, placement, r, 0.127);
+    try testing.expectEqual(@as(usize, 0), viol.len);
+
+    // Regression: the same walls on a plane-less (stackup 2) have only the
+    // two outer faces — the net cannot route, and NO inner copper appears.
+    placement.rules = .{ .plane_nets = &.{}, .copper_layers = 2 };
+    const flat = try route(arena, placement, .{});
+    try testing.expectEqual(@as(usize, 0), flat.routed);
+    try testing.expectEqual(@as(usize, 1), flat.failed.len);
+    try testing.expectEqual(@as(f64, 0), trackLenOnLayer(flat.tracks, 2));
+
+    // Legacy no-stackup boards keep the 2-signal model too (net A is not a
+    // ground, so the implicit planes don't rescue it).
+    placement.rules = .{};
+    const legacy = try route(arena, placement, .{});
+    try testing.expectEqual(@as(usize, 0), legacy.routed);
+    try testing.expectEqual(@as(f64, 0), trackLenOnLayer(legacy.tracks, 2));
+}
+
+/// Total copper length (mm) the tracks put on signal layer `layer` — test
+/// helper (hoisted so the inner-layer test keeps a single top-level loop).
+fn trackLenOnLayer(tracks: []const Track, layer: u8) f64 {
+    var len: f64 = 0;
+    for (tracks) |t| {
+        if (t.layer == layer) len += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
+    }
+    return len;
+}
+
+// spec: placement/router - reports a grid too large to route via RouteResult.grid_overflow instead of a silent empty result
+test "route flags grid overflow on an oversized board" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const pads_a = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads_a, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads_a, .fallback = false, .x = 900, .y = 900 },
+    };
+    const pins_a = [_]export_kicad.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins_a }};
+    // ~900×900 mm at the default 0.254 mm pitch ≈ 12.6M nodes/layer — far past
+    // MAX_NODES, so the router must bail AND say so.
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -0.5,
+        .miny = -0.5,
+        .maxx = 900.5,
+        .maxy = 900.5,
+        .generated = true,
+    };
+    const r = try route(arena, placement, .{});
+    try testing.expect(r.grid_overflow);
+    try testing.expectEqual(@as(usize, 0), r.tracks.len);
+    try testing.expectEqual(@as(usize, 0), r.total);
 }
 
 // spec: placement/router - an outer-layer pour connects same-side pads directly; only opposite-face pads get a stitching via
@@ -2615,12 +2774,8 @@ test "a routed diagonal reserves its corner cells against foreign nets only" {
     // not occ).
     const grid = Grid{ .ox = 0, .oy = 0, .g = 0.254, .nx = 20, .ny = 20 };
     const nodes = grid.nx * grid.ny;
-    const occ = [2][]i32{ try arena.alloc(i32, nodes), try arena.alloc(i32, nodes) };
-    @memset(occ[0], EMPTY);
-    @memset(occ[1], EMPTY);
-    const resv = [2][]i32{ try arena.alloc(i32, nodes), try arena.alloc(i32, nodes) };
-    @memset(resv[0], EMPTY);
-    @memset(resv[1], EMPTY);
+    const occ = try allocLayerGrids(arena, 2, nodes);
+    const resv = try allocLayerGrids(arena, 2, nodes);
     var ctx = Ctx{
         .arena = arena,
         .grid = grid,

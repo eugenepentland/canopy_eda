@@ -44,15 +44,19 @@ pub const PlaneNet = union(enum) { named: []const u8, ground };
 /// A solid-pour copper layer: its 1-based stack index + the net it carries.
 pub const PlaneLayer = struct { index: u8, net: PlaneNet };
 
+/// An inner ROUTABLE copper layer: its 1-based stack index + the signal-layer
+/// index (2..) the router's `Track.layer` uses for it.
+pub const InnerSignal = struct { index: u8, sig: u8 };
+
 /// Identity of one Gerber output file.
 pub const Layer = union(enum) {
     /// Outer signal copper (pads, routed tracks, via lands).
     copper: optimizer.Side,
     /// Inner solid plane.
     plane: PlaneLayer,
-    /// A declared inner signal layer the 2-signal-layer router never uses —
-    /// emitted empty so the file set still matches the stackup count.
-    inner_blank: u8,
+    /// A plane-free inner copper layer the router treats as a signal layer —
+    /// emits that layer's routed tracks, via lands, and through-pad barrels.
+    inner_signal: InnerSignal,
     mask: optimizer.Side,
     paste: optimizer.Side,
     silk: optimizer.Side,
@@ -88,14 +92,26 @@ pub fn planLayers(arena: std.mem.Allocator, placement: optimizer.Placement) std.
         try out.append(arena, .{ .layer = .{ .plane = .{ .index = 2, .net = .ground } }, .suffix = "In1_Cu.g2", .function = "Copper,L2,Inner" });
         try out.append(arena, .{ .layer = .{ .plane = .{ .index = 3, .net = .ground } }, .suffix = "In2_Cu.g3", .function = "Copper,L3,Inner" });
     } else {
+        // Signal-layer indices for plane-free inners count up from 2 in stack
+        // order — the same assignment `BoardRules.signalStackIndex` makes, so
+        // a persisted `Track.layer` lands on exactly this file.
+        var sig: u8 = 2;
         var i: u8 = 2;
         while (i < n) : (i += 1) {
             const suffix = try std.fmt.allocPrint(arena, "In{d}_Cu.g{d}", .{ i - 1, i });
-            const function = try std.fmt.allocPrint(arena, "Copper,L{d},Inner", .{i});
-            const layer: Layer = if (declaredPlaneAt(rules, i)) |net|
-                .{ .plane = .{ .index = i, .net = .{ .named = net } } }
-            else
-                .{ .inner_blank = i };
+            var layer: Layer = undefined;
+            var function: []const u8 = undefined;
+            if (declaredPlaneAt(rules, i)) |net| {
+                layer = .{ .plane = .{ .index = i, .net = .{ .named = net } } };
+                function = try std.fmt.allocPrint(arena, "Copper,L{d},Inner", .{i});
+            } else {
+                layer = .{ .inner_signal = .{ .index = i, .sig = sig } };
+                // The X2-spec spelling for an inner copper layer is "Inr";
+                // the plane files keep the writer's established "Inner" so
+                // existing declared-plane packages don't churn.
+                function = try std.fmt.allocPrint(arena, "Copper,L{d},Inr", .{i});
+                sig += 1;
+            }
             try out.append(arena, .{ .layer = layer, .suffix = suffix, .function = function });
         }
     }
@@ -193,7 +209,7 @@ pub fn writeLayer(
     switch (layer) {
         .copper => |side| try writeCopper(&g, placement, copper, side),
         .plane => |pl| try writePlane(&g, placement, copper, pl),
-        .inner_blank => try g.w.writeAll("G04 inner signal layer unused by the 2-signal-layer router*\n"),
+        .inner_signal => |is| try writeInnerCopper(&g, placement, copper, is.sig),
         .mask => |side| try writeMask(&g, placement, side),
         .paste => |side| try writePaste(&g, placement, side),
         .silk => |side| try writeSilk(&g, placement, side, texts),
@@ -266,6 +282,28 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
     }
     for (copper.tracks) |t| {
         if (t.layer != li) continue;
+        try g.use(.c, t.width, 0);
+        try g.line(t.x1, t.y1, t.x2, t.y2);
+    }
+    for (copper.vias) |v| {
+        try g.use(.c, v.dia, 0);
+        try g.flash(v.x, v.y);
+    }
+}
+
+/// Inner SIGNAL copper: the routed tracks persisted on signal layer `sig`,
+/// via lands (through vias reach every copper layer), and through-pad barrel
+/// annuli (a PTH pad has copper on each layer — inner tracks may terminate
+/// on it). SMD pads live only on their outer face and never appear here.
+fn writeInnerCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, sig: u8) Error!void {
+    for (placement.parts) |p| {
+        for (p.pads) |pad| {
+            if (!pad.thru or pad.npth) continue;
+            try flashPad(g, p, pad, 0);
+        }
+    }
+    for (copper.tracks) |t| {
+        if (t.layer != sig) continue;
         try g.use(.c, t.width, 0);
         try g.line(t.x1, t.y1, t.x2, t.y2);
     }
@@ -738,14 +776,56 @@ test "planLayers sizes the copper set from the stackup rules" {
     try testing.expectEqualStrings("B_Cu.gbl", two[1].suffix);
     try testing.expectEqualStrings("Copper,L2,Bot", two[1].function);
 
-    // Declared 4-layer with one plane: the named plane plus one blank inner.
+    // Declared 4-layer with one plane: the named plane plus one ROUTABLE
+    // inner signal layer (stack L3 = signal index 2, the router's third layer).
     const gnd = [_][]const u8{"GND"};
     const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
     p.rules = .{ .plane_nets = &gnd, .copper_layers = 4, .planes = &planes };
     const four = try planLayers(arena, p);
     try testing.expectEqual(@as(usize, 11), four.len);
     try testing.expectEqualStrings("GND", four[1].layer.plane.net.named);
-    try testing.expect(four[2].layer == .inner_blank);
+    try testing.expect(four[2].layer == .inner_signal);
+    try testing.expectEqual(@as(u8, 3), four[2].layer.inner_signal.index);
+    try testing.expectEqual(@as(u8, 2), four[2].layer.inner_signal.sig);
+    try testing.expectEqualStrings("In2_Cu.g3", four[2].suffix);
+    try testing.expectEqualStrings("Copper,L3,Inr", four[2].function);
+}
+
+// spec: export_gerber - an inner signal layer emits its routed tracks, via lands, and through-pad barrels; other layers' tracks stay off it
+test "inner signal layer carries layer-2 copper" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const pads = [_]geometry.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 1.0, .h = 0.5 }, // SMD — must NOT appear
+        .{ .number = "2", .x = 2, .y = 0, .w = 1.4, .h = 1.4, .shape = "circle", .thru = true, .drill = 0.9 },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
+    };
+    const placement = testPlacement(&parts, &.{});
+    const tracks = [_]router.Track{
+        .{ .x1 = 3, .y1 = 5, .x2 = 7, .y2 = 5, .layer = 2, .width = 0.2, .net = 0 }, // inner — drawn
+        .{ .x1 = 1, .y1 = 1, .x2 = 2, .y2 = 1, .layer = 0, .width = 0.2, .net = 0 }, // top — absent
+    };
+    const vias = [_]router.Via{.{ .x = 5, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 }};
+
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    const inner: Layer = .{ .inner_signal = .{ .index = 3, .sig = 2 } };
+    try writeLayer(&aw.writer, arena, placement, .{ .tracks = &tracks, .vias = &vias }, &.{}, export_fab.frameFor(placement), inner, "Copper,L3,Inr");
+    const out = aw.written();
+
+    // The layer-2 track draws ((3,5)→(7,5), y-up (3,5)→(7,5)); the top track doesn't.
+    try testing.expect(std.mem.indexOf(u8, out, "X3000000Y5000000D02*\nX7000000Y5000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "X1000000Y9000000D02*") == null);
+    // Via land flashes; the through pad's barrel flashes (world (12,5)); the
+    // SMD pad (world (9,5)) has no copper on an inner layer.
+    try testing.expect(std.mem.indexOf(u8, out, "X5000000Y5000000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "C,1.400000*%") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "X12000000Y5000000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "X9000000Y5000000D03*") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "R,1.000000X0.500000") == null);
 }
 
 // spec: export_gerber - outer copper flashes side-correct pads and draws routed tracks/vias in the y-up frame

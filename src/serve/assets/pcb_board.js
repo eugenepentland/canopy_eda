@@ -3,10 +3,23 @@ const NS="http://www.w3.org/2000/svg";
 const S=PCB.scale,MX=PCB.minx,MY=PCB.miny,M=PCB.margin,G=PCB.grid;
 const P=PCB.parts, orig=P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};});
 var RO=!!PCB.ro;
+// ── Signal-layer table (from the server blob, audit 1.2) ────────────────
+// PCB.layers = [{l,name,c}, …] — every ROUTABLE copper layer of the stackup:
+// 0=top(F.Cu), 1=bottom(B.Cu), 2..=plane-free inner layers in stack order.
+// Nothing below hard-codes the layer count; older blobs fall back to the
+// classic two-layer table.
+var LYR=(PCB.layers&&PCB.layers.length)?PCB.layers:[{l:0,name:"F.Cu",c:"#f85149"},{l:1,name:"B.Cu",c:"#388bfd"}];
+var NSIG=LYR.length;
+function layerName(l){for(var i=0;i<LYR.length;i++)if(LYR[i].l===l)return LYR[i].name;return "L"+l;}
+function layerColor(l){for(var i=0;i<LYR.length;i++)if(LYR[i].l===l)return LYR[i].c;return "#8b949e";}
+// Visibility key for a copper layer ("top"/"bottom" keep their legacy
+// localStorage spelling; inner layers get "l2", "l3", …).
+function visKey(l){return l===0?"top":(l===1?"bottom":("l"+l));}
 // ── Live view state (layers / grid / units) — audit 1.5 ─────────────────
 // Persisted per design in localStorage alongside the existing "pcb-rigid-off:"
 // key. `G` stays the footprint-editor grid constant; snap uses gridMM (0 = off).
 var viewKey="pcb-view:"+PCB.name,viewSt={grid:G,units:"mm",vis:{top:1,bottom:1,silk:1,rats:1,drc:1}};
+for(var _li=2;_li<NSIG;_li++)viewSt.vis["l"+_li]=1; // inner copper defaults visible
 try{var _vs=JSON.parse(localStorage.getItem(viewKey)||"null");if(_vs){
  if(typeof _vs.grid==="number")viewSt.grid=_vs.grid;
  if(_vs.units)viewSt.units=_vs.units;
@@ -15,7 +28,7 @@ function viewSave(){try{localStorage.setItem(viewKey,JSON.stringify(viewSt));}ca
 // Effective snap step (mm). grid "off" (0) → a tiny step so parts still move
 // smoothly but aren't quantized.
 function snapG(){return viewSt.grid>0?viewSt.grid:0.001;}
-var activeLayer=0; // 0=top(F.Cu), 1=bottom(B.Cu) — draw layer for vias/free tracks
+var activeLayer=0; // signal-layer index (see LYR) — draw layer for vias/free tracks
 function syncActiveLayer(){var s=document.getElementById("pcb-actlayer");if(s)s.value=String(activeLayer);
  var b=document.getElementById("pcb-draw");/* drawBtnSync fills the label */ if(b&&typeof drawBtnSync==="function")drawBtnSync();}
 // mm↔mil display formatting (display only — the model stays mm).
@@ -330,17 +343,18 @@ function paintLinks(ctx){if(!ratsOn||!viewSt.vis.rats)return;
 // Per-layer copper visibility + a dim of the INACTIVE copper layer while
 // drawing, so the active layer reads clearly (audit 1.5). A layer hidden in
 // the Layers panel isn't drawn at all.
-function layerAlpha(layer){if(layer===0&&!viewSt.vis.top)return 0;if(layer===1&&!viewSt.vis.bottom)return 0;
+function layerAlpha(layer){if(!viewSt.vis[visKey(layer)])return 0;
  if(drawMode&&layer!==activeLayer)return 0.30;return 0.85;}
+function anyCopperVisible(){for(var i=0;i<LYR.length;i++)if(viewSt.vis[visKey(LYR[i].l)])return true;return false;}
 function paintTracks(ctx){
  ctx.lineCap="round";
  (PCB.tracks||[]).forEach(function(t){var a=layerAlpha(t.l||0);if(a<=0)return;ctx.globalAlpha=a;
-  ctx.strokeStyle=(t.l==0)?"#f85149":"#388bfd";
+  ctx.strokeStyle=layerColor(t.l||0);
   ctx.lineWidth=Math.max(t.w*S,1.2);
   ctx.beginPath();ctx.moveTo(X(t.x1),Y(t.y1));ctx.lineTo(X(t.x2),Y(t.y2));ctx.stroke();});
  ctx.globalAlpha=1;ctx.lineCap="butt";
- // Vias span both layers — hide only when BOTH copper layers are hidden.
- if(!viewSt.vis.top&&!viewSt.vis.bottom)return;
+ // Vias span every copper layer — hide only when ALL of them are hidden.
+ if(!anyCopperVisible())return;
  (PCB.vias||[]).forEach(function(v){
   var rr=Math.max(v.d/2*S,2.5),dr=(v.drill>0)?v.drill:viaGeo().drill;
   var rh=Math.min(Math.max(dr/2*S,1),rr*0.7);
@@ -1408,8 +1422,8 @@ var drawMode=false,dtrace=null,drawCur=null,drawShift=false;
 function trackW(){var v=parseFloat((document.getElementById("r-tw")||{}).value);return v>0?v:0.25;}
 function drawBtnSync(){var b=document.getElementById("pcb-draw");if(!b)return;
  b.classList.toggle("on",drawMode);
- var al=activeLayer?"B.Cu":"F.Cu";
- b.textContent=drawMode?(dtrace?("✎ "+nLeaf(dtrace.net)+" · "+(dtrace.l?"B.Cu":"F.Cu")):("✎ click a pad… ["+al+"]")):"✎ Draw";}
+ var al=layerName(activeLayer);
+ b.textContent=drawMode?(dtrace?("✎ "+nLeaf(dtrace.net)+" · "+layerName(dtrace.l)):("✎ click a pad… ["+al+"]")):"✎ Draw";}
 function drawModeSet(on){if(RO)return;drawMode=on;if(!on)dtrace=null;
  if(on&&outlineMode)outlineArm(false);
  if(on&&polyMode)polyArm(false);
@@ -1511,7 +1525,11 @@ function segHitsBox(x1,y1,x2,y2,bx0,by0,bx1,by1){
   return ua>=0&&ua<=1&&ub>=0&&ub<=1;}
  return segX(x1,y1,x2,y2,bx0,by0,bx1,by0)||segX(x1,y1,x2,y2,bx1,by0,bx1,by1)||
   segX(x1,y1,x2,y2,bx1,by1,bx0,by1)||segX(x1,y1,x2,y2,bx0,by1,bx0,by0);}
-// A proposed via at (x,y) on `net`: check foreign copper on BOTH layers.
+// A proposed via at (x,y) on `net`: a via is through-only, so it must clear
+// foreign copper on EVERY layer. Pads exist only on the two outer faces
+// (SMD) or on all layers (thru — padBoxesOn includes those for either face),
+// so checking the two faces covers every pad; tracks and vias below are
+// checked without a layer filter, which covers inner-layer copper too.
 function viaViolation(x,y,net,dia){var clr=netClrFor(net),vr=(dia||0.4)/2;
  for(var L=0;L<2;L++){var pads=padBoxesOn(L);
   for(var i=0;i<pads.length;i++){var pb=pads[i];if(sameNet(pb.net,net))continue;
@@ -1575,12 +1593,20 @@ function drawTarget(m,shift){if(!shift){var mg=magSnap(m,dtrace&&dtrace.net);if(
 // Would a segment from the last vertex to (x,y) breach clearance?
 function drawTargetViolates(x,y){if(!dtrace)return false;
  return !!segViolation(dtrace.lx,dtrace.ly,x,y,dtrace.l,dtrace.net,dtrace.w/2,dtrace.laid);}
+// The signal layer a via drop lands the trace on: the ACTIVE layer when the
+// user parked it somewhere other than the trace's current layer (explicit
+// intent), else the next VISIBLE signal layer in cycle order — so V on a
+// 2-layer board still flips top↔bottom, and on a 4/6-layer board it walks
+// the routable stack (skipping layers hidden in the Layers panel).
+function nextDrawLayer(cur){if(activeLayer!==cur)return activeLayer;
+ for(var k=1;k<=NSIG;k++){var c=(cur+k)%NSIG;if(viewSt.vis[visKey(c)])return c;}
+ return (cur+1)%NSIG;}
 function drawViaHere(){if(!dtrace)return;var vg=viaGeo();
  if(viaViolation(dtrace.lx,dtrace.ly,dtrace.net,vg.dia)){
   routeStatMsg("a via here violates clearance — move first",true);return;}
  PCB.vias=PCB.vias||[];
  PCB.vias.push({x:dtrace.lx,y:dtrace.ly,d:vg.dia,drill:vg.drill,net:dtrace.net});
- dtrace.l=dtrace.l?0:1;activeLayer=dtrace.l;syncActiveLayer();drawBtnSync();ovPaintSoon();}
+ dtrace.l=nextDrawLayer(dtrace.l);activeLayer=dtrace.l;syncActiveLayer();drawBtnSync();ovPaintSoon();}
 function drawBack(){if(!dtrace)return;
  var ts=PCB.tracks||[],last=ts.length?ts[ts.length-1]:null;
  if(dtrace.n>0&&last&&last.x2===dtrace.lx&&last.y2===dtrace.ly&&last.net===dtrace.net){
@@ -1597,7 +1623,7 @@ function paintDraw(ctx){if(!drawMode||!dtrace||!drawCur)return;
  var s=drawTarget(drawCur,drawShift);
  var bad=!!segViolation(dtrace.lx,dtrace.ly,s.x,s.y,dtrace.l,dtrace.net,dtrace.w/2,dtrace.laid);
  ctx.save();ctx.globalAlpha=bad?0.9:0.7;ctx.lineCap="round";ctx.setLineDash([4,3]);
- ctx.strokeStyle=bad?"#ff4d4d":((dtrace.l==0)?"#f85149":"#388bfd");
+ ctx.strokeStyle=bad?"#ff4d4d":layerColor(dtrace.l);
  ctx.lineWidth=Math.max(dtrace.w*S,1.2);
  ctx.beginPath();ctx.moveTo(X(dtrace.lx),Y(dtrace.ly));ctx.lineTo(X(s.x),Y(s.y));ctx.stroke();
  // magnet indicator: a small ring at a snapped target
@@ -1840,7 +1866,8 @@ if(rgo)rgo.addEventListener("click",function(){
            remain — no preview+routed via doubling on the bypass caps. */
     var ok=(j.routed===j.total);
     var miss=(j.unrouted&&j.unrouted.length)?(" · missing: "+j.unrouted.join(", ")):"";
-    setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+" nets · "+((j.vias||[]).length)+" vias"+miss);
+    if(j.grid_overflow)setStat("r-stat","err","board exceeds the routing grid cap — not routed");
+    else setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+" nets · "+((j.vias||[]).length)+" vias"+miss);
     setStat("r-drc",(j.drc||[]).length?"err":"ok",(j.drc||[]).length?(j.drc.length+" DRC violation(s)"):"DRC clean ✓");
     var rp=j.return_path||0; setStat("r-rp",rp?"warn":"ok",rp?(rp+" return-path warning(s)"):"return paths ✓");
     rgo.disabled=false;})
@@ -1951,37 +1978,48 @@ setVB(); // initial overlay paint + zoom-dependent label visibility
   updatePropLive&&updatePropLive();drawBoardRect();}
  if(ub)ub.addEventListener("click",function(){viewSt.units=(viewSt.units==="mil")?"mm":"mil";viewSave();unitsSync();});
  unitsSync();
- // Layers popover — visibility checkboxes + active-layer selector.
+ // Layers popover — visibility checkboxes (every copper layer from the
+ // PCB.layers table, so inner signal layers list themselves) + active-layer
+ // selector covering the whole signal stack.
  var lb=document.getElementById("pcb-layers-btn"),pop=document.getElementById("pcb-layers-pop");
  function chk(id,lbl,sw){return '<label><input type="checkbox" id="'+id+'"'+(sw.on?" checked":"")+'>'+
   (sw.c?'<span class="lp-swatch" style="background:'+sw.c+'"></span>':'')+lbl+'</label>';}
+ function copperLabel(L){return L.l===0?"Top copper":(L.l===1?"Bottom copper":(L.name+" copper"));}
  function buildPop(){if(!pop)return;var v=viewSt.vis;
-  pop.innerHTML='<div class="lp-h">Layers</div>'+
-   chk("lp-top","Top copper",{on:v.top,c:"#f85149"})+
-   chk("lp-bottom","Bottom copper",{on:v.bottom,c:"#388bfd"})+
-   chk("lp-silk","Silk / labels",{on:v.silk,c:"#8b949e"})+
+  var rows='<div class="lp-h">Layers</div>';
+  var map={};
+  LYR.forEach(function(L){var id="lp-cu"+L.l;map[id]=visKey(L.l);
+   rows+=chk(id,copperLabel(L),{on:v[visKey(L.l)],c:L.c});});
+  rows+=chk("lp-silk","Silk / labels",{on:v.silk,c:"#8b949e"})+
    chk("lp-rats","Ratsnest",{on:v.rats,c:"#9aa7b4"})+
    chk("lp-drc","DRC markers",{on:v.drc,c:"#ef4444"})+
    '<div class="lp-sep"></div>'+
-   '<label>Active <select id="pcb-actlayer"><option value="0">Top (F.Cu)</option>'+
-   '<option value="1">Bottom (B.Cu)</option></select></label>';
-  var map={"lp-top":"top","lp-bottom":"bottom","lp-silk":"silk","lp-rats":"rats","lp-drc":"drc"};
+   '<label>Active <select id="pcb-actlayer">';
+  LYR.forEach(function(L){rows+='<option value="'+L.l+'">'+
+   (L.l===0?"Top (F.Cu)":(L.l===1?"Bottom (B.Cu)":L.name))+'</option>';});
+  rows+='</select></label>';
+  pop.innerHTML=rows;
+  map["lp-silk"]="silk";map["lp-rats"]="rats";map["lp-drc"]="drc";
   Object.keys(map).forEach(function(id){var c=document.getElementById(id);
    c.addEventListener("change",function(){viewSt.vis[map[id]]=c.checked?1:0;viewSave();paintSoon();drawDrc();rats();});});
   var al=document.getElementById("pcb-actlayer");al.value=String(activeLayer);
-  al.addEventListener("change",function(){activeLayer=al.value==="1"?1:0;if(dtrace)dtrace.l=activeLayer;paintSoon();drawBtnSync();});}
+  al.addEventListener("change",function(){var nl=parseInt(al.value,10);
+   activeLayer=(nl>=0&&nl<NSIG)?nl:0;if(dtrace)dtrace.l=activeLayer;paintSoon();drawBtnSync();});}
  function popOpen(){if(!pop||!lb)return;buildPop();
   var r=lb.getBoundingClientRect(),pr=(pop.offsetParent||document.body).getBoundingClientRect();
   pop.style.left=(r.left-pr.left)+"px";pop.style.top=(r.bottom-pr.top+4)+"px";pop.hidden=false;lb.classList.add("active");}
  function popClose(){if(pop)pop.hidden=true;if(lb)lb.classList.remove("active");}
  if(lb)lb.addEventListener("click",function(ev){ev.stopPropagation();if(pop.hidden)popOpen();else popClose();});
  document.addEventListener("click",function(ev){if(pop&&!pop.hidden&&ev.target!==lb&&!pop.contains(ev.target))popClose();});
- // Active-layer keys: ( / ) and PgUp/PgDn.
+ // Active-layer keys: ( / PgUp step back, ) / PgDn step forward — cycling
+ // through EVERY signal layer of the stackup (top → bottom → inners → top).
  document.addEventListener("keydown",function(ev){if(kbTyping(ev.target))return;
   if(ev.key==="("||ev.key==="PageUp"||ev.key===")"||ev.key==="PageDown"){
-   ev.preventDefault();activeLayer=activeLayer?0:1;if(dtrace)dtrace.l=activeLayer;
+   ev.preventDefault();
+   var step=(ev.key===")"||ev.key==="PageDown")?1:(NSIG-1);
+   activeLayer=(activeLayer+step)%NSIG;if(dtrace)dtrace.l=activeLayer;
    var al=document.getElementById("pcb-actlayer");if(al)al.value=String(activeLayer);
-   paintSoon();drawBtnSync();routeStatMsg("active layer: "+(activeLayer?"B.Cu (bottom)":"F.Cu (top)"));}});
+   paintSoon();drawBtnSync();routeStatMsg("active layer: "+layerName(activeLayer));}});
  // ── Ruler / measure tool (M) ──────────────────────────────────────────
  var rulerMode=false,rulerDraw=null,rgRuler=null;
  var rulerBtn=document.getElementById("pcb-ruler-btn");

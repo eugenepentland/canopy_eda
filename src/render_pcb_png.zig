@@ -38,6 +38,17 @@ const AW_SIG = Rgb.hex("#9aa7b4"); // generic signal airwire
 const LOOP_RET = Rgb.hex("#58a6ff"); // L2 ground-return overlay
 const TRACK_TOP = Rgb.hex("#ef4444"); // F.Cu trace
 const TRACK_BOT = Rgb.hex("#3b82f6"); // B.Cu trace
+// Inner signal-layer traces, cycling (mirrors optimizer.INNER_LAYER_COLORS
+// so the PNG matches the browser viewer's palette).
+const TRACK_INNER = [_]Rgb{ Rgb.hex("#d4aa00"), Rgb.hex("#cc66cc"), Rgb.hex("#26c6a8"), Rgb.hex("#e0824e") };
+
+/// Trace colour for a routed track's signal layer (0 = top red, 1 = bottom
+/// blue, inner layers cycle the KiCad-ish palette).
+fn trackColor(layer: u8) Rgb {
+    if (layer == 0) return TRACK_TOP;
+    if (layer == 1) return TRACK_BOT;
+    return TRACK_INNER[(layer - 2) % TRACK_INNER.len];
+}
 const VIA_COL = Rgb.hex("#d8b048");
 const VIA_HOLE = Rgb.hex("#0d1117");
 const PAD_HOLE = Rgb.hex("#0d1117"); // drilled bore punched through a thru/npth pad
@@ -699,7 +710,7 @@ const Ctx = struct {
 
     fn drawRouted(self: *Ctx, r: router.RouteResult) void {
         for (r.tracks) |t| {
-            const col = if (t.layer == 0) TRACK_TOP else TRACK_BOT;
+            const col = trackColor(t.layer);
             self.cv.line(self.xpx(t.x1), self.ypx(t.y1), self.xpx(t.x2), self.ypx(t.y2), @max(self.len(t.width), self.pw(0.6)), col, 0.92, .round);
         }
         for (r.vias) |v| {
@@ -1138,6 +1149,15 @@ const Ctx = struct {
         if (routed) {
             x = self.legendItem(x, y, TRACK_TOP, "F.CU");
             x = self.legendItem(x, y, TRACK_BOT, "B.CU");
+            // Inner routable layers (a >2-signal stackup): one entry each,
+            // named from the stackup so the legend matches the Gerber files.
+            const n_sig = self.p.rules.signalLayerCount();
+            var lname_buf: [16]u8 = undefined;
+            var sig: u8 = 2;
+            while (sig < n_sig) : (sig += 1) {
+                const nm = self.p.rules.signalLayerName(sig, &lname_buf);
+                x = self.legendItem(x, y, trackColor(sig), nm);
+            }
             x = self.legendItem(x, y, VIA_COL, "VIA");
         }
         if (self.focus) x = self.legendItem(x, y, ACCENT, "FOCUS");
