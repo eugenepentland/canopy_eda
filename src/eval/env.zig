@@ -1080,6 +1080,10 @@ pub const BoardSpec = struct {
     /// Outline size in mm. 0 ⇒ `(size …)` missing → the form is inert.
     w: f64 = 0,
     h: f64 = 0,
+    /// `(corner-radius R)` — round the outline's corners with radius R mm
+    /// (emitted as fine polyline arcs on every exact-shape consumer:
+    /// Edge.Cuts, board-edge DRC, the renderers). 0 = square corners.
+    corner_radius: f64 = 0,
     /// Edge-docked parts per board edge (NOT sides of an anchor — the words
     /// name the physical board edge the connector mounts on).
     sides: []const PlacementSideSpec = &.{},

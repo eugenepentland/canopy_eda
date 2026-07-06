@@ -19,6 +19,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const geometry = @import("../placement/geometry.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
+const outline_mod = @import("../placement/outline.zig");
 const export_fab = @import("../export_fab.zig");
 const export_gerber = @import("../export_gerber.zig");
 const zipfile = @import("../zipfile.zig");
@@ -177,17 +178,22 @@ const SavedRoutes = struct { tracks: []const SavedTrack, vias: []const SavedVia 
 /// Shared JSON fragments for copper serialization — the sidecar, the page
 /// blob, and the Stamp subroutes all write the identical track/via shape.
 const TRACK_JSON_FMT = "{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d},\"net\":";
+/// One outline-polygon vertex as a JSON `[x,y]` pair (sidecar + page blob).
+const PT_PAIR_FMT = "[{d},{d}]";
 const VIA_JSON_FMT = "{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":";
 const VIAS_ARR_OPEN = "],\"vias\":[";
 /// "ref\x00pad" / "prefix\x00origin" composite hash keys.
 const PIN_KEY_FMT = "{s}\x00{s}";
 
-/// A user-DRAWN board outline rectangle (world mm) captured with a saved
-/// layout — the interactive counterpart of the authored `(board (size W H))`
-/// form (the ▭ Outline tool: rough-place first, then draw the board around
+/// A user-DRAWN board outline (world mm) captured with a saved layout — the
+/// interactive counterpart of the authored `(board (size W H))` form (the
+/// ▭ Outline / ⬠ Poly tools: rough-place first, then draw the board around
 /// it). When the shown layout carries one it becomes the placement's
 /// `board_rect`, so every renderer draws it and the board-edge DRC checks it.
-const SavedOutline = struct { x: f64, y: f64, w: f64, h: f64 };
+/// `pts` is the closed-polygon vertex list of a ⬠ Poly outline; when set,
+/// x/y/w/h are always its bounding box (derived at parse time, so the two
+/// can never disagree). Null `pts` = a plain drawn rectangle.
+const SavedOutline = struct { x: f64, y: f64, w: f64, h: f64, pts: ?[]const [2]f64 = null };
 
 /// Which layout state the page is showing — the precedence ladder made
 /// visible in the scorebar chip: source **spec** > saved **snapshot**
@@ -1020,12 +1026,20 @@ pub fn solveForRequest(
     // to a worse arrangement (e.g. a 70.8 hand layout relaxing back to 86
     // because it isn't a relax fixed-point), and `solve` discards any saved
     // layout with a courtyard overlap outright (applyCached's staleness test).
-    const placement = (if ((opts.layout != null or starred_name != null) and cached != null)
+    var placement = (if ((opts.layout != null or starred_name != null) and cached != null)
         optimizer.placeFromPoses(alloc, eff_block, project_dir, cached.?, params)
     else if (grid_only)
         optimizer.gridPlace(alloc, eff_block, project_dir, params)
     else
         optimizer.solve(alloc, eff_block, project_dir, cached, params, .place)) catch return error.BuildFailed;
+    // Fold the shown saved layout's user-drawn outline (rectangle or polygon)
+    // onto the placement, exactly like the /pcb-layout page does — the PNG /
+    // describe / MCP views must show the same board edge the viewer and the
+    // fab outputs use.
+    if (opts.layout orelse starred_name) |sn| {
+        if (opts.sub == null)
+            _ = applyShownOutline(&placement, readLayouts(alloc, project_dir, name), sn);
+    }
 
     // Staging coverage from the solve just above (same thread): parts the
     // `(board …)` edge-dock / force path left in the band and the ones autofill
@@ -1780,7 +1794,10 @@ fn blessedFabView(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, name
     var vias: []const router.Via = &.{};
     for (readLayouts(req.arena, ctx.project_dir, name)) |L| {
         if (!L.default) continue;
-        if (L.outline) |o| placement.board_rect = .{ .minx = o.x, .miny = o.y, .w = o.w, .h = o.h };
+        if (L.outline) |o| {
+            placement.board_rect = .{ .minx = o.x, .miny = o.y, .w = o.w, .h = o.h };
+            placement.board_poly = o.pts; // exact polygon when one was drawn
+        }
         if (L.routes) |sr| {
             if (restoreRoutes(req.arena, sr, placement.nets)) |r| {
                 tracks = r.tracks;
@@ -1946,7 +1963,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         .score = score,
         .parts = parts,
         .routes = parseSavedRoutes(req.arena, root.object.get("routes")),
-        .outline = parseSavedOutline(root.object.get("outline")),
+        .outline = parseSavedOutline(req.arena, root.object.get("outline")),
     };
     // A top-level DESIGN keeps exactly one layout: the save replaces the whole
     // list with this snapshot, auto-starred so KiCad sync + the fab outputs
@@ -2612,7 +2629,7 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
             .default = default_name.len > 0 and std.mem.eql(u8, nm.string, default_name),
             .rough = rough,
             .routes = parseSavedRoutes(alloc, it.object.get("routes")),
-            .outline = parseSavedOutline(it.object.get("outline")),
+            .outline = parseSavedOutline(alloc, it.object.get("outline")),
         }) catch return list.items;
     }
     return list.toOwnedSlice(alloc) catch null;
@@ -2688,11 +2705,20 @@ fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedRoutes {
     };
 }
 
-/// Parse an `{"x","y","w","h"}` outline object; null when absent/malformed
-/// or degenerate (w/h must be positive real board dimensions).
-fn parseSavedOutline(v: ?std.json.Value) ?SavedOutline {
+/// Parse an `{"x","y","w","h"[,"pts":[[x,y],…]]}` outline object; null when
+/// absent/malformed or degenerate (w/h must be positive real board
+/// dimensions). A valid `pts` closed polygon (≥3 vertices) wins: x/y/w/h are
+/// re-derived from its bounding box so the rect fields can never drift from
+/// the polygon (old rect-only sidecars keep loading unchanged).
+fn parseSavedOutline(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedOutline {
     const obj = v orelse return null;
     if (obj != .object) return null;
+    if (parseOutlinePts(alloc, obj.object.get("pts"))) |pts| {
+        const bb = outline_mod.bboxRect(pts);
+        if (bb.w > 0 and bb.h > 0)
+            return .{ .x = bb.minx, .y = bb.miny, .w = bb.w, .h = bb.h, .pts = pts };
+        alloc.free(pts);
+    }
     const o = SavedOutline{
         .x = jsonNum(obj.object.get("x")),
         .y = jsonNum(obj.object.get("y")),
@@ -2701,6 +2727,40 @@ fn parseSavedOutline(v: ?std.json.Value) ?SavedOutline {
     };
     if (!(o.w > 0) or !(o.h > 0)) return null;
     return o;
+}
+
+/// Serialize a `SavedOutline` as the sidecar/page JSON object — the exact
+/// shape `parseSavedOutline` reads back (rect fields always, `pts` only for
+/// polygon outlines). Shared by the sidecar writer and the page blob so the
+/// two can never diverge.
+fn writeSavedOutlineJson(w: *std.Io.Writer, o: SavedOutline) std.Io.Writer.Error!void {
+    try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}", .{ o.x, o.y, o.w, o.h });
+    if (o.pts) |pts| {
+        try w.writeAll(",\"pts\":[");
+        for (pts, 0..) |p, i| {
+            if (i > 0) try w.writeAll(",");
+            try w.print(PT_PAIR_FMT, .{ p[0], p[1] });
+        }
+        try w.writeAll("]");
+    }
+    try w.writeAll("}");
+}
+
+/// Parse a `[[x,y],…]` polygon vertex array: ≥3 well-formed 2-number pairs,
+/// else null (malformed entries reject the whole polygon rather than
+/// silently reshaping the board).
+fn parseOutlinePts(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const [2]f64 {
+    const arr = v orelse return null;
+    if (arr != .array or arr.array.items.len < 3) return null;
+    const pts = alloc.alloc([2]f64, arr.array.items.len) catch return null;
+    for (arr.array.items, 0..) |it, i| {
+        if (it != .array or it.array.items.len != 2) {
+            alloc.free(pts);
+            return null;
+        }
+        pts[i] = .{ jsonNum(it.array.items[0]), jsonNum(it.array.items[1]) };
+    }
+    return pts;
 }
 
 /// A pose/route JSON string field, or "" when absent/not a string.
@@ -2820,6 +2880,7 @@ fn applyShownOutline(placement: *optimizer.Placement, layouts: []const SavedLayo
         if (!std.mem.eql(u8, L.name, sn)) continue;
         const o = L.outline orelse return false;
         placement.board_rect = .{ .minx = o.x, .miny = o.y, .w = o.w, .h = o.h };
+        placement.board_poly = o.pts; // exact polygon when one was drawn
         placement.minx = @min(placement.minx, o.x);
         placement.miny = @min(placement.miny, o.y);
         placement.maxx = @max(placement.maxx, o.x + o.w);
@@ -2973,7 +3034,10 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: 
             try w.writeAll(",\"routes\":");
             try writeSavedRoutesJson(w, sr);
         }
-        if (L.outline) |o| try w.print(",\"outline\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}", .{ o.x, o.y, o.w, o.h });
+        if (L.outline) |o| {
+            try w.writeAll(",\"outline\":");
+            try writeSavedOutlineJson(w, o);
+        }
         if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}", .{ s.hpwl, s.loop, s.caps, s.objective });
         try w.writeAll(",\"parts\":[");
         for (L.parts, 0..) |pt, j| {
@@ -3812,6 +3876,11 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     try w.writeAll("<button class=\"btn\" id=\"pcb-outline\" title=\"Draw the board outline: click, then drag a rectangle " ++
         "on the board (a plain click clears it). Grid-snapped; saved with the layout (Save/Update); becomes the board edge " ++
         "the renderers draw and the board-edge DRC checks.\">\u{25AD} Outline</button>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-outline-poly\" title=\"Draw a POLYGON board outline (L/T shapes, cutout-free " ++
+        "notches): click to place vertices (grid-snapped), click the first vertex or press Enter to close, Backspace removes " ++
+        "the last vertex, Esc cancels. After closing, drag a vertex handle to edit. Saved with the layout (Save/Update); " ++
+        "becomes the exact board edge the renderers draw, the board-edge DRC measures, and the Gerber Edge.Cuts traces." ++
+        "\">\u{2B21} Poly</button>");
     try w.writeAll("<button class=\"btn\" id=\"pcb-draw\" title=\"Hand-route (X): click a pad to start a trace, click to " ++
         "fix corners (45\u{b0}/grid snapped, Shift = free angle), V drops a via and flips layer, click a same-net pad or " ++
         "double-click to finish, Backspace steps back, Esc ends. Right-click deletes the track/via under the cursor. " ++
@@ -4487,7 +4556,7 @@ fn writePadsJson(
             try w.writeAll(",\"poly\":[");
             for (pad.poly, 0..) |pp, k| {
                 if (k > 0) try w.writeAll(",");
-                try w.print("[{d},{d}]", .{ pp[0], pp[1] });
+                try w.print(PT_PAIR_FMT, .{ pp[0], pp[1] });
             }
             try w.writeAll("]");
         }
@@ -4783,11 +4852,23 @@ fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placem
     try w.print("\"margin\":{d},\"grid\":{d},\"w\":{d},\"h\":{d},", .{ MARGIN_MM, optimizer.GRID_MM, v.width, v.height });
     try w.print("\"clr\":{d},\"cmargin\":{d},", .{ clearance, geometry.BBOX_MARGIN_MM });
     // Outline rectangle (world mm) — the authored `(board (size W H) …)` or
-    // the shown layout's drawn outline; null when neither exists.
+    // the shown layout's drawn outline; null when neither exists. A
+    // non-rectangular board also carries its exact polygon (`board_poly`,
+    // `[[x,y],…]`) — the rect is then that polygon's bounding box.
     if (p.board_rect) |br| {
         try w.print("\"board\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}},", .{ br.minx, br.miny, br.w, br.h });
     } else {
         try w.writeAll("\"board\":null,");
+    }
+    if (p.board_poly) |poly| {
+        try w.writeAll("\"board_poly\":[");
+        for (poly, 0..) |pp, i| {
+            if (i > 0) try w.writeAll(",");
+            try w.print(PT_PAIR_FMT, .{ pp[0], pp[1] });
+        }
+        try w.writeAll("],");
+    } else {
+        try w.writeAll("\"board_poly\":null,");
     }
     // Declared outer-layer copper pours ((stackup …) planes on an outer
     // face): net + the rect the Gerber pour fills (board outline, or the
@@ -4879,7 +4960,10 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
             try w.writeAll(",\"routes\":");
             try writeSavedRoutesJson(w, sr);
         }
-        if (L.outline) |o| try w.print(",\"outline\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}", .{ o.x, o.y, o.w, o.h });
+        if (L.outline) |o| {
+            try w.writeAll(",\"outline\":");
+            try writeSavedOutlineJson(w, o);
+        }
         try w.writeAll(",\"parts\":{");
         for (L.parts, 0..) |pt, j| {
             if (j > 0) try w.writeAll(",");
@@ -5547,8 +5631,52 @@ test "layouts sidecar round-trips a drawn outline" {
     try std.testing.expectEqual(@as(f64, -5), o.x);
     try std.testing.expectEqual(@as(f64, 50), o.w);
     try std.testing.expectEqual(@as(f64, 40), o.h);
+    try std.testing.expect(o.pts == null);
     // A degenerate outline (zero size) never round-trips into existence.
-    try std.testing.expect(parseSavedOutline(null) == null);
+    try std.testing.expect(parseSavedOutline(alloc, null) == null);
+}
+
+// spec: Web Server - A saved layout round-trips a polygon board outline; the rect fields are re-derived as its bbox
+test "layouts sidecar round-trips a polygon outline" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    // L-shaped outline; the stored rect fields deliberately LIE (0,0,1,1) —
+    // the parser must re-derive them from the polygon bbox.
+    const l_pts = [_][2]f64{ .{ -5, 0 }, .{ 45, 0 }, .{ 45, 20 }, .{ 20, 20 }, .{ 20, 40 }, .{ -5, 40 } };
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
+    const layouts = [_]SavedLayout{.{
+        .name = "poly-outlined",
+        .kind = KIND_MANUAL,
+        .ts = 1,
+        .score = null,
+        .parts = &parts,
+        .outline = .{ .x = 0, .y = 0, .w = 1, .h = 1, .pts = &l_pts },
+    }};
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJson(&aw.writer, &layouts, null);
+    const got = parseLayouts(alloc, aw.written()) orelse return error.TestParseFailed;
+    const o = got[0].outline orelse return error.TestParseFailed;
+    const pts = o.pts orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(usize, 6), pts.len);
+    try std.testing.expectEqual(@as(f64, 20), pts[3][0]);
+    try std.testing.expectEqual(@as(f64, 20), pts[3][1]);
+    // Rect fields = polygon bbox, not the stored lie.
+    try std.testing.expectEqual(@as(f64, -5), o.x);
+    try std.testing.expectEqual(@as(f64, 0), o.y);
+    try std.testing.expectEqual(@as(f64, 50), o.w);
+    try std.testing.expectEqual(@as(f64, 40), o.h);
+    // A malformed vertex list (pair with one number) rejects the polygon but
+    // keeps the rect, so a corrupt sidecar can never reshape the board.
+    const bad = parseLayouts(alloc,
+        \\{"layouts":[{"name":"b","kind":"manual","ts":1,
+        \\ "outline":{"x":1,"y":2,"w":30,"h":20,"pts":[[0],[1,1],[2,2]]},
+        \\ "parts":[{"ref":"U1","x":0,"y":0,"rot":0}]}]}
+    ) orelse return error.TestParseFailed;
+    const bo = bad[0].outline orelse return error.TestParseFailed;
+    try std.testing.expect(bo.pts == null);
+    try std.testing.expectEqual(@as(f64, 30), bo.w);
 }
 
 // spec: Web Server - A saved layout round-trips its routed copper (tracks + vias, net-name keyed) through the sidecar

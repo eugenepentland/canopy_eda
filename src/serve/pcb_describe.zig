@@ -16,6 +16,7 @@ const httpz = @import("httpz");
 const optimizer = @import("../placement/optimizer.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
+const outline_mod = @import("../placement/outline.zig");
 const module_policy = @import("../placement/module_policy.zig");
 const layout_lint = @import("../placement/layout_lint.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
@@ -155,7 +156,19 @@ pub fn writeDescribeJson(
     // distinct from the bbox above (which includes the staging band/margins).
     if (p.board_rect) |br| {
         try w.print(",\"outline\":{{\"w_mm\":{d:.2},\"h_mm\":{d:.2}", .{ br.w, br.h });
-        try w.print(",\"minx\":{d:.2},\"miny\":{d:.2}}}", .{ br.minx, br.miny });
+        try w.print(",\"minx\":{d:.2},\"miny\":{d:.2}", .{ br.minx, br.miny });
+        // Non-rectangular boards: w/h above are the polygon's BBOX; the
+        // exact closed outline is spelled out so an agent can reason about
+        // notches/cutaways, not just the envelope.
+        if (p.board_poly) |poly| {
+            try w.print(",\"points\":{d},\"poly\":[", .{poly.len});
+            for (poly, 0..) |pp, i| {
+                if (i > 0) try w.writeAll(",");
+                try w.print("[{d:.2},{d:.2}]", .{ pp[0], pp[1] });
+            }
+            try w.writeAll("]");
+        }
+        try w.writeAll("}");
     }
     // Declared outer-layer copper pours — the textual twin of the PNG's
     // translucent wash, so an agent reading the facts knows a face is a pour
@@ -463,9 +476,7 @@ fn writeLint(
         for (p.parts) |part| {
             if (in_band.contains(part.ref_des)) continue;
             const half = aabbHalf(part);
-            if (part.x - half[0] < br.minx - tol or part.x + half[0] > br.minx + br.w + tol or
-                part.y - half[1] < br.miny - tol or part.y + half[1] > br.miny + br.h + tol)
-            {
+            if (partCrossesOutline(br, p.board_poly, part.x, part.y, half, tol)) {
                 try outside.append(alloc, part.ref_des);
             }
         }
@@ -606,6 +617,31 @@ pub fn aabbHalf(part: optimizer.Part) [2]f64 {
     const c = @abs(@cos(a));
     const s = @abs(@sin(a));
     return .{ part.hw * c + part.hh * s, part.hw * s + part.hh * c };
+}
+
+/// Does a part's courtyard AABB (centre cx/cy, half-extents `half`) poke
+/// past the board outline? Non-rectangular boards test the AABB's centre and
+/// corners against the exact polygon (a corner hanging into a notch is
+/// outside even though it's inside the bbox); plain boards keep the cheap
+/// rectangle containment.
+fn partCrossesOutline(br: optimizer.BoardRect, poly: ?[]const [2]f64, cx: f64, cy: f64, half: [2]f64, tol: f64) bool {
+    if (poly) |pl| {
+        if (pl.len >= 3) {
+            const probes = [_][2]f64{
+                .{ cx, cy },
+                .{ cx - half[0], cy - half[1] },
+                .{ cx + half[0], cy - half[1] },
+                .{ cx + half[0], cy + half[1] },
+                .{ cx - half[0], cy + half[1] },
+            };
+            for (probes) |pt| {
+                if (outline_mod.signedInset(pl, pt[0], pt[1]) < -tol) return true;
+            }
+            return false;
+        }
+    }
+    return cx - half[0] < br.minx - tol or cx + half[0] > br.minx + br.w + tol or
+        cy - half[1] < br.miny - tol or cy + half[1] > br.miny + br.h + tol;
 }
 
 /// Which side of a reference box a point offset (dx,dy) falls on, normalized

@@ -511,6 +511,7 @@ src/paths.zig::PathError value
 src/paths.zig::designSiblingPath | fn designSiblingPath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ext: []const u8, ) PathError![]u8
 src/paths.zig::designSourcePath | fn designSourcePath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) PathError![]u8
 src/placement/drc.zig::Kind enum_
+src/placement/drc.zig::STAGING_EXEMPT_MM value
 src/placement/drc.zig::Violation struct_
 src/placement/drc.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, ) std.mem.Allocator.Error![]Violation
 src/placement/drc.zig::countKind | fn countKind(v: []const Violation, k: Kind) usize
@@ -586,6 +587,13 @@ src/placement/optimizer.zig::solvePinAdjacent | fn solvePinAdjacent( arena: std.
 src/placement/optimizer.zig::validateConstraints | fn validateConstraints( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, params: Params, ) std.mem.Allocator.Error![]const []const u8
 src/placement/optimizer.zig::worldCourtyard | fn worldCourtyard(p: Part) BoardRect
 src/placement/optimizer.zig::worldPadCenter | fn worldPadCenter(p: Part, lx: f64, ly: f64) [2]f64
+src/placement/outline.zig::CORNER_SEGS value
+src/placement/outline.zig::bboxRect | fn bboxRect(poly: []const [2]f64) optimizer.BoardRect
+src/placement/outline.zig::contains | fn contains(poly: []const [2]f64, x: f64, y: f64) bool
+src/placement/outline.zig::distToEdge | fn distToEdge(poly: []const [2]f64, x: f64, y: f64) f64
+src/placement/outline.zig::roundedRectPoly | fn roundedRectPoly(alloc: std.mem.Allocator, r: optimizer.BoardRect, radius: f64) std.mem.Allocator.Error![]const [2]f64
+src/placement/outline.zig::segCrossesEdge | fn segCrossesEdge(poly: []const [2]f64, x1: f64, y1: f64, x2: f64, y2: f64) ?[2]f64
+src/placement/outline.zig::signedInset | fn signedInset(poly: []const [2]f64, x: f64, y: f64) f64
 src/placement/pad_shape.zig::Shape struct_
 src/placement/pad_shape.zig::pointDist | fn pointDist(x0: f64, y0: f64, x1: f64, y1: f64, poly: []const [2]f64, px: f64, py: f64, slack: f64) f64
 src/placement/pad_shape.zig::shapeGap | fn shapeGap(a: Shape, b: Shape, slack: f64) f64

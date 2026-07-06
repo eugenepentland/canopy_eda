@@ -1648,6 +1648,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     const board_sides = try parseBoardSides(self, form_children);
     var w: f64 = 0;
     var h: f64 = 0;
+    var corner_radius: f64 = 0;
     var corners: std.ArrayListUnmanaged(env_mod.PlacementItem) = .empty;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
@@ -1660,6 +1661,10 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
             }
             continue;
         }
+        if (std.mem.eql(u8, head, "corner-radius")) {
+            if (c.len >= 2) corner_radius = @max(c[1].asNumber() orelse 0, 0);
+            continue;
+        }
         if (std.mem.eql(u8, head, "corners")) {
             for (c[1..]) |item_node| {
                 const ref = item_node.asString() orelse item_node.asAtom() orelse continue;
@@ -1670,6 +1675,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     return .{
         .w = w,
         .h = h,
+        .corner_radius = corner_radius,
         .sides = board_sides,
         .corners = corners.toOwnedSlice(self.allocator) catch &.{},
         .present = true,
@@ -2128,12 +2134,13 @@ test "buildNets renames bypass stubs onto the canonical root" {
     try testing.expect(found_stub);
 }
 
-// spec: eval/design_block - board form parses outline size, edge lists, and corners
+// spec: eval/design_block - board form parses outline size, corner radius, edge lists, and corners
 test "design-block parses a (board ...) form" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
         \\  (board (size 80 55)
+        \\    (corner-radius 3)
         \\    (left "usbc" "rj45")
         \\    (right (rot 90 "sma1"))
         \\    (corners "MK1" "MK2" "MK3" "MK4")))
@@ -2148,6 +2155,7 @@ test "design-block parses a (board ...) form" {
     try testing.expect(block.board.present);
     try testing.expectApproxEqAbs(@as(f64, 80), block.board.w, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 55), block.board.h, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 3), block.board.corner_radius, 1e-9);
     try testing.expectEqual(@as(usize, 2), block.board.sides.len);
     try testing.expectEqualStrings("usbc", block.board.sides[0].items[0].ref);
     try testing.expectEqual(@as(f64, 90), block.board.sides[1].items[0].rot.?);

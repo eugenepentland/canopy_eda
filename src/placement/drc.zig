@@ -16,6 +16,7 @@ const std = @import("std");
 const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
 const pad_shape = @import("pad_shape.zig");
+const outline = @import("outline.zig");
 const export_kicad = @import("../export_kicad.zig");
 
 const FlatNet = export_kicad.FlatNet;
@@ -246,10 +247,13 @@ fn checkDrillRules(
     }
 }
 
-/// copper ↔ board edge: when the design declares a `(board (size W H) …)`
-/// outline, routed copper (vias + tracks) must keep the copper-to-edge rule
-/// (`edge`) from it. Features clearly OUTSIDE the outline (the off-board
-/// staging band) are skipped — a workflow state, not an edge-clearance defect.
+/// copper ↔ board edge: when the design declares a board outline, routed
+/// copper (vias + tracks) must keep the copper-to-edge rule (`edge`, the
+/// `(design-rules (copper-edge …))` value, defaulting to the plain copper
+/// clearance) INSIDE it — measured against the exact polygon when the outline
+/// is non-rectangular (`board_poly`), else the rectangle. Features clearly
+/// outside (the off-board staging band, > STAGING_EXEMPT_MM out) are skipped —
+/// they're a workflow state, not an edge-clearance defect.
 fn checkBoardEdge(
     arena: std.mem.Allocator,
     out: *Viol,
@@ -259,10 +263,11 @@ fn checkBoardEdge(
     edge: f64,
 ) std.mem.Allocator.Error!void {
     const br = placement.board_rect orelse return;
+    const poly = placement.board_poly;
     for (vias) |v| {
         const vr = v.dia / 2;
-        const inset = edgeInset(br, v.x, v.y);
-        if (inset < -vr) continue; // fully off-board (staged)
+        const inset = boardInset(br, poly, v.x, v.y);
+        if (inset < -(vr + STAGING_EXEMPT_MM)) continue; // staging band
         const gap = inset - vr;
         if (gap < edge - EPS) {
             try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = edge, .kind = .board_edge });
@@ -270,21 +275,31 @@ fn checkBoardEdge(
     }
     for (tracks) |t| {
         const hw = t.width / 2;
-        // The inset function is concave over a segment, so its minimum is at an
-        // endpoint — checking both ends covers the whole track.
+        // For a rectangle the inset is concave over a segment, so the
+        // minimum is at an endpoint; a concave polygon can also cut the
+        // MIDDLE of a straight track, so that crossing is checked too.
         const ends = [_][2]f64{ .{ t.x1, t.y1 }, .{ t.x2, t.y2 } };
         var worst: f64 = std.math.inf(f64);
         var wx: f64 = t.x1;
         var wy: f64 = t.y1;
         for (ends) |e| {
-            const inset = edgeInset(br, e[0], e[1]);
+            const inset = boardInset(br, poly, e[0], e[1]);
             if (inset < worst) {
                 worst = inset;
                 wx = e[0];
                 wy = e[1];
             }
         }
-        if (worst < -hw) continue; // fully off-board (staged)
+        if (poly) |pl| {
+            if (worst > -(hw + STAGING_EXEMPT_MM)) {
+                if (outline.segCrossesEdge(pl, t.x1, t.y1, t.x2, t.y2)) |hit| {
+                    worst = 0;
+                    wx = hit[0];
+                    wy = hit[1];
+                }
+            }
+        }
+        if (worst < -(hw + STAGING_EXEMPT_MM)) continue; // staging band
         const gap = worst - hw;
         if (gap < edge - EPS) {
             try out.append(arena, .{ .x = wx, .y = wy, .gap = gap, .clearance = edge, .kind = .board_edge });
@@ -390,6 +405,12 @@ fn rectOverlap(a: optimizer.BoardRect, b: optimizer.BoardRect) struct { depth: f
     return .{ .depth = @min(ox, oy), .x = cx, .y = cy };
 }
 
+/// How far outside the outline a feature may sit before the board-edge check
+/// writes it off as staged (parked in the off-board staging band) rather
+/// than flagging it — copper just past the edge IS an error (it would be
+/// routed off the board), copper centimetres away is a workflow state.
+pub const STAGING_EXEMPT_MM: f64 = 10.0;
+
 /// Signed distance from (x,y) to the nearest board-outline edge — positive
 /// inside the rectangle, negative outside.
 fn edgeInset(br: optimizer.BoardRect, x: f64, y: f64) f64 {
@@ -398,6 +419,15 @@ fn edgeInset(br: optimizer.BoardRect, x: f64, y: f64) f64 {
     const dt = y - br.miny;
     const db = br.miny + br.h - y;
     return @min(@min(dl, dr), @min(dt, db));
+}
+
+/// Signed inset of (x,y) from the board outline: the exact polygon when the
+/// board is non-rectangular, else the rectangle. Positive = inside.
+fn boardInset(br: optimizer.BoardRect, poly: ?[]const [2]f64, x: f64, y: f64) f64 {
+    if (poly) |p| {
+        if (p.len >= 3) return outline.signedInset(p, x, y);
+    }
+    return edgeInset(br, x, y);
 }
 
 /// Shortest distance from point (px,py) to segment (ax,ay)-(bx,by).
@@ -605,6 +635,53 @@ test "check flags copper at the board edge, not staged copper" {
     const v = try check(arena, placement, routed, 0.127);
     try testing.expectEqual(@as(usize, 1), v.len);
     try testing.expectEqual(Kind.board_edge, v[0].kind);
+}
+
+// spec: placement/drc - checks the board edge against a non-rectangular outline polygon, catching copper in a notch
+test "check measures the exact outline polygon on an L-shaped board" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    // 10×10 board with the corner at (6..10, 4..10) notched out (y-down).
+    const l_poly = [_][2]f64{
+        .{ 0, 0 }, .{ 10, 0 }, .{ 10, 4 }, .{ 6, 4 }, .{ 6, 10 }, .{ 0, 10 },
+    };
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 },
+        .board_poly = &l_poly,
+    };
+    // Via at (8,8): INSIDE the bbox rectangle but in the notch — off the real
+    // board, only 2 mm out, so it must be flagged (not staging-exempt). A via
+    // at (3,5) sits ≥ clearance inside every polygon edge — clean. A via 20 mm
+    // below the board is parked in the staging band — skipped. The track cuts
+    // across the notch wall (both endpoints comfortably inside): flagged.
+    const vias = [_]router.Via{
+        .{ .x = 8, .y = 8, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 3, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 3, .y = 30, .dia = 0.4, .drill = 0.2, .net = 0 },
+    };
+    const tracks = [_]router.Track{
+        .{ .x1 = 2, .y1 = 8, .x2 = 9, .y2 = 8, .layer = 0, .width = 0.127, .net = 0 },
+    };
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &vias, .routed = 1, .total = 1 };
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 2), v.len);
+    for (v) |viol| try testing.expectEqual(Kind.board_edge, viol.kind);
+    // The notch via is reported at its own position, the track at the wall.
+    try testing.expectApproxEqAbs(@as(f64, 8), v[0].x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 6), v[1].x, 1e-9);
 }
 
 // spec: placement/drc - a routed module with a crowded ground pad has no clearance violations

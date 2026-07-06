@@ -492,10 +492,12 @@ pub const scope_form_docs = blk: {
             "the force / rough solver on /pcb-layout.",
     } };
     t[@intFromEnum(ScopeForm.board)] = .{ .scope = tl, .doc = .{
-        .syntax = "(board (size W H) " ++
+        .syntax = "(board (size W H) [(corner-radius R)] " ++
             "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(corners \"REF\"…)])",
         .summary = "Physical board outline + edge hardware: (size W H) is the outline in mm " ++
-            "(required — without it the form is inert). Each (left|right|top|bottom …) list " ++
+            "(required — without it the form is inert). (corner-radius R) rounds the outline's " ++
+            "corners with radius R mm — the shape flows to Edge.Cuts, the board-edge DRC, and " ++
+            "every renderer as a fine polyline. Each (left|right|top|bottom …) list " ++
             "docks those parts flush INSIDE that board edge (the words name physical edges, " ++
             "not sides of an anchor), slid along the edge toward the pads they connect to; " ++
             "(rot N \"REF\") overrides the default pads-inward rotation. (corners …) pins " ++

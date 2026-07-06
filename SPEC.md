@@ -173,6 +173,7 @@ Public functions: check, countKind
 - a routed module with a crowded ground pad has no clearance violations
 - flags a via whose annular ring is under the fab minimum
 - flags copper crowding the board outline and skips the off-board staging band
+- checks the board edge against a non-rectangular outline polygon, catching copper in a notch
 - flags same-layer track crossings and sub-clearance pairs between nets
 - flags a track crossing a foreign pad on its layer; other-layer SMD pads don't clash
 - flags two placed parts whose courtyards overlap, but not disjoint or opposite-side ones
@@ -180,6 +181,14 @@ Public functions: check, countKind
 - flags a drilled hole below the minimum drill diameter (pads and vias); SMD pads exempt
 - board-level design rules default to the toolchain's legacy constants when no form is authored
 - a (design-rules …) value overrides the matching default in the DRC
+
+## placement/outline
+
+Public functions: contains, distToEdge, signedInset, bboxRect, segCrossesEdge, roundedRectPoly
+
+- point-in-polygon and signed inset classify an L-shaped outline's interior, notch, and edges
+- a segment crossing a concave notch edge reports the crossing point
+- rounded-rect generation clamps the radius and keeps corner points inside the rect
 
 ## placement/module_policy
 
@@ -407,6 +416,7 @@ Public functions: planLayers, writeLayer
 - an outer-layer pour paints the copper file solid and isolates only foreign same-face features
 - the edge layer closes the board outline; silk strokes footprint art and ref-des text
 - the mask margin comes from (design-rules …), defaulting byte-identically to 0.05 mm
+- a non-rectangular board emits its exact outline polygon on the edge layer
 
 ## zipfile
 
@@ -647,7 +657,7 @@ Public functions: analyze
 - layout group form parses a labeled region over member block keys
 - layout edge form parses left/right edge-pinned block keys
 - hosts form records the sub-block instance names a section owns
-- board form parses outline size, edge lists, and corners
+- board form parses outline size, corner radius, edge lists, and corners
 - placement-group expands into a placement-order (pins) and a group (cohesion)
 - revision form captures id, date, and newest-first changelog
 - revision form with only an id is present with empty date/changelog
@@ -909,5 +919,6 @@ Public functions: designSourcePath, designSiblingPath
 
 ## Web Server
 
+- A saved layout round-trips a polygon board outline; the rect fields are re-derived as its bbox
 - Stamped module copper keeps its group tag through the sidecar so rigid-group moves carry it
 - Stamped module copper maps its net names onto the parent design via the origin-key bridge, slug-prefixing private nets
