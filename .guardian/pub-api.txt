@@ -402,6 +402,7 @@ src/export_gerber.zig::LayerFile struct_
 src/export_gerber.zig::PlaneLayer struct_
 src/export_gerber.zig::PlaneNet union_
 src/export_gerber.zig::planLayers | fn planLayers(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]const LayerFile
+src/export_gerber.zig::writeJobFile | fn writeJobFile( w: *std.Io.Writer, placement: optimizer.Placement, files: []const LayerFile, name_prefix: []const u8, ) std.Io.Writer.Error!void
 src/export_gerber.zig::writeLayer | fn writeLayer( w: *std.Io.Writer, arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, frame: export_fab.Frame, layer: Layer, function: []const u8, ) Error!void
 src/export_kicad.zig::ExportError value
 src/export_kicad.zig::FlatInstance struct_
@@ -443,9 +444,31 @@ src/export_kicad_netlist.zig::collectNets | fn collectNets( allocator: std.mem.A
 src/export_kicad_netlist.zig::extractFootprintName | fn extractFootprintName(allocator: std.mem.Allocator, source: []const u8) NetlistError![]const u8
 src/export_kicad_netlist.zig::extractPadNames | fn extractPadNames(allocator: std.mem.Allocator, source: []const u8) NetlistError![]const []const u8
 src/export_kicad_netlist.zig::writeNetlist | fn writeNetlist( allocator: std.mem.Allocator, design_name: []const u8, instances: []const FlatInstance, nets: []const FlatNet, fp_name_map: *const std.StringHashMap([]const u8), fp_pad_map: *const std.StringHashMap([]const []const u8), ) std.mem.Allocator.Error![]const u8
+src/fab_readiness.zig::Context struct_
+src/fab_readiness.zig::Item struct_
+src/fab_readiness.zig::Report struct_
+src/fab_readiness.zig::STAGING_BAND_MM value
+src/fab_readiness.zig::Stats struct_
+src/fab_readiness.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ctx: Context, ) std.mem.Allocator.Error!Report
+src/fab_readiness.zig::ok | fn ok(self: Report) bool
+src/fab_readiness.zig::writeJson | fn writeJson(w: *std.Io.Writer, report: Report) std.Io.Writer.Error!void
 src/font5x7.zig::GH value
 src/font5x7.zig::GW value
 src/font5x7.zig::cols | fn cols(c: u8) [GW]u8
+src/gerber_verify.zig::ApKind enum_
+src/gerber_verify.zig::Aperture struct_
+src/gerber_verify.zig::EPS_MM value
+src/gerber_verify.zig::ExpectFlash struct_
+src/gerber_verify.zig::ExpectSegment struct_
+src/gerber_verify.zig::Flash struct_
+src/gerber_verify.zig::Miss struct_
+src/gerber_verify.zig::ParseError value
+src/gerber_verify.zig::Parsed struct_
+src/gerber_verify.zig::Report struct_
+src/gerber_verify.zig::Segment struct_
+src/gerber_verify.zig::ok | fn ok(self: Report) bool
+src/gerber_verify.zig::parse | fn parse(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed
+src/gerber_verify.zig::verifyCopperLayer | fn verifyCopperLayer( arena: std.mem.Allocator, gerber_bytes: []const u8, frame: export_fab.Frame, flashes: []const ExpectFlash, segments: []const ExpectSegment, ) ParseError!Report
 src/id_insert.zig::IdInsertError value
 src/id_insert.zig::applyInserts | fn applyInserts( allocator: std.mem.Allocator, source: []const u8, pending: []const Evaluator.PendingId, pending_child: []const Evaluator.PendingChildId, ) IdInsertError![]u8
 src/id_insert.zig::insertPendingIds | fn insertPendingIds( allocator: std.mem.Allocator, source_path: []const u8, pending: []const Evaluator.PendingId, pending_child: []const Evaluator.PendingChildId, ) IdInsertError!void
@@ -1109,6 +1132,7 @@ src/serve/pcb_layout_page.zig::loadSyncLayout | fn loadSyncLayout( alloc: std.me
 src/serve/pcb_layout_page.zig::loadSyncVias | fn loadSyncVias( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, name: []const u8, ) ?[]const SyncVia
 src/serve/pcb_layout_page.zig::pcbCentroidApi | fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbDrillApi | fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbFabReadinessApi | fn pcbFabReadinessApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbGerbersApi | fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbLayoutJsonApi | fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbLayoutPage | fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void

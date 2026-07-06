@@ -1688,6 +1688,71 @@ function focusPart(want){
  flashIdx=idx;flashUntil=Date.now()+2600;paintSoon();
  if(!RO)selectComp(p.ref);
  return true;}
+// ── Fab-readiness gate (⤓ Gerbers) ──────────────────────────────────────
+// The Gerbers button no longer downloads blindly: it first fetches the
+// pre-fab readiness report (/api/fab-readiness) and, when there are errors
+// or warnings, opens a modal listing them. Errors offer "Download anyway"
+// (?force=1); warnings-only offer "Continue". A clean board downloads
+// straight through, no modal.
+function fabZipUrl(force){
+ var q=subq();
+ if(force)q=q?q+"&force=1":"?force=1";
+ return "/api/pcb-gerbers/"+encodeURIComponent(PCB.name)+q;}
+function fabDownload(force){
+ var a=document.createElement("a");
+ a.href=fabZipUrl(force);a.download="";
+ document.body.appendChild(a);a.click();document.body.removeChild(a);}
+function fabModalClose(){var m=document.getElementById("fab-modal");if(m)m.hidden=true;}
+function fabRenderReport(rep){
+ var h="";
+ function list(cls,label,items){
+  if(!items||!items.length)return "";
+  var s='<div class="fab-sec '+cls+'">'+label+' ('+items.length+')</div><ul>';
+  items.forEach(function(it){
+   var extra="";
+   if(it.net)extra=' <code>'+pEsc(it.net)+'</code>';
+   else if(it.ref)extra=' <code>'+pEsc(it.ref)+'</code>';
+   s+='<li>'+pEsc(it.message)+extra+'</li>';});
+  return s+'</ul>';}
+ h+=list("err","Errors — these block the fab package",rep.errors);
+ h+=list("warn","Warnings",rep.warnings);
+ if((!rep.errors||!rep.errors.length)&&(!rep.warnings||!rep.warnings.length))
+  h+='<div class="fab-sec ok">Board is fab-ready.</div>';
+ var s=rep.stats||{};
+ h+='<div class="fab-stats">'+(s.parts||0)+' parts · '+
+  (s.connected_nets||0)+'/'+(s.routable_nets||0)+' routable nets connected · '+
+  (s.tracks||0)+' tracks · '+(s.vias||0)+' vias · '+
+  (s.drc_violations||0)+' DRC · outline: '+(s.has_outline?"yes":"no")+'</div>';
+ return h;}
+function fabOpenModal(rep){
+ var m=document.getElementById("fab-modal");if(!m)return;
+ var body=document.getElementById("fab-body"),go=document.getElementById("fab-go"),
+  title=document.getElementById("fab-title");
+ body.innerHTML=fabRenderReport(rep);
+ var hasErr=rep.errors&&rep.errors.length;
+ title.textContent=hasErr?"Fab readiness — problems found":"Fab readiness — warnings";
+ go.textContent=hasErr?"Download anyway":"Continue — download";
+ go.className=hasErr?"btn fab-danger":"btn";
+ go.onclick=function(){fabModalClose();fabDownload(!!hasErr);};
+ m.hidden=false;}
+(function(){
+ var btn=document.getElementById("pcb-fab");if(!btn)return;
+ btn.addEventListener("click",function(){
+  btn.disabled=true;
+  fetch("/api/fab-readiness/"+encodeURIComponent(PCB.name)+subq())
+   .then(function(r){return r.ok?r.json():null;})
+   .then(function(rep){
+    if(!rep){fabDownload(false);return;} // no report (e.g. no saved layout) — let the ZIP endpoint answer
+    var clean=rep.ok&&(!rep.warnings||!rep.warnings.length);
+    if(clean)fabDownload(false);else fabOpenModal(rep);})
+   .catch(function(){fabDownload(false);})
+   .then(function(){btn.disabled=false;});});
+ var fx=document.getElementById("fab-x"),fc=document.getElementById("fab-cancel"),
+  fm=document.getElementById("fab-modal");
+ if(fx)fx.addEventListener("click",fabModalClose);
+ if(fc)fc.addEventListener("click",fabModalClose);
+ if(fm)fm.addEventListener("click",function(ev){if(ev.target===fm)fabModalClose();});
+})();
 // ── Two-window live cross-probe ─────────────────────────────────────────
 // The KiCad two-monitor workflow, browser-native: keep /schematics/<name>
 // open in another tab/window and clicking a part here highlights it there;

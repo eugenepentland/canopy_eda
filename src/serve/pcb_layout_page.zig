@@ -22,6 +22,7 @@ const drc = @import("../placement/drc.zig");
 const outline_mod = @import("../placement/outline.zig");
 const export_fab = @import("../export_fab.zig");
 const export_gerber = @import("../export_gerber.zig");
+const fab_readiness = @import("../fab_readiness.zig");
 const zipfile = @import("../zipfile.zig");
 const module_policy = @import("../placement/module_policy.zig");
 const modules_mod = @import("modules.zig");
@@ -489,7 +490,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // WebGL 3D-view stage — hidden until the "3D View" tab is opened, then the
     // body gets `.mode-3d` (CSS swaps the SVG out for this). Built lazily.
     if (!embed) try w.writeAll(PCB_3D_STAGE_HTML);
-    if (!embed) try w.writeAll(COURTYARD_MODAL);
+    if (!embed) try w.writeAll(COURTYARD_MODAL ++ FAB_MODAL);
     try w.writeAll("</main>");
     // Right sidebar: the saved-layouts history (manual snapshots + auto-recorded
     // optimizer runs). Lives in its own column so the board has the full centre
@@ -1784,7 +1785,29 @@ const FabView = struct {
     tracks: []const router.Track = &.{},
     vias: []const router.Via = &.{},
     frame: export_fab.Frame,
+    /// True when the blessed poses came from a saved snapshot (★ default →
+    /// newest manual → any named), false when they fell back to the bare
+    /// optimizer cache — the fab-readiness check surfaces the cache case as a
+    /// warning.
+    from_saved: bool = false,
 };
+
+/// The saved snapshot the blessed poses come from — the same precedence
+/// `chooseSyncPoses` walks (★ default → newest manual → any named), so the
+/// fab package's outline + routes are restored from the SAME layout its poses
+/// were. Null when only the optimizer cache exists.
+fn blessedLayout(layouts: []const SavedLayout) ?*const SavedLayout {
+    for (layouts) |*L| {
+        if (L.default and L.parts.len > 0) return L;
+    }
+    for (layouts) |*L| {
+        if (std.mem.eql(u8, L.kind, KIND_MANUAL) and L.parts.len > 0) return L;
+    }
+    for (layouts) |*L| {
+        if (L.parts.len > 0) return L;
+    }
+    return null;
+}
 
 /// Resolve `name`'s fab view (see `FabView`); null (+ client error status)
 /// when the design/module doesn't resolve or has no saved layout.
@@ -1792,8 +1815,9 @@ fn blessedFabView(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, name
     var placement = blessedPlacement(ctx, req, res, name) orelse return null;
     var tracks: []const router.Track = &.{};
     var vias: []const router.Via = &.{};
-    for (readLayouts(req.arena, ctx.project_dir, name)) |L| {
-        if (!L.default) continue;
+    var from_saved = false;
+    if (blessedLayout(readLayouts(req.arena, ctx.project_dir, name))) |L| {
+        from_saved = true;
         if (L.outline) |o| {
             placement.board_rect = .{ .minx = o.x, .miny = o.y, .w = o.w, .h = o.h };
             placement.board_poly = o.pts; // exact polygon when one was drawn
@@ -1804,9 +1828,8 @@ fn blessedFabView(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, name
                 vias = r.vias;
             }
         }
-        break;
     }
-    return .{ .placement = placement, .tracks = tracks, .vias = vias, .frame = export_fab.frameFor(placement) };
+    return .{ .placement = placement, .tracks = tracks, .vias = vias, .frame = export_fab.frameFor(placement), .from_saved = from_saved };
 }
 
 /// GET /api/pcb-centroid/:name — the pick-and-place centroid CSV at the
@@ -1841,22 +1864,68 @@ pub fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     res.body = aw.written();
 }
 
+/// Run the fab-readiness report over a resolved `FabView` (the same view the
+/// Gerber export builds), so the check and the files describe the same board.
+fn fabReadinessFor(req: *httpz.Request, fv: FabView) HandlerError!fab_readiness.Report {
+    const copper = export_gerber.Copper{ .tracks = fv.tracks, .vias = fv.vias };
+    return fab_readiness.check(req.arena, fv.placement, copper, .{ .from_saved_layout = fv.from_saved });
+}
+
+/// GET /api/fab-readiness/:name — the pre-fab correctness report for `name`'s
+/// blessed layout (audit item 0.1): `{ok,errors:[…],warnings:[…],stats:{…}}`,
+/// computed against the SAME blessed-layout selection the Gerber export uses.
+/// The viewer fetches this before download and gates on it; `pcbGerbersApi`
+/// enforces it server-side (409 on errors unless `?force=1`).
+pub fn pcbFabReadinessApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const fv = blessedFabView(ctx, req, res, name) orelse return;
+    const report = try fabReadinessFor(req, fv);
+    var aw: std.Io.Writer.Allocating = .init(req.arena);
+    try fab_readiness.writeJson(&aw.writer, report);
+    res.content_type = .JSON;
+    res.body = aw.written();
+}
+
 /// GET /api/pcb-gerbers/:name — the complete fab package as one ZIP: Gerber
 /// copper (outer signal layers + stackup-derived inner planes), solder mask,
-/// paste, silkscreen, board profile, Excellon PTH/NPTH drills, and the
-/// centroid CSV — all at the blessed poses with the ★ layout's persisted
-/// routed copper, in one shared y-up frame. What a board house needs to
-/// build the board, no KiCad in the loop.
+/// paste, silkscreen, board profile, Excellon PTH/NPTH drills, the centroid
+/// CSV, and a `.gbrjob` job file — all at the blessed poses with the ★
+/// layout's persisted routed copper, in one shared y-up frame. What a board
+/// house needs to build the board, no KiCad in the loop.
+///
+/// Gated by the fab-readiness report (`/api/fab-readiness`): if that finds
+/// blocking errors, this returns **HTTP 409** with the report JSON and writes
+/// nothing — unless `?force=1` overrides the gate (the viewer's "Download
+/// anyway"). Warnings never block. A clean (or forced) request downloads the
+/// ZIP as before.
 pub fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
     };
     const fv = blessedFabView(ctx, req, res, name) orelse return;
+
+    // Pre-fab gate: block on errors unless explicitly forced.
+    if (!queryFlag(req, "force")) {
+        const report = try fabReadinessFor(req, fv);
+        if (!report.ok()) {
+            res.status = 409;
+            var jw: std.Io.Writer.Allocating = .init(req.arena);
+            try fab_readiness.writeJson(&jw.writer, report);
+            res.content_type = .JSON;
+            res.body = jw.written();
+            return;
+        }
+    }
+
     const copper = export_gerber.Copper{ .tracks = fv.tracks, .vias = fv.vias };
 
     var entries: std.ArrayListUnmanaged(zipfile.Entry) = .empty;
-    for (try export_gerber.planLayers(req.arena, fv.placement)) |f| {
+    const layers = try export_gerber.planLayers(req.arena, fv.placement);
+    for (layers) |f| {
         var aw: std.Io.Writer.Allocating = .init(req.arena);
         try export_gerber.writeLayer(&aw.writer, req.arena, fv.placement, copper, fv.frame, f.layer, f.function);
         try entries.append(req.arena, .{
@@ -1864,6 +1933,14 @@ pub fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
             .data = aw.written(),
         });
     }
+    // The Gerber Job File ties the package together (board size, layer count,
+    // per-file FileFunction). Its Path fields match the entry names above.
+    var jbw: std.Io.Writer.Allocating = .init(req.arena);
+    try export_gerber.writeJobFile(&jbw.writer, fv.placement, layers, name);
+    try entries.append(req.arena, .{
+        .name = try std.fmt.allocPrint(req.arena, "{s}-job.gbrjob", .{name}),
+        .data = jbw.written(),
+    });
     var pth: std.Io.Writer.Allocating = .init(req.arena);
     try export_fab.excellonDrill(&pth.writer, req.arena, fv.placement.parts, fv.vias, .plated, fv.frame);
     try entries.append(req.arena, .{
@@ -3887,12 +3964,13 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
         "Copper is saved with the layout (Save/Update).\">\u{270E} Draw</button>");
     try w.writeAll(BAR_GRP_END);
     // Fab handoff: the complete manufacturing package at the saved (★) layout.
+    // A button (not a plain link) so it can run the pre-fab readiness gate
+    // first — clean downloads straight through, errors/warnings open a modal.
     try w.writeAll(BAR_GRP);
-    try w.writeAll("<a class=\"btn\" id=\"pcb-fab\" href=\"/api/pcb-gerbers/");
-    try writeAttr(w, name);
-    try w.writeAll("\" download title=\"Download the fab package (ZIP): Gerber copper / mask / paste / silk / " ++
-        "board profile + Excellon drills + centroid CSV, at the saved (\u{2605}) layout with its saved routed " ++
-        "copper. Save a layout first.\">\u{2913} Gerbers</a>");
+    try w.writeAll("<button class=\"btn\" id=\"pcb-fab\" title=\"Download the fab package (ZIP): Gerber copper / mask / paste / silk / " ++
+        "board profile + Excellon drills + centroid CSV + .gbrjob, at the saved (\u{2605}) layout with its saved routed " ++
+        "copper. Runs a pre-fab readiness check first (unrouted nets, DRC, off-board parts). Save a layout first.\">" ++
+        "\u{2913} Gerbers</button>");
     try w.writeAll(BAR_GRP_END);
     try w.writeAll("<span class=\"zoom-grp\"><button class=\"btn\" id=\"z-out\" title=\"Zoom out\">−</button>");
     try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");
@@ -5128,6 +5206,21 @@ const COURTYARD_MODAL =
     \\</div></div>
 ;
 
+// ── Fab-readiness modal ──────────────────────────────────────────────────
+
+/// Hidden-by-default overlay populated by BOARD_JS when the ⤓ Gerbers button
+/// finds the fab-readiness report non-clean. Lists errors + warnings; the
+/// primary action is "Download anyway" (force) on errors, "Continue" on
+/// warnings-only. Reuses the court-modal styling.
+const FAB_MODAL =
+    \\<div id="fab-modal" class="court-modal" hidden><div class="court-dialog fab-dialog">
+    \\<div class="court-h"><span id="fab-title">Fab readiness</span><button id="fab-x" class="court-x" title="Close">×</button></div>
+    \\<div id="fab-body" class="fab-body"></div>
+    \\<div class="court-actions"><button id="fab-go" class="btn">Download anyway</button>
+    \\<button id="fab-cancel" class="btn">Cancel</button></div>
+    \\</div></div>
+;
+
 // ── Styles + client renderer ─────────────────────────────────────────────
 
 const PAGE_CSS =
@@ -5384,6 +5477,18 @@ const PAGE_CSS =
     \\  border-radius:5px;padding:4px 11px;cursor:pointer;color:#c9d1d9}
     \\.court-dialog .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
     \\.court-dialog .btn:disabled{opacity:.45;cursor:default}
+    \\.fab-dialog{width:440px;max-width:92vw}
+    \\.fab-body{max-height:52vh;overflow-y:auto;margin-bottom:10px;font-size:12.5px;line-height:1.45}
+    \\.fab-body .fab-sec{font-weight:600;margin:8px 0 4px}
+    \\.fab-body .fab-sec.err{color:#f85149}
+    \\.fab-body .fab-sec.warn{color:#d29922}
+    \\.fab-body .fab-sec.ok{color:#3fb950}
+    \\.fab-body ul{margin:0 0 6px;padding-left:18px}
+    \\.fab-body li{margin:2px 0;color:#c9d1d9}
+    \\.fab-body li code{background:#0d1117;border:1px solid #21262d;border-radius:3px;padding:0 4px;color:#79c0ff}
+    \\.fab-body .fab-stats{color:#8b949e;font-size:11.5px;margin-top:8px;border-top:1px solid #21262d;padding-top:6px}
+    \\.court-dialog .btn.fab-danger{border-color:#f85149;color:#ff9d95}
+    \\.court-dialog .btn.fab-danger:hover{background:#3d1417;border-color:#f85149;color:#ffb3ab}
     \\.pcb-3d-stage{display:none;position:relative;width:100%;height:calc(100vh - 150px);min-height:460px;
     \\  background:#010409;border:1px solid #30363d;border-radius:8px;overflow:hidden}
     \\body.mode-3d .pcb-3d-stage{display:block}
