@@ -380,9 +380,13 @@
       if (wash && col) { ctx.fillStyle = col + "14"; roundRect(b.x, b.y, b.w, b.h, 10); ctx.fill(); }
       ctx.strokeStyle = col ? col + "55" : "#1d2733"; ctx.lineWidth = sw(1.6);
       roundRect(b.x, b.y, b.w, b.h, 10); ctx.stroke();
-      ctx.fillStyle = col || C.secLabel; ctx.font = "600 " + fs + "px sans-serif";
+      ctx.fillStyle = col || C.secLabel;
       ctx.textAlign = "left"; ctx.textBaseline = "middle";
-      ctx.fillText((b.num ? b.num + " · " : "") + b.name, b.x + 16, b.y + Math.max(24, fs * 0.75));
+      // Titles must FIT the band now that bands are column-width, not
+      // page-width — shrink to the box (and never taller than the header row).
+      const text = (b.num ? b.num + " · " : "") + b.name;
+      const fs2 = fitFont(text, Math.max(90, b.w - 30), Math.min(fs, 56), 10, "600");
+      ctx.fillText(text, b.x + 16, b.y + Math.max(22, fs2 * 0.72));
     });
 
     // Far-zoom glance: the whole board as titled bands + one chip per cell —
