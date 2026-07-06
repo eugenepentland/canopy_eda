@@ -174,7 +174,16 @@ P0 and P1 are implemented (this branch):
   labels 333 → 275; V1P8 stack no longer drawn in 5 cells; MCU cell deflated
   to 839×912. labstation: 21 authored bands; barracuda: 0 duplicate passives.
 
-P2 (2D packing, glance colors) remains open.
+P2 shipped as well (2026-07-06): bands place into category-family **columns**
+(power | mcu/clock | memory/comms | sensors/analog/peripherals |
+connectors/bring-up) with a height budget + spill, so the map lands near a
+landscape aspect instead of a ribbon (stm32n6 2508×10410 → 8985×2264;
+labstation 15726 → 3586 tall). Mostly-empty columns accept the next family so
+small designs don't smear. The glance layer is a real block diagram now:
+category-colored band containers (washed fill + colored numbered titles),
+cell chips with the component name nearly as large as the ref, and
+**band-to-band edges** aggregated from the signal links (weight ∝ link
+count — Core↔PSRAM 20, Core↔Expansion 18 on stm32n6), drawn under the boxes.
 
 ## Notes
 

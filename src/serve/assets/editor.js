@@ -374,11 +374,13 @@
     const ptVis = (x, y) => x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1;
 
     // Band containers (Power / multi-cell sections) — the wayfinding layer.
-    const drawBands = (fs) => (M.bands || []).forEach((b) => {
+    const drawBands = (fs, wash) => (M.bands || []).forEach((b) => {
       if (!boxVis(b.x, b.y, b.x + b.w, b.y + b.h)) return;
-      ctx.strokeStyle = b.power ? "#3a3423" : "#1d2733"; ctx.lineWidth = sw(1.6);
+      const col = b.col || (b.power ? C.rail : "");
+      if (wash && col) { ctx.fillStyle = col + "14"; roundRect(b.x, b.y, b.w, b.h, 10); ctx.fill(); }
+      ctx.strokeStyle = col ? col + "55" : "#1d2733"; ctx.lineWidth = sw(1.6);
       roundRect(b.x, b.y, b.w, b.h, 10); ctx.stroke();
-      ctx.fillStyle = b.power ? C.rail : C.secLabel; ctx.font = "600 " + fs + "px sans-serif";
+      ctx.fillStyle = col || C.secLabel; ctx.font = "600 " + fs + "px sans-serif";
       ctx.textAlign = "left"; ctx.textBaseline = "middle";
       ctx.fillText((b.num ? b.num + " · " : "") + b.name, b.x + 16, b.y + Math.max(24, fs * 0.75));
     });
@@ -387,26 +389,38 @@
     // "fit all" reads like a block diagram; zoom in (or double-click a chip)
     // for the full detail.
     if (s < GLANCE_S && M.mapBox) {
-      drawBands(Math.min(150, 20 / s));
+      // Block-diagram edges first (under the boxes): which subsystems talk,
+      // line weight by how many signal links run between them.
+      (M.bandLinks || []).forEach((e) => {
+        const A = (M.bands || [])[e.a], B = (M.bands || [])[e.b];
+        if (!A || !B) return;
+        ctx.strokeStyle = "#3d5573"; ctx.globalAlpha = 0.5;
+        ctx.lineWidth = sw(Math.min(6, 1.2 + Math.log2(1 + e.n) * 1.4));
+        ctx.beginPath(); ctx.moveTo(A.x + A.w / 2, A.y + A.h / 2); ctx.lineTo(B.x + B.w / 2, B.y + B.h / 2); ctx.stroke();
+        ctx.globalAlpha = 1;
+      });
+      drawBands(Math.min(150, 20 / s), true);
       const cfs = 14 / s;
       M.secs.forEach((sc) => {
         if (!boxVis(sc.x, sc.y, sc.x + sc.w, sc.y + sc.h)) return;
-        ctx.fillStyle = C.hub; ctx.strokeStyle = C.hubStroke; ctx.lineWidth = sw(1.4);
+        ctx.fillStyle = C.hub; ctx.strokeStyle = sc.col || C.hubStroke; ctx.lineWidth = sw(1.4);
         roundRect(sc.x, sc.y, sc.w, sc.h, 8); ctx.fill(); ctx.stroke();
         const label = sc.ref || sc.name || "";
         ctx.fillStyle = C.hubLabel; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-        fitFont(label, sc.w * 0.86, Math.min(sc.h * 0.34, cfs), 4, "600");
-        ctx.fillText(label, sc.cx, sc.cy - (sc.part ? sc.h * 0.1 : 0));
+        fitFont(label, sc.w * 0.86, Math.min(sc.h * 0.3, cfs), 4, "600");
+        ctx.fillText(label, sc.cx, sc.cy - (sc.part ? sc.h * 0.12 : 0));
         if (sc.part) {
+          // the component name is what tells a reader WHAT this is — keep it
+          // nearly as large as the ref instead of a footnote
           ctx.fillStyle = C.pinName;
-          fitFont(sc.part, sc.w * 0.86, Math.min(sc.h * 0.2, cfs * 0.6), 3);
-          ctx.fillText(sc.part, sc.cx, sc.cy + sc.h * 0.18);
+          fitFont(sc.part, sc.w * 0.9, Math.min(sc.h * 0.22, cfs * 0.8), 4);
+          ctx.fillText(sc.part, sc.cx, sc.cy + sc.h * 0.16);
         }
       });
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       return;
     }
-    drawBands(Math.min(40, Math.max(20, 12 / s)));
+    drawBands(Math.min(40, Math.max(20, 12 / s)), false);
 
     // Sections (dashed structure boxes) — dim those outside the active sheet.
     M.secs.forEach((sc) => {
@@ -2062,31 +2076,102 @@
       if (last && !last.name) last.cells.push.apply(last.cells, g.cells);
       else packs.push({ name: null, cells: g.cells });
     });
-    const CGX = 72, CGY = 64, MAXW = 2600, BAND_PAD = 24, BAND_HEAD = 68, BAND_GAP = 56;   // header tall enough that the band title clears the first cell's own title row
-    let cy = 0, bx1 = 0, by1 = 0;
-    m.bands = [];
-    packs.forEach((p) => {
-      const top = cy;
-      if (p.name) cy += BAND_HEAD;
-      let cx = 0, rowH = 0, right = 0;
-      p.cells.forEach((c) => {
-        if (cx > 0 && cx + c.w > MAXW) { cx = 0; cy += rowH + CGY; rowH = 0; }
-        c.x = cx; c.y = cy; cx += c.w + CGX; rowH = Math.max(rowH, c.h);
-        right = Math.max(right, c.x + c.w);
+    const CGX = 72, CGY = 64, BAND_PAD = 24, BAND_HEAD = 68, BAND_GAP = 56, COL_GAP = 150, BANDW = 1600;
+    // ── 2D floorplan packing ─────────────────────────────────────────
+    // Instead of one tall stack, bands place into category-family COLUMNS the
+    // way a hand block diagram reads: power feeds in from the left, the
+    // MCU/clock core sits beside it, then memory/comms, then the peripheral
+    // field, with connectors/bring-up on the right edge. A column that
+    // outgrows the height budget spills into a sibling column, so the whole
+    // map lands near a landscape aspect instead of a ribbon.
+    const CAT_COL = { mcu: "#1f6feb", power: "#e3b341", memory: "#8957e5", peripheral: "#2ea043", connector: "#d29922", clock: "#4a9a8a", comms: "#2196f3", sensor: "#3fb950", analog: "#e040fb", protection: "#8b949e" };
+    const famRankOf = (pk) => {
+      if (pk.name === "Power") return 0;
+      const cat = pk.name ? catOf.get(pk.name) : null;
+      if (cat === "power") return 0;
+      if (cat === "mcu" || cat === "clock") return 1;
+      if (cat === "memory" || cat === "comms") return 2;
+      if (cat === "connector" || cat === "protection") return 4;
+      if (!pk.name) return 4;                       // unsectioned + test points → the bring-up edge
+      return 3;                                     // sensors / analog / peripherals
+    };
+    packs.forEach((pk) => {
+      // pre-pack the band's cells into a local box (wrap at BANDW, or the
+      // widest single cell when one is larger)
+      let wrapW = BANDW;
+      pk.cells.forEach((c) => { wrapW = Math.max(wrapW, c.w); });
+      let cx = 0, py = pk.name ? BAND_HEAD : 0, rowH = 0, w = 0;
+      pk.cells.forEach((c) => {
+        if (cx > 0 && cx + c.w > wrapW) { cx = 0; py += rowH + CGY; rowH = 0; }
+        c.bx = cx; c.by = py; cx += c.w + CGX; rowH = Math.max(rowH, c.h);
+        w = Math.max(w, c.bx + c.w);
       });
-      cy += rowH;
-      if (p.name) {
-        m.bands.push({ name: p.name, num: m.bands.length + 1, x: -BAND_PAD, y: top, w: right + 2 * BAND_PAD, h: (cy - top) + BAND_PAD, count: p.cells.length, power: p.name === "Power" });
-        cy += BAND_PAD + BAND_GAP;
-      } else cy += CGY;
-      bx1 = Math.max(bx1, right);
+      pk.w = w; pk.h = py + rowH;
+      pk.fam = famRankOf(pk);
+      pk.cat = pk.name === "Power" ? "power" : (pk.name ? catOf.get(pk.name) : null);
     });
-    by1 = cy;
+    let area = 0, tallest = 0;
+    packs.forEach((pk) => {
+      area += (pk.w + 2 * BAND_PAD + COL_GAP) * (pk.h + BAND_PAD + BAND_GAP);
+      tallest = Math.max(tallest, pk.h + BAND_PAD + BAND_GAP);
+    });
+    const HBUDGET = Math.max(tallest, Math.sqrt(area / 2.2));   // aim near a 2:1-ish landscape
+    const cols = [];
+    // A family prefers its own column, but a mostly-empty column keeps
+    // accepting the next family (a tiny design shouldn't smear into six
+    // half-empty columns). Left-to-right reading order is preserved either way.
+    { let cur = null;
+      for (let fam = 0; fam <= 4; fam++) {
+        let famNew = true;
+        packs.forEach((pk) => {
+          if (pk.fam !== fam) return;
+          const ph = pk.h + BAND_PAD + BAND_GAP;
+          const famBreak = famNew && cur && cur.y > HBUDGET * 0.5;
+          if (!cur || famBreak || (cur.y > 0 && cur.y + ph > HBUDGET)) { cur = { w: 0, y: 0, items: [] }; cols.push(cur); }
+          famNew = false;
+          cur.items.push({ pk, y: cur.y });
+          cur.y += ph;
+          cur.w = Math.max(cur.w, pk.w + 2 * BAND_PAD);
+        });
+      }
+    }
+    let bx1 = 0, by1 = 0, colX = 0;
+    m.bands = [];
+    cols.forEach((col) => {
+      col.items.forEach((it) => {
+        const pk = it.pk;
+        const bcol = (pk.name && CAT_COL[pk.cat]) || "";
+        pk.cells.forEach((c) => { c.x = colX + BAND_PAD + c.bx; c.y = it.y + c.by; c.bcol = bcol; });
+        if (pk.name) {
+          pk.bandIdx = m.bands.length;
+          m.bands.push({ name: pk.name, num: m.bands.length + 1, x: colX, y: it.y, w: pk.w + 2 * BAND_PAD, h: pk.h + BAND_PAD,
+            count: pk.cells.length, power: pk.name === "Power", cat: pk.cat || "", col: CAT_COL[pk.cat] || "" });
+        }
+        bx1 = Math.max(bx1, colX + pk.w + 2 * BAND_PAD);
+        by1 = Math.max(by1, it.y + pk.h + BAND_PAD);
+      });
+      colX += col.w + COL_GAP;
+    });
+    // Aggregate inter-band signal links → the glance layer's block-diagram
+    // edges (which subsystems talk, and how much). Power rows aren't links,
+    // so this stays signal topology, not the everywhere power web.
+    { const bandIdxOfRef = new Map();
+      packs.forEach((pk) => { if (pk.name) pk.cells.forEach((c) => { if (c.ref) bandIdxOfRef.set(c.ref, pk.bandIdx); }); });
+      const ec = new Map();
+      links.forEach((lk) => {
+        const a = bandIdxOfRef.get(lk.a.ref), b = bandIdxOfRef.get(lk.b.ref);
+        if (a === undefined || b === undefined || a === b) return;
+        const k = a < b ? a + ":" + b : b + ":" + a;
+        ec.set(k, (ec.get(k) || 0) + 1);
+      });
+      m.bandLinks = [];
+      ec.forEach((n, k) => { const ab = k.split(":"); m.bandLinks.push({ a: +ab[0], b: +ab[1], n }); });
+    }
     // Emit the synthesized model (replacing the real layout).
     m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = []; m.chips = [];
     cells.forEach((c) => {
       const ox = c.x + c.ox, oy = c.y + c.oy;                      // content origin (inset by the cell margin)
-      m.secs.push({ name: c.title || "", ref: c.ref || "", part: c.tps ? "" : (compOf.get(c.ref) || ""), x: c.x, y: c.y, w: c.w, h: c.h, idx: 0, cx: c.x + c.w / 2, cy: c.y + c.h / 2 });   // region title: ref · part — section (ref/part feed the glance chips)
+      m.secs.push({ name: c.title || "", ref: c.ref || "", part: c.tps ? "" : (compOf.get(c.ref) || ""), col: c.bcol || "", x: c.x, y: c.y, w: c.w, h: c.h, idx: 0, cx: c.x + c.w / 2, cy: c.y + c.h / 2 });   // region title: ref · part — section (ref/part feed the glance chips)
       if (c.tps) {
         c.tps.forEach((t) => {
           const x = ox + t.x, y = oy + t.y;
