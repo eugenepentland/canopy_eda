@@ -292,10 +292,22 @@ fn writeSilk(g: *Gx, placement: optimizer.Placement, side: optimizer.Side) Error
     }
 }
 
-/// Board profile: the outline rectangle as a thin closed contour.
+/// Board profile as a thin closed contour: the exact outline polygon when
+/// the board is non-rectangular (viewer-drawn polygon / `(corner-radius R)`
+/// rounded rect, straight segments), else the outline rectangle.
 fn writeEdge(g: *Gx, placement: optimizer.Placement) Error!void {
-    const r = export_fab.outlineRect(placement);
     try g.use(.c, EDGE_W_MM, 0);
+    if (placement.board_poly) |poly| {
+        if (poly.len >= 3) {
+            var prev = poly[poly.len - 1];
+            for (poly) |v| {
+                try g.line(prev[0], prev[1], v[0], v[1]);
+                prev = v;
+            }
+            return;
+        }
+    }
+    const r = export_fab.outlineRect(placement);
     try g.line(r.minx, r.miny, r.minx + r.w, r.miny);
     try g.line(r.minx + r.w, r.miny, r.minx + r.w, r.miny + r.h);
     try g.line(r.minx + r.w, r.miny + r.h, r.minx, r.miny + r.h);
@@ -779,4 +791,34 @@ test "edge closes the outline and silk carries the ref-des" {
     try testing.expect(std.mem.indexOf(u8, silk_out, "X9000000Y6000000D02*\nX11000000Y6000000D01*") != null);
     // Ref-des strokes exist (the "U1" glyphs flash many single pixels).
     try testing.expect(std.mem.count(u8, silk_out, "D03*") >= 10);
+}
+
+// spec: export_gerber - a non-rectangular board emits its exact outline polygon on the edge layer
+test "edge layer traces the outline polygon when the board is non-rectangular" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // L-shaped 10×10 board with the (6..10, 4..10) corner notched out (y-down
+    // world). The fab frame origin is the polygon BBOX's bottom-left, so the
+    // notch vertices land at positive y-up coordinates.
+    const l_poly = [_][2]f64{
+        .{ 0, 0 }, .{ 10, 0 }, .{ 10, 4 }, .{ 6, 4 }, .{ 6, 10 }, .{ 0, 10 },
+    };
+    var placement = testPlacement(&.{}, &.{});
+    placement.board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 };
+    placement.board_poly = &l_poly;
+
+    var ew: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&ew.writer, arena, placement, .{}, export_fab.frameFor(placement), .edge, "Profile,NP");
+    const edge = ew.written();
+    // The notch corner (6,4) → y-up (6,6) is drawn to from (10,4) → (10,6).
+    try testing.expect(std.mem.indexOf(u8, edge, "X10000000Y6000000D02*\nX6000000Y6000000D01*") != null);
+    // The notch wall (6,4)→(6,10) → y-up (6,6)→(6,0).
+    try testing.expect(std.mem.indexOf(u8, edge, "X6000000Y6000000D02*\nX6000000Y0D01*") != null);
+    // The path closes: last vertex (0,10) → first (0,0), y-up (0,0)→(0,10).
+    try testing.expect(std.mem.indexOf(u8, edge, "X0Y0D02*\nX0Y10000000D01*") != null);
+    // The plain bbox rectangle's notched corner (10,10 y-down → 10,0 y-up)
+    // never appears as a draw target.
+    try testing.expect(std.mem.indexOf(u8, edge, "X10000000Y0D01*") == null);
 }

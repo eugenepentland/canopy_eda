@@ -442,6 +442,7 @@ test {
     _ = @import("placement/geometry.zig");
     _ = @import("placement/pin_roles.zig");
     _ = @import("placement/pad_shape.zig");
+    _ = @import("placement/outline.zig");
     _ = @import("placement/optimizer.zig");
     _ = @import("placement/router.zig");
     _ = @import("placement/drc.zig");

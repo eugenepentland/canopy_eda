@@ -31,16 +31,48 @@ const CV=document.createElement("canvas");CV.className="pcb-scene";
 // the layout), else the authored (board (size W H) …) rectangle.
 var gB=document.createElementNS(NS,"g");
 svg.insertBefore(gB,gR); gB.style.pointerEvents="none";
-PCB.outline=(PCB.outline_drawn&&PCB.board)?{x:PCB.board.x,y:PCB.board.y,w:PCB.board.w,h:PCB.board.h}:null;
+PCB.outline=(PCB.outline_drawn&&PCB.board)?{x:PCB.board.x,y:PCB.board.y,w:PCB.board.w,h:PCB.board.h,pts:(PCB.board_poly||null)}:null;
 function drawBoardRect(tmp){
  while(gB.firstChild)gB.removeChild(gB.firstChild);
+ if(polyPts&&polyPts.length){polySketch();return;} // ⬡ Poly in progress
  var br=tmp||PCB.outline||PCB.board;if(!br||!(br.w>0)||!(br.h>0))return;
  var drawn=!!(tmp||PCB.outline);
- gB.appendChild(el("rect",{x:X(br.x).toFixed(1),y:Y(br.y).toFixed(1),width:(br.w*S).toFixed(1),
-   height:(br.h*S).toFixed(1),fill:"none",stroke:"#7ee787","stroke-width":1.6,opacity:0.85,
-   "stroke-dasharray":tmp?"6 4":"0"}));
+ // Exact polygon outline (drawn ⬡ Poly pts, or the authored corner-radius
+ // shape the server sends as PCB.board_poly); rectangles keep the rect path.
+ var pts=tmp?null:(PCB.outline?(PCB.outline.pts||null):(PCB.board_poly||null));
+ if(pts&&pts.length>=3){
+  var str=pts.map(function(p){return X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1);}).join(" ");
+  gB.appendChild(el("polygon",{points:str,fill:"none",stroke:"#7ee787","stroke-width":1.6,opacity:0.85}));
+  // A drawn polygon's vertices stay editable: square handles, dragged in the
+  // pointer handlers (gB is pointer-events:none; hits are coordinate-tested).
+  if(drawn&&!RO)pts.forEach(function(p){gB.appendChild(el("rect",{
+    x:(X(p[0])-3.5).toFixed(1),y:(Y(p[1])-3.5).toFixed(1),width:7,height:7,
+    fill:"#0d1117",stroke:"#7ee787","stroke-width":1.2,opacity:0.9}));});
+ }else{
+  gB.appendChild(el("rect",{x:X(br.x).toFixed(1),y:Y(br.y).toFixed(1),width:(br.w*S).toFixed(1),
+    height:(br.h*S).toFixed(1),fill:"none",stroke:"#7ee787","stroke-width":1.6,opacity:0.85,
+    "stroke-dasharray":tmp?"6 4":"0"}));
+ }
  var bt=el("text",{x:(X(br.x)+6).toFixed(1),y:(Y(br.y)+14).toFixed(1),fill:"#7ee787","font-size":"11",opacity:0.85});
  bt.textContent=br.w.toFixed(1)+"×"+br.h.toFixed(1)+" mm"+(drawn?" (drawn)":""); gB.appendChild(bt);
+}
+// The in-progress ⬡ Poly sketch: placed vertices as a dashed open path, a
+// rubber segment to the cursor, and a ring marking the first vertex (the
+// click-to-close target).
+function polySketch(){
+ var str=polyPts.map(function(p){return X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1);}).join(" ");
+ gB.appendChild(el("polyline",{points:str,fill:"none",stroke:"#7ee787","stroke-width":1.6,
+   opacity:0.85,"stroke-dasharray":"6 4"}));
+ if(polyCur){var lp=polyPts[polyPts.length-1];
+  gB.appendChild(el("line",{x1:X(lp[0]).toFixed(1),y1:Y(lp[1]).toFixed(1),
+    x2:X(polyCur.x).toFixed(1),y2:Y(polyCur.y).toFixed(1),
+    stroke:"#7ee787","stroke-width":1,opacity:0.6,"stroke-dasharray":"3 3"}));}
+ var f=polyPts[0];
+ gB.appendChild(el("circle",{cx:X(f[0]).toFixed(1),cy:Y(f[1]).toFixed(1),r:6,fill:"none",
+   stroke:"#7ee787","stroke-width":1.4,opacity:0.9}));
+ polyPts.forEach(function(p){gB.appendChild(el("rect",{
+   x:(X(p[0])-3).toFixed(1),y:(Y(p[1])-3).toFixed(1),width:6,height:6,
+   fill:"#7ee787",opacity:0.9}));});
 }
 drawBoardRect();
 function wpt(i,lx,ly){var p=P[i],a=(p.rot||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a);
@@ -614,6 +646,7 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Explode / re-cohere hovered sub-circuit</span><kbd>G</kbd></div>'+
   '<div class="kbd-row"><span>Move whole sub-circuit</span><kbd>drag any of its parts</kbd></div>'+
   '<div class="kbd-row"><span>Draw board outline (click = clear)</span><kbd>▭ Outline, then drag</kbd></div>'+
+  '<div class="kbd-row"><span>Polygon outline (Enter close &middot; Backspace undo &middot; Esc cancel)</span><kbd>⬡ Poly, then click vertices</kbd></div>'+
   '<div class="kbd-row"><span>Hand-route mode (click pad → trace)</span><kbd>X</kbd></div>'+
   '<div class="kbd-row"><span>Drop via + flip layer (while routing)</span><kbd>V</kbd></div>'+
   '<div class="kbd-row"><span>Step back / finish trace</span><kbd>Backspace / Enter &middot; dbl-click</kbd></div>'+
@@ -642,7 +675,9 @@ var SPACE=false;
 document.addEventListener("keydown",function(ev){if((ev.key===" "||ev.code==="Space")&&!kbTyping(ev.target)){SPACE=true;ev.preventDefault();}});
 document.addEventListener("keyup",function(ev){if(ev.key===" "||ev.code==="Space")SPACE=false;});
 document.addEventListener("keydown",function(ev){
- if(ev.key=="Escape"){if(kbdOv){kbdClose();}else if(drawMode){if(dtrace)drawEnd();else drawModeSet(false);}else if(outlineMode){outDraw=null;outlineArm(false);drawBoardRect();}else{selClear();clearSel();}return;}
+ if(ev.key=="Escape"){if(kbdOv){kbdClose();}else if(drawMode){if(dtrace)drawEnd();else drawModeSet(false);}else if(polyMode){if(polyPts){polyPts=null;polyCur=null;drawBoardRect();}else polyArm(false);}else if(outlineMode){outDraw=null;outlineArm(false);drawBoardRect();}else{selClear();clearSel();}return;}
+ if(polyMode&&ev.key=="Enter"){ev.preventDefault();polyClose();return;}
+ if(polyMode&&(ev.key=="Backspace"||ev.key=="Delete")){ev.preventDefault();polyPop();return;}
  var typing=kbTyping(ev.target);
  if(ev.key=="?"&&!typing){ev.preventDefault();kbdToggle();return;}
  if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;
@@ -690,6 +725,8 @@ document.addEventListener("keydown",function(ev){if(!(ev.ctrlKey||ev.metaKey)||k
 undoBtns();
 var outBtn=document.getElementById("pcb-outline");
 if(outBtn)outBtn.addEventListener("click",function(){outlineArm(!outlineMode);});
+var polyBtn=document.getElementById("pcb-outline-poly");
+if(polyBtn)polyBtn.addEventListener("click",function(){polyArm(!polyMode);});
 document.getElementById("pcb-reset").addEventListener("click",function(){recordUndo();
  selClear();P.forEach(function(p,i){p.x=orig[i].x;p.y=orig[i].y;p.rot=orig[i].rot;p.side=orig[i].side;});applyAll();});
 document.getElementById("pcb-score").addEventListener("click",fetchScore);
@@ -937,13 +974,55 @@ var pan=null,marq=null,marqEl=null;
 // with the layout (SavedLayout.outline) and becomes the board edge every
 // renderer draws and the board-edge DRC checks. RO pages never arm it.
 var outlineMode=false,outDraw=null;
-function outlineArm(on){outlineMode=on;
+function outlineArm(on){
+ if(on&&polyMode)polyArm(false);
+ outlineMode=on;
  var b=document.getElementById("pcb-outline");if(b)b.classList.toggle("on",on);
- svg.classList.toggle("outline-mode",on);
+ svg.classList.toggle("outline-mode",on||polyMode);
  var msg=document.getElementById("pcb-savemsg");
  if(msg&&on){msg.style.color="#7ee787";
   msg.textContent="outline: drag a rectangle on the board (plain click clears, Esc cancels)";}
  else if(msg&&!outDraw){msg.textContent="";}}
+// ⬡ Poly tool: click to place polygon-outline vertices (grid-snapped); click
+// the first vertex or press Enter to close, Backspace removes the last
+// vertex, Esc cancels. The closed polygon becomes PCB.outline
+// ({x,y,w,h}=bbox + pts) — persisted by Save/Update exactly like the
+// rectangle — and its vertices stay draggable for editing afterwards.
+var polyMode=false,polyPts=null,polyCur=null,vdrag=null;
+function polyArm(on){if(RO&&on)return;
+ if(on&&outlineMode)outlineArm(false);
+ if(on&&drawMode)drawModeSet(false);
+ polyMode=on;
+ if(!on){polyPts=null;polyCur=null;}
+ var b=document.getElementById("pcb-outline-poly");if(b)b.classList.toggle("on",on);
+ svg.classList.toggle("outline-mode",on||outlineMode);
+ var msg=document.getElementById("pcb-savemsg");
+ if(msg&&on){msg.style.color="#7ee787";
+  msg.textContent="polygon outline: click to place vertices — click the first vertex or Enter closes, Backspace undoes, Esc cancels";}
+ else if(msg&&!on){msg.textContent="";}
+ drawBoardRect();}
+function outlineMsg(txt){var msg=document.getElementById("pcb-savemsg");
+ if(msg){msg.style.color="#8b949e";msg.textContent=txt;}}
+// Re-derive a polygon outline's rect fields from its vertex bbox (the server
+// does the same on parse, so the pair can never disagree).
+function outlineBboxSync(){var o=PCB.outline;if(!o||!o.pts)return;
+ var ax=1e18,ay=1e18,bx=-1e18,by=-1e18;
+ o.pts.forEach(function(p){ax=Math.min(ax,p[0]);ay=Math.min(ay,p[1]);bx=Math.max(bx,p[0]);by=Math.max(by,p[1]);});
+ o.x=ax;o.y=ay;o.w=bx-ax;o.h=by-ay;}
+function polyClose(){
+ if(!polyPts||polyPts.length<3){polyArm(false);drawBoardRect();return;}
+ var prev=PCB.outline,pts=polyPts.slice();polyPts=null;polyCur=null;
+ PCB.outline={x:0,y:0,w:0,h:0,pts:pts};outlineBboxSync();
+ var ok=PCB.outline.w>=2&&PCB.outline.h>=2;
+ if(!ok)PCB.outline=prev;
+ polyArm(false);drawBoardRect();
+ outlineMsg(ok?"polygon outline set — Save/Update to keep":"polygon too small — outline unchanged");}
+function polyPop(){if(polyPts&&polyPts.length){polyPts.pop();if(!polyPts.length)polyPts=null;drawBoardRect();}}
+// The drawn-polygon vertex under a board point, or -1 (handle-sized hit box).
+function vtxAt(m){var o=PCB.outline;if(!o||!o.pts)return -1;
+ var bd=7/S,best=-1;
+ o.pts.forEach(function(p,i){var d=Math.max(Math.abs(p[0]-m.x),Math.abs(p[1]-m.y));if(d<=bd){bd=d;best=i;}});
+ return best;}
 // Start a viewport pan from the current pointer. Shared by the empty-space
 // handler below AND the part/pad pointerdown handlers (defined earlier, this is
 // hoisted), so a middle-button or Space-held drag pans the board even when the
@@ -990,6 +1069,16 @@ function touchUp(ev){
 svg.addEventListener("pointercancel",function(ev){touchUp(ev);
  if(ev.pointerType==="touch"&&touchCount()===0){pan=null;pinch=null;svg.style.cursor="";}});
 svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.preventDefault();
+ if((outlineMode||polyMode)&&ev.button===0&&!polyPts){var hv=vtxAt(mm(ev));
+  if(hv>=0){vdrag={i:hv,moved:false};pcap(ev);return;}}
+ if(polyMode){if(ev.button!==0)return;
+  var pm=mm(ev);
+  if(polyPts&&polyPts.length>=3){var pf=polyPts[0];
+   if(Math.max(Math.abs(pm.x-pf[0]),Math.abs(pm.y-pf[1]))<=7/S){polyClose();return;}}
+  polyPts=polyPts||[];
+  var np=[Math.round(pm.x/G)*G,Math.round(pm.y/G)*G],lp2=polyPts[polyPts.length-1];
+  if(!lp2||lp2[0]!==np[0]||lp2[1]!==np[1])polyPts.push(np);
+  polyCur=null;drawBoardRect();return;}
  if(outlineMode){var om=mm(ev);outDraw={x0:om.x,y0:om.y,x1:om.x,y1:om.y};
   pcap(ev);return;}
  if(SPACE||ev.button===1){startPan(ev);return;}
@@ -997,6 +1086,7 @@ svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.pre
  if(ev.pointerType==="touch"){touchDown(ev);return;}
  var m=mm(ev),hi=partAt(m.x,m.y);
  if(hi<0){
+  if(!RO){var uv=vtxAt(m);if(uv>=0){vdrag={i:uv,moved:false};pcap(ev);return;}}
   marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false};pcap(ev);
   marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);return;}
  // Part gesture (hit-tested — parts are canvas-painted, not DOM).
@@ -1009,6 +1099,11 @@ svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.pre
  drag={i:hi,ox:P[hi].x-m.x,oy:P[hi].y-m.y,m0:m,snap:snapPoses()};svg.style.cursor="grabbing";});
 svg.addEventListener("pointermove",function(ev){
  if(ev.pointerType==="touch"&&touchMove(ev))return; // active pinch consumed it
+ if(vdrag){var vv=mm(ev),vgx=Math.round(vv.x/G)*G,vgy=Math.round(vv.y/G)*G,vo=PCB.outline;
+  if(vo&&vo.pts&&vdrag.i<vo.pts.length&&(vo.pts[vdrag.i][0]!==vgx||vo.pts[vdrag.i][1]!==vgy)){
+   vo.pts[vdrag.i]=[vgx,vgy];vdrag.moved=true;outlineBboxSync();drawBoardRect();}
+  return;}
+ if(polyMode&&polyPts){polyCur=mm(ev);drawBoardRect();return;}
  if(outDraw){var om=mm(ev);outDraw.x1=om.x;outDraw.y1=om.y;
   drawBoardRect({x:Math.min(outDraw.x0,outDraw.x1),y:Math.min(outDraw.y0,outDraw.y1),
    w:Math.abs(outDraw.x1-outDraw.x0),h:Math.abs(outDraw.y1-outDraw.y0)});return;}
@@ -1038,13 +1133,16 @@ svg.addEventListener("pointermove",function(ev){
  if(hi!==cur){cur=hi;
   var hg=(hi>=0)?grpOf(P[hi].ref):null;
   hoverGrpName=(hg&&grpRigid(hg))?hg:null;
-  svg.style.cursor=outlineMode?"":(hi<0?"":(P[hi].locked?"not-allowed":(RO?"":"grab")));
+  svg.style.cursor=(outlineMode||polyMode)?"":(hi<0?"":(P[hi].locked?"not-allowed":(RO?"":"grab")));
   paintSoon();}});
 function clickPart(ev,i){var m=mm(ev),pd=padAt(i,m.x,m.y);
  if(pd&&pd.net)selNet(pd.net);
  if(!RO)selectComp(P[i].ref);}
 svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.pointerId);}catch(e){}
  if(ev.pointerType==="touch")touchUp(ev);
+ if(vdrag){var vd=vdrag;vdrag=null;
+  if(vd.moved)outlineMsg("outline edited — Save/Update to keep");
+  return;}
  if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap,gdn=gdrag.down;gdrag=null;svg.style.cursor="";
   // No movement = a plain click on a rigid-group / multi-selected part —
   // select it like any other part instead of swallowing the click.
@@ -1118,6 +1216,7 @@ function drawBtnSync(){var b=document.getElementById("pcb-draw");if(!b)return;
  b.textContent=drawMode?(dtrace?("✎ "+nLeaf(dtrace.net)+" · "+(dtrace.l?"B.Cu":"F.Cu")):"✎ click a pad…"):"✎ Draw";}
 function drawModeSet(on){if(RO)return;drawMode=on;if(!on)dtrace=null;
  if(on&&outlineMode)outlineArm(false);
+ if(on&&polyMode)polyArm(false);
  svg.style.cursor=on?"crosshair":"";drawBtnSync();ovPaintSoon();}
 // 45°-family snap from the last vertex: H / V / diagonal by dominance, on
 // the grid. Shift = free angle (grid only).

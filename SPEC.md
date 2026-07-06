@@ -170,8 +170,17 @@ Public functions: check
 - a routed module with a crowded ground pad has no clearance violations
 - flags a via whose annular ring is under the fab minimum
 - flags copper crowding the board outline and skips the off-board staging band
+- checks the board edge against a non-rectangular outline polygon, catching copper in a notch
 - flags same-layer track crossings and sub-clearance pairs between nets
 - flags a track crossing a foreign pad on its layer; other-layer SMD pads don't clash
+
+## placement/outline
+
+Public functions: contains, distToEdge, signedInset, bboxRect, segCrossesEdge, roundedRectPoly
+
+- point-in-polygon and signed inset classify an L-shaped outline's interior, notch, and edges
+- a segment crossing a concave notch edge reports the crossing point
+- rounded-rect generation clamps the radius and keeps corner points inside the rect
 
 ## placement/module_policy
 
@@ -397,6 +406,7 @@ Public functions: planLayers, writeLayer
 - mask openings expand pads and tent vias; paste covers only same-side SMD pads
 - an inner plane pours solid copper and antipads only foreign holes
 - the edge layer closes the board outline; silk strokes footprint art and ref-des text
+- a non-rectangular board emits its exact outline polygon on the edge layer
 
 ## zipfile
 
@@ -634,7 +644,7 @@ Public functions: analyze
 - layout group form parses a labeled region over member block keys
 - layout edge form parses left/right edge-pinned block keys
 - hosts form records the sub-block instance names a section owns
-- board form parses outline size, edge lists, and corners
+- board form parses outline size, corner radius, edge lists, and corners
 - placement-group expands into a placement-order (pins) and a group (cohesion)
 - revision form captures id, date, and newest-first changelog
 - revision form with only an id is present with empty date/changelog
@@ -896,5 +906,6 @@ Public functions: designSourcePath, designSiblingPath
 
 ## Web Server
 
+- A saved layout round-trips a polygon board outline; the rect fields are re-derived as its bbox
 - Stamped module copper keeps its group tag through the sidecar so rigid-group moves carry it
 - Stamped module copper maps its net names onto the parent design via the origin-key bridge, slug-prefixing private nets

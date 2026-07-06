@@ -45,6 +45,7 @@ const pin_roles = @import("pin_roles.zig");
 const module_policy = @import("module_policy.zig");
 const router = @import("router.zig");
 const drc = @import("drc.zig");
+const outline_mod = @import("outline.zig");
 const parser = @import("../sexpr/parser.zig");
 const infra_fs = @import("../infra/fs.zig");
 
@@ -498,6 +499,14 @@ pub const Placement = struct {
     /// world coordinates (same frame as `parts`). Null when the design has no
     /// effective board form — renderers draw no outline.
     board_rect: ?BoardRect = null,
+    /// The EXACT outline as a closed polygon (world mm, straight segments)
+    /// when the board is non-rectangular — an authored `(corner-radius R)`
+    /// rounded rect or a viewer-drawn polygon. Null = plain rectangle
+    /// (`board_rect` is the whole story). When set, `board_rect` is always
+    /// this polygon's bounding box (the solver keeps placing against the
+    /// bbox; only exact-shape consumers — DRC, Gerber Edge.Cuts, the
+    /// renderers — read the polygon).
+    board_poly: ?[]const [2]f64 = null,
     /// Board-level routing rules resolved from the design's `(stackup …)` and
     /// `(net-class …)` forms — see `BoardRules`.
     rules: BoardRules = .{},
@@ -5493,6 +5502,15 @@ fn boardRectFromPoses(
     };
 }
 
+/// The authored exact outline polygon for a resolved board rectangle:
+/// `(board … (corner-radius R))` yields the rounded-rect polyline, a plain
+/// `(size W H)` yields null (the rectangle IS the outline). Kept next to the
+/// rect derivation so `board_rect`/`board_poly` can never disagree.
+fn authoredBoardPoly(arena: std.mem.Allocator, r: BoardRect, spec: env.BoardSpec) std.mem.Allocator.Error!?[]const [2]f64 {
+    if (!(spec.corner_radius > 0)) return null;
+    return try outline_mod.roundedRectPoly(arena, r, spec.corner_radius);
+}
+
 /// The design's plane-carrying net names per its `(stackup …)` form, in the
 /// shape `Placement.plane_nets` documents (null = legacy implicit planes).
 fn planeNetsOf(arena: std.mem.Allocator, block: *const DesignBlock) std.mem.Allocator.Error!?[]const []const u8 {
@@ -5653,6 +5671,7 @@ pub fn solve(
     if (board_live) {
         if (board_rect == null) board_rect = try boardRectFromPoses(arena, parts, prep.instances, block.board);
         pl.board_rect = board_rect;
+        pl.board_poly = try authoredBoardPoly(arena, board_rect.?, block.board);
         // The view frame must include the outline even where it reaches past
         // the parts (a sparse board on a big rectangle).
         const r = board_rect.?;
@@ -5797,6 +5816,7 @@ pub fn placeFromPoses(
     if (block.board.present and block.board.w > 0 and block.board.h > 0) {
         const r = try boardRectFromPoses(arena, parts, prep.instances, block.board);
         pl.board_rect = r;
+        pl.board_poly = try authoredBoardPoly(arena, r, block.board);
         pl.minx = @min(pl.minx, r.minx);
         pl.miny = @min(pl.miny, r.miny);
         pl.maxx = @max(pl.maxx, r.minx + r.w);

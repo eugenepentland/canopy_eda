@@ -1,8 +1,8 @@
 # guardian-snapshot v1
 src/bom_resolve.zig:682: more than one top-level loop
-src/eval/design_block.zig:1800: switch at top level of test body
-src/eval/design_block.zig:1822: switch at top level of test body
-src/eval/design_block.zig:1848: switch at top level of test body
-src/eval/design_block.zig:1874: switch at top level of test body
+src/eval/design_block.zig:1806: switch at top level of test body
+src/eval/design_block.zig:1828: switch at top level of test body
+src/eval/design_block.zig:1854: switch at top level of test body
+src/eval/design_block.zig:1880: switch at top level of test body
 src/kicad_pcb/format.zig:107: while at top level of test body
 src/kicad_pcb/writer.zig:2284: while at top level of test body

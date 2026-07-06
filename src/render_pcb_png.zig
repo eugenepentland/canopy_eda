@@ -723,16 +723,44 @@ const Ctx = struct {
         }
     }
 
-    /// The `(board (size W H) …)` outline rectangle with its dimensions, under
-    /// the parts — the physical board edge everything must stay inside.
+    /// The board outline with its dimensions, under the parts — the physical
+    /// board edge everything must stay inside. Non-rectangular boards (a
+    /// drawn polygon / `(corner-radius R)`) stroke the exact polygon; the
+    /// dimension label stays the bounding box.
     fn drawBoardOutline(self: *Ctx) void {
         const r = self.p.board_rect orelse return;
         const x0 = self.xpx(r.minx);
         const y0 = self.ypx(r.miny);
+        if (self.p.board_poly) |poly| {
+            if (poly.len >= 3) {
+                // Rounded rects run 36 points, hand-drawn polygons a handful;
+                // spill to the heap only for an unusually dense outline.
+                var stack: [64][2]f32 = undefined;
+                var pts: [][2]f32 = &stack;
+                var heap = false;
+                if (poly.len > stack.len) {
+                    if (self.cv.alloc.alloc([2]f32, poly.len)) |b| {
+                        pts = b;
+                        heap = true;
+                    } else |_| {}
+                }
+                defer if (heap) self.cv.alloc.free(pts);
+                const n = @min(poly.len, pts.len);
+                for (poly[0..n], 0..) |pp, i| pts[i] = .{ self.xpx(pp[0]), self.ypx(pp[1]) };
+                self.cv.strokePath(pts[0..n], .closed, self.pw(1.4), EDGE_COL, 0.9);
+                self.labelBoardDims(r, x0, y0);
+                return;
+            }
+        }
         const x1 = self.xpx(r.minx + r.w);
         const y1 = self.ypx(r.miny + r.h);
         const pts = [_][2]f32{ .{ x0, y0 }, .{ x1, y0 }, .{ x1, y1 }, .{ x0, y1 }, .{ x0, y0 } };
         self.cv.strokePath(&pts, .open, self.pw(1.4), EDGE_COL, 0.9);
+        self.labelBoardDims(r, x0, y0);
+    }
+
+    /// The outline's W×H dimension label at its bbox top-left corner.
+    fn labelBoardDims(self: *Ctx, r: optimizer.BoardRect, x0: f32, y0: f32) void {
         var buf: [32]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "{d:.0}x{d:.0}mm", .{ r.w, r.h }) catch "";
         self.cv.text(x0 + self.pw(4), y0 + self.pw(3), s, self.pw(8), EDGE_COL, 0.9, .start);
