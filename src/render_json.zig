@@ -121,6 +121,9 @@ const JsonHub = struct {
     /// cells into bands by this instead of geometric containment, so a
     /// module's parts land on the author's sheet, not a module-title one.
     sec: []const u8 = "",
+    /// Section-grid card index this hub renders in — shared with every passive
+    /// the card emits, so the editor pairs a module's caps with its own IC.
+    slot: ?usize = null,
     left_pins: std.ArrayListUnmanaged(JsonPin),
     right_pins: std.ArrayListUnmanaged(JsonPin),
 };
@@ -215,6 +218,8 @@ const JsonPassive = struct {
     y: f64,
     w: f64,
     h: f64,
+    /// Section-grid card the emitting hub renders in (see JsonHub.slot).
+    slot: ?usize = null,
     count: u32 = 1,
     src_offset: u32 = 0,
     /// `(decouples "IC" PAD)` binding (module-local ref + resolved pad), copied off
@@ -961,11 +966,16 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
             // Collect hub data
             var json_hub = try collectHubData(&ctx, allocator, cell.hub_inst, cell.part, x_offset, content_y, &alt_map, &asserted_fns);
             json_hub.sec = sg.sheet;
+            json_hub.slot = cell.section_idx;
             try scene.hubs.append(allocator, json_hub);
 
             // Collect connections for this hub (writes wires/passives straight
             // into `scene`; it doesn't mutate the JsonHub row appended above).
+            // Everything the card emits gets the card's slot id, so the editor
+            // can pair a module's decoupling caps with the module's own IC.
+            const passives_before = scene.passives.items.len;
             try collectHubConnections(&ctx, &scene, allocator, cell.hub_inst, cell.part, x_offset, content_y);
+            for (scene.passives.items[passives_before..]) |*jp| jp.slot = cell.section_idx;
 
             content_y += h + CELL_BLOCK_GAP;
         }
@@ -1965,6 +1975,7 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         try writeJsonString(w, "symbol", p.symbol);
         try w.print(",\"x\":{d:.1},\"y\":{d:.1},\"w\":{d:.1},\"h\":{d:.1}", .{ p.x, p.y, p.w, p.h });
         try w.print(",\"count\":{d},\"src\":{d},\"flip\":{s}", .{ p.count, p.src_offset, if (p.flip) "true" else "false" });
+        if (p.slot) |sl| try w.print(",\"slot\":{d}", .{sl});
         if (p.decouple_pin.len > 0) {
             try w.writeAll(",");
             try writeJsonString(w, "decouplePin", p.decouple_pin);
@@ -2130,6 +2141,7 @@ fn writeJsonHub(w: anytype, h: JsonHub) !void {
         try w.writeAll(",");
         try writeJsonString(w, "sec", h.sec);
     }
+    if (h.slot) |sl| try w.print(",\"slot\":{d}", .{sl});
     try w.writeAll(",\"leftPins\":[");
     for (h.left_pins.items, 0..) |pin, pi| {
         if (pi > 0) try w.writeAll(",");
