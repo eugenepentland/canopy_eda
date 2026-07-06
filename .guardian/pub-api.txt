@@ -182,6 +182,7 @@ src/eval/env.zig::CalcResult struct_
 src/eval/env.zig::Check union_
 src/eval/env.zig::ConstraintPriority enum_
 src/eval/env.zig::DesignBlock struct_
+src/eval/env.zig::DesignRulesSpec struct_
 src/eval/env.zig::Drive enum_
 src/eval/env.zig::EdgeSide enum_
 src/eval/env.zig::ElectricalDecl struct_
@@ -510,9 +511,9 @@ src/paths.zig::PathError value
 src/paths.zig::designSiblingPath | fn designSiblingPath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ext: []const u8, ) PathError![]u8
 src/paths.zig::designSourcePath | fn designSourcePath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) PathError![]u8
 src/placement/drc.zig::Kind enum_
-src/placement/drc.zig::MIN_ANNULAR_MM value
 src/placement/drc.zig::Violation struct_
 src/placement/drc.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, ) std.mem.Allocator.Error![]Violation
+src/placement/drc.zig::countKind | fn countKind(v: []const Violation, k: Kind) usize
 src/placement/geometry.zig::BBOX_MARGIN_MM value
 src/placement/geometry.zig::Geom struct_
 src/placement/geometry.zig::Pad struct_
@@ -536,6 +537,7 @@ src/placement/module_policy.zig::isInterestingClass | fn isInterestingClass(c: N
 src/placement/optimizer.zig::BoardRect struct_
 src/placement/optimizer.zig::BoardRules struct_
 src/placement/optimizer.zig::Breakdown struct_
+src/placement/optimizer.zig::DesignRules struct_
 src/placement/optimizer.zig::Edge enum_
 src/placement/optimizer.zig::FlatNet value
 src/placement/optimizer.zig::FullRouted struct_
@@ -558,6 +560,7 @@ src/placement/optimizer.zig::Score struct_
 src/placement/optimizer.zig::SeedMode enum_
 src/placement/optimizer.zig::Side enum_
 src/placement/optimizer.zig::Stub struct_
+src/placement/optimizer.zig::edgeClearance | fn edgeClearance(self: DesignRules) f64
 src/placement/optimizer.zig::effAlignW | fn effAlignW(params: Params) f64
 src/placement/optimizer.zig::faceRotation | fn faceRotation(pwr: PadRect, edge: Edge) f64
 src/placement/optimizer.zig::fromStr | fn fromStr(s: []const u8) Side
@@ -572,12 +575,14 @@ src/placement/optimizer.zig::perPartBlame | fn perPartBlame(p: Placement, params
 src/placement/optimizer.zig::pickAnchorHub | fn pickAnchorHub(parts: []const Part, nets: []const FlatNet) ?usize
 src/placement/optimizer.zig::placeFromPoses | fn placeFromPoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!Placement
 src/placement/optimizer.zig::placementDiag | fn placementDiag() PlacementDiag
+src/placement/optimizer.zig::pourEdge | fn pourEdge(self: DesignRules) f64
 src/placement/optimizer.zig::routedScorePoses | fn routedScorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!f64
 src/placement/optimizer.zig::scorePoses | fn scorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!Breakdown
 src/placement/optimizer.zig::setProgressSink | fn setProgressSink(sink: ?ProgressSink) void
 src/placement/optimizer.zig::solve | fn solve( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, cached: ?[]const RefPose, params: Params, mode: SeedMode, ) std.mem.Allocator.Error!Placement
 src/placement/optimizer.zig::solvePinAdjacent | fn solvePinAdjacent( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, params: Params, ) std.mem.Allocator.Error!?Placement
 src/placement/optimizer.zig::validateConstraints | fn validateConstraints( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, params: Params, ) std.mem.Allocator.Error![]const []const u8
+src/placement/optimizer.zig::worldCourtyard | fn worldCourtyard(p: Part) BoardRect
 src/placement/optimizer.zig::worldPadCenter | fn worldPadCenter(p: Part, lx: f64, ly: f64) [2]f64
 src/placement/pad_shape.zig::Shape struct_
 src/placement/pad_shape.zig::pointDist | fn pointDist(x0: f64, y0: f64, x1: f64, y1: f64, poly: []const [2]f64, px: f64, py: f64, slack: f64) f64
