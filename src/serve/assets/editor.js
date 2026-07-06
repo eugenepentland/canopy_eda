@@ -269,6 +269,7 @@
     normalizeAspect(); scheduleDraw();
   }
   function fitAll() {
+    fnDrill = false;                       // Fit returns to the system story
     activeSheet = -1;
     if (M.mapBox) fitTo(M.mapBox, 0.03);
     else fitTo({ x: 0, y: 0, w: scene.viewBox.w, h: scene.viewBox.h }, 0.03);
@@ -935,11 +936,16 @@
   // (function …) blocks and the camera is looking at (nearly) the whole
   // board — viewport-independent, so "Fit" shows the story on any monitor —
   // or is zoomed out past FN_S regardless.
+  // fnDrill: set when the user clicks INTO a function card — framing a
+  // full-height function still shows most of the board on a wide monitor,
+  // so without this the story tier would instantly re-assert. Fit (or deep
+  // zoom-out past FN_S, which ignores the flag) returns to the story.
+  let fnDrill = false;
   function fnTierActive() {
     if (!M || !(M.fnBoxes || []).length || !M.mapBox) return false;
     const s = scale();
     if (s >= GLANCE_S) return false;
-    return s < FN_S || (cam.w > M.mapBox.w * 0.77 && cam.h > M.mapBox.h * 0.77);
+    return s < FN_S || (!fnDrill && cam.w > M.mapBox.w * 0.77 && cam.h > M.mapBox.h * 0.77);
   }
   function pick(x, y) {
     const s = scale(), tp = 7 / s, tw = 5 / s, tl = 9 / s;
@@ -1069,7 +1075,7 @@
       else if (h.t === "part") { if (h.ghost) revealGhostBus(h.ref); else pinnedChips.clear(); select(h.kind, h.ref); }
       else if (h.t === "chip") toggleChipPin(h.chip);
       else if (h.t === "bus") toggleBus(h.key);
-      else if (h.t === "fn") fitTo(h.fb, 0.06);          // frame the function → band tier
+      else if (h.t === "fn") { fnDrill = true; fitTo(h.fb, 0.06); }   // frame the function → band tier
       else if (h.t === "net") highlightNetToggle(h.net);
       else deselect();
     }
@@ -1113,7 +1119,7 @@
     else if (h.t === "part" && h.ghost) { select(h.kind, h.ref); focusTarget(h.ref); }   // proxy → frame the part's own region
     else if (h.t === "part") { select(h.kind, h.ref); focusInspectorPrimary(); }         // real part → focus its value for editing
     else if (h.t === "chip" && h.chip && h.chip.target) focusTarget(h.chip.target);      // partner chip → jump to its cell
-    else if (h.t === "fn") fitTo(h.fb, 0.06);                                            // function block → frame it
+    else if (h.t === "fn") { fnDrill = true; fitTo(h.fb, 0.06); }                        // function block → frame it
   });
 
   // Part and net are mutually exclusive in the inspector: selecting one clears
