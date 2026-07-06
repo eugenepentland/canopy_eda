@@ -18,6 +18,7 @@ const drc = @import("placement/drc.zig");
 const raster = @import("raster.zig");
 const png = @import("png.zig");
 const numeric = @import("numeric.zig");
+const export_fab = @import("export_fab.zig");
 
 const Rgb = raster.Rgb;
 
@@ -250,6 +251,7 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
 
     if (opts.grid) ctx.drawGrid();
     ctx.drawBoardOutline();
+    ctx.drawPours();
     if (opts.compare != null) ctx.drawCompareGhost();
     ctx.drawParts();
     ctx.drawAirwires();
@@ -619,6 +621,10 @@ const Ctx = struct {
 
     fn drawAirwires(self: *Ctx) void {
         for (self.p.links) |l| {
+            // A net a declared plane/pour carries is connected by the copper
+            // sheet itself — drop its airwire, matching the page blob's filter
+            // (the implicit model's grounds never spring links at all).
+            if (l.net.len > 0 and self.p.rules.carriesPlane(l.net)) continue;
             const a_pt = self.lp(self.p.parts[l.a], l.ax, l.ay);
             const b_pt = self.lp(self.p.parts[l.b], l.bx, l.by);
             const col = awColor(l.kind);
@@ -736,6 +742,27 @@ const Ctx = struct {
         var buf: [32]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "{d:.0}x{d:.0}mm", .{ r.w, r.h }) catch "";
         self.cv.text(x0 + self.pw(4), y0 + self.pw(3), s, self.pw(8), EDGE_COL, 0.9, .start);
+    }
+
+    /// Declared outer-layer copper pours, under the parts: a translucent
+    /// wash across the pour region (the same rect the Gerber pours — board
+    /// outline, or the parts-bbox fallback) plus a "NET pour · F.Cu/B.Cu"
+    /// label in the layer's track colour, so a poured face reads as copper
+    /// in the PNG an MCP agent inspects instead of being invisible.
+    fn drawPours(self: *Ctx) void {
+        var n: f32 = 0;
+        for ([_]optimizer.Side{ .bottom, .top }) |side| {
+            const net = self.p.rules.pourNetOnSide(side) orelse continue;
+            const r = export_fab.outlineRect(self.p);
+            const x0 = self.xpx(r.minx);
+            const y0 = self.ypx(r.miny);
+            const col = if (side == .top) TRACK_TOP else TRACK_BOT;
+            self.cv.fillRect(x0, y0, self.len(r.w), self.len(r.h), col, if (side == .top) 0.10 else 0.12);
+            var buf: [96]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{s} pour - {s}", .{ net, if (side == .top) "F.Cu" else "B.Cu" }) catch "";
+            self.cv.text(x0 + self.pw(4), self.ypx(r.miny + r.h) - self.pw(12) - n * self.pw(11), s, self.pw(8), col, 0.95, .start);
+            n += 1;
+        }
     }
 
     /// A faint 1/2/5 mm reference grid with axis tick labels, under everything.

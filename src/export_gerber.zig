@@ -782,6 +782,52 @@ test "plane layer clears foreign holes and connects same-net barrels" {
     try testing.expect(std.mem.indexOf(u8, out, "X5000000Y5000000D03*") == null);
 }
 
+// spec: export_gerber - an outer-layer pour paints the copper file solid and isolates only foreign same-face features
+test "outer pour fills bottom copper and antipads foreign features" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const gnd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const sig_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1.0, .h = 0.5 }};
+    var parts = [_]optimizer.Part{
+        // Bottom-side GND cap: its pad must stay SOLID in the pour (no antipad).
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &gnd_pad, .fallback = false, .x = 4, .y = 4, .side = .bottom },
+        // Bottom-side signal part: its pad gets a clear-polarity isolation box.
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.7, .hh = 0.5, .pads = &sig_pad, .fallback = false, .x = 10, .y = 5, .side = .bottom },
+    };
+    const gnd_pins = [_]export_kicad.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const sig_pins = [_]export_kicad.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
+    const nets = [_]export_kicad.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "VIN", .pins = &sig_pins },
+    };
+    var placement = testPlacement(&parts, &nets);
+    // (stackup 2 (pour bottom "GND")) — index 2 IS the bottom outer face.
+    const gnd_names = [_][]const u8{"GND"};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    placement.rules = .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = &planes };
+
+    var bw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&bw.writer, arena, placement, .{}, export_fab.frameFor(placement), .{ .copper = .bottom }, "Copper,L2,Bot");
+    const bot = bw.written();
+    // The solid pour region + a clear-polarity pass, then back to dark.
+    try testing.expect(std.mem.indexOf(u8, bot, "G36*") != null);
+    try testing.expect(std.mem.indexOf(u8, bot, "%LPC*%") != null);
+    try testing.expect(std.mem.indexOf(u8, bot, "%LPD*%") != null);
+    // Foreign pad antipad: bbox 1.0x0.5 grown 0.3/side ⇒ 1.6x1.1 rect flash.
+    try testing.expect(std.mem.indexOf(u8, bot, "R,1.600000X1.100000*%") != null);
+    // The pad flashes themselves (dark) exist for both parts; the GND pad's
+    // 0.6 aperture never appears grown (0.6+0.6=1.2 would be its antipad).
+    try testing.expect(std.mem.indexOf(u8, bot, "R,0.600000X0.600000*%") != null);
+    try testing.expect(std.mem.indexOf(u8, bot, "R,1.200000X1.200000*%") == null);
+
+    // The un-poured top face keeps plain pads-only copper: no pour region.
+    var tw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&tw.writer, arena, placement, .{}, export_fab.frameFor(placement), .{ .copper = .top }, "Copper,L1,Top");
+    try testing.expect(std.mem.indexOf(u8, tw.written(), "G36*") == null);
+}
+
 // spec: export_gerber - the edge layer closes the board outline; silk strokes footprint art and ref-des text
 test "edge closes the outline and silk carries the ref-des" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
