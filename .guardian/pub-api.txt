@@ -150,6 +150,7 @@ src/erc.zig::runErc | fn runErc(allocator: std.mem.Allocator, block: *const Desi
 src/erc.zig::writeViolationsJson | fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) std.mem.Allocator.Error![]const u8
 src/escape.zig::writeXml | fn writeXml(w: anytype, s: []const u8) !void
 src/eval/builders.zig::addPartToInstance | fn addPartToInstance(self: *Evaluator, instances: []Instance, ref_des: []const u8, part_name: []const u8, pins: []const env_mod.PartPin) EvalError!void
+src/eval/builders.zig::buildFunction | fn buildFunction(self: *Evaluator, args: []const Node, env: *Env) EvalError!env_mod.FunctionSpec
 src/eval/builders.zig::buildGroup | fn buildGroup(self: *Evaluator, args: []const Node, env: *Env) EvalError!Group
 src/eval/builders.zig::buildNote | fn buildNote(self: *Evaluator, args: []const Node, env: *Env) EvalError!Note
 src/eval/builders.zig::buildPort | fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
@@ -186,6 +187,7 @@ src/eval/env.zig::EdgeSide enum_
 src/eval/env.zig::ElectricalDecl struct_
 src/eval/env.zig::ElectricalType enum_
 src/eval/env.zig::Env struct_
+src/eval/env.zig::FunctionSpec struct_
 src/eval/env.zig::Group struct_
 src/eval/env.zig::GroupConstraint struct_
 src/eval/env.zig::GroupStyle enum_

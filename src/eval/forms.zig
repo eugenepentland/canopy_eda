@@ -119,6 +119,7 @@ pub const ScopeForm = enum {
     category,
     // Top-level only (design-block scope)
     group,
+    function,
     sub_block,
     verifies,
     test_point,
@@ -157,6 +158,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "hosts", .hosts },
     .{ "category", .category },
     .{ "group", .group },
+    .{ "function", .function },
     .{ "sub-block", .sub_block },
     .{ "verifies", .verifies },
     .{ "test-point", .test_point },
@@ -447,6 +449,12 @@ pub const scope_form_docs = blk: {
     t[@intFromEnum(ScopeForm.group)] = .{ .scope = tl, .doc = .{
         .syntax = "(group …)",
         .summary = "Visual group annotation rendered in the schematic.",
+    } };
+    t[@intFromEnum(ScopeForm.function)] = .{ .scope = tl, .doc = .{
+        .syntax = "(function \"name\" [\"caption\"] [(stack N)] (hosts \"Section A\" \"Section B\" …))",
+        .summary = "Hand-authored functional super-block for the top-level system view: groups the " ++
+            "named sections/sheets into one what-it-does block (caption = verb/spec line, " ++
+            "stack N = ×N identical channels). The editor map draws these as the outermost zoom level.",
     } };
     t[@intFromEnum(ScopeForm.sub_block)] = .{ .scope = tl, .doc = .{
         .syntax = "(sub-block \"name\" (module-call args…))",

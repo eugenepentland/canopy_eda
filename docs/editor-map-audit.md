@@ -346,3 +346,27 @@ states what feeds what, what talks over what, and what each block is for.
 Then **B1.6** as the structural fix: one source of truth for the block
 diagram, and the migration path for phasing out /schematics. **B2.8** is
 the visual-quality leap that makes it look hand-drawn rather than packed.
+
+## Shipped (2026-07-06)
+
+**B0.1 + B0.2 + B1.5** landed as "editor glance block diagram": gold
+power-flow arrows with voltage entry-tags from `rails[]`, signal edges
+captioned by dominant net family / single net / count (pill-backed
+labels), authored section subtitles as band captions (`sheet_meta.sub`),
+edges clipped to box borders.
+
+**The function tier** landed on top (hand-authored LOD0): a new
+`(function "name" "caption" [(stack N)] (hosts "Section" …))` design-scope
+form (`FunctionSpec` in env.zig, `buildFunction` in builders.zig, scene
+`functions[]`). In the editor, member bands pack as one rigid mega-unit
+(vertical stack under a `FN_HEAD` header) so the function box is exactly
+the bbox of its bands at every zoom; the tier activates via
+`fnTierActive()` — whole-board camera view (cam covers >77% of the map,
+viewport-independent, so "Fit" shows the story) or below `FN_S = 0.18`.
+It draws super-block cards (name + verb caption + ×N offset-card stack),
+member bands wash-only, standalone bands titled, and **rolled-up edges**
+(power tags unioned, signals summed with the dominant bus label kept;
+intra-function edges drop out — the XSPI buses vanish inside "Compute
+Core", which is the point). Click/dblclick a card frames it → band tier.
+Authored on stm32n6 (5 functions) and labstation (7, PSU `(stack 2)`);
+designs with no `(function …)` forms are pixel-identical to before.

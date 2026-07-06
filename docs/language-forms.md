@@ -112,6 +112,7 @@ where each is accepted: **D** = design-block top level,
 | `(hosts "sub1" "sub2" …)` | ·S· | Fold the named sub-blocks into this section's block-diagram node (explicit attachment). |
 | `(category <key>)` | ·S· | Set this section's diagram category (e.g. mcu, power, rf), overriding the name heuristic. |
 | `(group …)` | D·· | Visual group annotation rendered in the schematic. |
+| `(function "name" ["caption"] [(stack N)] (hosts "Section A" "Section B" …))` | D·· | Hand-authored functional super-block for the top-level system view: groups the named sections/sheets into one what-it-does block (caption = verb/spec line, stack N = ×N identical channels). The editor map draws these as the outermost zoom level. |
 | `(sub-block "name" (module-call args…))` | D·· | Instantiate a parameterised module inside the design. Its parts flatten into the netlist under the sub-block path prefix and the PCB solver places them with the rest of the board. |
 | `(verifies (req "REF" REQID) [rationale])` | D·· | Mark a requirement as satisfied by a specific instance. |
 | `(test-point …)` | D·· | Declare a measurement / bring-up access point. |
