@@ -19,6 +19,7 @@ const std = @import("std");
 const optimizer = @import("optimizer.zig");
 const module_policy = @import("module_policy.zig");
 const pad_shape = @import("pad_shape.zig");
+const geometry = @import("geometry.zig");
 const export_kicad = @import("../export_kicad.zig");
 
 const Part = optimizer.Part;
@@ -92,9 +93,17 @@ const TOP_FIRST_MAX_PARTS: usize = 32;
 /// per unstitched signal via, so a huge board's already-long route is left alone.
 const STITCH_MAX_PARTS: usize = 48;
 const SQRT2: f64 = 1.4142135623730951; // diagonal step length vs. orthogonal
+/// Step-cost multiplier for maze moves onto an outer layer a declared pour
+/// covers: every signal trace there slices the pour into islands, so signals
+/// prefer the un-poured face — but the layer stays usable when the other side
+/// is walled off (the Gerber emission carves clearance around whatever lands
+/// there, so the result is legal either way).
+const POUR_COST_MULT: f64 = 1.5;
 
 /// Pass 1 of `route`: ground/plane nets. Each pad of a plane-carrying net
-/// drops a via to its plane. The via is placed where it keeps full
+/// drops a via to its plane — except pads already sitting IN an outer-layer
+/// pour of their own net (same-face SMD, or any through-hole barrel), which
+/// the pour connects directly. The via is placed where it keeps full
 /// via-clearance from every *foreign* pad (and any via already down) —
 /// preferring the pad centre, else fanning outward into open copper and
 /// joining it with a short same-net stub, so the via can't crowd a
@@ -123,8 +132,15 @@ fn planeViaPass(
         total.* += 1;
         const ni: i32 = @intCast(net_i);
         setNetParams(ctx, placement, net_i);
+        const pour = netPourLayers(placement, net.name);
         var placed_any = false;
+        var needed_any = false;
         for (pts) |c| {
+            // A pad whose copper already reaches an outer-layer pour of its
+            // own net sits IN the pour (same-face SMD pad, or a through-hole
+            // barrel meeting the pour on either face) — a via stitches nothing.
+            if (padInPour(pour, c)) continue;
+            needed_any = true;
             const cc = [2]f64{ c.x, c.y };
             const pos = findGroundVia(ctx, vias.items, cc, ni) orelse continue;
             placed_any = true;
@@ -137,8 +153,10 @@ fn planeViaPass(
         }
         // Only count the net routed if at least one plane via actually
         // dropped — a fully hemmed-in ground net must not inflate
-        // routed/total and hide the hand-fix from fullRouteCost's unrouted term.
-        if (placed_any) routed.* += 1 else try failed.append(arena, net.name);
+        // routed/total and hide the hand-fix from fullRouteCost's unrouted
+        // term. A net whose EVERY pad lands in an outer pour needs no via at
+        // all: the pour itself is the connection, so it counts routed.
+        if (placed_any or !needed_any) routed.* += 1 else try failed.append(arena, net.name);
     }
 }
 
@@ -197,6 +215,10 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
         .base = params,
         .index_reach = maxp.track_width / 2 + maxp.clearance,
         .has_bottom_pads = anyBottomPads(obs),
+        .pour = .{
+            placement.rules.pourNetOnSide(.top) != null,
+            placement.rules.pourNetOnSide(.bottom) != null,
+        },
     };
     var routed: usize = 0;
     var total: usize = 0;
@@ -393,7 +415,11 @@ pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, para
         if (pts.len < 2) continue;
         const ni: i32 = @intCast(net_i);
         setNetParams(&ctx, placement, net_i);
+        const pour = netPourLayers(placement, net.name);
         for (pts) |c| {
+            // Same skip as `route`'s pass 1: a pad already sitting in an
+            // outer-layer pour of its own net previews no via.
+            if (padInPour(pour, c)) continue;
             const cc = [2]f64{ c.x, c.y };
             const pos = findGroundVia(&ctx, vias.items, cc, ni) orelse continue;
             try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = ctx.params.via_dia, .drill = ctx.params.via_drill, .net = ni });
@@ -651,8 +677,9 @@ fn priorityDesc(pri: []const u32, a: usize, b: usize) bool {
 
 /// One route terminal: a pad's world centre (mm) + the signal layer it lives
 /// on (its part's side; a through-hole pad connects on either layer, so its
-/// part-side layer is simply where the maze starts).
-const NetPt = struct { x: f64, y: f64, layer: u8 };
+/// part-side layer is simply where the maze starts) + whether its barrel
+/// reaches both faces (the outer-pour skip in pass 1 needs it).
+const NetPt = struct { x: f64, y: f64, layer: u8, thru: bool = false };
 
 /// World centres (mm) of every resolvable pad on `net`, each tagged with the
 /// signal layer its part sits on.
@@ -661,18 +688,25 @@ fn netPoints(arena: std.mem.Allocator, placement: optimizer.Placement, idx_of: *
     for (net.pins) |pin| {
         const pi = idx_of.get(pin.ref_des) orelse continue;
         const part = placement.parts[pi];
-        const c = padCenter(part, pin.pin) orelse continue;
-        try list.append(arena, .{ .x = c[0], .y = c[1], .layer = sideLayer(part) });
+        const pad = padOf(part, pin.pin) orelse continue;
+        const c = optimizer.worldPadCenter(part, pad.x, pad.y);
+        try list.append(arena, .{ .x = c[0], .y = c[1], .layer = sideLayer(part), .thru = pad.thru });
     }
     return list.toOwnedSlice(arena);
 }
 
-/// World centre of `pin` on `part`, or null if the pad isn't in the footprint.
-fn padCenter(part: Part, pin: []const u8) ?[2]f64 {
+/// The footprint pad named `pin` on `part`, or null when absent.
+fn padOf(part: Part, pin: []const u8) ?geometry.Pad {
     for (part.pads) |pad| {
-        if (std.mem.eql(u8, pad.number, pin)) return optimizer.worldPadCenter(part, pad.x, pad.y);
+        if (std.mem.eql(u8, pad.number, pin)) return pad;
     }
     return null;
+}
+
+/// World centre of `pin` on `part`, or null if the pad isn't in the footprint.
+fn padCenter(part: Part, pin: []const u8) ?[2]f64 {
+    const pad = padOf(part, pin) orelse return null;
+    return optimizer.worldPadCenter(part, pad.x, pad.y);
 }
 
 // ── Via clearance (DRC-safe via placement) ──────────────────────────────────
@@ -1028,6 +1062,27 @@ fn netHasPlane(placement: optimizer.Placement, name: []const u8) bool {
     return false;
 }
 
+/// Which outer signal layers (index 0 = top, 1 = bottom) carry `name` as a
+/// declared pour — the faces where a same-net pad is already IN the copper.
+/// Both false on the legacy implicit model (its planes are inner-only).
+fn netPourLayers(placement: optimizer.Placement, name: []const u8) [2]bool {
+    var out = [2]bool{ false, false };
+    inline for ([_]optimizer.Side{ .top, .bottom }, 0..) |side, li| {
+        if (placement.rules.pourNetOnSide(side)) |pn| {
+            out[li] = std.ascii.eqlIgnoreCase(pn, name) or std.ascii.eqlIgnoreCase(pn, shortName(name));
+        }
+    }
+    return out;
+}
+
+/// True when route terminal `c` already sits in one of its net's outer-layer
+/// pours (`pour` from `netPourLayers`): an SMD pad on the poured face, or a
+/// through-hole barrel, which meets a pour on either face.
+fn padInPour(pour: [2]bool, c: NetPt) bool {
+    if (c.thru) return pour[0] or pour[1];
+    return pour[c.layer];
+}
+
 /// Overlay `net_i`'s `(net-class …)` rule onto the base route params — the
 /// per-net effective geometry every subsequent clearance/width/via read uses.
 /// Nets without a rule (or with zero fields) keep the base values.
@@ -1199,6 +1254,11 @@ const Ctx = struct {
     /// True when any obstacle pad lives on (or reaches, via through-hole) the
     /// bottom signal layer — false keeps `blocked`'s legacy all-top fast path.
     has_bottom_pads: bool = false,
+    /// Which outer signal layers a declared pour covers (0 = top, 1 = bottom).
+    /// Maze steps onto a poured layer cost `POUR_COST_MULT`× so signal copper
+    /// prefers the un-poured face instead of slicing the pour. Both false when
+    /// no pour is declared — the legacy cost model, unchanged.
+    pour: [2]bool = .{ false, false },
     /// Lazily-built spatial index over `obs` (pads are static for a route) so
     /// `blocked` tests only pads near the node, not all of them. Null until
     /// first use, or when the board is degenerate / the grid would be oversized
@@ -1598,7 +1658,9 @@ fn relaxStep(
     if (blocked(ctx, to_layer, tn, net)) return;
     const nodes = ctx.grid.nx * ctx.grid.ny;
     const to_key = to_layer * nodes + tn;
-    const nd = dist[from_key] + step;
+    // Stepping onto a poured outer layer costs extra — see `POUR_COST_MULT`.
+    const eff = if (ctx.pour[to_layer]) step * POUR_COST_MULT else step;
+    const nd = dist[from_key] + eff;
     if (nd < dist[to_key]) {
         dist[to_key] = nd;
         prev[to_key] = @intCast(from_key);
@@ -1900,6 +1962,64 @@ test "plane-less stackup maze-routes the ground net" {
     var gnd_len: f64 = 0;
     for (flat.tracks) |t| gnd_len += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
     try testing.expect(gnd_len >= 2.5); // the ~3 mm pad-to-pad run exists as copper
+}
+
+// spec: placement/router - an outer-layer pour connects same-side pads directly; only opposite-face pads get a stitching via
+test "outer pour skips vias for pads already in the pour" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const pads_smd = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    const pads_thru = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.8, .h = 0.8, .thru = true, .drill = 0.4 }};
+    var parts = [_]Part{
+        // Top SMD pad: opposite the bottom pour — the one pad that needs a via.
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads_smd, .fallback = false, .x = 0, .y = 0 },
+        // Bottom SMD pad: sits in the pour.
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads_smd, .fallback = false, .x = 3, .y = 0, .side = .bottom },
+        // Through-hole pad: its barrel meets the pour from either side.
+        .{ .ref_des = "J1", .kind = .passive, .hw = 0.6, .hh = 0.6, .pads = &pads_thru, .fallback = false, .x = 6, .y = 0 },
+    };
+    const pins_g = [_]export_kicad.FlatPin{
+        .{ .ref_des = "C1", .pin = "1" },
+        .{ .ref_des = "C2", .pin = "1" },
+        .{ .ref_des = "J1", .pin = "1" },
+    };
+    const nets = [_]FlatNet{.{ .name = "GND", .pins = &pins_g }};
+    const gnd_names = [_][]const u8{"GND"};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -0.6,
+        .miny = -0.6,
+        .maxx = 6.6,
+        .maxy = 0.6,
+        .generated = true,
+        .rules = .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = &planes },
+    };
+
+    // (stackup 2 (pour bottom "GND")): only the top-face SMD pad vias down.
+    const r = try route(arena, placement, .{});
+    try testing.expectEqual(@as(usize, 1), r.total);
+    try testing.expectEqual(@as(usize, 1), r.routed);
+    try testing.expectEqual(@as(usize, 0), r.failed.len);
+    try testing.expectEqual(@as(usize, 1), r.vias.len);
+    // The via serves C1 (near x=0), not the in-pour pads.
+    try testing.expect(@abs(r.vias[0].x) < 1.5);
+
+    // Every pad in the pour ⇒ zero vias, and the net still counts routed.
+    parts[0].side = .bottom;
+    const all_bot = try route(arena, placement, .{});
+    try testing.expectEqual(@as(usize, 1), all_bot.total);
+    try testing.expectEqual(@as(usize, 1), all_bot.routed);
+    try testing.expectEqual(@as(usize, 0), all_bot.failed.len);
+    try testing.expectEqual(@as(usize, 0), all_bot.vias.len);
 }
 
 // spec: placement/router - a net-class rule sets its nets' trace width and via size; unruled nets keep defaults
@@ -2474,8 +2594,13 @@ test "escape stub falls back to a trimmed clear stub when every heading is pad-b
     try testing.expectEqual(@as(usize, 0), r.vias.len);
     // …and whatever trimmed stub remains keeps full clearance from every
     // foreign pad (this is the assertion the old pad-crossing tier failed).
-    const viol = try @import("drc.zig").check(arena, placement, r, 0.127);
-    try testing.expectEqual(@as(usize, 0), viol.len);
+    // This fixture packs the ring pads tighter than the solver ever would (to
+    // starve every escape heading), so the diagonal courtyards intentionally
+    // overlap — every violation here is a courtyard overlap, and the COPPER
+    // clearance this test is about is clean (0 non-courtyard findings).
+    const drc = @import("drc.zig");
+    const viol = try drc.check(arena, placement, r, 0.127);
+    try testing.expectEqual(viol.len, drc.countKind(viol, .courtyard));
 }
 
 // spec: placement/router - reserves diagonal corner cells so later nets keep trace-to-trace clearance

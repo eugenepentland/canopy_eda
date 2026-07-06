@@ -45,6 +45,7 @@ const pin_roles = @import("pin_roles.zig");
 const module_policy = @import("module_policy.zig");
 const router = @import("router.zig");
 const drc = @import("drc.zig");
+const outline_mod = @import("outline.zig");
 const parser = @import("../sexpr/parser.zig");
 const infra_fs = @import("../infra/fs.zig");
 
@@ -498,6 +499,14 @@ pub const Placement = struct {
     /// world coordinates (same frame as `parts`). Null when the design has no
     /// effective board form — renderers draw no outline.
     board_rect: ?BoardRect = null,
+    /// The EXACT outline as a closed polygon (world mm, straight segments)
+    /// when the board is non-rectangular — an authored `(corner-radius R)`
+    /// rounded rect or a viewer-drawn polygon. Null = plain rectangle
+    /// (`board_rect` is the whole story). When set, `board_rect` is always
+    /// this polygon's bounding box (the solver keeps placing against the
+    /// bbox; only exact-shape consumers — DRC, Gerber Edge.Cuts, the
+    /// renderers — read the polygon).
+    board_poly: ?[]const [2]f64 = null,
     /// Board-level routing rules resolved from the design's `(stackup …)` and
     /// `(net-class …)` forms — see `BoardRules`.
     rules: BoardRules = .{},
@@ -524,6 +533,78 @@ pub const BoardRules = struct {
     /// (same data as `plane_nets` but keeping WHERE each plane sits, for the
     /// Gerber export's inner-layer files).
     planes: []const PlaneAt = &.{},
+    /// Board-level default design rules from a `(design-rules …)` form,
+    /// resolved to concrete millimetre values with the toolchain's built-in
+    /// defaults filled in for any rule the form omitted (so `.{}` — the
+    /// no-form default — reproduces every legacy constant). Read by the DRC
+    /// and Gerber export instead of the old hard-coded constants.
+    design: DesignRules = .{},
+
+    /// True when a DECLARED `(plane IDX "NET")` / `(pour …)` entry carries
+    /// `name` (case-insensitive, full flattened name or its `/`-leaf). The
+    /// legacy implicit model declares nothing here — its assumed ground
+    /// planes are matched by ground NAME in the router, not by this.
+    pub fn carriesPlane(self: BoardRules, name: []const u8) bool {
+        for (self.planes) |pl| {
+            if (std.ascii.eqlIgnoreCase(pl.net, name) or std.ascii.eqlIgnoreCase(pl.net, shortName(name))) return true;
+        }
+        return false;
+    }
+
+    /// The net a declared plane pours on the OUTER copper face of `side`
+    /// (stack index 1 = top/F.Cu, `copper_layers` = bottom/B.Cu), or null
+    /// when that face is a plain signal layer. Inner planes never match, and
+    /// a single-layer stack has no bottom face to pour.
+    pub fn pourNetOnSide(self: BoardRules, side: Side) ?[]const u8 {
+        const want: u8 = if (side == .top) 1 else (if (self.copper_layers >= 2) self.copper_layers else return null);
+        for (self.planes) |pl| {
+            if (pl.index == want) return pl.net;
+        }
+        return null;
+    }
+};
+
+/// Board-level default design rules as concrete millimetre values — the
+/// resolved form of a `(design-rules …)` form (or the built-in defaults when
+/// none is authored). Every field carries the value the toolchain used before
+/// the form existed, so a design with no `(design-rules …)` is byte-identical.
+pub const DesignRules = struct {
+    /// Copper-to-copper spacing (mm) — matches `RouteParams.clearance`.
+    clearance: f64 = 0.127,
+    /// Smallest legal drilled hole (mm). A via/pad drill below this flags
+    /// `min_drill`; drill=0 (legacy/synthetic) features are skipped.
+    min_drill: f64 = 0.2,
+    /// Solder-mask opening expansion per pad side (mm) — the Gerber margin.
+    mask_margin: f64 = 0.05,
+    /// Copper-pour isolation (mm): how far a solid pour keeps from foreign
+    /// copper (antipads around holes/vias, track/pad halos) AND its pullback
+    /// from the board edge in the Gerber export. Not settable via the form
+    /// directly — a `(design-rules (copper-edge …))` overrides it (that IS the
+    /// copper-to-edge rule), otherwise it stays the fab-safe pour default.
+    pour_clearance: f64 = 0.3,
+    /// Copper-to-board-outline clearance (mm): the copper-edge DRC rule and the
+    /// Gerber pour's edge pullback. 0 ⇒ the DRC falls back to the plain copper
+    /// `clearance` (old `board_edge` behaviour) and the pour uses `pour_clearance`.
+    copper_edge: f64 = 0,
+    /// Wall-to-wall spacing between two drilled holes (mm) — the hole-to-hole DRC.
+    hole_to_hole: f64 = 0.25,
+    /// Minimum via annular ring, copper radius − drill radius (mm).
+    min_annular: f64 = 0.1,
+
+    /// The effective copper-to-edge clearance for the DRC: the dedicated
+    /// `copper_edge` rule if set, else the plain copper `clearance` (so an
+    /// absent rule reproduces the old `board_edge` check, which measured
+    /// against the net clearance).
+    pub fn edgeClearance(self: DesignRules) f64 {
+        return if (self.copper_edge > 0) self.copper_edge else self.clearance;
+    }
+
+    /// The Gerber pour's pullback from the board edge: the `copper_edge` rule
+    /// when set, else the fab-safe `pour_clearance` default (0.3) — so an
+    /// absent form keeps the old hard-coded 0.3 mm edge pullback.
+    pub fn pourEdge(self: DesignRules) f64 {
+        return if (self.copper_edge > 0) self.copper_edge else self.pour_clearance;
+    }
 };
 
 /// One declared copper plane: 1-based stack index + the net it carries.
@@ -5493,6 +5574,15 @@ fn boardRectFromPoses(
     };
 }
 
+/// The authored exact outline polygon for a resolved board rectangle:
+/// `(board … (corner-radius R))` yields the rounded-rect polyline, a plain
+/// `(size W H)` yields null (the rectangle IS the outline). Kept next to the
+/// rect derivation so `board_rect`/`board_poly` can never disagree.
+fn authoredBoardPoly(arena: std.mem.Allocator, r: BoardRect, spec: env.BoardSpec) std.mem.Allocator.Error!?[]const [2]f64 {
+    if (!(spec.corner_radius > 0)) return null;
+    return try outline_mod.roundedRectPoly(arena, r, spec.corner_radius);
+}
+
 /// The design's plane-carrying net names per its `(stackup …)` form, in the
 /// shape `Placement.plane_nets` documents (null = legacy implicit planes).
 fn planeNetsOf(arena: std.mem.Allocator, block: *const DesignBlock) std.mem.Allocator.Error!?[]const []const u8 {
@@ -5517,7 +5607,25 @@ fn boardRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []con
         .net = try netRulesOf(arena, block, nets),
         .copper_layers = if (block.stackup.present) block.stackup.layers else 0,
         .planes = planes,
+        .design = designRulesOf(block),
     };
+}
+
+/// Resolve the design's `(design-rules …)` form into concrete `DesignRules`:
+/// each authored (non-zero) sub-form overrides the matching built-in default,
+/// and any omitted rule keeps its default — so a design with no form (or an
+/// empty `(design-rules)`) reproduces every legacy constant exactly.
+fn designRulesOf(block: *const DesignBlock) DesignRules {
+    var d = DesignRules{}; // built-in defaults (the old hard-coded constants)
+    const s = block.design_rules;
+    if (!s.present) return d;
+    if (s.clearance > 0) d.clearance = s.clearance;
+    if (s.min_drill > 0) d.min_drill = s.min_drill;
+    if (s.mask_margin > 0) d.mask_margin = s.mask_margin;
+    if (s.copper_edge > 0) d.copper_edge = s.copper_edge;
+    if (s.hole_to_hole > 0) d.hole_to_hole = s.hole_to_hole;
+    if (s.min_annular > 0) d.min_annular = s.min_annular;
+    return d;
 }
 
 /// Per-net routing geometry from the design's `(net-class …)` forms, aligned
@@ -5653,6 +5761,7 @@ pub fn solve(
     if (board_live) {
         if (board_rect == null) board_rect = try boardRectFromPoses(arena, parts, prep.instances, block.board);
         pl.board_rect = board_rect;
+        pl.board_poly = try authoredBoardPoly(arena, board_rect.?, block.board);
         // The view frame must include the outline even where it reaches past
         // the parts (a sparse board on a big rectangle).
         const r = board_rect.?;
@@ -5797,6 +5906,7 @@ pub fn placeFromPoses(
     if (block.board.present and block.board.w > 0 and block.board.h > 0) {
         const r = try boardRectFromPoses(arena, parts, prep.instances, block.board);
         pl.board_rect = r;
+        pl.board_poly = try authoredBoardPoly(arena, r, block.board);
         pl.minx = @min(pl.minx, r.minx);
         pl.miny = @min(pl.miny, r.miny);
         pl.maxx = @max(pl.maxx, r.minx + r.w);
@@ -7173,6 +7283,19 @@ fn courtCx(p: Part) f64 {
 }
 fn courtCy(p: Part) f64 {
     return if (p.ccx == 0 and p.ccy == 0) p.y else worldPt(p, p.ccx, p.ccy).y;
+}
+
+/// World-space axis-aligned courtyard rectangle of `p`: its rotation-aware
+/// half-extents about its (rotated, side-mirrored) courtyard centre. Public so
+/// the DRC can flag two parts whose courtyards overlap. The box is symmetric
+/// about its centre and only swaps extents on a quarter turn, so it stays
+/// axis-aligned for the 0/90/180/270° poses the solver produces.
+pub fn worldCourtyard(p: Part) BoardRect {
+    const cx = courtCx(p);
+    const cy = courtCy(p);
+    const hw = effHw(p);
+    const hh = effHh(p);
+    return .{ .minx = cx - hw, .miny = cy - hh, .w = 2 * hw, .h = 2 * hh };
 }
 
 /// Collision-keepout box used by every overlap/repulsion test: the escape-stub
@@ -9047,6 +9170,30 @@ test "isGroundName matches common ground rails" {
     try testing.expect(!isGroundName("VINGND")); // doesn't start with a ground token
 }
 
+// spec: placement/optimizer - board rules resolve declared pours by outer face and plane membership by net name
+test "BoardRules pour/plane lookups" {
+    const planes = [_]PlaneAt{ .{ .index = 2, .net = "GND" }, .{ .index = 3, .net = "PWR" } };
+    const four = BoardRules{ .plane_nets = &.{}, .copper_layers = 4, .planes = &planes };
+    // Inner planes carry their nets (leaf + case-insensitive) but pour no outer face.
+    try testing.expect(four.carriesPlane("GND"));
+    try testing.expect(four.carriesPlane("pwr/gnd"));
+    try testing.expect(!four.carriesPlane("VIN"));
+    try testing.expect(four.pourNetOnSide(.top) == null);
+    try testing.expect(four.pourNetOnSide(.bottom) == null);
+
+    // (stackup 2 (pour bottom "GND")): index 2 IS the bottom outer face.
+    const bot = [_]PlaneAt{.{ .index = 2, .net = "GND" }};
+    const two = BoardRules{ .plane_nets = &.{}, .copper_layers = 2, .planes = &bot };
+    try testing.expect(two.pourNetOnSide(.top) == null);
+    try testing.expectEqualStrings("GND", two.pourNetOnSide(.bottom).?);
+
+    // Index 1 is the top face; a 1-layer stack has no bottom face at all.
+    const top = [_]PlaneAt{.{ .index = 1, .net = "GND" }};
+    const one = BoardRules{ .plane_nets = &.{}, .copper_layers = 1, .planes = &top };
+    try testing.expectEqualStrings("GND", one.pourNetOnSide(.top).?);
+    try testing.expect(one.pourNetOnSide(.bottom) == null);
+}
+
 // spec: placement/optimizer - legalization separates two overlapping courtyards
 test "legalize removes overlap between two parts" {
     var parts = [_]Part{
@@ -10498,6 +10645,40 @@ test "overlayAuthoredGroups makes an authored group one island under its core" {
     try testing.expectEqual(@as(usize, 1), owner_of[2]); // Q2 absorbed as a member
     try testing.expectEqual(@as(usize, 1), owner_of[3]); // listed passive follows
     try testing.expectEqual(@as(usize, 1), owner_of[4]); // Q2's claimed part follows its hub in
+}
+
+// spec: placement/optimizer - design-rules resolve authored values over built-in defaults, absent form keeps every default
+test "designRulesOf fills defaults and honours authored overrides" {
+    // No form ⇒ every built-in default (the old hard-coded constants).
+    const none = DesignBlock{ .name = "t", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
+    const d0 = designRulesOf(&none);
+    try testing.expectEqual(@as(f64, 0.127), d0.clearance);
+    try testing.expectEqual(@as(f64, 0.2), d0.min_drill);
+    try testing.expectEqual(@as(f64, 0.05), d0.mask_margin);
+    try testing.expectEqual(@as(f64, 0.25), d0.hole_to_hole);
+    try testing.expectEqual(@as(f64, 0.1), d0.min_annular);
+    try testing.expectEqual(@as(f64, 0), d0.copper_edge); // unset ⇒ falls back per-consumer
+
+    // A present form overrides only the authored (non-zero) rules; the rest
+    // keep their defaults. Here only hole-to-hole + copper-edge are set.
+    const some = DesignBlock{
+        .name = "t",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .design_rules = .{ .present = true, .hole_to_hole = 0.3, .copper_edge = 0.4 },
+    };
+    const d1 = designRulesOf(&some);
+    try testing.expectEqual(@as(f64, 0.3), d1.hole_to_hole); // overridden
+    try testing.expectEqual(@as(f64, 0.4), d1.copper_edge); // overridden
+    try testing.expectEqual(@as(f64, 0.2), d1.min_drill); // still the default
+    try testing.expectEqual(@as(f64, 0.127), d1.clearance); // still the default
+    // copper_edge set ⇒ both edge accessors now use it.
+    try testing.expectEqual(@as(f64, 0.4), d1.edgeClearance());
+    try testing.expectEqual(@as(f64, 0.4), d1.pourEdge());
 }
 
 // spec: placement/optimizer - port directions are the flow compass: in enters left, out leaves right

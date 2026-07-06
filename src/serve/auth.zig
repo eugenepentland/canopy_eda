@@ -841,6 +841,7 @@ fn requiresWrite(req: *httpz.Request) bool {
     const read_only_posts = [_][]const u8{
         "/api/pcb-score", // also covers /api/pcb-score-batch
         "/api/pcb-route",
+        "/api/pcb-drc", // read-only DRC check of submitted copper
         "/api/validate/",
     };
     for (read_only_posts) |p| {

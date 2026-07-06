@@ -331,6 +331,7 @@ fn registerPcbRoutes(router: anytype) void {
     router.get("/api/rough-best-png/:name", rough_best.bestRoughPngApi, .{});
     router.get("/api/pcb-centroid/:name", pcb_layout_page.pcbCentroidApi, .{});
     router.get("/api/pcb-drill/:name", pcb_layout_page.pcbDrillApi, .{});
+    router.get("/api/fab-readiness/:name", pcb_layout_page.pcbFabReadinessApi, .{});
     router.get("/api/pcb-gerbers/:name", pcb_layout_page.pcbGerbersApi, .{});
     router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/delete", pcb_layout_page.deleteNamedLayoutApi, .{});
@@ -339,6 +340,7 @@ fn registerPcbRoutes(router: anytype) void {
     router.post("/api/pcb-score/:name", pcb_layout_page.pcbScoreApi, .{});
     router.post("/api/pcb-score-batch/:name", pcb_layout_page.pcbScoreBatchApi, .{});
     router.post("/api/pcb-route/:name", pcb_layout_page.pcbRouteApi, .{});
+    router.post("/api/pcb-drc/:name", pcb_layout_page.pcbDrcApi, .{});
     router.post("/api/pcb-regen-start/:name", pcb_layout_page.pcbRegenStartApi, .{});
     router.get("/api/pcb-progress/:name", pcb_layout_page.pcbProgressApi, .{});
     router.post("/api/courtyard/:name", pcb_layout_page.savePcbCourtyardApi, .{});

@@ -103,6 +103,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var rough_spec: env_mod.RoughSpec = .{};
     var stackup_spec: env_mod.StackupSpec = .{};
     var net_class_specs: std.ArrayListUnmanaged(env_mod.NetClassSpec) = .empty;
+    var design_rules_spec: env_mod.DesignRulesSpec = .{};
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
 
@@ -210,6 +211,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
             .stackup => stackup_spec = try parseStackup(self, form_children),
             .net_class => if (try parseNetClass(self, form_children)) |nc|
                 net_class_specs.append(self.allocator, nc) catch return EvalError.OutOfMemory,
+            .design_rules => design_rules_spec = parseDesignRules(self, form_children),
             // Section-only forms are ignored at the top level — a
             // design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract; the warning
@@ -255,6 +257,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .rough = rough_spec,
         .stackup = stackup_spec,
         .net_classes = net_class_specs.toOwnedSlice(self.allocator) catch &.{},
+        .design_rules = design_rules_spec,
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -841,6 +844,7 @@ fn evalSection(
             .rough,
             .stackup,
             .net_class,
+            .design_rules,
             => {
                 self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name});
             },
@@ -1644,6 +1648,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     const board_sides = try parseBoardSides(self, form_children);
     var w: f64 = 0;
     var h: f64 = 0;
+    var corner_radius: f64 = 0;
     var corners: std.ArrayListUnmanaged(env_mod.PlacementItem) = .empty;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
@@ -1656,6 +1661,10 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
             }
             continue;
         }
+        if (std.mem.eql(u8, head, "corner-radius")) {
+            if (c.len >= 2) corner_radius = @max(c[1].asNumber() orelse 0, 0);
+            continue;
+        }
         if (std.mem.eql(u8, head, "corners")) {
             for (c[1..]) |item_node| {
                 const ref = item_node.asString() orelse item_node.asAtom() orelse continue;
@@ -1666,6 +1675,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     return .{
         .w = w,
         .h = h,
+        .corner_radius = corner_radius,
         .sides = board_sides,
         .corners = corners.toOwnedSlice(self.allocator) catch &.{},
         .present = true,
@@ -1696,33 +1706,70 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
         const head = c[0].asAtom() orelse continue;
-        if (!std.mem.eql(u8, head, "plane")) {
-            self.warnFmt(c[0].span, "unknown (stackup …) sub-form ({s} …) — expected (plane IDX \"NET\")", .{head});
-            continue;
-        }
-        if (c.len < 3) {
-            self.warnFmt(c[0].span, "(plane …) needs a layer index and a net name", .{});
-            continue;
-        }
-        const idx_raw = c[1].asNumber() orelse {
-            self.warnFmt(c[1].span, "(plane …) layer index must be a number", .{});
-            continue;
+        const entry = if (std.mem.eql(u8, head, "plane"))
+            parsePlaneEntry(self, c, layers)
+        else if (std.mem.eql(u8, head, "pour"))
+            parsePourEntry(self, c, layers)
+        else blk: {
+            self.warnFmt(c[0].span, "unknown (stackup …) sub-form ({s} …) — expected (plane IDX \"NET\") or (pour top|bottom \"NET\")", .{head});
+            break :blk null;
         };
-        if (idx_raw < 1 or idx_raw > n_raw or idx_raw != @floor(idx_raw)) {
-            self.warnFmt(c[1].span, "(plane …) layer index out of range for this stackup", .{});
-            continue;
-        }
-        const net = c[2].asString() orelse c[2].asAtom() orelse {
-            self.warnFmt(c[2].span, "(plane …) net must be a name", .{});
-            continue;
-        };
-        planes.append(self.allocator, .{ .index = @intFromFloat(idx_raw), .net = net }) catch return EvalError.OutOfMemory;
+        if (entry) |pl| planes.append(self.allocator, pl) catch return EvalError.OutOfMemory;
     }
     return .{
         .layers = layers,
         .planes = planes.toOwnedSlice(self.allocator) catch &.{},
         .present = true,
     };
+}
+
+/// Parse one `(plane IDX "NET")` entry of a `(stackup …)` form. Null (with a
+/// warning) when the index is malformed / out of range or the net unnamed.
+fn parsePlaneEntry(self: *Evaluator, c: []const Node, layers: u8) ?env_mod.StackupPlane {
+    if (c.len < 3) {
+        self.warnFmt(c[0].span, "(plane …) needs a layer index and a net name", .{});
+        return null;
+    }
+    const idx_raw = c[1].asNumber() orelse {
+        self.warnFmt(c[1].span, "(plane …) layer index must be a number", .{});
+        return null;
+    };
+    if (idx_raw < 1 or idx_raw > @as(f64, @floatFromInt(layers)) or idx_raw != @floor(idx_raw)) {
+        self.warnFmt(c[1].span, "(plane …) layer index out of range for this stackup", .{});
+        return null;
+    }
+    const net = c[2].asString() orelse c[2].asAtom() orelse {
+        self.warnFmt(c[2].span, "(plane …) net must be a name", .{});
+        return null;
+    };
+    return .{ .index = @intFromFloat(idx_raw), .net = net };
+}
+
+/// Parse one `(pour top|bottom "NET")` entry — sugar for a `(plane …)` on the
+/// matching OUTER copper layer (top = 1, bottom = the stackup's layer count),
+/// so a 2-layer board can say `(pour bottom "GND")` instead of counting
+/// indices. Null (with a warning) on a malformed side/net.
+fn parsePourEntry(self: *Evaluator, c: []const Node, layers: u8) ?env_mod.StackupPlane {
+    if (c.len < 3) {
+        self.warnFmt(c[0].span, "(pour …) needs a side (top|bottom) and a net name", .{});
+        return null;
+    }
+    const side = c[1].asAtom() orelse {
+        self.warnFmt(c[1].span, "(pour …) side must be top or bottom", .{});
+        return null;
+    };
+    var index: ?u8 = null;
+    if (std.mem.eql(u8, side, "top")) index = 1;
+    if (std.mem.eql(u8, side, "bottom")) index = layers;
+    const idx = index orelse {
+        self.warnFmt(c[1].span, "(pour …) side must be top or bottom, got {s}", .{side});
+        return null;
+    };
+    const net = c[2].asString() orelse c[2].asAtom() orelse {
+        self.warnFmt(c[2].span, "(pour …) net must be a name", .{});
+        return null;
+    };
+    return .{ .index = idx, .net = net };
 }
 
 /// Parse one top-level `(net-class "name" (width MM) (clearance MM)
@@ -1771,6 +1818,39 @@ fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_m
         return null;
     }
     spec.nets = nets.toOwnedSlice(self.allocator) catch &.{};
+    return spec;
+}
+
+/// Parse a top-level `(design-rules (clearance MM) (min-drill MM)
+/// (mask-margin MM) (copper-edge MM) (hole-to-hole MM) (min-annular MM))`
+/// form into a `DesignRulesSpec`. Every sub-form is optional; an unset field
+/// stays 0 so the consumer falls back to its built-in default. `present` is
+/// set whenever the form appears (even empty), so a bare `(design-rules)` is a
+/// harmless no-op rather than an error.
+fn parseDesignRules(self: *Evaluator, form_children: []const Node) env_mod.DesignRulesSpec {
+    var spec = env_mod.DesignRulesSpec{ .present = true };
+    for (form_children[1..]) |child| {
+        const c = child.asList() orelse continue;
+        if (c.len < 1) continue;
+        const head = c[0].asAtom() orelse continue;
+        const val: ?f64 = if (c.len >= 2) c[1].asNumber() else null;
+        if (std.mem.eql(u8, head, "clearance")) {
+            spec.clearance = val orelse 0;
+        } else if (std.mem.eql(u8, head, "min-drill")) {
+            spec.min_drill = val orelse 0;
+        } else if (std.mem.eql(u8, head, "mask-margin")) {
+            spec.mask_margin = val orelse 0;
+        } else if (std.mem.eql(u8, head, "copper-edge")) {
+            spec.copper_edge = val orelse 0;
+        } else if (std.mem.eql(u8, head, "hole-to-hole")) {
+            spec.hole_to_hole = val orelse 0;
+        } else if (std.mem.eql(u8, head, "min-annular")) {
+            spec.min_annular = val orelse 0;
+        } else {
+            self.warnFmt(c[0].span, "unknown (design-rules …) sub-form ({s} …) — expected " ++
+                "clearance/min-drill/mask-margin/copper-edge/hole-to-hole/min-annular", .{head});
+        }
+    }
     return spec;
 }
 
@@ -1831,6 +1911,32 @@ test "design-block captures (stackup …)" {
     try testing.expectEqualStrings("PWR", block.stackup.planes[1].net);
 }
 
+// spec: eval/design_block - (pour top|bottom "NET") is stackup sugar for a plane on the matching outer layer
+test "design-block maps (pour …) onto outer-layer planes" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (stackup 2 (pour bottom "GND") (pour top "VDD") (pour sideways "X")))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const value = try evalDesignBlock(&eval, form_children[1..], &env);
+    const block = value.design_block;
+    try testing.expect(block.stackup.present);
+    try testing.expectEqual(@as(u8, 2), block.stackup.layers);
+    // The malformed side is warned + dropped; the two pours land on the
+    // outer indices (bottom = layer count, top = 1).
+    try testing.expectEqual(@as(usize, 2), block.stackup.planes.len);
+    try testing.expectEqual(@as(u8, 2), block.stackup.planes[0].index);
+    try testing.expectEqualStrings("GND", block.stackup.planes[0].net);
+    try testing.expectEqual(@as(u8, 1), block.stackup.planes[1].index);
+    try testing.expectEqualStrings("VDD", block.stackup.planes[1].net);
+}
+
 // spec: eval/design_block - a bare 2-layer stackup declares no planes so ground routes as copper
 test "design-block captures a plane-less (stackup 2)" {
     const a = std.heap.page_allocator;
@@ -1889,6 +1995,59 @@ test "design-block captures (net-class …) rules" {
     // Routing-order tier is captured, and an out-of-range value clamps to 7.
     try testing.expectEqual(@as(u32, 3), block.net_classes[1].priority);
     try testing.expectEqual(@as(u32, 7), block.net_classes[2].priority);
+}
+
+// spec: eval/design_block - design-rules form captures the board-level default rules on the design block
+test "design-block captures (design-rules …)" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (design-rules (clearance 0.15) (min-drill 0.25) (mask-margin 0.06)
+        \\    (copper-edge 0.4) (hole-to-hole 0.3) (min-annular 0.13)))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const value = try evalDesignBlock(&eval, form_children[1..], &env);
+    const block = switch (value) {
+        .design_block => |b| b,
+        else => return error.TestUnexpectedResult,
+    };
+    const dr = block.design_rules;
+    try testing.expect(dr.present);
+    try testing.expectEqual(@as(f64, 0.15), dr.clearance);
+    try testing.expectEqual(@as(f64, 0.25), dr.min_drill);
+    try testing.expectEqual(@as(f64, 0.06), dr.mask_margin);
+    try testing.expectEqual(@as(f64, 0.4), dr.copper_edge);
+    try testing.expectEqual(@as(f64, 0.3), dr.hole_to_hole);
+    try testing.expectEqual(@as(f64, 0.13), dr.min_annular);
+}
+
+// spec: eval/design_block - a design with no design-rules form leaves every rule at its zero (default) sentinel
+test "design-block without (design-rules …) has no rules present" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test")
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const value = try evalDesignBlock(&eval, form_children[1..], &env);
+    const block = switch (value) {
+        .design_block => |b| b,
+        else => return error.TestUnexpectedResult,
+    };
+    // No form ⇒ not present, every field the zero sentinel — the consumer
+    // (`optimizer.designRulesOf`) then fills in the built-in defaults.
+    try testing.expect(!block.design_rules.present);
+    try testing.expectEqual(@as(f64, 0), block.design_rules.clearance);
+    try testing.expectEqual(@as(f64, 0), block.design_rules.min_drill);
 }
 
 // spec: eval/design_block - net ties merge transitively so a chained tie collapses all three nets into one
@@ -1975,12 +2134,13 @@ test "buildNets renames bypass stubs onto the canonical root" {
     try testing.expect(found_stub);
 }
 
-// spec: eval/design_block - board form parses outline size, edge lists, and corners
+// spec: eval/design_block - board form parses outline size, corner radius, edge lists, and corners
 test "design-block parses a (board ...) form" {
     const a = std.heap.page_allocator;
     const src =
         \\(design-block "test"
         \\  (board (size 80 55)
+        \\    (corner-radius 3)
         \\    (left "usbc" "rj45")
         \\    (right (rot 90 "sma1"))
         \\    (corners "MK1" "MK2" "MK3" "MK4")))
@@ -1995,6 +2155,7 @@ test "design-block parses a (board ...) form" {
     try testing.expect(block.board.present);
     try testing.expectApproxEqAbs(@as(f64, 80), block.board.w, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 55), block.board.h, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 3), block.board.corner_radius, 1e-9);
     try testing.expectEqual(@as(usize, 2), block.board.sides.len);
     try testing.expectEqualStrings("usbc", block.board.sides[0].items[0].ref);
     try testing.expectEqual(@as(f64, 90), block.board.sides[1].items[0].rot.?);

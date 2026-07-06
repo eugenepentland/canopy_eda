@@ -25,11 +25,11 @@ const export_kicad = @import("export_kicad.zig");
 const export_fab = @import("export_fab.zig");
 const font = @import("font5x7.zig");
 
-/// Solder-mask opening expansion per pad side (mm) — KiCad's stock margin.
-const MASK_MARGIN_MM: f64 = 0.05;
-/// Copper-pour isolation: plane pullback from the board edge, and the
-/// clearance a pour keeps from foreign copper (antipads, track halos).
-const POUR_CLEARANCE_MM: f64 = 0.3;
+// Solder-mask margin and copper-pour isolation are no longer hard-coded here —
+// they live in `optimizer.DesignRules` (`mask_margin` / `pour_clearance` /
+// `copper_edge`), resolved from the design's `(design-rules …)` form with the
+// old constants (0.05 / 0.3) as defaults, and read via `placement.rules.design`.
+
 /// Silkscreen stroke width (mm) — footprint art and ref-des text alike.
 const SILK_W_MM: f64 = 0.15;
 /// Ref-des text pixel pitch (mm); glyphs are 5x7 px, so cap height ~1 mm.
@@ -115,14 +115,71 @@ pub fn planLayers(arena: std.mem.Allocator, placement: optimizer.Placement) std.
     return out.toOwnedSlice(arena);
 }
 
+/// Write the Gerber Job File (`.gbrjob`, JSON) that ties the package together:
+/// `GeneralSpecs` (board size from the outline, copper-layer count from the
+/// stackup) + `FilesAttributes` (each Gerber's archive path + its
+/// `FileFunction`/`FilePolarity`, matching the `%TF.*` attributes the layers
+/// carry). Many fabs' CAM reads this for automatic stackup/layer detection.
+/// `files` is the same `planLayers` set; `name_prefix` is the design name the
+/// archive entries are prefixed with (so `Path` matches the ZIP entry).
+pub fn writeJobFile(
+    w: *std.Io.Writer,
+    placement: optimizer.Placement,
+    files: []const LayerFile,
+    name_prefix: []const u8,
+) std.Io.Writer.Error!void {
+    const r = export_fab.outlineRect(placement);
+    const rules = placement.rules;
+    const layer_count: u8 = if (rules.plane_nets == null) 4 else @max(2, rules.copper_layers);
+    // Count copper files (the FileFunction begins with "Copper") for the
+    // MaterialStackup-less GeneralSpecs summary.
+    try w.writeAll("{\n  \"Header\": {\n");
+    try w.writeAll("    \"GenerationSoftware\": { \"Vendor\": \"netlisp\", \"Application\": \"netlisp\", \"Version\": \"1\" }\n");
+    try w.writeAll("  },\n  \"GeneralSpecs\": {\n");
+    try w.writeAll("    \"ProjectId\": { \"Name\": ");
+    try writeJsonStr(w, name_prefix);
+    try w.writeAll(", \"GUID\": \"\", \"Revision\": \"\" },\n");
+    try w.print("    \"Size\": {{ \"X\": {d:.3}, \"Y\": {d:.3} }},\n", .{ r.w, r.h });
+    try w.print("    \"LayerNumber\": {d},\n", .{layer_count});
+    try w.writeAll("    \"BoardThickness\": 1.6\n");
+    try w.writeAll("  },\n  \"FilesAttributes\": [\n");
+    for (files, 0..) |f, i| {
+        if (i > 0) try w.writeAll(",\n");
+        const polarity = if (f.layer == .mask) "Negative" else "Positive";
+        try w.writeAll("    { \"Path\": ");
+        // Path = "<name>-<suffix>", the ZIP entry name.
+        var buf: [256]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "{s}-{s}", .{ name_prefix, f.suffix }) catch f.suffix;
+        try writeJsonStr(w, path);
+        try w.writeAll(", \"FileFunction\": ");
+        try writeJsonStr(w, f.function);
+        try w.print(", \"FilePolarity\": \"{s}\" }}", .{polarity});
+    }
+    try w.writeAll("\n  ]\n}\n");
+}
+
+/// Minimal JSON string writer for the job file (quotes + backslash escaping).
+fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
+    try w.writeByte('"');
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        else => try w.writeByte(c),
+    };
+    try w.writeByte('"');
+}
+
 /// Write one complete Gerber file for `layer`. `copper` is the saved
 /// layout's persisted routed copper (empty is fine — pads still flash);
-/// `frame` must be the same package frame every sibling file uses.
+/// `texts` are the saved layout's board-level silkscreen labels (only the
+/// silk layers consume them); `frame` must be the same package frame every
+/// sibling file uses.
 pub fn writeLayer(
     w: *std.Io.Writer,
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     copper: Copper,
+    texts: []const font.BoardText,
     frame: export_fab.Frame,
     layer: Layer,
     function: []const u8,
@@ -139,7 +196,7 @@ pub fn writeLayer(
         .inner_blank => try g.w.writeAll("G04 inner signal layer unused by the 2-signal-layer router*\n"),
         .mask => |side| try writeMask(&g, placement, side),
         .paste => |side| try writePaste(&g, placement, side),
-        .silk => |side| try writeSilk(&g, placement, side),
+        .silk => |side| try writeSilk(&g, placement, side, texts),
         .edge => try writeEdge(&g, placement),
     }
 
@@ -175,6 +232,7 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
     // dark copper below re-lands the real features on the cleaned pour.
     if (declaredPlaneAt(placement.rules, stack_idx)) |pour_net| {
         const net: PlaneNet = .{ .named = pour_net };
+        const pc = placement.rules.design.pour_clearance;
         try pourRect(g, placement);
         try g.polarity(false);
         const nets = try padNets(g.arena, placement);
@@ -182,18 +240,18 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
             for (p.pads) |pad| {
                 if (isSmd(pad) and p.side != side) continue;
                 if (planeCarries(net, netOfPad(nets, placement, p.ref_des, pad.number))) continue;
-                try flashPadBox(g, p, pad, POUR_CLEARANCE_MM);
+                try flashPadBox(g, p, pad, pc);
             }
         }
         for (copper.tracks) |t| {
             if (t.layer != li) continue;
             if (planeCarries(net, netName(placement, t.net))) continue;
-            try g.use(.c, t.width + 2 * POUR_CLEARANCE_MM, 0);
+            try g.use(.c, t.width + 2 * pc, 0);
             try g.line(t.x1, t.y1, t.x2, t.y2);
         }
         for (copper.vias) |v| {
             if (planeCarries(net, netName(placement, v.net))) continue;
-            try g.use(.c, v.dia + 2 * POUR_CLEARANCE_MM, 0);
+            try g.use(.c, v.dia + 2 * pc, 0);
             try g.flash(v.x, v.y);
         }
         try g.polarity(true);
@@ -221,6 +279,7 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
 /// antipads punched over every drilled hole whose net the plane does NOT
 /// carry — same-net barrels connect directly (no thermal relief).
 fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneLayer) Error!void {
+    const pc = placement.rules.design.pour_clearance;
     try pourRect(g, placement);
     try g.polarity(false);
     const nets = try padNets(g.arena, placement);
@@ -230,13 +289,13 @@ fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneL
             const foreign = pad.npth or !planeCarries(pl.net, netOfPad(nets, placement, p.ref_des, pad.number));
             if (!foreign) continue;
             const c = optimizer.worldPadCenter(p, pad.x, pad.y);
-            try g.use(.c, pad.drill + 2 * POUR_CLEARANCE_MM, 0);
+            try g.use(.c, pad.drill + 2 * pc, 0);
             try g.flash(c[0], c[1]);
         }
     }
     for (copper.vias) |v| {
         if (planeCarries(pl.net, netName(placement, v.net))) continue;
-        try g.use(.c, v.dia + 2 * POUR_CLEARANCE_MM, 0);
+        try g.use(.c, v.dia + 2 * pc, 0);
         try g.flash(v.x, v.y);
     }
     try g.polarity(true);
@@ -246,10 +305,11 @@ fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneL
 /// on their part's side; through-hole and NPTH pads open on both sides.
 /// Vias are tented (no opening).
 fn writeMask(g: *Gx, placement: optimizer.Placement, side: optimizer.Side) Error!void {
+    const margin = placement.rules.design.mask_margin;
     for (placement.parts) |p| {
         for (p.pads) |pad| {
             if (isSmd(pad) and p.side != side) continue;
-            try flashPad(g, p, pad, MASK_MARGIN_MM);
+            try flashPad(g, p, pad, margin);
         }
     }
 }
@@ -273,9 +333,10 @@ fn writePaste(g: *Gx, placement: optimizer.Placement, side: optimizer.Side) Erro
 }
 
 /// Silkscreen: each same-side part's footprint art (lines + circles) plus
-/// its ref-des in 5x7 strokes above the courtyard. Bottom-side text mirrors
-/// so it reads correctly when the board is flipped.
-fn writeSilk(g: *Gx, placement: optimizer.Placement, side: optimizer.Side) Error!void {
+/// its ref-des in 5x7 strokes above the courtyard, then any board-level user
+/// text on this side. Bottom-side text mirrors so it reads correctly when the
+/// board is flipped.
+fn writeSilk(g: *Gx, placement: optimizer.Placement, side: optimizer.Side, texts: []const font.BoardText) Error!void {
     for (placement.parts) |p| {
         if (p.side != side) continue;
         try g.use(.c, SILK_W_MM, 0);
@@ -290,12 +351,30 @@ fn writeSilk(g: *Gx, placement: optimizer.Placement, side: optimizer.Side) Error
         }
         try drawRefDes(g, p);
     }
+    // Board-level user silkscreen text (Text tool / sidecar `texts[]`).
+    const bottom = side == .bottom;
+    for (texts) |t| {
+        if (t.bottom != bottom) continue;
+        try drawBoardText(g, t);
+    }
 }
 
-/// Board profile: the outline rectangle as a thin closed contour.
+/// Board profile as a thin closed contour: the exact outline polygon when
+/// the board is non-rectangular (viewer-drawn polygon / `(corner-radius R)`
+/// rounded rect, straight segments), else the outline rectangle.
 fn writeEdge(g: *Gx, placement: optimizer.Placement) Error!void {
-    const r = export_fab.outlineRect(placement);
     try g.use(.c, EDGE_W_MM, 0);
+    if (placement.board_poly) |poly| {
+        if (poly.len >= 3) {
+            var prev = poly[poly.len - 1];
+            for (poly) |v| {
+                try g.line(prev[0], prev[1], v[0], v[1]);
+                prev = v;
+            }
+            return;
+        }
+    }
+    const r = export_fab.outlineRect(placement);
     try g.line(r.minx, r.miny, r.minx + r.w, r.miny);
     try g.line(r.minx + r.w, r.miny, r.minx + r.w, r.miny + r.h);
     try g.line(r.minx + r.w, r.miny + r.h, r.minx, r.miny + r.h);
@@ -343,11 +422,12 @@ fn flashPadBox(g: *Gx, p: optimizer.Part, pad: geometry.Pad, grow: f64) Error!vo
 
 // ── Pours + net lookups ─────────────────────────────────────────────────────
 
-/// The solid pour region: the board outline pulled back by
-/// `POUR_CLEARANCE_MM` on every edge (skipped when degenerate).
+/// The solid pour region: the board outline pulled back by the copper-to-edge
+/// clearance (a `(design-rules (copper-edge …))` value, else the fab-safe pour
+/// default) on every edge (skipped when degenerate).
 fn pourRect(g: *Gx, placement: optimizer.Placement) Error!void {
     const r = export_fab.outlineRect(placement);
-    const p = POUR_CLEARANCE_MM;
+    const p = placement.rules.design.pourEdge();
     if (r.w <= 2 * p or r.h <= 2 * p) return;
     const pts = [_][2]f64{
         .{ r.minx + p, r.miny + p },
@@ -434,39 +514,77 @@ fn drawRefDes(g: *Gx, p: optimizer.Part) Error!void {
     const hh = if (q) p.hw else p.hh;
     const cc = optimizer.worldPadCenter(p, p.ccx, p.ccy);
     const ty = cc[1] - hh - (font.GH * TEXT_PX_MM) / 2 - 0.2;
-    try drawText(g, cc[0], ty, p.ref_des, p.side == .bottom);
+    // Ref-des uppercases (its font predates lowercase) at the fixed 0.15 mm
+    // pitch — kept byte-identical (see TextGeom defaults).
+    try drawText(g, cc[0], ty, p.ref_des, .{ .mirror = p.side == .bottom, .upper = true });
+}
+
+/// How a silkscreen string is laid out: the per-pixel pitch (mm), whether x
+/// mirrors about the anchor (bottom side), quarter-turn rotation, and whether
+/// the source is uppercased first (ref-des only, for byte-identical legacy).
+const TextGeom = struct {
+    pitch: f64 = TEXT_PX_MM,
+    mirror: bool = false,
+    rot: f64 = 0,
+    upper: bool = false,
+};
+
+/// Stroke a board-level user text at its world anchor, scaled to its cap
+/// height and rotated to its quarter turn. Bottom-side mirrors like ref-des.
+fn drawBoardText(g: *Gx, t: font.BoardText) Error!void {
+    // Cap height → pixel pitch (glyph is GH pixels tall). Guard non-positive.
+    const pitch = if (t.size > 0) t.size / @as(f64, @floatFromInt(font.GH)) else TEXT_PX_MM;
+    try drawText(g, t.x, t.y, t.text, .{ .pitch = pitch, .mirror = t.bottom, .rot = t.rot });
 }
 
 /// Stroke `s` centred at (cx,cy) in placement coordinates: each glyph row's
 /// runs of lit pixels become one horizontal segment (single pixels flash a
-/// dot). `mirror` flips x about the centre.
-fn drawText(g: *Gx, cx: f64, cy: f64, s: []const u8, mirror: bool) Error!void {
-    const P = TEXT_PX_MM;
+/// dot) — walked once per glyph via `font.glyphRuns` in the same row-then-
+/// column order the old inline loop used, so ref-des output is byte-identical.
+/// `geom.mirror` flips x about the centre (bottom-side readability);
+/// `geom.rot` rotates the whole string about the anchor.
+fn drawText(g: *Gx, cx: f64, cy: f64, s: []const u8, geom: TextGeom) Error!void {
+    const P = geom.pitch;
     const adv = @as(f64, @floatFromInt(font.GW + 1)) * P;
     const total = @as(f64, @floatFromInt(s.len)) * adv - P;
-    try g.use(.c, SILK_W_MM, 0);
-    for (s, 0..) |ch, k| {
-        const gx0 = -total / 2 + @as(f64, @floatFromInt(k)) * adv;
-        const cols = font.cols(std.ascii.toUpper(ch));
-        var r: u5 = 0;
-        while (r < font.GH) : (r += 1) {
-            const wy = cy + (@as(f64, @floatFromInt(r)) - 3.0) * P;
-            var c: usize = 0;
-            while (c < font.GW) {
-                if (cols[c] & (@as(u8, 1) << @intCast(r)) == 0) {
-                    c += 1;
-                    continue;
-                }
-                var e = c;
-                while (e + 1 < font.GW and cols[e + 1] & (@as(u8, 1) << @intCast(r)) != 0) e += 1;
-                const lx1 = gx0 + (@as(f64, @floatFromInt(c)) + 0.5) * P;
-                const lx2 = gx0 + (@as(f64, @floatFromInt(e)) + 0.5) * P;
-                const wx1 = if (mirror) cx - lx1 else cx + lx1;
-                const wx2 = if (mirror) cx - lx2 else cx + lx2;
-                if (c == e) try g.flash(wx1, wy) else try g.line(wx1, wy, wx2, wy);
-                c = e + 1;
-            }
+    // Rotation of the local (lx,ly) frame about the anchor (0 = the fast path
+    // where ca/sa are exactly 1/0, so unrotated text is byte-identical).
+    const a = @mod(geom.rot, 360.0) * std.math.pi / 180.0;
+    const ca = @cos(a);
+    const sa = @sin(a);
+    const Emit = struct {
+        g: *Gx,
+        cx: f64,
+        cy: f64,
+        gx0: f64,
+        p: f64,
+        mirror: bool,
+        rotated: bool,
+        ca: f64,
+        sa: f64,
+        // (lx,ly) local px → world mm: mirror x, then rotate about the anchor.
+        fn place(self: @This(), lxpx: f64, ly: f64) [2]f64 {
+            const lx = if (self.mirror) -lxpx else lxpx;
+            if (!self.rotated) return .{ self.cx + lx, self.cy + ly };
+            return .{ self.cx + lx * self.ca - ly * self.sa, self.cy + lx * self.sa + ly * self.ca };
         }
+        fn emit(self: @This(), run: font.Run) Error!void {
+            const ly = (@as(f64, @floatFromInt(run.r)) - 3.0) * self.p;
+            const lx1 = self.gx0 + (@as(f64, @floatFromInt(run.c0)) + 0.5) * self.p;
+            const lx2 = self.gx0 + (@as(f64, @floatFromInt(run.c1)) + 0.5) * self.p;
+            const w1 = self.place(lx1, ly);
+            if (run.c0 == run.c1) return self.g.flash(w1[0], w1[1]);
+            const w2 = self.place(lx2, ly);
+            try self.g.line(w1[0], w1[1], w2[0], w2[1]);
+        }
+    };
+    const rotated = geom.rot != 0;
+    try g.use(.c, SILK_W_MM, 0);
+    for (s, 0..) |ch0, k| {
+        const ch = if (geom.upper) std.ascii.toUpper(ch0) else ch0;
+        const gx0 = -total / 2 + @as(f64, @floatFromInt(k)) * adv;
+        const em = Emit{ .g = g, .cx = cx, .cy = cy, .gx0 = gx0, .p = P, .mirror = geom.mirror, .rotated = rotated, .ca = ca, .sa = sa };
+        try font.glyphRuns(ch, Error, em, Emit.emit);
     }
 }
 
@@ -655,7 +773,8 @@ test "writeLayer emits top copper with pads, tracks, and via lands" {
     const vias = [_]router.Via{.{ .x = 5, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 }};
 
     var aw: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&aw.writer, arena, placement, .{ .tracks = &tracks, .vias = &vias }, export_fab.frameFor(placement), .{ .copper = .top }, "Copper,L1,Top");
+    const top_copper = Copper{ .tracks = &tracks, .vias = &vias };
+    try writeLayer(&aw.writer, arena, placement, top_copper, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, "Copper,L1,Top");
     const out = aw.written();
 
     try testing.expect(std.mem.indexOf(u8, out, "%FSLAX46Y46*%") != null);
@@ -674,7 +793,7 @@ test "writeLayer emits top copper with pads, tracks, and via lands" {
     // is footprint-local; a centred pad stays at the part centre).
     var bw: std.Io.Writer.Allocating = .init(arena);
     const bot_copper = Copper{ .tracks = &tracks, .vias = &vias };
-    try writeLayer(&bw.writer, arena, placement, bot_copper, export_fab.frameFor(placement), .{ .copper = .bottom }, "Copper,L4,Bot");
+    try writeLayer(&bw.writer, arena, placement, bot_copper, &.{}, export_fab.frameFor(placement), .{ .copper = .bottom }, "Copper,L4,Bot");
     const bot = bw.written();
     try testing.expect(std.mem.indexOf(u8, bot, "X4000000Y6000000D03*") != null);
     try testing.expect(std.mem.indexOf(u8, bot, "X1000000Y9000000D02*\nX2000000Y9000000D01*") != null);
@@ -697,17 +816,44 @@ test "mask expands pads and skips vias; paste skips through-hole" {
     const vias = [_]router.Via{.{ .x = 5, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 }};
 
     var mw: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&mw.writer, arena, placement, .{ .vias = &vias }, export_fab.frameFor(placement), .{ .mask = .top }, "Soldermask,Top");
+    try writeLayer(&mw.writer, arena, placement, .{ .vias = &vias }, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, "Soldermask,Top");
     const mask = mw.written();
     try testing.expect(std.mem.indexOf(u8, mask, "%TF.FilePolarity,Negative*%") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "R,1.100000X0.600000*%") != null); // 0.05/side expansion
     try testing.expect(std.mem.indexOf(u8, mask, "X5000000Y5000000D03*") == null); // via tented
 
     var pw: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&pw.writer, arena, placement, .{}, export_fab.frameFor(placement), .{ .paste = .top }, "Paste,Top");
+    try writeLayer(&pw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .paste = .top }, "Paste,Top");
     const paste = pw.written();
     try testing.expect(std.mem.indexOf(u8, paste, "R,1.000000X0.500000*%") != null); // SMD at 1:1
     try testing.expect(std.mem.indexOf(u8, paste, "1.400000") == null); // thru pad has no paste
+}
+
+// spec: export_gerber - the mask margin comes from (design-rules …), defaulting byte-identically to 0.05 mm
+test "mask margin reads from the design rules" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1.0, .h = 0.5 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
+    };
+
+    // No form ⇒ default 0.05/side ⇒ the same 1.100000X0.600000 opening the
+    // legacy constant produced (the byte-identical regression).
+    const base = testPlacement(&parts, &.{});
+    var mw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&mw.writer, arena, base, .{}, &.{}, export_fab.frameFor(base), .{ .mask = .top }, "Soldermask,Top");
+    try testing.expect(std.mem.indexOf(u8, mw.written(), "R,1.100000X0.600000*%") != null);
+
+    // A (design-rules (mask-margin 0.1)) widens the opening to 0.1/side ⇒
+    // 1.200000X0.700000.
+    var wide = testPlacement(&parts, &.{});
+    wide.rules = .{ .design = .{ .mask_margin = 0.1 } };
+    var ww: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&ww.writer, arena, wide, .{}, &.{}, export_fab.frameFor(wide), .{ .mask = .top }, "Soldermask,Top");
+    try testing.expect(std.mem.indexOf(u8, ww.written(), "R,1.200000X0.700000*%") != null);
 }
 
 // spec: export_gerber - an inner plane pours solid copper and antipads only foreign holes
@@ -737,7 +883,7 @@ test "plane layer clears foreign holes and connects same-net barrels" {
 
     var aw: std.Io.Writer.Allocating = .init(arena);
     const inner: Layer = .{ .plane = .{ .index = 2, .net = .ground } };
-    try writeLayer(&aw.writer, arena, placement, .{ .vias = &vias }, export_fab.frameFor(placement), inner, "Copper,L2,Inner");
+    try writeLayer(&aw.writer, arena, placement, .{ .vias = &vias }, &.{}, export_fab.frameFor(placement), inner, "Copper,L2,Inner");
     const out = aw.written();
 
     try testing.expect(std.mem.indexOf(u8, out, "G36*") != null); // the solid pour
@@ -749,6 +895,77 @@ test "plane layer clears foreign holes and connects same-net barrels" {
     try testing.expect(std.mem.indexOf(u8, out, "X9000000Y5000000D03*") == null);
     try testing.expect(std.mem.indexOf(u8, out, "X6000000Y5000000D03*") != null);
     try testing.expect(std.mem.indexOf(u8, out, "X5000000Y5000000D03*") == null);
+}
+
+// spec: export_gerber - an outer-layer pour paints the copper file solid and isolates only foreign same-face features
+test "outer pour fills bottom copper and antipads foreign features" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const gnd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const sig_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1.0, .h = 0.5 }};
+    var parts = [_]optimizer.Part{
+        // Bottom-side GND cap: its pad must stay SOLID in the pour (no antipad).
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &gnd_pad, .fallback = false, .x = 4, .y = 4, .side = .bottom },
+        // Bottom-side signal part: its pad gets a clear-polarity isolation box.
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.7, .hh = 0.5, .pads = &sig_pad, .fallback = false, .x = 10, .y = 5, .side = .bottom },
+    };
+    const gnd_pins = [_]export_kicad.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const sig_pins = [_]export_kicad.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
+    const nets = [_]export_kicad.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "VIN", .pins = &sig_pins },
+    };
+    var placement = testPlacement(&parts, &nets);
+    // (stackup 2 (pour bottom "GND")) — index 2 IS the bottom outer face.
+    const gnd_names = [_][]const u8{"GND"};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    placement.rules = .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = &planes };
+
+    var bw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&bw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .bottom }, "Copper,L2,Bot");
+    const bot = bw.written();
+    // The solid pour region + a clear-polarity pass, then back to dark.
+    try testing.expect(std.mem.indexOf(u8, bot, "G36*") != null);
+    try testing.expect(std.mem.indexOf(u8, bot, "%LPC*%") != null);
+    try testing.expect(std.mem.indexOf(u8, bot, "%LPD*%") != null);
+    // Foreign pad antipad: bbox 1.0x0.5 grown 0.3/side ⇒ 1.6x1.1 rect flash.
+    try testing.expect(std.mem.indexOf(u8, bot, "R,1.600000X1.100000*%") != null);
+    // The pad flashes themselves (dark) exist for both parts; the GND pad's
+    // 0.6 aperture never appears grown (0.6+0.6=1.2 would be its antipad).
+    try testing.expect(std.mem.indexOf(u8, bot, "R,0.600000X0.600000*%") != null);
+    try testing.expect(std.mem.indexOf(u8, bot, "R,1.200000X1.200000*%") == null);
+
+    // The un-poured top face keeps plain pads-only copper: no pour region.
+    var tw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&tw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, "Copper,L1,Top");
+    try testing.expect(std.mem.indexOf(u8, tw.written(), "G36*") == null);
+}
+
+// spec: export_gerber - the .gbrjob job file lists board size, layer count, and each file's function
+test "writeJobFile summarizes the package as valid JSON" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const placement = testPlacement(&.{}, &.{});
+    const files = try planLayers(arena, placement);
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    try writeJobFile(&aw.writer, placement, files, "demo");
+    const out = aw.written();
+
+    // Parses as JSON and carries the spec fields.
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, out, .{});
+    const root = parsed.value.object;
+    const specs = root.get("GeneralSpecs").?.object;
+    try testing.expectEqual(@as(i64, 4), specs.get("LayerNumber").?.integer); // implicit 4-layer
+    try testing.expectApproxEqAbs(@as(f64, 20), specs.get("Size").?.object.get("X").?.float, 1e-6);
+    // The top-copper file entry carries the KiCad-style path + FileFunction.
+    try testing.expect(std.mem.indexOf(u8, out, "demo-F_Cu.gtl") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"Copper,L1,Top\"") != null);
+    // The mask file is Negative polarity.
+    try testing.expect(std.mem.indexOf(u8, out, "\"FilePolarity\": \"Negative\"") != null);
 }
 
 // spec: export_gerber - the edge layer closes the board outline; silk strokes footprint art and ref-des text
@@ -764,7 +981,7 @@ test "edge closes the outline and silk carries the ref-des" {
     const placement = testPlacement(&parts, &.{});
 
     var ew: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&ew.writer, arena, placement, .{}, export_fab.frameFor(placement), .edge, "Profile,NP");
+    try writeLayer(&ew.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .edge, "Profile,NP");
     const edge = ew.written();
     try testing.expect(std.mem.indexOf(u8, edge, "C,0.100000*%") != null);
     // All four outline corners appear ((0,0)→(20,10) in the y-up frame).
@@ -772,11 +989,124 @@ test "edge closes the outline and silk carries the ref-des" {
     try testing.expect(std.mem.indexOf(u8, edge, "X20000000Y0D01*") != null);
 
     var sw: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&sw.writer, arena, placement, .{}, export_fab.frameFor(placement), .{ .silk = .top }, "Legend,Top");
+    try writeLayer(&sw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .silk = .top }, "Legend,Top");
     const silk_out = sw.written();
     try testing.expect(std.mem.indexOf(u8, silk_out, "C,0.150000*%") != null);
     // The footprint silk line at world y=4 → y-up 6.
     try testing.expect(std.mem.indexOf(u8, silk_out, "X9000000Y6000000D02*\nX11000000Y6000000D01*") != null);
     // Ref-des strokes exist (the "U1" glyphs flash many single pixels).
     try testing.expect(std.mem.count(u8, silk_out, "D03*") >= 10);
+}
+
+// spec: export_gerber - a non-rectangular board emits its exact outline polygon on the edge layer
+test "edge layer traces the outline polygon when the board is non-rectangular" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // L-shaped 10×10 board with the (6..10, 4..10) corner notched out (y-down
+    // world). The fab frame origin is the polygon BBOX's bottom-left, so the
+    // notch vertices land at positive y-up coordinates.
+    const l_poly = [_][2]f64{
+        .{ 0, 0 }, .{ 10, 0 }, .{ 10, 4 }, .{ 6, 4 }, .{ 6, 10 }, .{ 0, 10 },
+    };
+    var placement = testPlacement(&.{}, &.{});
+    placement.board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 };
+    placement.board_poly = &l_poly;
+
+    var ew: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&ew.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .edge, "Profile,NP");
+    const edge = ew.written();
+    // The notch corner (6,4) → y-up (6,6) is drawn to from (10,4) → (10,6).
+    try testing.expect(std.mem.indexOf(u8, edge, "X10000000Y6000000D02*\nX6000000Y6000000D01*") != null);
+    // The notch wall (6,4)→(6,10) → y-up (6,6)→(6,0).
+    try testing.expect(std.mem.indexOf(u8, edge, "X6000000Y6000000D02*\nX6000000Y0D01*") != null);
+    // The path closes: last vertex (0,10) → first (0,0), y-up (0,0)→(0,10).
+    try testing.expect(std.mem.indexOf(u8, edge, "X0Y0D02*\nX0Y10000000D01*") != null);
+    // The plain bbox rectangle's notched corner (10,10 y-down → 10,0 y-up)
+    // never appears as a draw target.
+    try testing.expect(std.mem.indexOf(u8, edge, "X10000000Y0D01*") == null);
+}
+
+// spec: export_gerber - board-level silkscreen text strokes onto the silk layer at its world anchor, and only on its own side
+test "silk layer strokes board-level text at its anchor" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // Empty ref-des so the only silk strokes are the board text (no ref-des
+    // glyphs to muddy the flash counts).
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 10, .y = 5 },
+    };
+    const placement = testPlacement(&parts, &.{});
+    // A top-side "T" at world (10,5). "T" = a 5-wide top bar (one line run) plus
+    // a 1-wide stem down the middle (six single-pixel dot flashes).
+    const texts = [_]font.BoardText{
+        .{ .x = 10, .y = 5, .size = 1.05, .text = "T", .bottom = false },
+        .{ .x = 3, .y = 3, .size = 1.05, .text = "B", .bottom = true }, // wrong side
+    };
+
+    var tw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&tw.writer, arena, placement, .{}, &texts, export_fab.frameFor(placement), .{ .silk = .top }, "Legend,Top");
+    const out = tw.written();
+    // "T"'s top-bar run is a horizontal segment; its stem is exactly 6 dot
+    // flashes. The bottom "B" is filtered out of the top layer, so the counts
+    // are the glyph's alone.
+    try testing.expect(std.mem.count(u8, out, "D01*") >= 1); // the top-bar stroke
+    try testing.expectEqual(@as(usize, 6), std.mem.count(u8, out, "D03*")); // "T" stem dots only
+
+    // The same "B" on the BOTTOM silk layer does render (and mirrors); the top
+    // "T" is filtered off the bottom layer, so "B"'s own strokes are all that show.
+    var bw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&bw.writer, arena, placement, .{}, &texts, export_fab.frameFor(placement), .{ .silk = .bottom }, "Legend,Bot");
+    const bout = bw.written();
+    try testing.expect(std.mem.count(u8, bout, "D01*") >= 1);
+    // "B" flashes/strokes exist; "T"'s 6 stem dots are absent (wrong side).
+    try testing.expect(std.mem.count(u8, bout, "D03*") + std.mem.count(u8, bout, "D01*") >= 3);
+}
+
+// spec: export_gerber - silkscreen text scales with its cap-height size (2x size gives 2x glyph extent)
+test "board text extent scales with cap height" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // Empty ref-des so the measured strokes are the board text alone (a fixed
+    // ref-des would add size-independent x-extent and break the ratio).
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 10, .y = 5 },
+    };
+    const placement = testPlacement(&parts, &.{});
+
+    // Measure the x-span of the flashed "H" strokes at 1× vs 2× cap height. A
+    // taller cap is a proportionally wider glyph, so the span doubles.
+    const span = struct {
+        fn measure(a2: std.mem.Allocator, pl: optimizer.Placement, size: f64) !f64 {
+            const ts = [_]font.BoardText{.{ .x = 10, .y = 5, .size = size, .text = "H" }};
+            var wbuf: std.Io.Writer.Allocating = .init(a2);
+            try writeLayer(&wbuf.writer, a2, pl, .{}, &ts, export_fab.frameFor(pl), .{ .silk = .top }, "Legend,Top");
+            const s = wbuf.written();
+            var minx: f64 = 1e18;
+            var maxx: f64 = -1e18;
+            var it = std.mem.tokenizeScalar(u8, s, '\n');
+            while (it.next()) |line| {
+                if (line.len == 0 or line[0] != 'X') continue;
+                const yi = std.mem.indexOfScalar(u8, line, 'Y') orelse continue;
+                const xv = std.fmt.parseInt(i64, line[1..yi], 10) catch continue;
+                const xf: f64 = @floatFromInt(xv);
+                minx = @min(minx, xf);
+                maxx = @max(maxx, xf);
+            }
+            return maxx - minx;
+        }
+    }.measure;
+
+    const s1 = try span(arena, placement, 1.0);
+    const s2 = try span(arena, placement, 2.0);
+    try testing.expect(s1 > 0);
+    // 2× cap height → 2× x-extent (within a small tolerance for the half-pixel
+    // stroke offsets being scaled too).
+    const ratio = s2 / s1;
+    try testing.expect(ratio > 1.9 and ratio < 2.1);
 }

@@ -16,21 +16,39 @@ const std = @import("std");
 const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
 const pad_shape = @import("pad_shape.zig");
+const outline = @import("outline.zig");
 const export_kicad = @import("../export_kicad.zig");
 
 const FlatNet = export_kicad.FlatNet;
 
 /// What two features clash. Used for the marker label on the page.
 /// `annular` = a via's copper ring around its drill is thinner than the
-/// fab minimum; `board_edge` = copper closer to the board outline than the
-/// clearance rule.
-pub const Kind = enum { via_pad, via_via, via_track, track_track, track_pad, pad_pad, annular, board_edge };
+/// fab minimum; `board_edge` = routed copper closer to the board outline than
+/// the copper-to-edge rule; `courtyard` = two placed parts' courtyards overlap
+/// (on the same board side); `hole_hole` = two drilled holes' walls sit closer
+/// than the hole-to-hole rule; `min_drill` = a drilled hole below the minimum
+/// drill diameter.
+pub const Kind = enum {
+    via_pad,
+    via_via,
+    via_track,
+    track_track,
+    track_pad,
+    pad_pad,
+    annular,
+    board_edge,
+    courtyard,
+    hole_hole,
+    min_drill,
+};
 
-/// Minimum via annular ring (copper radius minus drill radius, mm) — the
-/// JLC-class proto-fab floor. The router's default via (0.4 ⌀ / 0.2 drill)
-/// sits exactly on it, so default routing is legal by construction and only
-/// a deliberately thinner (net-class) via trips the check.
-pub const MIN_ANNULAR_MM: f64 = 0.1;
+// The drill-station rule DEFAULTS (min-annular 0.1, min-drill 0.2,
+// hole-to-hole 0.25 mm) live on `optimizer.DesignRules` — one source of truth
+// resolved from the design's `(design-rules …)` form. This DRC reads them from
+// `placement.rules.design`; an absent form leaves each at its default. The
+// router's default via (0.4 ⌀ / 0.2 drill) sits exactly on the 0.1 mm annular
+// floor, so default routing is legal by construction and only a deliberately
+// thinner (net-class) via trips the annular check.
 
 /// One clearance violation, located at the midpoint of the offending gap.
 pub const Violation = struct {
@@ -45,14 +63,36 @@ pub const Violation = struct {
 /// empty ⇒ the box is exact), the net it carries, its part index (so two
 /// pads of the same part are never checked against each other), and the
 /// signal layer its copper lives on (0 = top, 1 = bottom — the part's side;
-/// `thru` pads exist on every layer).
-const PadBox = struct { x0: f64, y0: f64, x1: f64, y1: f64, poly: []const [2]f64 = &.{}, net: i32, part: usize, layer: u8 = 0, thru: bool = false };
+/// `thru` pads exist on every layer). `drill`/`hx`,`hy` carry the pad's
+/// drilled-hole diameter (0 ⇒ no hole) and world centre, for the drill-related
+/// checks.
+const PadBox = struct {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    poly: []const [2]f64 = &.{},
+    net: i32,
+    part: usize,
+    layer: u8 = 0,
+    thru: bool = false,
+    drill: f64 = 0,
+    hx: f64 = 0,
+    hy: f64 = 0,
+};
+
+/// One drilled hole reduced to its world centre + diameter — a pad hole or a
+/// via, unified so the min-drill and hole-to-hole checks treat them alike.
+const Hole = struct { x: f64, y: f64, drill: f64 };
 
 const EPS: f64 = 1e-6;
 
 /// Run the check. All output is allocated in `arena`. `clearance` is the
 /// copper-to-copper rule (mm); two features of different nets must be at least
-/// this far apart, edge to edge.
+/// this far apart, edge to edge. The board-level `(design-rules …)` values
+/// (min-annular, min-drill, hole-to-hole, copper-edge) are read from
+/// `placement.rules.design`; an absent form leaves each at its built-in
+/// default, so the output is unchanged for existing designs.
 pub fn check(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -63,6 +103,7 @@ pub fn check(
     const pads = try padBoxes(arena, placement);
     const vias = routed.vias;
     const tracks = routed.tracks;
+    const rules = placement.rules.design;
 
     // via ↔ pad
     for (vias) |v| {
@@ -132,52 +173,12 @@ pub fn check(
             }
         }
     }
-    // via annular ring: the copper ring around the drill must meet the fab
-    // minimum. Vias without recorded drills (legacy/synthetic) are skipped.
-    for (vias) |v| {
-        if (v.drill <= 0) continue;
-        const ring = (v.dia - v.drill) / 2;
-        if (ring < MIN_ANNULAR_MM - EPS) {
-            try out.append(arena, .{ .x = v.x, .y = v.y, .gap = ring, .clearance = MIN_ANNULAR_MM, .kind = .annular });
-        }
-    }
-    // copper ↔ board edge: when the design declares a `(board (size W H) …)`
-    // outline, routed copper must keep the clearance rule from it. Features
-    // clearly OUTSIDE the outline (the off-board staging band) are skipped —
-    // they're a workflow state, not an edge-clearance problem.
-    if (placement.board_rect) |br| {
-        for (vias) |v| {
-            const vr = v.dia / 2;
-            const inset = edgeInset(br, v.x, v.y);
-            if (inset < -vr) continue; // fully off-board (staged)
-            const gap = inset - vr;
-            if (gap < clearance - EPS) {
-                try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = clearance, .kind = .board_edge });
-            }
-        }
-        for (tracks) |t| {
-            const hw = t.width / 2;
-            // The inset function is concave over a segment, so its minimum is
-            // at an endpoint — checking both ends covers the whole track.
-            const ends = [_][2]f64{ .{ t.x1, t.y1 }, .{ t.x2, t.y2 } };
-            var worst: f64 = std.math.inf(f64);
-            var wx: f64 = t.x1;
-            var wy: f64 = t.y1;
-            for (ends) |e| {
-                const inset = edgeInset(br, e[0], e[1]);
-                if (inset < worst) {
-                    worst = inset;
-                    wx = e[0];
-                    wy = e[1];
-                }
-            }
-            if (worst < -hw) continue; // fully off-board (staged)
-            const gap = worst - hw;
-            if (gap < clearance - EPS) {
-                try out.append(arena, .{ .x = wx, .y = wy, .gap = gap, .clearance = clearance, .kind = .board_edge });
-            }
-        }
-    }
+    // Drill-related checks (annular ring, min-drill, hole-to-hole) and the
+    // copper-to-edge + courtyard-overlap checks live in helpers to keep `check`
+    // legible — each reads the board-level `(design-rules …)` value.
+    try checkDrillRules(arena, &out, pads, vias, rules);
+    try checkBoardEdge(arena, &out, placement, tracks, vias, rules.edgeClearance());
+    try checkCourtyards(arena, &out, placement);
     // pad ↔ pad (different parts)
     for (pads, 0..) |a, i| {
         for (pads[i + 1 ..]) |b| {
@@ -195,6 +196,139 @@ pub fn check(
         }
     }
     return out.toOwnedSlice(arena);
+}
+
+const Viol = std.ArrayListUnmanaged(Violation);
+
+/// The drill-station rules: via annular ring (`min_annular`), minimum drill
+/// diameter (`min_drill`), and hole-to-hole wall clearance (`hole_to_hole`).
+/// Every drilled feature (vias + drilled pads) is measured; drill=0 legacy /
+/// synthetic features are skipped, so an all-SMD board flags nothing.
+fn checkDrillRules(
+    arena: std.mem.Allocator,
+    out: *Viol,
+    pads: []const PadBox,
+    vias: []const router.Via,
+    rules: optimizer.DesignRules,
+) std.mem.Allocator.Error!void {
+    // annular ring: copper ring around a via drill must meet the fab minimum.
+    for (vias) |v| {
+        if (v.drill <= 0) continue;
+        const ring = (v.dia - v.drill) / 2;
+        if (ring < rules.min_annular - EPS) {
+            try out.append(arena, .{ .x = v.x, .y = v.y, .gap = ring, .clearance = rules.min_annular, .kind = .annular });
+        }
+    }
+    // min drill: no drilled hole smaller than the minimum drill (vias + pads).
+    for (vias) |v| {
+        if (v.drill > 0 and v.drill < rules.min_drill - EPS) {
+            try out.append(arena, .{ .x = v.x, .y = v.y, .gap = v.drill, .clearance = rules.min_drill, .kind = .min_drill });
+        }
+    }
+    for (pads) |p| {
+        if (p.drill > 0 and p.drill < rules.min_drill - EPS) {
+            try out.append(arena, .{ .x = p.hx, .y = p.hy, .gap = p.drill, .clearance = rules.min_drill, .kind = .min_drill });
+        }
+    }
+    // hole ↔ hole: two drilled holes whose walls sit closer than the rule risk
+    // breakout / a merged slot. Wall-to-wall = centre distance − both radii.
+    // Coincident holes (a via on a thru-hole barrel — the same physical hole)
+    // are skipped rather than flagged against themselves.
+    const holes = try allHoles(arena, pads, vias);
+    for (holes, 0..) |a, i| {
+        for (holes[i + 1 ..]) |b| {
+            const dist = std.math.hypot(a.x - b.x, a.y - b.y);
+            if (dist < EPS) continue;
+            const gap = dist - a.drill / 2 - b.drill / 2;
+            if (gap < rules.hole_to_hole - EPS) {
+                try out.append(arena, .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2, .gap = gap, .clearance = rules.hole_to_hole, .kind = .hole_hole });
+            }
+        }
+    }
+}
+
+/// copper ↔ board edge: when the design declares a board outline, routed
+/// copper (vias + tracks) must keep the copper-to-edge rule (`edge`, the
+/// `(design-rules (copper-edge …))` value, defaulting to the plain copper
+/// clearance) INSIDE it — measured against the exact polygon when the outline
+/// is non-rectangular (`board_poly`), else the rectangle. Features clearly
+/// outside (the off-board staging band, > STAGING_EXEMPT_MM out) are skipped —
+/// they're a workflow state, not an edge-clearance defect.
+fn checkBoardEdge(
+    arena: std.mem.Allocator,
+    out: *Viol,
+    placement: optimizer.Placement,
+    tracks: []const router.Track,
+    vias: []const router.Via,
+    edge: f64,
+) std.mem.Allocator.Error!void {
+    const br = placement.board_rect orelse return;
+    const poly = placement.board_poly;
+    for (vias) |v| {
+        const vr = v.dia / 2;
+        const inset = boardInset(br, poly, v.x, v.y);
+        if (inset < -(vr + STAGING_EXEMPT_MM)) continue; // staging band
+        const gap = inset - vr;
+        if (gap < edge - EPS) {
+            try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = edge, .kind = .board_edge });
+        }
+    }
+    for (tracks) |t| {
+        const hw = t.width / 2;
+        // For a rectangle the inset is concave over a segment, so the
+        // minimum is at an endpoint; a concave polygon can also cut the
+        // MIDDLE of a straight track, so that crossing is checked too.
+        const ends = [_][2]f64{ .{ t.x1, t.y1 }, .{ t.x2, t.y2 } };
+        var worst: f64 = std.math.inf(f64);
+        var wx: f64 = t.x1;
+        var wy: f64 = t.y1;
+        for (ends) |e| {
+            const inset = boardInset(br, poly, e[0], e[1]);
+            if (inset < worst) {
+                worst = inset;
+                wx = e[0];
+                wy = e[1];
+            }
+        }
+        if (poly) |pl| {
+            if (worst > -(hw + STAGING_EXEMPT_MM)) {
+                if (outline.segCrossesEdge(pl, t.x1, t.y1, t.x2, t.y2)) |hit| {
+                    worst = 0;
+                    wx = hit[0];
+                    wy = hit[1];
+                }
+            }
+        }
+        if (worst < -(hw + STAGING_EXEMPT_MM)) continue; // staging band
+        const gap = worst - hw;
+        if (gap < edge - EPS) {
+            try out.append(arena, .{ .x = wx, .y = wy, .gap = gap, .clearance = edge, .kind = .board_edge });
+        }
+    }
+}
+
+/// courtyard ↔ courtyard: two placed parts whose keep-out courtyards overlap
+/// can't both be assembled. Parts on OPPOSITE board sides never clash (their
+/// courtyards live on different faces). A strict interpenetration is the
+/// violation (negative gap = penetration depth); touching exactly is legal.
+fn checkCourtyards(
+    arena: std.mem.Allocator,
+    out: *Viol,
+    placement: optimizer.Placement,
+) std.mem.Allocator.Error!void {
+    for (placement.parts, 0..) |a, i| {
+        const ca = optimizer.worldCourtyard(a);
+        if (ca.w <= 0 or ca.h <= 0) continue;
+        for (placement.parts[i + 1 ..]) |b| {
+            if (a.side != b.side) continue;
+            const cb = optimizer.worldCourtyard(b);
+            if (cb.w <= 0 or cb.h <= 0) continue;
+            const ov = rectOverlap(ca, cb);
+            if (ov.depth > EPS) {
+                try out.append(arena, .{ .x = ov.x, .y = ov.y, .gap = -ov.depth, .clearance = 0, .kind = .courtyard });
+            }
+        }
+    }
 }
 
 /// Two features may touch only if they share a (real) net. Net index -1 means
@@ -220,6 +354,7 @@ fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Al
             const sh = try pad_shape.worldShape(arena, part, pad);
             const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ part.ref_des, pad.number });
             const net = pin_net.get(key) orelse -1;
+            const c = optimizer.worldPadCenter(part, pad.x, pad.y);
             try list.append(arena, .{
                 .x0 = sh.x0,
                 .y0 = sh.y0,
@@ -230,11 +365,51 @@ fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Al
                 .part = pi,
                 .layer = layer,
                 .thru = pad.thru,
+                .drill = pad.drill,
+                .hx = c[0],
+                .hy = c[1],
             });
         }
     }
     return list.toOwnedSlice(arena);
 }
+
+/// Every drilled hole on the board unified into one list: each pad with
+/// drill>0 (world centre + diameter) plus each via with drill>0. Arena-owned.
+fn allHoles(arena: std.mem.Allocator, pads: []const PadBox, vias: []const router.Via) std.mem.Allocator.Error![]Hole {
+    var list: std.ArrayListUnmanaged(Hole) = .empty;
+    for (pads) |p| {
+        if (p.drill <= 0) continue;
+        try list.append(arena, .{ .x = p.hx, .y = p.hy, .drill = p.drill });
+    }
+    for (vias) |v| {
+        if (v.drill <= 0) continue;
+        try list.append(arena, .{ .x = v.x, .y = v.y, .drill = v.drill });
+    }
+    return list.toOwnedSlice(arena);
+}
+
+/// Overlap of two axis-aligned rects: penetration depth (min of the x/y
+/// overlaps; ≤0 ⇒ disjoint or merely touching) and the centre of the shared
+/// region (the marker location). Used by the courtyard check.
+fn rectOverlap(a: optimizer.BoardRect, b: optimizer.BoardRect) struct { depth: f64, x: f64, y: f64 } {
+    const ax1 = a.minx + a.w;
+    const ay1 = a.miny + a.h;
+    const bx1 = b.minx + b.w;
+    const by1 = b.miny + b.h;
+    const ox = @min(ax1, bx1) - @max(a.minx, b.minx);
+    const oy = @min(ay1, by1) - @max(a.miny, b.miny);
+    if (ox <= 0 or oy <= 0) return .{ .depth = 0, .x = 0, .y = 0 };
+    const cx = (@max(a.minx, b.minx) + @min(ax1, bx1)) / 2;
+    const cy = (@max(a.miny, b.miny) + @min(ay1, by1)) / 2;
+    return .{ .depth = @min(ox, oy), .x = cx, .y = cy };
+}
+
+/// How far outside the outline a feature may sit before the board-edge check
+/// writes it off as staged (parked in the off-board staging band) rather
+/// than flagging it — copper just past the edge IS an error (it would be
+/// routed off the board), copper centimetres away is a workflow state.
+pub const STAGING_EXEMPT_MM: f64 = 10.0;
 
 /// Signed distance from (x,y) to the nearest board-outline edge — positive
 /// inside the rectangle, negative outside.
@@ -244,6 +419,15 @@ fn edgeInset(br: optimizer.BoardRect, x: f64, y: f64) f64 {
     const dt = y - br.miny;
     const db = br.miny + br.h - y;
     return @min(@min(dl, dr), @min(dt, db));
+}
+
+/// Signed inset of (x,y) from the board outline: the exact polygon when the
+/// board is non-rectangular, else the rectangle. Positive = inside.
+fn boardInset(br: optimizer.BoardRect, poly: ?[]const [2]f64, x: f64, y: f64) f64 {
+    if (poly) |p| {
+        if (p.len >= 3) return outline.signedInset(p, x, y);
+    }
+    return edgeInset(br, x, y);
 }
 
 /// Shortest distance from point (px,py) to segment (ax,ay)-(bx,by).
@@ -453,6 +637,96 @@ test "check flags copper at the board edge, not staged copper" {
     try testing.expectEqual(Kind.board_edge, v[0].kind);
 }
 
+// spec: placement/drc - checks the board edge against a non-rectangular outline polygon, catching copper in a notch
+test "check measures the exact outline polygon on an L-shaped board" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    // 10×10 board with the corner at (6..10, 4..10) notched out (y-down).
+    const l_poly = [_][2]f64{
+        .{ 0, 0 }, .{ 10, 0 }, .{ 10, 4 }, .{ 6, 4 }, .{ 6, 10 }, .{ 0, 10 },
+    };
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 },
+        .board_poly = &l_poly,
+    };
+    // Via at (8,8): INSIDE the bbox rectangle but in the notch — off the real
+    // board, only 2 mm out, so it must be flagged (not staging-exempt). A via
+    // at (3,5) sits ≥ clearance inside every polygon edge — clean. A via 20 mm
+    // below the board is parked in the staging band — skipped. The track cuts
+    // across the notch wall (both endpoints comfortably inside): flagged.
+    const vias = [_]router.Via{
+        .{ .x = 8, .y = 8, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 3, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 3, .y = 30, .dia = 0.4, .drill = 0.2, .net = 0 },
+    };
+    const tracks = [_]router.Track{
+        .{ .x1 = 2, .y1 = 8, .x2 = 9, .y2 = 8, .layer = 0, .width = 0.127, .net = 0 },
+    };
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &vias, .routed = 1, .total = 1 };
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 2), v.len);
+    for (v) |viol| try testing.expectEqual(Kind.board_edge, viol.kind);
+    // The notch via is reported at its own position, the track at the wall.
+    try testing.expectApproxEqAbs(@as(f64, 8), v[0].x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 6), v[1].x, 1e-9);
+}
+
+// spec: placement/drc - the polygon board-edge inset is measured against the copper-edge design rule
+test "check measures the polygon inset against the copper-edge rule" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    // Same L-shaped board as above (corner (6..10, 4..10) notched out, y-down).
+    const l_poly = [_][2]f64{
+        .{ 0, 0 }, .{ 10, 0 }, .{ 10, 4 }, .{ 6, 4 }, .{ 6, 10 }, .{ 0, 10 },
+    };
+    var placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 },
+        .board_poly = &l_poly,
+    };
+    // Via at (5.2, 8): 0.8 mm from the notch wall (x=6) ⇒ gap 0.6 after the
+    // 0.2 mm via radius. Clean under the default 0.127 mm rule; a
+    // (design-rules (copper-edge 0.75)) must flag it — and the reported
+    // clearance must BE the rule value. The plain bbox rectangle would put
+    // this via 2 mm inside (nearest bbox edge y=10), so a flag proves the
+    // POLYGON inset was measured against the copper-edge rule.
+    const vias = [_]router.Via{.{ .x = 5.2, .y = 8, .dia = 0.4, .drill = 0.2, .net = 0 }};
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 1, .total = 1 };
+
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, routed, 0.127), .board_edge));
+
+    placement.rules = .{ .design = .{ .copper_edge = 0.75 } };
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .board_edge));
+    try testing.expectEqual(@as(f64, 0.75), v[0].clearance);
+    try testing.expectApproxEqAbs(@as(f64, 0.6), v[0].gap, 1e-9);
+}
+
 // spec: placement/drc - a routed module with a crowded ground pad has no clearance violations
 test "route then check is clean when a ground pad abuts a foreign pad" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -624,4 +898,184 @@ test "check flags track-to-pad clashes layer-aware" {
     const own = [_]router.Track{.{ .x1 = -1, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 }};
     const ok = router.RouteResult{ .tracks = &own, .vias = &.{}, .routed = 1, .total = 1 };
     try testing.expectEqual(@as(usize, 0), (try check(arena, placement, ok, 0.127)).len);
+}
+
+/// A bare `Placement` around `parts` with default rules — the common shell for
+/// the courtyard/drill tests, which need no nets or routed copper.
+fn partsOnly(parts: []optimizer.Part) optimizer.Placement {
+    return .{
+        .parts = parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -10,
+        .miny = -10,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+    };
+}
+
+/// Count the violations of one kind — the drill/courtyard tests share layouts
+/// that could in principle trip more than the check under test. Public so
+/// other modules' tests (e.g. the router's escape-stub test) can isolate the
+/// copper-clearance kinds from an unrelated courtyard finding.
+pub fn countKind(v: []const Violation, k: Kind) usize {
+    var n: usize = 0;
+    for (v) |x| {
+        if (x.kind == k) n += 1;
+    }
+    return n;
+}
+
+/// The first violation of kind `k`, or null — lets a test assert a field on a
+/// specific finding without an `if` in the test body.
+fn firstOfKind(v: []const Violation, k: Kind) ?Violation {
+    for (v) |x| {
+        if (x.kind == k) return x;
+    }
+    return null;
+}
+
+// spec: placement/drc - flags two placed parts whose courtyards overlap, but not disjoint or opposite-side ones
+test "check flags overlapping courtyards only on the same side" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+
+    // Two 2×2 mm courtyards centred 1 mm apart interpenetrate by 1 mm.
+    var overlap = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 1, .y = 0 },
+    };
+    const v1 = try check(arena, partsOnly(&overlap), routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v1, .courtyard));
+    // The one courtyard violation records the interpenetration as a negative
+    // gap (the check only appends when depth > 0, so gap < 0 by construction).
+    try testing.expect(firstOfKind(v1, .courtyard).?.gap < 0);
+
+    // Slide U2 to 2.5 mm — the 2×2 boxes now sit 0.5 mm apart (edge-to-edge),
+    // so they don't overlap and nothing flags.
+    var apart = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 2.5, .y = 0 },
+    };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&apart), routed, 0.127), .courtyard));
+
+    // Same interpenetrating pair but on OPPOSITE board sides never clashes —
+    // their courtyards live on different faces.
+    var two_sided = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 0, .y = 0, .side = .top },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 1, .y = 0, .side = .bottom },
+    };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&two_sided), routed, 0.127), .courtyard));
+}
+
+// spec: placement/drc - flags two drilled holes whose walls sit closer than the hole-to-hole rule
+test "check flags hole-to-hole clearance and passes well-spaced holes" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+
+    // Two through-hole pads (0.4 mm drill ⇒ 0.2 mm radius each) whose centres
+    // are 0.5 mm apart ⇒ 0.1 mm wall-to-wall, under the 0.25 mm default rule.
+    const pads = [_]G.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6, .thru = true, .drill = 0.4 },
+        .{ .number = "2", .x = 0.5, .y = 0, .w = 0.6, .h = 0.6, .thru = true, .drill = 0.4 },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "J1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+    };
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    const v = try check(arena, partsOnly(&parts), routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .hole_hole));
+
+    // Space them 1 mm apart ⇒ 0.6 mm wall-to-wall, clear of the rule.
+    const far = [_]G.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6, .thru = true, .drill = 0.4 },
+        .{ .number = "2", .x = 1.0, .y = 0, .w = 0.6, .h = 0.6, .thru = true, .drill = 0.4 },
+    };
+    var far_parts = [_]optimizer.Part{
+        .{ .ref_des = "J1", .kind = .hub, .hw = 1.5, .hh = 1, .pads = &far, .fallback = false, .x = 0, .y = 0 },
+    };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&far_parts), routed, 0.127), .hole_hole));
+}
+
+// spec: placement/drc - flags a drilled hole below the minimum drill diameter (pads and vias); SMD pads exempt
+test "check flags sub-minimum drills" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+
+    // One SMD pad (no drill — exempt), one drilled pad at 0.15 mm (under the
+    // 0.2 mm default), well away from each other so hole-to-hole stays clean.
+    const pads = [_]G.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 },
+        .{ .number = "2", .x = 5, .y = 0, .w = 0.5, .h = 0.5, .thru = true, .drill = 0.15 },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 3, .hh = 1, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+    };
+    // A via drilled at 0.1 mm (under) and one at 0.3 mm (over); legacy via has
+    // no drill and is exempt.
+    const vias = [_]router.Via{
+        .{ .x = 0, .y = 5, .dia = 0.4, .drill = 0.1, .net = 0 },
+        .{ .x = 5, .y = 5, .dia = 0.6, .drill = 0.3, .net = 0 },
+        .{ .x = 9, .y = 5, .dia = 0.4, .net = 0 },
+    };
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 1, .total = 1 };
+    const v = try check(arena, partsOnly(&parts), routed, 0.127);
+    // The 0.15 mm pad + the 0.1 mm via = 2 min-drill violations; the SMD pad,
+    // the 0.3 mm via, and the drill-less via are all exempt.
+    try testing.expectEqual(@as(usize, 2), countKind(v, .min_drill));
+}
+
+// spec: placement/drc - board-level design rules default to the toolchain's legacy constants when no form is authored
+test "check default rules equal the legacy constants" {
+    // The no-form `DesignRules{}` must reproduce every old constant so existing
+    // designs are unchanged: annular 0.1, min-drill 0.2, hole-to-hole 0.25.
+    const d = optimizer.DesignRules{};
+    try testing.expectEqual(@as(f64, 0.1), d.min_annular);
+    try testing.expectEqual(@as(f64, 0.2), d.min_drill);
+    try testing.expectEqual(@as(f64, 0.25), d.hole_to_hole);
+    try testing.expectEqual(@as(f64, 0.05), d.mask_margin);
+    try testing.expectEqual(@as(f64, 0.3), d.pour_clearance);
+    // copper_edge unset ⇒ the DRC edge clearance falls back to the plain
+    // copper clearance (the old board_edge behaviour) and the Gerber pour
+    // pullback falls back to the fab-safe 0.3 mm.
+    try testing.expectEqual(@as(f64, 0.127), d.edgeClearance());
+    try testing.expectEqual(@as(f64, 0.3), d.pourEdge());
+}
+
+// spec: placement/drc - a (design-rules …) value overrides the matching default in the DRC
+test "check honours a design-rules override" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+
+    // Two drilled pads 0.5 mm apart ⇒ 0.1 mm wall-to-wall. At the 0.25 mm
+    // default this flags; loosening the design's hole-to-hole rule to 0.05 mm
+    // makes the same layout legal.
+    const pads = [_]G.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6, .thru = true, .drill = 0.4 },
+        .{ .number = "2", .x = 0.5, .y = 0, .w = 0.6, .h = 0.6, .thru = true, .drill = 0.4 },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "J1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+    };
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+
+    var loose = partsOnly(&parts);
+    loose.rules = .{ .design = .{ .hole_to_hole = 0.05 } };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, loose, routed, 0.127), .hole_hole));
+
+    // The default (no override) still flags it.
+    try testing.expectEqual(@as(usize, 1), countKind(try check(arena, partsOnly(&parts), routed, 0.127), .hole_hole));
 }

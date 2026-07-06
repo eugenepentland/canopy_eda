@@ -18,6 +18,8 @@ const drc = @import("placement/drc.zig");
 const raster = @import("raster.zig");
 const png = @import("png.zig");
 const numeric = @import("numeric.zig");
+const export_fab = @import("export_fab.zig");
+const font = @import("font5x7.zig");
 
 const Rgb = raster.Rgb;
 
@@ -126,6 +128,10 @@ pub const Options = struct {
     /// Callout overlay: numbered markers + a panel listing the board's worst
     /// problems (hottest loops, longest airwire, staged parts, DRC count).
     critique: bool = false,
+    /// Board-level silkscreen text labels (from the shown layout's sidecar).
+    /// Drawn in a silk colour at their world anchor + cap height, so the PNG
+    /// and MCP screenshots show the same legend the Gerber emits.
+    texts: []const font.BoardText = &.{},
 };
 
 /// Render `p` to PNG bytes owned by `alloc`.
@@ -250,6 +256,7 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
 
     if (opts.grid) ctx.drawGrid();
     ctx.drawBoardOutline();
+    ctx.drawPours();
     if (opts.compare != null) ctx.drawCompareGhost();
     ctx.drawParts();
     ctx.drawAirwires();
@@ -257,6 +264,7 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
     if (opts.dims) ctx.drawDims();
     if (opts.compare != null) ctx.drawCompareArrows();
     if (opts.routed) |r| ctx.drawRouted(r);
+    ctx.drawBoardTexts(); // silkscreen text sits above copper, under DRC/labels
     ctx.drawViolations(opts.violations);
     ctx.drawLabels();
     ctx.drawPinLabels();
@@ -619,6 +627,10 @@ const Ctx = struct {
 
     fn drawAirwires(self: *Ctx) void {
         for (self.p.links) |l| {
+            // A net a declared plane/pour carries is connected by the copper
+            // sheet itself — drop its airwire, matching the page blob's filter
+            // (the implicit model's grounds never spring links at all).
+            if (l.net.len > 0 and self.p.rules.carriesPlane(l.net)) continue;
             const a_pt = self.lp(self.p.parts[l.a], l.ax, l.ay);
             const b_pt = self.lp(self.p.parts[l.b], l.bx, l.by);
             const col = awColor(l.kind);
@@ -723,19 +735,68 @@ const Ctx = struct {
         }
     }
 
-    /// The `(board (size W H) …)` outline rectangle with its dimensions, under
-    /// the parts — the physical board edge everything must stay inside.
+    /// The board outline with its dimensions, under the parts — the physical
+    /// board edge everything must stay inside. Non-rectangular boards (a
+    /// drawn polygon / `(corner-radius R)`) stroke the exact polygon; the
+    /// dimension label stays the bounding box.
     fn drawBoardOutline(self: *Ctx) void {
         const r = self.p.board_rect orelse return;
         const x0 = self.xpx(r.minx);
         const y0 = self.ypx(r.miny);
+        if (self.p.board_poly) |poly| {
+            if (poly.len >= 3) {
+                // Rounded rects run 36 points, hand-drawn polygons a handful;
+                // spill to the heap only for an unusually dense outline.
+                var stack: [64][2]f32 = undefined;
+                var pts: [][2]f32 = &stack;
+                var heap = false;
+                if (poly.len > stack.len) {
+                    if (self.cv.alloc.alloc([2]f32, poly.len)) |b| {
+                        pts = b;
+                        heap = true;
+                    } else |_| {}
+                }
+                defer if (heap) self.cv.alloc.free(pts);
+                const n = @min(poly.len, pts.len);
+                for (poly[0..n], 0..) |pp, i| pts[i] = .{ self.xpx(pp[0]), self.ypx(pp[1]) };
+                self.cv.strokePath(pts[0..n], .closed, self.pw(1.4), EDGE_COL, 0.9);
+                self.labelBoardDims(r, x0, y0);
+                return;
+            }
+        }
         const x1 = self.xpx(r.minx + r.w);
         const y1 = self.ypx(r.miny + r.h);
         const pts = [_][2]f32{ .{ x0, y0 }, .{ x1, y0 }, .{ x1, y1 }, .{ x0, y1 }, .{ x0, y0 } };
         self.cv.strokePath(&pts, .open, self.pw(1.4), EDGE_COL, 0.9);
+        self.labelBoardDims(r, x0, y0);
+    }
+
+    /// The outline's W×H dimension label at its bbox top-left corner.
+    fn labelBoardDims(self: *Ctx, r: optimizer.BoardRect, x0: f32, y0: f32) void {
         var buf: [32]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "{d:.0}x{d:.0}mm", .{ r.w, r.h }) catch "";
         self.cv.text(x0 + self.pw(4), y0 + self.pw(3), s, self.pw(8), EDGE_COL, 0.9, .start);
+    }
+
+    /// Declared outer-layer copper pours, under the parts: a translucent
+    /// wash across the pour region (the same rect the Gerber pours — board
+    /// outline, or the parts-bbox fallback) plus a "NET pour · F.Cu/B.Cu"
+    /// label in the layer's track colour, so a poured face reads as copper
+    /// in the PNG an MCP agent inspects instead of being invisible.
+    fn drawPours(self: *Ctx) void {
+        var n: f32 = 0;
+        for ([_]optimizer.Side{ .bottom, .top }) |side| {
+            const net = self.p.rules.pourNetOnSide(side) orelse continue;
+            const r = export_fab.outlineRect(self.p);
+            const x0 = self.xpx(r.minx);
+            const y0 = self.ypx(r.miny);
+            const col = if (side == .top) TRACK_TOP else TRACK_BOT;
+            self.cv.fillRect(x0, y0, self.len(r.w), self.len(r.h), col, if (side == .top) 0.10 else 0.12);
+            var buf: [96]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{s} pour - {s}", .{ net, if (side == .top) "F.Cu" else "B.Cu" }) catch "";
+            self.cv.text(x0 + self.pw(4), self.ypx(r.miny + r.h) - self.pw(12) - n * self.pw(11), s, self.pw(8), col, 0.95, .start);
+            n += 1;
+        }
     }
 
     /// A faint 1/2/5 mm reference grid with axis tick labels, under everything.
@@ -941,6 +1002,57 @@ const Ctx = struct {
             else if (part.kind == .hub) HUB_STROKE else PASSIVE_STROKE;
             var buf: [96]u8 = undefined;
             self.cv.text(cx, top, self.partLabel(pi, &buf), h, col, 1.0, .middle);
+        }
+    }
+
+    /// Board-level silkscreen text (the Text tool / sidecar `texts[]`): each
+    /// glyph row's lit-pixel runs become one stroked segment in mm-space, then
+    /// project to px — the same 5x7 vector font the Gerber silk emits, so the
+    /// PNG shows exactly what will be fabricated. Cap height scales the pixel
+    /// pitch; bottom-side text mirrors x; the string rotates about its anchor.
+    fn drawBoardTexts(self: *Ctx) void {
+        const Pen = struct {
+            ctx: *Ctx,
+            cx: f64,
+            cy: f64,
+            gx0: f64,
+            pitch: f64,
+            mirror: bool,
+            ca: f64,
+            sa: f64,
+            fn place(self2: @This(), lxpx: f64, ly: f64) [2]f32 {
+                const lx = if (self2.mirror) -lxpx else lxpx;
+                const wx = self2.cx + lx * self2.ca - ly * self2.sa;
+                const wy = self2.cy + lx * self2.sa + ly * self2.ca;
+                return .{ self2.ctx.xpx(wx), self2.ctx.ypx(wy) };
+            }
+            fn emit(self2: @This(), run: font.Run) error{}!void {
+                const ly = (@as(f64, @floatFromInt(run.r)) - 3.0) * self2.pitch;
+                const lx1 = self2.gx0 + (@as(f64, @floatFromInt(run.c0)) + 0.5) * self2.pitch;
+                const lx2 = self2.gx0 + (@as(f64, @floatFromInt(run.c1)) + 0.5) * self2.pitch;
+                const a = self2.place(lx1, ly);
+                const b = self2.place(lx2, ly);
+                // Stroke width = the ~0.15 mm silk width projected to px (min 1 px
+                // so a zoomed-out label stays legible). A 1-px run draws as a dab.
+                const w = @max(self2.ctx.len(0.15), self2.ctx.pw(1.0));
+                self2.ctx.cv.line(a[0], a[1], b[0], b[1], w, SILK, 1.0, .round);
+            }
+        };
+        for (self.opts.texts) |t| {
+            if (t.text.len == 0) continue;
+            const pitch = if (t.size > 0) t.size / @as(f64, @floatFromInt(font.GH)) else font.DEFAULT_SIZE_MM / @as(f64, @floatFromInt(font.GH));
+            const adv = @as(f64, @floatFromInt(font.GW + 1)) * pitch;
+            const total = @as(f64, @floatFromInt(t.text.len)) * adv - pitch;
+            const a = @mod(t.rot, 360.0) * std.math.pi / 180.0;
+            const ca = @cos(a);
+            const sa = @sin(a);
+            for (t.text, 0..) |ch, k| {
+                const gx0 = -total / 2 + @as(f64, @floatFromInt(k)) * adv;
+                const pen = Pen{ .ctx = self, .cx = t.x, .cy = t.y, .gx0 = gx0, .pitch = pitch, .mirror = t.bottom, .ca = ca, .sa = sa };
+                // The emit callback is infallible (error{}); the exhaustive
+                // switch on the empty error set is a no-op, not a swallowed error.
+                font.glyphRuns(ch, error{}, pen, Pen.emit) catch |err| switch (err) {};
+            }
         }
     }
 

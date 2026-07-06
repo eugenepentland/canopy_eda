@@ -182,6 +182,7 @@ src/eval/env.zig::CalcResult struct_
 src/eval/env.zig::Check union_
 src/eval/env.zig::ConstraintPriority enum_
 src/eval/env.zig::DesignBlock struct_
+src/eval/env.zig::DesignRulesSpec struct_
 src/eval/env.zig::Drive enum_
 src/eval/env.zig::EdgeSide enum_
 src/eval/env.zig::ElectricalDecl struct_
@@ -401,7 +402,8 @@ src/export_gerber.zig::LayerFile struct_
 src/export_gerber.zig::PlaneLayer struct_
 src/export_gerber.zig::PlaneNet union_
 src/export_gerber.zig::planLayers | fn planLayers(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]const LayerFile
-src/export_gerber.zig::writeLayer | fn writeLayer( w: *std.Io.Writer, arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, frame: export_fab.Frame, layer: Layer, function: []const u8, ) Error!void
+src/export_gerber.zig::writeJobFile | fn writeJobFile( w: *std.Io.Writer, placement: optimizer.Placement, files: []const LayerFile, name_prefix: []const u8, ) std.Io.Writer.Error!void
+src/export_gerber.zig::writeLayer | fn writeLayer( w: *std.Io.Writer, arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, texts: []const font.BoardText, frame: export_fab.Frame, layer: Layer, function: []const u8, ) Error!void
 src/export_kicad.zig::ExportError value
 src/export_kicad.zig::FlatInstance struct_
 src/export_kicad.zig::FlatNet struct_
@@ -442,9 +444,35 @@ src/export_kicad_netlist.zig::collectNets | fn collectNets( allocator: std.mem.A
 src/export_kicad_netlist.zig::extractFootprintName | fn extractFootprintName(allocator: std.mem.Allocator, source: []const u8) NetlistError![]const u8
 src/export_kicad_netlist.zig::extractPadNames | fn extractPadNames(allocator: std.mem.Allocator, source: []const u8) NetlistError![]const []const u8
 src/export_kicad_netlist.zig::writeNetlist | fn writeNetlist( allocator: std.mem.Allocator, design_name: []const u8, instances: []const FlatInstance, nets: []const FlatNet, fp_name_map: *const std.StringHashMap([]const u8), fp_pad_map: *const std.StringHashMap([]const []const u8), ) std.mem.Allocator.Error![]const u8
+src/fab_readiness.zig::Context struct_
+src/fab_readiness.zig::Item struct_
+src/fab_readiness.zig::Report struct_
+src/fab_readiness.zig::STAGING_BAND_MM value
+src/fab_readiness.zig::Stats struct_
+src/fab_readiness.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ctx: Context, ) std.mem.Allocator.Error!Report
+src/fab_readiness.zig::ok | fn ok(self: Report) bool
+src/fab_readiness.zig::writeJson | fn writeJson(w: *std.Io.Writer, report: Report) std.Io.Writer.Error!void
+src/font5x7.zig::BoardText struct_
+src/font5x7.zig::DEFAULT_SIZE_MM value
 src/font5x7.zig::GH value
 src/font5x7.zig::GW value
+src/font5x7.zig::Run struct_
 src/font5x7.zig::cols | fn cols(c: u8) [GW]u8
+src/font5x7.zig::glyphRuns | fn glyphRuns(ch: u8, comptime E: type, ctx: anytype, emit: fn (@TypeOf(ctx), Run) E!void) E!void
+src/gerber_verify.zig::ApKind enum_
+src/gerber_verify.zig::Aperture struct_
+src/gerber_verify.zig::EPS_MM value
+src/gerber_verify.zig::ExpectFlash struct_
+src/gerber_verify.zig::ExpectSegment struct_
+src/gerber_verify.zig::Flash struct_
+src/gerber_verify.zig::Miss struct_
+src/gerber_verify.zig::ParseError value
+src/gerber_verify.zig::Parsed struct_
+src/gerber_verify.zig::Report struct_
+src/gerber_verify.zig::Segment struct_
+src/gerber_verify.zig::ok | fn ok(self: Report) bool
+src/gerber_verify.zig::parse | fn parse(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed
+src/gerber_verify.zig::verifyCopperLayer | fn verifyCopperLayer( arena: std.mem.Allocator, gerber_bytes: []const u8, frame: export_fab.Frame, flashes: []const ExpectFlash, segments: []const ExpectSegment, ) ParseError!Report
 src/id_insert.zig::IdInsertError value
 src/id_insert.zig::applyInserts | fn applyInserts( allocator: std.mem.Allocator, source: []const u8, pending: []const Evaluator.PendingId, pending_child: []const Evaluator.PendingChildId, ) IdInsertError![]u8
 src/id_insert.zig::insertPendingIds | fn insertPendingIds( allocator: std.mem.Allocator, source_path: []const u8, pending: []const Evaluator.PendingId, pending_child: []const Evaluator.PendingChildId, ) IdInsertError!void
@@ -510,9 +538,10 @@ src/paths.zig::PathError value
 src/paths.zig::designSiblingPath | fn designSiblingPath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ext: []const u8, ) PathError![]u8
 src/paths.zig::designSourcePath | fn designSourcePath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) PathError![]u8
 src/placement/drc.zig::Kind enum_
-src/placement/drc.zig::MIN_ANNULAR_MM value
+src/placement/drc.zig::STAGING_EXEMPT_MM value
 src/placement/drc.zig::Violation struct_
 src/placement/drc.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, ) std.mem.Allocator.Error![]Violation
+src/placement/drc.zig::countKind | fn countKind(v: []const Violation, k: Kind) usize
 src/placement/geometry.zig::BBOX_MARGIN_MM value
 src/placement/geometry.zig::Geom struct_
 src/placement/geometry.zig::Pad struct_
@@ -536,6 +565,7 @@ src/placement/module_policy.zig::isInterestingClass | fn isInterestingClass(c: N
 src/placement/optimizer.zig::BoardRect struct_
 src/placement/optimizer.zig::BoardRules struct_
 src/placement/optimizer.zig::Breakdown struct_
+src/placement/optimizer.zig::DesignRules struct_
 src/placement/optimizer.zig::Edge enum_
 src/placement/optimizer.zig::FlatNet value
 src/placement/optimizer.zig::FullRouted struct_
@@ -558,6 +588,8 @@ src/placement/optimizer.zig::Score struct_
 src/placement/optimizer.zig::SeedMode enum_
 src/placement/optimizer.zig::Side enum_
 src/placement/optimizer.zig::Stub struct_
+src/placement/optimizer.zig::carriesPlane | fn carriesPlane(self: BoardRules, name: []const u8) bool
+src/placement/optimizer.zig::edgeClearance | fn edgeClearance(self: DesignRules) f64
 src/placement/optimizer.zig::effAlignW | fn effAlignW(params: Params) f64
 src/placement/optimizer.zig::faceRotation | fn faceRotation(pwr: PadRect, edge: Edge) f64
 src/placement/optimizer.zig::fromStr | fn fromStr(s: []const u8) Side
@@ -572,13 +604,23 @@ src/placement/optimizer.zig::perPartBlame | fn perPartBlame(p: Placement, params
 src/placement/optimizer.zig::pickAnchorHub | fn pickAnchorHub(parts: []const Part, nets: []const FlatNet) ?usize
 src/placement/optimizer.zig::placeFromPoses | fn placeFromPoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!Placement
 src/placement/optimizer.zig::placementDiag | fn placementDiag() PlacementDiag
+src/placement/optimizer.zig::pourEdge | fn pourEdge(self: DesignRules) f64
+src/placement/optimizer.zig::pourNetOnSide | fn pourNetOnSide(self: BoardRules, side: Side) ?[]const u8
 src/placement/optimizer.zig::routedScorePoses | fn routedScorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!f64
 src/placement/optimizer.zig::scorePoses | fn scorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!Breakdown
 src/placement/optimizer.zig::setProgressSink | fn setProgressSink(sink: ?ProgressSink) void
 src/placement/optimizer.zig::solve | fn solve( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, cached: ?[]const RefPose, params: Params, mode: SeedMode, ) std.mem.Allocator.Error!Placement
 src/placement/optimizer.zig::solvePinAdjacent | fn solvePinAdjacent( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, params: Params, ) std.mem.Allocator.Error!?Placement
 src/placement/optimizer.zig::validateConstraints | fn validateConstraints( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, params: Params, ) std.mem.Allocator.Error![]const []const u8
+src/placement/optimizer.zig::worldCourtyard | fn worldCourtyard(p: Part) BoardRect
 src/placement/optimizer.zig::worldPadCenter | fn worldPadCenter(p: Part, lx: f64, ly: f64) [2]f64
+src/placement/outline.zig::CORNER_SEGS value
+src/placement/outline.zig::bboxRect | fn bboxRect(poly: []const [2]f64) optimizer.BoardRect
+src/placement/outline.zig::contains | fn contains(poly: []const [2]f64, x: f64, y: f64) bool
+src/placement/outline.zig::distToEdge | fn distToEdge(poly: []const [2]f64, x: f64, y: f64) f64
+src/placement/outline.zig::roundedRectPoly | fn roundedRectPoly(alloc: std.mem.Allocator, r: optimizer.BoardRect, radius: f64) std.mem.Allocator.Error![]const [2]f64
+src/placement/outline.zig::segCrossesEdge | fn segCrossesEdge(poly: []const [2]f64, x1: f64, y1: f64, x2: f64, y2: f64) ?[2]f64
+src/placement/outline.zig::signedInset | fn signedInset(poly: []const [2]f64, x: f64, y: f64) f64
 src/placement/pad_shape.zig::Shape struct_
 src/placement/pad_shape.zig::pointDist | fn pointDist(x0: f64, y0: f64, x1: f64, y1: f64, poly: []const [2]f64, px: f64, py: f64, slack: f64) f64
 src/placement/pad_shape.zig::shapeGap | fn shapeGap(a: Shape, b: Shape, slack: f64) f64
@@ -1093,7 +1135,9 @@ src/serve/pcb_layout_page.zig::loadSubBlockPoses | fn loadSubBlockPoses(alloc: s
 src/serve/pcb_layout_page.zig::loadSyncLayout | fn loadSyncLayout( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ?std.StringHashMap(SyncPose)
 src/serve/pcb_layout_page.zig::loadSyncVias | fn loadSyncVias( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, name: []const u8, ) ?[]const SyncVia
 src/serve/pcb_layout_page.zig::pcbCentroidApi | fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbDrcApi | fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbDrillApi | fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbFabReadinessApi | fn pcbFabReadinessApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbGerbersApi | fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbLayoutJsonApi | fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbLayoutPage | fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void

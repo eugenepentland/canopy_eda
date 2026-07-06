@@ -1080,6 +1080,10 @@ pub const BoardSpec = struct {
     /// Outline size in mm. 0 ⇒ `(size …)` missing → the form is inert.
     w: f64 = 0,
     h: f64 = 0,
+    /// `(corner-radius R)` — round the outline's corners with radius R mm
+    /// (emitted as fine polyline arcs on every exact-shape consumer:
+    /// Edge.Cuts, board-edge DRC, the renderers). 0 = square corners.
+    corner_radius: f64 = 0,
     /// Edge-docked parts per board edge (NOT sides of an anchor — the words
     /// name the physical board edge the connector mounts on).
     sides: []const PlacementSideSpec = &.{},
@@ -1130,6 +1134,31 @@ pub const NetClassSpec = struct {
     via_drill: f64 = 0,
     priority: u32 = 0,
     nets: []const []const u8 = &.{},
+};
+
+/// Board-level default design rules from a top-level `(design-rules
+/// (clearance MM) (min-drill MM) (mask-margin MM) (copper-edge MM)
+/// (hole-to-hole MM) (min-annular MM))` form. Each sub-form is optional; a
+/// zero (unset) field keeps the toolchain's built-in default (see the DRC /
+/// Gerber constants), so the absent form reproduces the legacy behaviour
+/// byte-for-byte. These are GLOBAL defaults: a per-net `(net-class …)` still
+/// overrides width/clearance/via for its own nets, but the extra rules
+/// (min-drill, mask-margin, copper-edge, hole-to-hole, min-annular) have no
+/// per-class equivalent and apply board-wide.
+///   • `clearance`   — copper-to-copper spacing (mm); the DRC + router default.
+///   • `min_drill`   — smallest legal drilled hole (mm); a via/pad below it flags.
+///   • `mask_margin` — solder-mask opening expansion per pad side (mm; Gerber).
+///   • `copper_edge` — copper-to-board-outline clearance (mm; Gerber pullback + DRC).
+///   • `hole_to_hole`— wall-to-wall spacing between two drilled holes (mm; DRC).
+///   • `min_annular` — minimum via annular ring, copper radius − drill radius (mm; DRC).
+pub const DesignRulesSpec = struct {
+    clearance: f64 = 0,
+    min_drill: f64 = 0,
+    mask_margin: f64 = 0,
+    copper_edge: f64 = 0,
+    hole_to_hole: f64 = 0,
+    min_annular: f64 = 0,
+    present: bool = false,
 };
 
 /// One historical entry from a `(change "id" "summary")` line inside the
@@ -1276,6 +1305,10 @@ pub const DesignBlock = struct {
     /// Routing rules from top-level `(net-class …)` forms, in authored order.
     /// The first class naming a net wins when two overlap.
     net_classes: []const NetClassSpec = &.{},
+    /// Board-level default design rules from a top-level `(design-rules …)`
+    /// form. `present=false` ⇒ none authored — every rule falls back to the
+    /// toolchain's built-in constant so existing designs are unchanged.
+    design_rules: DesignRulesSpec = .{},
 
     /// Ref-des flattening style for the netlist/BOM/emit flatteners: sub-block
     /// parts keep their path prefix (`pwr/C1`). Always `.hierarchical` now that
