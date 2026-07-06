@@ -331,6 +331,7 @@ fn registerPcbRoutes(router: anytype) void {
     router.get("/api/rough-best-png/:name", rough_best.bestRoughPngApi, .{});
     router.get("/api/pcb-centroid/:name", pcb_layout_page.pcbCentroidApi, .{});
     router.get("/api/pcb-drill/:name", pcb_layout_page.pcbDrillApi, .{});
+    router.get("/api/fab-readiness/:name", pcb_layout_page.pcbFabReadinessApi, .{});
     router.get("/api/pcb-gerbers/:name", pcb_layout_page.pcbGerbersApi, .{});
     router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/delete", pcb_layout_page.deleteNamedLayoutApi, .{});

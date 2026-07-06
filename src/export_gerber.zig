@@ -115,6 +115,60 @@ pub fn planLayers(arena: std.mem.Allocator, placement: optimizer.Placement) std.
     return out.toOwnedSlice(arena);
 }
 
+/// Write the Gerber Job File (`.gbrjob`, JSON) that ties the package together:
+/// `GeneralSpecs` (board size from the outline, copper-layer count from the
+/// stackup) + `FilesAttributes` (each Gerber's archive path + its
+/// `FileFunction`/`FilePolarity`, matching the `%TF.*` attributes the layers
+/// carry). Many fabs' CAM reads this for automatic stackup/layer detection.
+/// `files` is the same `planLayers` set; `name_prefix` is the design name the
+/// archive entries are prefixed with (so `Path` matches the ZIP entry).
+pub fn writeJobFile(
+    w: *std.Io.Writer,
+    placement: optimizer.Placement,
+    files: []const LayerFile,
+    name_prefix: []const u8,
+) std.Io.Writer.Error!void {
+    const r = export_fab.outlineRect(placement);
+    const rules = placement.rules;
+    const layer_count: u8 = if (rules.plane_nets == null) 4 else @max(2, rules.copper_layers);
+    // Count copper files (the FileFunction begins with "Copper") for the
+    // MaterialStackup-less GeneralSpecs summary.
+    try w.writeAll("{\n  \"Header\": {\n");
+    try w.writeAll("    \"GenerationSoftware\": { \"Vendor\": \"netlisp\", \"Application\": \"netlisp\", \"Version\": \"1\" }\n");
+    try w.writeAll("  },\n  \"GeneralSpecs\": {\n");
+    try w.writeAll("    \"ProjectId\": { \"Name\": ");
+    try writeJsonStr(w, name_prefix);
+    try w.writeAll(", \"GUID\": \"\", \"Revision\": \"\" },\n");
+    try w.print("    \"Size\": {{ \"X\": {d:.3}, \"Y\": {d:.3} }},\n", .{ r.w, r.h });
+    try w.print("    \"LayerNumber\": {d},\n", .{layer_count});
+    try w.writeAll("    \"BoardThickness\": 1.6\n");
+    try w.writeAll("  },\n  \"FilesAttributes\": [\n");
+    for (files, 0..) |f, i| {
+        if (i > 0) try w.writeAll(",\n");
+        const polarity = if (f.layer == .mask) "Negative" else "Positive";
+        try w.writeAll("    { \"Path\": ");
+        // Path = "<name>-<suffix>", the ZIP entry name.
+        var buf: [256]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "{s}-{s}", .{ name_prefix, f.suffix }) catch f.suffix;
+        try writeJsonStr(w, path);
+        try w.writeAll(", \"FileFunction\": ");
+        try writeJsonStr(w, f.function);
+        try w.print(", \"FilePolarity\": \"{s}\" }}", .{polarity});
+    }
+    try w.writeAll("\n  ]\n}\n");
+}
+
+/// Minimal JSON string writer for the job file (quotes + backslash escaping).
+fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
+    try w.writeByte('"');
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        else => try w.writeByte(c),
+    };
+    try w.writeByte('"');
+}
+
 /// Write one complete Gerber file for `layer`. `copper` is the saved
 /// layout's persisted routed copper (empty is fine — pads still flash);
 /// `frame` must be the same package frame every sibling file uses.
@@ -749,6 +803,31 @@ test "plane layer clears foreign holes and connects same-net barrels" {
     try testing.expect(std.mem.indexOf(u8, out, "X9000000Y5000000D03*") == null);
     try testing.expect(std.mem.indexOf(u8, out, "X6000000Y5000000D03*") != null);
     try testing.expect(std.mem.indexOf(u8, out, "X5000000Y5000000D03*") == null);
+}
+
+// spec: export_gerber - the .gbrjob job file lists board size, layer count, and each file's function
+test "writeJobFile summarizes the package as valid JSON" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const placement = testPlacement(&.{}, &.{});
+    const files = try planLayers(arena, placement);
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    try writeJobFile(&aw.writer, placement, files, "demo");
+    const out = aw.written();
+
+    // Parses as JSON and carries the spec fields.
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, out, .{});
+    const root = parsed.value.object;
+    const specs = root.get("GeneralSpecs").?.object;
+    try testing.expectEqual(@as(i64, 4), specs.get("LayerNumber").?.integer); // implicit 4-layer
+    try testing.expectApproxEqAbs(@as(f64, 20), specs.get("Size").?.object.get("X").?.float, 1e-6);
+    // The top-copper file entry carries the KiCad-style path + FileFunction.
+    try testing.expect(std.mem.indexOf(u8, out, "demo-F_Cu.gtl") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"Copper,L1,Top\"") != null);
+    // The mask file is Negative polarity.
+    try testing.expect(std.mem.indexOf(u8, out, "\"FilePolarity\": \"Negative\"") != null);
 }
 
 // spec: export_gerber - the edge layer closes the board outline; silk strokes footprint art and ref-des text

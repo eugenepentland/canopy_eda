@@ -54,8 +54,17 @@ unlinked tag: eval/modules - A later parameter's default may reference an earlie
 unlinked tag: eval/modules - A supplied argument overrides the parameter's declared default in ./src/eval/modules.zig
 unlinked tag: eval/modules - Omitted parameters fall back to their declared (param default) value in ./src/eval/modules.zig
 unlinked tag: eval/modules - Required parameters are still diagnosed when only defaulted ones are unbound in ./src/eval/modules.zig
+unlinked tag: export_gerber - the .gbrjob job file lists board size, layer count, and each file's function in ./src/export_gerber.zig
 unlinked tag: export_kicad - Sanitizes a declared footprint name so a path-traversal component can't escape the output directory in ./src/export_kicad.zig
 unlinked tag: export_kicad_netlist - extractPadNames reads bare-integer pad numbers so numerically-padded footprints appear in the NC inventory in ./src/export_kicad_netlist.zig
+unlinked tag: fab_readiness - a clean board produces no errors and reports ok in ./src/fab_readiness.zig
+unlinked tag: fab_readiness - a ground plane connects its pads without routed copper in ./src/fab_readiness.zig
+unlinked tag: fab_readiness - a missing outline, off-board part, drill-less via, and DNP all surface in ./src/fab_readiness.zig
+unlinked tag: fab_readiness - a routed net is connected; an unrouted multi-pad net is flagged in ./src/fab_readiness.zig
+unlinked tag: gerber_verify - a pad flashed at the wrong coordinate is reported as a miss in ./src/gerber_verify.zig
+unlinked tag: gerber_verify - a written copper layer reads back matching the placement model in ./src/gerber_verify.zig
+unlinked tag: gerber_verify - the reader parses our own aperture/flash/segment/region output in ./src/gerber_verify.zig
+unlinked tag: gerber_verify - top and bottom copper both read back correctly (frame/side conventions) in ./src/gerber_verify.zig
 unlinked tag: import_fold - A channel with a passive rewired between two same-template internal nets deviates instead of folding silently in ./src/import_fold.zig
 unlinked tag: kicad_pcb/writer - Escapes JSON-supplied op values so a raw quote/backslash cannot corrupt the board file in ./src/kicad_pcb/writer.zig
 unlinked tag: kicad_pcb/writer - swap_footprint preserves the board footprint's (attr …) assembly flags in ./src/kicad_pcb/writer.zig

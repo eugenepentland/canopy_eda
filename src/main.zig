@@ -461,6 +461,8 @@ test {
     _ = @import("render_pcb_png.zig");
     _ = @import("export_fab.zig");
     _ = @import("export_gerber.zig");
+    _ = @import("fab_readiness.zig");
+    _ = @import("gerber_verify.zig");
     _ = @import("zipfile.zig");
 
     // Memory-leak audit regression tests (src/leak_tests/) — exercise
