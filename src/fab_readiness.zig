@@ -297,14 +297,13 @@ const PadNode = struct {
     cx: f64,
     cy: f64,
     part: usize,
-    /// Union-find parent (index into the pad-node list).
-    root: usize,
 };
 
-/// Compute `net`'s connectivity over the persisted copper. Pads are the nodes;
-/// a same-net track or via that touches two pads' copper unions them; a
-/// plane-carried net unions every pad (the plane is the connection). `groups`
-/// counts the resulting connected components; `locations` counts distinct pad
+/// Compute `net`'s connectivity over the persisted copper. Pads, track
+/// segments, and vias are all union-find nodes, so connectivity propagates
+/// through multi-segment route chains and via layer-jumps; a plane-carried
+/// net unions every pad (the plane is the connection). `groups` counts the
+/// connected components over the PADS; `locations` counts distinct pad
 /// positions (so a net whose every pad sits at one point isn't "routable").
 fn netComponents(
     arena: std.mem.Allocator,
@@ -329,7 +328,6 @@ fn netComponents(
             .cx = (sh.x0 + sh.x1) / 2,
             .cy = (sh.y0 + sh.y1) / 2,
             .part = pi,
-            .root = nodes.items.len,
         });
     }
     const items = nodes.items;
@@ -354,35 +352,72 @@ fn netComponents(
     // it lands on (or vias down to) the plane, so treat them all as one group.
     if (netHasPlane(placement, net.name)) return .{ .locations = locations, .groups = 1 };
 
-    // Union pads bridged by same-net copper. Each track/via unions the set of
-    // pads it touches; a chain of tracks propagates through shared endpoints,
-    // but pads are the only union targets we care about (isolated copper with
-    // no pad is a separate — harmless-for-connectivity — concern).
+    // Union pads bridged by same-net copper — TRANSITIVELY through track
+    // chains and via jumps. A maze route is many short segments and only its
+    // END segments touch the pads, so tracks (and vias) must be union-find
+    // nodes themselves: pad↔track and pad↔via where the copper lands on the
+    // pad, track↔track where a same-layer joint touches, track↔via for the
+    // layer jump. Pads are what we count at the end.
+    var segs: std.ArrayListUnmanaged(router.Track) = .empty;
     for (copper.tracks) |t| {
-        if (!sameNet(t.net, net_i)) continue;
-        unionTouching(items, t.x1, t.y1, t.width / 2, t.x2, t.y2);
+        if (sameNet(t.net, net_i)) try segs.append(arena, t);
     }
+    var vs: std.ArrayListUnmanaged(router.Via) = .empty;
     for (copper.vias) |v| {
-        if (!sameNet(v.net, net_i)) continue;
-        unionTouching(items, v.x, v.y, v.dia / 2, v.x, v.y);
+        if (sameNet(v.net, net_i)) try vs.append(arena, v);
+    }
+    const n_pads = items.len;
+    const n_tracks = segs.items.len;
+    const parent = try arena.alloc(usize, n_pads + n_tracks + vs.items.len);
+    for (parent, 0..) |*p, i| p.* = i;
+
+    for (segs.items, 0..) |t, ti| {
+        // pad ↔ track (pads union with copper on any layer, matching the
+        // original behaviour — SMD pads only ever meet their own-side copper
+        // in practice, and thru pads meet both).
+        for (items, 0..) |p, pi| {
+            if (segShapeDist(t.x1, t.y1, t.x2, t.y2, p) <= t.width / 2 + TOUCH_SLACK_MM)
+                unite(parent, pi, n_pads + ti);
+        }
+        // track ↔ track: a same-layer joint (an endpoint of one on the body
+        // of the other) chains the route segments together.
+        for (segs.items[ti + 1 ..], ti + 1..) |b, bi| {
+            if (t.layer != b.layer) continue;
+            const touch = t.width / 2 + b.width / 2 + TOUCH_SLACK_MM;
+            if (segPointDist(t.x1, t.y1, t.x2, t.y2, b.x1, b.y1) <= touch or
+                segPointDist(t.x1, t.y1, t.x2, t.y2, b.x2, b.y2) <= touch or
+                segPointDist(b.x1, b.y1, b.x2, b.y2, t.x1, t.y1) <= touch or
+                segPointDist(b.x1, b.y1, b.x2, b.y2, t.x2, t.y2) <= touch)
+                unite(parent, n_pads + ti, n_pads + bi);
+        }
+        // track ↔ via: the cross-layer jump.
+        for (vs.items, 0..) |v, vi| {
+            if (segPointDist(t.x1, t.y1, t.x2, t.y2, v.x, v.y) <= t.width / 2 + v.dia / 2 + TOUCH_SLACK_MM)
+                unite(parent, n_pads + ti, n_pads + n_tracks + vi);
+        }
+    }
+    // pad ↔ via (a via dropped on/next to a pad joins its group).
+    for (vs.items, 0..) |v, vi| {
+        for (items, 0..) |p, pi| {
+            if (segShapeDist(v.x, v.y, v.x, v.y, p) <= v.dia / 2 + TOUCH_SLACK_MM)
+                unite(parent, pi, n_pads + n_tracks + vi);
+        }
     }
 
-    // Count distinct roots.
+    // Count distinct roots over the PAD nodes only.
     var group_root: std.AutoHashMap(usize, void) = .init(arena);
-    for (items, 0..) |_, i| try group_root.put(find(items, i), {});
+    for (0..n_pads) |i| try group_root.put(find(parent, i), {});
     return .{ .locations = locations, .groups = group_root.count() };
 }
 
-/// Union every pad whose copper the given segment (a track, or a via as a
-/// zero-length segment with radius) touches — so one track spanning two pads
-/// joins them, and a via dropped on a pad joins it into that pad's group.
-fn unionTouching(items: []PadNode, x1: f64, y1: f64, radius: f64, x2: f64, y2: f64) void {
-    var first: ?usize = null;
-    for (items, 0..) |*p, i| {
-        const d = segShapeDist(x1, y1, x2, y2, p.*);
-        if (d > radius + TOUCH_SLACK_MM) continue;
-        if (first) |f| unite(items, f, i) else first = i;
-    }
+/// Shortest distance from point (px,py) to segment (ax,ay)-(bx,by).
+fn segPointDist(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) f64 {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    if (len2 < 1e-12) return std.math.hypot(px - ax, py - ay);
+    const t = std.math.clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1);
+    return std.math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 
 /// Distance from segment (ax,ay)-(bx,by) to a pad's copper (0 inside it).
@@ -402,25 +437,25 @@ fn segShapeDist(ax: f64, ay: f64, bx: f64, by: f64, p: PadNode) f64 {
     return best;
 }
 
-// ── Union-find over pad nodes ───────────────────────────────────────────────
+// ── Union-find over copper nodes (pads | tracks | vias) ─────────────────────
 
-fn find(items: []PadNode, i: usize) usize {
+fn find(parent: []usize, i: usize) usize {
     var r = i;
-    while (items[r].root != r) r = items[r].root;
+    while (parent[r] != r) r = parent[r];
     // Path-halving.
     var x = i;
-    while (items[x].root != r) {
-        const next = items[x].root;
-        items[x].root = r;
+    while (parent[x] != r) {
+        const next = parent[x];
+        parent[x] = r;
         x = next;
     }
     return r;
 }
 
-fn unite(items: []PadNode, a: usize, b: usize) void {
-    const ra = find(items, a);
-    const rb = find(items, b);
-    if (ra != rb) items[rb].root = ra;
+fn unite(parent: []usize, a: usize, b: usize) void {
+    const ra = find(parent, a);
+    const rb = find(parent, b);
+    if (ra != rb) parent[rb] = ra;
 }
 
 // ── Net / plane / geometry helpers ──────────────────────────────────────────
@@ -546,6 +581,41 @@ test "connectivity flags an unrouted net and passes a routed one" {
     const routed = try check(arena, placement, .{ .tracks = &tracks }, .{});
     try testing.expect(!hasError(routed, "unrouted-net"));
     try testing.expectEqual(@as(usize, 1), routed.stats.connected_nets);
+
+    // A real maze route is a CHAIN of segments (only the end segments touch
+    // the pads) — the union must propagate through the track↔track joints.
+    const chain = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 3, .y1 = 0, .x2 = 3, .y2 = 1.5, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 3, .y1 = 1.5, .x2 = 10, .y2 = 1.5, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 10, .y1 = 1.5, .x2 = 10, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const chained = try check(arena, placement, .{ .tracks = &chain }, .{});
+    try testing.expect(!hasError(chained, "unrouted-net"));
+    try testing.expectEqual(@as(usize, 1), chained.stats.connected_nets);
+
+    // …and through a via layer-jump: top stub → via → bottom run → via → top stub.
+    const jump = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 2, .y1 = 0, .x2 = 8, .y2 = 0, .layer = 1, .width = 0.2, .net = 0 },
+        .{ .x1 = 8, .y1 = 0, .x2 = 10, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const jvias = [_]router.Via{
+        .{ .x = 2, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 8, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 },
+    };
+    const jumped = try check(arena, placement, .{ .tracks = &jump, .vias = &jvias }, .{});
+    try testing.expect(!hasError(jumped, "unrouted-net"));
+    try testing.expectEqual(@as(usize, 1), jumped.stats.connected_nets);
+
+    // Two same-layer segments that do NOT touch stay two islands (no false
+    // transitivity from the chain logic).
+    const gap = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 4, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 6, .y1 = 0, .x2 = 10, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const gapped = try check(arena, placement, .{ .tracks = &gap }, .{});
+    try testing.expect(hasError(gapped, "unrouted-net"));
 }
 
 // spec: fab_readiness - a ground plane connects its pads without routed copper
