@@ -20,6 +20,8 @@ const geometry = @import("../placement/geometry.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
 const export_fab = @import("../export_fab.zig");
+const export_gerber = @import("../export_gerber.zig");
+const zipfile = @import("../zipfile.zig");
 const module_policy = @import("../placement/module_policy.zig");
 const modules_mod = @import("modules.zig");
 const netlist = @import("../export_kicad_netlist.zig");
@@ -58,6 +60,8 @@ const PARTS_OPEN = "\"parts\":[";
 const ORIGIN_OPEN = ",\"origin\":";
 /// Error bodies shared across the layout handlers.
 const NO_BLOCK_MSG = "No design or module by that name";
+/// Response header name the fab-output endpoints set their MIME type on.
+const CT_HDR = "content-type";
 /// Returned when `?sub=<slug>` names a sub-block that doesn't exist in the design.
 const NO_SUB_MSG = "No sub-block by that name";
 const BAD_JSON_MSG = "bad json";
@@ -1755,18 +1759,52 @@ fn blessedPlacement(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, na
     };
 }
 
+/// Everything the fab writers need, resolved ONCE so every file of a package
+/// agrees: the blessed placement with the ★ layout's drawn outline applied
+/// (it's the board edge the gerbers profile), that layout's persisted routed
+/// copper, and the shared y-up output frame derived from that outline. A
+/// drill file and a copper file built from different FabViews would
+/// mis-stack in CAM — always build one view per package.
+const FabView = struct {
+    placement: optimizer.Placement,
+    tracks: []const router.Track = &.{},
+    vias: []const router.Via = &.{},
+    frame: export_fab.Frame,
+};
+
+/// Resolve `name`'s fab view (see `FabView`); null (+ client error status)
+/// when the design/module doesn't resolve or has no saved layout.
+fn blessedFabView(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, name: []const u8) ?FabView {
+    var placement = blessedPlacement(ctx, req, res, name) orelse return null;
+    var tracks: []const router.Track = &.{};
+    var vias: []const router.Via = &.{};
+    for (readLayouts(req.arena, ctx.project_dir, name)) |L| {
+        if (!L.default) continue;
+        if (L.outline) |o| placement.board_rect = .{ .minx = o.x, .miny = o.y, .w = o.w, .h = o.h };
+        if (L.routes) |sr| {
+            if (restoreRoutes(req.arena, sr, placement.nets)) |r| {
+                tracks = r.tracks;
+                vias = r.vias;
+            }
+        }
+        break;
+    }
+    return .{ .placement = placement, .tracks = tracks, .vias = vias, .frame = export_fab.frameFor(placement) };
+}
+
 /// GET /api/pcb-centroid/:name — the pick-and-place centroid CSV at the
-/// design's blessed poses (see `blessedPlacement`), side-aware. The assembly
-/// half of the fab package; pairs with the BOM CSV.
+/// design's blessed poses (see `blessedPlacement`), side-aware, in the
+/// shared fab frame. The assembly half of the fab package; pairs with the
+/// BOM CSV.
 pub fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
     };
-    const placement = blessedPlacement(ctx, req, res, name) orelse return;
+    const fv = blessedFabView(ctx, req, res, name) orelse return;
     var aw: std.Io.Writer.Allocating = .init(req.arena);
-    try export_fab.centroidCsv(&aw.writer, placement.parts, placement.instances);
-    res.header("content-type", "text/csv; charset=utf-8");
+    try export_fab.centroidCsv(&aw.writer, fv.placement.parts, fv.placement.instances, fv.frame);
+    res.header(CT_HDR, "text/csv; charset=utf-8");
     res.body = aw.written();
 }
 
@@ -1778,20 +1816,61 @@ pub fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         res.status = 404;
         return;
     };
-    const placement = blessedPlacement(ctx, req, res, name) orelse return;
-    // Vias come from the blessed (★/default-preferred) layout's saved routes.
-    var vias: []const router.Via = &.{};
-    for (readLayouts(req.arena, ctx.project_dir, name)) |L| {
-        if (!L.default) continue;
-        const sr = L.routes orelse break;
-        if (restoreRoutes(req.arena, sr, placement.nets)) |r| vias = r.vias;
-        break;
-    }
+    const fv = blessedFabView(ctx, req, res, name) orelse return;
     const class: export_fab.DrillClass = if (queryFlag(req, "npth")) .non_plated else .plated;
     var aw: std.Io.Writer.Allocating = .init(req.arena);
-    try export_fab.excellonDrill(&aw.writer, req.arena, placement.parts, vias, class);
-    res.header("content-type", "text/plain; charset=utf-8");
+    try export_fab.excellonDrill(&aw.writer, req.arena, fv.placement.parts, fv.vias, class, fv.frame);
+    res.header(CT_HDR, "text/plain; charset=utf-8");
     res.body = aw.written();
+}
+
+/// GET /api/pcb-gerbers/:name — the complete fab package as one ZIP: Gerber
+/// copper (outer signal layers + stackup-derived inner planes), solder mask,
+/// paste, silkscreen, board profile, Excellon PTH/NPTH drills, and the
+/// centroid CSV — all at the blessed poses with the ★ layout's persisted
+/// routed copper, in one shared y-up frame. What a board house needs to
+/// build the board, no KiCad in the loop.
+pub fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const fv = blessedFabView(ctx, req, res, name) orelse return;
+    const copper = export_gerber.Copper{ .tracks = fv.tracks, .vias = fv.vias };
+
+    var entries: std.ArrayListUnmanaged(zipfile.Entry) = .empty;
+    for (try export_gerber.planLayers(req.arena, fv.placement)) |f| {
+        var aw: std.Io.Writer.Allocating = .init(req.arena);
+        try export_gerber.writeLayer(&aw.writer, req.arena, fv.placement, copper, fv.frame, f.layer, f.function);
+        try entries.append(req.arena, .{
+            .name = try std.fmt.allocPrint(req.arena, "{s}-{s}", .{ name, f.suffix }),
+            .data = aw.written(),
+        });
+    }
+    var pth: std.Io.Writer.Allocating = .init(req.arena);
+    try export_fab.excellonDrill(&pth.writer, req.arena, fv.placement.parts, fv.vias, .plated, fv.frame);
+    try entries.append(req.arena, .{
+        .name = try std.fmt.allocPrint(req.arena, "{s}-PTH.drl", .{name}),
+        .data = pth.written(),
+    });
+    var npth: std.Io.Writer.Allocating = .init(req.arena);
+    try export_fab.excellonDrill(&npth.writer, req.arena, fv.placement.parts, fv.vias, .non_plated, fv.frame);
+    try entries.append(req.arena, .{
+        .name = try std.fmt.allocPrint(req.arena, "{s}-NPTH.drl", .{name}),
+        .data = npth.written(),
+    });
+    var cw: std.Io.Writer.Allocating = .init(req.arena);
+    try export_fab.centroidCsv(&cw.writer, fv.placement.parts, fv.placement.instances, fv.frame);
+    try entries.append(req.arena, .{
+        .name = try std.fmt.allocPrint(req.arena, "{s}-centroid.csv", .{name}),
+        .data = cw.written(),
+    });
+
+    var zw: std.Io.Writer.Allocating = .init(req.arena);
+    try zipfile.write(&zw.writer, entries.items);
+    res.header(CT_HDR, "application/zip");
+    res.header("content-disposition", try std.fmt.allocPrint(req.arena, "attachment; filename=\"{s}-gerbers.zip\"", .{name}));
+    res.body = zw.written();
 }
 
 /// POST /api/pcb-layouts/:name — save a named layout snapshot (kind "manual").
@@ -3737,6 +3816,14 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
         "fix corners (45\u{b0}/grid snapped, Shift = free angle), V drops a via and flips layer, click a same-net pad or " ++
         "double-click to finish, Backspace steps back, Esc ends. Right-click deletes the track/via under the cursor. " ++
         "Copper is saved with the layout (Save/Update).\">\u{270E} Draw</button>");
+    try w.writeAll(BAR_GRP_END);
+    // Fab handoff: the complete manufacturing package at the saved (★) layout.
+    try w.writeAll(BAR_GRP);
+    try w.writeAll("<a class=\"btn\" id=\"pcb-fab\" href=\"/api/pcb-gerbers/");
+    try writeAttr(w, name);
+    try w.writeAll("\" download title=\"Download the fab package (ZIP): Gerber copper / mask / paste / silk / " ++
+        "board profile + Excellon drills + centroid CSV, at the saved (\u{2605}) layout with its saved routed " ++
+        "copper. Save a layout first.\">\u{2913} Gerbers</a>");
     try w.writeAll(BAR_GRP_END);
     try w.writeAll("<span class=\"zoom-grp\"><button class=\"btn\" id=\"z-out\" title=\"Zoom out\">−</button>");
     try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");

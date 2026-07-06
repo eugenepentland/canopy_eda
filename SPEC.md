@@ -382,10 +382,27 @@ Public functions: worldShape, pointDist, shapeGap
 
 ## export_fab
 
-Public functions: centroidCsv, excellonDrill
+Public functions: centroidCsv, excellonDrill, frameFor, outlineRect
 
 - the centroid CSV lists each part's pose with its board side
 - the Excellon writer splits plated pads + vias from non-plated holes and groups tools by diameter
+- fab writers share one y-up frame derived from the board outline
+
+## export_gerber
+
+Public functions: planLayers, writeLayer
+
+- plans the file set from the stackup (implicit 4-layer, declared planes, plain 2-layer)
+- outer copper flashes side-correct pads and draws routed tracks/vias in the y-up frame
+- mask openings expand pads and tent vias; paste covers only same-side SMD pads
+- an inner plane pours solid copper and antipads only foreign holes
+- the edge layer closes the board outline; silk strokes footprint art and ref-des text
+
+## zipfile
+
+Public functions: write
+
+- packs entries into a store-method archive the standard extractor reads back
 
 ## bom
 

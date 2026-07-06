@@ -318,6 +318,34 @@ fn maybeCompress(req: *httpz.Request, res: *httpz.Response) void {
 /// auth, OAuth, and MCP route against an httpz instance, then blocks on
 /// `server.listen()`. Project files are served out of `project_dir`; auth
 /// state lives in `auth_dir` (or `<project_dir>/auth` when null).
+/// The PCB-layout surface: the viewer page plus its JSON/PNG/facts APIs,
+/// layout snapshot management, routing/regen, and the fab outputs
+/// (centroid, drill, gerber package).
+fn registerPcbRoutes(router: anytype) void {
+    router.get("/pcb-layout/:name", pcb_layout_page.pcbLayoutPage, .{});
+    router.get("/api/pcb-layout/:name", pcb_layout_page.pcbLayoutJsonApi, .{});
+    router.get("/api/pcb-png/:name", pcb_layout_page.pcbPngApi, .{});
+    router.get("/api/pcb-describe/:name", pcb_describe.pcbDescribeApi, .{});
+    router.get("/api/layout-match/:name", layout_match.layoutMatchApi, .{});
+    router.get("/api/rough-best/:name", rough_best.bestRoughApi, .{});
+    router.get("/api/rough-best-png/:name", rough_best.bestRoughPngApi, .{});
+    router.get("/api/pcb-centroid/:name", pcb_layout_page.pcbCentroidApi, .{});
+    router.get("/api/pcb-drill/:name", pcb_layout_page.pcbDrillApi, .{});
+    router.get("/api/pcb-gerbers/:name", pcb_layout_page.pcbGerbersApi, .{});
+    router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
+    router.post("/api/pcb-layouts/:name/delete", pcb_layout_page.deleteNamedLayoutApi, .{});
+    router.post("/api/pcb-layouts/:name/default", pcb_layout_page.setDefaultLayoutApi, .{});
+    router.post("/api/pcb-rescore/:name", pcb_layout_page.rescoreLayoutsApi, .{});
+    router.post("/api/pcb-score/:name", pcb_layout_page.pcbScoreApi, .{});
+    router.post("/api/pcb-score-batch/:name", pcb_layout_page.pcbScoreBatchApi, .{});
+    router.post("/api/pcb-route/:name", pcb_layout_page.pcbRouteApi, .{});
+    router.post("/api/pcb-regen-start/:name", pcb_layout_page.pcbRegenStartApi, .{});
+    router.get("/api/pcb-progress/:name", pcb_layout_page.pcbProgressApi, .{});
+    router.post("/api/courtyard/:name", pcb_layout_page.savePcbCourtyardApi, .{});
+}
+
+/// Start the HTTP server: configure auth/rate limits, register every route
+/// (pages, APIs, MCP, OAuth), and block serving requests until shutdown.
 pub fn serve(
     allocator: std.mem.Allocator,
     port: u16,
@@ -374,25 +402,7 @@ pub fn serve(
     // KiCad-style sheet editor (prototype): section-as-sheet canvas navigator.
     router.get("/editor/:name", editor_page.editorPage, .{});
     router.get("/api/editor-scene/:name", editor_page.editorSceneApi, .{});
-    router.get("/pcb-layout/:name", pcb_layout_page.pcbLayoutPage, .{});
-    router.get("/api/pcb-layout/:name", pcb_layout_page.pcbLayoutJsonApi, .{});
-    router.get("/api/pcb-png/:name", pcb_layout_page.pcbPngApi, .{});
-    router.get("/api/pcb-describe/:name", pcb_describe.pcbDescribeApi, .{});
-    router.get("/api/layout-match/:name", layout_match.layoutMatchApi, .{});
-    router.get("/api/rough-best/:name", rough_best.bestRoughApi, .{});
-    router.get("/api/rough-best-png/:name", rough_best.bestRoughPngApi, .{});
-    router.get("/api/pcb-centroid/:name", pcb_layout_page.pcbCentroidApi, .{});
-    router.get("/api/pcb-drill/:name", pcb_layout_page.pcbDrillApi, .{});
-    router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
-    router.post("/api/pcb-layouts/:name/delete", pcb_layout_page.deleteNamedLayoutApi, .{});
-    router.post("/api/pcb-layouts/:name/default", pcb_layout_page.setDefaultLayoutApi, .{});
-    router.post("/api/pcb-rescore/:name", pcb_layout_page.rescoreLayoutsApi, .{});
-    router.post("/api/pcb-score/:name", pcb_layout_page.pcbScoreApi, .{});
-    router.post("/api/pcb-score-batch/:name", pcb_layout_page.pcbScoreBatchApi, .{});
-    router.post("/api/pcb-route/:name", pcb_layout_page.pcbRouteApi, .{});
-    router.post("/api/pcb-regen-start/:name", pcb_layout_page.pcbRegenStartApi, .{});
-    router.get("/api/pcb-progress/:name", pcb_layout_page.pcbProgressApi, .{});
-    router.post("/api/courtyard/:name", pcb_layout_page.savePcbCourtyardApi, .{});
+    registerPcbRoutes(router);
     router.get("/modules", modules_page.modulesListPage, .{});
     router.get("/modules/:name", modules_page.moduleViewPage, .{});
     router.get("/mcp-tools", mcp_docs.mcpDocsPage, .{});

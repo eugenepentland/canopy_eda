@@ -1,22 +1,70 @@
 //! Assembly/fab text outputs generated straight from a solved placement:
-//! the pick-and-place centroid CSV and the Excellon drill files. These are
-//! the netlisp-native halves of the manufacturing package (BOM already
-//! exists; Gerber copper is a later phase) — enough for a fab to drill the
-//! board and an assembler to place it without KiCad in the loop.
+//! the pick-and-place centroid CSV and the Excellon drill files — together
+//! with `export_gerber.zig` (copper/mask/paste/silk/edge) the full
+//! netlisp-native manufacturing package, so a fab can build the board and an
+//! assembler can place it without KiCad in the loop.
+//!
+//! All outputs share one coordinate `Frame`: the placement model is
+//! millimetres y-DOWN (KiCad editor convention), while Gerber and Excellon
+//! are y-UP, so every emitted point is `(x - ox, oy - y)` — origin at the
+//! board outline's bottom-left corner, positive coordinates, and the same
+//! frame across copper, drill, and centroid so CAM layers stack exactly.
 
 const std = @import("std");
 const optimizer = @import("placement/optimizer.zig");
 const router = @import("placement/router.zig");
 const export_kicad = @import("export_kicad.zig");
 
+/// The shared fab-output coordinate frame: emitted = `(x - ox, oy - y)`.
+/// Build one with `frameFor` and pass the SAME frame to every writer of a
+/// package — a mixed-frame package mis-stacks in CAM.
+pub const Frame = struct {
+    ox: f64 = 0,
+    oy: f64 = 0,
+
+    /// Placement-space point → fab-output point (mm, y-up).
+    pub fn pt(self: Frame, x: f64, y: f64) [2]f64 {
+        return .{ x - self.ox, self.oy - y };
+    }
+};
+
+/// Margin added around the parts' bounding box when a design declares no
+/// board outline — the fallback rectangle `outlineRect` synthesizes.
+pub const AUTO_OUTLINE_MARGIN_MM: f64 = 1.0;
+
+/// The board outline every fab writer agrees on: the placement's authored /
+/// drawn `board_rect` when present, else the parts' bounding box grown by
+/// `AUTO_OUTLINE_MARGIN_MM` (so an outline-less design still exports a
+/// closed, plausible board profile).
+pub fn outlineRect(placement: optimizer.Placement) optimizer.BoardRect {
+    if (placement.board_rect) |r| return r;
+    return .{
+        .minx = placement.minx - AUTO_OUTLINE_MARGIN_MM,
+        .miny = placement.miny - AUTO_OUTLINE_MARGIN_MM,
+        .w = (placement.maxx - placement.minx) + 2 * AUTO_OUTLINE_MARGIN_MM,
+        .h = (placement.maxy - placement.miny) + 2 * AUTO_OUTLINE_MARGIN_MM,
+    };
+}
+
+/// The package frame for `placement`: origin at the board outline's
+/// bottom-left corner (y-down "bottom" = maxy), so fab outputs are y-up with
+/// (0,0) at the board corner.
+pub fn frameFor(placement: optimizer.Placement) Frame {
+    const r = outlineRect(placement);
+    return .{ .ox = r.minx, .oy = r.miny + r.h };
+}
+
 /// Write the pick-and-place centroid CSV (JLC-style columns): one row per
-/// placed part — ref-des, value, footprint, centre (mm), rotation (deg), and
-/// which board side it mounts on. `instances` is index-aligned with `parts`
-/// (the `Placement` contract); a missing instance leaves value/package empty.
+/// placed part — ref-des, value, footprint, centre (package-frame mm, y-up),
+/// rotation (deg, CCW-positive — the KiCad pos-file convention, so the sense
+/// matches what the gerbers show), and which board side it mounts on.
+/// `instances` is index-aligned with `parts` (the `Placement` contract); a
+/// missing instance leaves value/package empty.
 pub fn centroidCsv(
     w: *std.Io.Writer,
     parts: []const optimizer.Part,
     instances: []const export_kicad.FlatInstance,
+    frame: Frame,
 ) std.Io.Writer.Error!void {
     try w.writeAll("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n");
     for (parts, 0..) |p, i| {
@@ -25,10 +73,14 @@ pub fn centroidCsv(
         if (i < instances.len) try writeCsvField(w, instances[i].value);
         try w.writeByte(',');
         if (i < instances.len) try writeCsvField(w, instances[i].footprint);
+        const c = frame.pt(p.x, p.y);
+        // The placement angle is CW-positive in its y-down world; the pos-file
+        // (and Gerber) world is y-up, where the same physical orientation
+        // reads CCW-positive — emit the negated angle (KiCad does the same).
         try w.print(",{d:.3}mm,{d:.3}mm,{d:.0},{s}\n", .{
-            p.x,
-            p.y,
-            p.rot,
+            c[0],
+            c[1],
+            @mod(360.0 - p.rot, 360.0),
             if (p.side == .bottom) "Bottom" else "Top",
         });
     }
@@ -45,13 +97,16 @@ pub const DrillClass = enum { plated, non_plated };
 /// `.plated` emits the PTH file: every plated through-hole pad of every
 /// placed part plus every routed via. `.non_plated` emits the NPTH file
 /// (mounting holes / non-plated pads only). Holes are grouped into one tool
-/// per distinct diameter (0.01 mm resolution), smallest first.
+/// per distinct diameter (0.01 mm resolution), smallest first. Coordinates
+/// are in the shared package `frame` (y-up) so the holes stack on the
+/// gerbers.
 pub fn excellonDrill(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
     parts: []const optimizer.Part,
     vias: []const router.Via,
     class: DrillClass,
+    frame: Frame,
 ) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
     const plated = class == .plated;
     var holes: std.ArrayListUnmanaged(Hole) = .empty;
@@ -61,13 +116,15 @@ pub fn excellonDrill(
             const want = if (plated) (pad.thru and !pad.npth) else pad.npth;
             if (!want) continue;
             const c = optimizer.worldPadCenter(p, pad.x, pad.y);
-            try holes.append(alloc, .{ .x = c[0], .y = c[1], .d = pad.drill });
+            const f = frame.pt(c[0], c[1]);
+            try holes.append(alloc, .{ .x = f[0], .y = f[1], .d = pad.drill });
         }
     }
     if (plated) {
         for (vias) |v| {
             if (v.drill <= 0) continue;
-            try holes.append(alloc, .{ .x = v.x, .y = v.y, .d = v.drill });
+            const f = frame.pt(v.x, v.y);
+            try holes.append(alloc, .{ .x = f[0], .y = f[1], .d = v.drill });
         }
     }
 
@@ -132,10 +189,44 @@ test "centroidCsv emits one side-aware row per part" {
         .{ .ref_des = "C1", .component = "cap", .value = "100nF", .footprint = "C_0402", .uuid = "", .origin_key = "", .properties = &.{} },
     };
     var aw: std.Io.Writer.Allocating = .init(alloc);
-    try centroidCsv(&aw.writer, &parts, &instances);
+    // Frame with the board bottom at y=20: y flips (5→15, 2→18) and the
+    // CW-positive placement angle comes out CCW-positive (90→270).
+    try centroidCsv(&aw.writer, &parts, &instances, .{ .ox = 0, .oy = 20 });
     const out = aw.written();
-    try testing.expect(std.mem.indexOf(u8, out, "U1,STM32,LQFP-48,10.000mm,5.000mm,90,Top") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "C1,100nF,C_0402,1.000mm,2.000mm,0,Bottom") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "U1,STM32,LQFP-48,10.000mm,15.000mm,270,Top") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "C1,100nF,C_0402,1.000mm,18.000mm,0,Bottom") != null);
+}
+
+// spec: export_fab - fab writers share one y-up frame derived from the board outline
+test "frameFor puts the origin at the outline's bottom-left corner" {
+    var p = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 2,
+        .miny = 3,
+        .maxx = 12,
+        .maxy = 8,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 20, .h = 10 },
+    };
+    const f = frameFor(p);
+    try testing.expectApproxEqAbs(@as(f64, 0), f.ox, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10), f.oy, 1e-9);
+    // A point at the outline's top-left maps to (0, h) — y-up.
+    const tl = f.pt(0, 0);
+    try testing.expectApproxEqAbs(@as(f64, 0), tl[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10), tl[1], 1e-9);
+
+    // No outline: the parts' bbox + margin synthesizes one.
+    p.board_rect = null;
+    const auto = outlineRect(p);
+    try testing.expectApproxEqAbs(@as(f64, 2 - AUTO_OUTLINE_MARGIN_MM), auto.minx, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10 + 2 * AUTO_OUTLINE_MARGIN_MM), auto.w, 1e-9);
 }
 
 // spec: export_fab - the Excellon writer splits plated pads + vias from non-plated holes and groups tools by diameter
@@ -154,16 +245,19 @@ test "excellonDrill separates PTH and NPTH files" {
     };
     const vias = [_]router.Via{.{ .x = 5, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 }};
 
+    // Board bottom at y=20 → the part-origin pad (10,10) emits at (10,10).
+    const frame = Frame{ .ox = 0, .oy = 20 };
     var pth: std.Io.Writer.Allocating = .init(alloc);
-    try excellonDrill(&pth.writer, alloc, &parts, &vias, .plated);
+    try excellonDrill(&pth.writer, alloc, &parts, &vias, .plated, frame);
     const pth_out = pth.written();
     try testing.expect(std.mem.indexOf(u8, pth_out, "T1C0.200") != null); // via tool (smallest first)
     try testing.expect(std.mem.indexOf(u8, pth_out, "C0.920") != null); // thru pad tool
-    try testing.expect(std.mem.indexOf(u8, pth_out, "X10.000Y10.000") != null); // pad at part origin
+    try testing.expect(std.mem.indexOf(u8, pth_out, "X10.000Y10.000") != null); // pad at part origin (y flipped)
+    try testing.expect(std.mem.indexOf(u8, pth_out, "X5.000Y15.000") != null); // via, y flipped
     try testing.expect(std.mem.indexOf(u8, pth_out, "C0.750") == null); // NPTH kept out
 
     var npth: std.Io.Writer.Allocating = .init(alloc);
-    try excellonDrill(&npth.writer, alloc, &parts, &vias, .non_plated);
+    try excellonDrill(&npth.writer, alloc, &parts, &vias, .non_plated, frame);
     const npth_out = npth.written();
     try testing.expect(std.mem.indexOf(u8, npth_out, "T1C0.750") != null); // the mounting hole
     try testing.expect(std.mem.indexOf(u8, npth_out, "X13.000Y10.000") != null);

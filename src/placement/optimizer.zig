@@ -516,7 +516,18 @@ pub const BoardRules = struct {
     /// `Placement.nets`. Empty when no classes are declared; a zero field
     /// keeps the router's default for that quantity.
     net: []const NetRule = &.{},
+    /// Total copper-layer count from `(stackup N …)`; 0 = no stackup form
+    /// (the legacy implicit 4-layer model). The Gerber export sizes its
+    /// copper file set from this.
+    copper_layers: u8 = 0,
+    /// Declared `(plane IDX "NET")` entries with their 1-based copper index
+    /// (same data as `plane_nets` but keeping WHERE each plane sits, for the
+    /// Gerber export's inner-layer files).
+    planes: []const PlaneAt = &.{},
 };
+
+/// One declared copper plane: 1-based stack index + the net it carries.
+pub const PlaneAt = struct { index: u8, net: []const u8 };
 
 /// One net's routing geometry override (mm) resolved from `(net-class …)`.
 /// Zero = keep the router default for that quantity.
@@ -5491,6 +5502,24 @@ fn planeNetsOf(arena: std.mem.Allocator, block: *const DesignBlock) std.mem.Allo
     return out;
 }
 
+/// The full `BoardRules` for `block`: plane nets + per-net class geometry +
+/// the copper stack (layer count and where each declared plane sits). The one
+/// construction path for `Placement.rules`.
+fn boardRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []const FlatNet) std.mem.Allocator.Error!BoardRules {
+    var planes: []const PlaneAt = &.{};
+    if (block.stackup.present and block.stackup.planes.len > 0) {
+        const out = try arena.alloc(PlaneAt, block.stackup.planes.len);
+        for (block.stackup.planes, 0..) |pl, i| out[i] = .{ .index = pl.index, .net = pl.net };
+        planes = out;
+    }
+    return .{
+        .plane_nets = try planeNetsOf(arena, block),
+        .net = try netRulesOf(arena, block, nets),
+        .copper_layers = if (block.stackup.present) block.stackup.layers else 0,
+        .planes = planes,
+    };
+}
+
 /// Per-net routing geometry from the design's `(net-class …)` forms, aligned
 /// with `nets` (see `Placement.net_rules`). Names match case-insensitively on
 /// the full flattened net name or its leaf after the last `/`; the first class
@@ -5620,7 +5649,7 @@ pub fn solve(
     // same lower-is-better scalar the explore frame used.
     emitBest(parts, bd.objective, .refine);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
-    pl.rules = .{ .plane_nets = try planeNetsOf(arena, block), .net = try netRulesOf(arena, block, nets) };
+    pl.rules = try boardRulesOf(arena, block, nets);
     if (board_live) {
         if (board_rect == null) board_rect = try boardRectFromPoses(arena, parts, prep.instances, block.board);
         pl.board_rect = board_rect;
@@ -5763,7 +5792,7 @@ pub fn placeFromPoses(
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
-    pl.rules = .{ .plane_nets = try planeNetsOf(arena, block), .net = try netRulesOf(arena, block, nets) };
+    pl.rules = try boardRulesOf(arena, block, nets);
     // Saved/hand layouts of a `(board …)` design keep their outline overlay.
     if (block.board.present and block.board.w > 0 and block.board.h > 0) {
         const r = try boardRectFromPoses(arena, parts, prep.instances, block.board);
@@ -5801,7 +5830,7 @@ pub fn gridPlace(
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
-    pl.rules = .{ .plane_nets = try planeNetsOf(arena, block), .net = try netRulesOf(arena, block, nets) };
+    pl.rules = try boardRulesOf(arena, block, nets);
     return pl;
 }
 

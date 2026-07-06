@@ -628,13 +628,30 @@ Local dev still uses `http://localhost:7050`.
   fresh result is what you see (not the starred layout); Save commits it.
   Static assets serve with content-hash ETags + no-cache revalidation, so a
   deploy can never leave a browser running stale viewer JS.
-- **Fab outputs (no Gerber yet)**: `GET /api/pcb-centroid/:name` —
-  side-aware pick-and-place CSV at the blessed poses (★ default → newest
-  manual → any → cache, the KiCad-sync preference); `GET
-  /api/pcb-drill/:name[?npth=1]` — Excellon drill (plated: thru pads + the ★
-  layout's persisted routed vias; `?npth=1`: non-plated mounting holes).
-  Formatters in `src/export_fab.zig`; footprint pads now parse `(drill D)`
-  + npth into the placement model.
+- **Fab outputs (full package, Gerber included)**: `GET
+  /api/pcb-gerbers/:name` — the complete manufacturing package as one ZIP
+  (the `⤓ Gerbers` toolbar button on `/pcb-layout`): RS-274X/X2 Gerbers —
+  outer copper (pads + the ★ layout's persisted routed tracks/vias), inner
+  planes per the `(stackup …)` form (no form = the router's implicit 4-layer
+  model, emitted as two inner ground planes with clearance antipads around
+  foreign holes; a plane declared on an outer layer pours it with
+  clear-polarity isolation), solder mask (0.05 mm expansion, vias tented),
+  paste, silkscreen (footprint art + 5x7 ref-des strokes, mirrored on the
+  bottom), and the board profile (the ★ layout's drawn outline > authored
+  `(board …)` rect > parts-bbox fallback) — plus the Excellon PTH/NPTH
+  drills and the centroid CSV. KiCad file naming + Protel extensions, so
+  fab CAM auto-detects layers. Writer in `src/export_gerber.zig`, store-only
+  ZIP in `src/zipfile.zig`. Individual pieces stay available: `GET
+  /api/pcb-centroid/:name` — side-aware pick-and-place CSV at the blessed
+  poses (★ default → newest manual → any → cache, the KiCad-sync
+  preference); `GET /api/pcb-drill/:name[?npth=1]` — Excellon drill
+  (plated: thru pads + the ★ layout's persisted routed vias; `?npth=1`:
+  non-plated mounting holes). Formatters in `src/export_fab.zig`. **All fab
+  outputs share one coordinate frame** (`export_fab.Frame`: y-UP, origin at
+  the board outline's bottom-left, centroid rotation CCW-positive — the
+  Gerber/KiCad-pos convention; the placement model itself stays y-down), so
+  the package stacks exactly in CAM — never mix files from different
+  requests/frames.
 - **PCB layout facts**: `GET /api/pcb-describe/:name` — structured spatial facts about the solved placement (`src/serve/pcb_describe.zig`), the textual twin of the PNG: built from the identical placement-selection logic and accepting the same query parameters, so the facts always describe the board the image shows. Returns JSON with the axes convention (y grows down; "top" = −y), the anchor (largest hub IC), per-part `ref`/`origin`/side-of-anchor/`gap_mm`/nets/`unplaced`, per-decoupling-loop net + power-leg mm + nH + side, each hub's net→package-edge pad map, spec coverage (incl. `unresolved` spec names), per-part `want_side` (the part sits OPPOSITE the hub edge its net's pads are on), a `module_policy` block (Phase 0 of the module-placement ruleset — `src/placement/module_policy.zig`: the detected `ModuleClass` per hub IC (buck/ldo/mcu/rf_amp/generic, best-effort — integrated power modules with no discrete inductor read `generic`), the criticality `net_classes` (input_rail/switch_node/clock/rf/feedback/analog — the routing-order taxonomy), and the inferred passive `roles` (input_cap/decoupling_cap/bulk_cap/feedback_divider/matching_element)), a `lint` array (fell-back-to-auto / unresolved-name / unplaced errors; wrong-side / long-loop / outside-outline warns; plus the Phase-1 layout gates in `src/placement/layout_lint.zig` — `decap-far` (HF decap power-leg to its nearest supply pad >6 mm; bulk caps exempt), `hot-loop-not-tightest` (the switcher input loop is looser than a less-critical decoupling loop), `feedback-near-aggressor` (an FB/comp part within ~2 mm of a switch-node/clock/RF passive)), `board.outline` (the authored `(board (size W H) …)` rectangle when one exists), and (with `?route=1`) `routed:{trace_mm,tracks,vias,drc}`. The same facts flow through the MCP `describe_pcb_layout` tool. Agents should read measurements here and use the PNG for gestalt.
 - **Rough-vs-starred match**: `GET /api/layout-match/:name` — score how hand-like the `?rough=1` seed is versus the design's *starred* layout (the saved layout flagged `"default"`/★ in `/pcb-layout`, the user's blessed hand-finished reference; `src/serve/layout_match.zig`). The metric is per interchangeable class (kind+value+footprint+net set), per IC edge, COUNT agreement — credit `min(rough, starred)` parts per edge — so swapping which fungible 100 nF cap sits on an edge isn't penalized and looseness is tolerated (only the wrong edge/proportion costs). Returns `{name, starred, n, area_match_pct, classes[]}` (each class's rough/starred per-edge tallies show which subsystem the rough scattered differently), else `{starred:null, message}` when nothing is starred yet. Measures placement hand-likeness / how little dragging remains to finish — NOT the electrical score. MCP twin: `compare_layout_to_starred`.
 - **Layout state**: one sidecar per design — `<design>.layouts.json` `{default, cache, layouts[]}`. `layouts[]` = named snapshots (manual saves + auto-recorded optimizer runs), `default` = the starred (★) / KiCad-sync seed, `cache` = the single-slot optimizer cache (tuning params + poses, overwritten each solve). Precedence the `/pcb-layout` viewer shows as a scorebar chip: explicit `?refine=<snapshot>` > starred (★) default > cache > fresh solve > plain grid. (The old source-authored `(placement …)` spec once sat at the top of this chain; that DSL form is retired — layout is seeded from saved snapshots / the `?rough=1` seed now, not from a spec form in the `.sexp`.) Legacy standalone `<design>.autolayout.json` is still read as a fallback and deleted on the next solve; `.placement.json` migration was dropped (all designs migrated).
