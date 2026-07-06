@@ -684,6 +684,49 @@ test "check measures the exact outline polygon on an L-shaped board" {
     try testing.expectApproxEqAbs(@as(f64, 6), v[1].x, 1e-9);
 }
 
+// spec: placement/drc - the polygon board-edge inset is measured against the copper-edge design rule
+test "check measures the polygon inset against the copper-edge rule" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    // Same L-shaped board as above (corner (6..10, 4..10) notched out, y-down).
+    const l_poly = [_][2]f64{
+        .{ 0, 0 }, .{ 10, 0 }, .{ 10, 4 }, .{ 6, 4 }, .{ 6, 10 }, .{ 0, 10 },
+    };
+    var placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 },
+        .board_poly = &l_poly,
+    };
+    // Via at (5.2, 8): 0.8 mm from the notch wall (x=6) ⇒ gap 0.6 after the
+    // 0.2 mm via radius. Clean under the default 0.127 mm rule; a
+    // (design-rules (copper-edge 0.75)) must flag it — and the reported
+    // clearance must BE the rule value. The plain bbox rectangle would put
+    // this via 2 mm inside (nearest bbox edge y=10), so a flag proves the
+    // POLYGON inset was measured against the copper-edge rule.
+    const vias = [_]router.Via{.{ .x = 5.2, .y = 8, .dia = 0.4, .drill = 0.2, .net = 0 }};
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 1, .total = 1 };
+
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, routed, 0.127), .board_edge));
+
+    placement.rules = .{ .design = .{ .copper_edge = 0.75 } };
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .board_edge));
+    try testing.expectEqual(@as(f64, 0.75), v[0].clearance);
+    try testing.expectApproxEqAbs(@as(f64, 0.6), v[0].gap, 1e-9);
+}
+
 // spec: placement/drc - a routed module with a crowded ground pad has no clearance violations
 test "route then check is clean when a ground pad abuts a foreign pad" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);

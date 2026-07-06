@@ -174,6 +174,7 @@ Public functions: check, countKind
 - flags a via whose annular ring is under the fab minimum
 - flags copper crowding the board outline and skips the off-board staging band
 - checks the board edge against a non-rectangular outline polygon, catching copper in a notch
+- the polygon board-edge inset is measured against the copper-edge design rule
 - flags same-layer track crossings and sub-clearance pairs between nets
 - flags a track crossing a foreign pad on its layer; other-layer SMD pads don't clash
 - flags two placed parts whose courtyards overlap, but not disjoint or opposite-side ones

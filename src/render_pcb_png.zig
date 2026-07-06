@@ -259,12 +259,12 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
     ctx.drawPours();
     if (opts.compare != null) ctx.drawCompareGhost();
     ctx.drawParts();
-    ctx.drawBoardTexts();
     ctx.drawAirwires();
     ctx.drawLoops();
     if (opts.dims) ctx.drawDims();
     if (opts.compare != null) ctx.drawCompareArrows();
     if (opts.routed) |r| ctx.drawRouted(r);
+    ctx.drawBoardTexts(); // silkscreen text sits above copper, under DRC/labels
     ctx.drawViolations(opts.violations);
     ctx.drawLabels();
     ctx.drawPinLabels();

@@ -146,10 +146,10 @@ function scenePaint(){paintQueued=false;
  paintPours(ctx,k);
  paintGroupBoxes(ctx,k);
  paintParts(ctx,k);
- paintTexts(ctx,k);
  paintLinks(ctx);
  paintClr(ctx);
  paintTracks(ctx);
+ paintTexts(ctx,k); // silkscreen text sits above copper, under the draw overlay
  paintDraw(ctx);
  if(flashIdx>=0&&Date.now()<flashUntil){var fp=P[flashIdx];
   var fc=wpt(flashIdx,fp.ccx||0,fp.ccy||0);
@@ -731,7 +731,7 @@ document.addEventListener("keydown",function(ev){
  if((ev.key=="t"||ev.key=="T")&&!ev.ctrlKey&&!ev.metaKey&&!typing){ev.preventDefault();txArm(!textMode);return;}
  // A selected text label rotates (R) / deletes (Del/Backspace) before parts.
  if(txSel>=0&&!typing){
-  if(ev.key=="r"||ev.key=="R"){ev.preventDefault();var t=PCB.texts[txSel];
+  if(ev.key=="r"||ev.key=="R"){ev.preventDefault();var t=PCB.texts[txSel];recordUndo();
    t.rot=((((t.rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;paintSoon();txPopReposition(txSel);txDirty();return;}
   if(ev.key=="Delete"||ev.key=="Backspace"){ev.preventDefault();txDelete(txSel);return;}}
  if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;
@@ -770,9 +770,10 @@ var undoStack=[],redoStack=[];
 function snapPoses(){return P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top",locked:!!p.locked};});}
 function cloneCopper(){return {tracks:(PCB.tracks||[]).map(function(t){return {x1:t.x1,y1:t.y1,x2:t.x2,y2:t.y2,l:t.l||0,w:t.w,net:t.net||"",g:t.g};}),
  vias:(PCB.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g};})};}
+function cloneTexts(){return (PCB.texts||[]).map(function(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t.size||1,text:t.text};});}
 // Build a full snapshot. `poses` optionally overrides the current poses (a
-// drag's captured pre-move state); copper is always the current copper.
-function snapAll(poses){var c=cloneCopper();return {poses:poses||snapPoses(),tracks:c.tracks,vias:c.vias};}
+// drag's captured pre-move state); copper + texts are always current.
+function snapAll(poses){var c=cloneCopper();return {poses:poses||snapPoses(),tracks:c.tracks,vias:c.vias,texts:cloneTexts()};}
 function undoBtns(){var u=document.getElementById("pcb-undo"),r=document.getElementById("pcb-redo");
  if(u)u.disabled=!undoStack.length;if(r)r.disabled=!redoStack.length;}
 // recordUndo accepts a full snapshot {poses,tracks,vias}, a bare pose array
@@ -786,6 +787,10 @@ function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y
  applyAll();
  PCB.tracks=(s.tracks||[]).map(function(t){return {x1:t.x1,y1:t.y1,x2:t.x2,y2:t.y2,l:t.l||0,w:t.w,net:t.net||"",g:t.g};});
  PCB.vias=(s.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g};});
+ // Board texts rewind with the same snapshot; drop any selection/popover
+ // pointing at a label the restored state no longer has.
+ PCB.texts=(s.texts||[]).map(function(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t.size||1,text:t.text};});
+ if(typeof txSel!=="undefined"&&txSel>=0){txSel=-1;txPopClose();}
  PCB.drc=[];drawRoute();drawDrc();scheduleDrc();}
 function doUndo(){if(!undoStack.length)return;redoStack.push(snapAll());restoreSnap(undoStack.pop());undoBtns();}
 function doRedo(){if(!redoStack.length)return;undoStack.push(snapAll());restoreSnap(redoStack.pop());undoBtns();}
@@ -1053,6 +1058,9 @@ var pan=null,marq=null,marqEl=null;
 var outlineMode=false,outDraw=null;
 function outlineArm(on){
  if(on&&polyMode)polyArm(false);
+ if(on&&drawMode)drawModeSet(false);
+ if(on&&textMode)txArm(false);
+ if(on&&PCB.rulerOff)PCB.rulerOff();
  outlineMode=on;
  var b=document.getElementById("pcb-outline");if(b)b.classList.toggle("on",on);
  svg.classList.toggle("outline-mode",on||polyMode);
@@ -1069,6 +1077,8 @@ var polyMode=false,polyPts=null,polyCur=null,vdrag=null;
 function polyArm(on){if(RO&&on)return;
  if(on&&outlineMode)outlineArm(false);
  if(on&&drawMode)drawModeSet(false);
+ if(on&&textMode)txArm(false);
+ if(on&&PCB.rulerOff)PCB.rulerOff();
  polyMode=on;
  if(!on){polyPts=null;polyCur=null;}
  var b=document.getElementById("pcb-outline-poly");if(b)b.classList.toggle("on",on);
@@ -1147,8 +1157,9 @@ svg.addEventListener("pointercancel",function(ev){touchUp(ev);
  if(ev.pointerType==="touch"&&touchCount()===0){pan=null;pinch=null;svg.style.cursor="";}});
 svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.preventDefault();
  if(SPACE||ev.button===1){startPan(ev);return;} // pan takes priority in any mode
+ if(PCB.rulerOn)return; // ruler overlay owns the gesture (its capture handlers measure)
  if(textMode&&ev.button===0){var tm=mm(ev),ti=txAt(tm.x,tm.y);
-  if(ti>=0){txSelect(ti);txDrag={i:ti,ox:PCB.texts[ti].x-tm.x,oy:PCB.texts[ti].y-tm.y,moved:false};pcap(ev);}
+  if(ti>=0){txSelect(ti);txDrag={i:ti,ox:PCB.texts[ti].x-tm.x,oy:PCB.texts[ti].y-tm.y,moved:false,snap:snapAll()};pcap(ev);}
   else{txSelect(-1);txPlace(tm);}return;}
  if((outlineMode||polyMode)&&ev.button===0&&!polyPts){var hv=vtxAt(mm(ev));
   if(hv>=0){vdrag={i:hv,moved:false};pcap(ev);return;}}
@@ -1226,7 +1237,7 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
  if(vdrag){var vd=vdrag;vdrag=null;
   if(vd.moved)outlineMsg("outline edited — Save/Update to keep");
   return;}
- if(txDrag){var moved=txDrag.moved,ti=txDrag.i;txDrag=null;if(moved){txDirty();txPopReposition(ti);}return;}
+ if(txDrag){var moved=txDrag.moved,ti=txDrag.i,tsnap=txDrag.snap;txDrag=null;if(moved){recordUndo(tsnap);txDirty();txPopReposition(ti);}return;}
  if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap,gdn=gdrag.down;gdrag=null;svg.style.cursor="";
   // No movement = a plain click on a rigid-group / multi-selected part —
   // select it like any other part instead of swallowing the click.
@@ -1267,6 +1278,8 @@ function txArm(on){textMode=on;if(RO)textMode=false;
  svg.classList.toggle("text-mode",textMode);
  if(textMode&&drawMode)drawModeSet(false);
  if(textMode&&outlineMode)outlineArm(false);
+ if(textMode&&polyMode)polyArm(false);
+ if(textMode&&PCB.rulerOff)PCB.rulerOff();
  var msg=document.getElementById("pcb-savemsg");
  if(msg&&textMode){msg.style.color=TX_COL;
   msg.textContent="text: click the board to place a label (click a label to edit, R rotates, Del deletes, Esc ends)";}
@@ -1303,6 +1316,9 @@ var txPop=null;
 function txPopClose(){if(txPop&&txPop.parentNode)txPop.parentNode.removeChild(txPop);txPop=null;}
 function txPopOpen(i){txPopClose();var t=PCB.texts[i];if(!t)return;
  var host=svg.parentNode;if(!host)return;
+ // One undo entry per edit burst: the pre-edit snapshot is captured now and
+ // pushed on the FIRST mutating control event (typing more keeps amending).
+ var pre=snapAll();function txOnce(){if(pre){recordUndo(pre);pre=null;}}
  txPop=document.createElement("div");txPop.className="tx-pop";
  txPop.style.cssText="position:absolute;z-index:20;background:#161b22;border:1px solid #30363d;"+
   "border-radius:6px;padding:8px;font:12px system-ui;color:#c9d1d9;box-shadow:0 4px 16px rgba(0,0,0,.5);min-width:190px";
@@ -1316,16 +1332,16 @@ function txPopOpen(i){txPopClose();var t=PCB.texts[i];if(!t)return;
   r.appendChild(s);r.appendChild(node);return r;}
  var ti=document.createElement("input");ti.type="text";ti.value=t.text;
  ti.style.cssText="flex:1;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:2px 4px";
- ti.addEventListener("input",function(){t.text=ti.value;paintSoon();});
+ ti.addEventListener("input",function(){txOnce();t.text=ti.value;paintSoon();});
  var si=document.createElement("input");si.type="number";si.step="0.1";si.min="0.3";si.value=(t.size||1).toString();
  si.style.cssText="width:64px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:2px 4px";
- si.addEventListener("input",function(){var v=parseFloat(si.value);if(v>0){t.size=v;paintSoon();txPopReposition(i);}});
+ si.addEventListener("input",function(){var v=parseFloat(si.value);if(v>0){txOnce();t.size=v;paintSoon();txPopReposition(i);}});
  var ro=document.createElement("select");["0","90","180","270"].forEach(function(v){var o=document.createElement("option");o.value=v;o.textContent=v+"°";ro.appendChild(o);});
  ro.value=String(((t.rot||0)%360+360)%360);ro.style.cssText="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:2px";
- ro.addEventListener("change",function(){t.rot=parseInt(ro.value,10)||0;paintSoon();txPopReposition(i);});
+ ro.addEventListener("change",function(){txOnce();t.rot=parseInt(ro.value,10)||0;paintSoon();txPopReposition(i);});
  var sd=document.createElement("select");[["top","Top"],["bottom","Bottom"]].forEach(function(p){var o=document.createElement("option");o.value=p[0];o.textContent=p[1];sd.appendChild(o);});
  sd.value=(t.side==="bottom")?"bottom":"top";sd.style.cssText="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:2px";
- sd.addEventListener("change",function(){t.side=sd.value;paintSoon();});
+ sd.addEventListener("change",function(){txOnce();t.side=sd.value;paintSoon();});
  var del=document.createElement("button");del.textContent="Delete";del.className="btn";
  del.addEventListener("click",function(){txDelete(i);});
  txPop.appendChild(row("Text",ti));txPop.appendChild(row("Size",si));
@@ -1334,13 +1350,14 @@ function txPopOpen(i){txPopClose();var t=PCB.texts[i];if(!t)return;
  host.appendChild(txPop);ti.focus();ti.select();}
 function txPopReposition(i){if(txPop&&txSel===i)txPopOpen(i);}
 function txSelect(i){txSel=i;paintSoon();if(i>=0)txPopOpen(i);else txPopClose();}
-function txDelete(i){if(i<0||i>=PCB.texts.length)return;PCB.texts.splice(i,1);
+function txDelete(i){if(i<0||i>=PCB.texts.length)return;recordUndo();PCB.texts.splice(i,1);
  txSel=-1;txPopClose();paintSoon();txDirty();}
 function txDirty(){var msg=document.getElementById("pcb-savemsg");
  if(msg){msg.style.color="#8b949e";msg.textContent="text changed — Save/Update to keep";}}
 function txPlace(m){var gx=Math.round(m.x/G)*G,gy=Math.round(m.y/G)*G;
  var s=window.prompt("Silkscreen text:","");if(s==null)return;s=s.trim();if(!s)return;
  var side=(cur>=0&&P[cur].side==="bottom")?"bottom":"top";
+ recordUndo();
  PCB.texts.push({x:gx,y:gy,rot:0,side:side,size:1.0,text:s});
  txSelect(PCB.texts.length-1);txDirty();}
 var textBtn=document.getElementById("pcb-text");
@@ -1396,6 +1413,8 @@ function drawBtnSync(){var b=document.getElementById("pcb-draw");if(!b)return;
 function drawModeSet(on){if(RO)return;drawMode=on;if(!on)dtrace=null;
  if(on&&outlineMode)outlineArm(false);
  if(on&&polyMode)polyArm(false);
+ if(on&&textMode)txArm(false);
+ if(on&&PCB.rulerOff)PCB.rulerOff();
  svg.style.cursor=on?"crosshair":"";drawBtnSync();ovPaintSoon();}
 // 45°-family snap from the last vertex: H / V / diagonal by dominance, on
 // the grid. Shift = free angle (grid only).
@@ -1966,7 +1985,9 @@ setVB(); // initial overlay paint + zoom-dependent label visibility
  // ── Ruler / measure tool (M) ──────────────────────────────────────────
  var rulerMode=false,rulerDraw=null,rgRuler=null;
  var rulerBtn=document.getElementById("pcb-ruler-btn");
- function rulerArm(on){rulerMode=on;svg.classList.toggle("ruler-mode",on);
+ function rulerArm(on){rulerMode=on;PCB.rulerOn=on;svg.classList.toggle("ruler-mode",on);
+  if(on){if(drawMode)drawModeSet(false);if(textMode)txArm(false);
+   if(polyMode)polyArm(false);if(outlineMode)outlineArm(false);}
   if(rulerBtn)rulerBtn.classList.toggle("active",on);
   if(!on){rulerClear();var msg=document.getElementById("pcb-savemsg");if(msg&&/measure/.test(msg.textContent))msg.textContent="";}
   else{var m2=document.getElementById("pcb-savemsg");if(m2){m2.style.color="#e3b341";m2.textContent="measure: drag to measure (Esc exits)";}}}
@@ -1980,6 +2001,7 @@ setVB(); // initial overlay paint + zoom-dependent label visibility
   var lt=el("text",{"class":"pcb-ruler-lbl",x:(X(b.x)+8).toFixed(1),y:(Y(b.y)-6).toFixed(1)});
   lt.textContent="d="+fmtLen2(dist)+"  dx="+fmtLen2(Math.abs(dx))+"  dy="+fmtLen2(Math.abs(dy));
   rgRuler.appendChild(lt);}
+ PCB.rulerOff=function(){if(rulerMode)rulerArm(false);};
  if(rulerBtn)rulerBtn.addEventListener("click",function(){rulerArm(!rulerMode);});
  document.addEventListener("keydown",function(ev){if(kbTyping(ev.target))return;
   if((ev.key==="m"||ev.key==="M")&&!ev.ctrlKey&&!ev.metaKey&&!RO){ev.preventDefault();rulerArm(!rulerMode);return;}
