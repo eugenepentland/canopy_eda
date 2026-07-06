@@ -397,6 +397,8 @@ Public functions: planLayers, writeLayer
 - mask openings expand pads and tent vias; paste covers only same-side SMD pads
 - an inner plane pours solid copper and antipads only foreign holes
 - the edge layer closes the board outline; silk strokes footprint art and ref-des text
+- board-level silkscreen text strokes onto the silk layer at its world anchor, and only on its own side
+- silkscreen text scales with its cap-height size (2x size gives 2x glyph extent)
 
 ## zipfile
 

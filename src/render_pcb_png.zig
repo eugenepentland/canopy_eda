@@ -18,6 +18,7 @@ const drc = @import("placement/drc.zig");
 const raster = @import("raster.zig");
 const png = @import("png.zig");
 const numeric = @import("numeric.zig");
+const font = @import("font5x7.zig");
 
 const Rgb = raster.Rgb;
 
@@ -126,6 +127,10 @@ pub const Options = struct {
     /// Callout overlay: numbered markers + a panel listing the board's worst
     /// problems (hottest loops, longest airwire, staged parts, DRC count).
     critique: bool = false,
+    /// Board-level silkscreen text labels (from the shown layout's sidecar).
+    /// Drawn in a silk colour at their world anchor + cap height, so the PNG
+    /// and MCP screenshots show the same legend the Gerber emits.
+    texts: []const font.BoardText = &.{},
 };
 
 /// Render `p` to PNG bytes owned by `alloc`.
@@ -252,6 +257,7 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
     ctx.drawBoardOutline();
     if (opts.compare != null) ctx.drawCompareGhost();
     ctx.drawParts();
+    ctx.drawBoardTexts();
     ctx.drawAirwires();
     ctx.drawLoops();
     if (opts.dims) ctx.drawDims();
@@ -941,6 +947,57 @@ const Ctx = struct {
             else if (part.kind == .hub) HUB_STROKE else PASSIVE_STROKE;
             var buf: [96]u8 = undefined;
             self.cv.text(cx, top, self.partLabel(pi, &buf), h, col, 1.0, .middle);
+        }
+    }
+
+    /// Board-level silkscreen text (the Text tool / sidecar `texts[]`): each
+    /// glyph row's lit-pixel runs become one stroked segment in mm-space, then
+    /// project to px — the same 5x7 vector font the Gerber silk emits, so the
+    /// PNG shows exactly what will be fabricated. Cap height scales the pixel
+    /// pitch; bottom-side text mirrors x; the string rotates about its anchor.
+    fn drawBoardTexts(self: *Ctx) void {
+        const Pen = struct {
+            ctx: *Ctx,
+            cx: f64,
+            cy: f64,
+            gx0: f64,
+            pitch: f64,
+            mirror: bool,
+            ca: f64,
+            sa: f64,
+            fn place(self2: @This(), lxpx: f64, ly: f64) [2]f32 {
+                const lx = if (self2.mirror) -lxpx else lxpx;
+                const wx = self2.cx + lx * self2.ca - ly * self2.sa;
+                const wy = self2.cy + lx * self2.sa + ly * self2.ca;
+                return .{ self2.ctx.xpx(wx), self2.ctx.ypx(wy) };
+            }
+            fn emit(self2: @This(), run: font.Run) error{}!void {
+                const ly = (@as(f64, @floatFromInt(run.r)) - 3.0) * self2.pitch;
+                const lx1 = self2.gx0 + (@as(f64, @floatFromInt(run.c0)) + 0.5) * self2.pitch;
+                const lx2 = self2.gx0 + (@as(f64, @floatFromInt(run.c1)) + 0.5) * self2.pitch;
+                const a = self2.place(lx1, ly);
+                const b = self2.place(lx2, ly);
+                // Stroke width = the ~0.15 mm silk width projected to px (min 1 px
+                // so a zoomed-out label stays legible). A 1-px run draws as a dab.
+                const w = @max(self2.ctx.len(0.15), self2.ctx.pw(1.0));
+                self2.ctx.cv.line(a[0], a[1], b[0], b[1], w, SILK, 1.0, .round);
+            }
+        };
+        for (self.opts.texts) |t| {
+            if (t.text.len == 0) continue;
+            const pitch = if (t.size > 0) t.size / @as(f64, @floatFromInt(font.GH)) else font.DEFAULT_SIZE_MM / @as(f64, @floatFromInt(font.GH));
+            const adv = @as(f64, @floatFromInt(font.GW + 1)) * pitch;
+            const total = @as(f64, @floatFromInt(t.text.len)) * adv - pitch;
+            const a = @mod(t.rot, 360.0) * std.math.pi / 180.0;
+            const ca = @cos(a);
+            const sa = @sin(a);
+            for (t.text, 0..) |ch, k| {
+                const gx0 = -total / 2 + @as(f64, @floatFromInt(k)) * adv;
+                const pen = Pen{ .ctx = self, .cx = t.x, .cy = t.y, .gx0 = gx0, .pitch = pitch, .mirror = t.bottom, .ca = ca, .sa = sa };
+                // The emit callback is infallible (error{}); the exhaustive
+                // switch on the empty error set is a no-op, not a swallowed error.
+                font.glyphRuns(ch, error{}, pen, Pen.emit) catch |err| switch (err) {};
+            }
         }
     }
 

@@ -401,7 +401,7 @@ src/export_gerber.zig::LayerFile struct_
 src/export_gerber.zig::PlaneLayer struct_
 src/export_gerber.zig::PlaneNet union_
 src/export_gerber.zig::planLayers | fn planLayers(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]const LayerFile
-src/export_gerber.zig::writeLayer | fn writeLayer( w: *std.Io.Writer, arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, frame: export_fab.Frame, layer: Layer, function: []const u8, ) Error!void
+src/export_gerber.zig::writeLayer | fn writeLayer( w: *std.Io.Writer, arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, texts: []const font.BoardText, frame: export_fab.Frame, layer: Layer, function: []const u8, ) Error!void
 src/export_kicad.zig::ExportError value
 src/export_kicad.zig::FlatInstance struct_
 src/export_kicad.zig::FlatNet struct_
@@ -442,9 +442,13 @@ src/export_kicad_netlist.zig::collectNets | fn collectNets( allocator: std.mem.A
 src/export_kicad_netlist.zig::extractFootprintName | fn extractFootprintName(allocator: std.mem.Allocator, source: []const u8) NetlistError![]const u8
 src/export_kicad_netlist.zig::extractPadNames | fn extractPadNames(allocator: std.mem.Allocator, source: []const u8) NetlistError![]const []const u8
 src/export_kicad_netlist.zig::writeNetlist | fn writeNetlist( allocator: std.mem.Allocator, design_name: []const u8, instances: []const FlatInstance, nets: []const FlatNet, fp_name_map: *const std.StringHashMap([]const u8), fp_pad_map: *const std.StringHashMap([]const []const u8), ) std.mem.Allocator.Error![]const u8
+src/font5x7.zig::BoardText struct_
+src/font5x7.zig::DEFAULT_SIZE_MM value
 src/font5x7.zig::GH value
 src/font5x7.zig::GW value
+src/font5x7.zig::Run struct_
 src/font5x7.zig::cols | fn cols(c: u8) [GW]u8
+src/font5x7.zig::glyphRuns | fn glyphRuns(ch: u8, comptime E: type, ctx: anytype, emit: fn (@TypeOf(ctx), Run) E!void) E!void
 src/id_insert.zig::IdInsertError value
 src/id_insert.zig::applyInserts | fn applyInserts( allocator: std.mem.Allocator, source: []const u8, pending: []const Evaluator.PendingId, pending_child: []const Evaluator.PendingChildId, ) IdInsertError![]u8
 src/id_insert.zig::insertPendingIds | fn insertPendingIds( allocator: std.mem.Allocator, source_path: []const u8, pending: []const Evaluator.PendingId, pending_child: []const Evaluator.PendingChildId, ) IdInsertError!void
