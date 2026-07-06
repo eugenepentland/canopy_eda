@@ -329,10 +329,13 @@ fn buildPowerRails(allocator: Allocator, block: *const DesignBlock) Allocator.Er
 }
 
 /// One authored sheet (section, sub-section, or unattached sub-block) with the
-/// coarse `render_block_types.Category` its name/instances classify to.
+/// coarse `render_block_types.Category` its name/instances classify to and the
+/// authored one-line subtitle (the `(section "name" "subtitle" …)` spec text —
+/// the glance layer's block caption). Empty for sub-blocks.
 const SheetMeta = struct {
     name: []const u8,
     cat: []const u8,
+    sub: []const u8 = "",
 };
 
 const SceneGraph = struct {
@@ -696,9 +699,9 @@ fn collectAuthoredSections(allocator: Allocator, block: *const DesignBlock, sub_
 fn buildSheetMeta(allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize) ![]const SheetMeta {
     var list: std.ArrayListUnmanaged(SheetMeta) = .empty;
     for (block.sections) |sec| {
-        try list.append(allocator, .{ .name = sec.name, .cat = @tagName(rb_types.classifySection(sec)) });
+        try list.append(allocator, .{ .name = sec.name, .cat = @tagName(rb_types.classifySection(sec)), .sub = sec.description });
         for (sec.sub_sections) |sub| {
-            try list.append(allocator, .{ .name = sub.name, .cat = @tagName(rb_types.classifySection(sub)) });
+            try list.append(allocator, .{ .name = sub.name, .cat = @tagName(rb_types.classifySection(sub)), .sub = sub.description });
         }
     }
     for (block.sub_blocks, 0..) |sb, sb_idx| {
@@ -2023,6 +2026,10 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         try json_writer.writeString(w, sm.name);
         try w.writeAll(",\"cat\":");
         try json_writer.writeString(w, sm.cat);
+        if (sm.sub.len > 0) {
+            try w.writeAll(",\"sub\":");
+            try json_writer.writeString(w, sm.sub);
+        }
         try w.writeAll("}");
     }
     try w.writeAll("]");
@@ -2194,7 +2201,7 @@ fn testAttachBlock(subs: []const env_mod.SubBlock) DesignBlock {
         .ports = &.{},
         .notes = &.{},
         .groups = &.{},
-        .sections = &[_]env_mod.Section{.{ .name = "Boot NOR Flash" }},
+        .sections = &[_]env_mod.Section{.{ .name = "Boot NOR Flash", .description = "MX66UW 1Gb OctoSPI" }},
         .sub_blocks = subs,
     };
 }
@@ -2230,7 +2237,9 @@ test "buildSheetMeta categorizes sections and unattached sub-blocks" {
     const metas = try buildSheetMeta(arena, &block, &attachments);
     try std.testing.expectEqual(@as(usize, 2), metas.len);
     try std.testing.expectEqualStrings("memory", metas[0].cat); // "Boot NOR Flash" → Flash keyword
+    try std.testing.expectEqualStrings("MX66UW 1Gb OctoSPI", metas[0].sub); // authored subtitle rides along
     try std.testing.expectEqualStrings("comms", metas[1].cat); // "USB-C 2.0 HS" → USB keyword
+    try std.testing.expectEqualStrings("", metas[1].sub); // sub-blocks have no subtitle
 }
 
 // spec: render_svg - Scene hubs serialize their authored sheet and the scene lists sheet categories
@@ -2264,11 +2273,17 @@ test "serializeScene emits hub sec, pin role, and sheet_meta" {
     try hub.left_pins.append(alloc, .{ .pin_numbers = "1", .display_name = "VSS", .y = 0, .side = "left", .net = "GND", .role = "gnd", .pgroup = "Power" });
     defer scene.hubs.items[0].left_pins.deinit(alloc);
     try scene.hubs.append(alloc, hub);
-    scene.sheet_meta = &[_]SheetMeta{.{ .name = "Boot NOR Flash", .cat = "memory" }};
+    scene.sheet_meta = &[_]SheetMeta{
+        .{ .name = "Boot NOR Flash", .cat = "memory", .sub = "MX66UW 1Gb OctoSPI" },
+        .{ .name = "Aux", .cat = "peripheral" },
+    };
     const out = try serializeScene(alloc, &scene);
     defer alloc.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"sec\":\"Boot NOR Flash\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"role\":\"gnd\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"grp\":\"Power\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"sheet_meta\":[{\"name\":\"Boot NOR Flash\",\"cat\":\"memory\"}]") != null);
+    // Subtitle serialized when authored, omitted when empty.
+    const want_meta = "\"sheet_meta\":[{\"name\":\"Boot NOR Flash\",\"cat\":\"memory\"," ++
+        "\"sub\":\"MX66UW 1Gb OctoSPI\"},{\"name\":\"Aux\",\"cat\":\"peripheral\"}]";
+    try std.testing.expect(std.mem.indexOf(u8, out, want_meta) != null);
 }

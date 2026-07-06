@@ -384,24 +384,87 @@
       ctx.textAlign = "left"; ctx.textBaseline = "middle";
       // Titles must FIT the band now that bands are column-width, not
       // page-width — shrink to the box (and never taller than the header row).
+      // At glance zoom the authored subtitle rides under the title as the
+      // block caption ("TPS62823 12V-to-3.3V, 2A"), so the title yields a
+      // little height to keep both inside the header band.
+      const cap = wash && b.sub;
       const text = (b.num ? b.num + " · " : "") + b.name;
-      const fs2 = fitFont(text, Math.max(90, b.w - 30), Math.min(fs, 56), 10, "600");
-      ctx.fillText(text, b.x + 16, b.y + Math.max(22, fs2 * 0.72));
+      const fs2 = fitFont(text, Math.max(90, b.w - 30), Math.min(fs, cap ? 40 : 56), 10, "600");
+      const ty = b.y + Math.max(22, fs2 * 0.72);
+      ctx.fillText(text, b.x + 16, ty);
+      if (cap) {
+        ctx.fillStyle = C.pinName; ctx.globalAlpha = 0.8;
+        const fs3 = fitFont(b.sub, Math.max(90, b.w - 30), Math.min(fs * 0.6, 22), 8);
+        ctx.fillText(b.sub, b.x + 16, ty + fs3 * 1.25);
+        ctx.globalAlpha = 1;
+      }
     });
 
     // Far-zoom glance: the whole board as titled bands + one chip per cell —
     // "fit all" reads like a block diagram; zoom in (or double-click a chip)
     // for the full detail.
     if (s < GLANCE_S && M.mapBox) {
-      // Block-diagram edges first (under the boxes): which subsystems talk,
-      // line weight by how many signal links run between them.
+      // Segment A→B clipped to the two band boxes' borders, so arrowheads and
+      // labels land in the corridor BETWEEN the blocks, not under them.
+      // Returns null when the boxes touch/overlap along the line.
+      const edgePts = (A, B) => {
+        const ax = A.x + A.w / 2, ay = A.y + A.h / 2, bx = B.x + B.w / 2, by = B.y + B.h / 2;
+        const dx = bx - ax, dy = by - ay;
+        const tA = Math.min(dx ? (A.w / 2) / Math.abs(dx) : 9, dy ? (A.h / 2) / Math.abs(dy) : 9);
+        const tB = Math.min(dx ? (B.w / 2) / Math.abs(dx) : 9, dy ? (B.h / 2) / Math.abs(dy) : 9);
+        if (tA + tB >= 0.94) return null;
+        return { x0: ax + dx * tA, y0: ay + dy * tA, x1: bx - dx * tB, y1: by - dy * tB };
+      };
+      const arrowAt = (x, y, dx, dy, sz) => {
+        const L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L;
+        ctx.beginPath(); ctx.moveTo(x, y);
+        ctx.lineTo(x - ux * sz - uy * sz * 0.45, y - uy * sz + ux * sz * 0.45);
+        ctx.lineTo(x - ux * sz + uy * sz * 0.45, y - uy * sz - ux * sz * 0.45);
+        ctx.closePath(); ctx.fill();
+      };
+      // Pill-backed edge caption — a dark rounded chip under colored text, so
+      // the label stays legible over any lines/boxes it happens to cross.
+      const edgeText = (text, x, y, fs, col) => {
+        ctx.font = "600 " + fs + "px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        const hw = ctx.measureText(text).width / 2 + fs * 0.45;
+        ctx.fillStyle = "rgba(13,17,23,0.86)";
+        roundRect(x - hw, y - fs * 0.72, 2 * hw, fs * 1.44, fs * 0.4); ctx.fill();
+        ctx.fillStyle = col; ctx.fillText(text, x, y);
+      };
+      const efs = Math.min(40, 10 / s);
+      // Power-flow arrows first (bottom layer): producer band → consumer
+      // band in rail gold, arrowhead at the consumer. The voltage tag docks
+      // just before the arrowhead — an entry tag on the consumer block — so
+      // a producer's wide fan-out never piles its labels at one point.
+      (M.railLinks || []).forEach((e) => {
+        const A = (M.bands || [])[e.a], B = (M.bands || [])[e.b];
+        if (!A || !B) return;
+        const p = edgePts(A, B); if (!p) return;
+        ctx.strokeStyle = C.rail; ctx.fillStyle = C.rail; ctx.globalAlpha = 0.55;
+        ctx.lineWidth = sw(1.7);
+        ctx.beginPath(); ctx.moveTo(p.x0, p.y0); ctx.lineTo(p.x1, p.y1); ctx.stroke();
+        arrowAt(p.x1, p.y1, p.x1 - p.x0, p.y1 - p.y0, Math.min(50, 9 / s));
+        ctx.globalAlpha = 1;
+        if (e.label) {
+          const L = Math.hypot(p.x1 - p.x0, p.y1 - p.y0) || 1;
+          const ux = (p.x1 - p.x0) / L, uy = (p.y1 - p.y0) / L;
+          edgeText(e.label, p.x1 - ux * efs * 2.4, p.y1 - uy * efs * 2.4, efs * 0.85, C.rail);
+        }
+      });
+      // Signal edges: which subsystems talk — width by link count, caption by
+      // the dominant bus family ("FLASH_IO[0:7]"), the single net, or "×9".
       (M.bandLinks || []).forEach((e) => {
         const A = (M.bands || [])[e.a], B = (M.bands || [])[e.b];
         if (!A || !B) return;
+        const p = edgePts(A, B);
         ctx.strokeStyle = "#3d5573"; ctx.globalAlpha = 0.5;
         ctx.lineWidth = sw(Math.min(6, 1.2 + Math.log2(1 + e.n) * 1.4));
-        ctx.beginPath(); ctx.moveTo(A.x + A.w / 2, A.y + A.h / 2); ctx.lineTo(B.x + B.w / 2, B.y + B.h / 2); ctx.stroke();
+        ctx.beginPath();
+        if (p) { ctx.moveTo(p.x0, p.y0); ctx.lineTo(p.x1, p.y1); }
+        else { ctx.moveTo(A.x + A.w / 2, A.y + A.h / 2); ctx.lineTo(B.x + B.w / 2, B.y + B.h / 2); }
+        ctx.stroke();
         ctx.globalAlpha = 1;
+        if (p && e.label) edgeText(e.label, (p.x0 + p.x1) / 2, (p.y0 + p.y1) / 2, efs * 0.8, "#9fb4cf");
       });
       drawBands(Math.min(150, 20 / s), true);
       const cfs = 14 / s;
@@ -1474,7 +1537,7 @@
     const railByNet = new Map();          // net or alias -> {net, producer}
     (scene.rails || []).forEach((r) => {
       if (!r.source_hub) return;
-      const entry = { net: r.net, producer: r.source_hub };
+      const entry = { net: r.net, producer: r.source_hub, volts: r.nominal };
       railByNet.set(r.net, entry);
       (r.aliases || []).forEach((a) => railByNet.set(a, entry));
     });
@@ -2060,7 +2123,8 @@
     // Categories come from the scene's sheet_meta (the same classifier that colors
     // the system-overview diagram); authored order breaks ties (stable sort).
     const catRank = { power: 0, mcu: 1, memory: 2, clock: 3, comms: 4, sensor: 5, analog: 6, peripheral: 7, protection: 8, connector: 9 };
-    const catOf = new Map(); (scene.sheet_meta || []).forEach((sm) => catOf.set(sm.name, sm.cat));
+    const catOf = new Map(), subOf = new Map();
+    (scene.sheet_meta || []).forEach((sm) => { catOf.set(sm.name, sm.cat); if (sm.sub) subOf.set(sm.name, sm.sub); });
     const bandRank = (g) => {
       if (g.name === "Power") return -1;
       if (g.name === " tp") return 99;
@@ -2149,7 +2213,8 @@
         if (pk.name) {
           pk.bandIdx = m.bands.length;
           m.bands.push({ name: pk.name, num: m.bands.length + 1, x: colX, y: it.y, w: pk.w + 2 * BAND_PAD, h: pk.h + BAND_PAD,
-            count: pk.cells.length, power: pk.name === "Power", cat: pk.cat || "", col: CAT_COL[pk.cat] || "" });
+            count: pk.cells.length, power: pk.name === "Power", cat: pk.cat || "", col: CAT_COL[pk.cat] || "",
+            sub: subOf.get(pk.name) || "" });
         }
         bx1 = Math.max(bx1, colX + pk.w + 2 * BAND_PAD);
         by1 = Math.max(by1, it.y + pk.h + BAND_PAD);
@@ -2158,7 +2223,10 @@
     });
     // Aggregate inter-band signal links → the glance layer's block-diagram
     // edges (which subsystems talk, and how much). Power rows aren't links,
-    // so this stays signal topology, not the everywhere power web.
+    // so this stays signal topology, not the everywhere power web. Each edge
+    // is also NAMED: when one indexed net family dominates the pair, the
+    // label is that bus ("FLASH_IO[0:7]"), else the link count ("×9") —
+    // line weight alone doesn't say WHAT the wires are.
     { const bandIdxOfRef = new Map();
       packs.forEach((pk) => { if (pk.name) pk.cells.forEach((c) => { if (c.ref) bandIdxOfRef.set(c.ref, pk.bandIdx); }); });
       const ec = new Map();
@@ -2166,10 +2234,59 @@
         const a = bandIdxOfRef.get(lk.a.ref), b = bandIdxOfRef.get(lk.b.ref);
         if (a === undefined || b === undefined || a === b) return;
         const k = a < b ? a + ":" + b : b + ":" + a;
-        ec.set(k, (ec.get(k) || 0) + 1);
+        let e = ec.get(k); if (!e) { e = { n: 0, nets: [] }; ec.set(k, e); }
+        e.n++; if (lk.a.net) e.nets.push(netLeaf(lk.a.net));
       });
+      const busLabel = (e) => {
+        const fams = new Map();
+        e.nets.forEach((nm) => { const mm = /^(.*?)(\d+)$/.exec(nm); if (!mm || !mm[1]) return; let a = fams.get(mm[1]); if (!a) { a = []; fams.set(mm[1], a); } a.push(+mm[2]); });
+        let pre = null, arr = null;
+        fams.forEach((ix, p) => { if (!arr || ix.length > arr.length) { arr = ix; pre = p; } });
+        if (arr && arr.length >= 3 && arr.length * 2 >= e.n) {
+          const extra = e.n - arr.length;
+          return pre.replace(/[_\-]+$/, "") + "[" + Math.min.apply(null, arr) + ":" + Math.max.apply(null, arr) + "]" + (extra > 0 ? " +" + extra : "");
+        }
+        if (e.n === 1 && e.nets.length) return e.nets[0];   // one wire → name it
+        return e.n > 1 ? "×" + e.n : "";
+      };
       m.bandLinks = [];
-      ec.forEach((n, k) => { const ab = k.split(":"); m.bandLinks.push({ a: +ab[0], b: +ab[1], n }); });
+      ec.forEach((e, k) => { const ab = k.split(":"); m.bandLinks.push({ a: +ab[0], b: +ab[1], n: e.n, label: busLabel(e) }); });
+      // Power-flow edges: rail producer band → consumer bands, labeled with
+      // the rail voltage (scene nominal, else the net name). "What feeds
+      // what" is the first thing a block diagram states, and the signal
+      // edges above deliberately exclude it.
+      const nomByNet = new Map();
+      (scene.rails || []).forEach((r) => { if (r.nominal != null) { nomByNet.set(r.net, r.nominal); (r.aliases || []).forEach((al) => nomByNet.set(al, r.nominal)); } });
+      const prodBand = new Map(), railTag = new Map(), consBand = new Map();
+      railByNet.forEach((e) => {
+        if (prodBand.has(e.net)) return;
+        const pb = bandIdxOfRef.get(e.producer);
+        if (pb === undefined) return;
+        prodBand.set(e.net, pb);
+        const v = e.volts != null ? e.volts : nomByNet.get(e.net);
+        railTag.set(e.net, v != null ? Math.round(v * 100) / 100 + "V" : netLeaf(e.net));
+      });
+      real.forEach((h) => {
+        const b = bandIdxOfRef.get(h.ref);
+        if (b === undefined) return;
+        h.pins.forEach((p) => {
+          const n = p.anet || p.net, e = n && railByNet.get(n);
+          if (!e || !prodBand.has(e.net)) return;
+          let s = consBand.get(e.net); if (!s) { s = new Set(); consBand.set(e.net, s); } s.add(b);
+        });
+      });
+      const ra = new Map();
+      consBand.forEach((bands, net) => {
+        const pb = prodBand.get(net);
+        bands.forEach((b) => {
+          if (b === pb) return;
+          const k = pb + ">" + b;
+          let e = ra.get(k); if (!e) { e = { a: pb, b, tags: [] }; ra.set(k, e); }
+          if (e.tags.indexOf(railTag.get(net)) < 0) e.tags.push(railTag.get(net));
+        });
+      });
+      m.railLinks = [];
+      ra.forEach((e) => m.railLinks.push({ a: e.a, b: e.b, label: e.tags.slice(0, 3).join(" · ") + (e.tags.length > 3 ? " +" + (e.tags.length - 3) : "") }));
     }
     // Emit the synthesized model (replacing the real layout).
     m.secs = []; m.hubs = []; m.passes = []; m.wires = []; m.labels = []; m.pulls = []; m.chips = [];
