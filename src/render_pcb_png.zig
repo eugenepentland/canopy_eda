@@ -23,42 +23,42 @@ const font = @import("font5x7.zig");
 
 const Rgb = raster.Rgb;
 
-// ── Theme (matches BOARD_JS) ───────────────────────────────────────────────
-const BG = Rgb.hex("#0d1117");
-const COURT_FILL = Rgb.hex("#161b22");
-const COURT_FILL_BOT = Rgb.hex("#122036"); // bottom-side part body (blue wash, KiCad-like)
-const HUB_STROKE = Rgb.hex("#58a6ff");
-const PASSIVE_STROKE = Rgb.hex("#8b949e");
-const SILK = Rgb.hex("#8b949e");
-const PAD_COL = Rgb.hex("#b08d57");
-const PAD_COL_BOT = Rgb.hex("#5b8dd6"); // bottom-side pad copper (B.Cu blue)
+// ── Theme (matches BOARD_JS — KiCad pcbnew default colours) ────────────────
+const BG = Rgb.hex("#001023"); // KiCad dark navy canvas
+const COURT_COL = Rgb.hex("#D864FF"); // courtyard outline (KiCad magenta, drawn dim)
+const SILK = Rgb.hex("#F0F0F0"); // F.Silkscreen white
+const SILK_BOT = Rgb.hex("#E8B2C8"); // B.Silkscreen pink
+const PAD_COL = Rgb.hex("#C83434"); // F.Cu SMD pad copper
+const PAD_COL_BOT = Rgb.hex("#4D7FC4"); // B.Cu SMD pad copper
+const PAD_PTH = Rgb.hex("#d0a028"); // through-hole pad annulus (KiCad PTH gold)
+const PAD_NPTH = Rgb.hex("#26323e"); // non-plated hole rim (no copper)
 const AW_PROX = Rgb.hex("#ea580c"); // hot decoupling loop / proximity hug
 const AW_GND = Rgb.hex("#22b8cf"); // ground return airwire
-const AW_SIG = Rgb.hex("#9aa7b4"); // generic signal airwire
+const AW_SIG = Rgb.hex("#ffffff"); // ratsnest airwire (KiCad white, drawn ~35% alpha)
 const LOOP_RET = Rgb.hex("#58a6ff"); // L2 ground-return overlay
-const TRACK_TOP = Rgb.hex("#ef4444"); // F.Cu trace
-const TRACK_BOT = Rgb.hex("#3b82f6"); // B.Cu trace
+const TRACK_TOP = Rgb.hex("#C83434"); // F.Cu trace
+const TRACK_BOT = Rgb.hex("#4D7FC4"); // B.Cu trace
 // Inner signal-layer traces, cycling (mirrors optimizer.INNER_LAYER_COLORS
 // so the PNG matches the browser viewer's palette).
-const TRACK_INNER = [_]Rgb{ Rgb.hex("#d4aa00"), Rgb.hex("#cc66cc"), Rgb.hex("#26c6a8"), Rgb.hex("#e0824e") };
+const TRACK_INNER = [_]Rgb{ Rgb.hex("#C2C200"), Rgb.hex("#C200C2"), Rgb.hex("#C2C2C2"), Rgb.hex("#00C2C2") };
 
 /// Trace colour for a routed track's signal layer (0 = top red, 1 = bottom
-/// blue, inner layers cycle the KiCad-ish palette).
+/// blue, inner layers cycle KiCad's In1../In4 palette).
 fn trackColor(layer: u8) Rgb {
     if (layer == 0) return TRACK_TOP;
     if (layer == 1) return TRACK_BOT;
     return TRACK_INNER[(layer - 2) % TRACK_INNER.len];
 }
-const VIA_COL = Rgb.hex("#d8b048");
-const VIA_HOLE = Rgb.hex("#0d1117");
-const PAD_HOLE = Rgb.hex("#0d1117"); // drilled bore punched through a thru/npth pad
-const DRC_COL = Rgb.hex("#f85149");
+const VIA_COL = Rgb.hex("#B2B27A"); // via annulus (KiCad muted olive-gold)
+const VIA_HOLE = Rgb.hex("#001023");
+const PAD_HOLE = Rgb.hex("#001023"); // drilled bore punched through a thru/npth pad
+const DRC_COL = Rgb.hex("#f4432c"); // DRC marker (KiCad red-orange)
 const ACCENT = Rgb.hex("#f5c542"); // focus highlight
 const TEXT_COL = Rgb.hex("#c9d1d9");
-const TEXT_DIM = Rgb.hex("#6e7681");
+const TEXT_DIM = Rgb.hex("#7d8590");
 const GOOD_COL = Rgb.hex("#3fb950"); // improvement (compare Δ ≤ 0)
-const GRID_COL = Rgb.hex("#30363d"); // reference grid lines
-const EDGE_COL = Rgb.hex("#7ee787"); // (board …) outline rectangle
+const GRID_COL = Rgb.hex("#2a3a4a"); // reference grid lines
+const EDGE_COL = Rgb.hex("#D0D2CD"); // board outline (KiCad Edge.Cuts)
 // Blame heatmap ramp: cheap (cool) → expensive (hot).
 const BLAME_LO = Rgb.hex("#15302a");
 const BLAME_MID = Rgb.hex("#b8860b");
@@ -546,23 +546,19 @@ const Ctx = struct {
         for (self.p.parts, 0..) |part, pi| {
             const active = self.partActive(part);
             const base_a: f32 = if (active) 1.0 else DIM_A;
-            const stroke = if (part.kind == .hub) HUB_STROKE else PASSIVE_STROKE;
             // Courtyard (rotated quad about the box centre — offset from the
-            // part origin when the library rect is off-origin).
+            // part origin when the library rect is off-origin). KiCad-style:
+            // a thin dim magenta outline, NO fill — the part reads from its
+            // pads + silk, not a solid body box.
             const court = [_][2]f32{
                 self.lp(part, part.ccx - part.hw, part.ccy - part.hh), self.lp(part, part.ccx + part.hw, part.ccy - part.hh),
                 self.lp(part, part.ccx + part.hw, part.ccy + part.hh), self.lp(part, part.ccx - part.hw, part.ccy + part.hh),
             };
-            // Blame heatmap tints the fill green→red by objective share; the cool
-            // baseline COURT_FILL otherwise (blue wash for bottom-side parts).
-            const fill = if (self.opts.blame and pi < self.blame_norm.len)
-                blameColor(self.blame_norm[pi])
-            else if (part.side == .bottom)
-                COURT_FILL_BOT
-            else
-                COURT_FILL;
-            self.cv.fillPoly(&court, fill, base_a);
-            self.cv.strokePath(&court, .closed, self.outlineW(active), stroke, base_a);
+            // Blame heatmap still tints the fill green→red by objective share.
+            if (self.opts.blame and pi < self.blame_norm.len) {
+                self.cv.fillPoly(&court, blameColor(self.blame_norm[pi]), base_a);
+            }
+            self.cv.strokePath(&court, .closed, self.outlineW(active), COURT_COL, base_a * 0.35);
             if (self.focus and active and (self.refHot(part.ref_des))) {
                 self.cv.strokePath(&court, .closed, self.outlineW(true) + self.pw(1.5), ACCENT, 0.9);
             }
@@ -578,15 +574,17 @@ const Ctx = struct {
                 // outline so the agent can tell authored from solver-chosen.
                 self.cv.strokePath(&court, .closed, self.outlineW(true), ACCENT, 0.75);
             }
-            // Silk (footprint-local, rotates with the part).
+            // Silk (footprint-local, rotates with the part) — F.Silk white on
+            // top, B.Silk pink on bottom-side parts.
+            const silk_col = if (part.side == .bottom) SILK_BOT else SILK;
             for (part.silk_lines) |sl| {
                 const a = self.lp(part, sl.x1, sl.y1);
                 const b = self.lp(part, sl.x2, sl.y2);
-                self.cv.line(a[0], a[1], b[0], b[1], self.pw(0.8), SILK, base_a, .round);
+                self.cv.line(a[0], a[1], b[0], b[1], self.pw(0.8), silk_col, base_a, .round);
             }
             for (part.silk_circles) |sc| {
                 const c = self.lp(part, sc.cx, sc.cy);
-                self.cv.ring(c[0], c[1], @max(self.len(sc.r), self.pw(1)), self.pw(0.8), SILK, base_a);
+                self.cv.ring(c[0], c[1], @max(self.len(sc.r), self.pw(1)), self.pw(0.8), silk_col, base_a);
             }
             self.drawPads(part, active);
         }
@@ -595,7 +593,13 @@ const Ctx = struct {
     fn drawPads(self: *Ctx, part: optimizer.Part, active: bool) void {
         for (part.pads) |pad| {
             const hot = self.focus and self.netHot(self.netOf(part.ref_des, pad.number));
-            const col = if (hot) ACCENT else if (part.side == .bottom) PAD_COL_BOT else PAD_COL;
+            // Layer-coloured pads (KiCad): SMD pads in their face's copper
+            // colour, plated through-hole pads gold on every layer, NPTH
+            // mounting holes as a dim copper-free rim.
+            const layer_col = if (pad.drill > 0)
+                (if (pad.npth) PAD_NPTH else PAD_PTH)
+            else if (part.side == .bottom) PAD_COL_BOT else PAD_COL;
+            const col = if (hot) ACCENT else layer_col;
             const a: f32 = if (hot or active) 1.0 else DIM_A;
             if (pad.poly.len >= 3) {
                 // KiCad custom pads carry full copper outlines (100-200+ pts);
@@ -646,7 +650,9 @@ const Ctx = struct {
             const b_pt = self.lp(self.p.parts[l.b], l.bx, l.by);
             const col = awColor(l.kind);
             const base_w: f64 = if (l.kind == .signal) 0.7 else 1.3;
-            var alpha: f32 = if (l.kind == .signal) 0.55 else 0.9;
+            // KiCad ratsnest: thin solid white at ~35% alpha; the loop/ground
+            // kinds keep their accent colours but stay translucent too.
+            var alpha: f32 = if (l.kind == .signal) 0.38 else 0.8;
             var col2 = col;
             var w = base_w;
             if (self.focus) {
@@ -1010,7 +1016,7 @@ const Ctx = struct {
                 DRC_COL
             else if (self.focus and self.refHot(part.ref_des))
                 ACCENT
-            else if (part.kind == .hub) HUB_STROKE else PASSIVE_STROKE;
+            else if (part.side == .bottom) SILK_BOT else SILK;
             var buf: [96]u8 = undefined;
             self.cv.text(cx, top, self.partLabel(pi, &buf), h, col, 1.0, .middle);
         }
@@ -1031,6 +1037,7 @@ const Ctx = struct {
             mirror: bool,
             ca: f64,
             sa: f64,
+            col: Rgb,
             fn place(self2: @This(), lxpx: f64, ly: f64) [2]f32 {
                 const lx = if (self2.mirror) -lxpx else lxpx;
                 const wx = self2.cx + lx * self2.ca - ly * self2.sa;
@@ -1046,7 +1053,7 @@ const Ctx = struct {
                 // Stroke width = the ~0.15 mm silk width projected to px (min 1 px
                 // so a zoomed-out label stays legible). A 1-px run draws as a dab.
                 const w = @max(self2.ctx.len(0.15), self2.ctx.pw(1.0));
-                self2.ctx.cv.line(a[0], a[1], b[0], b[1], w, SILK, 1.0, .round);
+                self2.ctx.cv.line(a[0], a[1], b[0], b[1], w, self2.col, 1.0, .round);
             }
         };
         for (self.opts.texts) |t| {
@@ -1059,7 +1066,8 @@ const Ctx = struct {
             const sa = @sin(a);
             for (t.text, 0..) |ch, k| {
                 const gx0 = -total / 2 + @as(f64, @floatFromInt(k)) * adv;
-                const pen = Pen{ .ctx = self, .cx = t.x, .cy = t.y, .gx0 = gx0, .pitch = pitch, .mirror = t.bottom, .ca = ca, .sa = sa };
+                const tcol = if (t.bottom) SILK_BOT else SILK;
+                const pen = Pen{ .ctx = self, .cx = t.x, .cy = t.y, .gx0 = gx0, .pitch = pitch, .mirror = t.bottom, .ca = ca, .sa = sa, .col = tcol };
                 // The emit callback is infallible (error{}); the exhaustive
                 // switch on the empty error set is a no-op, not a swallowed error.
                 font.glyphRuns(ch, error{}, pen, Pen.emit) catch |err| switch (err) {};

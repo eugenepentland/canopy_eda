@@ -460,7 +460,26 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     // Cross-probe target for the sidebar's "Show in schematic" links: modules
     // render under /modules/, designs under /schematics/.
     const sch_base: []const u8 = if (module_res != null) "/modules/" else "/schematics/";
-    if (!embed) try writeSidebar(w, placement, sch_base);
+    const auto_score = LayoutScore{
+        .hpwl = placement.score.hpwl_mm,
+        .loop = placement.score.loop_mm,
+        .caps = placement.score.loop_caps,
+        .objective = placement.breakdown.objective,
+    };
+    // Full page: the left dock carries Properties + the Tuning/Score/Route
+    // accordion + the saved-layouts history (KiCad-style docked column; the
+    // Sub-circuits palette appends itself here client-side).
+    if (!embed) try writeSidebar(w, placement, sch_base, .{
+        .name = name,
+        .shown = shown,
+        .ro_params = ro.params,
+        .routed = routed,
+        .n_drc = rv.violations.len,
+        .n_rp = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0,
+        .layouts = layouts,
+        .auto = auto_score,
+        .single = single,
+    });
     try w.writeAll("<main class=\"pcb-main\">");
     const src_class = classifyLayoutSource(sub, grid_only, choice.spec_drives, refine_name, starred_name, choice.cached);
     if (embed and !edit_embed) {
@@ -472,52 +491,19 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         try writeEmbedRoute(w, ro.params, routed, rv.violations.len, tg.clr, tg.drc);
     } else {
         // Header row: title + the Schematic ⇄ PCB Layout switcher (PCB active).
-        // `name` resolves as a design under src/ first, else a reusable module —
-        // so the Schematic link points at the matching viewer. The editable embed
-        // skips this header (the parent card carries its own Schematic/PCB toggle)
-        // but keeps the full editing toolbar that follows.
-        if (!embed) {
-            const schematic_path: []const u8 = if (module_res != null) "/modules/" else "/schematics/";
-            try w.writeAll("<div class=\"pcb-head\">");
-            try w.print("<h1>{s} <span class=\"pcb-sub\">PCB Layout · force-directed · drag to edit</span></h1>", .{eff_block.name});
-            try w.print(
-                "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
-                    "<a href=\"{s}{s}\">Schematic</a>" ++
-                    "<a class=\"active\" id=\"pcb-tab-2d\" href=\"/pcb-layout/{s}\">PCB Layout</a>" ++
-                    "<a id=\"pcb-tab-3d\" href=\"#\">3D View</a></nav>",
-                .{ schematic_path, name, name },
-            );
-            try w.writeAll("</div>");
-        }
-        try writeEditControls(w, placement, name, src_class, grid_only, routed, shown, ro.params, rv.violations.len, single);
+        // The editable embed skips this header (the parent card carries its own
+        // Schematic/PCB toggle) but keeps the full editing toolbar that follows.
+        if (!embed) try writeHeadNav(w, module_res != null, name, eff_block.name);
+        try writeEditControls(w, placement, name, src_class, grid_only, routed, shown, ro.params, rv.violations.len, single, embed);
     }
     if (embed and !edit_embed) try writeLegend(w, placement, false);
-    try w.print(
-        "<svg id=\"pcb-svg\" class=\"pcb-svg\" viewBox=\"0 0 {d:.0} {d:.0}\" width=\"{d:.0}\" height=\"{d:.0}\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
-        .{ view.width, view.height, view.width, view.height },
-    );
+    try writeStage(w, view, embed);
     // WebGL 3D-view stage — hidden until the "3D View" tab is opened, then the
     // body gets `.mode-3d` (CSS swaps the SVG out for this). Built lazily.
     if (!embed) try w.writeAll(PCB_3D_STAGE_HTML);
     if (!embed) try w.writeAll(COURTYARD_MODAL ++ FAB_MODAL);
     try w.writeAll("</main>");
-    // Right sidebar: the saved-layouts history (manual snapshots + auto-recorded
-    // optimizer runs). Lives in its own column so the board has the full centre
-    // width. Emitted before the scripts so BOARD_JS can wire up its Load/Delete
-    // buttons. Shown on the full page and in the editable embed (so a module's
-    // layout can be loaded / starred there); omitted in the read-only preview.
-    const show_panel = !single and (!embed or edit_embed);
-    if (show_panel) {
-        const auto_score = LayoutScore{
-            .hpwl = placement.score.hpwl_mm,
-            .loop = placement.score.loop_mm,
-            .caps = placement.score.loop_caps,
-            .objective = placement.breakdown.objective,
-        };
-        try w.writeAll("<aside class=\"pcb-rside\">");
-        try writeLayoutsPanel(w, layouts, auto_score, placement);
-        try w.writeAll("</aside>");
-    }
+    try writeRightDock(w, embed, edit_embed, single, layouts, auto_score, placement);
     try w.writeAll("</div>");
     try writePcbData(
         w,
@@ -4099,29 +4085,32 @@ fn writeEditControls(
     ro_params: router.RouteParams,
     n_drc: usize,
     single: bool,
+    embed: bool,
 ) std.Io.Writer.Error!void {
-    try writeScorebar(w, placement, name, src, single);
+    try writeScorebar(w, placement, name, src, single, embed);
     // When showing the plain grid placeholder, say so — the score is the raw
     // grid's, not an optimized layout, and Regenerate computes the real one.
     if (grid_only) try w.writeAll(
         "<div class=\"pcb-note\">Showing parts on a plain grid — no layout computed yet. " ++
             "Drag parts to arrange, or hit <b>Regenerate</b> to auto-place.</div>",
     );
-    // Secondary controls collapse behind a chip row (accordion: one panel open at
-    // a time) so the default view is just the toolbar + board. The Route panel
-    // auto-opens when the page loaded already routed, so its status is visible
-    // without a click.
-    const route_open = routed != null;
-    try writeTabsRow(w, route_open);
-    try w.writeAll("<div class=\"pcb-panels\">");
-    try writeTuning(w, shown);
-    try writeScoreView(w, shown, name);
-    const rp_warn = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0;
-    try writeRoutePanel(w, ro_params, routed, n_drc, rp_warn, route_open);
-    try w.writeAll("</div>");
-    try writeLegend(w, placement, true); // hidden; revealed by the Legend chip
-    try writeHeatLegend(w); // hidden; revealed by the Heatmap chip
-    try writeNetLegend(w); // hidden; revealed by the Net colours chip
+    // Editable embed only: the secondary controls stay in the main column
+    // behind the classic chip row (accordion). The full page docks the same
+    // panels into the left sidebar (writeSidebar) and its view toggles into
+    // the right Appearance panel, so nothing is emitted here.
+    if (embed) {
+        const route_open = routed != null;
+        try writeTabsRow(w, route_open, true);
+        try w.writeAll("<div class=\"pcb-panels\">");
+        try writeTuning(w, shown);
+        try writeScoreView(w, shown, name);
+        const rp_warn = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0;
+        try writeRoutePanel(w, ro_params, routed, n_drc, rp_warn, route_open, true);
+        try w.writeAll("</div>");
+    }
+    try writeLegend(w, placement, true); // hidden; revealed by the Legend toggle
+    try writeHeatLegend(w); // hidden; revealed by the Heatmap toggle
+    try writeNetLegend(w); // hidden; revealed by the Net-colours toggle
 }
 
 // Action-bar group wrappers — small inline-flex clusters separated by thin rules
@@ -4131,7 +4120,7 @@ const BAR_SEP = "<span class=\"bar-sep\"></span>";
 const BAR_GRP = "<span class=\"bar-grp\">";
 const BAR_GRP_END = "</span>" ++ BAR_SEP;
 
-fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, src: LayoutSource, single: bool) std.Io.Writer.Error!void {
+fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, src: LayoutSource, single: bool, tools_in_bar: bool) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-bar\">");
     try writeSourceChip(w, src);
     // Headline objective + its delta only — the per-term breakdown (wire / loop /
@@ -4175,22 +4164,15 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     try w.writeAll("<button class=\"btn\" id=\"pcb-undo\" disabled title=\"Undo last move / rotate (Ctrl+Z)\">↶ Undo</button>");
     try w.writeAll("<button class=\"btn\" id=\"pcb-redo\" disabled title=\"Redo (Ctrl+Shift+Z)\">↷ Redo</button>");
     try w.writeAll("<button class=\"btn\" id=\"pcb-reset\" title=\"Discard manual edits, restore the auto layout\">Reset</button>");
-    try w.writeAll("<button class=\"btn\" id=\"pcb-outline\" title=\"Draw the board outline: click, then drag a rectangle " ++
-        "on the board (a plain click clears it). Grid-snapped; saved with the layout (Save/Update); becomes the board edge " ++
-        "the renderers draw and the board-edge DRC checks.\">\u{25AD} Outline</button>");
-    try w.writeAll("<button class=\"btn\" id=\"pcb-outline-poly\" title=\"Draw a POLYGON board outline (L/T shapes, cutout-free " ++
-        "notches): click to place vertices (grid-snapped), click the first vertex or press Enter to close, Backspace removes " ++
-        "the last vertex, Esc cancels. After closing, drag a vertex handle to edit. Saved with the layout (Save/Update); " ++
-        "becomes the exact board edge the renderers draw, the board-edge DRC measures, and the Gerber Edge.Cuts traces." ++
-        "\">\u{2B21} Poly</button>");
-    try w.writeAll("<button class=\"btn\" id=\"pcb-draw\" title=\"Hand-route (X): click a pad to start a trace, click to " ++
-        "fix corners (45\u{b0}/grid snapped, Shift = free angle), V drops a via and flips layer, click a same-net pad or " ++
-        "double-click to finish, Backspace steps back, Esc ends. Right-click deletes the track/via under the cursor. " ++
-        "Copper is saved with the layout (Save/Update).\">\u{270E} Draw</button>");
-    try w.writeAll("<button class=\"btn\" id=\"pcb-text\" title=\"Silkscreen text (T): click on the board to place a label " ++
-        "(grid-snapped, on the active side). Click an existing label to edit its content / size / rotation / side, drag to " ++
-        "move it, R rotates 90\u{b0}, Del or right-click deletes. Saved with the layout (Save/Update); emitted on the silk " ++
-        "Gerber.\">T Text</button>");
+    // Editable embed keeps the drawing tools in the action bar (it has no
+    // vertical tool strip); the full page docks them left of the canvas
+    // (TOOLSTRIP_HTML — same ids, so the wiring is shared).
+    if (tools_in_bar) {
+        try w.writeAll("<button class=\"btn\" id=\"pcb-outline\" title=\"" ++ TIP_OUTLINE ++ "\">\u{25AD} Outline</button>");
+        try w.writeAll("<button class=\"btn\" id=\"pcb-outline-poly\" title=\"" ++ TIP_POLY ++ "\">\u{2B21} Poly</button>");
+        try w.writeAll("<button class=\"btn\" id=\"pcb-draw\" title=\"" ++ TIP_DRAW ++ "\">\u{270E} Draw</button>");
+        try w.writeAll("<button class=\"btn\" id=\"pcb-text\" title=\"" ++ TIP_TEXT ++ "\">T Text</button>");
+    }
     try w.writeAll(BAR_GRP_END);
     // Fab handoff: the complete manufacturing package at the saved (★) layout.
     // A button (not a plain link) so it can run the pre-fab readiness gate
@@ -4201,15 +4183,82 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
         "copper. Runs a pre-fab readiness check first (unrouted nets, DRC, off-board parts). Save a layout first.\">" ++
         "\u{2913} Gerbers</button>");
     try w.writeAll(BAR_GRP_END);
-    try w.writeAll("<span class=\"zoom-grp\"><button class=\"btn\" id=\"z-out\" title=\"Zoom out\">−</button>");
-    try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");
-    try w.writeAll("<button class=\"btn\" id=\"z-fit\" title=\"Reset zoom\">Fit</button></span>");
+    // Zoom stays in the bar for embeds only — the full page's tool strip
+    // carries −/+/Fit (same ids). The old drag/rotate hint line moved into
+    // the status bar's "?" help button.
+    if (tools_in_bar) {
+        try w.writeAll("<span class=\"zoom-grp\"><button class=\"btn\" id=\"z-out\" title=\"Zoom out\">−</button>");
+        try w.writeAll("<button class=\"btn\" id=\"z-in\" title=\"Zoom in\">+</button>");
+        try w.writeAll("<button class=\"btn\" id=\"z-fit\" title=\"Reset zoom\">Fit</button></span>");
+    }
     try w.writeAll("<span class=\"savemsg\" id=\"pcb-savemsg\"></span>");
-    try w.print("<span class=\"muted\" title=\"drag part to move · hover + R to rotate · Ctrl+Z undo · " ++
-        "two-finger drag / middle-drag to pan · scroll wheel or pinch to zoom · snaps to {d} mm grid · press ? for all shortcuts\">" ++
-        "drag · R rotate · Ctrl+Z undo · ? help</span>", .{optimizer.GRID_MM});
+    if (tools_in_bar) {
+        try w.print("<span class=\"muted\" title=\"drag part to move · hover + R to rotate · Ctrl+Z undo · " ++
+            "two-finger drag / middle-drag to pan · scroll wheel or pinch to zoom · snaps to {d} mm grid · press ? for all shortcuts\">" ++
+            "drag · R rotate · Ctrl+Z undo · ? help</span>", .{optimizer.GRID_MM});
+    }
     try w.writeAll("</div>");
 }
+
+// ── Drawing-tool tooltips (shared by the action bar and the tool strip) ─────
+const TIP_OUTLINE = "Board outline rectangle: click, then drag a rectangle " ++
+    "on the board (a plain click clears it). Grid-snapped; saved with the layout (Save/Update); becomes the board edge " ++
+    "the renderers draw and the board-edge DRC checks.";
+const TIP_POLY = "Polygon board outline (L/T shapes, cutout-free " ++
+    "notches): click to place vertices (grid-snapped), click the first vertex or press Enter to close, Backspace removes " ++
+    "the last vertex, Esc cancels. After closing, drag a vertex handle to edit. Saved with the layout (Save/Update); " ++
+    "becomes the exact board edge the renderers draw, the board-edge DRC measures, and the Gerber Edge.Cuts traces.";
+const TIP_DRAW = "Route tracks (X): click a pad to start a trace, click to " ++
+    "fix corners (45\u{b0}/grid snapped, Shift = free angle), V drops a via and flips layer, click a same-net pad or " ++
+    "double-click to finish, Backspace steps back, Esc ends. Right-click deletes the track/via under the cursor. " ++
+    "Copper is saved with the layout (Save/Update).";
+const TIP_TEXT = "Silkscreen text (T): click on the board to place a label " ++
+    "(grid-snapped, on the active side). Click an existing label to edit its content / size / rotation / side, drag to " ++
+    "move it, R rotates 90\u{b0}, Del or right-click deletes. Saved with the layout (Save/Update); emitted on the silk " ++
+    "Gerber.";
+const TIP_RULER = "Ruler / measure (M): drag to measure dx / dy / distance in the current units; Esc exits.";
+
+/// KiCad-style vertical drawing toolbar, docked on the canvas' left edge
+/// (full page only). Every button keeps the id the board script already
+/// wires: select is the new explicit "disarm all modes" tool; the rest are
+/// the same tools that used to sit in the action bar.
+const TOOLSTRIP_HTML =
+    "<div class=\"pcb-toolstrip\" id=\"pcb-toolstrip\">" ++
+    "<button class=\"ts-btn on\" id=\"tool-select\" title=\"Select / move (Esc) — drag parts, marquee-select on empty board\">\u{2196}</button>" ++
+    "<button class=\"ts-btn\" id=\"pcb-draw\" title=\"" ++ TIP_DRAW ++ "\">\u{270E}</button>" ++
+    "<button class=\"ts-btn\" id=\"pcb-outline\" title=\"" ++ TIP_OUTLINE ++ "\">\u{25AD}</button>" ++
+    "<button class=\"ts-btn\" id=\"pcb-outline-poly\" title=\"" ++ TIP_POLY ++ "\">\u{2B21}</button>" ++
+    "<button class=\"ts-btn\" id=\"pcb-text\" title=\"" ++ TIP_TEXT ++ "\">T</button>" ++
+    "<button class=\"ts-btn\" id=\"pcb-ruler-btn\" title=\"" ++ TIP_RULER ++ "\">\u{1F4CF}</button>" ++
+    "<span class=\"ts-sep\"></span>" ++
+    "<button class=\"ts-btn\" id=\"z-in\" title=\"Zoom in\">+</button>" ++
+    "<button class=\"ts-btn\" id=\"z-out\" title=\"Zoom out\">\u{2212}</button>" ++
+    "<button class=\"ts-btn\" id=\"z-fit\" title=\"Zoom to fit\">\u{26F6}</button>" ++
+    "</div>";
+
+/// KiCad-style status bar under the canvas (full page only): live cursor
+/// position, drag/measure deltas, zoom, snap grid, units, active layer,
+/// hovered part/net, and the shortcut help. The grid select + units button
+/// keep their classic ids so the existing view-state wiring binds them.
+const STATUSBAR_HTML =
+    "<div class=\"pcb-status\" id=\"pcb-status\">" ++
+    "<span class=\"st-seg st-xy\" id=\"st-xy\"></span>" ++
+    "<span class=\"st-seg st-dxdy\" id=\"st-dxdy\"></span>" ++
+    "<span class=\"st-seg\" id=\"st-zoom\" title=\"Zoom\"></span>" ++
+    "<span class=\"st-seg st-grid\" title=\"Snap grid for placement, hand routing, and the outline tool\">grid " ++
+    "<select id=\"pcb-grid-sel\">" ++
+    "<option value=\"0.5\">0.5 mm</option><option value=\"0.25\">0.25 mm</option>" ++
+    "<option value=\"0.1\">0.1 mm</option><option value=\"0.05\">0.05 mm</option>" ++
+    "<option value=\"0\">off</option></select></span>" ++
+    "<button class=\"st-seg st-btn\" id=\"pcb-units-btn\" " ++
+    "title=\"Toggle coordinate / dimension display between mm and mil (display only)\">mm</button>" ++
+    "<span class=\"st-seg st-layer\" id=\"st-layer\" title=\"Active layer — ( / ) or PgUp/PgDn to switch\">" ++
+    "<i id=\"st-layer-sw\"></i><span id=\"st-layer-nm\"></span></span>" ++
+    "<span class=\"st-seg st-tool\" id=\"st-tool\"></span>" ++
+    "<span class=\"st-spacer\"></span>" ++
+    "<span class=\"st-seg st-hover\" id=\"st-hover\"></span>" ++
+    "<button class=\"st-seg st-btn\" id=\"pcb-help\" title=\"Keyboard &amp; mouse shortcuts (?)\">?</button>" ++
+    "</div>";
 
 /// Saved-layouts panel: the named history (manual snapshots + auto-recorded
 /// optimizer runs), newest first, each row showing its kind, score, and delta
@@ -4300,7 +4349,7 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
         try writeAttr(w, L.name);
         try w.writeAll("\">✕</button></span></div></div>");
     }
-    try w.writeAll("</div></div>");
+    try w.writeAll(DIV2_END);
 }
 
 /// Delta of a saved layout's cost versus the on-screen auto baseline, on the
@@ -4332,7 +4381,7 @@ fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Wr
 /// Heatmap / Legend) — extracted so the repeated literal stays in one place.
 const VIEW_CHIP_OPEN = "<label class=\"view-chip\" ";
 
-fn writeTabsRow(w: *std.Io.Writer, route_open: bool) std.Io.Writer.Error!void {
+fn writeTabsRow(w: *std.Io.Writer, route_open: bool, with_view_controls: bool) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-tabs\">");
     try w.writeAll("<button class=\"tab-chip\" data-panel=\"panel-tune\" " ++
         "title=\"Steering weights — re-runs the optimizer\">Tuning</button>");
@@ -4342,37 +4391,43 @@ fn writeTabsRow(w: *std.Io.Writer, route_open: bool) std.Io.Writer.Error!void {
         "<button class=\"tab-chip active\" data-panel=\"panel-route\" title=\"Autoroute + DRC\">Route</button>"
     else
         "<button class=\"tab-chip\" data-panel=\"panel-route\" title=\"Autoroute + DRC\">Route</button>");
-    try w.writeAll("<span class=\"tabs-sep\"></span>");
-    try w.writeAll(VIEW_CHIP_OPEN ++
-        "title=\"Show the ratsnest airwires + decoupling-loop overlays (pin-to-pin) — " ++
-        "uncheck to hide them and read the bare placement\">" ++
-        "<input type=\"checkbox\" id=\"v-rats\" checked> Ratsnest</label>");
-    try w.writeAll(VIEW_CHIP_OPEN ++
-        "title=\"Give every net its own pad/airwire colour — no-connect white, GND " ++
-        "brown, power warm, each signal net a distinct colour — so connectivity " ++
-        "reads off the board without the schematic\">" ++
-        "<input type=\"checkbox\" id=\"v-netcol\" checked> Net colours</label>");
-    try w.writeAll(VIEW_CHIP_OPEN ++
-        "title=\"Tint each part green→red by its share of the objective (cost/blame heatmap)\">" ++
-        "<input type=\"checkbox\" id=\"v-heat\"> Heatmap</label>");
-    try w.writeAll(VIEW_CHIP_OPEN ++ "title=\"Show the trace / via colour key\">" ++
-        "<input type=\"checkbox\" id=\"v-legend\"> Legend</label>");
-    try w.writeAll("<span class=\"tabs-sep\"></span>");
-    // Layers / grid / units / ruler controls (audit 1.5). Populated + wired in
-    // pcb_board.js; the layers popover is built client-side so it can read the
-    // persisted per-design visibility state.
-    try w.writeAll("<button class=\"tab-chip\" id=\"pcb-layers-btn\" " ++
-        "title=\"Layer visibility + active draw layer — ( / ) or PgUp/PgDn switch the active layer\">\u{25A4} Layers</button>");
-    try w.writeAll("<label class=\"view-chip\" title=\"Snap grid for placement, hand routing, and the outline tool\">" ++
-        "Grid <select id=\"pcb-grid-sel\">" ++
-        "<option value=\"0.5\">0.5 mm</option><option value=\"0.25\">0.25 mm</option>" ++
-        "<option value=\"0.1\">0.1 mm</option><option value=\"0.05\">0.05 mm</option>" ++
-        "<option value=\"0\">off</option></select></label>");
-    try w.writeAll("<button class=\"tab-chip\" id=\"pcb-units-btn\" " ++
-        "title=\"Toggle coordinate / dimension display between mm and mil (display only)\">mm</button>");
-    try w.writeAll("<button class=\"tab-chip\" id=\"pcb-ruler-btn\" " ++
-        "title=\"Ruler / measure (M): drag to measure dx / dy / distance in the current units; Esc exits\">\u{1F4CF} Ruler</button>");
-    try w.writeAll("<div class=\"pcb-layers-pop\" id=\"pcb-layers-pop\" hidden></div>");
+    // The view toggles + layers/grid/units/ruler controls stay in this row for
+    // the editable embed only. The full page docks the toggles into the
+    // Appearance panel, the grid/units into the status bar, and the ruler into
+    // the tool strip — writeSidebar calls this with `with_view_controls=false`.
+    if (with_view_controls) {
+        try w.writeAll("<span class=\"tabs-sep\"></span>");
+        try w.writeAll(VIEW_CHIP_OPEN ++
+            "title=\"Show the ratsnest airwires + decoupling-loop overlays (pin-to-pin) — " ++
+            "uncheck to hide them and read the bare placement\">" ++
+            "<input type=\"checkbox\" id=\"v-rats\" checked> Ratsnest</label>");
+        try w.writeAll(VIEW_CHIP_OPEN ++
+            "title=\"Give every net its own pad/airwire colour — no-connect white, GND " ++
+            "brown, power warm, each signal net a distinct colour — so connectivity " ++
+            "reads off the board without the schematic\">" ++
+            "<input type=\"checkbox\" id=\"v-netcol\"> Net colours</label>");
+        try w.writeAll(VIEW_CHIP_OPEN ++
+            "title=\"Tint each part green→red by its share of the objective (cost/blame heatmap)\">" ++
+            "<input type=\"checkbox\" id=\"v-heat\"> Heatmap</label>");
+        try w.writeAll(VIEW_CHIP_OPEN ++ "title=\"Show the trace / via colour key\">" ++
+            "<input type=\"checkbox\" id=\"v-legend\"> Legend</label>");
+        try w.writeAll("<span class=\"tabs-sep\"></span>");
+        // Layers / grid / units / ruler controls (audit 1.5). Populated + wired
+        // in pcb_board.js; the layers popover is built client-side so it can
+        // read the persisted per-design visibility state.
+        try w.writeAll("<button class=\"tab-chip\" id=\"pcb-layers-btn\" " ++
+            "title=\"Layer visibility + active draw layer — ( / ) or PgUp/PgDn switch the active layer\">\u{25A4} Layers</button>");
+        try w.writeAll("<label class=\"view-chip\" title=\"Snap grid for placement, hand routing, and the outline tool\">" ++
+            "Grid <select id=\"pcb-grid-sel\">" ++
+            "<option value=\"0.5\">0.5 mm</option><option value=\"0.25\">0.25 mm</option>" ++
+            "<option value=\"0.1\">0.1 mm</option><option value=\"0.05\">0.05 mm</option>" ++
+            "<option value=\"0\">off</option></select></label>");
+        try w.writeAll("<button class=\"tab-chip\" id=\"pcb-units-btn\" " ++
+            "title=\"Toggle coordinate / dimension display between mm and mil (display only)\">mm</button>");
+        try w.writeAll("<button class=\"tab-chip\" id=\"pcb-ruler-btn\" " ++
+            "title=\"" ++ TIP_RULER ++ "\">\u{1F4CF} Ruler</button>");
+        try w.writeAll("<div class=\"pcb-layers-pop\" id=\"pcb-layers-pop\" hidden></div>");
+    }
     try w.writeAll("</div>");
 }
 
@@ -4521,7 +4576,7 @@ fn writeNetColors(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Plac
 /// the four buckets the per-net colouring uses (signal shown as a spectrum since
 /// every signal net gets its own colour).
 fn writeNetLegend(w: *std.Io.Writer) std.Io.Writer.Error!void {
-    try w.writeAll("<div class=\"net-legend\" id=\"net-legend\">" ++
+    try w.writeAll("<div class=\"net-legend\" id=\"net-legend\" hidden>" ++
         "<span class=\"net-h\">Net colours</span>" ++
         "<span class=\"net-sw\"><i style=\"background:" ++ NET_WHITE ++ "\"></i>No-connect</span>" ++
         "<span class=\"net-sw\"><i style=\"background:" ++ NET_BROWN ++ "\"></i>GND</span>" ++
@@ -4632,6 +4687,7 @@ fn writeRoutePanel(
     n_drc: usize,
     n_rp: usize,
     start_open: bool,
+    clr_toggle: bool,
 ) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-route pcb-panel\" id=\"panel-route\"");
     if (!start_open) try w.writeAll(" hidden");
@@ -4641,7 +4697,9 @@ fn writeRoutePanel(
     try w.print("<label>Via drill <input id=\"r-vd\" type=\"number\" step=\"0.05\" min=\"0.1\" value=\"{d}\"></label>", .{params.via_drill});
     try w.print("<label>Via Ø <input id=\"r-va\" type=\"number\" step=\"0.05\" min=\"0.2\" value=\"{d}\"></label>", .{params.via_dia});
     try w.writeAll("<button class=\"btn\" id=\"r-go\">Route</button>");
-    try w.writeAll("<label class=\"tune-chk\"><input id=\"r-clr-show\" type=\"checkbox\"> show clearance</label>");
+    // The clearance-halo toggle lives in the Appearance panel's Objects tab
+    // on the full page; embeds (no Appearance panel) keep it here.
+    if (clr_toggle) try w.writeAll("<label class=\"tune-chk\"><input id=\"r-clr-show\" type=\"checkbox\"> show clearance</label>");
     try w.writeAll("<label class=\"tune-chk\"><input id=\"r-drc-show\" type=\"checkbox\" checked> show DRC</label>");
     // Status spans, updated in place by the Route button's POST (no reload, so
     // the on-screen layout stays put); pre-filled here for a direct ?route=1 GET.
@@ -4772,14 +4830,26 @@ fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement, hidden: bool) std.Io.W
 
 // ── Sidebar (single-part properties panel, KiCad-style) ──────────────────
 
-/// KiCad-style properties sidebar: empty until a part is clicked on the board,
-/// then BOARD_JS (`renderProps`) fills it with just that one part's properties
-/// — ref, value, footprint (courtyard-edit), live position/rotation, pin→net
-/// list, and a schematic jump. Every per-part field already ships in the
-/// embedded `PCB.parts`, so this only emits the container + the empty-state
-/// hint; the part count and the schematic-jump base (`/schematics/` vs
-/// `/modules/`, stashed as `data-schbase`) are the lone server-rendered bits.
-fn writeSidebar(w: *std.Io.Writer, p: optimizer.Placement, sch_base: []const u8) HandlerError!void {
+/// Everything the docked left column needs beyond the placement itself.
+const SidebarOpts = struct {
+    name: []const u8,
+    shown: optimizer.Params,
+    ro_params: router.RouteParams,
+    routed: ?router.RouteResult,
+    n_drc: usize,
+    n_rp: usize,
+    layouts: []const SavedLayout,
+    auto: LayoutScore,
+    single: bool,
+};
+
+/// The full page's docked left column (KiCad-style): the single-part
+/// Properties panel on top (empty until a part is clicked — BOARD_JS
+/// `renderProps` fills it; the Sub-circuits palette appends itself after it),
+/// then the Tuning/Score/Route accordion (same chip + panel ids the classic
+/// row used, so the accordion JS binds unchanged), then the saved-layouts
+/// history (multi-layout pages only — top-level designs keep ONE layout).
+fn writeSidebar(w: *std.Io.Writer, p: optimizer.Placement, sch_base: []const u8, o: SidebarOpts) HandlerError!void {
     try w.writeAll("<aside class=\"pcb-side\">");
     try w.writeAll("<div class=\"side-h\">Properties</div>");
     try w.writeAll("<div id=\"prop-body\" class=\"prop-body\" data-schbase=\"");
@@ -4789,7 +4859,102 @@ fn writeSidebar(w: *std.Io.Writer, p: optimizer.Placement, sch_base: []const u8)
             "<br><span class=\"prop-empty-n\">{d} components</span></div>",
         .{p.instances.len},
     );
-    try w.writeAll("</div></aside>");
+    try w.writeAll("</div>");
+    const route_open = o.routed != null;
+    try w.writeAll("<div class=\"side-acc\">");
+    try writeTabsRow(w, route_open, false);
+    try w.writeAll("<div class=\"pcb-panels\">");
+    try writeTuning(w, o.shown);
+    try writeScoreView(w, o.shown, o.name);
+    try writeRoutePanel(w, o.ro_params, o.routed, o.n_drc, o.n_rp, route_open, false);
+    try w.writeAll(DIV2_END);
+    if (!o.single) try writeLayoutsPanel(w, o.layouts, o.auto, p);
+    try w.writeAll("</aside>");
+}
+
+/// Full-page header row: title + the Schematic ⇄ PCB Layout ⇄ 3D switcher
+/// (PCB active). `name` resolves as a design under src/ first, else a
+/// reusable module — the Schematic link points at the matching viewer.
+fn writeHeadNav(w: *std.Io.Writer, is_module: bool, name: []const u8, title: []const u8) std.Io.Writer.Error!void {
+    const schematic_path: []const u8 = if (is_module) "/modules/" else "/schematics/";
+    try w.writeAll("<div class=\"pcb-head\">");
+    try w.print("<h1>{s} <span class=\"pcb-sub\">PCB Layout · force-directed · drag to edit</span></h1>", .{title});
+    try w.print(
+        "<nav class=\"viewtoggle\" aria-label=\"View\">" ++
+            "<a href=\"{s}{s}\">Schematic</a>" ++
+            "<a class=\"active\" id=\"pcb-tab-2d\" href=\"/pcb-layout/{s}\">PCB Layout</a>" ++
+            "<a id=\"pcb-tab-3d\" href=\"#\">3D View</a></nav>",
+        .{ schematic_path, name, name },
+    );
+    try w.writeAll("</div>");
+}
+
+/// The board stage: a vertical tool strip (full page only) docked on the
+/// canvas' left edge, the canvas host (SVG + scene canvas), and a KiCad
+/// status bar underneath. Embeds keep the bare stage (no strip/status).
+fn writeStage(w: *std.Io.Writer, view: View, embed: bool) std.Io.Writer.Error!void {
+    try w.writeAll("<div class=\"pcb-stage\">");
+    if (!embed) try w.writeAll(TOOLSTRIP_HTML);
+    try w.writeAll("<div class=\"pcb-canvas-host\">");
+    try w.print(
+        "<svg id=\"pcb-svg\" class=\"pcb-svg\" viewBox=\"0 0 {d:.0} {d:.0}\" width=\"{d:.0}\" height=\"{d:.0}\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+        .{ view.width, view.height, view.width, view.height },
+    );
+    if (!embed) try w.writeAll(STATUSBAR_HTML);
+    try w.writeAll(DIV2_END);
+}
+
+/// Right dock. Full page: the KiCad-style Appearance panel (Layers / Objects
+/// tabs; rows built client-side from the persisted view state). Editable
+/// embed: the saved-layouts history stays in this column (embeds have no left
+/// dock); omitted in the read-only preview.
+fn writeRightDock(
+    w: *std.Io.Writer,
+    embed: bool,
+    edit_embed: bool,
+    single: bool,
+    layouts: []const SavedLayout,
+    auto: LayoutScore,
+    placement: optimizer.Placement,
+) std.Io.Writer.Error!void {
+    if (!embed) {
+        try writeAppearance(w);
+        return;
+    }
+    if (edit_embed and !single) {
+        try w.writeAll("<aside class=\"pcb-rside\">");
+        try writeLayoutsPanel(w, layouts, auto, placement);
+        try w.writeAll("</aside>");
+    }
+}
+
+/// The right-docked Appearance panel (full page only), KiCad pcbnew's
+/// Layers/Objects dock. The Layers tab's rows are built client-side (they
+/// read the persisted per-design visibility + active-layer state and the
+/// board's `PCB.layers` stackup table); the Objects tab hosts the classic
+/// view toggles — same input ids as ever, so the board script's existing
+/// bindings find them here.
+fn writeAppearance(w: *std.Io.Writer) std.Io.Writer.Error!void {
+    try w.writeAll("<aside class=\"pcb-rside pcb-appear\" id=\"pcb-appear\">" ++
+        "<div class=\"ap-tabs\">" ++
+        "<button class=\"ap-tab active\" data-aptab=\"ap-layers\">Layers</button>" ++
+        "<button class=\"ap-tab\" data-aptab=\"ap-objects\">Objects</button></div>" ++
+        "<div class=\"ap-pane\" id=\"ap-layers\"></div>" ++
+        "<div class=\"ap-pane\" id=\"ap-objects\" hidden>" ++
+        "<label class=\"ap-row\" title=\"Show the ratsnest airwires + decoupling-loop overlays (pin-to-pin) — " ++
+        "uncheck to hide them and read the bare placement\">" ++
+        "<input type=\"checkbox\" id=\"v-rats\" checked><span>Ratsnest</span></label>" ++
+        "<label class=\"ap-row\" title=\"Give every net its own pad/airwire colour — no-connect white, GND " ++
+        "brown, power warm, each signal net a distinct colour — so connectivity " ++
+        "reads off the board without the schematic\">" ++
+        "<input type=\"checkbox\" id=\"v-netcol\"><span>Net colours</span></label>" ++
+        "<label class=\"ap-row\" title=\"Tint each part green→red by its share of the objective (cost/blame heatmap)\">" ++
+        "<input type=\"checkbox\" id=\"v-heat\"><span>Heatmap</span></label>" ++
+        "<label class=\"ap-row\" title=\"Show the trace / via colour key\">" ++
+        "<input type=\"checkbox\" id=\"v-legend\"><span>Legend</span></label>" ++
+        "<label class=\"ap-row\" title=\"Show clearance halos around pads, tracks and vias (Route panel sets the mm)\">" ++
+        "<input type=\"checkbox\" id=\"r-clr-show\"><span>Clearance halos</span></label>" ++
+        "</div></aside>");
 }
 
 // ── Embedded board data (consumed by BOARD_JS) ───────────────────────────
@@ -5323,6 +5488,9 @@ fn drcKindStr(k: drc.Kind) []const u8 {
 
 // ── Small helpers ────────────────────────────────────────────────────────
 
+/// Two closing divs — shared by the stage, layouts-panel and sidebar writers.
+const DIV2_END = "</div></div>";
+
 /// Emit `"layouts":[ … ],` — the saved-layout history for the client. Each
 /// entry carries its name, kind, optional score, and `parts` as a ref → {x,y,
 /// rot, origin?} map so a Load reads positions by the renumber-stable `origin`
@@ -5532,205 +5700,267 @@ const FAB_MODAL =
 // ── Styles + client renderer ─────────────────────────────────────────────
 
 const PAGE_CSS =
-    \\html,body{margin:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-    \\a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}
-    \\.pcb-layout{display:flex;gap:16px;align-items:flex-start;max-width:1760px;margin:0 auto;padding:12px 18px}
-    \\.pcb-main{flex:1;min-width:0}
-    \\.pcb-note{font-size:12px;color:#d29922;background:#1d2230;border:1px solid #30363d;border-left:3px solid #d29922;
-    \\  border-radius:6px;padding:6px 10px;margin:2px 0 8px}
-    \\.pcb-note b{color:#f0f6fc}
-    \\.pcb-head{display:flex;align-items:center;gap:12px;margin:6px 0 2px;flex-wrap:wrap}
+    \\/* Neutral graphite CAD chrome (de-GitHubbed): page + panel palette lives
+    \\   here once — panels #232428, inset #1a1b1e, borders #2c2d31/#3a3b40,
+    \\   text #d6d7db/#9b9ca3, KiCad-ish accent blue #5a8fd6. */
+    \\html,body{margin:0;background:#1b1c20;color:#d6d7db;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    \\a{color:#6ba1e8;text-decoration:none}a:hover{text-decoration:underline}
+    \\/* App-frame layout: the editor fills the viewport between the site navbar
+    \\   (42px) and the window bottom; the three columns scroll internally and
+    \\   the canvas flexes to every remaining pixel. */
+    \\.pcb-layout{display:flex;gap:10px;align-items:stretch;margin:0;padding:8px 10px;box-sizing:border-box;
+    \\  height:calc(100vh - 42px);min-height:480px}
+    \\.pcb-main{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0}
+    \\.pcb-note{font-size:12px;color:#d8a03c;background:#26221a;border:1px solid #3a3b40;border-left:3px solid #d8a03c;
+    \\  border-radius:6px;padding:6px 10px;margin:2px 0 8px;flex:none}
+    \\.pcb-note b{color:#f0f1f3}
+    \\.pcb-head{display:flex;align-items:center;gap:12px;margin:2px 0;flex-wrap:wrap;flex:none}
     \\.pcb-head h1{flex:1;min-width:0}
-    \\.pcb-main h1{font-size:18px;font-weight:600;margin:4px 0;color:#f0f6fc}
-    \\.pcb-sub{font-size:13px;font-weight:400;color:#8b949e}
-    \\.pcb-bar{display:flex;gap:10px;align-items:center;margin:8px 0;flex-wrap:wrap}
-    \\.src-chip{font-size:11px;padding:2px 9px;border-radius:10px;border:1px solid #30363d;color:#8b949e;cursor:help;white-space:nowrap}
-    \\.src-chip.src-spec{color:#3fb950;border-color:#238636}
-    \\.src-chip.src-snap{color:#58a6ff;border-color:#1f6feb}
+    \\.pcb-main h1{font-size:17px;font-weight:600;margin:2px 0;color:#f0f1f3}
+    \\.pcb-sub{font-size:13px;font-weight:400;color:#9b9ca3}
+    \\.pcb-bar{display:flex;gap:10px;align-items:center;margin:6px 0;flex-wrap:wrap;flex:none}
+    \\.src-chip{font-size:11px;padding:2px 9px;border-radius:10px;border:1px solid #3a3b40;color:#9b9ca3;cursor:help;white-space:nowrap}
+    \\.src-chip.src-spec{color:#4cae54;border-color:#2f7d38}
+    \\.src-chip.src-snap{color:#6ba1e8;border-color:#3d6db5}
     \\.src-chip.src-star{color:#e3b341;border-color:#9e6a03}
-    \\.src-chip.src-cache{color:#d29922;border-color:#9e6a03}
-    \\.src-chip.src-grid{color:#f85149;border-color:#da3633}
+    \\.src-chip.src-cache{color:#d8a03c;border-color:#9e6a03}
+    \\.src-chip.src-grid{color:#e05b4b;border-color:#b23c30}
     \\/* Fixed-footprint score chips: inline-block + min-width + tabular digits,
     \\   so a recalculated number never rewraps the toolbar and jumps the board. */
-    \\.pcb-bar .score{font-weight:600;color:#e6edf3;background:#161b22;border:1px solid #21262d;border-radius:4px;padding:2px 8px;
+    \\.pcb-bar .score{font-weight:600;color:#e4e5e9;background:#232428;border:1px solid #2c2d31;border-radius:4px;padding:2px 8px;
     \\  display:inline-block;min-width:118px;text-align:center;font-variant-numeric:tabular-nums}
     \\.pcb-bar .delta{font-size:12px;font-weight:600;min-width:34px;display:inline-block;font-variant-numeric:tabular-nums}
-    \\.pcb-bar .delta.up{color:#f85149}
-    \\.pcb-bar .delta.down{color:#3fb950}
+    \\.pcb-bar .delta.up{color:#e05b4b}
+    \\.pcb-bar .delta.down{color:#4cae54}
     \\.pcb-bar .bar-grp{display:inline-flex;gap:5px;align-items:center}
-    \\.pcb-bar .bar-sep{width:1px;height:18px;background:#30363d;flex:none}
-    \\.pcb-bar .btn{font:inherit;font-size:12px;border:1px solid #30363d;background:#21262d;border-radius:5px;
-    \\  padding:3px 9px;cursor:pointer;text-decoration:none;color:#c9d1d9;display:inline-block}
-    \\.pcb-bar .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
+    \\.pcb-bar .bar-sep{width:1px;height:18px;background:#3a3b40;flex:none}
+    \\.pcb-bar .btn{font:inherit;font-size:12px;border:1px solid #3a3b40;background:#2c2d31;border-radius:4px;
+    \\  padding:3px 9px;cursor:pointer;text-decoration:none;color:#d6d7db;display:inline-block}
+    \\.pcb-bar .btn:hover{background:#37383d;border-color:#5a8fd6;color:#f0f1f3}
     \\.pcb-bar .btn:disabled{opacity:.45;cursor:default}
     \\.pcb-bar .zoom-grp{display:inline-flex;gap:4px}
     \\.pcb-bar .zoom-grp .btn{min-width:26px;text-align:center;padding:3px 7px}
-    \\.pcb-bar .savemsg{font-size:12px;color:#3fb950;font-weight:600}
-    \\.pcb-bar .lay-active{font-size:12px;color:#58a6ff;font-weight:600;font-style:italic}
-    \\.pcb-bar .muted{font-size:11.5px;color:#6e7681}
+    \\.pcb-bar .savemsg{font-size:12px;color:#4cae54;font-weight:600}
+    \\.pcb-bar .lay-active{font-size:12px;color:#6ba1e8;font-weight:600;font-style:italic}
+    \\.pcb-bar .muted{font-size:11.5px;color:#85868d}
+    \\/* ── Board stage: tool strip · canvas · status bar ── */
+    \\.pcb-stage{flex:1;display:flex;min-height:0;margin-top:2px}
+    \\.pcb-toolstrip{width:36px;flex:none;display:flex;flex-direction:column;align-items:center;gap:3px;
+    \\  padding:6px 0;background:#232428;border:1px solid #2c2d31;border-right:0;border-radius:6px 0 0 6px}
+    \\.ts-btn{width:28px;height:28px;flex:none;display:flex;align-items:center;justify-content:center;
+    \\  font:600 13px system-ui,sans-serif;background:none;border:1px solid transparent;border-radius:5px;
+    \\  color:#b9bac1;cursor:pointer;padding:0}
+    \\.ts-btn:hover{background:#2f3035;border-color:#3a3b40;color:#f0f1f3}
+    \\.ts-btn.on,.ts-btn.active{background:rgba(90,143,214,.25);border-color:#5a8fd6;color:#f0f1f3}
+    \\.ts-sep{height:1px;width:20px;background:#3a3b40;margin:4px 0;flex:none}
+    \\.pcb-canvas-host{flex:1;min-width:0;display:flex;flex-direction:column;position:relative;overflow:hidden;
+    \\  border:1px solid #2c2d31;border-radius:0 6px 6px 0;background:#001023}
+    \\/* The scene (parts/pads/airwires/copper) is painted on the canvas; the
+    \\   transparent SVG above it carries pointer events + light overlays. */
+    \\.pcb-svg{flex:1;min-height:0;width:100%;display:block;background:transparent;
+    \\  touch-action:none;position:relative;z-index:1}
+    \\.pcb-scene{position:absolute;pointer-events:none;z-index:0}
+    \\/* ── KiCad status bar ── */
+    \\.pcb-status{height:26px;flex:none;display:flex;align-items:stretch;background:#232428;
+    \\  border-top:1px solid #2c2d31;font-size:11.5px;color:#9b9ca3;position:relative;z-index:2;overflow:hidden}
+    \\.st-seg{padding:0 9px;border-right:1px solid #2c2d31;display:inline-flex;align-items:center;gap:5px;
+    \\  white-space:nowrap;font-variant-numeric:tabular-nums}
+    \\.st-xy{min-width:158px}
+    \\.st-dxdy{min-width:120px;color:#d8a03c}
+    \\.st-spacer{flex:1}
+    \\.st-tool{color:#e3b341}
+    \\.st-hover{border-right:0;color:#d6d7db;max-width:38vw;overflow:hidden;text-overflow:ellipsis}
+    \\.st-btn{background:none;border:0;border-right:1px solid #2c2d31;cursor:pointer;color:#b9bac1;font:inherit}
+    \\.st-btn:hover{background:#2f3035;color:#f0f1f3}
+    \\#pcb-help{border-left:1px solid #2c2d31;border-right:0;min-width:26px;justify-content:center}
+    \\#st-layer-sw{width:11px;height:11px;border-radius:2px;display:inline-block;background:#C83434;flex:none}
+    \\.pcb-status select{font:inherit;font-size:11.5px;background:#1a1b1e;color:#d6d7db;border:1px solid #3a3b40;border-radius:4px;padding:0 2px}
+    \\/* ── Left dock (Properties · accordion · saved layouts · sub-circuits) ── */
+    \\.pcb-side{width:300px;flex:none;display:flex;flex-direction:column;min-height:0;overflow-y:auto;
+    \\  border:1px solid #2c2d31;border-radius:6px;background:#232428}
+    \\.side-h{font-size:13px;font-weight:600;padding:9px 12px;border-bottom:1px solid #2c2d31;position:sticky;top:0;background:#232428;color:#f0f1f3;z-index:1;flex:none}
+    \\.side-acc{border-top:1px solid #2c2d31;padding:8px 8px 10px;flex:none}
+    \\.side-acc .pcb-tabs{margin:0 0 6px}
+    \\.pcb-side .pcb-saved{border:0;border-top:1px solid #2c2d31;border-radius:0;background:transparent;flex:none}
+    \\/* ── Right dock: KiCad Appearance panel (Layers / Objects) ── */
     \\.pcb-rside{width:320px;flex:none;position:sticky;top:8px;max-height:calc(100vh - 16px);overflow:auto}
-    \\.pcb-saved{border:1px solid #21262d;border-radius:8px;background:#161b22;overflow:hidden}
-    \\.pcb-saved .saved-h{font-size:12px;font-weight:700;color:#f0f6fc;padding:8px 10px;background:#0d1117;border-bottom:1px solid #21262d;
+    \\.pcb-appear{position:static;width:236px;max-height:none;display:flex;flex-direction:column;min-height:0;overflow:hidden;
+    \\  border:1px solid #2c2d31;border-radius:6px;background:#232428}
+    \\.ap-tabs{display:flex;flex:none;border-bottom:1px solid #2c2d31}
+    \\.ap-tab{flex:1;font:inherit;font-size:12px;font-weight:600;padding:8px 0;background:none;border:0;
+    \\  border-bottom:2px solid transparent;color:#9b9ca3;cursor:pointer}
+    \\.ap-tab:hover{color:#d6d7db}
+    \\.ap-tab.active{color:#f0f1f3;border-bottom-color:#5a8fd6}
+    \\.ap-pane{flex:1;overflow-y:auto;padding:6px 0}
+    \\.ap-pane[hidden]{display:none}
+    \\.ap-row{display:flex;align-items:center;gap:8px;padding:5px 12px;font-size:12px;color:#d6d7db;cursor:pointer}
+    \\.ap-row:hover{background:#2b2c31}
+    \\.ap-lrow{display:flex;align-items:center;gap:8px;padding:4px 12px;font-size:12px;color:#d6d7db;cursor:pointer;
+    \\  border-left:3px solid transparent}
+    \\.ap-lrow:hover{background:#2b2c31}
+    \\.ap-lrow.cur{background:rgba(90,143,214,.22);border-left-color:#5a8fd6;color:#f0f1f3}
+    \\.ap-sw{width:14px;height:14px;border-radius:3px;flex:none;border:1px solid rgba(255,255,255,.18);display:inline-block}
+    \\.ap-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\.ap-eye{margin-left:auto;background:none;border:0;cursor:pointer;color:#b9bac1;font-size:13px;padding:0 2px;flex:none}
+    \\.ap-eye.off{opacity:.28}
+    \\.ap-h{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:#85868d;padding:8px 12px 4px}
+    \\/* ── Saved layouts ── */
+    \\.pcb-saved{border:1px solid #2c2d31;border-radius:8px;background:#232428;overflow:hidden}
+    \\.pcb-saved .saved-h{font-size:12px;font-weight:700;color:#f0f1f3;padding:8px 10px;background:#1e1f23;border-bottom:1px solid #2c2d31;
     \\  display:flex;align-items:center;justify-content:space-between;gap:8px}
-    \\.saved-rescore{font:inherit;font-size:11px;font-weight:600;border:1px solid #30363d;background:#21262d;color:#c9d1d9;
+    \\.saved-rescore{font:inherit;font-size:11px;font-weight:600;border:1px solid #3a3b40;background:#2c2d31;color:#d6d7db;
     \\  border-radius:5px;padding:2px 9px;cursor:pointer}
-    \\.saved-rescore:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
+    \\.saved-rescore:hover{background:#37383d;border-color:#5a8fd6;color:#f0f1f3}
     \\.saved-rescore:disabled{opacity:.5;cursor:default}
-    \\.pcb-saved .saved-n{color:#8b949e;font-weight:400}
-    \\.pcb-saved .saved-empty{font-size:12px;color:#8b949e;padding:10px;line-height:1.5}
+    \\.pcb-saved .saved-n{color:#9b9ca3;font-weight:400}
+    \\.pcb-saved .saved-empty{font-size:12px;color:#9b9ca3;padding:10px;line-height:1.5}
     \\.saved-list{display:flex;flex-direction:column}
-    \\.lay-row{display:flex;flex-direction:column;gap:5px;padding:8px 10px;border-bottom:1px solid #21262d;font-size:12px}
+    \\.lay-row{display:flex;flex-direction:column;gap:5px;padding:8px 10px;border-bottom:1px solid #2c2d31;font-size:12px}
     \\.lay-row:last-child{border-bottom:0}
     \\.lay-top{display:flex;gap:6px;align-items:center}
     \\.lay-bot{display:flex;gap:8px;align-items:center;justify-content:space-between}
     \\.lay-kind{font-size:9.5px;font-weight:700;border-radius:3px;padding:1px 5px;letter-spacing:.03em;flex:none}
-    \\.lay-kind.k-man{background:#14365c;color:#79c0ff}
-    \\.lay-kind.k-auto{background:#21262d;color:#8b949e}
-    \\.lay-name{font-weight:600;color:#e6edf3;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    \\.lay-cover{font-size:9.5px;font-weight:700;border-radius:3px;padding:1px 5px;flex:none;background:#3a2c12;color:#d29922;cursor:help}
-    \\.lay-score{color:#8b949e;font-size:11px;flex:1;min-width:0}
+    \\.lay-kind.k-man{background:#22344d;color:#8ab8f0}
+    \\.lay-kind.k-auto{background:#2c2d31;color:#9b9ca3}
+    \\.lay-name{font-weight:600;color:#e4e5e9;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\.lay-cover{font-size:9.5px;font-weight:700;border-radius:3px;padding:1px 5px;flex:none;background:#3a2c12;color:#d8a03c;cursor:help}
+    \\.lay-score{color:#9b9ca3;font-size:11px;flex:1;min-width:0}
     \\.lay-d{font-weight:600;min-width:36px;text-align:right;flex:none}
-    \\.lay-d.up{color:#f85149}
-    \\.lay-d.down{color:#3fb950}
+    \\.lay-d.up{color:#e05b4b}
+    \\.lay-d.down{color:#4cae54}
     \\.lay-actions{display:flex;gap:6px;flex:none}
-    \\.lay-row .btn{font:inherit;font-size:11px;border:1px solid #30363d;background:#21262d;border-radius:5px;padding:2px 8px;cursor:pointer;color:#c9d1d9}
-    \\.lay-row .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
-    \\.lay-row .lay-del{color:#f85149;border-color:#5b1e28;padding:2px 7px}
-    \\.lay-row .lay-del:hover{background:#30363d;border-color:#f85149;color:#ffa198}
-    \\.lay-row .lay-star{color:#8b949e;padding:2px 7px;line-height:1}
+    \\.lay-row .btn{font:inherit;font-size:11px;border:1px solid #3a3b40;background:#2c2d31;border-radius:5px;padding:2px 8px;cursor:pointer;color:#d6d7db}
+    \\.lay-row .btn:hover{background:#37383d;border-color:#5a8fd6;color:#f0f1f3}
+    \\.lay-row .lay-del{color:#e05b4b;border-color:#5b1e28;padding:2px 7px}
+    \\.lay-row .lay-del:hover{background:#37383d;border-color:#e05b4b;color:#ffa198}
+    \\.lay-row .lay-star{color:#9b9ca3;padding:2px 7px;line-height:1}
     \\.lay-row .lay-star:hover{color:#e3b341;border-color:#e3b341}
     \\.lay-row .lay-star.on{color:#e3b341;border-color:#7a5c12;background:#2b2410}
-    \\.lay-row.def{background:#13210f;box-shadow:inset 2px 0 0 #e3b341}
-    \\.lay-row.active{background:#0d1f2d;box-shadow:inset 2px 0 0 #58a6ff}
-    \\.lay-row.active.def{box-shadow:inset 2px 0 0 #58a6ff,inset 4px 0 0 #e3b341}
-    \\/* Collapsible control deck: a chip row toggles one panel at a time, so the
-    \\   default view is the toolbar + board instead of a stack of control strips. */
+    \\.lay-row.def{background:#1f2a1a;box-shadow:inset 2px 0 0 #e3b341}
+    \\.lay-row.active{background:#20304a;box-shadow:inset 2px 0 0 #6ba1e8}
+    \\.lay-row.active.def{box-shadow:inset 2px 0 0 #6ba1e8,inset 4px 0 0 #e3b341}
+    \\/* Collapsible control deck: a chip row toggles one panel at a time (in the
+    \\   left dock on the full page; above the board in the editable embed). */
     \\.pcb-tabs{display:flex;gap:6px;align-items:center;margin:6px 0 8px;flex-wrap:wrap}
-    \\.pcb-tabs .tab-chip{font:inherit;font-size:12px;border:1px solid #30363d;background:#161b22;color:#c9d1d9;
+    \\.pcb-tabs .tab-chip{font:inherit;font-size:12px;border:1px solid #3a3b40;background:#232428;color:#d6d7db;
     \\  border-radius:14px;padding:3px 12px;cursor:pointer}
-    \\.pcb-tabs .tab-chip:hover{background:#21262d;border-color:#58a6ff;color:#e6edf3}
-    \\.pcb-tabs .tab-chip.active{background:rgba(31,111,235,.22);border-color:#58a6ff;color:#e6edf3}
-    \\.pcb-tabs .tabs-sep{width:1px;height:18px;background:#30363d;margin:0 3px}
-    \\.pcb-tabs .view-chip{display:inline-flex;gap:5px;align-items:center;font-size:12px;color:#c9d1d9;
-    \\  border:1px solid #30363d;background:#161b22;border-radius:14px;padding:3px 11px;cursor:pointer}
-    \\.pcb-tabs .view-chip:hover{border-color:#58a6ff;color:#e6edf3}
-    \\.pcb-tabs .tab-chip.active{background:rgba(31,111,235,.22);border-color:#58a6ff;color:#e6edf3}
-    \\.pcb-tabs #pcb-grid-sel{font:inherit;font-size:12px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:1px 3px}
-    \\.pcb-layers-pop{position:absolute;z-index:40;background:#161b22;border:1px solid #30363d;border-radius:8px;
-    \\  padding:8px 12px;box-shadow:0 6px 20px rgba(0,0,0,.5);font-size:12px;color:#c9d1d9;min-width:150px}
+    \\.pcb-tabs .tab-chip:hover{background:#2c2d31;border-color:#5a8fd6;color:#f0f1f3}
+    \\.pcb-tabs .tab-chip.active{background:rgba(90,143,214,.25);border-color:#5a8fd6;color:#f0f1f3}
+    \\.pcb-tabs .tabs-sep{width:1px;height:18px;background:#3a3b40;margin:0 3px}
+    \\.pcb-tabs .view-chip{display:inline-flex;gap:5px;align-items:center;font-size:12px;color:#d6d7db;
+    \\  border:1px solid #3a3b40;background:#232428;border-radius:14px;padding:3px 11px;cursor:pointer}
+    \\.pcb-tabs .view-chip:hover{border-color:#5a8fd6;color:#f0f1f3}
+    \\.pcb-tabs #pcb-grid-sel{font:inherit;font-size:12px;background:#1a1b1e;color:#d6d7db;border:1px solid #3a3b40;border-radius:5px;padding:1px 3px}
+    \\.pcb-layers-pop{position:absolute;z-index:40;background:#232428;border:1px solid #3a3b40;border-radius:8px;
+    \\  padding:8px 12px;box-shadow:0 6px 20px rgba(0,0,0,.5);font-size:12px;color:#d6d7db;min-width:150px}
     \\.pcb-layers-pop[hidden]{display:none}
-    \\.pcb-layers-pop .lp-h{font-weight:700;color:#f0f6fc;margin:2px 0 6px}
+    \\.pcb-layers-pop .lp-h{font-weight:700;color:#f0f1f3;margin:2px 0 6px}
     \\.pcb-layers-pop label{display:flex;gap:6px;align-items:center;padding:2px 0;cursor:pointer}
-    \\.pcb-layers-pop .lp-sep{height:1px;background:#30363d;margin:6px 0}
+    \\.pcb-layers-pop .lp-sep{height:1px;background:#3a3b40;margin:6px 0}
     \\.pcb-layers-pop .lp-swatch{width:10px;height:10px;border-radius:2px;display:inline-block}
-    \\.pcb-layers-pop select{font:inherit;font-size:12px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:5px;padding:1px 4px}
+    \\.pcb-layers-pop select{font:inherit;font-size:12px;background:#1a1b1e;color:#d6d7db;border:1px solid #3a3b40;border-radius:5px;padding:1px 4px}
     \\.pcb-ruler-line{stroke:#e3b341;stroke-width:1.4;stroke-dasharray:4 3;pointer-events:none}
-    \\.pcb-ruler-lbl{fill:#e3b341;font-size:12px;font-weight:600;paint-order:stroke;stroke:#010409;stroke-width:3;pointer-events:none}
+    \\.pcb-ruler-lbl{fill:#e3b341;font-size:12px;font-weight:600;paint-order:stroke;stroke:#001023;stroke-width:3;pointer-events:none}
     \\svg.ruler-mode{cursor:crosshair}
-    \\.pcb-panel{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:8px 12px}
+    \\.pcb-panel{background:#1e1f23;border:1px solid #2c2d31;border-radius:8px;padding:8px 12px}
     \\.pcb-panel[hidden]{display:none}
-    \\.pcb-panel .btn{font:inherit;font-size:12px;border:1px solid #30363d;background:#21262d;border-radius:5px;
-    \\  padding:3px 9px;cursor:pointer;text-decoration:none;color:#c9d1d9;display:inline-block}
-    \\.pcb-panel .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
-    \\.heat-legend{display:flex;gap:9px;align-items:center;font-size:12px;color:#8b949e;margin:4px 0 12px;flex-wrap:wrap}
+    \\.pcb-panel .btn{font:inherit;font-size:12px;border:1px solid #3a3b40;background:#2c2d31;border-radius:5px;
+    \\  padding:3px 9px;cursor:pointer;text-decoration:none;color:#d6d7db;display:inline-block}
+    \\.pcb-panel .btn:hover{background:#37383d;border-color:#5a8fd6;color:#f0f1f3}
+    \\.heat-legend{display:flex;gap:9px;align-items:center;font-size:12px;color:#9b9ca3;margin:4px 0 8px;flex-wrap:wrap;flex:none}
     \\.heat-legend[hidden]{display:none}
-    \\.heat-legend .heat-h{font-weight:700;color:#f0f6fc}
-    \\.heat-legend .heat-lbl{font-size:11px;color:#8b949e}
-    \\.heat-legend .heat-bar{width:120px;height:10px;border-radius:5px;border:1px solid #30363d;
+    \\.heat-legend .heat-h{font-weight:700;color:#f0f1f3}
+    \\.heat-legend .heat-lbl{font-size:11px;color:#9b9ca3}
+    \\.heat-legend .heat-bar{width:120px;height:10px;border-radius:5px;border:1px solid #3a3b40;
     \\  background:linear-gradient(90deg,#15302a,#b8860b,#c0392b)}
-    \\.heat-legend .muted{font-size:11px;color:#6e7681}
-    \\.net-legend{display:flex;gap:10px;align-items:center;font-size:12px;color:#8b949e;margin:4px 0 12px;flex-wrap:wrap}
+    \\.heat-legend .muted{font-size:11px;color:#85868d}
+    \\.net-legend{display:flex;gap:10px;align-items:center;font-size:12px;color:#9b9ca3;margin:4px 0 8px;flex-wrap:wrap;flex:none}
     \\.net-legend[hidden]{display:none}
-    \\.net-legend .net-h{font-weight:700;color:#f0f6fc}
-    \\.net-legend .net-sw{display:inline-flex;gap:5px;align-items:center;font-size:11px;color:#c9d1d9}
-    \\.net-legend .net-sw i{width:13px;height:13px;border-radius:3px;border:1px solid #30363d;display:inline-block}
-    \\.net-legend .muted{font-size:11px;color:#6e7681}
+    \\.net-legend .net-h{font-weight:700;color:#f0f1f3}
+    \\.net-legend .net-sw{display:inline-flex;gap:5px;align-items:center;font-size:11px;color:#d6d7db}
+    \\.net-legend .net-sw i{width:13px;height:13px;border-radius:3px;border:1px solid #3a3b40;display:inline-block}
+    \\.net-legend .muted{font-size:11px;color:#85868d}
     \\.pcb-legend[hidden]{display:none}
-    \\.pcb-tune{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#8b949e}
-    \\.pcb-tune .tune-h{font-weight:700;color:#f0f6fc}
+    \\.pcb-tune{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#9b9ca3}
+    \\.pcb-tune .tune-h{font-weight:700;color:#f0f1f3}
     \\.pcb-tune label{display:flex;gap:4px;align-items:center}
-    \\.pcb-tune input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #30363d;
-    \\  background:#0d1117;color:#c9d1d9;border-radius:4px;padding:2px 4px}
-    \\.pcb-tune .muted{font-size:11px;color:#6e7681}
+    \\.pcb-tune input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #3a3b40;
+    \\  background:#1a1b1e;color:#d6d7db;border-radius:4px;padding:2px 4px}
+    \\.pcb-tune .muted{font-size:11px;color:#85868d}
     \\.pcb-scoreview .sv-row{display:flex;gap:3px;align-items:center}
     \\.pcb-scoreview .sv-wl{gap:1px}
     \\.pcb-scoreview input[type=number]{width:44px}
     \\.pcb-scoreview .sc-readout{flex-basis:100%;display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
-    \\.sc-readout .score{font-weight:600;color:#e6edf3;background:#161b22;border:1px solid #21262d;border-radius:4px;padding:2px 8px}
-    \\.sc-readout .sc-sub{font-weight:500;font-size:12px;color:#8b949e;background:#0d1117}
+    \\.sc-readout .score{font-weight:600;color:#e4e5e9;background:#232428;border:1px solid #2c2d31;border-radius:4px;padding:2px 8px}
+    \\.sc-readout .sc-sub{font-weight:500;font-size:12px;color:#9b9ca3;background:#1a1b1e}
     \\.sc-readout .delta{font-size:12px;font-weight:600;min-width:30px}
-    \\.sc-readout .delta.up{color:#f85149}
-    \\.sc-readout .delta.down{color:#3fb950}
+    \\.sc-readout .delta.up{color:#e05b4b}
+    \\.sc-readout .delta.down{color:#4cae54}
     \\.sc-readout .sc-off{opacity:.35;text-decoration:line-through}
-    \\.pcb-route{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#8b949e}
-    \\.pcb-route .tune-h{font-weight:700;color:#f0f6fc}
+    \\.pcb-route{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#9b9ca3}
+    \\.pcb-route .tune-h{font-weight:700;color:#f0f1f3}
     \\.pcb-route label{display:flex;gap:4px;align-items:center}
-    \\.pcb-route input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #30363d;
-    \\  background:#0d1117;color:#c9d1d9;border-radius:4px;padding:2px 4px}
-    \\.pcb-route .muted{font-size:11px;color:#6e7681}
+    \\.pcb-route input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #3a3b40;
+    \\  background:#1a1b1e;color:#d6d7db;border-radius:4px;padding:2px 4px}
+    \\.pcb-route .muted{font-size:11px;color:#85868d}
     \\.pcb-route .route-stat{font-weight:600}
-    \\.pcb-route .route-stat.ok{color:#3fb950}
-    \\.pcb-route .route-stat.warn{color:#f85149}
-    \\.pcb-route .route-stat.err{color:#fff;background:#da3633;border-radius:4px;padding:1px 7px}
-    \\.pcb-legend{display:flex;gap:14px;align-items:center;font-size:12px;color:#8b949e;margin:4px 0 12px;flex-wrap:wrap}
+    \\.pcb-route .route-stat.ok{color:#4cae54}
+    \\.pcb-route .route-stat.warn{color:#e05b4b}
+    \\.pcb-route .route-stat.err{color:#fff;background:#b23c30;border-radius:4px;padding:1px 7px}
+    \\.pcb-legend{display:flex;gap:14px;align-items:center;font-size:12px;color:#9b9ca3;margin:4px 0 8px;flex-wrap:wrap;flex:none}
     \\.pcb-legend .sw{display:inline-block;width:18px;height:0;border-top-width:3px;border-top-style:solid;vertical-align:middle}
     \\.pcb-legend .sw.prox{border-color:#ea580c}
     \\.pcb-legend .sw.gnd{border-color:#22b8cf}
     \\.pcb-legend .sw.l2gnd{border-color:#58a6ff;border-top-style:dashed}
-    \\.pcb-legend .sw.viadot{border:0;height:9px;width:9px;border-radius:50%;background:radial-gradient(circle,#fff 0 1.5px,#ca8a04 1.5px)}
-    \\.pcb-legend .sw.sig{border-color:#9aa7b4}
-    \\.pcb-legend .note{color:#d29922}
-    \\/* The scene (parts/pads/airwires/copper) is painted on the canvas; the
-    \\   transparent SVG above it carries pointer events + light overlays. */
-    \\.pcb-svg{background:transparent;border:1px solid #30363d;border-radius:8px;max-width:100%;height:auto;
-    \\  touch-action:none;position:relative;z-index:1}
-    \\.pcb-scene{position:absolute;pointer-events:none;z-index:0;border-radius:8px}
+    \\.pcb-legend .sw.viadot{border:0;height:9px;width:9px;border-radius:50%;background:radial-gradient(circle,#001023 0 1.5px,#B2B27A 1.5px)}
+    \\.pcb-legend .sw.sig{border-color:rgba(255,255,255,.55)}
+    \\.pcb-legend .note{color:#d8a03c}
     \\.pcb-ref{font:600 9px system-ui,sans-serif;text-anchor:middle;pointer-events:none;user-select:none}
     \\.part{cursor:grab}
     \\/* Highlights are plain strokes — SVG drop-shadow filters forced slow
     \\   repaints of everything under them on every hover/drag. */
-    \\.part.hl .court{stroke:#58a6ff!important;stroke-width:2!important}
-    \\.part.sel .court{stroke:#58a6ff!important;stroke-width:2.4!important}
+    \\.part.hl .court{stroke:#ffffff!important;stroke-width:2!important}
+    \\.part.sel .court{stroke:#ffffff!important;stroke-width:2.4!important}
     \\.part.msel .court{stroke:#d2a8ff!important;stroke-width:2!important}
-    \\/* Bottom-side (B.Cu) parts: blue body wash + blue pads, KiCad-style. The
+    \\/* Bottom-side (B.Cu) parts: blue pads carry the signal (KiCad); the
     \\   geometry itself is mirrored by setT (scale(-1,1) inside the rotation). */
-    \\.part.botside .court{fill:#122036}
-    \\.padset.botside .pad{fill:#5b8dd6}
+    \\.part.botside .court{fill:none}
+    \\.padset.botside .pad{fill:#4D7FC4}
     \\/* Locked parts refuse drag/rotate/flip — dashed outline + no grab cursor. */
     \\.part.plocked{cursor:not-allowed}
     \\.part.plocked .court{stroke-dasharray:2 2!important;opacity:.92}
     \\/* Outline-draw mode: crosshair + a lit toolbar button while armed. */
     \\.pcb-svg.outline-mode{cursor:crosshair}
     \\.pcb-svg.text-mode{cursor:text}
-    \\#pcb-outline.on{color:#7ee787;border-color:#2ea043;box-shadow:0 0 0 1px #2ea04366}
+    \\#pcb-outline.on,#pcb-outline-poly.on{color:#7ee787;border-color:#2ea043;box-shadow:0 0 0 1px #2ea04366}
     \\#pcb-draw.on{color:#f0c674;border-color:#b08800;box-shadow:0 0 0 1px #b0880066}
     \\#pcb-text.on{color:#d6a94e;border-color:#b08800;box-shadow:0 0 0 1px #b0880066}
     \\/* Rigid sub-circuit hover: every member of the group glows together, so
     \\   "this whole block drags as one" is visible before you grab it. */
     \\.part.grp-hl .court{stroke:#7ee787!important;stroke-width:2!important}
     \\/* Sub-circuits palette (sidebar): one row per sub-block. */
-    \\.sub-panel{border-top:1px solid #21262d}
+    \\.sub-panel{border-top:1px solid #2c2d31;flex:none}
     \\.sub-row{display:flex;align-items:center;gap:6px;padding:5px 12px;font-size:12px}
-    \\.sub-row:hover{background:#1c2129}
-    \\.sub-row.cur{background:#0d1f2d;box-shadow:inset 2px 0 0 #58a6ff}
-    \\.sub-name{color:#e6edf3;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    \\a.sub-name:hover,a.grp-name:hover{color:#58a6ff;text-decoration:underline}
-    \\.sub-n{color:#6e7681;font-size:11px}
-    \\.sub-rigid,.sub-stamp{background:#21262d;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;
+    \\.sub-row:hover{background:#2b2c31}
+    \\.sub-row.cur{background:#20304a;box-shadow:inset 2px 0 0 #6ba1e8}
+    \\.sub-name{color:#e4e5e9;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\a.sub-name:hover,a.grp-name:hover{color:#6ba1e8;text-decoration:underline}
+    \\.sub-n{color:#85868d;font-size:11px}
+    \\.sub-rigid,.sub-stamp{background:#2c2d31;border:1px solid #3a3b40;border-radius:4px;color:#d6d7db;
     \\  font-size:11px;padding:1px 7px;cursor:pointer}
     \\.sub-rigid.on{color:#7ee787;border-color:#2ea04366}
-    \\.sub-stamp:hover,.sub-rigid:hover{border-color:#58a6ff}
-    \\.sub-cov{color:#d29922;font-size:10.5px;font-weight:600;cursor:help}
-    \\.sub-noseed{color:#6e7681;font-size:11px;cursor:help;padding:1px 7px}
+    \\.sub-stamp:hover,.sub-rigid:hover{border-color:#5a8fd6}
+    \\.sub-cov{color:#d8a03c;font-size:10.5px;font-weight:600;cursor:help}
+    \\.sub-noseed{color:#85868d;font-size:11px;cursor:help;padding:1px 7px}
     \\/* Properties panel: the selected part's sub-circuit row (+ per-part Stamp). */
     \\.prop-grp{display:flex;align-items:center;gap:8px;padding:6px 14px;font-size:12px;flex-wrap:wrap}
     \\.grp-name{color:#7ee787;font-weight:600}
-    \\.grp-n{color:#6e7681;font-size:11px}
-    \\.grp-stamp{background:#21262d;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;
+    \\.grp-n{color:#85868d;font-size:11px}
+    \\.grp-stamp{background:#2c2d31;border:1px solid #3a3b40;border-radius:4px;color:#d6d7db;
     \\  font-size:11px;padding:1px 7px;cursor:pointer}
-    \\.grp-stamp:hover{border-color:#58a6ff}
-    \\.grp-noseed{color:#6e7681;font-size:11px;cursor:help}
-    \\.marquee{fill:rgba(88,166,255,.12);stroke:#58a6ff;stroke-width:1;stroke-dasharray:4 3;vector-effect:non-scaling-stroke;pointer-events:none}
+    \\.grp-stamp:hover{border-color:#5a8fd6}
+    \\.grp-noseed{color:#85868d;font-size:11px;cursor:help}
+    \\.marquee{fill:rgba(90,143,214,.12);stroke:#5a8fd6;stroke-width:1;stroke-dasharray:4 3;vector-effect:non-scaling-stroke;pointer-events:none}
     \\.pad[data-net]{cursor:pointer}
     \\.pad.net-hl{fill:#f85149}
     \\.pn.net-hl{background:#5b1e28;color:#ffa198}
@@ -5742,27 +5972,24 @@ const PAGE_CSS =
     \\   glow instead of gold, so you can see exactly which pad each cap decouples. */
     \\.pad.net-sel-pin{stroke:#f85149;stroke-width:1.8;paint-order:stroke}
     \\.pn.net-sel{background:#3a2e07;color:#ffd33d;box-shadow:0 0 0 1px #ffd33d}
-    \\.pcb-side{width:288px;flex:none;position:sticky;top:8px;max-height:calc(100vh - 16px);
-    \\  overflow:auto;border:1px solid #21262d;border-radius:8px;background:#161b22}
-    \\.side-h{font-size:13px;font-weight:600;padding:10px 12px;border-bottom:1px solid #21262d;position:sticky;top:0;background:#161b22;color:#f0f6fc}
-    \\.prop-empty{padding:16px 14px;color:#8b949e;line-height:1.55;font-size:12.5px}
-    \\.prop-empty-n{display:inline-block;margin-top:6px;color:#6e7681;font-size:11.5px}
-    \\.prop-head{display:flex;align-items:baseline;gap:8px;padding:11px 12px;border-bottom:1px solid #21262d}
-    \\.prop-ref{font-weight:700;font-size:16px;color:#f0f6fc}
-    \\.prop-val{font-size:12.5px;color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    \\.prop-rows{padding:7px 12px;border-bottom:1px solid #21262d}
+    \\.prop-empty{padding:16px 14px;color:#9b9ca3;line-height:1.55;font-size:12.5px}
+    \\.prop-empty-n{display:inline-block;margin-top:6px;color:#85868d;font-size:11.5px}
+    \\.prop-head{display:flex;align-items:baseline;gap:8px;padding:11px 12px;border-bottom:1px solid #2c2d31}
+    \\.prop-ref{font-weight:700;font-size:16px;color:#f0f1f3}
+    \\.prop-val{font-size:12.5px;color:#9b9ca3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    \\.prop-rows{padding:7px 12px;border-bottom:1px solid #2c2d31}
     \\.prop-row{display:flex;justify-content:space-between;gap:10px;padding:2.5px 0;font-size:12px}
-    \\.prop-row .k{color:#8b949e}
-    \\.prop-row .v{color:#e6edf3;font-variant-numeric:tabular-nums;text-align:right}
-    \\.prop-fp{display:block;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid #21262d;
-    \\  padding:8px 12px;cursor:pointer;font-family:inherit;font-size:11px;color:#6e7681}
-    \\.prop-fp:hover{color:#58a6ff;text-decoration:underline}
-    \\.prop-sec{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:#6e7681;padding:9px 12px 5px}
+    \\.prop-row .k{color:#9b9ca3}
+    \\.prop-row .v{color:#e4e5e9;font-variant-numeric:tabular-nums;text-align:right}
+    \\.prop-fp{display:block;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid #2c2d31;
+    \\  padding:8px 12px;cursor:pointer;font-family:inherit;font-size:11px;color:#85868d}
+    \\.prop-fp:hover{color:#6ba1e8;text-decoration:underline}
+    \\.prop-sec{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:#85868d;padding:9px 12px 5px}
     \\.prop-pins{display:flex;flex-wrap:wrap;gap:4px 5px;padding:0 12px 11px}
-    \\.prop-sch{display:block;padding:10px 12px;font-size:12px;color:#58a6ff;border-top:1px solid #21262d}
+    \\.prop-sch{display:block;padding:10px 12px;font-size:12px;color:#6ba1e8;border-top:1px solid #2c2d31}
     \\.prop-sch:hover{text-decoration:underline}
-    \\.pn{font-size:11px;color:#c9d1d9;background:#21262d;border-radius:3px;padding:0 5px;white-space:nowrap}
-    \\.pn b{color:#e6edf3;font-weight:600;margin-right:3px}
+    \\.pn{font-size:11px;color:#d6d7db;background:#2c2d31;border-radius:3px;padding:0 5px;white-space:nowrap}
+    \\.pn b{color:#e4e5e9;font-weight:600;margin-right:3px}
     \\.part.focus-flash .court{stroke:#f0b72f!important;stroke-width:2.6!important;animation:partflash .55s ease-in-out 4}
     \\@keyframes partflash{50%{stroke-opacity:0.25}}
     \\/* Parts the placement spec didn't list (auto-staged): flag them red, and
@@ -5771,96 +5998,99 @@ const PAGE_CSS =
     \\.part.unplaced .pcb-ref{fill:#f85149!important}
     \\.unplaced-box{fill:rgba(248,81,73,.05);stroke:#f85149;stroke-width:1.4;stroke-dasharray:7 5}
     \\.unplaced-lbl{fill:#f85149;font:700 11px system-ui,sans-serif}
-    \\.kbd-overlay{position:fixed;inset:0;background:rgba(1,4,9,0.72);z-index:340;display:flex;align-items:center;justify-content:center}
-    \\.kbd-box{background:#161b22;border:1px solid #30363d;border-radius:10px;min-width:320px;max-width:480px;
+    \\.kbd-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.66);z-index:340;display:flex;align-items:center;justify-content:center}
+    \\.kbd-box{background:#232428;border:1px solid #3a3b40;border-radius:10px;min-width:320px;max-width:480px;
     \\  padding:18px 22px;box-shadow:0 16px 48px rgba(0,0,0,0.7)}
-    \\.kbd-box h3{margin:0 0 12px;font-size:15px;color:#f0f6fc}
-    \\.kbd-row{display:flex;justify-content:space-between;gap:18px;padding:4px 0;font-size:13px;color:#c9d1d9}
-    \\.kbd-row kbd{background:#21262d;border:1px solid #30363d;border-bottom-width:2px;border-radius:4px;
-    \\  padding:1px 7px;font-family:ui-monospace,monospace;font-size:11.5px;color:#79c0ff;white-space:nowrap}
-    \\.kbd-hint{margin-top:12px;font-size:11.5px;color:#6e7681}
-    \\.court-modal{position:fixed;inset:0;background:rgba(1,4,9,0.7);display:flex;
+    \\.kbd-box h3{margin:0 0 12px;font-size:15px;color:#f0f1f3}
+    \\.kbd-row{display:flex;justify-content:space-between;gap:18px;padding:4px 0;font-size:13px;color:#d6d7db}
+    \\.kbd-row kbd{background:#2c2d31;border:1px solid #3a3b40;border-bottom-width:2px;border-radius:4px;
+    \\  padding:1px 7px;font-family:ui-monospace,monospace;font-size:11.5px;color:#8ab8f0;white-space:nowrap}
+    \\.kbd-hint{margin-top:12px;font-size:11.5px;color:#85868d}
+    \\.court-modal{position:fixed;inset:0;background:rgba(0,0,0,0.64);display:flex;
     \\  align-items:center;justify-content:center;z-index:200}
     \\.court-modal[hidden]{display:none}
-    \\.court-dialog{background:#161b22;border:1px solid #30363d;color:#c9d1d9;border-radius:10px;padding:16px 18px;width:320px;
+    \\.court-dialog{background:#232428;border:1px solid #3a3b40;color:#d6d7db;border-radius:10px;padding:16px 18px;width:320px;
     \\  box-shadow:0 12px 40px rgba(0,0,0,0.5);font-family:system-ui,sans-serif}
     \\.court-h{display:flex;align-items:center;justify-content:space-between;font-weight:600;
-    \\  color:#f0f6fc;font-size:14px;margin-bottom:8px}
-    \\.court-x{border:0;background:none;font-size:20px;line-height:1;cursor:pointer;color:#8b949e}
-    \\.court-svg{width:100%;height:240px;background:#010409;border-radius:6px;display:block;touch-action:none}
-    \\.court-mode{display:flex;gap:14px;align-items:center;margin:10px 0 4px;font-size:12px;color:#c9d1d9}
+    \\  color:#f0f1f3;font-size:14px;margin-bottom:8px}
+    \\.court-x{border:0;background:none;font-size:20px;line-height:1;cursor:pointer;color:#9b9ca3}
+    \\.court-svg{width:100%;height:240px;background:#001023;border-radius:6px;display:block;touch-action:none}
+    \\.court-mode{display:flex;gap:14px;align-items:center;margin:10px 0 4px;font-size:12px;color:#d6d7db}
     \\.court-mode label{display:flex;gap:4px;align-items:center;cursor:pointer}
-    \\.court-fields{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:4px 0 4px;font-size:12px;color:#c9d1d9}
+    \\.court-fields{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:4px 0 4px;font-size:12px;color:#d6d7db}
     \\.court-fields[hidden]{display:none}
-    \\.court-fields input{width:64px;font:inherit;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:2px 4px}
-    \\.court-full{color:#8b949e;font-size:12px;margin:2px 0 8px}
-    \\.court-note{font-size:11px;color:#6e7681;line-height:1.4;margin-bottom:10px}
+    \\.court-fields input{width:64px;font:inherit;background:#1a1b1e;border:1px solid #3a3b40;color:#d6d7db;border-radius:4px;padding:2px 4px}
+    \\.court-full{color:#9b9ca3;font-size:12px;margin:2px 0 8px}
+    \\.court-note{font-size:11px;color:#85868d;line-height:1.4;margin-bottom:10px}
     \\.court-actions{display:flex;gap:8px;align-items:center}
-    \\.court-dialog .btn{font:inherit;font-size:12px;border:1px solid #30363d;background:#21262d;
-    \\  border-radius:5px;padding:4px 11px;cursor:pointer;color:#c9d1d9}
-    \\.court-dialog .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
+    \\.court-dialog .btn{font:inherit;font-size:12px;border:1px solid #3a3b40;background:#2c2d31;
+    \\  border-radius:5px;padding:4px 11px;cursor:pointer;color:#d6d7db}
+    \\.court-dialog .btn:hover{background:#37383d;border-color:#5a8fd6;color:#f0f1f3}
     \\.court-dialog .btn:disabled{opacity:.45;cursor:default}
     \\.fab-dialog{width:440px;max-width:92vw}
     \\.fab-body{max-height:52vh;overflow-y:auto;margin-bottom:10px;font-size:12.5px;line-height:1.45}
     \\.fab-body .fab-sec{font-weight:600;margin:8px 0 4px}
-    \\.fab-body .fab-sec.err{color:#f85149}
-    \\.fab-body .fab-sec.warn{color:#d29922}
-    \\.fab-body .fab-sec.ok{color:#3fb950}
+    \\.fab-body .fab-sec.err{color:#e05b4b}
+    \\.fab-body .fab-sec.warn{color:#d8a03c}
+    \\.fab-body .fab-sec.ok{color:#4cae54}
     \\.fab-body ul{margin:0 0 6px;padding-left:18px}
-    \\.fab-body li{margin:2px 0;color:#c9d1d9}
-    \\.fab-body li code{background:#0d1117;border:1px solid #21262d;border-radius:3px;padding:0 4px;color:#79c0ff}
-    \\.fab-body .fab-stats{color:#8b949e;font-size:11.5px;margin-top:8px;border-top:1px solid #21262d;padding-top:6px}
-    \\.court-dialog .btn.fab-danger{border-color:#f85149;color:#ff9d95}
-    \\.court-dialog .btn.fab-danger:hover{background:#3d1417;border-color:#f85149;color:#ffb3ab}
-    \\.pcb-3d-stage{display:none;position:relative;width:100%;height:calc(100vh - 150px);min-height:460px;
-    \\  background:#010409;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+    \\.fab-body li{margin:2px 0;color:#d6d7db}
+    \\.fab-body li code{background:#1a1b1e;border:1px solid #2c2d31;border-radius:3px;padding:0 4px;color:#8ab8f0}
+    \\.fab-body .fab-stats{color:#9b9ca3;font-size:11.5px;margin-top:8px;border-top:1px solid #2c2d31;padding-top:6px}
+    \\.court-dialog .btn.fab-danger{border-color:#e05b4b;color:#ff9d95}
+    \\.court-dialog .btn.fab-danger:hover{background:#3d1417;border-color:#e05b4b;color:#ffb3ab}
+    \\.pcb-3d-stage{display:none;position:relative;width:100%;flex:1;min-height:320px;
+    \\  background:#001023;border:1px solid #2c2d31;border-radius:8px;overflow:hidden}
     \\body.mode-3d .pcb-3d-stage{display:block}
     \\.pcb-3d-stage canvas{display:block;width:100%;height:100%;touch-action:none}
-    \\#pcb-3d-status{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#8b949e;
-    \\  font-size:13px;background:rgba(13,17,23,.8);padding:6px 12px;border-radius:6px}
-    \\#pcb-3d-status.err{color:#f85149}
+    \\#pcb-3d-status{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#9b9ca3;
+    \\  font-size:13px;background:rgba(26,27,30,.8);padding:6px 12px;border-radius:6px}
+    \\#pcb-3d-status.err{color:#e05b4b}
     \\.pcb-3d-tools{position:absolute;top:10px;right:10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;
-    \\  background:rgba(22,27,34,.85);border:1px solid #30363d;border-radius:6px;padding:5px 8px;font-size:12px;color:#8b949e}
-    \\.pcb-3d-tools .btn{font:inherit;font-size:12px;border:1px solid #30363d;background:#21262d;border-radius:5px;
-    \\  padding:3px 9px;cursor:pointer;color:#c9d1d9}
-    \\.pcb-3d-tools .btn:hover{background:#30363d;border-color:#58a6ff;color:#e6edf3}
+    \\  background:rgba(35,36,40,.88);border:1px solid #3a3b40;border-radius:6px;padding:5px 8px;font-size:12px;color:#9b9ca3}
+    \\.pcb-3d-tools .btn{font:inherit;font-size:12px;border:1px solid #3a3b40;background:#2c2d31;border-radius:5px;
+    \\  padding:3px 9px;cursor:pointer;color:#d6d7db}
+    \\.pcb-3d-tools .btn:hover{background:#37383d;border-color:#5a8fd6;color:#f0f1f3}
     \\.pcb-3d-tools label{display:flex;gap:3px;align-items:center;cursor:pointer}
-    \\.pcb-3d-tools .sep{width:1px;height:16px;background:#30363d}
-    \\body.mode-3d .pcb-svg,body.mode-3d .pcb-tune,body.mode-3d .pcb-route,body.mode-3d .pcb-tabs,
-    \\body.mode-3d .pcb-panel,body.mode-3d .heat-legend,body.mode-3d .net-legend,
-    \\body.mode-3d .pcb-legend,body.mode-3d .pcb-note,body.mode-3d .pcb-bar{display:none}
+    \\.pcb-3d-tools .sep{width:1px;height:16px;background:#3a3b40}
+    \\/* 3D mode hides the 2D stage + the MAIN column's control rows only — the
+    \\   docked sidebars (accordion panels included) stay usable. */
+    \\body.mode-3d .pcb-stage,body.mode-3d .pcb-main .pcb-tune,body.mode-3d .pcb-main .pcb-route,
+    \\body.mode-3d .pcb-main .pcb-tabs,body.mode-3d .pcb-main .pcb-panel,body.mode-3d .heat-legend,
+    \\body.mode-3d .net-legend,body.mode-3d .pcb-legend,body.mode-3d .pcb-note,body.mode-3d .pcb-bar{display:none}
     \\/* Live-regen status card — floats over the top of the board (pointer-events
     \\   off) so the optimizer's best-so-far arrangement stays fully visible and
     \\   animating underneath while it converges. */
     \\.pcb-live{position:fixed;top:68px;left:50%;transform:translateX(-50%);z-index:300;pointer-events:none}
-    \\.pcb-live-card{display:flex;align-items:center;gap:10px;background:rgba(13,17,23,.92);
-    \\  border:1px solid #30363d;border-radius:9px;padding:9px 15px;box-shadow:0 4px 18px rgba(0,0,0,.45);
-    \\  font-size:13px;color:#e6edf3;max-width:90vw}
-    \\.pcb-live-spin{width:15px;height:15px;border:2px solid #30363d;border-top-color:#58a6ff;
+    \\.pcb-live-card{display:flex;align-items:center;gap:10px;background:rgba(30,31,35,.94);
+    \\  border:1px solid #3a3b40;border-radius:9px;padding:9px 15px;box-shadow:0 4px 18px rgba(0,0,0,.45);
+    \\  font-size:13px;color:#e4e5e9;max-width:90vw}
+    \\.pcb-live-spin{width:15px;height:15px;border:2px solid #3a3b40;border-top-color:#5a8fd6;
     \\  border-radius:50%;animation:pcb-live-rot .8s linear infinite;flex:0 0 auto}
-    \\.pcb-live.err .pcb-live-spin{border-top-color:#f85149;animation:none}
-    \\.pcb-live.done .pcb-live-spin{border-top-color:#3fb950;animation:none}
+    \\.pcb-live.err .pcb-live-spin{border-top-color:#e05b4b;animation:none}
+    \\.pcb-live.done .pcb-live-spin{border-top-color:#4cae54;animation:none}
     \\.pcb-live-msg{font-weight:600}
-    \\.pcb-live-sub{color:#8b949e;font-size:12px;font-variant-numeric:tabular-nums}
+    \\.pcb-live-sub{color:#9b9ca3;font-size:12px;font-variant-numeric:tabular-nums}
     \\@keyframes pcb-live-rot{to{transform:rotate(360deg)}}
-    \\/* Touch: the board owns its gestures (one finger pans, two pinch-zoom —
-    \\   see BOARD_JS) — without this the browser scrolls/zooms the page instead
-    \\   and every touch drag dies as a pointercancel. */
-    \\.pcb-svg{touch-action:none}
-    \\/* Phone / narrow-tablet layout: the three columns (board · saved layouts ·
-    \\   findings sidebar) stack vertically — board first, panels below — and the
-    \\   sidebars lose their sticky/viewport-height framing. Buttons and chips get
-    \\   finger-sized padding. */
+    \\/* Phone / narrow-tablet layout: the columns stack vertically — board first,
+    \\   panels below — the app-frame height unlocks, the tool strip turns into a
+    \\   horizontal row above the canvas, and buttons get finger-sized padding.
+    \\   Touch gestures: the board owns them (one finger pans, two pinch-zoom). */
     \\@media (max-width:920px){
-    \\  .pcb-layout{flex-direction:column;gap:12px;padding:8px 10px}
-    \\  /* Stack order: board first, then the part-properties panel (it fills on
-    \\     tap), then the saved-layouts history — regardless of DOM order (the
-    \\     properties aside precedes the board for the desktop left column). */
-    \\  .pcb-main{width:100%;order:1}
+    \\  .pcb-layout{flex-direction:column;gap:12px;padding:8px 10px;height:auto;min-height:0}
+    \\  .pcb-main{width:100%;order:1;overflow:visible}
     \\  .pcb-side{order:2}
     \\  .pcb-rside{order:3}
-    \\  .pcb-rside,.pcb-side{width:100%;position:static;max-height:none}
+    \\  .pcb-rside,.pcb-side,.pcb-appear{width:100%;position:static;max-height:60vh}
+    \\  .pcb-stage{height:64vh;flex-direction:column}
+    \\  .pcb-toolstrip{width:auto;flex-direction:row;justify-content:center;gap:6px;padding:3px 6px;
+    \\    border:1px solid #2c2d31;border-bottom:0;border-radius:6px 6px 0 0}
+    \\  .ts-sep{width:1px;height:20px;margin:0 4px;align-self:center}
+    \\  .pcb-canvas-host{border-radius:0 0 6px 6px}
+    \\  .pcb-status{flex-wrap:nowrap;overflow-x:auto}
+    \\  .st-xy,.st-dxdy{min-width:0}
     \\  .pcb-bar .btn,.pcb-panel .btn,.pcb-tabs .tab-chip,.pcb-tabs .view-chip{padding:6px 12px}
+    \\  .ts-btn{width:34px;height:34px}
     \\  .pcb-bar{gap:8px}
     \\  .pcb-bar .score{min-width:0}
     \\  .pcb-head h1{font-size:16px}
@@ -5872,10 +6102,13 @@ const PAGE_CSS =
 /// the `embed` class. Strips outer padding, lets the board fill the frame
 /// width, and drops the grab cursor (no dragging in the read-only preview).
 const EMBED_CSS =
-    \\body.embed .pcb-layout{padding:8px 10px;max-width:none}
+    \\body.embed .pcb-layout{padding:8px 10px;max-width:none;height:auto;min-height:0}
     \\body.embed .pcb-bar{margin:4px 0}
     \\body.embed .pcb-route{margin:2px 0 6px}
     \\body.embed .pcb-svg{width:100%}
+    \\/* Embeds live inside an iframe: no app-frame lock, the stage takes the
+    \\   frame height minus the bar/route rows (100vh = the iframe itself). */
+    \\body.embed .pcb-stage{height:calc(100vh - 140px);min-height:240px;flex:none}
     \\body.embed:not(.embed-edit) .part{cursor:default}
     \\body.embed-edit .part{cursor:grab}
 ;
