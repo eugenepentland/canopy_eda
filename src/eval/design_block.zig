@@ -103,6 +103,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var rough_spec: env_mod.RoughSpec = .{};
     var stackup_spec: env_mod.StackupSpec = .{};
     var net_class_specs: std.ArrayListUnmanaged(env_mod.NetClassSpec) = .empty;
+    var design_rules_spec: env_mod.DesignRulesSpec = .{};
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
 
@@ -210,6 +211,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
             .stackup => stackup_spec = try parseStackup(self, form_children),
             .net_class => if (try parseNetClass(self, form_children)) |nc|
                 net_class_specs.append(self.allocator, nc) catch return EvalError.OutOfMemory,
+            .design_rules => design_rules_spec = parseDesignRules(self, form_children),
             // Section-only forms are ignored at the top level — a
             // design-block body shouldn't carry status/description/pins
             // directly. The exhaustive switch is the contract; the warning
@@ -255,6 +257,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .rough = rough_spec,
         .stackup = stackup_spec,
         .net_classes = net_class_specs.toOwnedSlice(self.allocator) catch &.{},
+        .design_rules = design_rules_spec,
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -841,6 +844,7 @@ fn evalSection(
             .rough,
             .stackup,
             .net_class,
+            .design_rules,
             => {
                 self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name});
             },
@@ -1774,6 +1778,39 @@ fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_m
     return spec;
 }
 
+/// Parse a top-level `(design-rules (clearance MM) (min-drill MM)
+/// (mask-margin MM) (copper-edge MM) (hole-to-hole MM) (min-annular MM))`
+/// form into a `DesignRulesSpec`. Every sub-form is optional; an unset field
+/// stays 0 so the consumer falls back to its built-in default. `present` is
+/// set whenever the form appears (even empty), so a bare `(design-rules)` is a
+/// harmless no-op rather than an error.
+fn parseDesignRules(self: *Evaluator, form_children: []const Node) env_mod.DesignRulesSpec {
+    var spec = env_mod.DesignRulesSpec{ .present = true };
+    for (form_children[1..]) |child| {
+        const c = child.asList() orelse continue;
+        if (c.len < 1) continue;
+        const head = c[0].asAtom() orelse continue;
+        const val: ?f64 = if (c.len >= 2) c[1].asNumber() else null;
+        if (std.mem.eql(u8, head, "clearance")) {
+            spec.clearance = val orelse 0;
+        } else if (std.mem.eql(u8, head, "min-drill")) {
+            spec.min_drill = val orelse 0;
+        } else if (std.mem.eql(u8, head, "mask-margin")) {
+            spec.mask_margin = val orelse 0;
+        } else if (std.mem.eql(u8, head, "copper-edge")) {
+            spec.copper_edge = val orelse 0;
+        } else if (std.mem.eql(u8, head, "hole-to-hole")) {
+            spec.hole_to_hole = val orelse 0;
+        } else if (std.mem.eql(u8, head, "min-annular")) {
+            spec.min_annular = val orelse 0;
+        } else {
+            self.warnFmt(c[0].span, "unknown (design-rules …) sub-form ({s} …) — expected " ++
+                "clearance/min-drill/mask-margin/copper-edge/hole-to-hole/min-annular", .{head});
+        }
+    }
+    return spec;
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -1889,6 +1926,59 @@ test "design-block captures (net-class …) rules" {
     // Routing-order tier is captured, and an out-of-range value clamps to 7.
     try testing.expectEqual(@as(u32, 3), block.net_classes[1].priority);
     try testing.expectEqual(@as(u32, 7), block.net_classes[2].priority);
+}
+
+// spec: eval/design_block - design-rules form captures the board-level default rules on the design block
+test "design-block captures (design-rules …)" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (design-rules (clearance 0.15) (min-drill 0.25) (mask-margin 0.06)
+        \\    (copper-edge 0.4) (hole-to-hole 0.3) (min-annular 0.13)))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const value = try evalDesignBlock(&eval, form_children[1..], &env);
+    const block = switch (value) {
+        .design_block => |b| b,
+        else => return error.TestUnexpectedResult,
+    };
+    const dr = block.design_rules;
+    try testing.expect(dr.present);
+    try testing.expectEqual(@as(f64, 0.15), dr.clearance);
+    try testing.expectEqual(@as(f64, 0.25), dr.min_drill);
+    try testing.expectEqual(@as(f64, 0.06), dr.mask_margin);
+    try testing.expectEqual(@as(f64, 0.4), dr.copper_edge);
+    try testing.expectEqual(@as(f64, 0.3), dr.hole_to_hole);
+    try testing.expectEqual(@as(f64, 0.13), dr.min_annular);
+}
+
+// spec: eval/design_block - a design with no design-rules form leaves every rule at its zero (default) sentinel
+test "design-block without (design-rules …) has no rules present" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test")
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const value = try evalDesignBlock(&eval, form_children[1..], &env);
+    const block = switch (value) {
+        .design_block => |b| b,
+        else => return error.TestUnexpectedResult,
+    };
+    // No form ⇒ not present, every field the zero sentinel — the consumer
+    // (`optimizer.designRulesOf`) then fills in the built-in defaults.
+    try testing.expect(!block.design_rules.present);
+    try testing.expectEqual(@as(f64, 0), block.design_rules.clearance);
+    try testing.expectEqual(@as(f64, 0), block.design_rules.min_drill);
 }
 
 // spec: eval/design_block - net ties merge transitively so a chained tie collapses all three nets into one

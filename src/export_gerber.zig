@@ -25,11 +25,11 @@ const export_kicad = @import("export_kicad.zig");
 const export_fab = @import("export_fab.zig");
 const font = @import("font5x7.zig");
 
-/// Solder-mask opening expansion per pad side (mm) — KiCad's stock margin.
-const MASK_MARGIN_MM: f64 = 0.05;
-/// Copper-pour isolation: plane pullback from the board edge, and the
-/// clearance a pour keeps from foreign copper (antipads, track halos).
-const POUR_CLEARANCE_MM: f64 = 0.3;
+// Solder-mask margin and copper-pour isolation are no longer hard-coded here —
+// they live in `optimizer.DesignRules` (`mask_margin` / `pour_clearance` /
+// `copper_edge`), resolved from the design's `(design-rules …)` form with the
+// old constants (0.05 / 0.3) as defaults, and read via `placement.rules.design`.
+
 /// Silkscreen stroke width (mm) — footprint art and ref-des text alike.
 const SILK_W_MM: f64 = 0.15;
 /// Ref-des text pixel pitch (mm); glyphs are 5x7 px, so cap height ~1 mm.
@@ -175,6 +175,7 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
     // dark copper below re-lands the real features on the cleaned pour.
     if (declaredPlaneAt(placement.rules, stack_idx)) |pour_net| {
         const net: PlaneNet = .{ .named = pour_net };
+        const pc = placement.rules.design.pour_clearance;
         try pourRect(g, placement);
         try g.polarity(false);
         const nets = try padNets(g.arena, placement);
@@ -182,18 +183,18 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
             for (p.pads) |pad| {
                 if (isSmd(pad) and p.side != side) continue;
                 if (planeCarries(net, netOfPad(nets, placement, p.ref_des, pad.number))) continue;
-                try flashPadBox(g, p, pad, POUR_CLEARANCE_MM);
+                try flashPadBox(g, p, pad, pc);
             }
         }
         for (copper.tracks) |t| {
             if (t.layer != li) continue;
             if (planeCarries(net, netName(placement, t.net))) continue;
-            try g.use(.c, t.width + 2 * POUR_CLEARANCE_MM, 0);
+            try g.use(.c, t.width + 2 * pc, 0);
             try g.line(t.x1, t.y1, t.x2, t.y2);
         }
         for (copper.vias) |v| {
             if (planeCarries(net, netName(placement, v.net))) continue;
-            try g.use(.c, v.dia + 2 * POUR_CLEARANCE_MM, 0);
+            try g.use(.c, v.dia + 2 * pc, 0);
             try g.flash(v.x, v.y);
         }
         try g.polarity(true);
@@ -221,6 +222,7 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
 /// antipads punched over every drilled hole whose net the plane does NOT
 /// carry — same-net barrels connect directly (no thermal relief).
 fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneLayer) Error!void {
+    const pc = placement.rules.design.pour_clearance;
     try pourRect(g, placement);
     try g.polarity(false);
     const nets = try padNets(g.arena, placement);
@@ -230,13 +232,13 @@ fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneL
             const foreign = pad.npth or !planeCarries(pl.net, netOfPad(nets, placement, p.ref_des, pad.number));
             if (!foreign) continue;
             const c = optimizer.worldPadCenter(p, pad.x, pad.y);
-            try g.use(.c, pad.drill + 2 * POUR_CLEARANCE_MM, 0);
+            try g.use(.c, pad.drill + 2 * pc, 0);
             try g.flash(c[0], c[1]);
         }
     }
     for (copper.vias) |v| {
         if (planeCarries(pl.net, netName(placement, v.net))) continue;
-        try g.use(.c, v.dia + 2 * POUR_CLEARANCE_MM, 0);
+        try g.use(.c, v.dia + 2 * pc, 0);
         try g.flash(v.x, v.y);
     }
     try g.polarity(true);
@@ -246,10 +248,11 @@ fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneL
 /// on their part's side; through-hole and NPTH pads open on both sides.
 /// Vias are tented (no opening).
 fn writeMask(g: *Gx, placement: optimizer.Placement, side: optimizer.Side) Error!void {
+    const margin = placement.rules.design.mask_margin;
     for (placement.parts) |p| {
         for (p.pads) |pad| {
             if (isSmd(pad) and p.side != side) continue;
-            try flashPad(g, p, pad, MASK_MARGIN_MM);
+            try flashPad(g, p, pad, margin);
         }
     }
 }
@@ -343,11 +346,12 @@ fn flashPadBox(g: *Gx, p: optimizer.Part, pad: geometry.Pad, grow: f64) Error!vo
 
 // ── Pours + net lookups ─────────────────────────────────────────────────────
 
-/// The solid pour region: the board outline pulled back by
-/// `POUR_CLEARANCE_MM` on every edge (skipped when degenerate).
+/// The solid pour region: the board outline pulled back by the copper-to-edge
+/// clearance (a `(design-rules (copper-edge …))` value, else the fab-safe pour
+/// default) on every edge (skipped when degenerate).
 fn pourRect(g: *Gx, placement: optimizer.Placement) Error!void {
     const r = export_fab.outlineRect(placement);
-    const p = POUR_CLEARANCE_MM;
+    const p = placement.rules.design.pourEdge();
     if (r.w <= 2 * p or r.h <= 2 * p) return;
     const pts = [_][2]f64{
         .{ r.minx + p, r.miny + p },
@@ -708,6 +712,33 @@ test "mask expands pads and skips vias; paste skips through-hole" {
     const paste = pw.written();
     try testing.expect(std.mem.indexOf(u8, paste, "R,1.000000X0.500000*%") != null); // SMD at 1:1
     try testing.expect(std.mem.indexOf(u8, paste, "1.400000") == null); // thru pad has no paste
+}
+
+// spec: export_gerber - the mask margin comes from (design-rules …), defaulting byte-identically to 0.05 mm
+test "mask margin reads from the design rules" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1.0, .h = 0.5 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
+    };
+
+    // No form ⇒ default 0.05/side ⇒ the same 1.100000X0.600000 opening the
+    // legacy constant produced (the byte-identical regression).
+    const base = testPlacement(&parts, &.{});
+    var mw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&mw.writer, arena, base, .{}, export_fab.frameFor(base), .{ .mask = .top }, "Soldermask,Top");
+    try testing.expect(std.mem.indexOf(u8, mw.written(), "R,1.100000X0.600000*%") != null);
+
+    // A (design-rules (mask-margin 0.1)) widens the opening to 0.1/side ⇒
+    // 1.200000X0.700000.
+    var wide = testPlacement(&parts, &.{});
+    wide.rules = .{ .design = .{ .mask_margin = 0.1 } };
+    var ww: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&ww.writer, arena, wide, .{}, export_fab.frameFor(wide), .{ .mask = .top }, "Soldermask,Top");
+    try testing.expect(std.mem.indexOf(u8, ww.written(), "R,1.200000X0.700000*%") != null);
 }
 
 // spec: export_gerber - an inner plane pours solid copper and antipads only foreign holes

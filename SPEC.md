@@ -138,6 +138,7 @@ Public functions: solve
 - an authored (group ...) islands its members around the group core
 - port directions are the flow compass: in enters left, out leaves right
 - differential twins mirror the P lane onto the N lane at the pads' pitch
+- design-rules resolve authored values over built-in defaults, absent form keeps every default
 
 ## placement/router
 
@@ -163,7 +164,7 @@ Public functions: route, returnPathViolations
 
 ## placement/drc
 
-Public functions: check
+Public functions: check, countKind
 
 - flags a via that crowds a foreign pad's clearance
 - passes a via that shares the pad's net
@@ -172,6 +173,11 @@ Public functions: check
 - flags copper crowding the board outline and skips the off-board staging band
 - flags same-layer track crossings and sub-clearance pairs between nets
 - flags a track crossing a foreign pad on its layer; other-layer SMD pads don't clash
+- flags two placed parts whose courtyards overlap, but not disjoint or opposite-side ones
+- flags two drilled holes whose walls sit closer than the hole-to-hole rule
+- flags a drilled hole below the minimum drill diameter (pads and vias); SMD pads exempt
+- board-level design rules default to the toolchain's legacy constants when no form is authored
+- a (design-rules …) value overrides the matching default in the DRC
 
 ## placement/module_policy
 
@@ -397,6 +403,7 @@ Public functions: planLayers, writeLayer
 - mask openings expand pads and tent vias; paste covers only same-side SMD pads
 - an inner plane pours solid copper and antipads only foreign holes
 - the edge layer closes the board outline; silk strokes footprint art and ref-des text
+- the mask margin comes from (design-rules …), defaulting byte-identically to 0.05 mm
 
 ## zipfile
 
@@ -627,6 +634,8 @@ Public functions: analyze
 - stackup form captures layer count and plane assignments on the design block
 - a bare 2-layer stackup declares no planes so ground routes as copper
 - net-class forms capture width/clearance/via geometry and routing priority for their listed nets
+- design-rules form captures the board-level default rules on the design block
+- a design with no design-rules form leaves every rule at its zero (default) sentinel
 - layout form parses (anchor "name") roots and (place "name" (rel "ref")) directives
 - layout place resolves right-of/left-of/above/below into a relative offset from the referenced block
 - layout place collects multiple constraints so a block is positioned by several references

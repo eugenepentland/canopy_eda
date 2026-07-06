@@ -2474,8 +2474,13 @@ test "escape stub falls back to a trimmed clear stub when every heading is pad-b
     try testing.expectEqual(@as(usize, 0), r.vias.len);
     // …and whatever trimmed stub remains keeps full clearance from every
     // foreign pad (this is the assertion the old pad-crossing tier failed).
-    const viol = try @import("drc.zig").check(arena, placement, r, 0.127);
-    try testing.expectEqual(@as(usize, 0), viol.len);
+    // This fixture packs the ring pads tighter than the solver ever would (to
+    // starve every escape heading), so the diagonal courtyards intentionally
+    // overlap — every violation here is a courtyard overlap, and the COPPER
+    // clearance this test is about is clean (0 non-courtyard findings).
+    const drc = @import("drc.zig");
+    const viol = try drc.check(arena, placement, r, 0.127);
+    try testing.expectEqual(viol.len, drc.countKind(viol, .courtyard));
 }
 
 // spec: placement/router - reserves diagonal corner cells so later nets keep trace-to-trace clearance

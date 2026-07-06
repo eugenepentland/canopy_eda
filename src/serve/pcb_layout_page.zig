@@ -4830,6 +4830,9 @@ fn drcKindStr(k: drc.Kind) []const u8 {
         .pad_pad => "pad↔pad",
         .annular => "annular ring",
         .board_edge => "board edge",
+        .courtyard => "courtyard overlap",
+        .hole_hole => "hole↔hole",
+        .min_drill => "min drill",
     };
 }
 
