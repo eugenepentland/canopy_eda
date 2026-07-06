@@ -5753,7 +5753,10 @@ const PAGE_CSS =
     \\.ts-btn:hover{background:#2f3035;border-color:#3a3b40;color:#f0f1f3}
     \\.ts-btn.on,.ts-btn.active{background:rgba(90,143,214,.25);border-color:#5a8fd6;color:#f0f1f3}
     \\.ts-sep{height:1px;width:20px;background:#3a3b40;margin:4px 0;flex:none}
-    \\.pcb-canvas-host{flex:1;min-width:0;display:flex;flex-direction:column;position:relative;overflow:hidden;
+    \\/* overflow stays visible so the text-tool popover (absolutely positioned
+    \\   inside the host) never clips at the canvas edge; the scene canvas is
+    \\   sized exactly to the SVG so nothing else escapes. */
+    \\.pcb-canvas-host{flex:1;min-width:0;display:flex;flex-direction:column;position:relative;
     \\  border:1px solid #2c2d31;border-radius:0 6px 6px 0;background:#001023}
     \\/* The scene (parts/pads/airwires/copper) is painted on the canvas; the
     \\   transparent SVG above it carries pointer events + light overlays. */
@@ -6095,6 +6098,7 @@ const PAGE_CSS =
     \\  .pcb-bar .score{min-width:0}
     \\  .pcb-head h1{font-size:16px}
     \\  .pcb-live{top:56px;width:calc(100vw - 20px)}
+    \\  .pcb-3d-stage{height:64vh;flex:none}
     \\}
 ;
 
@@ -6109,6 +6113,7 @@ const EMBED_CSS =
     \\/* Embeds live inside an iframe: no app-frame lock, the stage takes the
     \\   frame height minus the bar/route rows (100vh = the iframe itself). */
     \\body.embed .pcb-stage{height:calc(100vh - 140px);min-height:240px;flex:none}
+    \\body.embed .pcb-canvas-host{border-radius:6px}
     \\body.embed:not(.embed-edit) .part{cursor:default}
     \\body.embed-edit .part{cursor:grab}
 ;

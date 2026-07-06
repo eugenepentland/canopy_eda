@@ -1242,6 +1242,10 @@ function fitVB(){var ar=hostAspect(),w=VBW,h=VBW*ar;
 function vbResize(){var ar=hostAspect(),cy=vb.y+vb.h/2,h=vb.w*ar;
  vb.y=cy-h/2;vb.h=h;setVB();}
 window.addEventListener("resize",function(){vbResize();paintSoon();});
+// The stage also reflows WITHOUT a window resize (legend toggles, panels
+// opening) — observe the svg itself so the aspect never drifts from the box.
+if(window.ResizeObserver){try{
+ new ResizeObserver(function(){vbResize();paintSoon();}).observe(svg);}catch(e){}}
 function zoomAt(cx,cy,f){if((f<1&&vb.w<VBW*0.08)||(f>1&&vb.w>VBW*8))return;
  var r=svg.getBoundingClientRect();
  var px=vb.x+(cx-r.left)*(vb.w/r.width),py=vb.y+(cy-r.top)*(vb.h/r.height);
