@@ -1159,6 +1159,12 @@ src/serve/pcb_layout_page.zig::layoutCoverage | fn layoutCoverage(L: SavedLayout
 src/serve/pcb_layout_page.zig::loadSubBlockPoses | fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock) ?[]const optimizer.RefPose
 src/serve/pcb_layout_page.zig::loadSyncLayout | fn loadSyncLayout( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ?std.StringHashMap(SyncPose)
 src/serve/pcb_layout_page.zig::loadSyncVias | fn loadSyncVias( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, name: []const u8, ) ?[]const SyncVia
+src/serve/pcb_layout_page.zig::mcpClearRoutes | fn mcpClearRoutes( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::mcpRoutePcb | fn mcpRoutePcb( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::mcpRunFabReadiness | fn mcpRunFabReadiness( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::mcpSavePcbLayout | fn mcpSavePcbLayout( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::mcpSetBoardOutline | fn mcpSetBoardOutline( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::mcpSetPartPoses | fn mcpSetPartPoses( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), ) HandlerError!bool
 src/serve/pcb_layout_page.zig::pcbCentroidApi | fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbDrcApi | fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbDrillApi | fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void

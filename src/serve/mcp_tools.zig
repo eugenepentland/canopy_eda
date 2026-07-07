@@ -94,6 +94,17 @@ const tools = [_]ToolEntry{
     .{ .name = "get_pcb_layout_image", .is_mutation = false },
     .{ .name = "describe_pcb_layout", .is_mutation = false },
     .{ .name = "compare_layout_to_starred", .is_mutation = false },
+    // PCB layout MUTATION tools — edit the `<design>.layouts.json` sidecar so an
+    // agent can take a board schematic → gated Gerbers headless: place parts,
+    // draw the board outline, autoroute, save/star, clear copper. Read-only twin
+    // `run_fab_readiness` returns the pre-fab gate report. Handlers live in
+    // pcb_layout_page.zig (reusing the viewer's own save/route/fab helpers).
+    .{ .name = "set_part_poses", .is_mutation = true },
+    .{ .name = "set_board_outline", .is_mutation = true },
+    .{ .name = "route_pcb", .is_mutation = true },
+    .{ .name = "save_pcb_layout", .is_mutation = true },
+    .{ .name = "clear_routes", .is_mutation = true },
+    .{ .name = "run_fab_readiness", .is_mutation = false },
     .{ .name = "get_version", .is_mutation = false },
     .{ .name = "run_checks", .is_mutation = false },
     // The auto-generated S-expression language reference, rendered live from
@@ -214,6 +225,7 @@ fn callInner(
     if (try dispatchVfs(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchProject(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchInfo(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
+    if (try dispatchPcbLayout(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchParts(allocator, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchLanguage(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchReview(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
@@ -262,6 +274,28 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "get_version")) return try toolGetVersion(args_val, out, allocator);
     if (std.mem.eql(u8, tool_name, "run_checks")) return try toolRunChecks(allocator, project_dir, args_val, out, w);
     if (std.mem.eql(u8, tool_name, "read_datasheet")) return try toolReadDatasheet(allocator, project_dir, args_val, out);
+    return null;
+}
+
+/// PCB layout mutation tools (+ the read-only fab-readiness twin). These write
+/// the `<design>.layouts.json` sidecar (set poses / outline, autoroute, save,
+/// clear copper) so an agent can drive a board to gated Gerbers without a
+/// browser; the handlers live in `pcb_layout_page.zig` beside the viewer's own
+/// save/route/fab endpoints they reuse. Returns null when the tool name matches
+/// none of these.
+fn dispatchPcbLayout(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    tool_name: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) !?bool {
+    if (std.mem.eql(u8, tool_name, "set_part_poses")) return try pcb_layout_page.mcpSetPartPoses(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "set_board_outline")) return try pcb_layout_page.mcpSetBoardOutline(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "route_pcb")) return try pcb_layout_page.mcpRoutePcb(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "save_pcb_layout")) return try pcb_layout_page.mcpSavePcbLayout(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "clear_routes")) return try pcb_layout_page.mcpClearRoutes(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "run_fab_readiness")) return try pcb_layout_page.mcpRunFabReadiness(allocator, project_dir, args_val, out);
     return null;
 }
 
