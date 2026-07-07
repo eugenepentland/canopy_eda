@@ -67,7 +67,9 @@ pub fn describeDesign(
     };
     const solved = try pcb_layout_page.solveForRequest(alloc, project_dir, name, opts, &eval, &module_res);
 
-    const route_params = router.RouteParams{};
+    // Seed router/DRC from the design's resolved `(design-rules …)` so the facts
+    // describe the same board the PNG shows and the fab gate checks.
+    const route_params = solved.placement.rules.design.routeParams();
     const routed: ?RoutedSummary = if (opts.route) blk: {
         const r = router.route(alloc, solved.placement, route_params) catch break :blk null;
         const v = drc.check(alloc, solved.placement, r, route_params.clearance) catch &.{};

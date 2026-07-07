@@ -661,6 +661,33 @@ pub const DesignRules = struct {
     hole_to_hole: f64 = 0.25,
     /// Minimum via annular ring, copper radius − drill radius (mm).
     min_annular: f64 = 0.1,
+    /// Default routed trace width (mm) — the autorouter's `RouteParams` seed.
+    /// Matches `RouteParams.track_width`, so an absent form seeds the router
+    /// exactly as before. A per-net `(net-class (width …))` still overrides it.
+    track_width: f64 = 0.127,
+    /// Default via copper diameter (mm) — the `RouteParams` seed (matches
+    /// `RouteParams.via_dia`). A per-net `(net-class (via …))` overrides it.
+    via_dia: f64 = 0.4,
+    /// Default via drill diameter (mm) — the `RouteParams` seed (matches
+    /// `RouteParams.via_drill`). A per-net `(net-class (via …))` overrides it.
+    via_drill: f64 = 0.2,
+
+    /// The autorouter default geometry these board rules imply: clearance +
+    /// track width + via size mapped onto a `RouteParams`. This is the router
+    /// SEED — an explicit query/panel param still overrides it (interactive
+    /// convenience), but the fab gate uses the resolved rules directly. A
+    /// design with no `(design-rules …)` resolves to the built-in defaults,
+    /// which equal the `RouteParams` defaults, so this is a no-op for existing
+    /// boards. Defined here (not in router.zig) so the one source of truth for
+    /// each default number lives on `DesignRules`.
+    pub fn routeParams(self: DesignRules) router.RouteParams {
+        return .{
+            .track_width = self.track_width,
+            .clearance = self.clearance,
+            .via_drill = self.via_drill,
+            .via_dia = self.via_dia,
+        };
+    }
 
     /// The effective copper-to-edge clearance for the DRC: the dedicated
     /// `copper_edge` rule if set, else the plain copper `clearance` (so an
@@ -5696,6 +5723,9 @@ fn designRulesOf(block: *const DesignBlock) DesignRules {
     if (s.copper_edge > 0) d.copper_edge = s.copper_edge;
     if (s.hole_to_hole > 0) d.hole_to_hole = s.hole_to_hole;
     if (s.min_annular > 0) d.min_annular = s.min_annular;
+    if (s.track_width > 0) d.track_width = s.track_width;
+    if (s.via_dia > 0) d.via_dia = s.via_dia;
+    if (s.via_drill > 0) d.via_drill = s.via_drill;
     return d;
 }
 
@@ -10783,9 +10813,15 @@ test "designRulesOf fills defaults and honours authored overrides" {
     try testing.expectEqual(@as(f64, 0.25), d0.hole_to_hole);
     try testing.expectEqual(@as(f64, 0.1), d0.min_annular);
     try testing.expectEqual(@as(f64, 0), d0.copper_edge); // unset ⇒ falls back per-consumer
+    // Routing-geometry defaults match RouteParams exactly (backward compat).
+    try testing.expectEqual(@as(f64, 0.127), d0.track_width);
+    try testing.expectEqual(@as(f64, 0.4), d0.via_dia);
+    try testing.expectEqual(@as(f64, 0.2), d0.via_drill);
+    // The no-form route seed IS the built-in RouteParams — nothing shifts.
+    try testing.expectEqual(router.RouteParams{}, d0.routeParams());
 
     // A present form overrides only the authored (non-zero) rules; the rest
-    // keep their defaults. Here only hole-to-hole + copper-edge are set.
+    // keep their defaults. Here hole-to-hole + copper-edge + the routing geometry.
     const some = DesignBlock{
         .name = "t",
         .instances = &.{},
@@ -10794,7 +10830,7 @@ test "designRulesOf fills defaults and honours authored overrides" {
         .notes = &.{},
         .groups = &.{},
         .sub_blocks = &.{},
-        .design_rules = .{ .present = true, .hole_to_hole = 0.3, .copper_edge = 0.4 },
+        .design_rules = .{ .present = true, .hole_to_hole = 0.3, .copper_edge = 0.4, .track_width = 0.2, .via_dia = 0.5, .via_drill = 0.25 },
     };
     const d1 = designRulesOf(&some);
     try testing.expectEqual(@as(f64, 0.3), d1.hole_to_hole); // overridden
@@ -10804,6 +10840,15 @@ test "designRulesOf fills defaults and honours authored overrides" {
     // copper_edge set ⇒ both edge accessors now use it.
     try testing.expectEqual(@as(f64, 0.4), d1.edgeClearance());
     try testing.expectEqual(@as(f64, 0.4), d1.pourEdge());
+    // Authored routing geometry overrides the defaults and flows into the seed.
+    try testing.expectEqual(@as(f64, 0.2), d1.track_width);
+    try testing.expectEqual(@as(f64, 0.5), d1.via_dia);
+    try testing.expectEqual(@as(f64, 0.25), d1.via_drill);
+    const rp = d1.routeParams();
+    try testing.expectEqual(@as(f64, 0.2), rp.track_width);
+    try testing.expectEqual(@as(f64, 0.127), rp.clearance); // clearance kept its default
+    try testing.expectEqual(@as(f64, 0.5), rp.via_dia);
+    try testing.expectEqual(@as(f64, 0.25), rp.via_drill);
 }
 
 // spec: placement/optimizer - port directions are the flow compass: in enters left, out leaves right

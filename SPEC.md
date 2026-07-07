@@ -187,6 +187,8 @@ Public functions: check, countKind
 - flags a drilled hole below the minimum drill diameter (pads and vias); SMD pads exempt
 - board-level design rules default to the toolchain's legacy constants when no form is authored
 - a (design-rules …) value overrides the matching default in the DRC
+- a wider board clearance flags copper the default rule allowed
+- a net-class clearance override is enforced against that net's neighbours server-side
 
 ## placement/outline
 
@@ -942,3 +944,4 @@ Public functions: check, writeJson
 - a ground plane connects its pads without routed copper
 - a missing outline, off-board part, drill-less via, and DNP all surface
 - a clean board produces no errors and reports ok
+- the fab gate's DRC measures against the design's resolved clearance rule

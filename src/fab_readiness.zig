@@ -152,9 +152,13 @@ pub fn check(
 
     // ── DRC against the persisted copper at the current poses ───────────────
     // The router/DRC normally only run on the Route button; here we DRC the
-    // saved copper exactly as it will ship. Default clearance is the router's
-    // 5-mil rule (the same one /pcb-layout re-checks saved copper with).
-    const clearance = (router.RouteParams{}).clearance;
+    // saved copper exactly as it will ship. The base clearance is the design's
+    // resolved `(design-rules …)` rule (built-in 5-mil default when no form),
+    // and `drc.check` layers per-net `(net-class …)` overrides from
+    // `placement.rules.net` on top. The gate deliberately ignores any
+    // interactive query/panel clearance — it must judge the board against the
+    // authored rules, not whatever a user last routed with.
+    const clearance = placement.rules.design.clearance;
     const routed = router.RouteResult{
         .tracks = copper.tracks,
         .vias = copper.vias,
@@ -795,6 +799,57 @@ test "a clean routed board is export-ready" {
     try writeJson(&aw.writer, r);
     try testing.expect(std.mem.indexOf(u8, aw.written(), "\"ok\":true") != null);
     try testing.expect(std.mem.indexOf(u8, aw.written(), "\"routable_nets\":1") != null);
+}
+
+// spec: fab_readiness - the fab gate's DRC measures against the design's resolved clearance rule
+test "fab gate DRC uses the design's clearance, not a hardcoded default" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Two single-pad parts on different nets, 0.2 mm edge-to-edge apart (pad
+    // half-width 0.3; centres 0.8 apart ⇒ 0.8 − 0.3 − 0.3 = 0.2). Each net has one
+    // pad (no airwire) and there's no routed copper, and the courtyards are kept
+    // small (hw 0.35 < half the 0.8 pitch) so they don't overlap — so the ONLY
+    // thing that can flag is the pad↔pad clearance. At the 0.127 mm default the
+    // board is clean; a (design-rules (clearance 0.3)) — resolved onto
+    // placement.rules.design — must make the gate's DRC flag it, proving the gate
+    // reads the authored rule.
+    const u_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const c_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.35, .hh = 0.35, .pads = &u_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.35, .hh = 0.35, .pads = &c_pads, .fallback = false, .x = 0.8, .y = 0 },
+    };
+    const ap = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const bp = [_]export_kicad.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]export_kicad.FlatNet{ .{ .name = "A", .pins = &ap }, .{ .name = "B", .pins = &bp } };
+    const base = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 4,
+        .maxy = 4,
+        .generated = false,
+        .board_rect = .{ .minx = -2, .miny = -2, .w = 6, .h = 6 },
+    };
+    const empty = export_gerber.Copper{};
+
+    // Default clearance ⇒ the 0.2 mm pad gap is legal; no DRC error.
+    const r0 = try check(arena, base, empty, .{});
+    try testing.expect(!hasError(r0, "drc"));
+
+    // A 0.3 mm design clearance ⇒ the same gap flags; the gate reports a DRC error.
+    var strict = base;
+    strict.rules = .{ .design = .{ .clearance = 0.3 } };
+    const r1 = try check(arena, strict, empty, .{});
+    try testing.expect(hasError(r1, "drc"));
 }
 
 fn hasError(r: Report, id: []const u8) bool {
