@@ -15,6 +15,11 @@ unlinked tag: Web Server - Module-layout status reads rough and starred flags fr
 unlinked tag: Web Server - Module-layout status reports neither rough nor starred when none recorded in ./src/layout_status.zig
 unlinked tag: Web Server - The /pcb-layout page defaults to the design's starred (★) saved layout, below an explicit ?refine= snapshot and a (placement …) spec in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - The layouts sidecar round-trips snapshots and the optimizer cache slot through one file in ./src/serve/pcb_layout_page.zig
+unlinked tag: Web Server - The route_pcb MCP tool serializes routed net indices back to net names, round-tripping through restoreRoutes in ./src/serve/pcb_layout_page.zig
+unlinked tag: Web Server - The route_pcb MCP tool's net-scoped copper drops the requested nets from prior copper and merges in the fresh copper for them in ./src/serve/pcb_layout_page.zig
+unlinked tag: Web Server - The set_board_outline MCP tool accepts a rect and a polygon pts, deriving the rect fields from the polygon bbox in ./src/serve/pcb_layout_page.zig
+unlinked tag: Web Server - The set_part_poses MCP tool parses each pose's ref, mm centre, and optional rot/side/locked (absent optionals stay unset) in ./src/serve/pcb_layout_page.zig
+unlinked tag: Web Server - The set_part_poses MCP tool resolves a part by module-local origin key when the ref-des is not an exact match in ./src/serve/pcb_layout_page.zig
 unlinked tag: Web Server - hybrid score ranks the reference layout at exactly 1.0 and penalizes stylistic deviation in ./src/serve/style_score.zig
 unlinked tag: Web Server - layout-match counts a wrong-edge proportion as a partial area mismatch in ./src/serve/layout_match.zig
 unlinked tag: Web Server - layout-match credits interchangeable parts by per-edge count, ignoring which fungible part is where in ./src/serve/layout_match.zig
