@@ -187,6 +187,11 @@ Public functions: check, countKind
 - flags a drilled hole below the minimum drill diameter (pads and vias); SMD pads exempt
 - board-level design rules default to the toolchain's legacy constants when no form is authored
 - a (design-rules …) value overrides the matching default in the DRC
+- flags a thin solder-mask web between two adjacent pad openings, and is a warning
+- flags silkscreen that crosses a foreign pad's mask opening, as a warning
+- flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt
+- flags a track narrower than its net-class width, else the board minimum, as an error
+- existing copper violations are error-severity; only the hygiene checks are warnings
 
 ## placement/outline
 
@@ -408,6 +413,7 @@ Public functions: worldShape, pointDist, shapeGap
 Public functions: centroidCsv, excellonDrill, frameFor, outlineRect
 
 - the centroid CSV lists each part's pose with its board side
+- the centroid CSV drops DNP parts by default and keeps them under keep_dnp
 - the Excellon writer splits plated pads + vias from non-plated holes and groups tools by diameter
 - fab writers share one y-up frame derived from the board outline
 
@@ -942,3 +948,5 @@ Public functions: check, writeJson
 - a ground plane connects its pads without routed copper
 - a missing outline, off-board part, drill-less via, and DNP all surface
 - a clean board produces no errors and reports ok
+- a warning-severity DRC finding flows through as a gate warning; an error-severity one blocks
+- a custom outline polygon with fewer than 3 points warns that the profile fell back to a rect

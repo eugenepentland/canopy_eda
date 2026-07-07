@@ -1877,11 +1877,19 @@ document.addEventListener("keydown",function(ev){if(RO||kbTyping(ev.target))retu
  if(ev.key=="v"||ev.key=="V"){ev.preventDefault();drawViaHere();return;}
  if(ev.key=="Backspace"){ev.preventDefault();drawBack();return;}
  if(ev.key=="Enter"&&dtrace){ev.preventDefault();drawEnd();return;}});
+// Per-kind marker tooltip. Courtyard/silk have no clearance rule, so the
+// generic "gap X < clr" form reads as nonsense ("< 0 mm") — give them their own.
+function drcMsg(d){
+ if(d.k=="courtyard overlap")return d.k+" — parts overlap by "+(-d.gap).toFixed(3)+" mm";
+ if(d.k=="silk over pad")return d.k+" — silkscreen crosses a pad's solder-mask opening";
+ if(d.k=="mask sliver")return d.k+" — mask web "+d.gap.toFixed(3)+" mm < "+d.clr+" mm min";
+ if(d.k=="track width")return d.k+" — "+d.gap.toFixed(3)+" mm < "+d.clr+" mm required";
+ return d.k+" — gap "+d.gap.toFixed(3)+" mm < "+d.clr+" mm";}
 function drawDrc(){while(gD.firstChild)gD.removeChild(gD.firstChild);
  if(!viewSt.vis.drc)return;
  var cb=document.getElementById("r-drc-show"); if(cb&&!cb.checked)return;
  (PCB.drc||[]).forEach(function(d){var cx=X(d.x),cy=Y(d.y);
-   var t=el("title",{}); t.textContent=d.k+" — gap "+d.gap.toFixed(3)+" mm < "+d.clr+" mm";
+   var t=el("title",{}); t.textContent=drcMsg(d);
    var c=el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:8,fill:"none",stroke:TH.drc,"stroke-width":2}); c.appendChild(t);
    gD.appendChild(c);
    gD.appendChild(el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:2.4,fill:TH.drc}));});}
@@ -1894,9 +1902,14 @@ if(drcCb)drcCb.addEventListener("change",drawDrc);
 // The live client-side check blocks obvious shorts during drawing; this is the
 // authoritative re-check (all 8 checks, incl. annular + board-edge).
 var drcTimer=null,drcSeq=0;
+// Chip splits the count by severity: error-severity violations gate the fab
+// package (red), warning-severity ones (courtyard/mask-sliver/silk) are advisory.
 function drcChip(n){var e=document.getElementById("r-drc");if(!e)return;
  if(n<0){e.className="route-stat";e.textContent="checking…";return;}
- e.className="route-stat "+(n?"err":"ok");e.textContent=n?(n+" DRC violation(s)"):"DRC clean ✓";}
+ var arr=PCB.drc||[],err=0,warn=0;
+ for(var i=0;i<arr.length;i++){if(arr[i].sev=="warn")warn++;else err++;}
+ e.className="route-stat "+(err?"err":"ok");
+ e.textContent=err?(err+" err / "+warn+" warn"):(warn?(warn+" warn"):"DRC clean ✓");}
 function runDrcNow(){if(RO)return;var seq=++drcSeq;drcChip(-1);
  var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),
   tracks:PCB.tracks||[],vias:PCB.vias||[],clearance:clrVal(),outline:PCB.outline||null};

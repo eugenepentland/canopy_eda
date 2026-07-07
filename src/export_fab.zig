@@ -32,6 +32,11 @@ pub const Frame = struct {
 /// board outline — the fallback rectangle `outlineRect` synthesizes.
 pub const AUTO_OUTLINE_MARGIN_MM: f64 = 1.0;
 
+/// Whether the centroid CSV keeps Do-Not-Populate parts. `.drop` (the default)
+/// omits them — an assembler's pick-and-place machine should only see stuffed
+/// parts; `.keep` (the `?dnp=keep` opt-in) lists them (a populated variant).
+pub const DnpMode = enum { drop, keep };
+
 /// The board outline every fab writer agrees on: the placement's authored /
 /// drawn `board_rect` when present, else the parts' bounding box grown by
 /// `AUTO_OUTLINE_MARGIN_MM` (so an outline-less design still exports a
@@ -60,14 +65,20 @@ pub fn frameFor(placement: optimizer.Placement) Frame {
 /// matches what the gerbers show), and which board side it mounts on.
 /// `instances` is index-aligned with `parts` (the `Placement` contract); a
 /// missing instance leaves value/package empty.
+///
+/// Do-Not-Populate parts are DROPPED by default (`dnp = .drop`) — an
+/// assembler's pick-and-place machine should only see the parts it stuffs. Pass
+/// `dnp = .keep` (the `?dnp=keep` opt-in) to list them (a populated variant).
 pub fn centroidCsv(
     w: *std.Io.Writer,
     parts: []const optimizer.Part,
     instances: []const export_kicad.FlatInstance,
     frame: Frame,
+    dnp: DnpMode,
 ) std.Io.Writer.Error!void {
     try w.writeAll("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n");
     for (parts, 0..) |p, i| {
+        if (dnp == .drop and i < instances.len and instances[i].dnp) continue;
         try writeCsvField(w, p.ref_des);
         try w.writeByte(',');
         if (i < instances.len) try writeCsvField(w, instances[i].value);
@@ -191,10 +202,38 @@ test "centroidCsv emits one side-aware row per part" {
     var aw: std.Io.Writer.Allocating = .init(alloc);
     // Frame with the board bottom at y=20: y flips (5→15, 2→18) and the
     // CW-positive placement angle comes out CCW-positive (90→270).
-    try centroidCsv(&aw.writer, &parts, &instances, .{ .ox = 0, .oy = 20 });
+    try centroidCsv(&aw.writer, &parts, &instances, .{ .ox = 0, .oy = 20 }, .drop);
     const out = aw.written();
     try testing.expect(std.mem.indexOf(u8, out, "U1,STM32,LQFP-48,10.000mm,15.000mm,270,Top") != null);
     try testing.expect(std.mem.indexOf(u8, out, "C1,100nF,C_0402,1.000mm,18.000mm,0,Bottom") != null);
+}
+
+// spec: export_fab - the centroid CSV drops DNP parts by default and keeps them under keep_dnp
+test "centroidCsv excludes DNP parts unless keep_dnp is set" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false, .x = 5, .y = 5 },
+        .{ .ref_des = "R_OPT", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 8, .y = 5 },
+    };
+    const instances = [_]export_kicad.FlatInstance{
+        .{ .ref_des = "U1", .component = "mcu", .value = "STM32", .footprint = "LQFP-48", .uuid = "", .origin_key = "", .properties = &.{} },
+        .{ .ref_des = "R_OPT", .component = "res", .value = "0R", .footprint = "R_0402", .uuid = "", .origin_key = "", .properties = &.{}, .dnp = true },
+    };
+
+    // Default (.drop): the DNP option resistor is dropped, the stuffed IC stays.
+    var drop: std.Io.Writer.Allocating = .init(alloc);
+    try centroidCsv(&drop.writer, &parts, &instances, .{ .ox = 0, .oy = 10 }, .drop);
+    try testing.expect(std.mem.indexOf(u8, drop.written(), "U1,") != null);
+    try testing.expect(std.mem.indexOf(u8, drop.written(), "R_OPT,") == null);
+
+    // .keep: both rows present.
+    var keep: std.Io.Writer.Allocating = .init(alloc);
+    try centroidCsv(&keep.writer, &parts, &instances, .{ .ox = 0, .oy = 10 }, .keep);
+    try testing.expect(std.mem.indexOf(u8, keep.written(), "U1,") != null);
+    try testing.expect(std.mem.indexOf(u8, keep.written(), "R_OPT,") != null);
 }
 
 // spec: export_fab - fab writers share one y-up frame derived from the board outline

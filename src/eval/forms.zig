@@ -539,15 +539,17 @@ pub const scope_form_docs = blk: {
             "Repeat the form for more classes (e.g. a wide \"power\" class and a tight \"rf\" class).",
     } };
     t[@intFromEnum(ScopeForm.design_rules)] = .{ .scope = tl, .doc = .{
-        .syntax = "(design-rules [(clearance MM)] [(min-drill MM)] [(mask-margin MM)] [(copper-edge MM)] [(hole-to-hole MM)] [(min-annular MM)])",
+        .syntax = "(design-rules [(clearance MM)] [(min-drill MM)] [(mask-margin MM)] [(copper-edge MM)] " ++
+            "[(hole-to-hole MM)] [(min-annular MM)] [(mask-web MM)] [(min-width MM)])",
         .summary = "Board-level DEFAULT design rules (all sub-forms optional; mm): (clearance) copper-to-copper " ++
             "spacing for the router + DRC; (min-drill) smallest legal drilled hole; (mask-margin) solder-mask " ++
             "opening expansion per pad side; (copper-edge) copper-to-board-outline clearance; (hole-to-hole) " ++
             "wall-to-wall spacing between two drilled holes; (min-annular) minimum via annular ring " ++
-            "(copper radius − drill radius). These are global defaults — a per-net (net-class …) still " ++
+            "(copper radius − drill radius); (mask-web) smallest solder-mask sliver between two adjacent " ++
+            "openings; (min-width) narrowest legal track. These are global defaults — a per-net (net-class …) still " ++
             "overrides width/clearance/via for its own nets. An omitted rule keeps the toolchain's built-in " ++
             "default (clearance 0.127, min-drill 0.2, mask-margin 0.05, copper-edge = clearance, " ++
-            "hole-to-hole 0.25, min-annular 0.1), so a design with no form is unchanged.",
+            "hole-to-hole 0.25, min-annular 0.1, mask-web 0.2, min-width 0.1), so a design with no form is unchanged.",
     } };
     t[@intFromEnum(ScopeForm.revision)] = .{ .scope = tl, .doc = .{
         .syntax = "(revision \"ID\" [(date \"YYYY-MM-DD\")] [(change \"ID\" \"summary\")…])",

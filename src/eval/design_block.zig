@@ -1822,7 +1822,8 @@ fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_m
 }
 
 /// Parse a top-level `(design-rules (clearance MM) (min-drill MM)
-/// (mask-margin MM) (copper-edge MM) (hole-to-hole MM) (min-annular MM))`
+/// (mask-margin MM) (copper-edge MM) (hole-to-hole MM) (min-annular MM)
+/// (mask-web MM) (min-width MM))`
 /// form into a `DesignRulesSpec`. Every sub-form is optional; an unset field
 /// stays 0 so the consumer falls back to its built-in default. `present` is
 /// set whenever the form appears (even empty), so a bare `(design-rules)` is a
@@ -1846,9 +1847,13 @@ fn parseDesignRules(self: *Evaluator, form_children: []const Node) env_mod.Desig
             spec.hole_to_hole = val orelse 0;
         } else if (std.mem.eql(u8, head, "min-annular")) {
             spec.min_annular = val orelse 0;
+        } else if (std.mem.eql(u8, head, "mask-web")) {
+            spec.mask_web = val orelse 0;
+        } else if (std.mem.eql(u8, head, "min-width")) {
+            spec.min_width = val orelse 0;
         } else {
             self.warnFmt(c[0].span, "unknown (design-rules …) sub-form ({s} …) — expected " ++
-                "clearance/min-drill/mask-margin/copper-edge/hole-to-hole/min-annular", .{head});
+                "clearance/min-drill/mask-margin/copper-edge/hole-to-hole/min-annular/mask-web/min-width", .{head});
         }
     }
     return spec;

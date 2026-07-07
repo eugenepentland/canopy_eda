@@ -2755,11 +2755,15 @@ test "escape stub falls back to a trimmed clear stub when every heading is pad-b
     // foreign pad (this is the assertion the old pad-crossing tier failed).
     // This fixture packs the ring pads tighter than the solver ever would (to
     // starve every escape heading), so the diagonal courtyards intentionally
-    // overlap — every violation here is a courtyard overlap, and the COPPER
-    // clearance this test is about is clean (0 non-courtyard findings).
+    // overlap and the tight mask openings leave slivers — both assembly-hygiene
+    // warnings, not copper defects. The COPPER clearance this test is about is
+    // clean: zero via/track/pad clearance violations.
     const drc = @import("drc.zig");
     const viol = try drc.check(arena, placement, r, 0.127);
-    try testing.expectEqual(viol.len, drc.countKind(viol, .courtyard));
+    const copper = drc.countKind(viol, .via_pad) + drc.countKind(viol, .via_via) +
+        drc.countKind(viol, .via_track) + drc.countKind(viol, .track_track) +
+        drc.countKind(viol, .track_pad) + drc.countKind(viol, .pad_pad);
+    try testing.expectEqual(@as(usize, 0), copper);
 }
 
 // spec: placement/router - reserves diagonal corner cells so later nets keep trace-to-trace clearance

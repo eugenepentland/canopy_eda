@@ -1151,6 +1151,8 @@ pub const NetClassSpec = struct {
 ///   • `copper_edge` — copper-to-board-outline clearance (mm; Gerber pullback + DRC).
 ///   • `hole_to_hole`— wall-to-wall spacing between two drilled holes (mm; DRC).
 ///   • `min_annular` — minimum via annular ring, copper radius − drill radius (mm; DRC).
+///   • `mask_web`    — smallest solder-mask web between two adjacent openings (mm; DRC).
+///   • `min_width`   — narrowest legal track (mm; DRC — a net-class width still overrides per net).
 pub const DesignRulesSpec = struct {
     clearance: f64 = 0,
     min_drill: f64 = 0,
@@ -1158,6 +1160,8 @@ pub const DesignRulesSpec = struct {
     copper_edge: f64 = 0,
     hole_to_hole: f64 = 0,
     min_annular: f64 = 0,
+    mask_web: f64 = 0,
+    min_width: f64 = 0,
     present: bool = false,
 };
 

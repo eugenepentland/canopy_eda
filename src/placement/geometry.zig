@@ -43,6 +43,10 @@ pub const Pad = struct {
     npth: bool = false,
     /// Drill diameter (mm; 0 = no hole). Oval drills record their larger axis.
     drill: f64 = 0,
+    /// The drill is an oval slot (`(drill oval DX DY)`), so `drill` is only the
+    /// larger axis — a scalar annular ring can't be derived from it. The
+    /// annular DRC skips these (a slot's annular is axis-dependent).
+    drill_oval: bool = false,
 };
 
 /// A silkscreen line segment (footprint-local mm).
@@ -188,6 +192,7 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
     var w: f64 = 0;
     var h: f64 = 0;
     var drill: f64 = 0;
+    var drill_oval = false;
     var poly: []const [2]f64 = &.{};
     for (cl[2..]) |c| {
         if (c.isForm("pos")) {
@@ -201,14 +206,29 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
         } else if (c.isForm("poly")) {
             poly = parsePadPoly(arena, c) orelse poly;
         } else if (c.isForm("drill")) {
-            // `(drill D)` or `(drill oval DX DY)` — record the larger axis.
+            // `(drill D)` or `(drill oval DX DY)` — record the larger axis, and
+            // remember when it's an oval slot (annular ring is axis-dependent).
             const dl = c.asList() orelse continue;
+            const dhead = if (dl.len >= 2) dl[1].asAtom() else null;
+            if (dhead != null and std.mem.eql(u8, dhead.?, "oval")) drill_oval = true;
             for (dl[1..]) |dn| {
                 if (dn.asNumber()) |d| drill = @max(drill, d);
             }
         }
     }
-    return .{ .number = number, .x = x, .y = y, .w = w, .h = h, .shape = shape, .poly = poly, .thru = thru, .npth = npth, .drill = drill };
+    return .{
+        .number = number,
+        .x = x,
+        .y = y,
+        .w = w,
+        .h = h,
+        .shape = shape,
+        .poly = poly,
+        .thru = thru,
+        .npth = npth,
+        .drill = drill,
+        .drill_oval = drill_oval,
+    };
 }
 
 /// Parse a `(poly (x y) …)` form into footprint-absolute points, or null.
