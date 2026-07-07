@@ -425,21 +425,22 @@ function padPath(ctx,pd){
 // F.Cu/B.Cu" label UNDER everything, in the layer's track colour (red top /
 // blue bottom) — so a poured face reads as copper instead of being invisible.
 function paintPours(ctx,k){
- var ik=1/Math.max(k||1,0.01),n=0;
+ var ik=1/Math.max(k||1,0.01),seen={};
  (PCB.pours||[]).forEach(function(q){
-  if(!(q.w>0&&q.h>0))return;
+  var poly=q.poly;if(!poly||poly.length<3)return;
   var top=(q.side==="top");
-  ctx.fillStyle=top?"rgba(200,52,52,0.10)":"rgba(77,127,196,0.12)";
-  ctx.fillRect(X(q.x),Y(q.y),q.w*S,q.h*S);
+  ctx.beginPath();ctx.moveTo(X(poly[0][0]),Y(poly[0][1]));
+  for(var i=1;i<poly.length;i++)ctx.lineTo(X(poly[i][0]),Y(poly[i][1]));
+  ctx.closePath();
+  ctx.fillStyle=top?"rgba(200,52,52,0.10)":"rgba(77,127,196,0.12)";ctx.fill();
   ctx.strokeStyle=top?"rgba(200,52,52,0.45)":"rgba(77,127,196,0.5)";
-  ctx.lineWidth=1;ctx.setLineDash([5,4]);
-  ctx.strokeRect(X(q.x),Y(q.y),q.w*S,q.h*S);
-  ctx.setLineDash([]);
-  ctx.font="600 "+(11*ik).toFixed(2)+"px system-ui,sans-serif";
-  ctx.textAlign="left";ctx.textBaseline="alphabetic";
-  ctx.fillStyle=top?"rgba(220,90,90,0.9)":"rgba(110,155,215,0.9)";
-  ctx.fillText(q.net+" pour · "+(top?"F.Cu":"B.Cu"),X(q.x)+5*ik,Y(q.y+q.h)-(5+n*14)*ik);
-  n++;});}
+  ctx.lineWidth=1;ctx.setLineDash([5,4]);ctx.stroke();ctx.setLineDash([]);
+  if(!seen[q.side]){seen[q.side]=1;
+   var mnx=1/0,mxy=-1/0;for(var j=0;j<poly.length;j++){if(poly[j][0]<mnx)mnx=poly[j][0];if(poly[j][1]>mxy)mxy=poly[j][1];}
+   ctx.font="600 "+(11*ik).toFixed(2)+"px system-ui,sans-serif";
+   ctx.textAlign="left";ctx.textBaseline="alphabetic";
+   ctx.fillStyle=top?"rgba(220,90,90,0.9)":"rgba(110,155,215,0.9)";
+   ctx.fillText(q.net+" pour · "+(top?"F.Cu":"B.Cu"),X(mnx)+5*ik,Y(mxy)-5*ik);}});}
 // movG/only: drag-cache split — a group box is dynamic when any member moves
 // (its bounding box follows the drag).
 function paintGroupBoxes(ctx,k,movG,only){

@@ -196,6 +196,16 @@ Public functions: contains, distToEdge, signedInset, bboxRect, segCrossesEdge, r
 - a segment crossing a concave notch edge reports the crossing point
 - rounded-rect generation clamps the radius and keeps corner points inside the rect
 
+## placement/pour
+
+Public functions: compute, planeConnect
+
+- a seeded pour keeps its component and drops an unseeded orphan island
+- a foreign trace that splits a plane leaves its same-net pads in separate components
+- the fill respects a non-rectangular board outline
+- an isolated same-net pad reports no pour component
+- carryingLayers resolves declared planes and the implicit ground model
+
 ## placement/module_policy
 
 Public functions: analyze, classifyNetName, isInductor
@@ -940,5 +950,6 @@ Public functions: check, writeJson
 - a routed net is connected; an unrouted multi-pad net is flagged
 - connectivity propagates across an inner-signal-layer chain through its vias
 - a ground plane connects its pads without routed copper
+- a surface pad isolated from the plane is flagged until a plane via bridges it
 - a missing outline, off-board part, drill-less via, and DNP all surface
 - a clean board produces no errors and reports ok

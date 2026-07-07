@@ -21,6 +21,7 @@ const optimizer = @import("placement/optimizer.zig");
 const router = @import("placement/router.zig");
 const geometry = @import("placement/geometry.zig");
 const pad_shape = @import("placement/pad_shape.zig");
+const pour = @import("placement/pour.zig");
 const export_kicad = @import("export_kicad.zig");
 const export_fab = @import("export_fab.zig");
 const font = @import("font5x7.zig");
@@ -243,13 +244,17 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
     const li: u8 = if (side == .bottom) 1 else 0;
     const stack_idx: u8 = if (side == .top) 1 else bottomIndex(placement.rules);
 
-    // A `(plane IDX "NET")` declared on this OUTER layer: pour it first, then
-    // carve clearance around every foreign feature in clear polarity — the
-    // dark copper below re-lands the real features on the cleaned pour.
+    // A `(plane IDX "NET")` declared on this OUTER layer: pour the COMPUTED
+    // fill (island-free kept components) as the dark base, carve clearance
+    // around every foreign feature in clear polarity, then thermally relieve
+    // the same-net through-hole pads — the dark copper below re-lands the real
+    // features on the cleaned pour.
     if (declaredPlaneAt(placement.rules, stack_idx)) |pour_net| {
         const net: PlaneNet = .{ .named = pour_net };
+        const pnet: pour.PlaneNet = .{ .named = pour_net };
         const pc = placement.rules.design.pour_clearance;
-        try pourRect(g, placement);
+        const fill = try pour.compute(g.arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias }, .{ .net = pnet, .side = side, .track_layer = li });
+        for (fill.contours) |poly| try regionPoly(g, poly);
         try g.polarity(false);
         const nets = try padNets(g.arena, placement);
         for (placement.parts) |p| {
@@ -271,6 +276,7 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
             try g.flash(v.x, v.y);
         }
         try g.polarity(true);
+        try thermalReliefs(g, placement, nets, net);
     }
 
     for (placement.parts) |p| {
@@ -313,12 +319,16 @@ fn writeInnerCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, sig:
     }
 }
 
-/// Inner plane: solid pour over the (pulled-back) outline, then clearance
-/// antipads punched over every drilled hole whose net the plane does NOT
-/// carry — same-net barrels connect directly (no thermal relief).
+/// Inner plane: the COMPUTED fill (kept components only — orphan islands and a
+/// plane split by a foreign trace are dropped, not shipped as believed copper)
+/// as the dark base, clearance antipads punched over every foreign drilled hole
+/// / via, then 4-spoke thermal reliefs on the same-net through-hole barrels (so
+/// plane-tied THT pads are reworkable). Same-net vias stay solid.
 fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneLayer) Error!void {
     const pc = placement.rules.design.pour_clearance;
-    try pourRect(g, placement);
+    const pnet: pour.PlaneNet = if (pl.net == .ground) .ground else .{ .named = pl.net.named };
+    const fill = try pour.compute(g.arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias }, .{ .net = pnet });
+    for (fill.contours) |poly| try regionPoly(g, poly);
     try g.polarity(false);
     const nets = try padNets(g.arena, placement);
     for (placement.parts) |p| {
@@ -337,6 +347,45 @@ fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneL
         try g.flash(v.x, v.y);
     }
     try g.polarity(true);
+    try thermalReliefs(g, placement, nets, pl.net);
+}
+
+/// Spoke width (mm) bridging a plane-tied through-hole pad's thermal-relief gap
+/// — `max(0.3, default track width)`, a fab-safe KiCad-ish default (not
+/// author-tunable this round).
+const THERMAL_SPOKE_MM: f64 = @max(0.3, (router.RouteParams{}).track_width);
+
+/// Emit 4-spoke thermal reliefs for every same-net THROUGH-HOLE pad the plane
+/// `net` carries: clear an isolation ring (gap = pour clearance) around each,
+/// re-flash its land, and bridge the ring with an axis-aligned copper cross.
+/// SMD same-net pads and vias are left solid (the KiCad default).
+fn thermalReliefs(g: *Gx, placement: optimizer.Placement, nets: std.StringHashMap(usize), net: PlaneNet) Error!void {
+    const gap = placement.rules.design.pour_clearance;
+    for (placement.parts) |p| {
+        for (p.pads) |pad| {
+            if (pad.npth or !pad.thru or pad.drill <= 0) continue;
+            if (!planeCarries(net, netOfPad(nets, placement, p.ref_des, pad.number))) continue;
+            try thermalRelief(g, p, pad, gap);
+        }
+    }
+}
+
+/// One pad's thermal relief: a clear isolation ring (pad copper + `gap`), then
+/// the dark land re-flash plus a horizontal and vertical spoke crossing it.
+fn thermalRelief(g: *Gx, p: optimizer.Part, pad: geometry.Pad, gap: f64) Error!void {
+    const sh = try pad_shape.worldShape(g.arena, p, pad);
+    const cx = (sh.x0 + sh.x1) / 2;
+    const cy = (sh.y0 + sh.y1) / 2;
+    const rout = @max(sh.x1 - sh.x0, sh.y1 - sh.y0) / 2 + gap;
+    try g.polarity(false);
+    try g.use(.c, 2 * rout, 0);
+    try g.flash(cx, cy);
+    try g.polarity(true);
+    try flashPad(g, p, pad, 0);
+    const reach = rout + THERMAL_SPOKE_MM;
+    try g.use(.c, THERMAL_SPOKE_MM, 0);
+    try g.line(cx - reach, cy, cx + reach, cy);
+    try g.line(cx, cy - reach, cx, cy + reach);
 }
 
 /// Solder mask (negative: a flash = an OPENING in the mask). SMD pads open
@@ -966,13 +1015,18 @@ test "plane layer clears foreign holes and connects same-net barrels" {
     try writeLayer(&aw.writer, arena, placement, .{ .vias = &vias }, &.{}, export_fab.frameFor(placement), inner, "Copper,L2,Inner");
     const out = aw.written();
 
-    try testing.expect(std.mem.indexOf(u8, out, "G36*") != null); // the solid pour
+    try testing.expect(std.mem.indexOf(u8, out, "G36*") != null); // the computed pour region
     try testing.expect(std.mem.indexOf(u8, out, "%LPC*%") != null); // clear pass
     // Foreign pad hole (J1.2 at world (11,5)→(11,5) y-up) antipadded 0.8+0.6.
     try testing.expect(std.mem.indexOf(u8, out, "C,1.400000*%") != null);
     try testing.expect(std.mem.indexOf(u8, out, "X11000000Y5000000D03*") != null);
-    // Same-net GND pad hole at (9,5) NOT antipadded; foreign via antipadded.
-    try testing.expect(std.mem.indexOf(u8, out, "X9000000Y5000000D03*") == null);
+    // Same-net GND THT barrel at (9,5) is THERMALLY RELIEVED (not solid): a
+    // clear isolation ring (pad 1.4 + 0.3 gap ⇒ C,2.0) flashes at its centre,
+    // and 0.3 mm spokes bridge the gap.
+    try testing.expect(std.mem.indexOf(u8, out, "C,2.000000*%") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "X9000000Y5000000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "C,0.300000*%") != null); // spoke aperture
+    // Foreign via antipadded; same-net GND via connects solid (no flash).
     try testing.expect(std.mem.indexOf(u8, out, "X6000000Y5000000D03*") != null);
     try testing.expect(std.mem.indexOf(u8, out, "X5000000Y5000000D03*") == null);
 }

@@ -20,6 +20,7 @@ const geometry = @import("../placement/geometry.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
 const outline_mod = @import("../placement/outline.zig");
+const pour = @import("../placement/pour.zig");
 const export_fab = @import("../export_fab.zig");
 const export_gerber = @import("../export_gerber.zig");
 const fab_readiness = @import("../fab_readiness.zig");
@@ -5113,7 +5114,8 @@ fn writePcbData(
     }
 
     try w.writeAll("<script>const PCB=");
-    try writeBlobHead(w, v, clearance, p, opts);
+    const pour_copper: pour.Copper = if (routed) |r| .{ .tracks = r.tracks, .vias = r.vias } else .{};
+    try writeBlobHead(w, alloc, v, clearance, p, pour_copper, opts);
     // Server-computed objective breakdown of the layout on screen — the baseline
     // the live score deltas against. Same shape the /api/pcb-score endpoint returns.
     try w.print("\"caps\":{d},\"auto\":", .{p.score.loop_caps});
@@ -5357,7 +5359,15 @@ fn writeRoutedArrays(
 /// (the placement's — carries a drawn outline when one was applied), the
 /// read-only/sub flags, and the Stamp seed poses. Split from writePcbData
 /// purely to keep both under the function-length cap.
-fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placement, opts: PcbDataOpts) HandlerError!void {
+fn writeBlobHead(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    v: View,
+    clearance: f64,
+    p: optimizer.Placement,
+    copper: pour.Copper,
+    opts: PcbDataOpts,
+) HandlerError!void {
     try w.print("{{\"scale\":{d},\"minx\":{d},\"miny\":{d},", .{ v.scale, v.minx, v.miny });
     try w.print("\"margin\":{d},\"grid\":{d},\"w\":{d},\"h\":{d},", .{ MARGIN_MM, optimizer.GRID_MM, v.width, v.height });
     try w.print("\"clr\":{d},\"cmargin\":{d},", .{ clearance, geometry.BBOX_MARGIN_MM });
@@ -5380,21 +5390,30 @@ fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placem
     } else {
         try w.writeAll("\"board_poly\":null,");
     }
-    // Declared outer-layer copper pours ((stackup …) planes on an outer
-    // face): net + the rect the Gerber pour fills (board outline, or the
-    // parts-bbox fallback), so the viewer paints the poured face under the
-    // parts instead of leaving it invisible copper.
+    // Declared outer-layer copper pours ((stackup …) planes on an outer face):
+    // the REAL computed fill's kept-component contours (outline-clipped, foreign
+    // features carved, orphan islands dropped) so the viewer paints the actual
+    // poured copper — what the Gerber emits — instead of a full-board rect.
     try w.writeAll("\"pours\":[");
     var pfirst = true;
     for ([_]optimizer.Side{ .top, .bottom }) |side| {
         const pn = p.rules.pourNetOnSide(side) orelse continue;
-        const r = export_fab.outlineRect(p);
-        if (!pfirst) try w.writeByte(',');
-        pfirst = false;
+        const li: u8 = if (side == .top) 0 else 1;
+        const fill = pour.compute(alloc, p, copper, .{ .net = .{ .named = pn }, .side = side, .track_layer = li }) catch continue;
         const side_word: []const u8 = if (side == .top) "top" else "bottom";
-        try w.print("{{\"side\":\"{s}\",\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"net\":", .{ side_word, r.minx, r.miny, r.w, r.h });
-        try writeJsonStr(w, pn);
-        try w.writeByte('}');
+        for (fill.contours) |poly| {
+            if (poly.len < 3) continue;
+            if (!pfirst) try w.writeByte(',');
+            pfirst = false;
+            try w.print("{{\"side\":\"{s}\",\"net\":", .{side_word});
+            try writeJsonStr(w, pn);
+            try w.writeAll(",\"poly\":[");
+            for (poly, 0..) |pt, i| {
+                if (i > 0) try w.writeByte(',');
+                try w.print(PT_PAIR_FMT, .{ pt[0], pt[1] });
+            }
+            try w.writeAll("]}");
+        }
     }
     try w.writeAll("],");
     // The board's SIGNAL-layer table (from the `(stackup …)` rules): index
