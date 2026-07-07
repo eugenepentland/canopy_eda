@@ -966,6 +966,7 @@ Public functions: designSourcePath, designSiblingPath
 - Source-snapshot listing skips the reserved layouts subdir
 - The layout sidecar carries an optimistic-concurrency rev, emitted only when non-zero
 - readLayoutRev reads the sidecar rev (0 for a legacy file), and a save stamps disk_rev+1
+- An MCP layout mutation snapshots the sidecar to history and bumps the rev like a viewer Save
 
 ## fab_readiness
 

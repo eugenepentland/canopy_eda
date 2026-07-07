@@ -6660,7 +6660,7 @@ fn mcpPersistWorking(
         entry.name = "layout";
         entry.default = true;
         const only = [_]SavedLayout{entry};
-        writeLayouts(alloc, project_dir, name, &only);
+        mcpProtectedWrite(alloc, project_dir, name, &only);
         return;
     }
     const existing = readLayouts(alloc, project_dir, name);
@@ -6681,7 +6681,20 @@ fn mcpPersistWorking(
         entry.default = star;
         out.insert(alloc, 0, entry) catch return;
     }
-    writeLayouts(alloc, project_dir, name, out.items);
+    mcpProtectedWrite(alloc, project_dir, name, out.items);
+}
+
+/// Write a sidecar mutated over MCP the way the viewer's Save does: snapshot
+/// the previous design-level sidecar into `history/` first (best-effort), then
+/// stamp `disk rev + 1` — so an agent's mutation is (a) recoverable and (b)
+/// visible to an open editor tab's optimistic-concurrency guard (the tab's now
+/// stale rev 409s on its next save instead of silently clobbering). MCP tools
+/// are design-level only, so there is no `sub` variant.
+fn mcpProtectedWrite(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) void {
+    if (layoutsSidecar(alloc, project_dir, name, null, LAYOUTS_EXT)) |scp| {
+        _ = history.snapshotLayouts(alloc, project_dir, name, scp) catch null;
+    }
+    writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name), readLayoutRev(alloc, project_dir, name, null) + 1);
 }
 
 /// Net NAME at flattened-net index `idx` (−1 / out-of-range ⇒ "" — foreign
@@ -7402,6 +7415,32 @@ test "layout sidecar rev reads back and a save stamps the next rev" {
     // An explicit rev value round-trips too.
     writeLayoutsFile(alloc, project, "foo", &layouts, null, 42);
     try std.testing.expectEqual(@as(i64, 42), readLayoutRev(alloc, project, "foo", null));
+}
+
+// spec: Web Server - An MCP layout mutation snapshots the sidecar to history and bumps the rev like a viewer Save
+test "MCP persist bumps the sidecar rev and snapshots history" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.makePath("src");
+    try tmp.dir.writeFile(.{ .sub_path = "src/foo.layouts.json", .data = "{\"layouts\":[]}" });
+
+    // Two MCP persists: each stamps disk rev + 1 (0→1→2), so an open editor
+    // tab holding the old rev 409s on its next save instead of clobbering.
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 1, .y = 2, .rot = 0 }};
+    const entry = SavedLayout{ .name = "layout", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts, .default = true };
+    mcpPersistWorking(alloc, project, "foo", true, entry, true);
+    try std.testing.expectEqual(@as(i64, 1), readLayoutRev(alloc, project, "foo", null));
+    mcpPersistWorking(alloc, project, "foo", true, entry, true);
+    try std.testing.expectEqual(@as(i64, 2), readLayoutRev(alloc, project, "foo", null));
+
+    // The pre-write sidecar landed in history/ (recoverable like a viewer Save).
+    const snaps = try history.listLayoutSnapshots(alloc, project, "foo");
+    try std.testing.expect(snaps.len >= 1);
 }
 
 // spec: Web Server - The /pcb-layout page defaults to the design's starred (★) saved layout, below an explicit ?refine= snapshot and a (placement …) spec
