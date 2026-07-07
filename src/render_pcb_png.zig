@@ -621,6 +621,20 @@ const Ctx = struct {
             } else if (std.mem.eql(u8, pad.shape, "circle")) {
                 const c = self.lp(part, pad.x, pad.y);
                 self.cv.disc(c[0], c[1], self.len(@min(pad.w, pad.h) / 2), col, a);
+            } else if (std.mem.eql(u8, pad.shape, "oval")) {
+                // A stadium (obround): a round-capped line along the major axis,
+                // width = the minor axis — draws the true pill, not a sharp rect.
+                if (pad.w >= pad.h) {
+                    const e = (pad.w - pad.h) / 2;
+                    const a1 = self.lp(part, pad.x - e, pad.y);
+                    const b1 = self.lp(part, pad.x + e, pad.y);
+                    self.cv.line(a1[0], a1[1], b1[0], b1[1], self.len(pad.h), col, a, .round);
+                } else {
+                    const e = (pad.h - pad.w) / 2;
+                    const a1 = self.lp(part, pad.x, pad.y - e);
+                    const b1 = self.lp(part, pad.x, pad.y + e);
+                    self.cv.line(a1[0], a1[1], b1[0], b1[1], self.len(pad.w), col, a, .round);
+                }
             } else {
                 const hw = pad.w / 2;
                 const hh = pad.h / 2;
@@ -631,11 +645,18 @@ const Ctx = struct {
                 self.cv.fillPoly(&quad, col, a);
             }
             // Drilled bore: punch a board-coloured hole through thru/npth pads so
-            // through-hole parts and mounting holes read as holes, not solid copper.
+            // through-hole parts and mounting holes read as holes, not solid
+            // copper — an oval drill punches a capsule slot, not a round hole.
             if (pad.drill > 0) {
-                const c = self.lp(part, pad.x, pad.y);
-                const hr = @max(self.len(pad.drill / 2), self.pw(0.6));
-                self.cv.disc(c[0], c[1], hr, PAD_HOLE, a);
+                if (pad.isSlot()) {
+                    const e1 = self.lp(part, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
+                    const e2 = self.lp(part, pad.x - pad.slot_half[0], pad.y - pad.slot_half[1]);
+                    self.cv.line(e1[0], e1[1], e2[0], e2[1], @max(self.len(pad.drill), self.pw(1.2)), PAD_HOLE, a, .round);
+                } else {
+                    const c = self.lp(part, pad.x, pad.y);
+                    const hr = @max(self.len(pad.drill / 2), self.pw(0.6));
+                    self.cv.disc(c[0], c[1], hr, PAD_HOLE, a);
+                }
             }
         }
     }

@@ -87,6 +87,7 @@ Public functions: load
 - parses pads and courtyard half-extents from a footprint sexp
 - synthesizes a fallback box sized by pin count when the footprint is missing
 - parses silkscreen lines and circles from a footprint sexp
+- parses an oval drill into a slot (minor-axis tool + arc-centre offset), pad rotation, and roundrect ratio
 
 ## placement/optimizer
 
@@ -187,6 +188,7 @@ Public functions: check, countKind
 - flags a drilled hole below the minimum drill diameter (pads and vias); SMD pads exempt
 - board-level design rules default to the toolchain's legacy constants when no form is authored
 - a (design-rules …) value overrides the matching default in the DRC
+- an oval slot's hole-to-hole clearance is measured end-to-end (capsule), not at its centre
 
 ## placement/outline
 
@@ -410,6 +412,7 @@ Public functions: centroidCsv, excellonDrill, frameFor, outlineRect
 - the centroid CSV lists each part's pose with its board side
 - the Excellon writer splits plated pads + vias from non-plated holes and groups tools by diameter
 - fab writers share one y-up frame derived from the board outline
+- an oval drill exports as a G85 slot at its minor-axis tool between the two arc centres, in both drill files
 
 ## export_gerber
 
@@ -426,6 +429,10 @@ Public functions: planLayers, writeLayer
 - a non-rectangular board emits its exact outline polygon on the edge layer
 - board-level silkscreen text strokes onto the silk layer at its world anchor, and only on its own side
 - silkscreen text scales with its cap-height size (2x size gives 2x glyph extent)
+- a roundrect pad emits its rounded outline as a G36 region while a plain rect stays an R aperture
+- a custom polygon pad's mask opening is offset outward from its copper by the mask margin
+- a pad at a non-quarter angle emits a rotated region instead of an axis-aligned aperture
+- the .gbrjob board thickness comes from the stackup (thickness …), defaulting to 1.6 mm
 
 ## zipfile
 

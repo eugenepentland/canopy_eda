@@ -1682,11 +1682,12 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     };
 }
 
-/// Parse a top-level `(stackup N (plane IDX "NET")…)` form into a
-/// `StackupSpec`. N (total copper layers) is required and must be ≥1; a
+/// Parse a top-level `(stackup N (plane IDX "NET")… (thickness MM))` form into
+/// a `StackupSpec`. N (total copper layers) is required and must be ≥1; a
 /// malformed count leaves the spec absent (warned) so a typo can't silently
 /// change the routing model. `(plane …)` entries with a bad index (0 or > N)
-/// are skipped with a warning.
+/// are skipped with a warning. An optional `(thickness MM)` sets the finished
+/// board thickness reported in the Gerber `.gbrjob` (default 1.6 mm).
 fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod.StackupSpec {
     if (form_children.len < 2) {
         self.warnFmt(form_children[0].span, "(stackup …) needs a copper layer count, e.g. (stackup 2)", .{});
@@ -1701,17 +1702,27 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
         return .{};
     }
     const layers: u8 = @intFromFloat(n_raw);
+    var thickness: f64 = 0;
     var planes: std.ArrayListUnmanaged(env_mod.StackupPlane) = .empty;
     for (form_children[2..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
         const head = c[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "thickness")) {
+            // (thickness MM) — finished board thickness, flowed to .gbrjob.
+            if (c.len >= 2) {
+                if (c[1].asNumber()) |t| {
+                    if (t > 0) thickness = t else self.warnFmt(c[1].span, "(thickness …) must be a positive millimetre value", .{});
+                } else self.warnFmt(c[1].span, "(thickness …) must be a number (mm)", .{});
+            } else self.warnFmt(c[0].span, "(thickness …) needs a millimetre value, e.g. (thickness 1.6)", .{});
+            continue;
+        }
         const entry = if (std.mem.eql(u8, head, "plane"))
             parsePlaneEntry(self, c, layers)
         else if (std.mem.eql(u8, head, "pour"))
             parsePourEntry(self, c, layers)
         else blk: {
-            self.warnFmt(c[0].span, "unknown (stackup …) sub-form ({s} …) — expected (plane IDX \"NET\") or (pour top|bottom \"NET\")", .{head});
+            self.warnFmt(c[0].span, "unknown (stackup …) sub-form ({s} …) — expected (plane …), (pour …), or (thickness MM)", .{head});
             break :blk null;
         };
         if (entry) |pl| planes.append(self.allocator, pl) catch return EvalError.OutOfMemory;
@@ -1720,6 +1731,7 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
         .layers = layers,
         .planes = planes.toOwnedSlice(self.allocator) catch &.{},
         .present = true,
+        .thickness = thickness,
     };
 }
 

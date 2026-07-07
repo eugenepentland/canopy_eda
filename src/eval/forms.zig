@@ -516,17 +516,18 @@ pub const scope_form_docs = blk: {
             "group are placed last. Refs match by ref-des or module-local origin name (exact or leaf).",
     } };
     t[@intFromEnum(ScopeForm.stackup)] = .{ .scope = tl, .doc = .{
-        .syntax = "(stackup N [(plane IDX \"NET\")…] [(pour top|bottom \"NET\")…])",
+        .syntax = "(stackup N [(plane IDX \"NET\")…] [(pour top|bottom \"NET\")…] [(thickness MM)])",
         .summary = "Declare the board's copper stack: N total copper layers (1-based, 1 = top/F.Cu, " ++
             "N = bottom/B.Cu); each (plane IDX \"NET\") makes layer IDX a solid plane carrying NET, " ++
             "all other layers are routed signal layers. `(pour top|bottom \"NET\")` is sugar for a " ++
             "plane on the matching OUTER layer (top = 1, bottom = N): the face is emitted as a solid " ++
             "copper pour (Gerber + /pcb-layout + PNG), NET pads already on that face connect through " ++
-            "the pour with no stitching via, and signal routing prefers the un-poured face. " ++
-            "`(stackup 2)` is a plain 2-layer board with no planes — ground/power are routed as " ++
-            "copper like any other net; `(stackup 2 (pour bottom \"GND\"))` is the classic 2-layer " ++
-            "board with a bottom ground pour. Without the form the router keeps its legacy implicit " ++
-            "model (4 layers with assumed GND+PWR inner planes).",
+            "the pour with no stitching via, and signal routing prefers the un-poured face. An " ++
+            "optional (thickness MM) sets the finished board thickness reported in the Gerber .gbrjob " ++
+            "(default 1.6 mm). `(stackup 2)` is a plain 2-layer board with no planes — ground/power " ++
+            "are routed as copper like any other net; `(stackup 2 (pour bottom \"GND\"))` is the " ++
+            "classic 2-layer board with a bottom ground pour. Without the form the router keeps its " ++
+            "legacy implicit model (4 layers with assumed GND+PWR inner planes).",
     } };
     t[@intFromEnum(ScopeForm.net_class)] = .{ .scope = tl, .doc = .{
         .syntax = "(net-class \"name\" [(width MM)] [(clearance MM)] [(via DIA DRILL)] [(priority 0-7)] (nets \"A\" \"B\"…))",

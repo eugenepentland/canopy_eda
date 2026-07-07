@@ -86,8 +86,11 @@ pub fn centroidCsv(
     }
 }
 
-/// One hole for the Excellon writer: position (mm) + drill diameter (mm).
-const Hole = struct { x: f64, y: f64, d: f64 };
+/// One hole for the Excellon writer: position (mm) + tool diameter (mm). A
+/// `slot` (oval drill) additionally carries its far arc-centre `(x2,y2)`; it
+/// is routed with a `G85` canned slot between the two ends by a `d`-diameter
+/// tool. Round holes leave `slot=false` and only use `(x,y)`.
+const Hole = struct { x: f64, y: f64, d: f64, x2: f64 = 0, y2: f64 = 0, slot: bool = false };
 
 /// Which drill file to emit — fabs take plated and non-plated holes as two
 /// separate Excellon files.
@@ -115,9 +118,18 @@ pub fn excellonDrill(
             if (pad.drill <= 0) continue;
             const want = if (plated) (pad.thru and !pad.npth) else pad.npth;
             if (!want) continue;
-            const c = optimizer.worldPadCenter(p, pad.x, pad.y);
-            const f = frame.pt(c[0], c[1]);
-            try holes.append(alloc, .{ .x = f[0], .y = f[1], .d = pad.drill });
+            if (pad.isSlot()) {
+                // The two slot-end arc centres, at the pad's world pose.
+                const e1 = optimizer.worldPadCenter(p, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
+                const e2 = optimizer.worldPadCenter(p, pad.x - pad.slot_half[0], pad.y - pad.slot_half[1]);
+                const f1 = frame.pt(e1[0], e1[1]);
+                const f2 = frame.pt(e2[0], e2[1]);
+                try holes.append(alloc, .{ .x = f1[0], .y = f1[1], .x2 = f2[0], .y2 = f2[1], .d = pad.drill, .slot = true });
+            } else {
+                const c = optimizer.worldPadCenter(p, pad.x, pad.y);
+                const f = frame.pt(c[0], c[1]);
+                try holes.append(alloc, .{ .x = f[0], .y = f[1], .d = pad.drill });
+            }
         }
     }
     if (plated) {
@@ -151,7 +163,12 @@ pub fn excellonDrill(
         try w.print("T{d}\n", .{ti});
         for (holes.items) |h| {
             if (@abs(h.d - d) >= 0.005) continue;
-            try w.print("X{d:.3}Y{d:.3}\n", .{ h.x, h.y });
+            if (h.slot) {
+                // Excellon canned slot: route from one arc centre to the other.
+                try w.print("X{d:.3}Y{d:.3}G85X{d:.3}Y{d:.3}\n", .{ h.x, h.y, h.x2, h.y2 });
+            } else {
+                try w.print("X{d:.3}Y{d:.3}\n", .{ h.x, h.y });
+            }
         }
     }
     try w.writeAll("M30\n");
@@ -262,4 +279,40 @@ test "excellonDrill separates PTH and NPTH files" {
     try testing.expect(std.mem.indexOf(u8, npth_out, "T1C0.750") != null); // the mounting hole
     try testing.expect(std.mem.indexOf(u8, npth_out, "X13.000Y10.000") != null);
     try testing.expect(std.mem.indexOf(u8, npth_out, "C0.200") == null); // vias are plated-only
+}
+
+// spec: export_fab - an oval drill exports as a G85 slot at its minor-axis tool between the two arc centres, in both drill files
+test "excellonDrill routes oval slots with a G85 record" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    // A plated slot 1.10 long × 0.40 wide, running along +x (slot_half.x =
+    // (1.10-0.40)/2 = 0.35), plus an NPTH shield slot 1.10 long × 0.50 wide
+    // running along +y. The tool is the MINOR axis; the slot runs between the
+    // two arc centres (±slot_half about the pad centre).
+    const pads = [_]geometry.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 1.4, .h = 0.6, .thru = true, .drill = 0.40, .slot_half = .{ 0.35, 0 } },
+        .{ .number = "SH1", .x = 4, .y = 0, .w = 1.0, .h = 1.6, .thru = true, .npth = true, .drill = 0.50, .slot_half = .{ 0, 0.30 } },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "J1", .kind = .hub, .hw = 3, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 10 },
+    };
+    const frame = Frame{ .ox = 0, .oy = 20 }; // board bottom at y=20
+
+    var pth: std.Io.Writer.Allocating = .init(alloc);
+    try excellonDrill(&pth.writer, alloc, &parts, &.{}, .plated, frame);
+    const pth_out = pth.written();
+    try testing.expect(std.mem.indexOf(u8, pth_out, "T1C0.400") != null); // tool = minor axis
+    // Slot centred at world (10,10) → (10,10) y-up, ends at x = 10±0.35.
+    try testing.expect(std.mem.indexOf(u8, pth_out, "X10.350Y10.000G85X9.650Y10.000") != null);
+    try testing.expect(std.mem.indexOf(u8, pth_out, "C0.500") == null); // NPTH kept out
+
+    var npth: std.Io.Writer.Allocating = .init(alloc);
+    try excellonDrill(&npth.writer, alloc, &parts, &.{}, .non_plated, frame);
+    const npth_out = npth.written();
+    try testing.expect(std.mem.indexOf(u8, npth_out, "T1C0.500") != null);
+    // NPTH slot at world (14,10); its two ends (14,10±0.30) flip through the
+    // y-up frame (20-y), so the first end lands at y=9.700, the second at 10.300.
+    try testing.expect(std.mem.indexOf(u8, npth_out, "X14.000Y9.700G85X14.000Y10.300") != null);
 }

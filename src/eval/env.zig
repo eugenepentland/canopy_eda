@@ -1110,6 +1110,9 @@ pub const StackupSpec = struct {
     layers: u8 = 0,
     planes: []const StackupPlane = &.{},
     present: bool = false,
+    /// Finished board thickness (mm) from `(thickness MM)`; 0 ⇒ unset (the
+    /// Gerber job file's fab-standard 1.6 mm default applies).
+    thickness: f64 = 0,
 
     /// The declared plane carrying `net` names a ground-ish plane? Helper for
     /// the router: true when ANY plane is declared (used per-net at routing).
