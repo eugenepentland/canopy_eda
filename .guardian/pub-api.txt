@@ -1023,9 +1023,12 @@ src/serve/footprint_preview.zig::boardFootprintApi | fn boardFootprintApi(ctx: *
 src/serve/footprint_preview.zig::footprintApi | fn footprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/history.zig::HistoryError value
 src/serve/history.zig::SnapshotInfo struct_
+src/serve/history.zig::layoutSnapshotPath | fn layoutSnapshotPath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, ) HistoryError![]u8
+src/serve/history.zig::listLayoutSnapshots | fn listLayoutSnapshots( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) HistoryError![]SnapshotInfo
 src/serve/history.zig::listSnapshots | fn listSnapshots( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) HistoryError![]SnapshotInfo
 src/serve/history.zig::restore | fn restore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, ) HistoryError!void
 src/serve/history.zig::snapshot | fn snapshot( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, description: ?[]const u8, ) HistoryError!?[]const u8
+src/serve/history.zig::snapshotLayouts | fn snapshotLayouts( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, sidecar_path: []const u8, ) HistoryError!?[]const u8
 src/serve/layout_match.zig::ClassDist struct_
 src/serve/layout_match.zig::MatchResult struct_
 src/serve/layout_match.zig::PInfo struct_
@@ -1161,6 +1164,7 @@ src/serve/pcb_layout_page.zig::pcbDrcApi | fn pcbDrcApi(ctx: *Handler, req: *htt
 src/serve/pcb_layout_page.zig::pcbDrillApi | fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbFabReadinessApi | fn pcbFabReadinessApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbGerbersApi | fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbLayoutHistoryApi | fn pcbLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbLayoutJsonApi | fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbLayoutPage | fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbPngApi | fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -1173,6 +1177,7 @@ src/serve/pcb_layout_page.zig::pngRequestFromQuery | fn pngRequestFromQuery(aren
 src/serve/pcb_layout_page.zig::readLayouts | fn readLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const SavedLayout
 src/serve/pcb_layout_page.zig::renderDesignPng | fn renderDesignPng( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, ) PngError![]u8
 src/serve/pcb_layout_page.zig::rescoreLayoutsApi | fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::restoreLayoutHistoryApi | fn restoreLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::saveNamedLayoutApi | fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::savePcbCourtyardApi | fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::setDefaultLayoutApi | fn setDefaultLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void

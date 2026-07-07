@@ -961,6 +961,11 @@ Public functions: designSourcePath, designSiblingPath
 - Inner-layer copper (l ≥ 2) round-trips the sidecar; legacy entries without an l stay top copper
 - Stamped module copper keeps its group tag through the sidecar so rigid-group moves carry it
 - Stamped module copper maps its net names onto the parent design via the origin-key bridge, slug-prefixing private nets
+- The layout sidecar is snapshotted into history and listed newest-first
+- Layout snapshots are pruned to the newest retention cap
+- Source-snapshot listing skips the reserved layouts subdir
+- The layout sidecar carries an optimistic-concurrency rev, emitted only when non-zero
+- readLayoutRev reads the sidecar rev (0 for a legacy file), and a save stamps disk_rev+1
 
 ## fab_readiness
 

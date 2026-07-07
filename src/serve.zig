@@ -334,6 +334,8 @@ fn registerPcbRoutes(router: anytype) void {
     router.get("/api/fab-readiness/:name", pcb_layout_page.pcbFabReadinessApi, .{});
     router.get("/api/pcb-gerbers/:name", pcb_layout_page.pcbGerbersApi, .{});
     router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
+    router.get("/api/pcb-layout-history/:name", pcb_layout_page.pcbLayoutHistoryApi, .{});
+    router.post("/api/pcb-layout-history/:name/restore", pcb_layout_page.restoreLayoutHistoryApi, .{});
     router.post("/api/pcb-layouts/:name/delete", pcb_layout_page.deleteNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/default", pcb_layout_page.setDefaultLayoutApi, .{});
     router.post("/api/pcb-rescore/:name", pcb_layout_page.rescoreLayoutsApi, .{});

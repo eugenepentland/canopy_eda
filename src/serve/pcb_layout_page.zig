@@ -37,6 +37,7 @@ const png_mod = @import("../png.zig");
 const assets_css = @import("assets_css.zig");
 const pages_tmpl = @import("templates/pages.zig");
 const serve_root = @import("../serve.zig");
+const history = @import("history.zig");
 const Handler = serve_root.Handler;
 
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -530,6 +531,11 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
             .saved_routes = rv.saved,
             .subroutes_json = subseeds.routes,
             .texts = rv.texts,
+            // Read AFTER every render-path write above (persistGeneratedLayout,
+            // displayLayouts dedup, recordAutoLayout) so the embedded rev matches
+            // what's on disk — those writes preserve the rev, so it's stable
+            // across reloads and only a user Save/Update bumps it.
+            .rev = readLayoutRev(ctx.allocator, ctx.project_dir, name, sub),
         },
     );
     // Shared footprint engine (FP.padShape) must load before the board script
@@ -2179,6 +2185,37 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     // persist to its own `<design>.<sub>.layouts.json` sidecar (see writeLayoutsSub).
     const sub = subSlug(req);
 
+    // ── Optimistic-concurrency guard ─────────────────────────────────
+    // The page embedded the sidecar rev it loaded (PCB.rev); the save echoes it
+    // back. If the on-disk rev moved since (a second window saved), refuse the
+    // write with 409 + the current rev so the client can warn "reload to
+    // continue" instead of silently clobbering the other window's edits. A body
+    // with no `rev` (a legacy cached page) skips the check and just stamps —
+    // "accept then stamp". The successful write bumps the rev to `new_rev`.
+    const disk_rev = readLayoutRev(req.arena, ctx.project_dir, name, sub);
+    if (root.object.get("rev")) |rv| {
+        const client_rev: ?i64 = switch (rv) {
+            .integer => |i| i,
+            .float => |f| @intFromFloat(f),
+            else => null,
+        };
+        if (client_rev) |cr| if (cr != disk_rev) {
+            res.status = 409;
+            res.content_type = .JSON;
+            res.body = try std.fmt.allocPrint(req.arena, "{{\"error\":\"conflict\",\"rev\":{d}}}", .{disk_rev});
+            return;
+        };
+    }
+    const new_rev = disk_rev + 1;
+    // Snapshot the design-level sidecar this save will overwrite BEFORE touching
+    // it, so a bad Save/Update is recoverable from history. Best-effort. Sub
+    // circuits keep multi-snapshot in-file history already, so they're skipped.
+    if (sub == null) {
+        if (layoutsSidecar(req.arena, ctx.project_dir, name, null, LAYOUTS_EXT)) |scp| {
+            _ = history.snapshotLayouts(req.arena, ctx.project_dir, name, scp) catch null;
+        }
+    }
+
     // Score the hand layout on the server with the optimizer's own objective —
     // the same code the live `/api/pcb-score` endpoint uses — so a saved layout
     // is directly comparable to the auto baseline (HPWL + real routed-trace
@@ -2228,9 +2265,9 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         entry.name = "layout";
         entry.default = true;
         const only = [_]SavedLayout{entry};
-        writeLayoutsSub(req.arena, ctx.project_dir, name, sub, &only);
+        writeLayoutsSubRev(req.arena, ctx.project_dir, name, sub, &only, new_rev);
         res.content_type = .JSON;
-        res.body = "{\"ok\":true,\"single\":true}";
+        res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"single\":true,\"rev\":{d}}}", .{new_rev});
         return;
     }
     const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
@@ -2264,9 +2301,83 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         } else try out.append(req.arena, L);
     }
     if (!replaced and !dup) try out.insert(req.arena, 0, entry);
-    writeLayoutsSub(req.arena, ctx.project_dir, name, sub, out.items);
+    writeLayoutsSubRev(req.arena, ctx.project_dir, name, sub, out.items, new_rev);
     res.content_type = .JSON;
-    res.body = OK_JSON_TRUE;
+    res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rev\":{d}}}", .{new_rev});
+}
+
+/// GET /api/pcb-layout-history/:name — list the design's `.layouts.json`
+/// snapshots (newest first) as `{"snapshots":[{"id":…}, …]}`. Each Save/Update
+/// rolls the previous sidecar into history; this backs a restore picker.
+pub fn pcbLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const snaps = history.listLayoutSnapshots(req.arena, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = "history unavailable";
+        return;
+    };
+    var aw: std.Io.Writer.Allocating = .init(req.arena);
+    const w = &aw.writer;
+    try w.writeAll("{\"snapshots\":[");
+    for (snaps, 0..) |s, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"id\":");
+        try writeJsonStr(w, s.id);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
+    res.content_type = .JSON;
+    res.body = aw.written();
+}
+
+/// POST /api/pcb-layout-history/:name/restore — swap a `.layouts.json` snapshot
+/// back into the live sidecar. Body `{"id":"<timestamp>"}`. Snapshots the
+/// CURRENT sidecar first (the restore is itself undoable) and bumps the rev, so
+/// any window still holding the pre-restore rev 409s on its next save instead
+/// of clobbering the restored state. Design-level only (sub circuits keep
+/// multi-snapshot in-file history). Returns `{"ok":true,"rev":N}`.
+pub fn restoreLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const root = parseJsonObject(req, res) orelse return;
+    const id_v = root.object.get("id") orelse {
+        res.status = 400;
+        res.body = "no id";
+        return;
+    };
+    if (id_v != .string) {
+        res.status = 400;
+        return;
+    }
+    const snap_path = history.layoutSnapshotPath(req.arena, ctx.project_dir, name, id_v.string) catch {
+        res.status = 404;
+        res.body = "snapshot not found";
+        return;
+    };
+    const snap_data = infra_fs.cwd().readFileAlloc(req.arena, snap_path, 1 << 20) catch {
+        res.status = 500;
+        res.body = "snapshot read failed";
+        return;
+    };
+    const restored = parseLayouts(req.arena, snap_data) orelse {
+        res.status = 500;
+        res.body = "corrupt snapshot";
+        return;
+    };
+    // Snapshot the current sidecar so the restore itself is undoable, then write
+    // the restored layouts with a bumped rev, preserving the current cache slot.
+    const disk_rev = readLayoutRev(req.arena, ctx.project_dir, name, null);
+    if (layoutsSidecar(req.arena, ctx.project_dir, name, null, LAYOUTS_EXT)) |scp| {
+        _ = history.snapshotLayouts(req.arena, ctx.project_dir, name, scp) catch null;
+    }
+    writeLayoutsFile(req.arena, ctx.project_dir, name, restored, readCacheSlot(req.arena, ctx.project_dir, name), disk_rev + 1);
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rev\":{d}}}", .{disk_rev + 1});
 }
 
 /// POST /api/pcb-layouts/:name/delete — drop a named layout. Body: `{"name"}`.
@@ -3304,49 +3415,87 @@ fn readCacheSlot(alloc: std.mem.Allocator, project_dir: []const u8, name: []cons
     return parseCacheSlot(alloc, root);
 }
 
+/// The sidecar's optimistic-concurrency `rev` (top-level `"rev"` field), or 0
+/// when the file/field is absent (legacy). Every user Save/Update embeds the
+/// rev the page loaded and the save guard 409s on a mismatch; render-path
+/// writes preserve this value so merely viewing/regenerating never bumps it.
+fn readLayoutRev(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) i64 {
+    const path = layoutsSidecar(alloc, project_dir, name, sub, LAYOUTS_EXT) orelse return 0;
+    defer alloc.free(path);
+    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch return 0;
+    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return 0;
+    if (root != .object) return 0;
+    const rv = root.object.get("rev") orelse return 0;
+    return switch (rv) {
+        .integer => |i| i,
+        .float => |f| @intFromFloat(f),
+        else => 0,
+    };
+}
+
 /// Persist the layout list to `.layouts.json`, carrying the existing cache
-/// slot over unchanged. Best-effort: a write failure just means the list
-/// reverts to what was last on disk.
+/// slot AND the current `rev` over unchanged (a render-path write, not a user
+/// save — see `readLayoutRev`). Best-effort: a write failure just means the
+/// list reverts to what was last on disk.
 fn writeLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) void {
-    writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name));
+    writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name), readLayoutRev(alloc, project_dir, name, null));
 }
 
 /// As `writeLayouts`, but for a `?sub=` scoped sub circuit writes its per-sub
-/// sidecar. The sub store carries no auto-cache slot (sub previews always solve
-/// fresh), so only the layouts array is persisted. `sub == null` delegates to
+/// sidecar, preserving that sidecar's rev. `sub == null` delegates to
 /// `writeLayouts` (design store, cache preserved).
 fn writeLayoutsSub(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, layouts: []const SavedLayout) void {
-    if (sub == null) return writeLayouts(alloc, project_dir, name, layouts);
+    writeLayoutsSubRev(alloc, project_dir, name, sub, layouts, readLayoutRev(alloc, project_dir, name, sub));
+}
+
+/// As `writeLayoutsSub`, but stamps an explicit `rev` — the user-save path
+/// passes `disk_rev + 1` to bump the counter; render-path callers pass the
+/// current rev to preserve it. The sub store carries no auto-cache slot (sub
+/// previews always solve fresh), so only the layouts array is persisted;
+/// `sub == null` goes through the design store (cache preserved).
+fn writeLayoutsSubRev(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, layouts: []const SavedLayout, rev: i64) void {
+    if (sub == null) return writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name), rev);
     const path = layoutsSidecar(alloc, project_dir, name, sub, LAYOUTS_EXT) orelse return;
     defer alloc.free(path);
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
-    writeLayoutsFileJson(w, layouts, null) catch return;
+    writeLayoutsFileJsonRev(w, layouts, null, rev) catch return;
     writeFileAll(path, aw.written()) catch return;
 }
 
-/// Persist layouts + cache slot to `.layouts.json` (the whole sidecar).
+/// Persist layouts + cache slot + `rev` to `.layouts.json` (the whole sidecar).
 fn writeLayoutsFile(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     layouts: []const SavedLayout,
     cache: ?CacheSlot,
+    rev: i64,
 ) void {
     const path = paths.designSiblingPath(alloc, project_dir, name, LAYOUTS_EXT) catch return;
     defer alloc.free(path);
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
-    writeLayoutsFileJson(w, layouts, cache) catch return;
+    writeLayoutsFileJsonRev(w, layouts, cache, rev) catch return;
     writeFileAll(path, aw.written()) catch return;
 }
 
-/// Serialize the sidecar to its on-disk shape: an optional top-level
-/// `"default":"<name>"` (the entry whose `default` flag is set, if any),
-/// the optional `"cache"` slot, then the `layouts` array. Score fields
-/// (hpwl/loop/caps) are flattened onto each entry and omitted when unscored.
+/// Serialize the sidecar with no optimistic-concurrency rev (rev 0 → omitted).
+/// The rev-free spelling used by the KiCad-sync/export round-trip tests and any
+/// caller that doesn't participate in the save guard.
 fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: ?CacheSlot) std.Io.Writer.Error!void {
+    return writeLayoutsFileJsonRev(w, layouts, cache, 0);
+}
+
+/// Serialize the sidecar to its on-disk shape: an optional top-level `"rev":N`
+/// optimistic-concurrency counter (omitted when 0 so a never-guarded legacy
+/// file stays byte-identical), then an optional `"default":"<name>"` (the entry
+/// whose `default` flag is set, if any), the optional `"cache"` slot, then the
+/// `layouts` array. Score fields (hpwl/loop/caps) are flattened onto each entry
+/// and omitted when unscored.
+fn writeLayoutsFileJsonRev(w: *std.Io.Writer, layouts: []const SavedLayout, cache: ?CacheSlot, rev: i64) std.Io.Writer.Error!void {
     try w.writeAll("{");
+    if (rev > 0) try w.print("\"rev\":{d},", .{rev});
     for (layouts) |L| {
         if (!L.default) continue;
         try w.writeAll("\"default\":");
@@ -3963,7 +4112,8 @@ pub fn loadSyncVias(
 fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement, params: optimizer.Params) void {
     const parts = posesFromPlacement(alloc, p) orelse return;
     const layouts = readLayouts(alloc, project_dir, name);
-    writeLayoutsFile(alloc, project_dir, name, layouts, .{ .params = params, .parts = parts });
+    // Refreshing the auto cache is a render-path write — preserve the rev.
+    writeLayoutsFile(alloc, project_dir, name, layouts, .{ .params = params, .parts = parts }, readLayoutRev(alloc, project_dir, name, null));
     if (paths.designSiblingPath(alloc, project_dir, name, AUTO_EXT)) |legacy| {
         defer alloc.free(legacy);
         infra_fs.cwd().deleteFile(legacy) catch |e| switch (e) {
@@ -5051,6 +5201,10 @@ const PcbDataOpts = struct {
     /// The shown layout's board-level silkscreen texts (ShownView.texts) —
     /// emitted as `PCB.texts` so the viewer draws + edits them.
     texts: []const font5x7.BoardText = &.{},
+    /// The layout sidecar's optimistic-concurrency rev at page-render time
+    /// (`readLayoutRev`). Emitted as `PCB.rev`; every Save/Update POST echoes
+    /// it back so the server can 409 a stale write from a second window.
+    rev: i64 = 0,
 };
 
 /// World position of the GND-plane via covering the pad centred at (`cx`,`cy`),
@@ -5508,6 +5662,9 @@ fn writeBlobHead(
     }
     if (opts.outline_drawn) try w.writeAll("\"outline_drawn\":true,");
     if (opts.single) try w.writeAll("\"single\":true,");
+    // Optimistic-concurrency rev the page loaded — Save/Update echoes it so a
+    // stale write from another window 409s instead of silently clobbering.
+    try w.print("\"rev\":{d},", .{opts.rev});
     // Per-sub-block module-layout seed poses for the palette's Stamp button,
     // plus which snapshot supplied each group's seeds (tooltip/coverage).
     try w.writeAll("\"subseeds\":");
@@ -5596,6 +5753,9 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
         try writeJsonStr(w, L.name);
         try w.writeAll(",\"kind\":");
         try writeJsonStr(w, L.kind);
+        // Capture time (unix s) — the viewer's unsaved-work check compares a
+        // localStorage draft's timestamp against the newest saved layout's.
+        try w.print(",\"ts\":{d}", .{L.ts});
         if (L.score) |s| {
             try w.print(",\"score\":{{\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}}}", .{ s.hpwl, s.loop, s.caps, s.objective });
         } else try w.writeAll(",\"score\":null");
@@ -6327,6 +6487,55 @@ test "layouts sidecar round-trips rough flag" {
     try std.testing.expectEqual(@as(usize, 2), got.len);
     try std.testing.expect(got[0].rough);
     try std.testing.expect(!got[1].rough);
+}
+
+// spec: Web Server - The layout sidecar carries an optimistic-concurrency rev, emitted only when non-zero
+test "layouts sidecar emits rev only when non-zero" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
+    const layouts = [_]SavedLayout{.{ .name = "layout", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts, .default = true }};
+
+    // rev > 0 → serialized at the root.
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJsonRev(&aw.writer, &layouts, null, 5);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\"rev\":5") != null);
+    // A legacy reader still parses the layout array unaffected.
+    const got = parseLayouts(alloc, aw.written()) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+
+    // rev == 0 → omitted (a never-guarded legacy file stays byte-identical).
+    var aw0: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJsonRev(&aw0.writer, &layouts, null, 0);
+    try std.testing.expect(std.mem.indexOf(u8, aw0.written(), "\"rev\"") == null);
+}
+
+// spec: Web Server - readLayoutRev reads the sidecar rev (0 for a legacy file), and a save stamps disk_rev+1
+test "layout sidecar rev reads back and a save stamps the next rev" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.makePath("src");
+
+    // Legacy sidecar with no rev → 0 ("accept then stamp" starts here).
+    try tmp.dir.writeFile(.{ .sub_path = "src/foo.layouts.json", .data = "{\"layouts\":[]}" });
+    try std.testing.expectEqual(@as(i64, 0), readLayoutRev(alloc, project, "foo", null));
+
+    // A save stamps disk_rev + 1 = 1; a follow-up read sees it.
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
+    const layouts = [_]SavedLayout{.{ .name = "layout", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts, .default = true }};
+    writeLayoutsFile(alloc, project, "foo", &layouts, null, 1);
+    try std.testing.expectEqual(@as(i64, 1), readLayoutRev(alloc, project, "foo", null));
+
+    // An explicit rev value round-trips too.
+    writeLayoutsFile(alloc, project, "foo", &layouts, null, 42);
+    try std.testing.expectEqual(@as(i64, 42), readLayoutRev(alloc, project, "foo", null));
 }
 
 // spec: Web Server - The /pcb-layout page defaults to the design's starred (★) saved layout, below an explicit ?refine= snapshot and a (placement …) spec
