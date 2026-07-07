@@ -79,11 +79,17 @@ const PadBox = struct {
     drill: f64 = 0,
     hx: f64 = 0,
     hy: f64 = 0,
+    /// World half-vector between a slot's centre and one arc centre (`{0,0}`
+    /// for a round bore). The slot's two ends are `(hx,hy) ± (shx,shy)`.
+    shx: f64 = 0,
+    shy: f64 = 0,
 };
 
-/// One drilled hole reduced to its world centre + diameter — a pad hole or a
-/// via, unified so the min-drill and hole-to-hole checks treat them alike.
-const Hole = struct { x: f64, y: f64, drill: f64 };
+/// One drilled hole reduced to its world centre + diameter and, for an oval
+/// slot, the half-vector to its arc centres (`{0,0}` for a round bore) — a pad
+/// hole or a via, unified so the min-drill and hole-to-hole checks treat them
+/// alike (a round hole is the zero-length capsule).
+const Hole = struct { x: f64, y: f64, drill: f64, shx: f64 = 0, shy: f64 = 0 };
 
 const EPS: f64 = 1e-6;
 
@@ -283,9 +289,12 @@ fn checkDrillRules(
     const holes = try allHoles(arena, pads, vias);
     for (holes, 0..) |a, i| {
         for (holes[i + 1 ..]) |b| {
-            const dist = std.math.hypot(a.x - b.x, a.y - b.y);
-            if (dist < EPS) continue;
-            const gap = dist - a.drill / 2 - b.drill / 2;
+            // Centre coincidence still skips a via on its own barrel; the wall
+            // gap is the capsule (segment ± radius) distance, so an oval slot is
+            // measured end-to-end, not as a point at its centre.
+            if (std.math.hypot(a.x - b.x, a.y - b.y) < EPS) continue;
+            const wall = segSegDist(a.x - a.shx, a.y - a.shy, a.x + a.shx, a.y + a.shy, b.x - b.shx, b.y - b.shy, b.x + b.shx, b.y + b.shy);
+            const gap = wall - a.drill / 2 - b.drill / 2;
             if (gap < rules.hole_to_hole - EPS) {
                 try out.append(arena, .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2, .gap = gap, .clearance = rules.hole_to_hole, .kind = .hole_hole });
             }
@@ -401,6 +410,15 @@ fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Al
             const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ part.ref_des, pad.number });
             const net = pin_net.get(key) orelse -1;
             const c = optimizer.worldPadCenter(part, pad.x, pad.y);
+            // World half-vector to a slot's arc centres (affine, so it's the
+            // difference of two transformed local points); zero for a round bore.
+            var shx: f64 = 0;
+            var shy: f64 = 0;
+            if (pad.isSlot()) {
+                const e1 = optimizer.worldPadCenter(part, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
+                shx = e1[0] - c[0];
+                shy = e1[1] - c[1];
+            }
             try list.append(arena, .{
                 .x0 = sh.x0,
                 .y0 = sh.y0,
@@ -414,6 +432,8 @@ fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Al
                 .drill = pad.drill,
                 .hx = c[0],
                 .hy = c[1],
+                .shx = shx,
+                .shy = shy,
             });
         }
     }
@@ -426,7 +446,7 @@ fn allHoles(arena: std.mem.Allocator, pads: []const PadBox, vias: []const router
     var list: std.ArrayListUnmanaged(Hole) = .empty;
     for (pads) |p| {
         if (p.drill <= 0) continue;
-        try list.append(arena, .{ .x = p.hx, .y = p.hy, .drill = p.drill });
+        try list.append(arena, .{ .x = p.hx, .y = p.hy, .drill = p.drill, .shx = p.shx, .shy = p.shy });
     }
     for (vias) |v| {
         if (v.drill <= 0) continue;
@@ -1273,4 +1293,44 @@ test "check enforces a per-net class clearance from placement.rules.net" {
     const v = try check(arena, placement, routed, 0.127);
     try testing.expectEqual(@as(usize, 1), countKind(v, .track_track));
     try testing.expectEqual(@as(f64, 0.3), firstOfKind(v, .track_track).?.clearance);
+}
+
+// spec: placement/drc - an oval slot's hole-to-hole clearance is measured end-to-end (capsule), not at its centre
+test "check measures an oval slot as a capsule for hole-to-hole" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // A thru slot: tool 0.4, running along x with arc centres at ±0.5. A round
+    // via sits 1.0 mm from the slot CENTRE but only 0.5 mm from its near end —
+    // the capsule (end-to-end) gap is what the hole-to-hole check must use.
+    const pads = [_]@import("geometry.zig").Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 1.4, .h = 0.6, .thru = true, .drill = 0.4, .slot_half = .{ 0.5, 0 } },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "J1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+    };
+    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "J1", .pin = "1" }};
+    const nets = [_]FlatNet{.{ .name = "SLOT", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 2,
+        .maxy = 2,
+        .generated = true,
+    };
+    // Wall gap = 0.5 (to near end) − 0.2 (slot r) − 0.2 (via r) = 0.1 < the
+    // 0.25 hole-to-hole rule → flags; the 1.0 mm centre distance would clear it.
+    const vias = [_]router.Via{.{ .x = 1.0, .y = 0, .dia = 0.4, .drill = 0.4, .net = 9 }};
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 1, .total = 1 };
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .hole_hole));
+    try testing.expectApproxEqAbs(@as(f64, 0.1), firstOfKind(v, .hole_hole).?.gap, 1e-9);
 }

@@ -544,10 +544,12 @@ src/placement/drc.zig::Violation struct_
 src/placement/drc.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, ) std.mem.Allocator.Error![]Violation
 src/placement/drc.zig::countKind | fn countKind(v: []const Violation, k: Kind) usize
 src/placement/geometry.zig::BBOX_MARGIN_MM value
+src/placement/geometry.zig::DEFAULT_RRATIO value
 src/placement/geometry.zig::Geom struct_
 src/placement/geometry.zig::Pad struct_
 src/placement/geometry.zig::SilkCircle struct_
 src/placement/geometry.zig::SilkLine struct_
+src/placement/geometry.zig::isSlot | fn isSlot(self: Pad) bool
 src/placement/geometry.zig::load | fn load( arena: std.mem.Allocator, project_dir: []const u8, fp_name: []const u8, pin_count_hint: usize, margin: f64, ) Geom
 src/placement/layout_lint.zig::Finding struct_
 src/placement/layout_lint.zig::Severity enum_

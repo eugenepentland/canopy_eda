@@ -157,7 +157,13 @@ pub fn writeJobFile(
     try w.writeAll(", \"GUID\": \"\", \"Revision\": \"\" },\n");
     try w.print("    \"Size\": {{ \"X\": {d:.3}, \"Y\": {d:.3} }},\n", .{ r.w, r.h });
     try w.print("    \"LayerNumber\": {d},\n", .{layer_count});
-    try w.writeAll("    \"BoardThickness\": 1.6\n");
+    // Finished board thickness from the design's `(stackup … (thickness MM))`;
+    // an unset thickness keeps the byte-identical fab-standard 1.6 mm default.
+    if (rules.board_thickness > 0) {
+        try w.print("    \"BoardThickness\": {d}\n", .{rules.board_thickness});
+    } else {
+        try w.writeAll("    \"BoardThickness\": 1.6\n");
+    }
     try w.writeAll("  },\n  \"FilesAttributes\": [\n");
     for (files, 0..) |f, i| {
         if (i > 0) try w.writeAll(",\n");
@@ -326,9 +332,17 @@ fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneL
             if (pad.drill <= 0) continue;
             const foreign = pad.npth or !planeCarries(pl.net, netOfPad(nets, placement, p.ref_des, pad.number));
             if (!foreign) continue;
-            const c = optimizer.worldPadCenter(p, pad.x, pad.y);
             try g.use(.c, pad.drill + 2 * pc, 0);
-            try g.flash(c[0], c[1]);
+            if (pad.isSlot()) {
+                // An oval hole's antipad is the capsule swept by the cleared
+                // tool: a round-cap stroke between the two arc centres.
+                const e1 = optimizer.worldPadCenter(p, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
+                const e2 = optimizer.worldPadCenter(p, pad.x - pad.slot_half[0], pad.y - pad.slot_half[1]);
+                try g.line(e1[0], e1[1], e2[0], e2[1]);
+            } else {
+                const c = optimizer.worldPadCenter(p, pad.x, pad.y);
+                try g.flash(c[0], c[1]);
+            }
         }
     }
     for (copper.vias) |v| {
@@ -421,29 +435,174 @@ fn writeEdge(g: *Gx, placement: optimizer.Placement) Error!void {
 
 // ── Pads ────────────────────────────────────────────────────────────────────
 
-/// Flash one pad at its world pose: model shape → aperture (rect/roundrect →
-/// R, circle → C, oval → O, both swapped on a quarter turn), custom outlines
-/// as a G36 region through the same `worldShape` the DRC measures. `expand`
-/// grows each side (mask openings); a custom outline ignores it and flashes
-/// 1:1 (over-opening a poly pad would expose neighbouring copper).
+/// Flash one pad at its world pose. Shapes map to their faithful fab feature:
+/// a circle is a C aperture; an axis-aligned plain rect / oval is an R / O
+/// aperture (w/h swapped on a quarter turn — the fast, byte-identical path); a
+/// roundrect, or ANY pad at a non-quarter angle, is emitted as its true outline
+/// via a G36 region (rounded corners / arbitrary rotation an aperture can't
+/// represent); a custom (thermal/EP) outline flashes its real copper polygon.
+/// `expand` grows every feature per side (mask/paste openings) — including the
+/// custom polygon, offset outward by `expand` so its opening keeps the margin.
 fn flashPad(g: *Gx, p: optimizer.Part, pad: geometry.Pad, expand: f64) Error!void {
+    // 1. Custom polygon pad: its real outline, offset outward for a margin.
     if (pad.poly.len >= 3) {
         const shape = try pad_shape.worldShape(g.arena, p, pad);
-        if (shape.poly.len >= 3) return regionPoly(g, shape.poly);
+        if (shape.poly.len >= 3) {
+            const poly = if (expand > 0) try offsetPolygon(g.arena, shape.poly, expand) else shape.poly;
+            return regionPoly(g, poly);
+        }
     }
-    const q = quarterRot(p.rot);
+    const c = optimizer.worldPadCenter(p, pad.x, pad.y);
+    // 2. Circle: rotation-invariant, always a C aperture.
+    if (std.mem.eql(u8, pad.shape, "circle")) {
+        const d = pad.w + 2 * expand;
+        if (d <= 0) return;
+        try g.use(.c, d, d);
+        return g.flash(c[0], c[1]);
+    }
+    // 3. Rounded corners or an off-axis pose → the true outline as a region.
+    const tot = p.rot + pad.rot;
+    if (isRoundrect(pad) or !axisAligned(tot)) {
+        const poly = try padRegion(g.arena, p, pad, expand);
+        if (poly.len >= 3) return regionPoly(g, poly);
+    }
+    // 4. Axis-aligned rect / oval aperture (the fast, byte-identical path).
+    const q = quarterRot(tot);
     const w = (if (q) pad.h else pad.w) + 2 * expand;
     const h = (if (q) pad.w else pad.h) + 2 * expand;
     if (w <= 0 or h <= 0) return;
-    const c = optimizer.worldPadCenter(p, pad.x, pad.y);
-    const kind: ApKind = if (std.mem.eql(u8, pad.shape, "circle"))
-        .c
-    else if (std.mem.eql(u8, pad.shape, "oval"))
-        .o
-    else
-        .r;
+    const kind: ApKind = if (std.mem.eql(u8, pad.shape, "oval")) .o else .r;
     try g.use(kind, w, h);
     try g.flash(c[0], c[1]);
+}
+
+/// A pad shape word test.
+fn isRoundrect(pad: geometry.Pad) bool {
+    return std.mem.eql(u8, pad.shape, "roundrect");
+}
+fn isOval(pad: geometry.Pad) bool {
+    return std.mem.eql(u8, pad.shape, "oval");
+}
+
+/// The roundrect corner ratio to use: the pad's explicit value (capped at 0.5),
+/// else the KiCad default so a bare `roundrect` still rounds.
+fn roundrectRatio(pad: geometry.Pad) f64 {
+    return if (pad.rratio > 0) @min(pad.rratio, 0.5) else geometry.DEFAULT_RRATIO;
+}
+
+/// True when `rot` (deg) is a multiple of 90° — an axis-aligned pose an R/O
+/// aperture can represent.
+fn axisAligned(rot: f64) bool {
+    return @abs(rot - @round(rot / 90) * 90) < 1e-6;
+}
+
+/// Corner-arc segments per rounded corner when a pad is polygonized.
+const PAD_ARC_SEG: usize = 6;
+
+/// The world-space region outline of a rect / roundrect / oval pad at `p`'s
+/// pose, grown `expand` per side (0 = copper 1:1). Rect ⇒ 4 corners; roundrect
+/// ⇒ its corner arcs (default ratio when unset); oval ⇒ a stadium (corner
+/// radius = half the minor axis). The pad's own `(pos … ROT)` rotates the local
+/// outline before the part pose is applied, so any angle comes out exact.
+fn padRegion(arena: std.mem.Allocator, p: optimizer.Part, pad: geometry.Pad, expand: f64) Error![]const [2]f64 {
+    const hw = pad.w / 2 + expand;
+    const hh = pad.h / 2 + expand;
+    if (hw <= 0 or hh <= 0) return &.{};
+    var r: f64 = 0;
+    if (isRoundrect(pad)) {
+        r = roundrectRatio(pad) * @min(pad.w, pad.h) + expand;
+    } else if (isOval(pad)) {
+        r = @min(pad.w, pad.h) / 2 + expand;
+    }
+    r = std.math.clamp(r, 0, @min(hw, hh));
+
+    // Local offsets from the pad centre (before the pad's own rotation).
+    var locals: std.ArrayListUnmanaged([2]f64) = .empty;
+    if (r <= 1e-9) {
+        try locals.append(arena, .{ hw, -hh });
+        try locals.append(arena, .{ hw, hh });
+        try locals.append(arena, .{ -hw, hh });
+        try locals.append(arena, .{ -hw, -hh });
+    } else {
+        const HALF_PI = std.math.pi / 2.0;
+        // Four corner arcs, ordered so the connecting straight edges are drawn
+        // between successive arcs (top-right → bottom-right → bottom-left → top-left).
+        const arcs = [4][3]f64{
+            .{ hw - r, -(hh - r), -HALF_PI },
+            .{ hw - r, hh - r, 0 },
+            .{ -(hw - r), hh - r, HALF_PI },
+            .{ -(hw - r), -(hh - r), std.math.pi },
+        };
+        for (arcs) |arc| {
+            var i: usize = 0;
+            while (i <= PAD_ARC_SEG) : (i += 1) {
+                const t = arc[2] + HALF_PI * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(PAD_ARC_SEG));
+                try locals.append(arena, .{ arc[0] + r * @cos(t), arc[1] + r * @sin(t) });
+            }
+        }
+    }
+
+    // Rotate each local offset by the pad's own angle, then apply the part pose.
+    const a = pad.rot * std.math.pi / 180.0;
+    const ca = @cos(a);
+    const sa = @sin(a);
+    const out = try arena.alloc([2]f64, locals.items.len);
+    for (locals.items, 0..) |d, i| {
+        const rx = d[0] * ca - d[1] * sa;
+        const ry = d[0] * sa + d[1] * ca;
+        out[i] = optimizer.worldPadCenter(p, pad.x + rx, pad.y + ry);
+    }
+    return out;
+}
+
+/// Offset the closed polygon `pts` outward by `d` mm (edge normals + mitered
+/// joins) — the mask/paste margin for a custom pad. Winding comes from the
+/// signed area so normals point outward regardless of orientation; a degenerate
+/// (near-parallel) join falls back to one edge normal, and the miter length is
+/// capped so a sharp corner can't spike.
+fn offsetPolygon(arena: std.mem.Allocator, pts: []const [2]f64, d: f64) Error![]const [2]f64 {
+    const n = pts.len;
+    if (n < 3 or d == 0) return pts;
+    var area2: f64 = 0;
+    var j: usize = n - 1;
+    for (pts, 0..) |v, i| {
+        area2 += pts[j][0] * v[1] - v[0] * pts[j][1];
+        j = i;
+    }
+    const ccw = area2 > 0;
+    const out = try arena.alloc([2]f64, n);
+    for (pts, 0..) |v, i| {
+        const prev = pts[(i + n - 1) % n];
+        const next = pts[(i + 1) % n];
+        const n1 = edgeNormal(prev, v, ccw);
+        const n2 = edgeNormal(v, next, ccw);
+        var mx = n1[0] + n2[0];
+        var my = n1[1] + n2[1];
+        const ml = std.math.hypot(mx, my);
+        if (ml < 1e-9) {
+            out[i] = .{ v[0] + n1[0] * d, v[1] + n1[1] * d };
+            continue;
+        }
+        mx /= ml;
+        my /= ml;
+        var cos_half = mx * n1[0] + my * n1[1];
+        if (cos_half < 0.2) cos_half = 0.2; // cap the miter on a sharp corner
+        const len = d / cos_half;
+        out[i] = .{ v[0] + mx * len, v[1] + my * len };
+    }
+    return out;
+}
+
+/// Unit outward normal of edge a→b: the right-hand normal `(dy,-dx)/l` is
+/// outward when the polygon's signed area is positive (`ccw`), else flipped.
+fn edgeNormal(a: [2]f64, b: [2]f64, ccw: bool) [2]f64 {
+    const ex = b[0] - a[0];
+    const ey = b[1] - a[1];
+    const l = std.math.hypot(ex, ey);
+    if (l < 1e-12) return .{ 0, 0 };
+    const nx = ey / l;
+    const ny = -ex / l;
+    return if (ccw) .{ nx, ny } else .{ -nx, -ny };
 }
 
 /// Flash a pad's bounding box grown by `grow` per side — the clear-polarity
@@ -1189,4 +1348,116 @@ test "board text extent scales with cap height" {
     // stroke offsets being scaled too).
     const ratio = s2 / s1;
     try testing.expect(ratio > 1.9 and ratio < 2.1);
+}
+
+/// Min/max integer X coordinate over a Gerber file's coordinate lines (4.6
+/// units) — used to measure a region's width for the mask-offset test.
+fn xExtent(s: []const u8) [2]i64 {
+    var minx: i64 = std.math.maxInt(i64);
+    var maxx: i64 = std.math.minInt(i64);
+    var it = std.mem.tokenizeScalar(u8, s, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0 or line[0] != 'X') continue;
+        const yi = std.mem.indexOfScalar(u8, line, 'Y') orelse continue;
+        const xv = std.fmt.parseInt(i64, line[1..yi], 10) catch continue;
+        minx = @min(minx, xv);
+        maxx = @max(maxx, xv);
+    }
+    return .{ minx, maxx };
+}
+
+// spec: export_gerber - a roundrect pad emits its rounded outline as a G36 region while a plain rect stays an R aperture
+test "roundrect pads emit as rounded regions, plain rects as apertures" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -2, .y = 0, .w = 1.0, .h = 0.6, .shape = "roundrect", .rratio = 0.25 },
+        .{ .number = "2", .x = 2, .y = 0, .w = 1.0, .h = 0.6, .shape = "rect" },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 3, .hh = 1, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
+    };
+    const placement = testPlacement(&parts, &.{});
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&aw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, "Copper,L1,Top");
+    const out = aw.written();
+    // Exactly one region (the roundrect); the plain rect stays a 1.0×0.6 R aperture.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "G36*"));
+    try testing.expect(std.mem.indexOf(u8, out, "R,1.000000X0.600000*%") != null);
+}
+
+// spec: export_gerber - a custom polygon pad's mask opening is offset outward from its copper by the mask margin
+test "custom pad mask opening exceeds its copper outline" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // A 2×2 custom pad given as a (poly …): copper flashes 1:1; the mask
+    // opening grows by the 0.05 mm/side default margin.
+    const poly = [_][2]f64{ .{ -1, -1 }, .{ 1, -1 }, .{ 1, 1 }, .{ -1, 1 } };
+    const pads = [_]geometry.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 2, .h = 2, .shape = "custom", .poly = &poly },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
+    };
+    const placement = testPlacement(&parts, &.{});
+
+    var cw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&cw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, "Copper,L1,Top");
+    const cs = xExtent(cw.written());
+
+    var mw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&mw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, "Soldermask,Top");
+    const ms = xExtent(mw.written());
+
+    // The mask region is wider than the copper region by ~2× the 0.05 mm margin
+    // (0.1 mm = 100000 in 4.6 units), never equal to it (the old bug).
+    const grow = (ms[1] - ms[0]) - (cs[1] - cs[0]);
+    try testing.expect(grow > 80000 and grow < 120000);
+}
+
+// spec: export_gerber - a pad at a non-quarter angle emits a rotated region instead of an axis-aligned aperture
+test "a 45-degree pad emits a rotated region, not an R aperture" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const pads = [_]geometry.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 1.0, .h = 0.4, .shape = "rect", .rot = 45 },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
+    };
+    const placement = testPlacement(&parts, &.{});
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&aw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, "Copper,L1,Top");
+    const out = aw.written();
+    // A rotated rect can't be an axis-aligned aperture — it's a G36 region and
+    // no R aperture is defined.
+    try testing.expect(std.mem.indexOf(u8, out, "G36*") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "R,") == null);
+}
+
+// spec: export_gerber - the .gbrjob board thickness comes from the stackup (thickness …), defaulting to 1.6 mm
+test "writeJobFile reports the stackup board thickness" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // No thickness → the byte-identical fab-standard 1.6 mm default.
+    var placement = testPlacement(&.{}, &.{});
+    var files = try planLayers(arena, placement);
+    var dw: std.Io.Writer.Allocating = .init(arena);
+    try writeJobFile(&dw.writer, placement, files, "demo");
+    try testing.expect(std.mem.indexOf(u8, dw.written(), "\"BoardThickness\": 1.6") != null);
+
+    // A declared (stackup 2 (thickness 0.8)) flows to the job file.
+    placement.rules = .{ .plane_nets = &.{}, .copper_layers = 2, .board_thickness = 0.8 };
+    files = try planLayers(arena, placement);
+    var tw: std.Io.Writer.Allocating = .init(arena);
+    try writeJobFile(&tw.writer, placement, files, "demo");
+    try testing.expect(std.mem.indexOf(u8, tw.written(), "\"BoardThickness\": 0.8") != null);
 }

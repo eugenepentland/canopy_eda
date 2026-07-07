@@ -539,6 +539,9 @@ pub const BoardRules = struct {
     /// no-form default — reproduces every legacy constant). Read by the DRC
     /// and Gerber export instead of the old hard-coded constants.
     design: DesignRules = .{},
+    /// Finished board thickness (mm) from `(stackup … (thickness MM))`; 0 ⇒
+    /// unset, and the Gerber job file falls back to the fab-standard 1.6 mm.
+    board_thickness: f64 = 0,
 
     /// True when a DECLARED `(plane IDX "NET")` / `(pour …)` entry carries
     /// `name` (case-insensitive, full flattened name or its `/`-leaf). The
@@ -5706,6 +5709,7 @@ fn boardRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []con
         .copper_layers = if (block.stackup.present) block.stackup.layers else 0,
         .planes = planes,
         .design = designRulesOf(block),
+        .board_thickness = if (block.stackup.present) block.stackup.thickness else 0,
     };
 }
 
