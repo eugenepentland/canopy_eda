@@ -79,6 +79,11 @@ pub const RouteResult = struct {
     /// callers can tell "nothing needed routing" apart from "the grid bailed"
     /// instead of silently showing an empty route.
     grid_overflow: bool = false,
+    /// How many bounded rip-up-&-reroute rounds ran after the greedy pass
+    /// (0 = none needed / the greedy pass already routed everything, or the
+    /// grid overflowed). Surfaced in the route-summary JSON so a caller can see
+    /// the router did more than one pass.
+    ripup_rounds: usize = 0,
 };
 
 /// Largest grid (nodes per SIGNAL LAYER) the router will attempt — keeps a
@@ -175,6 +180,64 @@ fn planeViaPass(
     }
 }
 
+/// Pass 2's greedy first-routed-wins loop, factored out of `route`. Routes each
+/// maze net in `order` (already priority-sorted): short single-layer nets get a
+/// top-layer-first attempt (rolled back if it fails), then the plain via-allowed
+/// maze route. Every net's outcome is appended to `routable` (the rip-up working
+/// set) and `total` is bumped per attempted net. No `routed`/`failed` tally here
+/// — that happens after rip-up so re-routed nets count correctly.
+fn greedyPass(
+    ctx: *Ctx,
+    placement: optimizer.Placement,
+    idx_of: *std.StringHashMap(usize),
+    order: []const usize,
+    net_pri: []const u32,
+    top_first: bool,
+    tracks: *std.ArrayListUnmanaged(Track),
+    vias: *std.ArrayListUnmanaged(Via),
+    total: *usize,
+    routable: *std.ArrayListUnmanaged(RipNet),
+) std.mem.Allocator.Error!void {
+    const arena = ctx.arena;
+    for (order) |net_i| {
+        const pts = try netPoints(arena, placement, idx_of, placement.nets[net_i]);
+        if (pts.len < 2) continue;
+        total.* += 1;
+        const ni: i32 = @intCast(net_i);
+        setNetParams(ctx, placement, net_i);
+        // Top-layer-first only for *short* single-layer nets (a feedback tap, a
+        // strap — a handful of pads), which almost always have a clear surface
+        // path. A short net with no top path rolls back and re-routes with layer
+        // changes. A net whose pads straddle both board sides needs a via by
+        // definition, so it skips the no-via attempt outright.
+        const one_layer = blk: {
+            for (pts[1..]) |q| {
+                if (q.layer != pts[0].layer) break :blk false;
+            }
+            break :blk true;
+        };
+        var ok = false;
+        if (top_first and one_layer and pts.len <= TOP_FIRST_MAX_PADS) {
+            const t_mark = tracks.items.len;
+            const v_mark = vias.items.len;
+            ctx.allow_vias = false;
+            ctx.use_poly = true; // accurate outlines so an EP notch frees the escape
+            const top_ok = try routeNet(ctx, ni, pts, tracks, vias);
+            ctx.allow_vias = true;
+            ctx.use_poly = false;
+            if (top_ok) {
+                ok = true;
+            } else {
+                tracks.shrinkRetainingCapacity(t_mark);
+                vias.shrinkRetainingCapacity(v_mark);
+                clearNetOcc(ctx, ni);
+            }
+        }
+        if (!ok) ok = try routeNet(ctx, ni, pts, tracks, vias);
+        try routable.append(arena, .{ .net_i = net_i, .pri = net_pri[net_i], .ok = ok });
+    }
+}
+
 /// Route `placement` under `params`. All output is allocated in `arena`.
 pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams) std.mem.Allocator.Error!RouteResult {
     var tracks: std.ArrayListUnmanaged(Track) = .empty;
@@ -263,43 +326,23 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     // the greedy first-come routing enough to strand other nets — so we skip it
     // and route exactly as before. Mirrors the routed-scoring part gate.
     const top_first = placement.parts.len <= TOP_FIRST_MAX_PARTS;
-    for (order.items) |net_i| {
-        const pts = try netPoints(arena, placement, &idx_of, placement.nets[net_i]);
-        if (pts.len < 2) continue;
-        total += 1;
-        const ni: i32 = @intCast(net_i);
-        setNetParams(&ctx, placement, net_i);
-        // …and only for *short* nets (a feedback tap, a strap — a handful of
-        // pads), which almost always have a clear surface path. A short net with
-        // no top path rolls back and re-routes with layer changes, same as before.
-        // A net whose pads sit on BOTH board sides needs a via by definition, so
-        // it skips the no-via attempt outright.
-        const one_layer = blk: {
-            for (pts[1..]) |q| {
-                if (q.layer != pts[0].layer) break :blk false;
-            }
-            break :blk true;
-        };
-        if (top_first and one_layer and pts.len <= TOP_FIRST_MAX_PADS) {
-            const t_mark = tracks.items.len;
-            const v_mark = vias.items.len;
-            ctx.allow_vias = false;
-            ctx.use_poly = true; // accurate outlines so an EP notch frees the escape
-            const top_ok = try routeNet(&ctx, ni, pts, &tracks, &vias);
-            ctx.allow_vias = true;
-            ctx.use_poly = false;
-            if (top_ok) {
-                routed += 1;
-                continue;
-            }
-            tracks.shrinkRetainingCapacity(t_mark);
-            vias.shrinkRetainingCapacity(v_mark);
-            clearNetOcc(&ctx, ni);
-        }
-        if (try routeNet(&ctx, ni, pts, &tracks, &vias))
-            routed += 1
-        else
-            try failed.append(arena, placement.nets[net_i].name);
+    // Greedy first-routed-wins pass. Every maze net's outcome lands in
+    // `routable` (priority order) — the working set the bounded rip-up pass then
+    // revisits. `routed`/`failed` are tallied from it *after* rip-up, so a net
+    // re-routed by a rip counts correctly.
+    var routable: std.ArrayListUnmanaged(RipNet) = .empty;
+    try greedyPass(&ctx, placement, &idx_of, order.items, net_pri, top_first, &tracks, &vias, &total, &routable);
+
+    // Bounded rip-up & reroute: give each still-failed net a chance to displace
+    // no-higher-priority copper that boxes it in (see `ripUpReroute`). The
+    // grid-overflow case already returned early above, so this only runs on a
+    // real grid. Then tally `routed`/`failed` from the (possibly rip-updated)
+    // working set — plane nets were already counted in pass 1.
+    var ripup_rounds: usize = 0;
+    if (anyFailed(routable.items))
+        ripup_rounds = try ripUpReroute(&ctx, placement, &idx_of, routable.items, &tracks, &vias);
+    for (routable.items) |rn| {
+        if (rn.ok) routed += 1 else try failed.append(arena, placement.nets[rn.net_i].name);
     }
 
     // Escape breakouts: the optimizer reserved a corridor in front of every
@@ -372,6 +415,7 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
         .routed = routed,
         .total = total,
         .failed = try failed.toOwnedSlice(arena),
+        .ripup_rounds = ripup_rounds,
     };
 }
 
@@ -1398,6 +1442,15 @@ fn blocked(ctx: *Ctx, layer: usize, n: usize, net: i32) bool {
     if (o != EMPTY and o != net) return true;
     const rv = ctx.resv[layer][n];
     if (rv != EMPTY and rv != net) return true;
+    return foreignPadAt(ctx, layer, n, net);
+}
+
+/// True when a FOREIGN pad's copper sits within clearance of node `(layer, n)`
+/// and the node isn't on the net's *own* pad — the physical-pad half of
+/// `blocked`, split out. The rip-up blocker probe reuses it so a probe can
+/// treat foreign *copper* as passable-at-a-penalty (a rip could clear it) while
+/// still refusing to tunnel through a pad (which can never be ripped).
+fn foreignPadAt(ctx: *Ctx, layer: usize, n: usize, net: i32) bool {
     // All-top boards keep the old fast path: nothing on the bottom layer to hit.
     if (layer != 0 and !ctx.has_bottom_pads) return false;
     const px = ctx.grid.worldX(n % ctx.grid.nx);
@@ -1506,10 +1559,13 @@ fn routeNet(ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayListUnman
             }
         } else {
             all_ok = false;
-            // Still mark the goal pad as occupied so later pads can target it
-            // — but never a blocked node (see the seed guard above): copper
-            // grown from it later would violate the neighbour's clearance.
-            if (!blocked(ctx, pt.layer, goal_key % nodes, net)) ctx.occ[pt.layer][goal_key % nodes] = net;
+            // Do NOT stamp the failed goal as this net's copper. It was never
+            // reached, so it carries no track — marking it `occ = net` would
+            // make it a Dijkstra *source* for a later same-net leg (see the
+            // source scan in `dijkstra`), letting that leg weld to a stranded
+            // island: the drawing looks connected while the pad is electrically
+            // split from the net's real copper. Leaving it EMPTY keeps the pad
+            // honestly unrouted — a later leg connects to the real tree or fails.
         }
     }
     return all_ok;
@@ -1586,6 +1642,454 @@ fn clearNetOcc(ctx: *Ctx, net: i32) void {
             if (c.* == net) c.* = EMPTY;
         }
     }
+}
+
+// ── Bounded rip-up & reroute ─────────────────────────────────────────────────
+//
+// The greedy pass is first-routed-wins, so a net can be boxed in by copper
+// routed before it. After it, each still-failed net gets a bounded chance to
+// displace copper of no-higher priority that stands in its way (see
+// `collectRippable` for why equal-priority copper is rippable but strictly
+// higher is protected): a soft "probe" search finds the min-cost path when
+// foreign copper is passable-at-a-penalty (the crossed nets are the blockers),
+// those blockers are ripped, the failed net is re-routed into the freed space,
+// and the ripped nets are re-routed after it (they may find alternates). Every
+// attempt is speculative — the whole routing state is snapshotted first and
+// rolled back unless the attempt strictly improves the outcome (more nets
+// routed, ties broken by shorter total copper), so rip-up can never regress a
+// board. Capped at `RIPUP_MAX_ROUNDS` passes and stops early once a pass changes
+// nothing. Skipped entirely on grid overflow
+// (that path returns before the greedy pass ever runs).
+
+/// A maze net's working record during rip-up: its net index, routing priority,
+/// and whether it is currently routed. Built once from the greedy pass, then
+/// mutated in place as nets are ripped and re-routed.
+const RipNet = struct { net_i: usize, pri: u32, ok: bool };
+
+/// Rip-up passes cap: at most this many full sweeps over the failed nets. Each
+/// sweep is O(failed × (probe + rip + reroute)); 3 is plenty for module boards
+/// and keeps the worst case a small multiple of the single greedy pass.
+const RIPUP_MAX_ROUNDS: usize = 3;
+/// Per-cell penalty (× grid pitch) the blocker probe charges for stepping onto
+/// foreign copper. Large enough that the probe crosses copper only when there is
+/// no pad-free detour — so the nets it reports are the ones actually walling the
+/// failed net in, not incidental copper it could have gone around.
+const RIPUP_CROSS_PEN: f64 = 200.0;
+
+/// True when at least one net in the working set is still unrouted — the cheap
+/// guard that keeps rip-up (and its scratch arena) off fully-routed boards.
+fn anyFailed(routable: []const RipNet) bool {
+    for (routable) |rn| {
+        if (!rn.ok) return true;
+    }
+    return false;
+}
+
+/// Total length (mm) of every track segment — the tie-break metric rip-up uses
+/// to prefer the shorter of two equally-routed outcomes.
+fn traceLen(tracks: []const Track) f64 {
+    var s: f64 = 0;
+    for (tracks) |t| s += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
+    return s;
+}
+
+/// Count of currently-routed nets in the working set.
+fn countRouted(routable: []const RipNet) usize {
+    var c: usize = 0;
+    for (routable) |rn| {
+        if (rn.ok) c += 1;
+    }
+    return c;
+}
+
+/// Drop every track of `net` from `list`, packing the survivors down in place.
+fn removeNetTracks(list: *std.ArrayListUnmanaged(Track), net: i32) void {
+    var w: usize = 0;
+    for (list.items) |item| {
+        if (item.net != net) {
+            list.items[w] = item;
+            w += 1;
+        }
+    }
+    list.shrinkRetainingCapacity(w);
+}
+
+/// Drop every via of `net` from `list`, packing the survivors down in place.
+fn removeNetVias(list: *std.ArrayListUnmanaged(Via), net: i32) void {
+    var w: usize = 0;
+    for (list.items) |item| {
+        if (item.net != net) {
+            list.items[w] = item;
+            w += 1;
+        }
+    }
+    list.shrinkRetainingCapacity(w);
+}
+
+/// Remove all of `net_i`'s copper from the board: clear its occupancy/reservation
+/// cells and delete its tracks + vias. Leaves every other net untouched (a net
+/// only ever stamps its own index), so the freed cells are exactly this net's.
+fn ripNet(ctx: *Ctx, tracks: *std.ArrayListUnmanaged(Track), vias: *std.ArrayListUnmanaged(Via), net_i: usize) void {
+    const ni: i32 = @intCast(net_i);
+    clearNetOcc(ctx, ni);
+    removeNetTracks(tracks, ni);
+    removeNetVias(vias, ni);
+}
+
+/// Cost of ENTERING node `(layer, n)` for `net` during a blocker probe: `null`
+/// if a foreign pad hard-blocks it (a pad can never be ripped), else the soft
+/// penalty — 0 for a free cell, `RIPUP_CROSS_PEN×g` per foreign-copper layer the
+/// cell carries. This is what makes the probe pass *through* copper so the path
+/// it finds reveals which nets a rip would have to clear.
+fn softEnter(ctx: *Ctx, layer: usize, n: usize, net: i32) ?f64 {
+    if (foreignPadAt(ctx, layer, n, net)) return null;
+    var pen: f64 = 0;
+    const o = ctx.occ[layer][n];
+    if (o != EMPTY and o != net) pen += RIPUP_CROSS_PEN * ctx.grid.g;
+    const rv = ctx.resv[layer][n];
+    if (rv != EMPTY and rv != net) pen += RIPUP_CROSS_PEN * ctx.grid.g;
+    return pen;
+}
+
+/// Relax one probe move onto `(to_layer, to_node)` at base step cost `base`,
+/// adding the soft entry penalty. A hard-pad-blocked target is skipped.
+fn softStep(ctx: *Ctx, pq: *PQ, dist: []f64, prev: []i64, net: i32, from_key: usize, to_layer: usize, to_node: ?usize, base: f64) std.mem.Allocator.Error!void {
+    const tn = to_node orelse return;
+    const enter = softEnter(ctx, to_layer, tn, net) orelse return;
+    const nodes = ctx.grid.nx * ctx.grid.ny;
+    const to_key = to_layer * nodes + tn;
+    const nd = dist[from_key] + base + enter;
+    if (nd < dist[to_key]) {
+        dist[to_key] = nd;
+        prev[to_key] = @intCast(from_key);
+        try pq.add(.{ .d = nd, .key = to_key });
+    }
+}
+
+/// Probe diagonal (dx,dy) of (ix,iy), refusing to clip a pad's corner (same
+/// no-corner-cut guard as the real maze) — foreign copper on the flanks is fine,
+/// only a hard-pad-blocked flank forbids the diagonal.
+fn softDiag(
+    ctx: *Ctx,
+    pq: *PQ,
+    dist: []f64,
+    prev: []i64,
+    net: i32,
+    from_key: usize,
+    layer: usize,
+    ix: usize,
+    iy: usize,
+    dx: i64,
+    dy: i64,
+) std.mem.Allocator.Error!void {
+    const grid = ctx.grid;
+    const c1 = neighbor(grid, ix, iy, dx, 0) orelse return;
+    const c2 = neighbor(grid, ix, iy, 0, dy) orelse return;
+    if (softEnter(ctx, layer, c1, net) == null or softEnter(ctx, layer, c2, net) == null) return;
+    try softStep(ctx, pq, dist, prev, net, from_key, layer, neighbor(grid, ix, iy, dx, dy), grid.g * SQRT2);
+}
+
+/// Soft Dijkstra from `src`'s access node to `goal`'s, foreign copper passable
+/// at a penalty (see `softEnter`). On reaching the goal it walks the path back
+/// and records every foreign net whose copper it crossed into `crossed` — the
+/// blocker set for this pad pair. Unreachable even softly (walled by pads) ⇒ no
+/// blockers recorded. Uses `scratch` for its dist/prev/queue.
+fn softProbe(ctx: *Ctx, net: i32, src: NetPt, goal: NetPt, crossed: *std.AutoHashMap(i32, void), scratch: std.mem.Allocator) std.mem.Allocator.Error!void {
+    const grid = ctx.grid;
+    const nodes = grid.nx * grid.ny;
+    const n_layers = ctx.occ.len;
+    const dist = try scratch.alloc(f64, n_layers * nodes);
+    const prev = try scratch.alloc(i64, n_layers * nodes);
+    @memset(dist, std.math.inf(f64));
+    @memset(prev, -1);
+
+    const s = grid.nearest(src.x, src.y);
+    const src_key = @as(usize, src.layer) * nodes + grid.node(s[0], s[1]);
+    const gd = grid.nearest(goal.x, goal.y);
+    const goal_key = @as(usize, goal.layer) * nodes + grid.node(gd[0], gd[1]);
+
+    var pq = std.PriorityQueue(QItem, void, qLess).init(scratch, {});
+    dist[src_key] = 0;
+    try pq.add(.{ .d = 0, .key = src_key });
+
+    var found = false;
+    while (pq.removeOrNull()) |it| {
+        if (it.d > dist[it.key]) continue;
+        if (it.key == goal_key) {
+            found = true;
+            break;
+        }
+        const layer = it.key / nodes;
+        const n = it.key % nodes;
+        const ix = n % grid.nx;
+        const iy = n / grid.nx;
+        try softStep(ctx, &pq, dist, prev, net, it.key, layer, neighbor(grid, ix, iy, 1, 0), grid.g);
+        try softStep(ctx, &pq, dist, prev, net, it.key, layer, neighbor(grid, ix, iy, -1, 0), grid.g);
+        try softStep(ctx, &pq, dist, prev, net, it.key, layer, neighbor(grid, ix, iy, 0, 1), grid.g);
+        try softStep(ctx, &pq, dist, prev, net, it.key, layer, neighbor(grid, ix, iy, 0, -1), grid.g);
+        try softDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, 1, 1);
+        try softDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, 1, -1);
+        try softDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, -1, 1);
+        try softDiag(ctx, &pq, dist, prev, net, it.key, layer, ix, iy, -1, -1);
+        if (n_layers > 1) {
+            for (0..n_layers) |to_layer| {
+                if (to_layer == layer) continue;
+                try softStep(ctx, &pq, dist, prev, net, it.key, to_layer, n, grid.g * VIA_COST_MULT);
+            }
+        }
+    }
+    if (!found) return;
+    // Walk back from the goal, recording foreign copper crossed on the way.
+    var k = goal_key;
+    while (true) {
+        const layer = k / nodes;
+        const nn = k % nodes;
+        const o = ctx.occ[layer][nn];
+        if (o != EMPTY and o != net) try crossed.put(o, {});
+        const rv = ctx.resv[layer][nn];
+        if (rv != EMPTY and rv != net) try crossed.put(rv, {});
+        const p = prev[k];
+        if (p < 0) break;
+        k = @intCast(p);
+    }
+}
+
+/// The foreign nets whose copper boxes `net_i` in: probe `net_i`'s first pad to
+/// each of its other pads with copper soft-passable and union the crossed nets.
+/// Returns the blocker net indices (deduped). Allocated in `scratch`.
+fn detectBlockers(
+    ctx: *Ctx,
+    placement: optimizer.Placement,
+    idx_of: *std.StringHashMap(usize),
+    net_i: usize,
+    scratch: std.mem.Allocator,
+) std.mem.Allocator.Error![]i32 {
+    const ni: i32 = @intCast(net_i);
+    setNetParams(ctx, placement, net_i);
+    const pts = try netPoints(scratch, placement, idx_of, placement.nets[net_i]);
+    if (pts.len < 2) return &.{};
+    var crossed = std.AutoHashMap(i32, void).init(scratch);
+    for (pts[1..]) |pt| try softProbe(ctx, ni, pts[0], pt, &crossed, scratch);
+    var out: std.ArrayListUnmanaged(i32) = .empty;
+    var it = crossed.keyIterator();
+    while (it.next()) |kp| try out.append(scratch, kp.*);
+    return out.toOwnedSlice(scratch);
+}
+
+/// Indices (into `routable`) of the nets rip-up may remove for a net of priority
+/// `fail_pri`: currently-routed blockers of priority ≤ `fail_pri` (never
+/// STRICTLY HIGHER) that are not a plane, a pour, or ground (that copper is
+/// never ripped).
+///
+/// Why lower-*or-equal*, not strictly-lower: the greedy pass routes strictly
+/// higher-priority nets first, so a net that failed there was only ever boxed in
+/// by copper of higher-OR-EQUAL priority. Forbidding equal-priority rips would
+/// therefore make rip-up unable to rescue the common case — a net walled off by
+/// an equal-tier neighbour (e.g. one flash-data line boxing the next) — leaving
+/// it a no-op. Equal-tier nets carry no real importance difference (net index is
+/// only a stable sort tiebreak), so ripping one to route another and letting it
+/// find an alternate is exactly the intended trade. STRICTLY higher priority
+/// (authored `(net-class (priority …))` tiers, the elevated switcher hot loop,
+/// planes/pours/ground) stays protected; `saveSnapshot`/keep-best still make the
+/// whole attempt a no-op unless it strictly improves the board.
+fn collectRippable(
+    scratch: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routable: []const RipNet,
+    blockers: []const i32,
+    fail_pri: u32,
+) std.mem.Allocator.Error![]usize {
+    var out: std.ArrayListUnmanaged(usize) = .empty;
+    for (routable, 0..) |rn, i| {
+        if (!rn.ok) continue; // only routed copper can be ripped
+        if (rn.pri > fail_pri) continue; // never rip STRICTLY higher priority
+        const name = placement.nets[rn.net_i].name;
+        if (netHasPlane(placement, name)) continue;
+        if (isGroundName(shortName(name))) continue;
+        const pour = netPourLayers(placement, name);
+        if (pour[0] or pour[1]) continue;
+        var is_blocker = false;
+        for (blockers) |b| {
+            if (b == @as(i32, @intCast(rn.net_i))) {
+                is_blocker = true;
+                break;
+            }
+        }
+        if (is_blocker) try out.append(scratch, i);
+    }
+    return out.toOwnedSlice(scratch);
+}
+
+/// Re-route one net from scratch (its copper must already be ripped), updating
+/// its `ok` flag. Mirrors the greedy pass's plain (via-allowed) attempt.
+fn rerouteNet(
+    ctx: *Ctx,
+    placement: optimizer.Placement,
+    idx_of: *std.StringHashMap(usize),
+    rn: *RipNet,
+    tracks: *std.ArrayListUnmanaged(Track),
+    vias: *std.ArrayListUnmanaged(Via),
+) std.mem.Allocator.Error!void {
+    setNetParams(ctx, placement, rn.net_i);
+    const pts = try netPoints(ctx.arena, placement, idx_of, placement.nets[rn.net_i]);
+    if (pts.len < 2) {
+        rn.ok = true;
+        return;
+    }
+    rn.ok = try routeNet(ctx, @intCast(rn.net_i), pts, tracks, vias);
+}
+
+/// A rollback point for one speculative rip-up attempt: the full routing state
+/// (copper + occupancy grids + per-net status) plus its score, all duplicated
+/// into the scratch arena so `restoreSnapshot` can put it back verbatim.
+const RipSnapshot = struct {
+    tracks: []Track,
+    vias: []Via,
+    occ: [][]i32,
+    resv: [][]i32,
+    routed: usize,
+    trace: f64,
+    ok: []bool,
+};
+
+/// Duplicate the current routing state into `scratch` for possible rollback.
+fn saveSnapshot(
+    scratch: std.mem.Allocator,
+    ctx: *Ctx,
+    tracks: *std.ArrayListUnmanaged(Track),
+    vias: *std.ArrayListUnmanaged(Via),
+    routable: []const RipNet,
+) std.mem.Allocator.Error!RipSnapshot {
+    const occ = try scratch.alloc([]i32, ctx.occ.len);
+    for (ctx.occ, occ) |src, *dst| dst.* = try scratch.dupe(i32, src);
+    const resv = try scratch.alloc([]i32, ctx.resv.len);
+    for (ctx.resv, resv) |src, *dst| dst.* = try scratch.dupe(i32, src);
+    const ok = try scratch.alloc(bool, routable.len);
+    for (routable, ok) |rn, *o| o.* = rn.ok;
+    return .{
+        .tracks = try scratch.dupe(Track, tracks.items),
+        .vias = try scratch.dupe(Via, vias.items),
+        .occ = occ,
+        .resv = resv,
+        .routed = countRouted(routable),
+        .trace = traceLen(tracks.items),
+        .ok = ok,
+    };
+}
+
+/// Restore the routing state captured by `saveSnapshot`, discarding the
+/// speculative attempt's changes.
+fn restoreSnapshot(
+    ctx: *Ctx,
+    tracks: *std.ArrayListUnmanaged(Track),
+    vias: *std.ArrayListUnmanaged(Via),
+    routable: []RipNet,
+    snap: RipSnapshot,
+) std.mem.Allocator.Error!void {
+    tracks.clearRetainingCapacity();
+    try tracks.appendSlice(ctx.arena, snap.tracks);
+    vias.clearRetainingCapacity();
+    try vias.appendSlice(ctx.arena, snap.vias);
+    for (ctx.occ, snap.occ) |dst, src| @memcpy(dst, src);
+    for (ctx.resv, snap.resv) |dst, src| @memcpy(dst, src);
+    for (routable, snap.ok) |*rn, o| rn.ok = o;
+}
+
+/// Bounded rip-up & reroute over the greedy pass's working set. Returns the
+/// number of rounds run (≥1 whenever called; caller only calls it when a net
+/// failed). See the section header above for the algorithm.
+fn ripUpReroute(
+    ctx: *Ctx,
+    placement: optimizer.Placement,
+    idx_of: *std.StringHashMap(usize),
+    routable: []RipNet,
+    tracks: *std.ArrayListUnmanaged(Track),
+    vias: *std.ArrayListUnmanaged(Via),
+) std.mem.Allocator.Error!usize {
+    // Scratch arena for per-attempt snapshots + probe state, backed by the
+    // caller's arena (not page_allocator) and reset between attempts so only one
+    // snapshot's worth of memory is ever live.
+    var scratch_inst = std.heap.ArenaAllocator.init(ctx.arena);
+    defer scratch_inst.deinit();
+    var rounds: usize = 0;
+    while (rounds < RIPUP_MAX_ROUNDS) {
+        rounds += 1;
+        var progress = false;
+        for (routable) |*rn| {
+            if (rn.ok) continue; // only still-failed nets seek room
+            const scratch = scratch_inst.allocator();
+            const blockers = try detectBlockers(ctx, placement, idx_of, rn.net_i, scratch);
+            const rippable = try collectRippable(scratch, placement, routable, blockers, rn.pri);
+            if (rippable.len == 0) {
+                _ = scratch_inst.reset(.retain_capacity);
+                continue;
+            }
+            const snap = try saveSnapshot(scratch, ctx, tracks, vias, routable);
+            // Rip the failed net + its lower-priority blockers…
+            ripNet(ctx, tracks, vias, rn.net_i);
+            rn.ok = false;
+            for (rippable) |ri| {
+                ripNet(ctx, tracks, vias, routable[ri].net_i);
+                routable[ri].ok = false;
+            }
+            // …reroute the net we're rescuing first (so it claims the freed
+            // space), then the ripped blockers in descending-priority order.
+            try rerouteNet(ctx, placement, idx_of, rn, tracks, vias);
+            for (rippable) |ri| try rerouteNet(ctx, placement, idx_of, &routable[ri], tracks, vias);
+            const now_routed = countRouted(routable);
+            const now_trace = traceLen(tracks.items);
+            const better = now_routed > snap.routed or
+                (now_routed == snap.routed and now_trace < snap.trace - 1e-6);
+            if (better) {
+                progress = true;
+            } else {
+                try restoreSnapshot(ctx, tracks, vias, routable, snap);
+            }
+            _ = scratch_inst.reset(.retain_capacity);
+        }
+        if (!progress) break;
+    }
+    return rounds;
+}
+
+/// Per-net routed-copper totals for the summary JSON: trace length (mm) summed
+/// over the net's track segments, and its via count. Emitted by `perNetRouted`.
+pub const NetRouted = struct { name: []const u8, mm: f64, vias: usize };
+
+/// Aggregate a `RouteResult`'s copper by net — one `NetRouted` per net that
+/// carries any track or via — so a caller can read where copper went per
+/// connection (the route-summary JSON's `per_net`). Sorted by descending trace
+/// length so the longest nets read first. `net`-index copper with no matching
+/// `placement.nets` entry (there should be none) is skipped.
+pub fn perNetRouted(arena: std.mem.Allocator, placement: optimizer.Placement, r: RouteResult) std.mem.Allocator.Error![]NetRouted {
+    var by_idx = std.AutoHashMap(i32, NetRouted).init(arena);
+    defer by_idx.deinit();
+    for (r.tracks) |t| {
+        if (t.net < 0) continue;
+        const ui: usize = @intCast(t.net);
+        if (ui >= placement.nets.len) continue;
+        const gop = try by_idx.getOrPut(t.net);
+        if (!gop.found_existing) gop.value_ptr.* = .{ .name = placement.nets[ui].name, .mm = 0, .vias = 0 };
+        gop.value_ptr.mm += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
+    }
+    for (r.vias) |v| {
+        if (v.net < 0) continue;
+        const ui: usize = @intCast(v.net);
+        if (ui >= placement.nets.len) continue;
+        const gop = try by_idx.getOrPut(v.net);
+        if (!gop.found_existing) gop.value_ptr.* = .{ .name = placement.nets[ui].name, .mm = 0, .vias = 0 };
+        gop.value_ptr.vias += 1;
+    }
+    var out: std.ArrayListUnmanaged(NetRouted) = .empty;
+    var it = by_idx.valueIterator();
+    while (it.next()) |nr| try out.append(arena, nr.*);
+    std.sort.pdq(NetRouted, out.items, {}, netRoutedLonger);
+    return out.toOwnedSlice(arena);
+}
+
+fn netRoutedLonger(_: void, a: NetRouted, b: NetRouted) bool {
+    if (a.mm != b.mm) return a.mm > b.mm;
+    return std.mem.lessThan(u8, b.name, a.name); // stable, name-descending tiebreak
 }
 
 /// Where a successful maze leg entered and left the grid: `goal` is the goal
@@ -2602,6 +3106,194 @@ test "route reports an unroutable net by name in failed" {
     try testing.expectEqual(@as(usize, 0), r.routed);
     try testing.expectEqual(@as(usize, 1), r.failed.len);
     try testing.expectEqualStrings("A", r.failed[0]);
+}
+
+// spec: placement/router - a failed leg's goal is never a same-net source, so a later leg cannot weld to a stranded pad
+test "failed leg leaves no stranded island for a later leg to weld onto" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const G = @import("geometry.zig");
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    // Same full-height through-hole wall as the failed-net test, but net A now
+    // has THREE pads: R1 alone on the left, R2 and R3 together on the right.
+    // The seed is R1 (left). Its first leg R1→R2 must cross the wall and fails.
+    // Before the fix that failed goal (R2's node) was stamped `occ = A`, so the
+    // next leg R1→R3 grew a path R2-node → R3 and welded R3 onto the stranded
+    // R2 island — a right-side {R2,R3} blob drawn as if wired to R1, electrically
+    // split. With the fix R2's node stays EMPTY, R1→R3 also crosses the wall and
+    // fails, and net A emits NO copper at all.
+    const wall = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 6.0, .thru = true }};
+    var parts = [_]Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = -3, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 3, .y = 0 },
+        .{ .ref_des = "R3", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 3, .y = 1.5 },
+        .{ .ref_des = "J1", .kind = .hub, .hw = 0.5, .hh = 3.0, .pads = &wall, .fallback = false, .x = 0, .y = 0 },
+    };
+    const a_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" }, .{ .ref_des = "R3", .pin = "1" } };
+    const w_pins = [_]export_kicad.FlatPin{.{ .ref_des = "J1", .pin = "1" }};
+    const nets = [_]FlatNet{ .{ .name = "A", .pins = &a_pins }, .{ .name = "WALL", .pins = &w_pins } };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -3.5,
+        .miny = -0.5,
+        .maxx = 3.5,
+        .maxy = 2.0,
+        .generated = true,
+    };
+    const r = try route(arena, placement, .{});
+    // Net A cannot bridge the wall, so it is reported failed…
+    try testing.expectEqual(@as(usize, 1), r.failed.len);
+    try testing.expectEqualStrings("A", r.failed[0]);
+    // …and — the invariant under test — emits ZERO copper: no track welds R3 to
+    // the stranded R2 node (net A is flattened-index 0).
+    var a_tracks: usize = 0;
+    for (r.tracks) |t| {
+        if (t.net == 0) a_tracks += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), a_tracks);
+}
+
+// spec: placement/router - perNetRouted totals a net's routed copper length and via count
+test "perNetRouted totals a net's routed copper length and via count" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const G = @import("geometry.zig");
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 3, .y = 0 },
+    };
+    const pins = [_]export_kicad.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -0.5,
+        .miny = -0.5,
+        .maxx = 3.5,
+        .maxy = 0.5,
+        .generated = true,
+    };
+    const r = try route(arena, placement, .{});
+    const per = try perNetRouted(arena, placement, r);
+    try testing.expectEqual(@as(usize, 1), per.len);
+    try testing.expectEqualStrings("SIG", per[0].name);
+    try testing.expect(per[0].mm > 0);
+    // The aggregate matches a direct sum over SIG's track segments; with only one
+    // net on the board, every via is SIG's, so per-net via count == total vias.
+    var sum: f64 = 0;
+    for (r.tracks) |t| sum += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
+    try testing.expectApproxEqAbs(sum, per[0].mm, 1e-6);
+    try testing.expectEqual(r.vias.len, per[0].vias);
+}
+
+// spec: placement/router - rip-up runs no rounds when the greedy pass already routed every net
+test "rip-up runs no rounds when the greedy pass routes everything" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const G = @import("geometry.zig");
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 3, .y = 0 },
+    };
+    const pins = [_]export_kicad.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -0.5,
+        .miny = -0.5,
+        .maxx = 3.5,
+        .maxy = 0.5,
+        .generated = true,
+    };
+    const r = try route(arena, placement, .{});
+    // A cleanly routable board never triggers rip-up (the `anyFailed` guard).
+    try testing.expectEqual(r.total, r.routed);
+    try testing.expectEqual(@as(usize, 0), r.ripup_rounds);
+}
+
+// spec: placement/router - rip-up leaves a wall-blocked net failed without disturbing an already-routed net
+test "rip-up leaves a wall-blocked net failed without disturbing a routed net" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const G = @import("geometry.zig");
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    // A through-hole wall taller than the board+routing-margin grid splits it on
+    // both layers with no over-the-top escape. GOOD's two pads sit together on the
+    // left (trivially routable); BAD straddles the wall (unroutable). Rip-up runs
+    // (BAD failed) but the wall is PADS, not copper, so BAD's blocker probe finds
+    // nothing to rip — it must leave GOOD untouched and BAD honestly failed, never
+    // welding BAD across the wall.
+    const wall = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 10.0, .thru = true }};
+    var parts = [_]Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.4, .hh = 0.4, .pads = &pad, .fallback = false, .x = -3, .y = -2 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.4, .hh = 0.4, .pads = &pad, .fallback = false, .x = -4, .y = -2 },
+        .{ .ref_des = "R3", .kind = .passive, .hw = 0.4, .hh = 0.4, .pads = &pad, .fallback = false, .x = -3, .y = 2 },
+        .{ .ref_des = "R4", .kind = .passive, .hw = 0.4, .hh = 0.4, .pads = &pad, .fallback = false, .x = 3, .y = 2 },
+        .{ .ref_des = "J1", .kind = .hub, .hw = 0.5, .hh = 3.2, .pads = &wall, .fallback = false, .x = 0, .y = 0 },
+    };
+    const good_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    const bad_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "R3", .pin = "1" }, .{ .ref_des = "R4", .pin = "1" } };
+    const w_pins = [_]export_kicad.FlatPin{.{ .ref_des = "J1", .pin = "1" }};
+    const nets = [_]FlatNet{
+        .{ .name = "GOOD", .pins = &good_pins },
+        .{ .name = "BAD", .pins = &bad_pins },
+        .{ .name = "WALL", .pins = &w_pins },
+    };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -5,
+        .miny = -3,
+        .maxx = 5,
+        .maxy = 3,
+        .generated = true,
+    };
+    const r = try route(arena, placement, .{});
+    try testing.expectEqual(@as(usize, 2), r.total); // GOOD + BAD (WALL is single-pad)
+    try testing.expectEqual(@as(usize, 1), r.routed); // GOOD routes, BAD can't
+    try testing.expectEqual(@as(usize, 1), r.failed.len);
+    try testing.expectEqualStrings("BAD", r.failed[0]);
+    try testing.expect(r.ripup_rounds >= 1); // rip-up ran (a net failed)
+    var good = false;
+    var bad_tracks: usize = 0;
+    for (r.tracks) |t| {
+        if (t.net == 0) good = true; // GOOD copper survived rip-up
+        if (t.net == 1) bad_tracks += 1; // BAD emitted no (false) copper
+    }
+    try testing.expect(good);
+    try testing.expectEqual(@as(usize, 0), bad_tracks);
 }
 
 // spec: placement/router - escape stubs keep clearance from routed tracks and leave at 45-degree headings

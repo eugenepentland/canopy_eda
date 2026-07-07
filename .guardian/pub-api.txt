@@ -648,6 +648,7 @@ src/placement/pin_roles.zig::load | fn load(arena: std.mem.Allocator, project_di
 src/placement/pin_roles.zig::padRequirements | fn padRequirements( arena: std.mem.Allocator, project_dir: []const u8, component: []const u8, ) std.StringHashMapUnmanaged(PadReq)
 src/placement/pin_roles.zig::strapPads | fn strapPads( arena: std.mem.Allocator, project_dir: []const u8, component: []const u8, ) std.StringHashMapUnmanaged([]const u8)
 src/placement/router.zig::LoopRouter struct_
+src/placement/router.zig::NetRouted struct_
 src/placement/router.zig::PadObs struct_
 src/placement/router.zig::RETURN_PATH_RADIUS_MM value
 src/placement/router.zig::RouteParams struct_
@@ -657,6 +658,7 @@ src/placement/router.zig::Via struct_
 src/placement/router.zig::groundVias | fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams) std.mem.Allocator.Error![]Via
 src/placement/router.zig::init | fn init( arena: std.mem.Allocator, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize), params: RouteParams, ) std.mem.Allocator.Error!LoopRouter
 src/placement/router.zig::legLen | fn legLen(self: *LoopRouter, cap_c: [2]f64, hub_c: [2]f64, net_id: i32) std.mem.Allocator.Error!?f64
+src/placement/router.zig::perNetRouted | fn perNetRouted(arena: std.mem.Allocator, placement: optimizer.Placement, r: RouteResult) std.mem.Allocator.Error![]NetRouted
 src/placement/router.zig::returnPathViolations | fn returnPathViolations(placement: optimizer.Placement, routed: RouteResult, radius: f64) usize
 src/placement/router.zig::route | fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams) std.mem.Allocator.Error!RouteResult
 src/png.zig::Error value
@@ -1170,6 +1172,7 @@ src/serve/pcb_layout_page.zig::solveForRequest | fn solveForRequest( alloc: std.
 src/serve/pcb_layout_page.zig::subBlockPoseByOriginKey | fn subBlockPoseByOriginKey( alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock, ) ?SubBlockSeeds
 src/serve/pcb_layout_page.zig::viasForPoses | fn viasForPoses( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, poses: []const optimizer.RefPose, params: optimizer.Params, ) ?[]const SyncVia
 src/serve/pcb_layout_page.zig::writeJsonStr | fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void
+src/serve/pcb_layout_page.zig::writePerNetJson | fn writePerNetJson(w: *std.Io.Writer, per_net: []const router.NetRouted) std.Io.Writer.Error!void
 src/serve/pdf_viewer.zig::HandlerError value
 src/serve/pdf_viewer.zig::pdfViewerPage | fn pdfViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/plugin_tokens.zig::Token struct_
