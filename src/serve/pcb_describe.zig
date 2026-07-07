@@ -67,7 +67,9 @@ pub fn describeDesign(
     };
     const solved = try pcb_layout_page.solveForRequest(alloc, project_dir, name, opts, &eval, &module_res);
 
-    const route_params = router.RouteParams{};
+    // Seed router/DRC from the design's resolved `(design-rules …)` so the facts
+    // describe the same board the PNG shows and the fab gate checks.
+    const route_params = solved.placement.rules.design.routeParams();
     const routed: ?RoutedSummary = if (opts.route) blk: {
         const r = router.route(alloc, solved.placement, route_params) catch break :blk null;
         const v = drc.check(alloc, solved.placement, r, route_params.clearance) catch &.{};
@@ -82,6 +84,8 @@ pub fn describeDesign(
             .total = r.total,
             .unrouted = r.failed,
             .grid_overflow = r.grid_overflow,
+            .ripup_rounds = r.ripup_rounds,
+            .per_net = router.perNetRouted(alloc, solved.placement, r) catch &.{},
         };
     } else null;
 
@@ -100,6 +104,10 @@ const RoutedSummary = struct {
     total: usize = 0,
     unrouted: []const []const u8 = &.{},
     grid_overflow: bool = false,
+    /// Bounded rip-up rounds the router ran after its greedy pass (0 = none).
+    ripup_rounds: usize = 0,
+    /// Per-net routed copper: length (mm) + via count, longest first.
+    per_net: []const router.NetRouted = &.{},
 };
 
 /// Errors the facts writer can hit: allocation (scratch maps/lists) + writer.
@@ -297,19 +305,25 @@ pub fn writeDescribeJson(
     try writeModulePolicy(w, p, policy);
     try writeLint(w, alloc, p, spec, wrong_side.items, findings, routed);
 
-    if (routed) |r| {
-        try w.print(
-            ",\"routed\":{{\"trace_mm\":{d:.1},\"tracks\":{d},\"vias\":{d},\"drc\":{d},\"routed\":{d},\"total\":{d},\"unrouted\":[",
-            .{ r.trace_mm, r.tracks, r.vias, r.drc, r.routed, r.total },
-        );
-        for (r.unrouted, 0..) |name_s, i| {
-            if (i > 0) try w.writeAll(",");
-            try pcb_layout_page.writeJsonStr(w, name_s);
-        }
-        try w.writeAll("]");
-        if (r.grid_overflow) try w.writeAll(",\"grid_overflow\":true");
-        try w.writeAll("}");
+    if (routed) |r| try writeRoutedJson(w, r);
+    try w.writeAll("}");
+}
+
+/// Emit the `,"routed":{…}` facts block: copper totals, net-completion counts,
+/// the unrouted-net names, rip-up rounds, and the per-net copper breakdown.
+fn writeRoutedJson(w: *std.Io.Writer, r: RoutedSummary) std.Io.Writer.Error!void {
+    try w.print(
+        ",\"routed\":{{\"trace_mm\":{d:.1},\"tracks\":{d},\"vias\":{d},\"drc\":{d},\"routed\":{d},\"total\":{d},\"unrouted\":[",
+        .{ r.trace_mm, r.tracks, r.vias, r.drc, r.routed, r.total },
+    );
+    for (r.unrouted, 0..) |name_s, i| {
+        if (i > 0) try w.writeAll(",");
+        try pcb_layout_page.writeJsonStr(w, name_s);
     }
+    try w.writeAll("]");
+    try w.print(",\"ripup_rounds\":{d}", .{r.ripup_rounds});
+    try pcb_layout_page.writePerNetJson(w, r.per_net);
+    if (r.grid_overflow) try w.writeAll(",\"grid_overflow\":true");
     try w.writeAll("}");
 }
 

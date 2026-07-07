@@ -87,6 +87,7 @@ Public functions: load
 - parses pads and courtyard half-extents from a footprint sexp
 - synthesizes a fallback box sized by pin count when the footprint is missing
 - parses silkscreen lines and circles from a footprint sexp
+- parses an oval drill into a slot (minor-axis tool + arc-centre offset), pad rotation, and roundrect ratio
 
 ## placement/optimizer
 
@@ -144,7 +145,7 @@ Public functions: solve
 
 ## placement/router
 
-Public functions: route, returnPathViolations
+Public functions: route, perNetRouted, returnPathViolations
 
 - maze-routes a two-pad net into connected track segments
 - a net spanning the two board sides routes through a via, each leg on its part's layer
@@ -162,6 +163,10 @@ Public functions: route, returnPathViolations
 - lets authored (net-class (priority …)) dominate the intrinsic net-class rank
 - auto-elevates a bare hub-to-inductor bridge net to the hot-loop tier
 - names the nets that failed to route in RouteResult.failed
+- a failed leg's goal is never a same-net source, so a later leg cannot weld to a stranded pad
+- perNetRouted totals a net's routed copper length and via count
+- rip-up runs no rounds when the greedy pass already routed every net
+- rip-up leaves a wall-blocked net failed without disturbing an already-routed net
 - escape stubs keep clearance from routed tracks and leave at 45-degree headings
 - reserves diagonal corner cells so later nets keep trace-to-trace clearance
 - escapes a fine-pitch pad through an off-grid gateway stub when no grid lane clears
@@ -187,6 +192,14 @@ Public functions: check, countKind
 - flags a drilled hole below the minimum drill diameter (pads and vias); SMD pads exempt
 - board-level design rules default to the toolchain's legacy constants when no form is authored
 - a (design-rules …) value overrides the matching default in the DRC
+- a wider board clearance flags copper the default rule allowed
+- a net-class clearance override is enforced against that net's neighbours server-side
+- an oval slot's hole-to-hole clearance is measured end-to-end (capsule), not at its centre
+- flags a thin solder-mask web between two adjacent pad openings, and is a warning
+- flags silkscreen that crosses a foreign pad's mask opening, as a warning
+- flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt
+- flags a track narrower than its net-class width, else the board minimum, as an error
+- existing copper violations are error-severity; only the hygiene checks are warnings
 
 ## placement/outline
 
@@ -195,6 +208,16 @@ Public functions: contains, distToEdge, signedInset, bboxRect, segCrossesEdge, r
 - point-in-polygon and signed inset classify an L-shaped outline's interior, notch, and edges
 - a segment crossing a concave notch edge reports the crossing point
 - rounded-rect generation clamps the radius and keeps corner points inside the rect
+
+## placement/pour
+
+Public functions: compute, planeConnect
+
+- a seeded pour keeps its component and drops an unseeded orphan island
+- a foreign trace that splits a plane leaves its same-net pads in separate components
+- the fill respects a non-rectangular board outline
+- an isolated same-net pad reports no pour component
+- carryingLayers resolves declared planes and the implicit ground model
 
 ## placement/module_policy
 
@@ -408,8 +431,10 @@ Public functions: worldShape, pointDist, shapeGap
 Public functions: centroidCsv, excellonDrill, frameFor, outlineRect
 
 - the centroid CSV lists each part's pose with its board side
+- the centroid CSV drops DNP parts by default and keeps them under keep_dnp
 - the Excellon writer splits plated pads + vias from non-plated holes and groups tools by diameter
 - fab writers share one y-up frame derived from the board outline
+- an oval drill exports as a G85 slot at its minor-axis tool between the two arc centres, in both drill files
 
 ## export_gerber
 
@@ -426,6 +451,10 @@ Public functions: planLayers, writeLayer
 - a non-rectangular board emits its exact outline polygon on the edge layer
 - board-level silkscreen text strokes onto the silk layer at its world anchor, and only on its own side
 - silkscreen text scales with its cap-height size (2x size gives 2x glyph extent)
+- a roundrect pad emits its rounded outline as a G36 region while a plain rect stays an R aperture
+- a custom polygon pad's mask opening is offset outward from its copper by the mask margin
+- a pad at a non-quarter angle emits a rotated region instead of an axis-aligned aperture
+- the .gbrjob board thickness comes from the stackup (thickness …), defaulting to 1.6 mm
 
 ## zipfile
 
@@ -932,6 +961,12 @@ Public functions: designSourcePath, designSiblingPath
 - Inner-layer copper (l ≥ 2) round-trips the sidecar; legacy entries without an l stay top copper
 - Stamped module copper keeps its group tag through the sidecar so rigid-group moves carry it
 - Stamped module copper maps its net names onto the parent design via the origin-key bridge, slug-prefixing private nets
+- The layout sidecar is snapshotted into history and listed newest-first
+- Layout snapshots are pruned to the newest retention cap
+- Source-snapshot listing skips the reserved layouts subdir
+- The layout sidecar carries an optimistic-concurrency rev, emitted only when non-zero
+- readLayoutRev reads the sidecar rev (0 for a legacy file), and a save stamps disk_rev+1
+- An MCP layout mutation snapshots the sidecar to history and bumps the rev like a viewer Save
 
 ## fab_readiness
 
@@ -940,5 +975,9 @@ Public functions: check, writeJson
 - a routed net is connected; an unrouted multi-pad net is flagged
 - connectivity propagates across an inner-signal-layer chain through its vias
 - a ground plane connects its pads without routed copper
+- a surface pad isolated from the plane is flagged until a plane via bridges it
 - a missing outline, off-board part, drill-less via, and DNP all surface
 - a clean board produces no errors and reports ok
+- the fab gate's DRC measures against the design's resolved clearance rule
+- a warning-severity DRC finding flows through as a gate warning; an error-severity one blocks
+- a custom outline polygon with fewer than 3 points warns that the profile fell back to a rect

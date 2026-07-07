@@ -388,9 +388,10 @@ src/eval/validate.zig::trackNetFormSource | fn trackNetFormSource(self: *Evaluat
 src/eval/validate.zig::validateDesign | fn validateDesign(self: *Evaluator, block: *const DesignBlock) EvalError!void
 src/eval/validate.zig::warnCombinableNets | fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged(u32)) EvalError!void
 src/export_fab.zig::AUTO_OUTLINE_MARGIN_MM value
+src/export_fab.zig::DnpMode enum_
 src/export_fab.zig::DrillClass enum_
 src/export_fab.zig::Frame struct_
-src/export_fab.zig::centroidCsv | fn centroidCsv( w: *std.Io.Writer, parts: []const optimizer.Part, instances: []const export_kicad.FlatInstance, frame: Frame, ) std.Io.Writer.Error!void
+src/export_fab.zig::centroidCsv | fn centroidCsv( w: *std.Io.Writer, parts: []const optimizer.Part, instances: []const export_kicad.FlatInstance, frame: Frame, dnp: DnpMode, ) std.Io.Writer.Error!void
 src/export_fab.zig::excellonDrill | fn excellonDrill( w: *std.Io.Writer, alloc: std.mem.Allocator, parts: []const optimizer.Part, vias: []const router.Via, class: DrillClass, frame: Frame, ) (std.Io.Writer.Error || std.mem.Allocator.Error)!void
 src/export_fab.zig::frameFor | fn frameFor(placement: optimizer.Placement) Frame
 src/export_fab.zig::outlineRect | fn outlineRect(placement: optimizer.Placement) optimizer.BoardRect
@@ -540,14 +541,17 @@ src/paths.zig::designSiblingPath | fn designSiblingPath( allocator: std.mem.Allo
 src/paths.zig::designSourcePath | fn designSourcePath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) PathError![]u8
 src/placement/drc.zig::Kind enum_
 src/placement/drc.zig::STAGING_EXEMPT_MM value
+src/placement/drc.zig::Severity enum_
 src/placement/drc.zig::Violation struct_
 src/placement/drc.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, ) std.mem.Allocator.Error![]Violation
 src/placement/drc.zig::countKind | fn countKind(v: []const Violation, k: Kind) usize
 src/placement/geometry.zig::BBOX_MARGIN_MM value
+src/placement/geometry.zig::DEFAULT_RRATIO value
 src/placement/geometry.zig::Geom struct_
 src/placement/geometry.zig::Pad struct_
 src/placement/geometry.zig::SilkCircle struct_
 src/placement/geometry.zig::SilkLine struct_
+src/placement/geometry.zig::isSlot | fn isSlot(self: Pad) bool
 src/placement/geometry.zig::load | fn load( arena: std.mem.Allocator, project_dir: []const u8, fp_name: []const u8, pin_count_hint: usize, margin: f64, ) Geom
 src/placement/layout_lint.zig::Finding struct_
 src/placement/layout_lint.zig::Severity enum_
@@ -609,6 +613,7 @@ src/placement/optimizer.zig::placeFromPoses | fn placeFromPoses( arena: std.mem.
 src/placement/optimizer.zig::placementDiag | fn placementDiag() PlacementDiag
 src/placement/optimizer.zig::pourEdge | fn pourEdge(self: DesignRules) f64
 src/placement/optimizer.zig::pourNetOnSide | fn pourNetOnSide(self: BoardRules, side: Side) ?[]const u8
+src/placement/optimizer.zig::routeParams | fn routeParams(self: DesignRules) router.RouteParams
 src/placement/optimizer.zig::routedScorePoses | fn routedScorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!f64
 src/placement/optimizer.zig::scorePoses | fn scorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!Breakdown
 src/placement/optimizer.zig::setProgressSink | fn setProgressSink(sink: ?ProgressSink) void
@@ -642,7 +647,16 @@ src/placement/pin_roles.zig::isSupplyFn | fn isSupplyFn(fn_name: []const u8) boo
 src/placement/pin_roles.zig::load | fn load(arena: std.mem.Allocator, project_dir: []const u8, component: []const u8) PartRoles
 src/placement/pin_roles.zig::padRequirements | fn padRequirements( arena: std.mem.Allocator, project_dir: []const u8, component: []const u8, ) std.StringHashMapUnmanaged(PadReq)
 src/placement/pin_roles.zig::strapPads | fn strapPads( arena: std.mem.Allocator, project_dir: []const u8, component: []const u8, ) std.StringHashMapUnmanaged([]const u8)
+src/placement/pour.zig::Copper struct_
+src/placement/pour.zig::Fill struct_
+src/placement/pour.zig::Join struct_
+src/placement/pour.zig::LayerSpec struct_
+src/placement/pour.zig::PadQuery struct_
+src/placement/pour.zig::PlaneNet union_
+src/placement/pour.zig::compute | fn compute( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, ) std.mem.Allocator.Error!Fill
+src/placement/pour.zig::planeConnect | fn planeConnect( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, net_name: []const u8, pads: []const PadQuery, vias: []const router.Via, ) std.mem.Allocator.Error!Join
 src/placement/router.zig::LoopRouter struct_
+src/placement/router.zig::NetRouted struct_
 src/placement/router.zig::PadObs struct_
 src/placement/router.zig::RETURN_PATH_RADIUS_MM value
 src/placement/router.zig::RouteParams struct_
@@ -652,6 +666,7 @@ src/placement/router.zig::Via struct_
 src/placement/router.zig::groundVias | fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams) std.mem.Allocator.Error![]Via
 src/placement/router.zig::init | fn init( arena: std.mem.Allocator, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize), params: RouteParams, ) std.mem.Allocator.Error!LoopRouter
 src/placement/router.zig::legLen | fn legLen(self: *LoopRouter, cap_c: [2]f64, hub_c: [2]f64, net_id: i32) std.mem.Allocator.Error!?f64
+src/placement/router.zig::perNetRouted | fn perNetRouted(arena: std.mem.Allocator, placement: optimizer.Placement, r: RouteResult) std.mem.Allocator.Error![]NetRouted
 src/placement/router.zig::returnPathViolations | fn returnPathViolations(placement: optimizer.Placement, routed: RouteResult, radius: f64) usize
 src/placement/router.zig::route | fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams) std.mem.Allocator.Error!RouteResult
 src/png.zig::Error value
@@ -1008,9 +1023,12 @@ src/serve/footprint_preview.zig::boardFootprintApi | fn boardFootprintApi(ctx: *
 src/serve/footprint_preview.zig::footprintApi | fn footprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/history.zig::HistoryError value
 src/serve/history.zig::SnapshotInfo struct_
+src/serve/history.zig::layoutSnapshotPath | fn layoutSnapshotPath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, ) HistoryError![]u8
+src/serve/history.zig::listLayoutSnapshots | fn listLayoutSnapshots( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) HistoryError![]SnapshotInfo
 src/serve/history.zig::listSnapshots | fn listSnapshots( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) HistoryError![]SnapshotInfo
 src/serve/history.zig::restore | fn restore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, ) HistoryError!void
 src/serve/history.zig::snapshot | fn snapshot( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, description: ?[]const u8, ) HistoryError!?[]const u8
+src/serve/history.zig::snapshotLayouts | fn snapshotLayouts( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, sidecar_path: []const u8, ) HistoryError!?[]const u8
 src/serve/layout_match.zig::ClassDist struct_
 src/serve/layout_match.zig::MatchResult struct_
 src/serve/layout_match.zig::PInfo struct_
@@ -1141,11 +1159,18 @@ src/serve/pcb_layout_page.zig::layoutCoverage | fn layoutCoverage(L: SavedLayout
 src/serve/pcb_layout_page.zig::loadSubBlockPoses | fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock) ?[]const optimizer.RefPose
 src/serve/pcb_layout_page.zig::loadSyncLayout | fn loadSyncLayout( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ?std.StringHashMap(SyncPose)
 src/serve/pcb_layout_page.zig::loadSyncVias | fn loadSyncVias( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, name: []const u8, ) ?[]const SyncVia
+src/serve/pcb_layout_page.zig::mcpClearRoutes | fn mcpClearRoutes( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::mcpRoutePcb | fn mcpRoutePcb( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::mcpRunFabReadiness | fn mcpRunFabReadiness( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::mcpSavePcbLayout | fn mcpSavePcbLayout( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::mcpSetBoardOutline | fn mcpSetBoardOutline( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::mcpSetPartPoses | fn mcpSetPartPoses( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), ) HandlerError!bool
 src/serve/pcb_layout_page.zig::pcbCentroidApi | fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbDrcApi | fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbDrillApi | fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbFabReadinessApi | fn pcbFabReadinessApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbGerbersApi | fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbLayoutHistoryApi | fn pcbLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbLayoutJsonApi | fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbLayoutPage | fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbPngApi | fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -1158,6 +1183,7 @@ src/serve/pcb_layout_page.zig::pngRequestFromQuery | fn pngRequestFromQuery(aren
 src/serve/pcb_layout_page.zig::readLayouts | fn readLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const SavedLayout
 src/serve/pcb_layout_page.zig::renderDesignPng | fn renderDesignPng( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, ) PngError![]u8
 src/serve/pcb_layout_page.zig::rescoreLayoutsApi | fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::restoreLayoutHistoryApi | fn restoreLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::saveNamedLayoutApi | fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::savePcbCourtyardApi | fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::setDefaultLayoutApi | fn setDefaultLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -1165,6 +1191,7 @@ src/serve/pcb_layout_page.zig::solveForRequest | fn solveForRequest( alloc: std.
 src/serve/pcb_layout_page.zig::subBlockPoseByOriginKey | fn subBlockPoseByOriginKey( alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock, ) ?SubBlockSeeds
 src/serve/pcb_layout_page.zig::viasForPoses | fn viasForPoses( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, poses: []const optimizer.RefPose, params: optimizer.Params, ) ?[]const SyncVia
 src/serve/pcb_layout_page.zig::writeJsonStr | fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void
+src/serve/pcb_layout_page.zig::writePerNetJson | fn writePerNetJson(w: *std.Io.Writer, per_net: []const router.NetRouted) std.Io.Writer.Error!void
 src/serve/pdf_viewer.zig::HandlerError value
 src/serve/pdf_viewer.zig::pdfViewerPage | fn pdfViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/plugin_tokens.zig::Token struct_

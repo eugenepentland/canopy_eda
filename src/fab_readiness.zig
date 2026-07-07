@@ -10,18 +10,21 @@
 //!
 //! Errors (block the export): a multi-location net whose persisted copper does
 //! not connect all its pads (an airwire remaining — plane/pour nets count as
-//! connected), a DRC violation against the persisted copper at the current
-//! poses, a part unplaced / stranded in the off-board staging band, a via with
-//! drill = 0 (a legacy synthetic via that would emit a bad Excellon hole), and
-//! a missing board outline (the profile would fall back to the parts bbox — a
-//! guess a fab shouldn't cut to). Warnings (informational): DNP parts still in
-//! the centroid, a layout coming from the optimizer cache rather than a saved
-//! snapshot.
+//! connected), an error-severity DRC violation against the persisted copper at
+//! the current poses, a part unplaced / stranded in the off-board staging band,
+//! a via with drill = 0 (a legacy synthetic via that would emit a bad Excellon
+//! hole), and a missing board outline (the profile would fall back to the parts
+//! bbox — a guess a fab shouldn't cut to). Warnings (informational): warning-
+//! severity DRC findings (courtyard/mask-sliver/silk-over-pad), DNP parts kept
+//! in the centroid when `?dnp=keep` overrides the drop-by-default, a malformed
+//! (< 3 point) custom outline that fell back to the bounding rect, and a layout
+//! coming from the optimizer cache rather than a saved snapshot.
 
 const std = @import("std");
 const optimizer = @import("placement/optimizer.zig");
 const router = @import("placement/router.zig");
 const drc = @import("placement/drc.zig");
+const pour = @import("placement/pour.zig");
 const export_gerber = @import("export_gerber.zig");
 const export_fab = @import("export_fab.zig");
 const pad_shape = @import("placement/pad_shape.zig");
@@ -78,12 +81,17 @@ pub const Report = struct {
 };
 
 /// Extra context the serve handler knows but the placement doesn't: whether the
-/// blessed layout came from a saved/starred snapshot (vs. the optimizer cache).
-/// Defaults keep the pure/test path free of server concerns.
+/// blessed layout came from a saved/starred snapshot (vs. the optimizer cache),
+/// and whether the centroid CSV keeps DNP parts (`?dnp=keep`). Defaults keep the
+/// pure/test path free of server concerns.
 pub const Context = struct {
     /// False ⇒ the layout is the single-slot optimizer cache, not a saved
     /// snapshot — a soft warning (a fab run should come off a blessed layout).
     from_saved_layout: bool = true,
+    /// True ⇒ the caller asked to KEEP Do-Not-Populate parts in the centroid
+    /// CSV (`?dnp=keep`). Since the default now DROPS them, the
+    /// `dnp-in-centroid` warning fires only in keep-mode.
+    keep_dnp: bool = false,
 };
 
 /// Run the readiness report. `copper` is the blessed layout's persisted routed
@@ -152,9 +160,13 @@ pub fn check(
 
     // ── DRC against the persisted copper at the current poses ───────────────
     // The router/DRC normally only run on the Route button; here we DRC the
-    // saved copper exactly as it will ship. Default clearance is the router's
-    // 5-mil rule (the same one /pcb-layout re-checks saved copper with).
-    const clearance = (router.RouteParams{}).clearance;
+    // saved copper exactly as it will ship. The base clearance is the design's
+    // resolved `(design-rules …)` rule (built-in 5-mil default when no form),
+    // and `drc.check` layers per-net `(net-class …)` overrides from
+    // `placement.rules.net` on top. The gate deliberately ignores any
+    // interactive query/panel clearance — it must judge the board against the
+    // authored rules, not whatever a user last routed with.
+    const clearance = placement.rules.design.clearance;
     const routed = router.RouteResult{
         .tracks = copper.tracks,
         .vias = copper.vias,
@@ -163,12 +175,28 @@ pub fn check(
     };
     const violations = drc.check(arena, placement, routed, clearance) catch &.{};
     stats.drc_violations = violations.len;
-    if (violations.len > 0) {
+    // Partition by severity: error-severity violations block the gate; warnings
+    // (courtyard overlap, mask slivers, silkscreen over a pad) flow through as
+    // an informational finding but never 409 the download.
+    var drc_errs: std.ArrayListUnmanaged(drc.Violation) = .empty;
+    var drc_warns: std.ArrayListUnmanaged(drc.Violation) = .empty;
+    for (violations) |v| {
+        if (v.severity == .warn) try drc_warns.append(arena, v) else try drc_errs.append(arena, v);
+    }
+    if (drc_errs.items.len > 0) {
         try errors.append(arena, .{
             .id = "drc",
             .message = try std.fmt.allocPrint(arena, "{d} DRC violation(s) in the persisted copper ({s})" ++
-                " — open the board's Route/DRC view to inspect them", .{ violations.len, drcSummary(arena, violations) }),
-            .count = violations.len,
+                " — open the board's Route/DRC view to inspect them", .{ drc_errs.items.len, drcSummary(arena, drc_errs.items) }),
+            .count = drc_errs.items.len,
+        });
+    }
+    if (drc_warns.items.len > 0) {
+        try warnings.append(arena, .{
+            .id = "drc-warn",
+            .message = try std.fmt.allocPrint(arena, "{d} DRC warning(s) in the persisted copper ({s})" ++
+                " — assembly-hygiene advisories; they don't block the fab package", .{ drc_warns.items.len, drcSummary(arena, drc_warns.items) }),
+            .count = drc_warns.items.len,
         });
     }
 
@@ -202,13 +230,28 @@ pub fn check(
         if (inst.dnp) dnp += 1;
     }
     stats.dnp_parts = dnp;
-    if (dnp > 0) {
+    // DNP parts are dropped from the centroid by default now, so this only
+    // warns when the caller opted back in with `?dnp=keep`.
+    if (dnp > 0 and ctx.keep_dnp) {
         try warnings.append(arena, .{
             .id = "dnp-in-centroid",
-            .message = try std.fmt.allocPrint(arena, "{d} Do-Not-Populate part(s) are still listed in the centroid CSV" ++
-                " — drop them from the pick-and-place file if your assembler wants only stuffed parts", .{dnp}),
+            .message = try std.fmt.allocPrint(arena, "{d} Do-Not-Populate part(s) are kept in the centroid CSV (?dnp=keep)" ++
+                " — drop the ?dnp=keep opt-in if your assembler wants only stuffed parts", .{dnp}),
             .count = dnp,
         });
+    }
+
+    // A custom outline polygon with < 3 points is degenerate: every fab writer
+    // silently falls back to the bounding rectangle, which may not be the shape
+    // the user drew. Surface it so the profile isn't a silent guess.
+    if (placement.board_poly) |poly| {
+        if (poly.len < 3) {
+            try warnings.append(arena, .{
+                .id = "malformed-outline",
+                .message = "malformed custom outline (< 3 points) — the board profile falls back to the bounding" ++
+                    " rectangle; redraw the outline to cut the intended shape",
+            });
+        }
     }
     if (!ctx.from_saved_layout) {
         try warnings.append(arena, .{
@@ -287,7 +330,8 @@ fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
 const NetConn = struct { locations: usize, groups: usize };
 
 /// One pad terminal of a net, reduced to its world box + centre. `part` lets us
-/// treat two pads of the same part on the same net as one location.
+/// treat two pads of the same part on the same net as one location; `thru`/
+/// `side` let the pour decide which copper layers the pad reaches.
 const PadNode = struct {
     x0: f64,
     y0: f64,
@@ -297,12 +341,14 @@ const PadNode = struct {
     cx: f64,
     cy: f64,
     part: usize,
+    thru: bool,
+    side: optimizer.Side,
 };
 
 /// Compute `net`'s connectivity over the persisted copper. Pads, track
-/// segments, and vias are all union-find nodes, so connectivity propagates
-/// through multi-segment route chains and via layer-jumps; a plane-carried
-/// net unions every pad (the plane is the connection). `groups` counts the
+/// segments, vias, AND the computed copper-pour components are all union-find
+/// nodes, so connectivity propagates through multi-segment route chains, via
+/// layer-jumps, and the real (island-verified) plane fill. `groups` counts the
 /// connected components over the PADS; `locations` counts distinct pad
 /// positions (so a net whose every pad sits at one point isn't "routable").
 fn netComponents(
@@ -328,6 +374,8 @@ fn netComponents(
             .cx = (sh.x0 + sh.x1) / 2,
             .cy = (sh.y0 + sh.y1) / 2,
             .part = pi,
+            .thru = pad.thru,
+            .side = part.side,
         });
     }
     const items = nodes.items;
@@ -348,10 +396,6 @@ fn netComponents(
     }
     if (locations < 2) return .{ .locations = locations, .groups = if (items.len == 0) 0 else 1 };
 
-    // A plane-carried net is connected through the plane copper — every pad on
-    // it lands on (or vias down to) the plane, so treat them all as one group.
-    if (netHasPlane(placement, net.name)) return .{ .locations = locations, .groups = 1 };
-
     // Union pads bridged by same-net copper — TRANSITIVELY through track
     // chains and via jumps. A maze route is many short segments and only its
     // END segments touch the pads, so tracks (and vias) must be union-find
@@ -366,10 +410,20 @@ fn netComponents(
     for (copper.vias) |v| {
         if (sameNet(v.net, net_i)) try vs.append(arena, v);
     }
+    // The computed copper POUR is the honest replacement for the old "any
+    // plane-carried net is one group" short-circuit: a pad counts as
+    // plane-connected iff it lands in a KEPT pour component (thermal-relieved
+    // pads still count — the spokes keep them in-component). A pad the pour
+    // cannot reach (isolated by its antipad ring, a plane a foreign trace
+    // split, the wrong side of a single-sided pour) stays its own group → an
+    // honest airwire, no longer believed-connected.
+    const qpads = try planeQueries(arena, items);
+    const join = try pour.planeConnect(arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias }, net.name, qpads, vs.items);
     const n_pads = items.len;
     const n_tracks = segs.items.len;
-    const parent = try arena.alloc(usize, n_pads + n_tracks + vs.items.len);
+    const parent = try arena.alloc(usize, n_pads + n_tracks + vs.items.len + join.n_comp);
     for (parent, 0..) |*p, i| p.* = i;
+    planeUnite(parent, join, n_pads, n_tracks);
 
     for (segs.items, 0..) |t, ti| {
         // pad ↔ track (pads union with copper on any layer, matching the
@@ -408,6 +462,28 @@ fn netComponents(
     var group_root: std.AutoHashMap(usize, void) = .init(arena);
     for (0..n_pads) |i| try group_root.put(find(parent, i), {});
     return .{ .locations = locations, .groups = group_root.count() };
+}
+
+/// Reduce the net's pad nodes to the pour engine's membership queries.
+fn planeQueries(arena: std.mem.Allocator, items: []const PadNode) std.mem.Allocator.Error![]const pour.PadQuery {
+    const out = try arena.alloc(pour.PadQuery, items.len);
+    for (items, 0..) |p, i| {
+        out[i] = .{ .cx = p.cx, .cy = p.cy, .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1, .thru = p.thru, .side = p.side };
+    }
+    return out;
+}
+
+/// Fold the pour-component assignment into the union-find: unite each pad / via
+/// with the (arena-tail) node for the kept pour component it landed in. Pads /
+/// vias in no component (-1) touch no pour node and stay their own group.
+fn planeUnite(parent: []usize, join: pour.Join, n_pads: usize, n_tracks: usize) void {
+    const base = n_pads + n_tracks + join.via_comp.len;
+    for (join.pad_comp, 0..) |c, i| {
+        if (c >= 0) unite(parent, i, base + @as(usize, @intCast(c)));
+    }
+    for (join.via_comp, 0..) |c, j| {
+        if (c >= 0) unite(parent, n_pads + n_tracks + j, base + @as(usize, @intCast(c)));
+    }
 }
 
 /// Shortest distance from point (px,py) to segment (ax,ay)-(bx,by).
@@ -708,6 +784,55 @@ test "a plane-carried net counts as connected" {
     try testing.expectEqual(@as(usize, 1), r.stats.connected_nets);
 }
 
+// spec: fab_readiness - a surface pad isolated from the plane is flagged until a plane via bridges it
+test "a plane via bridges a surface pad to the ground plane" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Two GND SURFACE-MOUNT pads (no barrel) over the implicit inner ground
+    // plane. With no via they do not reach the inner plane — honestly isolated
+    // (the old short-circuit believed them connected). The router's plane-via
+    // pass drops a via on each pad; those vias land in the plane and bridge the
+    // pads to it, so a routed board is one connected group again.
+    const u_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const c_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &u_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &c_pads, .fallback = false, .x = 10, .y = 0 },
+    };
+    const pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]export_kicad.FlatNet{.{ .name = "GND", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 12,
+        .maxy = 2,
+        .generated = false,
+        .board_rect = .{ .minx = -2, .miny = -2, .w = 16, .h = 6 },
+    };
+
+    // Unrouted: the surface pads cannot reach the inner plane → an airwire.
+    const bare = try check(arena, placement, .{}, .{});
+    try testing.expect(hasError(bare, "unrouted-net"));
+
+    // A GND plane via on each pad bridges it to the plane → one group.
+    const vias = [_]router.Via{
+        .{ .x = 0, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 10, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 },
+    };
+    const wired = try check(arena, placement, .{ .vias = &vias }, .{});
+    try testing.expect(!hasError(wired, "unrouted-net"));
+    try testing.expectEqual(@as(usize, 1), wired.stats.connected_nets);
+}
+
 // spec: fab_readiness - a missing outline, off-board part, drill-less via, and DNP all surface
 test "outline, off-board, drill-less via, and DNP findings" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
@@ -741,11 +866,16 @@ test "outline, off-board, drill-less via, and DNP findings" {
         .generated = false,
     };
     const vias = [_]router.Via{.{ .x = 5, .y = 5, .dia = 0.4, .drill = 0, .net = 0 }};
-    const no_outline = try check(arena, placement, .{ .vias = &vias }, .{ .from_saved_layout = false });
+    // keep_dnp mode: the DNP part is listed in the centroid, so the warning fires.
+    const no_outline = try check(arena, placement, .{ .vias = &vias }, .{ .from_saved_layout = false, .keep_dnp = true });
     try testing.expect(hasError(no_outline, "no-outline"));
     try testing.expect(hasError(no_outline, "via-no-drill"));
     try testing.expect(hasWarning(no_outline, "dnp-in-centroid"));
     try testing.expect(hasWarning(no_outline, "cache-layout"));
+
+    // Default (drop DNP): the same DNP part no longer warrants the warning.
+    const drop_dnp = try check(arena, placement, .{ .vias = &vias }, .{ .from_saved_layout = false });
+    try testing.expect(!hasWarning(drop_dnp, "dnp-in-centroid"));
 
     // Now give it an outline: U2 (at x=60) is >10 mm outside the 10×10 board.
     placement.board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 };
@@ -795,6 +925,157 @@ test "a clean routed board is export-ready" {
     try writeJson(&aw.writer, r);
     try testing.expect(std.mem.indexOf(u8, aw.written(), "\"ok\":true") != null);
     try testing.expect(std.mem.indexOf(u8, aw.written(), "\"routable_nets\":1") != null);
+}
+
+// spec: fab_readiness - the fab gate's DRC measures against the design's resolved clearance rule
+test "fab gate DRC uses the design's clearance, not a hardcoded default" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Two single-pad parts on different nets, 0.2 mm edge-to-edge apart (pad
+    // half-width 0.3; centres 0.8 apart ⇒ 0.8 − 0.3 − 0.3 = 0.2). Each net has one
+    // pad (no airwire) and there's no routed copper, and the courtyards are kept
+    // small (hw 0.35 < half the 0.8 pitch) so they don't overlap — so the ONLY
+    // thing that can flag is the pad↔pad clearance. At the 0.127 mm default the
+    // board is clean; a (design-rules (clearance 0.3)) — resolved onto
+    // placement.rules.design — must make the gate's DRC flag it, proving the gate
+    // reads the authored rule.
+    const u_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const c_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.35, .hh = 0.35, .pads = &u_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.35, .hh = 0.35, .pads = &c_pads, .fallback = false, .x = 0.8, .y = 0 },
+    };
+    const ap = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const bp = [_]export_kicad.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]export_kicad.FlatNet{ .{ .name = "A", .pins = &ap }, .{ .name = "B", .pins = &bp } };
+    const base = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 4,
+        .maxy = 4,
+        .generated = false,
+        .board_rect = .{ .minx = -2, .miny = -2, .w = 6, .h = 6 },
+    };
+    const empty = export_gerber.Copper{};
+
+    // Default clearance ⇒ the 0.2 mm pad gap is legal; no DRC error.
+    const r0 = try check(arena, base, empty, .{});
+    try testing.expect(!hasError(r0, "drc"));
+
+    // A 0.3 mm design clearance ⇒ the same gap flags; the gate reports a DRC error.
+    var strict = base;
+    strict.rules = .{ .design = .{ .clearance = 0.3 } };
+    const r1 = try check(arena, strict, empty, .{});
+    try testing.expect(hasError(r1, "drc"));
+}
+
+// spec: fab_readiness - a warning-severity DRC finding flows through as a gate warning; an error-severity one blocks
+test "the gate blocks on error-severity DRC but not on warnings" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Two pad-less hubs whose 2×2 courtyards overlap (a warning-only finding)
+    // on an otherwise clean, outlined board.
+    var warn_parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 3, .y = 3 },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 3.5, .y = 3 },
+    };
+    const warn_pl = optimizer.Placement{
+        .parts = &warn_parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 6,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 6 },
+    };
+    const wr = try check(arena, warn_pl, .{}, .{});
+    try testing.expect(wr.ok()); // a courtyard overlap alone never 409s
+    try testing.expect(!hasError(wr, "drc"));
+    try testing.expect(hasWarning(wr, "drc-warn"));
+
+    // Two hubs with pads on DIFFERENT nets sitting on top of each other — a
+    // pad↔pad copper clash (error severity) — must block.
+    const a_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const b_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var err_parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &a_pad, .fallback = false, .x = 3, .y = 3 },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &b_pad, .fallback = false, .x = 3.2, .y = 3 },
+    };
+    const a_pin = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const b_pin = [_]export_kicad.FlatPin{.{ .ref_des = "U2", .pin = "1" }};
+    const enets = [_]export_kicad.FlatNet{ .{ .name = "A", .pins = &a_pin }, .{ .name = "B", .pins = &b_pin } };
+    const err_pl = optimizer.Placement{
+        .parts = &err_parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &enets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 6,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 6 },
+    };
+    const er = try check(arena, err_pl, .{}, .{});
+    try testing.expect(!er.ok()); // the pad clash blocks the download
+    try testing.expect(hasError(er, "drc"));
+}
+
+// spec: fab_readiness - a custom outline polygon with fewer than 3 points warns that the profile fell back to a rect
+test "a malformed custom outline surfaces a warning" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 5, .y = 3 },
+    };
+    // A board_poly with only 2 points is degenerate — the writers fall back to
+    // the bbox rect, so warn.
+    const bad_poly = [_][2]f64{ .{ 0, 0 }, .{ 10, 6 } };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 6,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 6 },
+        .board_poly = &bad_poly,
+    };
+    const r = try check(arena, placement, .{}, .{});
+    try testing.expect(hasWarning(r, "malformed-outline"));
+    // A well-formed (≥ 3 point) polygon does not warn.
+    var good = placement;
+    const good_poly = [_][2]f64{ .{ 0, 0 }, .{ 10, 0 }, .{ 10, 6 }, .{ 0, 6 } };
+    good.board_poly = &good_poly;
+    try testing.expect(!hasWarning(try check(arena, good, .{}, .{}), "malformed-outline"));
 }
 
 fn hasError(r: Report, id: []const u8) bool {

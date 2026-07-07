@@ -140,7 +140,7 @@ A post-build pass over the resolved design block. 12 checks ship today:
 | `pin_function_unsupported` | A pin's `(as "FN")` assertion names a function that isn't in the pinout's primary + alts list. |
 | `pin_function_required` | A pin whose pinout entry has ≥ 2 alts was wired without an `(as …)` to disambiguate. (Pins with exactly one alt auto-fill via `pin_enrichment` and don't trigger this; pins with no alts don't need one.) The pinout lookup is dual-keyed by BGA position *and* logical name, so `(pin H4 …)` and `(pin PC13 …)` both resolve. |
 
-Two more violation kinds (`multiple_drivers`, `power_no_cap`) exist in the enum but aren't currently invoked from the runner.
+The `power_no_cap` violation kind exists in the enum but isn't currently invoked from the runner.
 
 ### Design-review report
 

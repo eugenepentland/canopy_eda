@@ -1682,11 +1682,12 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     };
 }
 
-/// Parse a top-level `(stackup N (plane IDX "NET")…)` form into a
-/// `StackupSpec`. N (total copper layers) is required and must be ≥1; a
+/// Parse a top-level `(stackup N (plane IDX "NET")… (thickness MM))` form into
+/// a `StackupSpec`. N (total copper layers) is required and must be ≥1; a
 /// malformed count leaves the spec absent (warned) so a typo can't silently
 /// change the routing model. `(plane …)` entries with a bad index (0 or > N)
-/// are skipped with a warning.
+/// are skipped with a warning. An optional `(thickness MM)` sets the finished
+/// board thickness reported in the Gerber `.gbrjob` (default 1.6 mm).
 fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod.StackupSpec {
     if (form_children.len < 2) {
         self.warnFmt(form_children[0].span, "(stackup …) needs a copper layer count, e.g. (stackup 2)", .{});
@@ -1701,17 +1702,27 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
         return .{};
     }
     const layers: u8 = @intFromFloat(n_raw);
+    var thickness: f64 = 0;
     var planes: std.ArrayListUnmanaged(env_mod.StackupPlane) = .empty;
     for (form_children[2..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
         const head = c[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "thickness")) {
+            // (thickness MM) — finished board thickness, flowed to .gbrjob.
+            if (c.len >= 2) {
+                if (c[1].asNumber()) |t| {
+                    if (t > 0) thickness = t else self.warnFmt(c[1].span, "(thickness …) must be a positive millimetre value", .{});
+                } else self.warnFmt(c[1].span, "(thickness …) must be a number (mm)", .{});
+            } else self.warnFmt(c[0].span, "(thickness …) needs a millimetre value, e.g. (thickness 1.6)", .{});
+            continue;
+        }
         const entry = if (std.mem.eql(u8, head, "plane"))
             parsePlaneEntry(self, c, layers)
         else if (std.mem.eql(u8, head, "pour"))
             parsePourEntry(self, c, layers)
         else blk: {
-            self.warnFmt(c[0].span, "unknown (stackup …) sub-form ({s} …) — expected (plane IDX \"NET\") or (pour top|bottom \"NET\")", .{head});
+            self.warnFmt(c[0].span, "unknown (stackup …) sub-form ({s} …) — expected (plane …), (pour …), or (thickness MM)", .{head});
             break :blk null;
         };
         if (entry) |pl| planes.append(self.allocator, pl) catch return EvalError.OutOfMemory;
@@ -1720,6 +1731,7 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
         .layers = layers,
         .planes = planes.toOwnedSlice(self.allocator) catch &.{},
         .present = true,
+        .thickness = thickness,
     };
 }
 
@@ -1822,11 +1834,14 @@ fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_m
 }
 
 /// Parse a top-level `(design-rules (clearance MM) (min-drill MM)
-/// (mask-margin MM) (copper-edge MM) (hole-to-hole MM) (min-annular MM))`
-/// form into a `DesignRulesSpec`. Every sub-form is optional; an unset field
-/// stays 0 so the consumer falls back to its built-in default. `present` is
-/// set whenever the form appears (even empty), so a bare `(design-rules)` is a
-/// harmless no-op rather than an error.
+/// (mask-margin MM) (copper-edge MM) (hole-to-hole MM) (min-annular MM)
+/// (mask-web MM) (min-width MM) (track-width MM) (via DIA DRILL))` form into
+/// a `DesignRulesSpec`. Every sub-form is optional; an unset field stays 0 so
+/// the consumer falls back to its built-in default. `present` is set whenever
+/// the form appears (even empty), so a bare `(design-rules)` is a harmless
+/// no-op rather than an error. `(track-width …)` and `(via …)` are the
+/// board's default routing geometry — they seed the autorouter's
+/// `RouteParams` (clearance/track/via).
 fn parseDesignRules(self: *Evaluator, form_children: []const Node) env_mod.DesignRulesSpec {
     var spec = env_mod.DesignRulesSpec{ .present = true };
     for (form_children[1..]) |child| {
@@ -1846,9 +1861,19 @@ fn parseDesignRules(self: *Evaluator, form_children: []const Node) env_mod.Desig
             spec.hole_to_hole = val orelse 0;
         } else if (std.mem.eql(u8, head, "min-annular")) {
             spec.min_annular = val orelse 0;
+        } else if (std.mem.eql(u8, head, "mask-web")) {
+            spec.mask_web = val orelse 0;
+        } else if (std.mem.eql(u8, head, "min-width")) {
+            spec.min_width = val orelse 0;
+        } else if (std.mem.eql(u8, head, "track-width")) {
+            spec.track_width = val orelse 0;
+        } else if (std.mem.eql(u8, head, "via")) {
+            // (via DIA DRILL) — the board-default via geometry (both mm).
+            spec.via_dia = val orelse 0;
+            if (c.len >= 3) spec.via_drill = c[2].asNumber() orelse 0;
         } else {
             self.warnFmt(c[0].span, "unknown (design-rules …) sub-form ({s} …) — expected " ++
-                "clearance/min-drill/mask-margin/copper-edge/hole-to-hole/min-annular", .{head});
+                "clearance/min-drill/mask-margin/copper-edge/hole-to-hole/min-annular/mask-web/min-width/track-width/via", .{head});
         }
     }
     return spec;
@@ -2003,7 +2028,8 @@ test "design-block captures (design-rules …)" {
     const src =
         \\(design-block "test"
         \\  (design-rules (clearance 0.15) (min-drill 0.25) (mask-margin 0.06)
-        \\    (copper-edge 0.4) (hole-to-hole 0.3) (min-annular 0.13)))
+        \\    (copper-edge 0.4) (hole-to-hole 0.3) (min-annular 0.13)
+        \\    (track-width 0.2) (via 0.5 0.25)))
     ;
     const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
@@ -2024,6 +2050,10 @@ test "design-block captures (design-rules …)" {
     try testing.expectEqual(@as(f64, 0.4), dr.copper_edge);
     try testing.expectEqual(@as(f64, 0.3), dr.hole_to_hole);
     try testing.expectEqual(@as(f64, 0.13), dr.min_annular);
+    // Board-default routing geometry: (track-width) + (via DIA DRILL).
+    try testing.expectEqual(@as(f64, 0.2), dr.track_width);
+    try testing.expectEqual(@as(f64, 0.5), dr.via_dia);
+    try testing.expectEqual(@as(f64, 0.25), dr.via_drill);
 }
 
 // spec: eval/design_block - a design with no design-rules form leaves every rule at its zero (default) sentinel

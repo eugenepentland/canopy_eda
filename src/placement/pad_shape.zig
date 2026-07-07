@@ -52,10 +52,24 @@ pub fn worldShape(arena: std.mem.Allocator, part: optimizer.Part, pad: geometry.
         }
         return .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1, .poly = try simplifyRing(arena, wp, SIMPLIFY_TOL_MM) };
     }
-    const q = @mod(@round(part.rot), 360);
     const c = optimizer.worldPadCenter(part, pad.x, pad.y);
-    const hw = if (q == 90 or q == 270) pad.h / 2 else pad.w / 2;
-    const hh = if (q == 90 or q == 270) pad.w / 2 else pad.h / 2;
+    // Total pad orientation = part pose + the pad's own `(pos … ROT)`. A
+    // quarter turn keeps the exact axis-aligned box (byte-identical to the old
+    // path); an arbitrary angle uses the conservative bbox of the rotated
+    // rectangle (`|hw·cosθ|+|hh·sinθ|` etc.) — enough for a pass/fail DRC.
+    const tot = part.rot + pad.rot;
+    const q = @mod(@round(tot), 360);
+    if (@abs(tot - @round(tot / 90) * 90) < 1e-6) {
+        const swap = q == 90 or q == 270;
+        const hw = if (swap) pad.h / 2 else pad.w / 2;
+        const hh = if (swap) pad.w / 2 else pad.h / 2;
+        return .{ .x0 = c[0] - hw, .y0 = c[1] - hh, .x1 = c[0] + hw, .y1 = c[1] + hh, .poly = &.{} };
+    }
+    const a = tot * std.math.pi / 180.0;
+    const ca = @abs(@cos(a));
+    const sa = @abs(@sin(a));
+    const hw = (pad.w / 2) * ca + (pad.h / 2) * sa;
+    const hh = (pad.w / 2) * sa + (pad.h / 2) * ca;
     return .{ .x0 = c[0] - hw, .y0 = c[1] - hh, .x1 = c[0] + hw, .y1 = c[1] + hh, .poly = &.{} };
 }
 

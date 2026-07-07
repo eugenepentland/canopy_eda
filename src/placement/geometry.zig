@@ -41,9 +41,31 @@ pub const Pad = struct {
     /// Non-plated (mounting hole) — drilled but not plated; kept apart from
     /// plated holes because fabs take them as separate drill files.
     npth: bool = false,
-    /// Drill diameter (mm; 0 = no hole). Oval drills record their larger axis.
+    /// Drill diameter (mm; 0 = no hole). For an oval drill / slot this is the
+    /// SLOT WIDTH — the minor axis, i.e. the diameter of the tool that plunges
+    /// it (min-drill / antipad / drill-file all key off this).
     drill: f64 = 0,
+    /// Half the vector between an oval drill's two arc centres, in
+    /// footprint-local mm. `{0,0}` ⇒ a round hole. A slot is the capsule swept
+    /// by a `drill`-diameter tool from `(x,y)-slot_half` to `(x,y)+slot_half`;
+    /// its major-axis length is `drill + 2·|slot_half|`.
+    slot_half: [2]f64 = .{ 0, 0 },
+    /// Pad rotation about its own centre (deg, CCW), from `(pos X Y ROT)`. Adds
+    /// to the part pose; a non-quarter total forces polygonized fab emission.
+    rot: f64 = 0,
+    /// Roundrect corner ratio (corner radius ÷ shorter side), from
+    /// `(roundrect_rratio R)`. 0 with shape "roundrect" ⇒ the KiCad default.
+    rratio: f64 = 0,
+
+    /// True when the pad's hole is an oval slot rather than a round bore.
+    pub fn isSlot(self: Pad) bool {
+        return self.slot_half[0] != 0 or self.slot_half[1] != 0;
+    }
 };
+
+/// KiCad's default roundrect corner ratio (corner radius ÷ shorter side) when
+/// a `roundrect` pad declares no explicit `(roundrect_rratio …)`.
+pub const DEFAULT_RRATIO: f64 = 0.25;
 
 /// A silkscreen line segment (footprint-local mm).
 pub const SilkLine = struct { x1: f64, y1: f64, x2: f64, y2: f64 };
@@ -185,30 +207,67 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
     const shape: []const u8 = if (cl.len >= 4) (cl[3].asAtom() orelse "rect") else "rect";
     var x: f64 = 0;
     var y: f64 = 0;
+    var rot: f64 = 0;
     var w: f64 = 0;
     var h: f64 = 0;
     var drill: f64 = 0;
+    var slot_half: [2]f64 = .{ 0, 0 };
+    var rratio: f64 = 0;
     var poly: []const [2]f64 = &.{};
     for (cl[2..]) |c| {
         if (c.isForm("pos")) {
             const pl = c.asList() orelse continue;
             if (pl.len >= 2) x = pl[1].asNumber() orelse 0;
             if (pl.len >= 3) y = pl[2].asNumber() orelse 0;
+            if (pl.len >= 4) rot = pl[3].asNumber() orelse 0;
         } else if (c.isForm("size")) {
             const sl = c.asList() orelse continue;
             if (sl.len >= 2) w = sl[1].asNumber() orelse 0;
             if (sl.len >= 3) h = sl[2].asNumber() orelse 0;
         } else if (c.isForm("poly")) {
             poly = parsePadPoly(arena, c) orelse poly;
+        } else if (c.isForm("roundrect_rratio")) {
+            const rl = c.asList() orelse continue;
+            if (rl.len >= 2) rratio = rl[1].asNumber() orelse 0;
         } else if (c.isForm("drill")) {
-            // `(drill D)` or `(drill oval DX DY)` — record the larger axis.
             const dl = c.asList() orelse continue;
-            for (dl[1..]) |dn| {
-                if (dn.asNumber()) |d| drill = @max(drill, d);
+            if (dl.len >= 4 and isAtomEql(dl[1], "oval")) {
+                // `(drill oval W H)` — an oblong slot. The TOOL diameter is the
+                // minor axis; the two arc centres are `|major − minor|` apart
+                // along the major axis (in the pad-local frame).
+                const dw = dl[2].asNumber() orelse 0;
+                const dh = dl[3].asNumber() orelse 0;
+                drill = @min(dw, dh);
+                const half = @max(0.0, (@max(dw, dh) - drill) / 2);
+                slot_half = if (dw >= dh) .{ half, 0 } else .{ 0, half };
+            } else {
+                // `(drill D)` — a round bore (largest numeric child, defensive).
+                for (dl[1..]) |dn| {
+                    if (dn.asNumber()) |d| drill = @max(drill, d);
+                }
             }
         }
     }
-    return .{ .number = number, .x = x, .y = y, .w = w, .h = h, .shape = shape, .poly = poly, .thru = thru, .npth = npth, .drill = drill };
+    return .{
+        .number = number,
+        .x = x,
+        .y = y,
+        .rot = rot,
+        .w = w,
+        .h = h,
+        .shape = shape,
+        .poly = poly,
+        .thru = thru,
+        .npth = npth,
+        .drill = drill,
+        .slot_half = slot_half,
+        .rratio = rratio,
+    };
+}
+
+/// True when `n` is the bare atom `s` (e.g. the `oval` keyword in a drill form).
+fn isAtomEql(n: Node, s: []const u8) bool {
+    return if (n.asAtom()) |a| std.mem.eql(u8, a, s) else false;
 }
 
 /// Parse a `(poly (x y) …)` form into footprint-absolute points, or null.
@@ -345,6 +404,42 @@ test "load falls back to a synthesized box for a missing footprint" {
     try testing.expect(g.fallback);
     try testing.expectEqual(@as(usize, 0), g.pads.len);
     try testing.expect(g.hw > 0 and g.hh > 0);
+}
+
+// spec: placement/geometry - parses an oval drill into a slot (minor-axis tool + arc-centre offset), pad rotation, and roundrect ratio
+test "parsePad reads oval slots, pad rotation, and roundrect ratio" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const src =
+        \\(footprint "SLOT"
+        \\  (pad SH1 thru oval (pos -4.50 -5.60 30) (size 1.00 1.60) (drill oval 0.50 1.10))
+        \\  (pad 1 smd roundrect (pos 0.48 0.00) (size 0.56 0.62) (roundrect_rratio 0.25))
+        \\  (pad 2 smd rect (pos 1.00 0.00) (size 1.00 1.00) (drill 0.60)))
+    ;
+    const nodes = try parser.parse(arena, src);
+    const children = nodes[0].asList().?;
+    var pads: std.ArrayListUnmanaged(Pad) = .empty;
+    for (children[2..]) |sub| {
+        if (sub.isForm("pad")) {
+            if (parsePad(arena, sub)) |p| try pads.append(arena, p);
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), pads.items.len);
+    // The slot's tool diameter is the MINOR axis (0.50); its arc centres are
+    // (1.10-0.50)/2 = 0.30 apart along y (the major axis here), and the pad
+    // carries its 30° rotation.
+    try testing.expect(pads.items[0].isSlot());
+    try testing.expectApproxEqAbs(@as(f64, 0.50), pads.items[0].drill, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), pads.items[0].slot_half[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.30), pads.items[0].slot_half[1], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 30), pads.items[0].rot, 1e-9);
+    // The roundrect ratio is captured; a round drill leaves slot_half zero.
+    try testing.expectApproxEqAbs(@as(f64, 0.25), pads.items[1].rratio, 1e-9);
+    try testing.expect(!pads.items[1].isSlot());
+    try testing.expect(!pads.items[2].isSlot());
+    try testing.expectApproxEqAbs(@as(f64, 0.60), pads.items[2].drill, 1e-9);
 }
 
 // spec: placement/geometry - parses silkscreen lines and circles from a footprint sexp

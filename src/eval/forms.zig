@@ -516,17 +516,18 @@ pub const scope_form_docs = blk: {
             "group are placed last. Refs match by ref-des or module-local origin name (exact or leaf).",
     } };
     t[@intFromEnum(ScopeForm.stackup)] = .{ .scope = tl, .doc = .{
-        .syntax = "(stackup N [(plane IDX \"NET\")…] [(pour top|bottom \"NET\")…])",
+        .syntax = "(stackup N [(plane IDX \"NET\")…] [(pour top|bottom \"NET\")…] [(thickness MM)])",
         .summary = "Declare the board's copper stack: N total copper layers (1-based, 1 = top/F.Cu, " ++
             "N = bottom/B.Cu); each (plane IDX \"NET\") makes layer IDX a solid plane carrying NET, " ++
             "all other layers are routed signal layers. `(pour top|bottom \"NET\")` is sugar for a " ++
             "plane on the matching OUTER layer (top = 1, bottom = N): the face is emitted as a solid " ++
             "copper pour (Gerber + /pcb-layout + PNG), NET pads already on that face connect through " ++
-            "the pour with no stitching via, and signal routing prefers the un-poured face. " ++
-            "`(stackup 2)` is a plain 2-layer board with no planes — ground/power are routed as " ++
-            "copper like any other net; `(stackup 2 (pour bottom \"GND\"))` is the classic 2-layer " ++
-            "board with a bottom ground pour. Without the form the router keeps its legacy implicit " ++
-            "model (4 layers with assumed GND+PWR inner planes).",
+            "the pour with no stitching via, and signal routing prefers the un-poured face. An " ++
+            "optional (thickness MM) sets the finished board thickness reported in the Gerber .gbrjob " ++
+            "(default 1.6 mm). `(stackup 2)` is a plain 2-layer board with no planes — ground/power " ++
+            "are routed as copper like any other net; `(stackup 2 (pour bottom \"GND\"))` is the " ++
+            "classic 2-layer board with a bottom ground pour. Without the form the router keeps its " ++
+            "legacy implicit model (4 layers with assumed GND+PWR inner planes).",
     } };
     t[@intFromEnum(ScopeForm.net_class)] = .{ .scope = tl, .doc = .{
         .syntax = "(net-class \"name\" [(width MM)] [(clearance MM)] [(via DIA DRILL)] [(priority 0-7)] (nets \"A\" \"B\"…))",
@@ -539,15 +540,21 @@ pub const scope_form_docs = blk: {
             "Repeat the form for more classes (e.g. a wide \"power\" class and a tight \"rf\" class).",
     } };
     t[@intFromEnum(ScopeForm.design_rules)] = .{ .scope = tl, .doc = .{
-        .syntax = "(design-rules [(clearance MM)] [(min-drill MM)] [(mask-margin MM)] [(copper-edge MM)] [(hole-to-hole MM)] [(min-annular MM)])",
+        .syntax = "(design-rules [(clearance MM)] [(min-drill MM)] [(mask-margin MM)] [(copper-edge MM)] " ++
+            "[(hole-to-hole MM)] [(min-annular MM)] [(mask-web MM)] [(min-width MM)] [(track-width MM)] [(via DIA DRILL)])",
         .summary = "Board-level DEFAULT design rules (all sub-forms optional; mm): (clearance) copper-to-copper " ++
             "spacing for the router + DRC; (min-drill) smallest legal drilled hole; (mask-margin) solder-mask " ++
             "opening expansion per pad side; (copper-edge) copper-to-board-outline clearance; (hole-to-hole) " ++
             "wall-to-wall spacing between two drilled holes; (min-annular) minimum via annular ring " ++
-            "(copper radius − drill radius). These are global defaults — a per-net (net-class …) still " ++
-            "overrides width/clearance/via for its own nets. An omitted rule keeps the toolchain's built-in " ++
-            "default (clearance 0.127, min-drill 0.2, mask-margin 0.05, copper-edge = clearance, " ++
-            "hole-to-hole 0.25, min-annular 0.1), so a design with no form is unchanged.",
+            "(copper radius − drill radius); (mask-web) smallest solder-mask sliver between two adjacent " ++
+            "openings; (min-width) narrowest legal track; (track-width) the default routed trace width; " ++
+            "(via DIA DRILL) the default via copper diameter + drill. The last two seed the autorouter's " ++
+            "geometry — an explicit query/panel override still wins for interactive routing, but the fab " ++
+            "gate judges the board against these authored rules. All are global defaults — a per-net " ++
+            "(net-class …) still overrides width/clearance/via for its own nets. An omitted rule keeps the " ++
+            "toolchain's built-in default (clearance 0.127, min-drill 0.2, mask-margin 0.05, copper-edge = " ++
+            "clearance, hole-to-hole 0.25, min-annular 0.1, mask-web 0.2, min-width 0.1, track-width 0.127, " ++
+            "via 0.4 / 0.2), so a design with no form is unchanged.",
     } };
     t[@intFromEnum(ScopeForm.revision)] = .{ .scope = tl, .doc = .{
         .syntax = "(revision \"ID\" [(date \"YYYY-MM-DD\")] [(change \"ID\" \"summary\")…])",

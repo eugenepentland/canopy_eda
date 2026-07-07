@@ -63,8 +63,17 @@ function statusDelta(m){var t="";
  if(typeof drag!=="undefined"&&drag&&drag.m0)t="dx "+fmtLen(m.x-drag.m0.x)+"  dy "+fmtLen(m.y-drag.m0.y);
  else if(typeof gdrag!=="undefined"&&gdrag)t="dx "+fmtLen(m.x-gdrag.sx)+"  dy "+fmtLen(m.y-gdrag.sy);
  stSet("st-dxdy",t);}
+// Routed copper totals for one net, summed from the drawn tracks/vias (covers
+// both freshly-routed and persisted copper — whatever is currently on the board).
+function netCopperStats(net){var mm=0,vias=0;
+ (PCB.tracks||[]).forEach(function(t){if(t.net===net)mm+=Math.hypot(t.x2-t.x1,t.y2-t.y1);});
+ (PCB.vias||[]).forEach(function(v){if(v.net===net)vias++;});
+ return {mm:mm,vias:vias};}
 function statusHover(m){var t="";
- if(cur>=0&&P[cur]){t=P[cur].ref;
+ if(hoverNet){t=hoverNet;var s=netCopperStats(hoverNet);
+  if(s.mm>0)t+=" · "+fmtLen(s.mm);
+  if(s.vias>0)t+=" · "+s.vias+" via"+(s.vias>1?"s":"");}
+ else if(cur>=0&&P[cur]){t=P[cur].ref;
   var pd=m?padAt(cur,m.x,m.y):null;
   if(pd&&pd.net)t+=" · "+pd.net;
   else if(P[cur].val)t+=" · "+P[cur].val;}
@@ -155,6 +164,13 @@ function moved(i){return P[i].x!==orig[i].x||P[i].y!==orig[i].y||(P[i].rot||0)!=
 function wrect(i,pad){var p=P[i],c=wpt(i,pad.x,pad.y),q=(((p.rot||0)%360)+360)%360;
  var hw=(q==90||q==270)?pad.h/2:pad.w/2, hh=(q==90||q==270)?pad.w/2:pad.h/2;
  return {x0:c.x-hw,y0:c.y-hh,x1:c.x+hw,y1:c.y+hh};}
+// World-space axis-aligned bounding box of a part's courtyard box, accounting
+// for its rotation + side mirror. Shared by the intersection-based marquee,
+// align/distribute (edge references) and zoom-to-selection.
+function partAABB(i){var p=P[i],c=wpt(i,p.ccx||0,p.ccy||0);
+ var a=(p.rot||0)*Math.PI/180,ca=Math.abs(Math.cos(a)),sa=Math.abs(Math.sin(a));
+ var hw=p.hw*ca+p.hh*sa, hh=p.hw*sa+p.hh*ca;
+ return {x0:c.x-hw,y0:c.y-hh,x1:c.x+hw,y1:c.y+hh};}
 // setT once wrote SVG transforms; parts are canvas-painted now, so every
 // legacy call site simply schedules a repaint (the scene reads P[] fresh).
 function setT(i){paintSoon();}
@@ -166,7 +182,7 @@ var loopPin={};(PCB.loops||[]).forEach(function(L){if(L.pp)loopPin[L.hub+":"+L.p
 // What the old per-element class toggles carried is now plain state the
 // painter reads: hover part / rigid-group glow / selection / net glow /
 // heat / staging — one repaint applies all of it.
-var cur=-1,hoverGrpName=null,hoverNet=null,flashIdx=-1,flashUntil=0;
+var cur=-1,hoverGrpName=null,hoverNet=null,flashIdx=-1,flashUntil=0,flashPt=null,flashPtUntil=0;
 // Part hit-test: courtyard box in part-local coords (un-rotate, un-mirror).
 // Smallest hit wins so a cap sitting on a hub grabs before the hub.
 function partAt(wx,wy){var best=-1,ba=1e18;
@@ -278,7 +294,15 @@ function scenePaint(){paintQueued=false;
   ctx.globalAlpha=0.4+0.6*Math.abs(Math.sin(Date.now()/180));
   ctx.strokeRect(X(fc.x)-fp.hw*S,Y(fc.y)-fp.hh*S,2*fp.hw*S,2*fp.hh*S);
   ctx.globalAlpha=1;setTimeout(paintSoon,60);}
- else if(flashIdx>=0){flashIdx=-1;}}
+ else if(flashIdx>=0){flashIdx=-1;}
+ // Flash-point marker (DRC click-to-locate): a pulsing ring at a world point.
+ if(flashPt&&Date.now()<flashPtUntil){
+  ctx.strokeStyle="#f4432c";ctx.lineWidth=2.2;
+  ctx.globalAlpha=0.35+0.65*Math.abs(Math.sin(Date.now()/180));
+  ctx.beginPath();ctx.arc(X(flashPt.x),Y(flashPt.y),12,0,6.2832);ctx.stroke();
+  ctx.beginPath();ctx.arc(X(flashPt.x),Y(flashPt.y),3.5,0,6.2832);ctx.stroke();
+  ctx.globalAlpha=1;setTimeout(paintSoon,60);}
+ else if(flashPt){flashPt=null;}}
 // Grid-dot overlay at the current snap pitch, only when the dots are at
 // least ~8 screen px apart (KiCad shows dots, not a mesh, and hides them
 // when they'd blur together). Count-capped as a safety net.
@@ -425,21 +449,22 @@ function padPath(ctx,pd){
 // F.Cu/B.Cu" label UNDER everything, in the layer's track colour (red top /
 // blue bottom) — so a poured face reads as copper instead of being invisible.
 function paintPours(ctx,k){
- var ik=1/Math.max(k||1,0.01),n=0;
+ var ik=1/Math.max(k||1,0.01),seen={};
  (PCB.pours||[]).forEach(function(q){
-  if(!(q.w>0&&q.h>0))return;
+  var poly=q.poly;if(!poly||poly.length<3)return;
   var top=(q.side==="top");
-  ctx.fillStyle=top?"rgba(200,52,52,0.10)":"rgba(77,127,196,0.12)";
-  ctx.fillRect(X(q.x),Y(q.y),q.w*S,q.h*S);
+  ctx.beginPath();ctx.moveTo(X(poly[0][0]),Y(poly[0][1]));
+  for(var i=1;i<poly.length;i++)ctx.lineTo(X(poly[i][0]),Y(poly[i][1]));
+  ctx.closePath();
+  ctx.fillStyle=top?"rgba(200,52,52,0.10)":"rgba(77,127,196,0.12)";ctx.fill();
   ctx.strokeStyle=top?"rgba(200,52,52,0.45)":"rgba(77,127,196,0.5)";
-  ctx.lineWidth=1;ctx.setLineDash([5,4]);
-  ctx.strokeRect(X(q.x),Y(q.y),q.w*S,q.h*S);
-  ctx.setLineDash([]);
-  ctx.font="600 "+(11*ik).toFixed(2)+"px system-ui,sans-serif";
-  ctx.textAlign="left";ctx.textBaseline="alphabetic";
-  ctx.fillStyle=top?"rgba(220,90,90,0.9)":"rgba(110,155,215,0.9)";
-  ctx.fillText(q.net+" pour · "+(top?"F.Cu":"B.Cu"),X(q.x)+5*ik,Y(q.y+q.h)-(5+n*14)*ik);
-  n++;});}
+  ctx.lineWidth=1;ctx.setLineDash([5,4]);ctx.stroke();ctx.setLineDash([]);
+  if(!seen[q.side]){seen[q.side]=1;
+   var mnx=1/0,mxy=-1/0;for(var j=0;j<poly.length;j++){if(poly[j][0]<mnx)mnx=poly[j][0];if(poly[j][1]>mxy)mxy=poly[j][1];}
+   ctx.font="600 "+(11*ik).toFixed(2)+"px system-ui,sans-serif";
+   ctx.textAlign="left";ctx.textBaseline="alphabetic";
+   ctx.fillStyle=top?"rgba(220,90,90,0.9)":"rgba(110,155,215,0.9)";
+   ctx.fillText(q.net+" pour · "+(top?"F.Cu":"B.Cu"),X(mnx)+5*ik,Y(mxy)-5*ik);}});}
 // movG/only: drag-cache split — a group box is dynamic when any member moves
 // (its bounding box follows the drag).
 function paintGroupBoxes(ctx,k,movG,only){
@@ -703,6 +728,15 @@ function pMm(v){return (Math.round(v*100)/100).toFixed(2);}
 function nLeaf(s){var i=String(s).lastIndexOf("/");return i<0?s:s.slice(i+1);}
 function pRow(k,v,id){return '<div class="prop-row"><span class="k">'+k+'</span><span class="v"'+
  (id?(' id="'+id+'"'):'')+'>'+pEsc(v)+'</span></div>';}
+// Editable rows for the (edit-only) properties panel: a numeric mm input and a
+// preset select. Committed on Enter/blur/change by wirePropInputs.
+function pNumRow(k,id,val,locked){return '<div class="prop-row"><span class="k">'+k+'</span>'+
+ '<input class="pv-in" id="'+id+'" type="number" step="0.001"'+(locked?' disabled':'')+
+ ' value="'+(Math.round(val*1000)/1000)+'"></div>';}
+function pSelRow(k,id,opts,cur,locked){var o='';opts.forEach(function(op){
+  o+='<option value="'+op[0]+'"'+(String(op[0])===String(cur)?' selected':'')+'>'+pEsc(op[1])+'</option>';});
+ return '<div class="prop-row"><span class="k">'+k+'</span>'+
+  '<select class="pv-in" id="'+id+'"'+(locked?' disabled':'')+'>'+o+'</select></div>';}
 function renderProps(){var body=document.getElementById("prop-body");if(!body)return;
  var p=selRef?partByRef(selRef):null;
  if(!p){body.innerHTML='<div class="prop-empty">Click a part on the board to see its properties.'+
@@ -710,9 +744,19 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
  var rot=(((p.rot||0)%360)+360)%360;
  var h='<div class="prop-head"><span class="prop-ref">'+pEsc(p.ref)+'</span>'+
   (p.val?'<span class="prop-val">'+pEsc(p.val)+'</span>':'')+'</div>';
- h+='<div class="prop-rows">'+pRow("X",fmtLen(p.x),"prop-x")+pRow("Y",fmtLen(p.y),"prop-y")+
-  pRow("Rotation",rot+"°","prop-rot")+pRow("Side",(p.side==="bottom")?"Bottom (B.Cu)":"Top (F.Cu)","prop-side")+
-  pRow("Type",(p.kind=="hub"?"Hub / IC":"Passive")+(p.locked?" · 🔒 locked":""))+'</div>';
+ if(!RO){
+  h+='<div class="prop-rows">'+
+   pNumRow("X (mm)","prop-x",p.x,p.locked)+
+   pNumRow("Y (mm)","prop-y",p.y,p.locked)+
+   pSelRow("Rotation","prop-rot",[["0","0°"],["90","90°"],["180","180°"],["270","270°"]],rot,p.locked)+
+   pSelRow("Side","prop-side",[["top","Top (F.Cu)"],["bottom","Bottom (B.Cu)"]],(p.side==="bottom"?"bottom":"top"),p.locked)+
+   pRow("Type",(p.kind=="hub"?"Hub / IC":"Passive"))+'</div>';
+  if(p.locked)h+='<div class="prop-lock">🔒 Locked — press <kbd>L</kbd> over the part to unlock before editing.</div>';
+ }else{
+  h+='<div class="prop-rows">'+pRow("X",fmtLen(p.x),"prop-x")+pRow("Y",fmtLen(p.y),"prop-y")+
+   pRow("Rotation",rot+"°","prop-rot")+pRow("Side",(p.side==="bottom")?"Bottom (B.Cu)":"Top (F.Cu)","prop-side")+
+   pRow("Type",(p.kind=="hub"?"Hub / IC":"Passive")+(p.locked?" · 🔒 locked":""))+'</div>';
+ }
  if(p.fp)h+='<button class="prop-fp" data-court-ref="'+pEsc(p.ref)+'" title="Edit footprint courtyard">▢ '+pEsc(p.fp)+'</button>';
  // Sub-circuit row: the part's group, and — when the module has a stampable
  // saved layout — the same Stamp the palette offers, so "pull the module's
@@ -738,6 +782,7 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
  h+='<a class="prop-sch" href="'+sb+encodeURIComponent(PCB.name)+'#comp-'+encodeURIComponent(p.ref)+'" '+
   'title="Open the schematic page scrolled to this part">Show in schematic →</a>';
  body.innerHTML=h;netIdxDrop();
+ if(!RO&&!p.locked)wirePropInputs(p.ref);
  var cb=body.querySelector("[data-court-ref]");
  if(cb)cb.addEventListener("click",function(){openCourt(cb.getAttribute("data-court-ref"));});
  var gsb=body.querySelector("[data-grp-stamp]");
@@ -748,10 +793,39 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
   e.addEventListener("mouseenter",function(){hlBy("data-net",nn,"net-hl",true);});
   e.addEventListener("mouseleave",function(){hlBy("data-net",nn,"net-hl",false);});
   e.addEventListener("click",function(){selNet(nn);});});}
+// Write a value into a prop-panel field whether it's an editable input/select
+// (edit page) or a read-only span (RO preview). A focused field is left alone
+// so a live drag never clobbers what the user is typing.
+function setPropVal(id,v){var e=document.getElementById(id);if(!e)return;
+ if(e.tagName==="INPUT"||e.tagName==="SELECT"){if(document.activeElement!==e)e.value=v;}
+ else e.textContent=v;}
 function updatePropLive(){if(!selRef)return;var p=partByRef(selRef);if(!p)return;
- var ex=document.getElementById("prop-x"),ey=document.getElementById("prop-y"),er=document.getElementById("prop-rot");
- if(ex)ex.textContent=fmtLen(p.x);if(ey)ey.textContent=fmtLen(p.y);
- if(er)er.textContent=((((p.rot||0)%360)+360)%360)+"°";}
+ var rot=((((p.rot||0)%360)+360)%360);
+ setPropVal("prop-x",RO?fmtLen(p.x):(Math.round(p.x*1000)/1000));
+ setPropVal("prop-y",RO?fmtLen(p.y):(Math.round(p.y*1000)/1000));
+ setPropVal("prop-rot",RO?(rot+"°"):String(rot));
+ setPropVal("prop-side",RO?(p.side==="bottom"?"Bottom (B.Cu)":"Top (F.Cu)"):(p.side==="bottom"?"bottom":"top"));}
+// Commit numeric-position / rotation / side edits from the properties panel.
+// X/Y set the EXACT pose (never grid-snapped — the whole point of typing a
+// coordinate); rotation is quantized to 0/90/180/270 (the pipeline only stores
+// quarter-turns for parts); side mirrors the F-key path. Each edit records one
+// undo and invalidates the part's copper the same way a drag does (commitMove).
+function wirePropInputs(ref){
+ var xi=document.getElementById("prop-x"),yi=document.getElementById("prop-y"),
+  ri=document.getElementById("prop-rot"),si=document.getElementById("prop-side");
+ function idxOf(){for(var i=0;i<P.length;i++)if(P[i].ref===ref)return i;return -1;}
+ function commitXY(){var i=idxOf();if(i<0||P[i].locked)return;
+  var nx=parseFloat(xi&&xi.value),ny=parseFloat(yi&&yi.value);
+  if(isNaN(nx)||isNaN(ny)){updatePropLive();return;}
+  if(nx===P[i].x&&ny===P[i].y)return;
+  recordUndo();P[i].x=nx;P[i].y=ny;commitMove([i]);}
+ [xi,yi].forEach(function(inp){if(!inp)return;
+  inp.addEventListener("keydown",function(ev){if(ev.key==="Enter"){ev.preventDefault();commitXY();try{inp.blur();}catch(e){}}});
+  inp.addEventListener("blur",commitXY);});
+ if(ri)ri.addEventListener("change",function(){var i=idxOf();if(i<0||P[i].locked)return;
+  recordUndo();P[i].rot=(((parseInt(ri.value,10)||0)%360)+360)%360;commitMove([i]);});
+ if(si)si.addEventListener("change",function(){var i=idxOf();if(i<0||P[i].locked)return;
+  recordUndo();P[i].side=(si.value==="bottom")?"bottom":"top";commitMove([i]);});}
 function markSelPart(){paintSoon();}
 function selectComp(ref){selRef=ref;renderProps();markGrpRow();markSelPart();xpSend(ref);}
 function clearSel(){if(!selRef)return;selRef=null;renderProps();markGrpRow();markSelPart();}
@@ -795,8 +869,89 @@ var drag=null, gdrag=null;
 // on any selected part moves the whole set. Painted purple vs the blue .sel.
 var sel=[];
 function markSel(){paintSoon();}
-function selSet(idxs){sel=idxs;markSel();}
-function selClear(){if(!sel.length)return;sel=[];markSel();}
+function selSet(idxs){sel=idxs;markSel();refreshAlignBar();}
+function selClear(){if(!sel.length)return;sel=[];markSel();refreshAlignBar();}
+// ── Multi-select align / distribute ─────────────────────────────────────
+// With ≥2 parts marquee-selected the sidebar Align cluster lights up. Each
+// button records ONE undo and moves the selection, treating a rigid sub-circuit
+// as a single unit (its whole member set translates together) and skipping
+// locked parts. Align uses courtyard-box edges; distribute evens out origin
+// spacing between the two extremes.
+function selEntities(){var claimed={},ents=[];
+ sel.forEach(function(i){if(P[i].locked)return;
+  var g=grpIdxs(i); // rigid-group member indices, or null for a lone part
+  if(g){var key=grpOf(P[i].ref);if(claimed[key])return;claimed[key]=1;
+   var idxs=g.filter(function(k){return !P[k].locked;});
+   if(idxs.length)ents.push({idxs:idxs});}
+  else ents.push({idxs:[i]});});
+ return ents;}
+function entBox(e){var x0=1e18,y0=1e18,x1=-1e18,y1=-1e18,sx=0,sy=0;
+ e.idxs.forEach(function(i){var b=partAABB(i);
+  x0=Math.min(x0,b.x0);y0=Math.min(y0,b.y0);x1=Math.max(x1,b.x1);y1=Math.max(y1,b.y1);
+  sx+=P[i].x;sy+=P[i].y;});
+ return {x0:x0,y0:y0,x1:x1,y1:y1,cx:(x0+x1)/2,cy:(y0+y1)/2,ox:sx/e.idxs.length,oy:sy/e.idxs.length};}
+// After any panel-driven move: invalidate copper (drag semantics), refresh
+// ratsnest / clearance / score / staging, drop the drag cache, repaint, re-DRC.
+function commitMove(idxs){if(!idxs.length)return;
+ clearRouteFor(idxs);ratsUpdate(idxs);drawClr();fetchScore();refreshUnplaced();
+ dragCacheDrop();paintSoon();scheduleDrc();updatePropLive();
+ if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
+function alignSel(mode){var ents=selEntities();if(ents.length<2)return;
+ var boxes=ents.map(entBox),uL=1e18,uR=-1e18,uT=1e18,uB=-1e18;
+ boxes.forEach(function(b){uL=Math.min(uL,b.x0);uR=Math.max(uR,b.x1);uT=Math.min(uT,b.y0);uB=Math.max(uB,b.y1);});
+ var midX=(uL+uR)/2,midY=(uT+uB)/2;
+ recordUndo();var moved=[];
+ ents.forEach(function(e,k){var b=boxes[k],dx=0,dy=0;
+  if(mode==="left")dx=uL-b.x0;else if(mode==="right")dx=uR-b.x1;
+  else if(mode==="top")dy=uT-b.y0;else if(mode==="bottom")dy=uB-b.y1;
+  else if(mode==="cx")dx=midX-b.cx;else if(mode==="cy")dy=midY-b.cy;
+  if(dx||dy)e.idxs.forEach(function(i){P[i].x+=dx;P[i].y+=dy;moved.push(i);});});
+ commitMove(moved);}
+function distributeSel(axis){var ents=selEntities();if(ents.length<3)return;
+ var boxes=ents.map(entBox);
+ var order=ents.map(function(e,k){return k;}).sort(function(a,b){
+  return axis==="h"?(boxes[a].ox-boxes[b].ox):(boxes[a].oy-boxes[b].oy);});
+ var n=order.length,c0=axis==="h"?boxes[order[0]].ox:boxes[order[0]].oy,
+  c1=axis==="h"?boxes[order[n-1]].ox:boxes[order[n-1]].oy;
+ recordUndo();var moved=[];
+ order.forEach(function(ei,rank){if(rank===0||rank===n-1)return;
+  var target=c0+(c1-c0)*rank/(n-1),cur=axis==="h"?boxes[ei].ox:boxes[ei].oy,d=target-cur;
+  if(d)ents[ei].idxs.forEach(function(i){if(axis==="h")P[i].x+=d;else P[i].y+=d;moved.push(i);});});
+ commitMove(moved);}
+// Show the Align cluster (and its live count) only when a multi-selection can
+// use it; distribute needs three movable entities.
+function refreshAlignBar(){var bar=document.getElementById("align-bar");if(!bar)return;
+ if(sel.length>=2){bar.hidden=false;
+  var ents=selEntities();
+  var n=document.getElementById("align-n");if(n)n.textContent=sel.length+" parts selected";
+  bar.querySelectorAll("[data-distribute]").forEach(function(b){b.disabled=ents.length<3;});
+  bar.querySelectorAll("[data-align]").forEach(function(b){b.disabled=ents.length<2;});}
+ else bar.hidden=true;}
+// Zoom the viewport to frame the current selection (Shift+F). Falls back to a
+// full Fit when nothing is selected. Plain Fit (button) is unchanged.
+function zoomToSel(){var idxs=sel.slice();
+ if(!idxs.length&&selRef){var si=-1;for(var i=0;i<P.length;i++)if(P[i].ref===selRef){si=i;break;}if(si>=0)idxs=[si];}
+ if(!idxs.length){fitVB();return;}
+ var x0=1e18,y0=1e18,x1=-1e18,y1=-1e18;
+ idxs.forEach(function(i){var b=partAABB(i);x0=Math.min(x0,b.x0);y0=Math.min(y0,b.y0);x1=Math.max(x1,b.x1);y1=Math.max(y1,b.y1);});
+ var sx0=X(x0),sy0=Y(y0),sx1=X(x1),sy1=Y(y1);
+ var w=Math.max(sx1-sx0,VBW*0.02),h=Math.max(sy1-sy0,VBW*0.02);
+ w*=1.36;h*=1.36; // ~18% margin each side
+ var cx=(sx0+sx1)/2,cy=(sy0+sy1)/2,far=hostAspect();
+ if(h/w<far)h=w*far;else w=h/far; // match the stage aspect
+ vb={x:cx-w/2,y:cy-h/2,w:w,h:h};setVB();paintSoon();}
+// Wire the Align cluster buttons + select-all / zoom-to-selection keys.
+(function(){
+ document.querySelectorAll("#align-bar [data-align]").forEach(function(b){
+  b.addEventListener("click",function(){alignSel(b.getAttribute("data-align"));});});
+ document.querySelectorAll("#align-bar [data-distribute]").forEach(function(b){
+  b.addEventListener("click",function(){distributeSel(b.getAttribute("data-distribute"));});});
+ refreshAlignBar();})();
+document.addEventListener("keydown",function(ev){if(kbTyping(ev.target))return;
+ if((ev.ctrlKey||ev.metaKey)&&(ev.key==="a"||ev.key==="A")){ev.preventDefault();
+  var all=[];P.forEach(function(p,i){if(!p.locked)all.push(i);});
+  clearSel();selSet(all);selNet(null);return;}
+ if(ev.key==="F"&&ev.shiftKey&&!ev.ctrlKey&&!ev.metaKey){ev.preventDefault();zoomToSel();return;}});
 function gdragStart(m,down,idxs){var src=idxs||sel;
  // A RIGID-group drag (idxs given) carries the group's stamped copper along:
  // snapshot the tagged tracks/vias so pointermove can translate them by the
@@ -952,7 +1107,7 @@ document.addEventListener("keydown",function(ev){
    setT(cur);clearRouteFor([cur]);ratsUpdate([cur]);fetchScore();refreshUnplaced();if(selRef===P[cur].ref)updatePropLive();return;}
  if((ev.key=="g"||ev.key=="G")&&cur>=0&&!typing){ev.preventDefault();
    var gg=grpOf(P[cur].ref);if(gg&&GRPS[gg]){grpToggle(gg);grpHl(gg,grpRigid(gg));}return;}
- if((ev.key=="f"||ev.key=="F")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;recordUndo();
+ if((ev.key=="f"||ev.key=="F")&&!ev.shiftKey&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;recordUndo();
    P[cur].side=(P[cur].side==="bottom")?"top":"bottom";
    setT(cur);clearRouteFor([cur]);ratsUpdate([cur]);drawClr();fetchScore();refreshUnplaced();
    if(selRef===P[cur].ref)renderProps();return;}
@@ -976,16 +1131,20 @@ function snapPoses(){return P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,s
 function cloneCopper(){return {tracks:(PCB.tracks||[]).map(function(t){return {x1:t.x1,y1:t.y1,x2:t.x2,y2:t.y2,l:t.l||0,w:t.w,net:t.net||"",g:t.g};}),
  vias:(PCB.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g};})};}
 function cloneTexts(){return (PCB.texts||[]).map(function(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t.size||1,text:t.text};});}
+// Deep-copy the drawn board outline ({x,y,w,h,pts?}) so a snapshot holds its
+// own vertex array — an in-place vertex drag must not mutate a stored undo step.
+function cloneOutline(){var o=PCB.outline;if(!o)return null;
+ return {x:o.x,y:o.y,w:o.w,h:o.h,pts:o.pts?o.pts.map(function(p){return [p[0],p[1]];}):null};}
 // Build a full snapshot. `poses` optionally overrides the current poses (a
-// drag's captured pre-move state); copper + texts are always current.
-function snapAll(poses){var c=cloneCopper();return {poses:poses||snapPoses(),tracks:c.tracks,vias:c.vias,texts:cloneTexts()};}
+// drag's captured pre-move state); copper + texts + outline are always current.
+function snapAll(poses){var c=cloneCopper();return {poses:poses||snapPoses(),tracks:c.tracks,vias:c.vias,texts:cloneTexts(),outline:cloneOutline()};}
 function undoBtns(){var u=document.getElementById("pcb-undo"),r=document.getElementById("pcb-redo");
  if(u)u.disabled=!undoStack.length;if(r)r.disabled=!redoStack.length;}
 // recordUndo accepts a full snapshot {poses,tracks,vias}, a bare pose array
 // (legacy drag capture — copper filled from the current model), or nothing.
 function recordUndo(snap){var e=(snap&&snap.poses)?snap:snapAll(Array.isArray(snap)?snap:null);
  undoStack.push(e);if(undoStack.length>200)undoStack.shift();
- redoStack.length=0;undoBtns();}
+ redoStack.length=0;undoBtns();markDirty();}
 function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y=q.y;P[i].rot=q.rot;P[i].side=q.side||"top";P[i].locked=!!q.locked;}});
  // applyAll() clears copper (a moved part invalidates routing), so restore the
  // snapshot's copper AFTER it, then repaint + re-DRC.
@@ -996,7 +1155,12 @@ function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y
  // pointing at a label the restored state no longer has.
  PCB.texts=(s.texts||[]).map(function(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t.size||1,text:t.text};});
  if(typeof txSel!=="undefined"&&txSel>=0){txSel=-1;txPopClose();}
- PCB.drc=[];drawRoute();drawDrc();scheduleDrc();}
+ // The board outline rewinds too (undo/redo of an outline draw/poly/vertex
+ // edit / clear); repaint it and mark the board dirty like any restored edit.
+ PCB.outline=s.outline?{x:s.outline.x,y:s.outline.y,w:s.outline.w,h:s.outline.h,
+  pts:s.outline.pts?s.outline.pts.map(function(p){return [p[0],p[1]];}):null}:null;
+ drawBoardRect();
+ PCB.drc=[];drawRoute();drawDrc();scheduleDrc();markDirty();}
 function doUndo(){if(!undoStack.length)return;redoStack.push(snapAll());restoreSnap(undoStack.pop());undoBtns();}
 function doRedo(){if(!redoStack.length)return;undoStack.push(snapAll());restoreSnap(redoStack.pop());undoBtns();}
 var undoBtn=document.getElementById("pcb-undo");if(undoBtn)undoBtn.addEventListener("click",doUndo);
@@ -1006,6 +1170,59 @@ document.addEventListener("keydown",function(ev){if(!(ev.ctrlKey||ev.metaKey)||k
  if(k==="z"&&!ev.shiftKey){ev.preventDefault();doUndo();}
  else if((k==="z"&&ev.shiftKey)||k==="y"){ev.preventDefault();doRedo();}});
 undoBtns();
+// ── Unsaved-work protection ─────────────────────────────────────────────
+// A dirty flag tracks edits since the last successful Save/Update. It arms a
+// beforeunload prompt and a debounced localStorage draft, so a refresh/crash
+// can offer to restore in-progress hand-routing/placement. RO pages never edit,
+// so they opt out entirely.
+var DRAFT_KEY="pcb-draft:"+PCB.name+(PCB.sub?(":"+PCB.sub):"");
+var pcbDirty=false,draftTimer=null;
+function markDirty(){if(RO)return;pcbDirty=true;scheduleDraft();}
+function clearDirty(){pcbDirty=false;if(draftTimer){clearTimeout(draftTimer);draftTimer=null;}clearDraft();}
+function scheduleDraft(){if(RO)return;if(draftTimer)clearTimeout(draftTimer);
+ draftTimer=setTimeout(function(){draftTimer=null;saveDraft();},5000);}
+function draftPoses(){return P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,
+ side:p.side||"top",locked:!!p.locked,origin:p.origin||""};});}
+// Persist the working state to localStorage. On a quota error (large boards)
+// retry a poses-only draft, then give up with a console warning.
+function saveDraft(){if(RO)return;var ts=Math.floor(Date.now()/1000);
+ try{localStorage.setItem(DRAFT_KEY,JSON.stringify({poses:draftPoses(),
+   tracks:PCB.tracks||[],vias:PCB.vias||[],texts:PCB.texts||[],outline:PCB.outline||null,
+   rev:PCB.rev||0,ts:ts}));}
+ catch(e){
+  try{localStorage.setItem(DRAFT_KEY,JSON.stringify({poses:draftPoses(),rev:PCB.rev||0,ts:ts,partial:true}));}
+  catch(e2){console.warn("pcb: could not save layout draft (localStorage full)");}}}
+function clearDraft(){try{localStorage.removeItem(DRAFT_KEY);}catch(e){}}
+// Standard unsaved-changes prompt. Returning a string arms the browser dialog.
+window.addEventListener("beforeunload",function(e){if(!pcbDirty)return;
+ e.preventDefault();e.returnValue="";return "";});
+// Apply a restored draft to the board (undoable), then re-mark dirty so the
+// user can Save it. Matches poses by ref (drafts are same-design, refs stable).
+function applyDraft(d){recordUndo();
+ (d.poses||[]).forEach(function(q){for(var i=0;i<P.length;i++){if(P[i].ref===q.ref){
+   P[i].x=q.x;P[i].y=q.y;P[i].rot=q.rot||0;P[i].side=q.side||"top";P[i].locked=!!q.locked;break;}}});
+ applyAll();
+ if(!d.partial){
+  if((d.tracks&&d.tracks.length)||(d.vias&&d.vias.length)){PCB.tracks=d.tracks||[];PCB.vias=d.vias||[];PCB.drc=[];drawRoute();drawDrc();}
+  PCB.texts=(d.texts||[]).map(function(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t.size||1,text:t.text};});
+  PCB.outline=d.outline||null;drawBoardRect();}
+ paintSoon();markDirty();}
+// Banner offering Restore/Discard of a found draft (fixed bar at top of page).
+function showDraftBanner(d,stale){if(document.getElementById("pcb-draft-banner"))return;
+ var bar=mkEl("div");bar.id="pcb-draft-banner";
+ bar.style.cssText="position:fixed;top:0;left:0;right:0;z-index:10000;background:#1f6feb;color:#fff;"+
+  "padding:8px 14px;display:flex;gap:12px;align-items:center;font:13px/1.4 system-ui,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35)";
+ var when="";try{when=new Date((d.ts||0)*1000).toLocaleString();}catch(e){}
+ var lbl=mkEl("span",null,(stale?"Unsaved layout work (the board changed in another window) ":"Unsaved layout work ")+(when?("from "+when+" "):"")+"was found.");
+ lbl.style.flex="1";
+ var rb=mkEl("button",null,"Restore"),db=mkEl("button",null,"Discard");
+ [rb,db].forEach(function(b){b.style.cssText="border:0;border-radius:4px;padding:5px 12px;cursor:pointer;font:inherit;font-weight:600";});
+ rb.style.background="#fff";rb.style.color="#0d1117";
+ db.style.background="transparent";db.style.color="#fff";db.style.border="1px solid rgba(255,255,255,.6)";
+ function close(){if(bar.parentNode)bar.parentNode.removeChild(bar);}
+ rb.addEventListener("click",function(){applyDraft(d);close();});
+ db.addEventListener("click",function(){clearDraft();close();});
+ bar.appendChild(lbl);bar.appendChild(rb);bar.appendChild(db);document.body.appendChild(bar);}
 var outBtn=document.getElementById("pcb-outline");
 if(outBtn)outBtn.addEventListener("click",function(){outlineArm(!outlineMode);});
 var polyBtn=document.getElementById("pcb-outline-poly");
@@ -1128,16 +1345,24 @@ function persistLayout(nm,verb){var msg=document.getElementById("pcb-savemsg");
  var routes=((PCB.tracks||[]).length||(PCB.vias||[]).length)?{tracks:PCB.tracks||[],vias:PCB.vias||[]}:null;
  var texts=(PCB.texts||[]).filter(function(t){return t&&t.text;});
  if(msg){msg.style.color="#8b949e";msg.textContent=verb+"\u{2026}";}
+ // Echo the sidecar rev the page loaded so the server can 409 a stale write
+ // (another window saved since) instead of silently clobbering it.
  return fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",
-   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts,routes:routes,outline:PCB.outline||null,texts:texts})})
-  .then(function(r){if(!r.ok)throw 0;return r.json();})
-  .then(function(){
+   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts,routes:routes,outline:PCB.outline||null,texts:texts,rev:PCB.rev||0})})
+  .then(function(r){
+    if(r.status===409){return r.json().catch(function(){return {};}).then(function(j){
+      var e=new Error("conflict");e.conflict=true;if(j&&typeof j.rev==="number")e.rev=j.rev;throw e;});}
+    if(!r.ok)throw 0;return r.json();})
+  .then(function(j){
+    // Adopt the server's bumped rev so the next Save from this window matches.
+    if(j&&typeof j.rev==="number")PCB.rev=j.rev;
     var pmap={};parts.forEach(function(p){pmap[p.ref]={x:p.x,y:p.y,rot:p.rot,origin:p.origin||"",side:p.side,locked:p.locked};});
     var Ls=PCB.layouts||(PCB.layouts=[]),found=null;
     for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm){found=Ls[i];break;}
-    if(found){found.parts=pmap;found.kind="manual";found.routes=routes;found.outline=PCB.outline||null;found.texts=texts;}
-    else Ls.push({name:nm,kind:"manual",parts:pmap,score:null,routes:routes,outline:PCB.outline||null,texts:texts});
+    if(found){found.parts=pmap;found.kind="manual";found.routes=routes;found.outline=PCB.outline||null;found.texts=texts;found.ts=Math.floor(Date.now()/1000);}
+    else Ls.push({name:nm,kind:"manual",parts:pmap,score:null,routes:routes,outline:PCB.outline||null,texts:texts,ts:Math.floor(Date.now()/1000)});
     upsertLayoutPanel(nm);setActiveLayout(nm);loadLayoutScores();
+    clearDirty();/* saved cleanly — drop the dirty flag + localStorage draft */
     // The URL may still carry a layout-selection flag from an earlier Rough/
     // Regenerate (?show=cache, ?regen, tuning params) that outranks the starred
     // layout on reload. You just SAVED — a refresh must show the saved board,
@@ -1149,8 +1374,15 @@ function persistLayout(nm,verb){var msg=document.getElementById("pcb-savemsg");
      window.history.replaceState(null,"",u.pathname+(u.searchParams.toString()?"?"+u.searchParams.toString():"")+u.hash);}catch(e){}
     if(msg){msg.style.color="#3fb950";msg.textContent=(verb==="updating"?"updated":"saved")+" \u{2713}";}
     scheduleDrc();/* re-DRC the just-saved copper (audit 1.1d) */})
-  .catch(function(){if(msg){msg.style.color="#f85149";
-    msg.textContent=(verb==="updating"?"update":"save")+" failed";}});}
+  .catch(function(e){
+    if(e&&e.conflict){
+     // The board changed under us — keep the dirty state + draft so nothing is
+     // lost, and do NOT adopt the server rev; the user reloads to pick up the
+     // other window's version, then re-saves.
+     if(msg){msg.style.color="#d29922";msg.textContent="layout changed in another window \u{2014} reload to continue";}
+     return;}
+    if(msg){msg.style.color="#f85149";
+     msg.textContent=(verb==="updating"?"update":"save")+" failed";}});}
 document.getElementById("pcb-saveas").addEventListener("click",function(){
  if(PCB.single){persistLayout("layout","saving");return;} // designs keep ONE layout
  var nm=window.prompt("Name this layout:","layout "+stamp());
@@ -1202,7 +1434,7 @@ function subPanelRefresh(){var box=document.getElementById("sub-panel");if(!box)
 // Net hover (sidebar pin-chip mouseenter): board pads glow via paint state.
 function netIdxDrop(){}
 function hlBy(at,v,cls,on){
- if(at==="data-net"){hoverNet=on?v:null;paintSoon();return;}
+ if(at==="data-net"){hoverNet=on?v:null;statusHover(null);paintSoon();return;}
  document.querySelectorAll("["+at+"]").forEach(function(e){
  if(e.getAttribute(at)===v)e.classList.toggle(cls,on);});}
 function wire(at,cls){document.querySelectorAll("["+at+"]").forEach(function(e){
@@ -1324,10 +1556,13 @@ function outlineBboxSync(){var o=PCB.outline;if(!o||!o.pts)return;
  o.x=ax;o.y=ay;o.w=bx-ax;o.h=by-ay;}
 function polyClose(){
  if(!polyPts||polyPts.length<3){polyArm(false);drawBoardRect();return;}
+ // Snapshot the pre-close outline so a committed polygon is one undo step.
+ var pre=snapAll();
  var prev=PCB.outline,pts=polyPts.slice();polyPts=null;polyCur=null;
  PCB.outline={x:0,y:0,w:0,h:0,pts:pts};outlineBboxSync();
  var ok=PCB.outline.w>=2&&PCB.outline.h>=2;
  if(!ok)PCB.outline=prev;
+ else recordUndo(pre);
  polyArm(false);drawBoardRect();
  outlineMsg(ok?"polygon outline set — Save/Update to keep":"polygon too small — outline unchanged");}
 function polyPop(){if(polyPts&&polyPts.length){polyPts.pop();if(!polyPts.length)polyPts=null;drawBoardRect();}}
@@ -1388,7 +1623,7 @@ svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.pre
   if(ti>=0){txSelect(ti);txDrag={i:ti,ox:PCB.texts[ti].x-tm.x,oy:PCB.texts[ti].y-tm.y,moved:false,snap:snapAll()};pcap(ev);}
   else{txSelect(-1);txPlace(tm);}return;}
  if((outlineMode||polyMode)&&ev.button===0&&!polyPts){var hv=vtxAt(mm(ev));
-  if(hv>=0){vdrag={i:hv,moved:false};pcap(ev);return;}}
+  if(hv>=0){vdrag={i:hv,moved:false,snap:snapAll()};pcap(ev);return;}}
  if(polyMode){if(ev.button!==0)return;
   var pm=mm(ev);
   if(polyPts&&polyPts.length>=3){var pf=polyPts[0];
@@ -1403,7 +1638,7 @@ svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.pre
  if(ev.pointerType==="touch"){touchDown(ev);return;}
  var m=mm(ev),hi=partAt(m.x,m.y);
  if(hi<0){
-  if(!RO){var uv=vtxAt(m);if(uv>=0){vdrag={i:uv,moved:false};pcap(ev);return;}}
+  if(!RO){var uv=vtxAt(m);if(uv>=0){vdrag={i:uv,moved:false,snap:snapAll()};pcap(ev);return;}}
   marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false};pcap(ev);
   marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);return;}
  // Part gesture (hit-tested — parts are canvas-painted, not DOM).
@@ -1463,7 +1698,9 @@ function clickPart(ev,i){var m=mm(ev),pd=padAt(i,m.x,m.y);
 svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.pointerId);}catch(e){}
  if(ev.pointerType==="touch")touchUp(ev);
  if(vdrag){var vd=vdrag;vdrag=null;
-  if(vd.moved)outlineMsg("outline edited — Save/Update to keep");
+  // The vertex moved in place during the drag; commit the pre-drag snapshot as
+  // one undo step (Ctrl+Z reverts the whole vertex move).
+  if(vd.moved){if(vd.snap)recordUndo(vd.snap);else markDirty();outlineMsg("outline edited — Save/Update to keep");}
   return;}
  if(txDrag){var moved=txDrag.moved,ti=txDrag.i,tsnap=txDrag.snap;txDrag=null;if(moved){recordUndo(tsnap);txDirty();txPopReposition(ti);}return;}
  if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap,gdn=gdrag.down;gdrag=null;svg.style.cursor="";
@@ -1479,6 +1716,9 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
  if(outDraw){var d=outDraw;outDraw=null;outlineArm(false);var og=snapG();
   var ax=Math.round(Math.min(d.x0,d.x1)/og)*og,ay=Math.round(Math.min(d.y0,d.y1)/og)*og;
   var bx=Math.round(Math.max(d.x0,d.x1)/og)*og,by=Math.round(Math.max(d.y0,d.y1)/og)*og;
+  // Undo the outline set/clear as one step — snapshot the pre-commit outline
+  // (the drag only previewed it via drawBoardRect, so PCB.outline is unchanged).
+  recordUndo();
   PCB.outline=(bx-ax>=2&&by-ay>=2)?{x:ax,y:ay,w:bx-ax,h:by-ay}:null;
   drawBoardRect();
   var msg=document.getElementById("pcb-savemsg");
@@ -1489,7 +1729,11 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
   if(click){if(tapi>=0)clickPart(ev,tapi);else{selClear();clearSel();selNet(null);}}return;}
  if(marq){var box=marq,mv=marq.moved;if(marqEl&&marqEl.parentNode)marqEl.parentNode.removeChild(marqEl);marqEl=null;marq=null;
   if(mv){var ax=Math.min(box.x0,box.x1),ay=Math.min(box.y0,box.y1),bx=Math.max(box.x0,box.x1),by=Math.max(box.y0,box.y1);
-   var pick=[];P.forEach(function(p,i){if(p.x>=ax&&p.x<=bx&&p.y>=ay&&p.y<=by)pick.push(i);});
+   // Intersection test: a part is caught when its courtyard box overlaps the
+   // band — so a large IC whose origin sits outside the rubber-band still
+   // selects (KiCad's crossing-window behaviour).
+   var pick=[];P.forEach(function(p,i){var b=partAABB(i);
+    if(!(b.x1<ax||b.x0>bx||b.y1<ay||b.y0>by))pick.push(i);});
    clearSel();selSet(pick);}
   else{selClear();clearSel();selNet(null);}return;}});
 // ── T Text tool: board-level silkscreen labels ──────────────────────────
@@ -1877,16 +2121,67 @@ document.addEventListener("keydown",function(ev){if(RO||kbTyping(ev.target))retu
  if(ev.key=="v"||ev.key=="V"){ev.preventDefault();drawViaHere();return;}
  if(ev.key=="Backspace"){ev.preventDefault();drawBack();return;}
  if(ev.key=="Enter"&&dtrace){ev.preventDefault();drawEnd();return;}});
+// Per-kind marker tooltip. Courtyard/silk have no clearance rule, so the
+// generic "gap X < clr" form reads as nonsense ("< 0 mm") — give them their own.
+function drcMsg(d){
+ if(d.k=="courtyard overlap")return d.k+" — parts overlap by "+(-d.gap).toFixed(3)+" mm";
+ if(d.k=="silk over pad")return d.k+" — silkscreen crosses a pad's solder-mask opening";
+ if(d.k=="mask sliver")return d.k+" — mask web "+d.gap.toFixed(3)+" mm < "+d.clr+" mm min";
+ if(d.k=="track width")return d.k+" — "+d.gap.toFixed(3)+" mm < "+d.clr+" mm required";
+ return d.k+" — gap "+d.gap.toFixed(3)+" mm < "+d.clr+" mm";}
 function drawDrc(){while(gD.firstChild)gD.removeChild(gD.firstChild);
+ renderDrcList(); // keep the violations panel in sync regardless of marker visibility
  if(!viewSt.vis.drc)return;
  var cb=document.getElementById("r-drc-show"); if(cb&&!cb.checked)return;
  (PCB.drc||[]).forEach(function(d){var cx=X(d.x),cy=Y(d.y);
-   var t=el("title",{}); t.textContent=d.k+" — gap "+d.gap.toFixed(3)+" mm < "+d.clr+" mm";
+   var t=el("title",{}); t.textContent=drcMsg(d);
    var c=el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:8,fill:"none",stroke:TH.drc,"stroke-width":2}); c.appendChild(t);
    gD.appendChild(c);
    gD.appendChild(el("circle",{cx:cx.toFixed(1),cy:cy.toFixed(1),r:2.4,fill:TH.drc}));});}
 var drcCb=document.getElementById("r-drc-show");
 if(drcCb)drcCb.addEventListener("change",drawDrc);
+// ── DRC violations panel ────────────────────────────────────────────────
+// The Route panel's DRC count chip doubles as an open/close toggle for a list
+// of the current /api/pcb-drc violations. Clicking a row pans/zooms to the
+// marker and flashes it (focusPoint). Rebuilt on every DRC refresh; tolerant of
+// an optional per-violation `severity` field (another agent owns the DRC
+// severity model — render it when present, ignore it when absent).
+function focusPoint(wx,wy){
+ var cx=X(wx),cy=Y(wy),far=hostAspect();
+ var fw=Math.min(VBW,vb.w,Math.max(24*S,VBW*0.12)); // zoom in to the marker, never past the board / never zoom out
+ vb={x:cx-fw/2,y:cy-fw*far/2,w:fw,h:fw*far};setVB();
+ flashPt={x:wx,y:wy};flashPtUntil=Date.now()+2600;paintSoon();}
+function ensureDrcList(){var lst=document.getElementById("drc-list");if(lst)return lst;
+ if(RO)return null;var rp=document.getElementById("panel-route");if(!rp)return null;
+ lst=document.createElement("div");lst.id="drc-list";lst.className="drc-list";lst.hidden=true;
+ rp.appendChild(lst);return lst;}
+function drcSevClass(d){var s=String(d.severity||d.sev||"").toLowerCase();
+ if(s==="warn"||s==="warning")return "warn";
+ if(s==="err"||s==="error")return "err";return "";}
+function drcLoc(d){
+ if(d.nets&&d.nets.length)return [].concat(d.nets).join(" · ");
+ if(d.refs&&d.refs.length)return [].concat(d.refs).join(" · ");
+ if(d.net)return d.net;if(d.ref)return d.ref;return "";}
+function renderDrcList(){var lst=ensureDrcList();if(!lst)return;
+ var v=PCB.drc||[];
+ if(!v.length){lst.innerHTML='<div class="drc-empty">No DRC violations.</div>';return;}
+ var h='';v.forEach(function(d,i){var loc=drcLoc(d),sc=drcSevClass(d);
+  h+='<div class="drc-row'+(sc?" "+sc:"")+'" data-drc="'+i+'" title="Locate this violation on the board">'+
+   '<span class="drc-k">'+pEsc(d.k||"violation")+'</span>'+
+   (loc?'<span class="drc-loc">'+pEsc(loc)+'</span>':'')+
+   '<span class="drc-gap">'+(d.gap!=null?(Math.round(d.gap*1000)/1000):"?")+' / '+(d.clr!=null?d.clr:"?")+' mm</span>'+
+   '</div>';});
+ lst.innerHTML=h;
+ lst.querySelectorAll("[data-drc]").forEach(function(row){
+  row.addEventListener("click",function(){var d=(PCB.drc||[])[+row.getAttribute("data-drc")];
+   lst.querySelectorAll(".drc-row").forEach(function(r){r.classList.remove("cur");});
+   row.classList.add("cur");
+   if(d&&d.x!=null&&d.y!=null)focusPoint(d.x,d.y);});});}
+function drcListToggle(){var lst=ensureDrcList();if(!lst)return;
+ lst.hidden=!lst.hidden;if(!lst.hidden)renderDrcList();}
+(function(){var chip=document.getElementById("r-drc");
+ if(chip&&!RO){chip.style.cursor="pointer";chip.title="Click to list / locate DRC violations";
+  chip.addEventListener("click",drcListToggle);}})();
 // ── Auto-DRC after copper edits (debounced ~800 ms) ─────────────────────
 // Every copper mutation (draw/delete/Stamp/route apply) and every Save
 // schedules a server DRC of the CURRENT poses + copper via /api/pcb-drc, so
@@ -1894,9 +2189,14 @@ if(drcCb)drcCb.addEventListener("change",drawDrc);
 // The live client-side check blocks obvious shorts during drawing; this is the
 // authoritative re-check (all 8 checks, incl. annular + board-edge).
 var drcTimer=null,drcSeq=0;
+// Chip splits the count by severity: error-severity violations gate the fab
+// package (red), warning-severity ones (courtyard/mask-sliver/silk) are advisory.
 function drcChip(n){var e=document.getElementById("r-drc");if(!e)return;
  if(n<0){e.className="route-stat";e.textContent="checking…";return;}
- e.className="route-stat "+(n?"err":"ok");e.textContent=n?(n+" DRC violation(s)"):"DRC clean ✓";}
+ var arr=PCB.drc||[],err=0,warn=0;
+ for(var i=0;i<arr.length;i++){if(arr[i].sev=="warn")warn++;else err++;}
+ e.className="route-stat "+(err?"err":"ok");
+ e.textContent=err?(err+" err / "+warn+" warn"):(warn?(warn+" warn"):"DRC clean ✓");}
 function runDrcNow(){if(RO)return;var seq=++drcSeq;drcChip(-1);
  var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),
   tracks:PCB.tracks||[],vias:PCB.vias||[],clearance:clrVal(),outline:PCB.outline||null};
@@ -2515,5 +2815,18 @@ function xpSend(ref){if(!xpc||xpMuted)return;
  try{want=new URLSearchParams(location.search).get("focus")||"";}catch(e){}
  if(!want&&location.hash.length>1)want=decodeURIComponent(location.hash.slice(1));
  if(want)focusPart(want);
+})();
+// On load, offer to restore a localStorage draft when one exists that is newer
+// than the served layout's save-time OR based on a different sidecar rev (the
+// board changed in another window). Neither → the draft is obsolete; drop it.
+(function(){if(RO)return;
+ var raw=null;try{raw=localStorage.getItem(DRAFT_KEY);}catch(e){}
+ if(!raw)return;
+ var d=null;try{d=JSON.parse(raw);}catch(e){clearDraft();return;}
+ if(!d||!d.poses||!d.poses.length){clearDraft();return;}
+ var servedTs=0;(PCB.layouts||[]).forEach(function(L){if(L&&L.ts>servedTs)servedTs=L.ts;});
+ var stale=(d.rev!==(PCB.rev||0));
+ if(!((d.ts||0)>servedTs||stale)){clearDraft();return;}
+ showDraftBanner(d,stale);
 })();
 })();

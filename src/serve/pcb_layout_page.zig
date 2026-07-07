@@ -20,6 +20,7 @@ const geometry = @import("../placement/geometry.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
 const outline_mod = @import("../placement/outline.zig");
+const pour = @import("../placement/pour.zig");
 const export_fab = @import("../export_fab.zig");
 const export_gerber = @import("../export_gerber.zig");
 const fab_readiness = @import("../fab_readiness.zig");
@@ -36,6 +37,7 @@ const png_mod = @import("../png.zig");
 const assets_css = @import("assets_css.zig");
 const pages_tmpl = @import("templates/pages.zig");
 const serve_root = @import("../serve.zig");
+const history = @import("history.zig");
 const Handler = serve_root.Handler;
 
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -64,6 +66,9 @@ const ORIGIN_OPEN = ",\"origin\":";
 /// JSON `,"texts":` key shared by the sidecar, the page blob, and the
 /// per-layout Load records (board-level silkscreen text array).
 const TEXTS_OPEN = ",\"texts\":";
+/// JSON `,"outline":` key shared by the sidecar writer, the page blob, and the
+/// MCP `set_board_outline` response.
+const OUTLINE_OPEN = ",\"outline\":";
 /// Error bodies shared across the layout handlers.
 const NO_BLOCK_MSG = "No design or module by that name";
 /// Response header name the fab-output endpoints set their MIME type on.
@@ -529,6 +534,11 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
             .saved_routes = rv.saved,
             .subroutes_json = subseeds.routes,
             .texts = rv.texts,
+            // Read AFTER every render-path write above (persistGeneratedLayout,
+            // displayLayouts dedup, recordAutoLayout) so the embedded rev matches
+            // what's on disk — those writes preserve the rev, so it's stable
+            // across reloads and only a user Save/Update bumps it.
+            .rev = readLayoutRev(ctx.allocator, ctx.project_dir, name, sub),
         },
     );
     // Shared footprint engine (FP.padShape) must load before the board script
@@ -858,13 +868,23 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
     // Optional `?route=1`: route the board and summarise the real copper so layouts
     // are directly comparable (trace length, via count, DRC) without scraping HTML.
-    const ro = parseRoute(req);
+    const ro = parseRoute(req, placement.rules.design.routeParams());
     const routed_metrics: ?RoutedMetrics = if (ro.run) blk: {
         const r = router.route(ctx.allocator, placement, ro.params) catch break :blk null;
         const v = drc.check(ctx.allocator, placement, r, ro.params.clearance) catch &.{};
         var trace: f64 = 0;
         for (r.tracks) |t| trace += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
-        break :blk .{ .trace_mm = trace, .tracks = r.tracks.len, .vias = r.vias.len, .drc = v.len, .routed = r.routed, .total = r.total, .unrouted = r.failed };
+        break :blk .{
+            .trace_mm = trace,
+            .tracks = r.tracks.len,
+            .vias = r.vias.len,
+            .drc = v.len,
+            .routed = r.routed,
+            .total = r.total,
+            .unrouted = r.failed,
+            .ripup_rounds = r.ripup_rounds,
+            .per_net = router.perNetRouted(ctx.allocator, placement, r) catch &.{},
+        };
     } else null;
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
@@ -884,7 +904,24 @@ const RoutedMetrics = struct {
     routed: usize = 0,
     total: usize = 0,
     unrouted: []const []const u8 = &.{},
+    /// Bounded rip-up rounds the router ran after its greedy pass (0 = none).
+    ripup_rounds: usize = 0,
+    /// Per-net routed copper: length (mm) + via count, longest first.
+    per_net: []const router.NetRouted = &.{},
 };
+
+/// Emit `,"per_net":[{"net":NAME,"mm":M,"vias":V},…]` — the per-net routed
+/// copper totals shared by the `?route=1` summary and `/api/pcb-describe`.
+pub fn writePerNetJson(w: *std.Io.Writer, per_net: []const router.NetRouted) std.Io.Writer.Error!void {
+    try w.writeAll(",\"per_net\":[");
+    for (per_net, 0..) |pn, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"net\":");
+        try writeJsonStr(w, pn.name);
+        try w.print(",\"mm\":{d:.1},\"vias\":{d}}}", .{ pn.mm, pn.vias });
+    }
+    try w.writeAll("]");
+}
 
 const PNG_DEFAULT_WIDTH: u32 = 1200;
 
@@ -1078,7 +1115,9 @@ pub fn renderDesignPng(
     const name_mode = opts.names orelse
         (if (spec_status != null) render_pcb_png.NameMode.origin else render_pcb_png.NameMode.ref);
 
-    const route_params = router.RouteParams{};
+    // Seed the router/DRC from the design's resolved `(design-rules …)` so the
+    // PNG mirrors the same rules the interactive viewer and fab gate use.
+    const route_params = placement.rules.design.routeParams();
     const routed: ?router.RouteResult = if (opts.route) (router.route(alloc, placement, route_params) catch null) else null;
     const violations: []const drc.Violation = if (routed) |r|
         (drc.check(alloc, placement, r, route_params.clearance) catch &.{})
@@ -1218,6 +1257,20 @@ fn queryFlag(req: *httpz.Request, key: []const u8) bool {
     return !(v.len == 0 or std.mem.eql(u8, v, "0"));
 }
 
+/// True when the request asks to KEEP Do-Not-Populate parts in the centroid
+/// CSV (`?dnp=keep`). Default (absent / any other value) drops them — the
+/// assembler's pick-and-place file should only carry stuffed parts.
+fn queryKeepDnp(req: *httpz.Request) bool {
+    const q = req.query() catch return false;
+    const v = q.get("dnp") orelse return false;
+    return std.mem.eql(u8, v, "keep");
+}
+
+/// `?dnp=keep` → keep DNP parts in the centroid; anything else drops them.
+fn dnpMode(req: *httpz.Request) export_fab.DnpMode {
+    return if (queryKeepDnp(req)) .keep else .drop;
+}
+
 /// Query `key` as a float, or -1 when absent/unparseable — the "unset" sentinel
 /// the PNG path uses to keep the optimizer's own default for a group knob.
 fn pngFloatOpt(req: *httpz.Request, key: []const u8) f64 {
@@ -1327,7 +1380,10 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
             if (i > 0) try w.writeAll(",");
             try writeJsonStr(w, name_s);
         }
-        try w.writeAll("]}");
+        try w.writeAll("]");
+        try w.print(",\"ripup_rounds\":{d}", .{r.ripup_rounds});
+        try writePerNetJson(w, r.per_net);
+        try w.writeAll("}");
     }
     // Report any parts the solve left staged below the board (the `(board …)`
     // edge-dock / force path) and the ones autofill pulled back out. Read straight
@@ -1804,12 +1860,11 @@ pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     }
 
     // Copper-to-copper clearance rule the check measures against — the body's
-    // `clearance` (mm), else the router default (matches ?route=1 and the
-    // client's PCB.clr).
-    const default_rp = router.RouteParams{};
-    var clearance = default_rp.clearance;
-    const cl = jsonNum(root.object.get(CLEARANCE_KEY));
-    if (cl > 0) clearance = cl;
+    // `clearance` (mm) overrides; else the design's resolved `(design-rules …)`
+    // base, applied after the placement is built below (matches ?route=1 and the
+    // client's PCB.clr). Per-net `(net-class …)` overrides are applied inside
+    // `drc.check` from `placement.rules.net`.
+    const body_clearance = jsonNum(root.object.get(CLEARANCE_KEY));
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
@@ -1856,6 +1911,7 @@ pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     else
         empty_rr;
 
+    const clearance = if (body_clearance > 0) body_clearance else placement.rules.design.clearance;
     const violations: []const drc.Violation = drc.check(ctx.allocator, placement, rr, clearance) catch &.{};
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
@@ -1863,7 +1919,9 @@ pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     try w.writeAll("{\"drc\":[");
     for (violations, 0..) |vio, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\"}}", .{ vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind) });
+        try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\",\"sev\":\"{s}\"}}", .{
+            vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind), drcSevStr(vio.severity),
+        });
     }
     try w.print("],\"n\":{d}}}", .{violations.len});
     res.content_type = .JSON;
@@ -1959,7 +2017,8 @@ fn blessedFabView(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, name
 /// GET /api/pcb-centroid/:name — the pick-and-place centroid CSV at the
 /// design's blessed poses (see `blessedPlacement`), side-aware, in the
 /// shared fab frame. The assembly half of the fab package; pairs with the
-/// BOM CSV.
+/// BOM CSV. Do-Not-Populate parts are dropped by default; `?dnp=keep` lists
+/// them (a fully-populated variant).
 pub fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -1967,7 +2026,7 @@ pub fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     };
     const fv = blessedFabView(ctx, req, res, name) orelse return;
     var aw: std.Io.Writer.Allocating = .init(req.arena);
-    try export_fab.centroidCsv(&aw.writer, fv.placement.parts, fv.placement.instances, fv.frame);
+    try export_fab.centroidCsv(&aw.writer, fv.placement.parts, fv.placement.instances, fv.frame, dnpMode(req));
     res.header(CT_HDR, "text/csv; charset=utf-8");
     res.body = aw.written();
 }
@@ -1992,7 +2051,10 @@ pub fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 /// Gerber export builds), so the check and the files describe the same board.
 fn fabReadinessFor(req: *httpz.Request, fv: FabView) HandlerError!fab_readiness.Report {
     const copper = export_gerber.Copper{ .tracks = fv.tracks, .vias = fv.vias };
-    return fab_readiness.check(req.arena, fv.placement, copper, .{ .from_saved_layout = fv.from_saved });
+    return fab_readiness.check(req.arena, fv.placement, copper, .{
+        .from_saved_layout = fv.from_saved,
+        .keep_dnp = queryKeepDnp(req),
+    });
 }
 
 /// GET /api/fab-readiness/:name — the pre-fab correctness report for `name`'s
@@ -2024,7 +2086,8 @@ pub fn pcbFabReadinessApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// blocking errors, this returns **HTTP 409** with the report JSON and writes
 /// nothing — unless `?force=1` overrides the gate (the viewer's "Download
 /// anyway"). Warnings never block. A clean (or forced) request downloads the
-/// ZIP as before.
+/// ZIP as before. `?dnp=keep` keeps Do-Not-Populate parts in the centroid CSV
+/// (dropped by default).
 pub fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -2078,7 +2141,7 @@ pub fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         .data = npth.written(),
     });
     var cw: std.Io.Writer.Allocating = .init(req.arena);
-    try export_fab.centroidCsv(&cw.writer, fv.placement.parts, fv.placement.instances, fv.frame);
+    try export_fab.centroidCsv(&cw.writer, fv.placement.parts, fv.placement.instances, fv.frame, dnpMode(req));
     try entries.append(req.arena, .{
         .name = try std.fmt.allocPrint(req.arena, "{s}-centroid.csv", .{name}),
         .data = cw.written(),
@@ -2124,6 +2187,37 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     // `?sub=` scopes the save to a sub circuit: score against that sub-block and
     // persist to its own `<design>.<sub>.layouts.json` sidecar (see writeLayoutsSub).
     const sub = subSlug(req);
+
+    // ── Optimistic-concurrency guard ─────────────────────────────────
+    // The page embedded the sidecar rev it loaded (PCB.rev); the save echoes it
+    // back. If the on-disk rev moved since (a second window saved), refuse the
+    // write with 409 + the current rev so the client can warn "reload to
+    // continue" instead of silently clobbering the other window's edits. A body
+    // with no `rev` (a legacy cached page) skips the check and just stamps —
+    // "accept then stamp". The successful write bumps the rev to `new_rev`.
+    const disk_rev = readLayoutRev(req.arena, ctx.project_dir, name, sub);
+    if (root.object.get("rev")) |rv| {
+        const client_rev: ?i64 = switch (rv) {
+            .integer => |i| i,
+            .float => |f| @intFromFloat(f),
+            else => null,
+        };
+        if (client_rev) |cr| if (cr != disk_rev) {
+            res.status = 409;
+            res.content_type = .JSON;
+            res.body = try std.fmt.allocPrint(req.arena, "{{\"error\":\"conflict\",\"rev\":{d}}}", .{disk_rev});
+            return;
+        };
+    }
+    const new_rev = disk_rev + 1;
+    // Snapshot the design-level sidecar this save will overwrite BEFORE touching
+    // it, so a bad Save/Update is recoverable from history. Best-effort. Sub
+    // circuits keep multi-snapshot in-file history already, so they're skipped.
+    if (sub == null) {
+        if (layoutsSidecar(req.arena, ctx.project_dir, name, null, LAYOUTS_EXT)) |scp| {
+            _ = history.snapshotLayouts(req.arena, ctx.project_dir, name, scp) catch null;
+        }
+    }
 
     // Score the hand layout on the server with the optimizer's own objective —
     // the same code the live `/api/pcb-score` endpoint uses — so a saved layout
@@ -2174,9 +2268,9 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         entry.name = "layout";
         entry.default = true;
         const only = [_]SavedLayout{entry};
-        writeLayoutsSub(req.arena, ctx.project_dir, name, sub, &only);
+        writeLayoutsSubRev(req.arena, ctx.project_dir, name, sub, &only, new_rev);
         res.content_type = .JSON;
-        res.body = "{\"ok\":true,\"single\":true}";
+        res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"single\":true,\"rev\":{d}}}", .{new_rev});
         return;
     }
     const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
@@ -2210,9 +2304,83 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         } else try out.append(req.arena, L);
     }
     if (!replaced and !dup) try out.insert(req.arena, 0, entry);
-    writeLayoutsSub(req.arena, ctx.project_dir, name, sub, out.items);
+    writeLayoutsSubRev(req.arena, ctx.project_dir, name, sub, out.items, new_rev);
     res.content_type = .JSON;
-    res.body = OK_JSON_TRUE;
+    res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rev\":{d}}}", .{new_rev});
+}
+
+/// GET /api/pcb-layout-history/:name — list the design's `.layouts.json`
+/// snapshots (newest first) as `{"snapshots":[{"id":…}, …]}`. Each Save/Update
+/// rolls the previous sidecar into history; this backs a restore picker.
+pub fn pcbLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const snaps = history.listLayoutSnapshots(req.arena, ctx.project_dir, name) catch {
+        res.status = 500;
+        res.body = "history unavailable";
+        return;
+    };
+    var aw: std.Io.Writer.Allocating = .init(req.arena);
+    const w = &aw.writer;
+    try w.writeAll("{\"snapshots\":[");
+    for (snaps, 0..) |s, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"id\":");
+        try writeJsonStr(w, s.id);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
+    res.content_type = .JSON;
+    res.body = aw.written();
+}
+
+/// POST /api/pcb-layout-history/:name/restore — swap a `.layouts.json` snapshot
+/// back into the live sidecar. Body `{"id":"<timestamp>"}`. Snapshots the
+/// CURRENT sidecar first (the restore is itself undoable) and bumps the rev, so
+/// any window still holding the pre-restore rev 409s on its next save instead
+/// of clobbering the restored state. Design-level only (sub circuits keep
+/// multi-snapshot in-file history). Returns `{"ok":true,"rev":N}`.
+pub fn restoreLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    const root = parseJsonObject(req, res) orelse return;
+    const id_v = root.object.get("id") orelse {
+        res.status = 400;
+        res.body = "no id";
+        return;
+    };
+    if (id_v != .string) {
+        res.status = 400;
+        return;
+    }
+    const snap_path = history.layoutSnapshotPath(req.arena, ctx.project_dir, name, id_v.string) catch {
+        res.status = 404;
+        res.body = "snapshot not found";
+        return;
+    };
+    const snap_data = infra_fs.cwd().readFileAlloc(req.arena, snap_path, 1 << 20) catch {
+        res.status = 500;
+        res.body = "snapshot read failed";
+        return;
+    };
+    const restored = parseLayouts(req.arena, snap_data) orelse {
+        res.status = 500;
+        res.body = "corrupt snapshot";
+        return;
+    };
+    // Snapshot the current sidecar so the restore itself is undoable, then write
+    // the restored layouts with a bumped rev, preserving the current cache slot.
+    const disk_rev = readLayoutRev(req.arena, ctx.project_dir, name, null);
+    if (layoutsSidecar(req.arena, ctx.project_dir, name, null, LAYOUTS_EXT)) |scp| {
+        _ = history.snapshotLayouts(req.arena, ctx.project_dir, name, scp) catch null;
+    }
+    writeLayoutsFile(req.arena, ctx.project_dir, name, restored, readCacheSlot(req.arena, ctx.project_dir, name), disk_rev + 1);
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rev\":{d}}}", .{disk_rev + 1});
 }
 
 /// POST /api/pcb-layouts/:name/delete — drop a named layout. Body: `{"name"}`.
@@ -3130,7 +3298,7 @@ fn resolveShownView(
     const outline_drawn = applyShownOutline(placement, layouts, shown);
     // Routing runs only on demand (?route=1); otherwise the shown saved
     // layout's persisted copper is restored (see shownSavedRoutes).
-    const ro = parseRoute(req);
+    const ro = parseRoute(req, placement.rules.design.routeParams());
     var routed: ?router.RouteResult = if (ro.run) (router.route(ctx.allocator, placement.*, ro.params) catch null) else null;
     var saved: ?SavedRoutes = null;
     if (routed == null) {
@@ -3250,49 +3418,87 @@ fn readCacheSlot(alloc: std.mem.Allocator, project_dir: []const u8, name: []cons
     return parseCacheSlot(alloc, root);
 }
 
+/// The sidecar's optimistic-concurrency `rev` (top-level `"rev"` field), or 0
+/// when the file/field is absent (legacy). Every user Save/Update embeds the
+/// rev the page loaded and the save guard 409s on a mismatch; render-path
+/// writes preserve this value so merely viewing/regenerating never bumps it.
+fn readLayoutRev(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) i64 {
+    const path = layoutsSidecar(alloc, project_dir, name, sub, LAYOUTS_EXT) orelse return 0;
+    defer alloc.free(path);
+    const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch return 0;
+    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return 0;
+    if (root != .object) return 0;
+    const rv = root.object.get("rev") orelse return 0;
+    return switch (rv) {
+        .integer => |i| i,
+        .float => |f| @intFromFloat(f),
+        else => 0,
+    };
+}
+
 /// Persist the layout list to `.layouts.json`, carrying the existing cache
-/// slot over unchanged. Best-effort: a write failure just means the list
-/// reverts to what was last on disk.
+/// slot AND the current `rev` over unchanged (a render-path write, not a user
+/// save — see `readLayoutRev`). Best-effort: a write failure just means the
+/// list reverts to what was last on disk.
 fn writeLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) void {
-    writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name));
+    writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name), readLayoutRev(alloc, project_dir, name, null));
 }
 
 /// As `writeLayouts`, but for a `?sub=` scoped sub circuit writes its per-sub
-/// sidecar. The sub store carries no auto-cache slot (sub previews always solve
-/// fresh), so only the layouts array is persisted. `sub == null` delegates to
+/// sidecar, preserving that sidecar's rev. `sub == null` delegates to
 /// `writeLayouts` (design store, cache preserved).
 fn writeLayoutsSub(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, layouts: []const SavedLayout) void {
-    if (sub == null) return writeLayouts(alloc, project_dir, name, layouts);
+    writeLayoutsSubRev(alloc, project_dir, name, sub, layouts, readLayoutRev(alloc, project_dir, name, sub));
+}
+
+/// As `writeLayoutsSub`, but stamps an explicit `rev` — the user-save path
+/// passes `disk_rev + 1` to bump the counter; render-path callers pass the
+/// current rev to preserve it. The sub store carries no auto-cache slot (sub
+/// previews always solve fresh), so only the layouts array is persisted;
+/// `sub == null` goes through the design store (cache preserved).
+fn writeLayoutsSubRev(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, layouts: []const SavedLayout, rev: i64) void {
+    if (sub == null) return writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name), rev);
     const path = layoutsSidecar(alloc, project_dir, name, sub, LAYOUTS_EXT) orelse return;
     defer alloc.free(path);
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
-    writeLayoutsFileJson(w, layouts, null) catch return;
+    writeLayoutsFileJsonRev(w, layouts, null, rev) catch return;
     writeFileAll(path, aw.written()) catch return;
 }
 
-/// Persist layouts + cache slot to `.layouts.json` (the whole sidecar).
+/// Persist layouts + cache slot + `rev` to `.layouts.json` (the whole sidecar).
 fn writeLayoutsFile(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     layouts: []const SavedLayout,
     cache: ?CacheSlot,
+    rev: i64,
 ) void {
     const path = paths.designSiblingPath(alloc, project_dir, name, LAYOUTS_EXT) catch return;
     defer alloc.free(path);
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
-    writeLayoutsFileJson(w, layouts, cache) catch return;
+    writeLayoutsFileJsonRev(w, layouts, cache, rev) catch return;
     writeFileAll(path, aw.written()) catch return;
 }
 
-/// Serialize the sidecar to its on-disk shape: an optional top-level
-/// `"default":"<name>"` (the entry whose `default` flag is set, if any),
-/// the optional `"cache"` slot, then the `layouts` array. Score fields
-/// (hpwl/loop/caps) are flattened onto each entry and omitted when unscored.
+/// Serialize the sidecar with no optimistic-concurrency rev (rev 0 → omitted).
+/// The rev-free spelling used by the KiCad-sync/export round-trip tests and any
+/// caller that doesn't participate in the save guard.
 fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: ?CacheSlot) std.Io.Writer.Error!void {
+    return writeLayoutsFileJsonRev(w, layouts, cache, 0);
+}
+
+/// Serialize the sidecar to its on-disk shape: an optional top-level `"rev":N`
+/// optimistic-concurrency counter (omitted when 0 so a never-guarded legacy
+/// file stays byte-identical), then an optional `"default":"<name>"` (the entry
+/// whose `default` flag is set, if any), the optional `"cache"` slot, then the
+/// `layouts` array. Score fields (hpwl/loop/caps) are flattened onto each entry
+/// and omitted when unscored.
+fn writeLayoutsFileJsonRev(w: *std.Io.Writer, layouts: []const SavedLayout, cache: ?CacheSlot, rev: i64) std.Io.Writer.Error!void {
     try w.writeAll("{");
+    if (rev > 0) try w.print("\"rev\":{d},", .{rev});
     for (layouts) |L| {
         if (!L.default) continue;
         try w.writeAll("\"default\":");
@@ -3319,7 +3525,7 @@ fn writeLayoutsFileJson(w: *std.Io.Writer, layouts: []const SavedLayout, cache: 
             try writeSavedRoutesJson(w, sr);
         }
         if (L.outline) |o| {
-            try w.writeAll(",\"outline\":");
+            try w.writeAll(OUTLINE_OPEN);
             try writeSavedOutlineJson(w, o);
         }
         if (L.texts.len > 0) {
@@ -3909,7 +4115,8 @@ pub fn loadSyncVias(
 fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, p: optimizer.Placement, params: optimizer.Params) void {
     const parts = posesFromPlacement(alloc, p) orelse return;
     const layouts = readLayouts(alloc, project_dir, name);
-    writeLayoutsFile(alloc, project_dir, name, layouts, .{ .params = params, .parts = parts });
+    // Refreshing the auto cache is a render-path write — preserve the rev.
+    writeLayoutsFile(alloc, project_dir, name, layouts, .{ .params = params, .parts = parts }, readLayoutRev(alloc, project_dir, name, null));
     if (paths.designSiblingPath(alloc, project_dir, name, AUTO_EXT)) |legacy| {
         defer alloc.free(legacy);
         infra_fs.cwd().deleteFile(legacy) catch |e| switch (e) {
@@ -4039,8 +4246,13 @@ fn parseF(s: []const u8, dflt: f64) f64 {
 /// (`?route=1`, set by the Route button).
 const RouteOpts = struct { params: router.RouteParams, run: bool };
 
-fn parseRoute(req: *httpz.Request) RouteOpts {
-    var p = router.RouteParams{};
+/// `base` is the router geometry seeded from the design's resolved
+/// `(design-rules …)` (via `DesignRules.routeParams()`); an explicit query param
+/// still overrides it, so interactive experimentation wins over the board
+/// default. A design with no `(design-rules …)` seeds the built-in RouteParams
+/// defaults, so the parsed result is unchanged for existing boards.
+fn parseRoute(req: *httpz.Request, base: router.RouteParams) RouteOpts {
+    var p = base;
     const q = req.query() catch return .{ .params = p, .run = false };
     if (q.get("track_width")) |v| p.track_width = parseF(v, p.track_width);
     if (q.get(CLEARANCE_KEY)) |v| p.clearance = parseF(v, p.clearance);
@@ -4259,6 +4471,25 @@ const STATUSBAR_HTML =
     "<span class=\"st-seg st-hover\" id=\"st-hover\"></span>" ++
     "<button class=\"st-seg st-btn\" id=\"pcb-help\" title=\"Keyboard &amp; mouse shortcuts (?)\">?</button>" ++
     "</div>";
+
+/// Align / distribute cluster (full page only). Hidden until ≥2 parts are
+/// marquee-selected; BOARD_JS's `refreshAlignBar` reveals it and updates the
+/// count, and the data-attributed buttons drive alignSel / distributeSel.
+const ALIGNBAR_HTML =
+    "<div class=\"align-bar\" id=\"align-bar\" hidden>" ++
+    "<div class=\"align-h\"><span id=\"align-n\">0 parts selected</span></div>" ++
+    "<div class=\"align-grid\">" ++
+    "<button class=\"al-btn\" data-align=\"left\" title=\"Align left edges\">\u{21E4}</button>" ++
+    "<button class=\"al-btn\" data-align=\"cx\" title=\"Align horizontal centres\">\u{2194}</button>" ++
+    "<button class=\"al-btn\" data-align=\"right\" title=\"Align right edges\">\u{21E5}</button>" ++
+    "<button class=\"al-btn\" data-align=\"top\" title=\"Align top edges\">\u{2912}</button>" ++
+    "<button class=\"al-btn\" data-align=\"cy\" title=\"Align vertical centres\">\u{2195}</button>" ++
+    "<button class=\"al-btn\" data-align=\"bottom\" title=\"Align bottom edges\">\u{2913}</button>" ++
+    "</div>" ++
+    "<div class=\"align-dist\">" ++
+    "<button class=\"al-btn wide\" data-distribute=\"h\" title=\"Distribute horizontally \u{2014} even origin spacing\">\u{21D4} H</button>" ++
+    "<button class=\"al-btn wide\" data-distribute=\"v\" title=\"Distribute vertically \u{2014} even origin spacing\">\u{21D5} V</button>" ++
+    "</div></div>";
 
 /// Saved-layouts panel: the named history (manual snapshots + auto-recorded
 /// optimizer runs), newest first, each row showing its kind, score, and delta
@@ -4852,6 +5083,7 @@ const SidebarOpts = struct {
 fn writeSidebar(w: *std.Io.Writer, p: optimizer.Placement, sch_base: []const u8, o: SidebarOpts) HandlerError!void {
     try w.writeAll("<aside class=\"pcb-side\">");
     try w.writeAll("<div class=\"side-h\">Properties</div>");
+    try w.writeAll(ALIGNBAR_HTML);
     try w.writeAll("<div id=\"prop-body\" class=\"prop-body\" data-schbase=\"");
     try writeAttr(w, sch_base);
     try w.print(
@@ -4992,6 +5224,10 @@ const PcbDataOpts = struct {
     /// The shown layout's board-level silkscreen texts (ShownView.texts) —
     /// emitted as `PCB.texts` so the viewer draws + edits them.
     texts: []const font5x7.BoardText = &.{},
+    /// The layout sidecar's optimistic-concurrency rev at page-render time
+    /// (`readLayoutRev`). Emitted as `PCB.rev`; every Save/Update POST echoes
+    /// it back so the server can 409 a stale write from a second window.
+    rev: i64 = 0,
 };
 
 /// World position of the GND-plane via covering the pad centred at (`cx`,`cy`),
@@ -5113,7 +5349,8 @@ fn writePcbData(
     }
 
     try w.writeAll("<script>const PCB=");
-    try writeBlobHead(w, v, clearance, p, opts);
+    const pour_copper: pour.Copper = if (routed) |r| .{ .tracks = r.tracks, .vias = r.vias } else .{};
+    try writeBlobHead(w, alloc, v, clearance, p, pour_copper, opts);
     // Server-computed objective breakdown of the layout on screen — the baseline
     // the live score deltas against. Same shape the /api/pcb-score endpoint returns.
     try w.print("\"caps\":{d},\"auto\":", .{p.score.loop_caps});
@@ -5336,7 +5573,9 @@ fn writeRoutedArrays(
     try w.writeAll("],\"drc\":[");
     for (violations, 0..) |vio, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\"}}", .{ vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind) });
+        try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\",\"sev\":\"{s}\"}}", .{
+            vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind), drcSevStr(vio.severity),
+        });
     }
     // Names of the nets the router could NOT fully connect — the actionable
     // half of the routed/total count (which connections are missing, not just
@@ -5357,7 +5596,15 @@ fn writeRoutedArrays(
 /// (the placement's — carries a drawn outline when one was applied), the
 /// read-only/sub flags, and the Stamp seed poses. Split from writePcbData
 /// purely to keep both under the function-length cap.
-fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placement, opts: PcbDataOpts) HandlerError!void {
+fn writeBlobHead(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    v: View,
+    clearance: f64,
+    p: optimizer.Placement,
+    copper: pour.Copper,
+    opts: PcbDataOpts,
+) HandlerError!void {
     try w.print("{{\"scale\":{d},\"minx\":{d},\"miny\":{d},", .{ v.scale, v.minx, v.miny });
     try w.print("\"margin\":{d},\"grid\":{d},\"w\":{d},\"h\":{d},", .{ MARGIN_MM, optimizer.GRID_MM, v.width, v.height });
     try w.print("\"clr\":{d},\"cmargin\":{d},", .{ clearance, geometry.BBOX_MARGIN_MM });
@@ -5380,21 +5627,30 @@ fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placem
     } else {
         try w.writeAll("\"board_poly\":null,");
     }
-    // Declared outer-layer copper pours ((stackup …) planes on an outer
-    // face): net + the rect the Gerber pour fills (board outline, or the
-    // parts-bbox fallback), so the viewer paints the poured face under the
-    // parts instead of leaving it invisible copper.
+    // Declared outer-layer copper pours ((stackup …) planes on an outer face):
+    // the REAL computed fill's kept-component contours (outline-clipped, foreign
+    // features carved, orphan islands dropped) so the viewer paints the actual
+    // poured copper — what the Gerber emits — instead of a full-board rect.
     try w.writeAll("\"pours\":[");
     var pfirst = true;
     for ([_]optimizer.Side{ .top, .bottom }) |side| {
         const pn = p.rules.pourNetOnSide(side) orelse continue;
-        const r = export_fab.outlineRect(p);
-        if (!pfirst) try w.writeByte(',');
-        pfirst = false;
+        const li: u8 = if (side == .top) 0 else 1;
+        const fill = pour.compute(alloc, p, copper, .{ .net = .{ .named = pn }, .side = side, .track_layer = li }) catch continue;
         const side_word: []const u8 = if (side == .top) "top" else "bottom";
-        try w.print("{{\"side\":\"{s}\",\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"net\":", .{ side_word, r.minx, r.miny, r.w, r.h });
-        try writeJsonStr(w, pn);
-        try w.writeByte('}');
+        for (fill.contours) |poly| {
+            if (poly.len < 3) continue;
+            if (!pfirst) try w.writeByte(',');
+            pfirst = false;
+            try w.print("{{\"side\":\"{s}\",\"net\":", .{side_word});
+            try writeJsonStr(w, pn);
+            try w.writeAll(",\"poly\":[");
+            for (poly, 0..) |pt, i| {
+                if (i > 0) try w.writeByte(',');
+                try w.print(PT_PAIR_FMT, .{ pt[0], pt[1] });
+            }
+            try w.writeAll("]}");
+        }
     }
     try w.writeAll("],");
     // The board's SIGNAL-layer table (from the `(stackup …)` rules): index
@@ -5429,6 +5685,9 @@ fn writeBlobHead(w: *std.Io.Writer, v: View, clearance: f64, p: optimizer.Placem
     }
     if (opts.outline_drawn) try w.writeAll("\"outline_drawn\":true,");
     if (opts.single) try w.writeAll("\"single\":true,");
+    // Optimistic-concurrency rev the page loaded — Save/Update echoes it so a
+    // stale write from another window 409s instead of silently clobbering.
+    try w.print("\"rev\":{d},", .{opts.rev});
     // Per-sub-block module-layout seed poses for the palette's Stamp button,
     // plus which snapshot supplied each group's seeds (tooltip/coverage).
     try w.writeAll("\"subseeds\":");
@@ -5479,10 +5738,24 @@ fn drcKindStr(k: drc.Kind) []const u8 {
         .track_pad => "track↔pad",
         .pad_pad => "pad↔pad",
         .annular => "annular ring",
+        .pad_annular => "pad annular ring",
         .board_edge => "board edge",
         .courtyard => "courtyard overlap",
         .hole_hole => "hole↔hole",
         .min_drill => "min drill",
+        .track_width => "track width",
+        .mask_sliver => "mask sliver",
+        .silk_over_pad => "silk over pad",
+    };
+}
+
+/// The severity word for a DRC violation kind, matching `drc.Violation.severity`
+/// — surfaced in the JSON so the viewer chip can split the error / warning
+/// counts and the client tooltip can style them apart.
+fn drcSevStr(sev: drc.Severity) []const u8 {
+    return switch (sev) {
+        .err => "err",
+        .warn => "warn",
     };
 }
 
@@ -5503,6 +5776,9 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
         try writeJsonStr(w, L.name);
         try w.writeAll(",\"kind\":");
         try writeJsonStr(w, L.kind);
+        // Capture time (unix s) — the viewer's unsaved-work check compares a
+        // localStorage draft's timestamp against the newest saved layout's.
+        try w.print(",\"ts\":{d}", .{L.ts});
         if (L.score) |s| {
             try w.print(",\"score\":{{\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}}}", .{ s.hpwl, s.loop, s.caps, s.objective });
         } else try w.writeAll(",\"score\":null");
@@ -5511,7 +5787,7 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
             try writeSavedRoutesJson(w, sr);
         }
         if (L.outline) |o| {
-            try w.writeAll(",\"outline\":");
+            try w.writeAll(OUTLINE_OPEN);
             try writeSavedOutlineJson(w, o);
         }
         if (L.texts.len > 0) {
@@ -5984,6 +6260,40 @@ const PAGE_CSS =
     \\.prop-row{display:flex;justify-content:space-between;gap:10px;padding:2.5px 0;font-size:12px}
     \\.prop-row .k{color:#9b9ca3}
     \\.prop-row .v{color:#e4e5e9;font-variant-numeric:tabular-nums;text-align:right}
+    \\/* Editable properties: numeric mm inputs + preset selects. */
+    \\.prop-row .pv-in{width:96px;font:inherit;font-size:12px;text-align:right;font-variant-numeric:tabular-nums;
+    \\  background:#1a1b1e;border:1px solid #3a3b40;color:#e4e5e9;border-radius:4px;padding:1px 5px}
+    \\.prop-row select.pv-in{text-align:left;text-align-last:right}
+    \\.prop-row .pv-in:focus{outline:none;border-color:#5a8fd6;background:#15161a}
+    \\.prop-row .pv-in:disabled{opacity:.5;cursor:not-allowed}
+    \\.prop-lock{padding:6px 12px;font-size:11px;color:#d8a03c;border-bottom:1px solid #2c2d31}
+    \\.prop-lock kbd{background:#2c2d31;border:1px solid #3a3b40;border-radius:3px;padding:0 4px;font-family:ui-monospace,monospace;font-size:10.5px}
+    \\/* Align / distribute cluster (shown for a ≥2 part multi-selection). */
+    \\.align-bar{border-bottom:1px solid #2c2d31;padding:8px 12px;background:#202126}
+    \\.align-bar[hidden]{display:none}
+    \\.align-h{font-size:11px;color:#9b9ca3;margin-bottom:6px}
+    \\.align-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-bottom:5px}
+    \\.align-dist{display:grid;grid-template-columns:repeat(2,1fr);gap:4px}
+    \\.al-btn{font:inherit;font-size:14px;line-height:1;border:1px solid #3a3b40;background:#2c2d31;color:#d6d7db;
+    \\  border-radius:5px;padding:5px 0;cursor:pointer;text-align:center}
+    \\.al-btn.wide{font-size:12px}
+    \\.al-btn:hover:not(:disabled){background:#37383d;border-color:#5a8fd6;color:#f0f1f3}
+    \\.al-btn:disabled{opacity:.4;cursor:not-allowed}
+    \\/* DRC violations list — toggled open by the Route panel's DRC count chip. */
+    \\.drc-list{flex-basis:100%;width:100%;margin-top:6px;max-height:200px;overflow-y:auto;
+    \\  border:1px solid #2c2d31;border-radius:6px;background:#191a1d}
+    \\.drc-list[hidden]{display:none}
+    \\.drc-empty{padding:8px 10px;font-size:11.5px;color:#85868d}
+    \\.drc-row{display:flex;align-items:center;gap:7px;padding:4px 9px;font-size:11px;cursor:pointer;
+    \\  border-left:2px solid #b23c30;border-bottom:1px solid #232428}
+    \\.drc-row:last-child{border-bottom:0}
+    \\.drc-row:hover{background:#232428}
+    \\.drc-row.cur{background:#2a1c1a}
+    \\.drc-row.warn{border-left-color:#d8a03c}
+    \\.drc-row.err{border-left-color:#e05b4b}
+    \\.drc-k{color:#e4e5e9;font-weight:600;white-space:nowrap}
+    \\.drc-loc{color:#8ab8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,monospace}
+    \\.drc-gap{margin-left:auto;color:#9b9ca3;font-variant-numeric:tabular-nums;white-space:nowrap}
     \\.prop-fp{display:block;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid #2c2d31;
     \\  padding:8px 12px;cursor:pointer;font-family:inherit;font-size:11px;color:#85868d}
     \\.prop-fp:hover{color:#6ba1e8;text-decoration:underline}
@@ -6177,6 +6487,828 @@ const PCB_3D_TOGGLE_JS =
     \\})();</script>
 ;
 
+// ── MCP layout-mutation tools ──────────────────────────────────────────
+//
+// The read-only PCB tools (get_pcb_layout_image / describe_pcb_layout /
+// compare_layout_to_starred) let an agent SEE a placement; these six let it
+// EDIT one — set poses, draw a board outline, autoroute, save/star, clear
+// copper, and run the pre-fab gate — so a design can go schematic → gated
+// Gerbers with no browser. They persist into the same `<design>.layouts.json`
+// sidecar the viewer writes, through the same save/route/fab helpers above, so
+// a layout the agent builds loads unchanged in `/pcb-layout`.
+//
+// Each takes the MCP arg object + the response buffer and returns `ok`.
+// Mutations write `<design>.layouts.json` and report the design's current
+// `live_version` (the sidecar isn't the design source, so the counter is
+// informational — the viewer picks up layout changes on its next load).
+
+/// Shared error/response fragments for the layout tools (extracted so the
+/// repeated-literal check stays quiet and the wording stays consistent).
+const MCP_ERR_MISSING_NAME = "missing argument \"name\"";
+const MCP_ERR_NO_DESIGN = "no design or module by that name";
+/// `{"ok":true,"live_version":N,"layout":` — the opening the tools that report
+/// only a layout name share (set_board_outline / route_pcb / clear_routes).
+const MCP_OK_LAYOUT_FMT = "{{\"ok\":true,\"live_version\":{d},\"layout\":";
+
+/// A single requested pose from `set_part_poses` (`x_mm`/`y_mm` in mm; `rot`/
+/// `side`/`locked` optional — absent keeps the part's current value).
+const McpReqPose = struct {
+    ref: []const u8,
+    has_xy: bool,
+    x: f64,
+    y: f64,
+    has_rot: bool,
+    rot: f64,
+    has_side: bool,
+    side: optimizer.Side,
+    has_locked: bool,
+    locked: bool,
+};
+
+/// `args.key` as a string (null when absent / not a string).
+fn mcpArgStr(args_val: ?std.json.Value, key: []const u8) ?[]const u8 {
+    const av = args_val orelse return null;
+    if (av != .object) return null;
+    const v = av.object.get(key) orelse return null;
+    return if (v == .string) v.string else null;
+}
+
+/// `args.key` as a bool (absent / non-bool ⇒ false).
+fn mcpArgBool(args_val: ?std.json.Value, key: []const u8) bool {
+    const av = args_val orelse return false;
+    if (av != .object) return false;
+    const v = av.object.get(key) orelse return false;
+    return v == .bool and v.bool;
+}
+
+/// `args.key` as a token list — a JSON string array or a comma-separated
+/// string (trimmed, empties dropped). Absent ⇒ empty slice.
+fn mcpArgStrList(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8) []const []const u8 {
+    const av = args_val orelse return &.{};
+    if (av != .object) return &.{};
+    const v = av.object.get(key) orelse return &.{};
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    if (v == .array) {
+        for (v.array.items) |it| {
+            if (it == .string and it.string.len > 0) list.append(alloc, it.string) catch break;
+        }
+    } else if (v == .string) {
+        var it = std.mem.tokenizeScalar(u8, v.string, ',');
+        while (it.next()) |tok| {
+            const t = std.mem.trim(u8, tok, " \t");
+            if (t.len > 0) list.append(alloc, t) catch break;
+        }
+    }
+    return list.toOwnedSlice(alloc) catch &.{};
+}
+
+/// Write an `{"ok":false,"error":<msg>}` envelope into `out` and return false
+/// (the MCP layer flags the result `isError`). The single error spelling for
+/// every layout tool.
+fn mcpFail(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, msg: []const u8) !bool {
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    try w.writeAll("{\"ok\":false,\"error\":");
+    try writeJsonStr(w, msg);
+    try w.writeAll("}");
+    try out.appendSlice(alloc, aw.written());
+    return false;
+}
+
+/// `mcpFail` with a formatted message (built on `alloc`, then escaped).
+fn mcpFailFmt(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !bool {
+    const msg = std.fmt.allocPrint(alloc, fmt, args) catch "error";
+    return mcpFail(out, alloc, msg);
+}
+
+/// A design resolves to a *single* layout (auto-starred "layout", KiCad-sync
+/// seed) rather than the multi-snapshot module store — true for a top-level
+/// design (`module_res == null`), matching `saveNamedLayoutApi`. Null when the
+/// name resolves to no design/module at all.
+fn mcpIsSingleDesign(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?bool {
+    var eval = Evaluator.init(alloc, project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        alloc.destroy(mr.eval);
+    };
+    _ = resolveBlock(alloc, project_dir, name, &eval, &module_res) orelse return null;
+    return module_res == null;
+}
+
+/// The layout entry the agent's edits land on: the `layout` arg by name, else —
+/// for a single design — its one "layout" entry, else the blessed snapshot
+/// (★ default → newest manual → any). Null when nothing matches (a fresh
+/// design, or an unknown `layout` name).
+fn mcpReadWorking(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    single: bool,
+    layout_arg: ?[]const u8,
+) ?SavedLayout {
+    const layouts = readLayouts(alloc, project_dir, name);
+    if (layout_arg) |la| {
+        for (layouts) |L| {
+            if (std.mem.eql(u8, L.name, la)) return L;
+        }
+        return null;
+    }
+    if (single) {
+        for (layouts) |L| {
+            if (L.default and L.parts.len > 0) return L;
+        }
+        return if (layouts.len > 0) layouts[0] else null;
+    }
+    if (blessedLayout(layouts)) |L| return L.*;
+    return null;
+}
+
+/// The name the working layout is stored under (see `mcpReadWorking`): the
+/// `layout` arg, else the blessed snapshot's name, else "layout".
+fn mcpWorkingName(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    single: bool,
+    layout_arg: ?[]const u8,
+) []const u8 {
+    if (layout_arg) |la| return la;
+    if (!single) {
+        if (blessedLayout(readLayouts(alloc, project_dir, name))) |L| return L.name;
+    }
+    return "layout";
+}
+
+/// Persist `entry` as the working layout. A single design keeps exactly ONE
+/// layout (the entry, forced name "layout" + auto-starred — the fab/KiCad-sync
+/// seed), replacing the list; a module store upserts `entry` by name (starring
+/// it clears any other default). Mirrors `saveNamedLayoutApi`'s split.
+fn mcpPersistWorking(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    single: bool,
+    entry_in: SavedLayout,
+    star: bool,
+) void {
+    var entry = entry_in;
+    entry.kind = KIND_MANUAL;
+    if (entry.ts == 0) entry.ts = clock.timestamp();
+    if (single) {
+        entry.name = "layout";
+        entry.default = true;
+        const only = [_]SavedLayout{entry};
+        mcpProtectedWrite(alloc, project_dir, name, &only);
+        return;
+    }
+    const existing = readLayouts(alloc, project_dir, name);
+    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var replaced = false;
+    for (existing) |L| {
+        if (!replaced and std.mem.eql(u8, L.name, entry.name)) {
+            entry.default = star or L.default;
+            out.append(alloc, entry) catch return;
+            replaced = true;
+        } else {
+            var e = L;
+            if (star) e.default = false;
+            out.append(alloc, e) catch return;
+        }
+    }
+    if (!replaced) {
+        entry.default = star;
+        out.insert(alloc, 0, entry) catch return;
+    }
+    mcpProtectedWrite(alloc, project_dir, name, out.items);
+}
+
+/// Write a sidecar mutated over MCP the way the viewer's Save does: snapshot
+/// the previous design-level sidecar into `history/` first (best-effort), then
+/// stamp `disk rev + 1` — so an agent's mutation is (a) recoverable and (b)
+/// visible to an open editor tab's optimistic-concurrency guard (the tab's now
+/// stale rev 409s on its next save instead of silently clobbering). MCP tools
+/// are design-level only, so there is no `sub` variant.
+fn mcpProtectedWrite(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) void {
+    if (layoutsSidecar(alloc, project_dir, name, null, LAYOUTS_EXT)) |scp| {
+        _ = history.snapshotLayouts(alloc, project_dir, name, scp) catch null;
+    }
+    writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name), readLayoutRev(alloc, project_dir, name, null) + 1);
+}
+
+/// Net NAME at flattened-net index `idx` (−1 / out-of-range ⇒ "" — foreign
+/// copper the sidecar still stores). Inverse of `restoreRoutes`' name→index.
+fn mcpNetNameAt(nets: []const export_kicad.FlatNet, idx: i32) []const u8 {
+    if (idx < 0) return "";
+    const u: usize = @intCast(idx);
+    return if (u < nets.len) nets[u].name else "";
+}
+
+/// A router `RouteResult` → the sidecar's `SavedRoutes` shape (net INDEX →
+/// net NAME, so the copper survives the next flatten's index shuffle). The
+/// persistence counterpart of `restoreRoutes`.
+fn mcpSavedRoutesFrom(
+    alloc: std.mem.Allocator,
+    r: router.RouteResult,
+    nets: []const export_kicad.FlatNet,
+) std.mem.Allocator.Error!SavedRoutes {
+    const tracks = try alloc.alloc(SavedTrack, r.tracks.len);
+    for (r.tracks, 0..) |t, i| tracks[i] = .{
+        .x1 = t.x1,
+        .y1 = t.y1,
+        .x2 = t.x2,
+        .y2 = t.y2,
+        .l = t.layer,
+        .w = t.width,
+        .net = mcpNetNameAt(nets, t.net),
+    };
+    const vias = try alloc.alloc(SavedVia, r.vias.len);
+    for (r.vias, 0..) |v, i| vias[i] = .{
+        .x = v.x,
+        .y = v.y,
+        .d = v.dia,
+        .drill = v.drill,
+        .net = mcpNetNameAt(nets, v.net),
+    };
+    return .{ .tracks = tracks, .vias = vias };
+}
+
+/// The set of net NAMES touched by any part in `moved` — the copper to
+/// invalidate when those parts move (mirrors the viewer's `clearRouteFor`:
+/// a moved part's nets' routed copper is stale, so it's dropped).
+fn mcpNetsTouchingRefs(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    moved: *const std.StringHashMap(void),
+) std.mem.Allocator.Error!std.StringHashMap(void) {
+    var set = std.StringHashMap(void).init(alloc);
+    for (placement.nets) |net| {
+        for (net.pins) |pin| {
+            if (moved.contains(pin.ref_des)) {
+                try set.put(net.name, {});
+                break;
+            }
+        }
+    }
+    return set;
+}
+
+/// Drop every track/via whose net is in `drop` from `sr`. Returns the surviving
+/// copper (null when nothing survives) and how many segments were dropped.
+const McpDroppedRoutes = struct { routes: ?SavedRoutes, dropped: usize };
+fn mcpDropRoutesForNets(
+    alloc: std.mem.Allocator,
+    sr: ?SavedRoutes,
+    drop: *const std.StringHashMap(void),
+) std.mem.Allocator.Error!McpDroppedRoutes {
+    const s = sr orelse return .{ .routes = null, .dropped = 0 };
+    var tracks: std.ArrayListUnmanaged(SavedTrack) = .empty;
+    var vias: std.ArrayListUnmanaged(SavedVia) = .empty;
+    var dropped: usize = 0;
+    for (s.tracks) |t| {
+        if (t.net.len > 0 and drop.contains(t.net)) dropped += 1 else try tracks.append(alloc, t);
+    }
+    for (s.vias) |v| {
+        if (v.net.len > 0 and drop.contains(v.net)) dropped += 1 else try vias.append(alloc, v);
+    }
+    if (tracks.items.len == 0 and vias.items.len == 0) return .{ .routes = null, .dropped = dropped };
+    return .{
+        .routes = .{ .tracks = try tracks.toOwnedSlice(alloc), .vias = try vias.toOwnedSlice(alloc) },
+        .dropped = dropped,
+    };
+}
+
+/// Keep only the tracks/vias whose net is in `keep` (the fresh copper for the
+/// `route_pcb` `nets` scope). Null when none match.
+fn mcpKeepRoutesForNets(
+    alloc: std.mem.Allocator,
+    sr: SavedRoutes,
+    keep: *const std.StringHashMap(void),
+) std.mem.Allocator.Error!?SavedRoutes {
+    var tracks: std.ArrayListUnmanaged(SavedTrack) = .empty;
+    var vias: std.ArrayListUnmanaged(SavedVia) = .empty;
+    for (sr.tracks) |t| {
+        if (t.net.len > 0 and keep.contains(t.net)) try tracks.append(alloc, t);
+    }
+    for (sr.vias) |v| {
+        if (v.net.len > 0 and keep.contains(v.net)) try vias.append(alloc, v);
+    }
+    if (tracks.items.len == 0 and vias.items.len == 0) return null;
+    return .{ .tracks = try tracks.toOwnedSlice(alloc), .vias = try vias.toOwnedSlice(alloc) };
+}
+
+/// Concatenate two optional route sets (either may be null).
+fn mcpMergeRoutes(alloc: std.mem.Allocator, a: ?SavedRoutes, b: ?SavedRoutes) std.mem.Allocator.Error!?SavedRoutes {
+    const ta = if (a) |x| x.tracks else &[_]SavedTrack{};
+    const tb = if (b) |x| x.tracks else &[_]SavedTrack{};
+    const va = if (a) |x| x.vias else &[_]SavedVia{};
+    const vb = if (b) |x| x.vias else &[_]SavedVia{};
+    if (ta.len + tb.len == 0 and va.len + vb.len == 0) return null;
+    const tracks = try alloc.alloc(SavedTrack, ta.len + tb.len);
+    @memcpy(tracks[0..ta.len], ta);
+    @memcpy(tracks[ta.len..], tb);
+    const vias = try alloc.alloc(SavedVia, va.len + vb.len);
+    @memcpy(vias[0..va.len], va);
+    @memcpy(vias[va.len..], vb);
+    return .{ .tracks = tracks, .vias = vias };
+}
+
+/// Parse the `poses` argument of `set_part_poses` into `[]McpReqPose`. Null
+/// when the arg is absent or not an array. Non-object entries are skipped;
+/// per-item `x_mm`/`y_mm` presence is validated by the caller.
+fn mcpParsePoses(alloc: std.mem.Allocator, args_val: ?std.json.Value) ?[]McpReqPose {
+    const av = args_val orelse return null;
+    if (av != .object) return null;
+    const v = av.object.get("poses") orelse return null;
+    if (v != .array) return null;
+    var list: std.ArrayListUnmanaged(McpReqPose) = .empty;
+    for (v.array.items) |it| {
+        if (it != .object) continue;
+        const ref_v = it.object.get("ref") orelse it.object.get("origin") orelse continue;
+        if (ref_v != .string) continue;
+        const xv = it.object.get("x_mm");
+        const yv = it.object.get("y_mm");
+        const rv = it.object.get("rot");
+        const sv = it.object.get("side");
+        const lv = it.object.get("locked");
+        list.append(alloc, .{
+            .ref = ref_v.string,
+            .has_xy = xv != null and yv != null,
+            .x = jsonNum(xv),
+            .y = jsonNum(yv),
+            .has_rot = rv != null,
+            .rot = jsonNum(rv),
+            .has_side = sv != null,
+            .side = jsonSide(sv),
+            .has_locked = lv != null,
+            .locked = jsonFlag(lv),
+        }) catch return list.items;
+    }
+    return list.toOwnedSlice(alloc) catch null;
+}
+
+/// The origin part of a possibly-prefixed key: "buck/U1" → "U1"; "C3" → "C3".
+/// Pairs with `refPrefix` so a request can name a part by its module-local
+/// origin key ("buck/C_IN") the same way a saved pose stores it.
+fn mcpOriginOf(s: []const u8) []const u8 {
+    const p = refPrefix(s);
+    return if (p.len > 0 and s.len > p.len) s[p.len + 1 ..] else s;
+}
+
+/// `set_part_poses` — batch pose update on the design's working (or named)
+/// layout. Every `ref` is resolved against the current flatten (exact ref-des
+/// first, then module-local origin key scoped by sub-block prefix); an unknown
+/// ref fails the whole call (nothing is written). Unlisted parts keep their
+/// poses; a moved part's nets' persisted copper is dropped (stale).
+pub fn mcpSetPartPoses(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) HandlerError!bool {
+    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
+    const reqs = mcpParsePoses(alloc, args_val) orelse return mcpFail(out, alloc, "missing or malformed \"poses\" array");
+    if (reqs.len == 0) return mcpFail(out, alloc, "\"poses\" is empty");
+    const layout_arg = mcpArgStr(args_val, "layout");
+
+    var eval = Evaluator.init(alloc, project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        alloc.destroy(mr.eval);
+    };
+    const solved = solveForRequest(alloc, project_dir, name, .{ .layout = layout_arg }, &eval, &module_res) catch |e|
+        return mcpFailFmt(out, alloc, "could not resolve layout: {s}", .{@errorName(e)});
+    const single = module_res == null;
+    const placement = solved.placement;
+    const base = posesFromPlacement(alloc, placement) orelse return mcpFail(out, alloc, "out of memory building poses");
+
+    // ref/origin → index into `base`, for O(1) resolve + patch.
+    var idx_of = std.StringHashMap(usize).init(alloc);
+    var origin_of = std.StringHashMap(usize).init(alloc);
+    for (base, 0..) |p, i| {
+        try idx_of.put(p.ref, i);
+        if (p.origin.len > 0) {
+            const key = try std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ refPrefix(p.ref), p.origin });
+            try origin_of.put(key, i);
+        }
+    }
+
+    var moved = std.StringHashMap(void).init(alloc);
+    var updated: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (reqs) |rq| {
+        if (!rq.has_xy) return mcpFailFmt(out, alloc, "pose for \"{s}\" is missing x_mm/y_mm", .{rq.ref});
+        const i: usize = idx_of.get(rq.ref) orelse blk: {
+            const key = try std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ refPrefix(rq.ref), mcpOriginOf(rq.ref) });
+            break :blk origin_of.get(key) orelse
+                return mcpFailFmt(out, alloc, "unknown ref \"{s}\" — not a component or origin key in this design", .{rq.ref});
+        };
+        var p = &base[i];
+        const before_x = p.x;
+        const before_y = p.y;
+        const before_rot = p.rot;
+        const before_side = p.side;
+        p.x = rq.x;
+        p.y = rq.y;
+        if (rq.has_rot) p.rot = rq.rot;
+        if (rq.has_side) p.side = rq.side;
+        if (rq.has_locked) p.locked = rq.locked;
+        if (before_x != p.x or before_y != p.y or before_rot != p.rot or before_side != p.side)
+            try moved.put(p.ref, {});
+        try updated.append(alloc, p.ref);
+    }
+
+    // A moved part's nets' persisted copper is now stale — drop it, keeping
+    // the working layout's outline / texts / other-net copper intact.
+    const working = mcpReadWorking(alloc, project_dir, name, single, layout_arg);
+    var drop = try mcpNetsTouchingRefs(alloc, placement, &moved);
+    const filtered = try mcpDropRoutesForNets(alloc, if (working) |w| w.routes else null, &drop);
+
+    const entry = SavedLayout{
+        .name = mcpWorkingName(alloc, project_dir, name, single, layout_arg),
+        .kind = KIND_MANUAL,
+        .ts = 0,
+        .score = null,
+        .parts = base,
+        .routes = filtered.routes,
+        .outline = if (working) |w| w.outline else null,
+        .texts = if (working) |w| w.texts else &.{},
+    };
+    mcpPersistWorking(alloc, project_dir, name, single, entry, false);
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    try w.print("{{\"ok\":true,\"live_version\":{d},\"single\":{s},\"layout\":", .{ serve_root.getLiveVersion(name), if (single) "true" else "false" });
+    try writeJsonStr(w, entry.name);
+    try w.print(",\"total_parts\":{d},\"moved\":{d},\"routes_dropped\":{d},\"updated\":[", .{ base.len, moved.count(), filtered.dropped });
+    for (updated.items, 0..) |r, i| {
+        if (i > 0) try w.writeAll(",");
+        try writeJsonStr(w, r);
+    }
+    try w.writeAll("]}");
+    try out.appendSlice(alloc, aw.written());
+    return true;
+}
+
+/// A `rect` object's nested `pts` array, if any (null when `rect` is absent
+/// or not an object). Split out so the polygon lookup stays one short line.
+fn mcpNestedPts(rect_v: ?std.json.Value) ?std.json.Value {
+    const r = rect_v orelse return null;
+    if (r != .object) return null;
+    return r.object.get("pts");
+}
+
+/// Parse `set_board_outline`'s outline argument (`av` is the args object): a
+/// `pts` polygon (top-level or under `rect`) wins, its bbox filling the rect
+/// fields; else the `rect` (or top-level) `{x,y,w,h}`. Same validation as the
+/// sidecar reader (`parseOutlinePts` / `parseSavedOutline`), so it round-trips.
+fn mcpParseOutlineArg(alloc: std.mem.Allocator, av: std.json.Value) ?SavedOutline {
+    const rect_v: ?std.json.Value = av.object.get("rect");
+    const pts_v: ?std.json.Value = av.object.get("pts") orelse mcpNestedPts(rect_v);
+    if (pts_v) |pv| {
+        const pts = parseOutlinePts(alloc, pv) orelse return null;
+        const bb = outline_mod.bboxRect(pts);
+        if (!(bb.w > 0) or !(bb.h > 0)) {
+            alloc.free(pts);
+            return null;
+        }
+        return .{ .x = bb.minx, .y = bb.miny, .w = bb.w, .h = bb.h, .pts = pts };
+    }
+    return parseSavedOutline(alloc, rect_v orelse av);
+}
+
+/// `set_board_outline` — write the working layout's board outline (a
+/// `{x,y,w,h}` rect or a `pts` polygon ≥3 vertices). The outline becomes the
+/// placement's `board_rect`/`board_poly`, so every renderer draws it and the
+/// board-edge DRC + Gerber Edge.Cuts profile use it. Bootstraps a base
+/// placement when the design has no layout yet.
+pub fn mcpSetBoardOutline(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) HandlerError!bool {
+    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
+    const layout_arg = mcpArgStr(args_val, "layout");
+    const av = args_val orelse return mcpFail(out, alloc, "missing outline");
+    if (av != .object) return mcpFail(out, alloc, "missing rect/pts");
+
+    // A `pts` polygon (top-level or under `rect`) wins; else the `rect`
+    // (or top-level) `{x,y,w,h}`. `parseOutlinePts` + `parseSavedOutline`
+    // do the validation the sidecar reader uses, so an outline set here reads
+    // back identically.
+    const outline = mcpParseOutlineArg(alloc, av) orelse
+        return mcpFail(out, alloc, "invalid outline — need a positive-area rect {x,y,w,h} or a polygon pts of ≥3 vertices");
+
+    const single = mcpIsSingleDesign(alloc, project_dir, name) orelse
+        return mcpFail(out, alloc, MCP_ERR_NO_DESIGN);
+    const working = mcpReadWorking(alloc, project_dir, name, single, layout_arg);
+    const parts: []const PartPose = if (working) |wl| wl.parts else mcpBootstrapParts(alloc, project_dir, name, layout_arg) orelse
+        return mcpFail(out, alloc, "could not resolve a placement to attach the outline to");
+
+    const entry = SavedLayout{
+        .name = mcpWorkingName(alloc, project_dir, name, single, layout_arg),
+        .kind = KIND_MANUAL,
+        .ts = 0,
+        .score = null,
+        .parts = parts,
+        .routes = if (working) |wl| wl.routes else null,
+        .outline = outline,
+        .texts = if (working) |wl| wl.texts else &.{},
+    };
+    mcpPersistWorking(alloc, project_dir, name, single, entry, false);
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    try w.print(MCP_OK_LAYOUT_FMT, .{serve_root.getLiveVersion(name)});
+    try writeJsonStr(w, entry.name);
+    try w.writeAll(OUTLINE_OPEN);
+    try writeSavedOutlineJson(w, outline);
+    try w.writeAll("}");
+    try out.appendSlice(alloc, aw.written());
+    return true;
+}
+
+/// Base poses for a design with no working layout yet — solve fresh and take
+/// the auto placement's poses (live ref-des + origin keys). Null on failure.
+fn mcpBootstrapParts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8) ?[]const PartPose {
+    var eval = Evaluator.init(alloc, project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        alloc.destroy(mr.eval);
+    };
+    const solved = solveForRequest(alloc, project_dir, name, .{ .layout = layout_arg }, &eval, &module_res) catch return null;
+    return posesFromPlacement(alloc, solved.placement);
+}
+
+/// `route_pcb` — autoroute the working layout's current poses at the design's
+/// resolved rules (its `(stackup …)` / `(net-class …)` widths, baked into the
+/// placement) and persist the copper into the layout. With `nets`, the router
+/// still runs full-board, but only those nets' fresh copper is adopted (the
+/// rest keep their prior copper — a full re-route is considered, so a scoped
+/// re-route can differ from routing that net alone). Returns route/DRC metrics.
+pub fn mcpRoutePcb(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) HandlerError!bool {
+    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
+    const layout_arg = mcpArgStr(args_val, "layout");
+    const scope = mcpArgStrList(alloc, args_val, "nets");
+
+    var eval = Evaluator.init(alloc, project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        alloc.destroy(mr.eval);
+    };
+    const solved = solveForRequest(alloc, project_dir, name, .{ .layout = layout_arg }, &eval, &module_res) catch |e|
+        return mcpFailFmt(out, alloc, "could not resolve layout: {s}", .{@errorName(e)});
+    const single = module_res == null;
+    const placement = solved.placement;
+    const rp = router.RouteParams{};
+    const routed = router.route(alloc, placement, rp) catch |e|
+        return mcpFailFmt(out, alloc, "routing failed: {s}", .{@errorName(e)});
+    const fresh = try mcpSavedRoutesFrom(alloc, routed, placement.nets);
+
+    const working = mcpReadWorking(alloc, project_dir, name, single, layout_arg);
+    var merged: ?SavedRoutes = undefined;
+    if (scope.len > 0) {
+        var keep = std.StringHashMap(void).init(alloc);
+        for (scope) |n| try keep.put(n, {});
+        const base_after_drop = try mcpDropRoutesForNets(alloc, if (working) |wl| wl.routes else null, &keep);
+        const fresh_scoped = try mcpKeepRoutesForNets(alloc, fresh, &keep);
+        merged = try mcpMergeRoutes(alloc, base_after_drop.routes, fresh_scoped);
+    } else {
+        merged = if (fresh.tracks.len == 0 and fresh.vias.len == 0) null else fresh;
+    }
+
+    // DRC-check exactly what gets persisted (restore net-name → index, then
+    // check against the current poses), so the reported count is truthful.
+    var drc_count: usize = 0;
+    var trace_mm: f64 = 0;
+    var n_tracks: usize = 0;
+    var n_vias: usize = 0;
+    if (merged) |m| {
+        n_tracks = m.tracks.len;
+        n_vias = m.vias.len;
+        for (m.tracks) |t| trace_mm += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
+        if (restoreRoutes(alloc, m, placement.nets)) |rr| {
+            const v = drc.check(alloc, placement, rr, rp.clearance) catch &.{};
+            drc_count = v.len;
+        }
+    }
+
+    const entry = SavedLayout{
+        .name = mcpWorkingName(alloc, project_dir, name, single, layout_arg),
+        .kind = KIND_MANUAL,
+        .ts = 0,
+        .score = null,
+        .parts = if (working) |wl| wl.parts else posesFromPlacement(alloc, placement) orelse &.{},
+        .routes = merged,
+        .outline = if (working) |wl| wl.outline else null,
+        .texts = if (working) |wl| wl.texts else &.{},
+    };
+    mcpPersistWorking(alloc, project_dir, name, single, entry, false);
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    try w.print(MCP_OK_LAYOUT_FMT, .{serve_root.getLiveVersion(name)});
+    try writeJsonStr(w, entry.name);
+    try w.print(",\"routed\":{d},\"total\":{d},\"drc\":{d},\"trace_mm\":{d:.3},\"tracks\":{d},\"vias\":{d},\"scope\":", .{
+        routed.routed, routed.total, drc_count, trace_mm, n_tracks, n_vias,
+    });
+    if (scope.len == 0) try w.writeAll("\"all\"") else {
+        try w.writeAll("[");
+        for (scope, 0..) |n, i| {
+            if (i > 0) try w.writeAll(",");
+            try writeJsonStr(w, n);
+        }
+        try w.writeAll("]");
+    }
+    try w.writeAll(",\"unrouted\":[");
+    for (routed.failed, 0..) |f, i| {
+        if (i > 0) try w.writeAll(",");
+        try writeJsonStr(w, f);
+    }
+    try w.writeAll("]}");
+    try out.appendSlice(alloc, aw.written());
+    return true;
+}
+
+/// `save_pcb_layout` — persist the working state as a named layout, optionally
+/// starred. A single design keeps its one auto-starred "layout" (star is
+/// implied); a module store snapshots the working layout under `layout_name`
+/// (default "manual") and stars it when asked (clearing any other default).
+pub fn mcpSavePcbLayout(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) HandlerError!bool {
+    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
+    const layout_name = mcpArgStr(args_val, "layout_name");
+    const star = mcpArgBool(args_val, "star");
+
+    const single = mcpIsSingleDesign(alloc, project_dir, name) orelse
+        return mcpFail(out, alloc, MCP_ERR_NO_DESIGN);
+    // Read the current working state (blessed / single "layout") to re-save.
+    const working = mcpReadWorking(alloc, project_dir, name, single, null) orelse
+        return mcpFail(out, alloc, "no working layout to save — set poses (or an outline) first");
+
+    const target_name: []const u8 = layout_name orelse (if (single) "layout" else "manual");
+    const entry = SavedLayout{
+        .name = target_name,
+        .kind = KIND_MANUAL,
+        .ts = 0,
+        .score = working.score,
+        .parts = working.parts,
+        .routes = working.routes,
+        .outline = working.outline,
+        .texts = working.texts,
+    };
+    mcpPersistWorking(alloc, project_dir, name, single, entry, star or single);
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    try w.print("{{\"ok\":true,\"live_version\":{d},\"single\":{s},\"starred\":{s},\"layout\":", .{
+        serve_root.getLiveVersion(name),
+        if (single) "true" else "false",
+        if (star or single) "true" else "false",
+    });
+    try writeJsonStr(w, if (single) "layout" else target_name);
+    try w.writeAll("}");
+    try out.appendSlice(alloc, aw.written());
+    return true;
+}
+
+/// `clear_routes` — drop all (or per-`nets`) persisted copper from the working
+/// layout, keeping its poses / outline / texts. The inverse of `route_pcb`.
+pub fn mcpClearRoutes(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) HandlerError!bool {
+    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
+    const layout_arg = mcpArgStr(args_val, "layout");
+    const scope = mcpArgStrList(alloc, args_val, "nets");
+
+    const single = mcpIsSingleDesign(alloc, project_dir, name) orelse
+        return mcpFail(out, alloc, MCP_ERR_NO_DESIGN);
+    const working = mcpReadWorking(alloc, project_dir, name, single, layout_arg) orelse
+        return mcpFail(out, alloc, "no working layout to clear");
+
+    var cleared: usize = 0;
+    var new_routes: ?SavedRoutes = null;
+    if (scope.len > 0) {
+        var drop = std.StringHashMap(void).init(alloc);
+        for (scope) |n| try drop.put(n, {});
+        const res = try mcpDropRoutesForNets(alloc, working.routes, &drop);
+        new_routes = res.routes;
+        cleared = res.dropped;
+    } else if (working.routes) |sr| {
+        cleared = sr.tracks.len + sr.vias.len;
+        new_routes = null;
+    }
+
+    const entry = SavedLayout{
+        .name = working.name,
+        .kind = KIND_MANUAL,
+        .ts = 0,
+        .score = working.score,
+        .parts = working.parts,
+        .routes = new_routes,
+        .outline = working.outline,
+        .texts = working.texts,
+    };
+    mcpPersistWorking(alloc, project_dir, name, single, entry, false);
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    const w = &aw.writer;
+    try w.print(MCP_OK_LAYOUT_FMT, .{serve_root.getLiveVersion(name)});
+    try writeJsonStr(w, entry.name);
+    try w.print(",\"cleared\":{d}}}", .{cleared});
+    try out.appendSlice(alloc, aw.written());
+    return true;
+}
+
+/// Resolve a design's fab view without an HTTP request — the alloc-based twin
+/// of `blessedFabView`: the placement at the chosen layout's poses (the
+/// `layout` arg, else the blessed ★/newest/any snapshot) with that layout's
+/// outline + routes applied, in the shared y-up fab frame. Null when the
+/// design doesn't resolve or has no layout at all.
+fn mcpFabView(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8) ?FabView {
+    var eval = Evaluator.init(alloc, project_dir);
+    defer eval.deinit();
+    var module_res: ?modules_mod.ResolvedBlock = null;
+    defer if (module_res) |mr| {
+        mr.eval.deinit();
+        alloc.destroy(mr.eval);
+    };
+    const block = resolveBlock(alloc, project_dir, name, &eval, &module_res) orelse return null;
+    const layouts = readLayouts(alloc, project_dir, name);
+    const chosen: ?SavedLayout = if (layout_arg) |la| blk: {
+        for (layouts) |L| {
+            if (std.mem.eql(u8, L.name, la) and L.parts.len > 0) break :blk L;
+        }
+        break :blk null;
+    } else if (blessedLayout(layouts)) |L| L.* else null;
+
+    const poses: []const optimizer.RefPose = if (layout_arg != null) blk: {
+        const c = chosen orelse return null;
+        break :blk rekeyPosesByOrigin(alloc, block, c.parts) orelse (refPosesFromParts(alloc, c.parts) orelse return null);
+    } else (chooseSyncPoses(alloc, project_dir, name) orelse return null);
+
+    var placement = optimizer.placeFromPoses(alloc, block, project_dir, poses, optimizer.Params{}) catch return null;
+    var tracks: []const router.Track = &.{};
+    var vias: []const router.Via = &.{};
+    var texts: []const font5x7.BoardText = &.{};
+    if (chosen) |L| {
+        if (L.outline) |o| {
+            placement.board_rect = .{ .minx = o.x, .miny = o.y, .w = o.w, .h = o.h };
+            placement.board_poly = o.pts;
+        }
+        if (L.routes) |sr| {
+            if (restoreRoutes(alloc, sr, placement.nets)) |r| {
+                tracks = r.tracks;
+                vias = r.vias;
+            }
+        }
+        texts = L.texts;
+    }
+    return .{ .placement = placement, .tracks = tracks, .vias = vias, .texts = texts, .frame = export_fab.frameFor(placement), .from_saved = chosen != null };
+}
+
+/// `run_fab_readiness` — the pre-fab correctness report for the design's
+/// blessed (or named) layout: `{ok,errors:[…],warnings:[…],stats:{…}}`,
+/// computed against the SAME fab view the Gerber export builds. Read-only —
+/// the gate `pcbGerbersApi` enforces server-side, surfaced here for the agent.
+pub fn mcpRunFabReadiness(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayListUnmanaged(u8),
+) HandlerError!bool {
+    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
+    const layout_arg = mcpArgStr(args_val, "layout");
+    const fv = mcpFabView(alloc, project_dir, name, layout_arg) orelse
+        return mcpFail(out, alloc, "no saved layout — set poses and save a layout first");
+    const copper = export_gerber.Copper{ .tracks = fv.tracks, .vias = fv.vias };
+    const report = fab_readiness.check(alloc, fv.placement, copper, .{ .from_saved_layout = fv.from_saved }) catch |e|
+        return mcpFailFmt(out, alloc, "fab-readiness check failed: {s}", .{@errorName(e)});
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try fab_readiness.writeJson(&aw.writer, report);
+    try out.appendSlice(alloc, aw.written());
+    return true;
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 // spec: Web Server - The layouts sidecar round-trips snapshots and the optimizer cache slot through one file
@@ -6234,6 +7366,81 @@ test "layouts sidecar round-trips rough flag" {
     try std.testing.expectEqual(@as(usize, 2), got.len);
     try std.testing.expect(got[0].rough);
     try std.testing.expect(!got[1].rough);
+}
+
+// spec: Web Server - The layout sidecar carries an optimistic-concurrency rev, emitted only when non-zero
+test "layouts sidecar emits rev only when non-zero" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
+    const layouts = [_]SavedLayout{.{ .name = "layout", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts, .default = true }};
+
+    // rev > 0 → serialized at the root.
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJsonRev(&aw.writer, &layouts, null, 5);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\"rev\":5") != null);
+    // A legacy reader still parses the layout array unaffected.
+    const got = parseLayouts(alloc, aw.written()) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+
+    // rev == 0 → omitted (a never-guarded legacy file stays byte-identical).
+    var aw0: std.Io.Writer.Allocating = .init(alloc);
+    try writeLayoutsFileJsonRev(&aw0.writer, &layouts, null, 0);
+    try std.testing.expect(std.mem.indexOf(u8, aw0.written(), "\"rev\"") == null);
+}
+
+// spec: Web Server - readLayoutRev reads the sidecar rev (0 for a legacy file), and a save stamps disk_rev+1
+test "layout sidecar rev reads back and a save stamps the next rev" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.makePath("src");
+
+    // Legacy sidecar with no rev → 0 ("accept then stamp" starts here).
+    try tmp.dir.writeFile(.{ .sub_path = "src/foo.layouts.json", .data = "{\"layouts\":[]}" });
+    try std.testing.expectEqual(@as(i64, 0), readLayoutRev(alloc, project, "foo", null));
+
+    // A save stamps disk_rev + 1 = 1; a follow-up read sees it.
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
+    const layouts = [_]SavedLayout{.{ .name = "layout", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts, .default = true }};
+    writeLayoutsFile(alloc, project, "foo", &layouts, null, 1);
+    try std.testing.expectEqual(@as(i64, 1), readLayoutRev(alloc, project, "foo", null));
+
+    // An explicit rev value round-trips too.
+    writeLayoutsFile(alloc, project, "foo", &layouts, null, 42);
+    try std.testing.expectEqual(@as(i64, 42), readLayoutRev(alloc, project, "foo", null));
+}
+
+// spec: Web Server - An MCP layout mutation snapshots the sidecar to history and bumps the rev like a viewer Save
+test "MCP persist bumps the sidecar rev and snapshots history" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.makePath("src");
+    try tmp.dir.writeFile(.{ .sub_path = "src/foo.layouts.json", .data = "{\"layouts\":[]}" });
+
+    // Two MCP persists: each stamps disk rev + 1 (0→1→2), so an open editor
+    // tab holding the old rev 409s on its next save instead of clobbering.
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 1, .y = 2, .rot = 0 }};
+    const entry = SavedLayout{ .name = "layout", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts, .default = true };
+    mcpPersistWorking(alloc, project, "foo", true, entry, true);
+    try std.testing.expectEqual(@as(i64, 1), readLayoutRev(alloc, project, "foo", null));
+    mcpPersistWorking(alloc, project, "foo", true, entry, true);
+    try std.testing.expectEqual(@as(i64, 2), readLayoutRev(alloc, project, "foo", null));
+
+    // The pre-write sidecar landed in history/ (recoverable like a viewer Save).
+    const snaps = try history.listLayoutSnapshots(alloc, project, "foo");
+    try std.testing.expect(snaps.len >= 1);
 }
 
 // spec: Web Server - The /pcb-layout page defaults to the design's starred (★) saved layout, below an explicit ?refine= snapshot and a (placement …) spec
@@ -6552,4 +7759,118 @@ test "layouts sidecar round-trips side and locked" {
     try std.testing.expect(got[0].parts[0].locked);
     try std.testing.expectEqual(optimizer.Side.top, got[0].parts[1].side);
     try std.testing.expect(!got[0].parts[1].locked);
+}
+
+// spec: Web Server - The set_part_poses MCP tool parses each pose's ref, mm centre, and optional rot/side/locked (absent optionals stay unset)
+test "mcp set_part_poses parses request poses" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const body =
+        \\{"poses":[{"ref":"C1","x_mm":1.5,"y_mm":2.5},
+        \\{"ref":"mcu/U1","x_mm":0,"y_mm":0,"rot":90,"side":"bottom","locked":true}]}
+    ;
+    const j = try std.json.parseFromSliceLeaky(std.json.Value, alloc, body, .{});
+    const poses = mcpParsePoses(alloc, j) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(usize, 2), poses.len);
+    try std.testing.expectEqualStrings("C1", poses[0].ref);
+    try std.testing.expect(poses[0].has_xy);
+    try std.testing.expectEqual(@as(f64, 1.5), poses[0].x);
+    try std.testing.expectEqual(@as(f64, 2.5), poses[0].y);
+    // Absent optionals stay unset so the tool keeps the part's current values.
+    try std.testing.expect(!poses[0].has_rot);
+    try std.testing.expect(!poses[0].has_side);
+    try std.testing.expect(!poses[0].has_locked);
+    // Present optionals parse through.
+    try std.testing.expect(poses[1].has_rot);
+    try std.testing.expectEqual(@as(f64, 90), poses[1].rot);
+    try std.testing.expectEqual(optimizer.Side.bottom, poses[1].side);
+    try std.testing.expect(poses[1].has_locked and poses[1].locked);
+}
+
+// spec: Web Server - The set_board_outline MCP tool accepts a rect and a polygon pts, deriving the rect fields from the polygon bbox
+test "mcp set_board_outline parses rect and polygon" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const jr = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"rect\":{\"x\":0,\"y\":0,\"w\":10,\"h\":20}}", .{});
+    const o1 = mcpParseOutlineArg(alloc, jr) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(f64, 10), o1.w);
+    try std.testing.expectEqual(@as(f64, 20), o1.h);
+    try std.testing.expect(o1.pts == null);
+
+    const jp = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"pts\":[[0,0],[4,0],[4,3]]}", .{});
+    const o2 = mcpParseOutlineArg(alloc, jp) orelse return error.TestParseFailed;
+    try std.testing.expect(o2.pts != null);
+    try std.testing.expectEqual(@as(f64, 4), o2.w); // bbox width
+    try std.testing.expectEqual(@as(f64, 3), o2.h); // bbox height
+
+    // A degenerate rect (zero area) is rejected.
+    const jbad = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"rect\":{\"x\":0,\"y\":0,\"w\":0,\"h\":0}}", .{});
+    try std.testing.expect(mcpParseOutlineArg(alloc, jbad) == null);
+}
+
+// spec: Web Server - The route_pcb MCP tool serializes routed net indices back to net names, round-tripping through restoreRoutes
+test "mcp route_pcb copper round-trips net index and name" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const nets = [_]export_kicad.FlatNet{
+        .{ .name = "GND", .pins = &[_]export_kicad.FlatPin{} },
+        .{ .name = "VBUS", .pins = &[_]export_kicad.FlatPin{} },
+    };
+    const rr = router.RouteResult{
+        .tracks = &[_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 1, .width = 0.3, .net = 1 }},
+        .vias = &[_]router.Via{.{ .x = 1, .y = 0, .dia = 0.6, .net = 1, .drill = 0.3 }},
+        .routed = 1,
+        .total = 1,
+    };
+    const sr = try mcpSavedRoutesFrom(alloc, rr, &nets);
+    try std.testing.expectEqualStrings("VBUS", sr.tracks[0].net);
+    try std.testing.expectEqual(@as(u8, 1), sr.tracks[0].l);
+    try std.testing.expectEqualStrings("VBUS", sr.vias[0].net);
+
+    const restored = restoreRoutes(alloc, sr, &nets) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(i32, 1), restored.tracks[0].net);
+    try std.testing.expectEqual(@as(i32, 1), restored.vias[0].net);
+}
+
+// spec: Web Server - The route_pcb MCP tool's net-scoped copper drops the requested nets from prior copper and merges in the fresh copper for them
+test "mcp route_pcb scoped copper drops and merges by net" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const sr = SavedRoutes{
+        .tracks = &[_]SavedTrack{
+            .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .w = 0.2, .net = "A" },
+            .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .w = 0.2, .net = "B" },
+        },
+        .vias = &.{},
+    };
+    var scope = std.StringHashMap(void).init(alloc);
+    try scope.put("A", {});
+
+    const dropped = try mcpDropRoutesForNets(alloc, sr, &scope);
+    try std.testing.expectEqual(@as(usize, 1), dropped.dropped); // A removed
+    const rem = dropped.routes orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(usize, 1), rem.tracks.len);
+    try std.testing.expectEqualStrings("B", rem.tracks[0].net); // B kept
+
+    const kept = try mcpKeepRoutesForNets(alloc, sr, &scope) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(usize, 1), kept.tracks.len);
+    try std.testing.expectEqualStrings("A", kept.tracks[0].net);
+
+    const merged = try mcpMergeRoutes(alloc, rem, kept) orelse return error.TestParseFailed;
+    try std.testing.expectEqual(@as(usize, 2), merged.tracks.len); // B (prior) + A (fresh)
+}
+
+// spec: Web Server - The set_part_poses MCP tool resolves a part by module-local origin key when the ref-des is not an exact match
+test "mcp origin-key strips the sub-block prefix" {
+    try std.testing.expectEqualStrings("U1", mcpOriginOf("buck/U1"));
+    try std.testing.expectEqualStrings("C3", mcpOriginOf("C3"));
+    try std.testing.expectEqualStrings("C_IN", mcpOriginOf("mcu/sub/C_IN"));
 }
