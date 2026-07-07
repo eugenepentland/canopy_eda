@@ -63,8 +63,17 @@ function statusDelta(m){var t="";
  if(typeof drag!=="undefined"&&drag&&drag.m0)t="dx "+fmtLen(m.x-drag.m0.x)+"  dy "+fmtLen(m.y-drag.m0.y);
  else if(typeof gdrag!=="undefined"&&gdrag)t="dx "+fmtLen(m.x-gdrag.sx)+"  dy "+fmtLen(m.y-gdrag.sy);
  stSet("st-dxdy",t);}
+// Routed copper totals for one net, summed from the drawn tracks/vias (covers
+// both freshly-routed and persisted copper — whatever is currently on the board).
+function netCopperStats(net){var mm=0,vias=0;
+ (PCB.tracks||[]).forEach(function(t){if(t.net===net)mm+=Math.hypot(t.x2-t.x1,t.y2-t.y1);});
+ (PCB.vias||[]).forEach(function(v){if(v.net===net)vias++;});
+ return {mm:mm,vias:vias};}
 function statusHover(m){var t="";
- if(cur>=0&&P[cur]){t=P[cur].ref;
+ if(hoverNet){t=hoverNet;var s=netCopperStats(hoverNet);
+  if(s.mm>0)t+=" · "+fmtLen(s.mm);
+  if(s.vias>0)t+=" · "+s.vias+" via"+(s.vias>1?"s":"");}
+ else if(cur>=0&&P[cur]){t=P[cur].ref;
   var pd=m?padAt(cur,m.x,m.y):null;
   if(pd&&pd.net)t+=" · "+pd.net;
   else if(P[cur].val)t+=" · "+P[cur].val;}
@@ -1202,7 +1211,7 @@ function subPanelRefresh(){var box=document.getElementById("sub-panel");if(!box)
 // Net hover (sidebar pin-chip mouseenter): board pads glow via paint state.
 function netIdxDrop(){}
 function hlBy(at,v,cls,on){
- if(at==="data-net"){hoverNet=on?v:null;paintSoon();return;}
+ if(at==="data-net"){hoverNet=on?v:null;statusHover(null);paintSoon();return;}
  document.querySelectorAll("["+at+"]").forEach(function(e){
  if(e.getAttribute(at)===v)e.classList.toggle(cls,on);});}
 function wire(at,cls){document.querySelectorAll("["+at+"]").forEach(function(e){

@@ -864,7 +864,17 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         const v = drc.check(ctx.allocator, placement, r, ro.params.clearance) catch &.{};
         var trace: f64 = 0;
         for (r.tracks) |t| trace += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
-        break :blk .{ .trace_mm = trace, .tracks = r.tracks.len, .vias = r.vias.len, .drc = v.len, .routed = r.routed, .total = r.total, .unrouted = r.failed };
+        break :blk .{
+            .trace_mm = trace,
+            .tracks = r.tracks.len,
+            .vias = r.vias.len,
+            .drc = v.len,
+            .routed = r.routed,
+            .total = r.total,
+            .unrouted = r.failed,
+            .ripup_rounds = r.ripup_rounds,
+            .per_net = router.perNetRouted(ctx.allocator, placement, r) catch &.{},
+        };
     } else null;
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
@@ -884,7 +894,24 @@ const RoutedMetrics = struct {
     routed: usize = 0,
     total: usize = 0,
     unrouted: []const []const u8 = &.{},
+    /// Bounded rip-up rounds the router ran after its greedy pass (0 = none).
+    ripup_rounds: usize = 0,
+    /// Per-net routed copper: length (mm) + via count, longest first.
+    per_net: []const router.NetRouted = &.{},
 };
+
+/// Emit `,"per_net":[{"net":NAME,"mm":M,"vias":V},…]` — the per-net routed
+/// copper totals shared by the `?route=1` summary and `/api/pcb-describe`.
+pub fn writePerNetJson(w: *std.Io.Writer, per_net: []const router.NetRouted) std.Io.Writer.Error!void {
+    try w.writeAll(",\"per_net\":[");
+    for (per_net, 0..) |pn, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"net\":");
+        try writeJsonStr(w, pn.name);
+        try w.print(",\"mm\":{d:.1},\"vias\":{d}}}", .{ pn.mm, pn.vias });
+    }
+    try w.writeAll("]");
+}
 
 const PNG_DEFAULT_WIDTH: u32 = 1200;
 
@@ -1327,7 +1354,10 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
             if (i > 0) try w.writeAll(",");
             try writeJsonStr(w, name_s);
         }
-        try w.writeAll("]}");
+        try w.writeAll("]");
+        try w.print(",\"ripup_rounds\":{d}", .{r.ripup_rounds});
+        try writePerNetJson(w, r.per_net);
+        try w.writeAll("}");
     }
     // Report any parts the solve left staged below the board (the `(board …)`
     // edge-dock / force path) and the ones autofill pulled back out. Read straight

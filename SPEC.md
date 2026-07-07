@@ -144,7 +144,7 @@ Public functions: solve
 
 ## placement/router
 
-Public functions: route, returnPathViolations
+Public functions: route, perNetRouted, returnPathViolations
 
 - maze-routes a two-pad net into connected track segments
 - a net spanning the two board sides routes through a via, each leg on its part's layer
@@ -162,6 +162,10 @@ Public functions: route, returnPathViolations
 - lets authored (net-class (priority …)) dominate the intrinsic net-class rank
 - auto-elevates a bare hub-to-inductor bridge net to the hot-loop tier
 - names the nets that failed to route in RouteResult.failed
+- a failed leg's goal is never a same-net source, so a later leg cannot weld to a stranded pad
+- perNetRouted totals a net's routed copper length and via count
+- rip-up runs no rounds when the greedy pass already routed every net
+- rip-up leaves a wall-blocked net failed without disturbing an already-routed net
 - escape stubs keep clearance from routed tracks and leave at 45-degree headings
 - reserves diagonal corner cells so later nets keep trace-to-trace clearance
 - escapes a fine-pitch pad through an off-grid gateway stub when no grid lane clears
