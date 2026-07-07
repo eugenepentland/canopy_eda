@@ -647,6 +647,14 @@ src/placement/pin_roles.zig::isSupplyFn | fn isSupplyFn(fn_name: []const u8) boo
 src/placement/pin_roles.zig::load | fn load(arena: std.mem.Allocator, project_dir: []const u8, component: []const u8) PartRoles
 src/placement/pin_roles.zig::padRequirements | fn padRequirements( arena: std.mem.Allocator, project_dir: []const u8, component: []const u8, ) std.StringHashMapUnmanaged(PadReq)
 src/placement/pin_roles.zig::strapPads | fn strapPads( arena: std.mem.Allocator, project_dir: []const u8, component: []const u8, ) std.StringHashMapUnmanaged([]const u8)
+src/placement/pour.zig::Copper struct_
+src/placement/pour.zig::Fill struct_
+src/placement/pour.zig::Join struct_
+src/placement/pour.zig::LayerSpec struct_
+src/placement/pour.zig::PadQuery struct_
+src/placement/pour.zig::PlaneNet union_
+src/placement/pour.zig::compute | fn compute( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, ) std.mem.Allocator.Error!Fill
+src/placement/pour.zig::planeConnect | fn planeConnect( arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, net_name: []const u8, pads: []const PadQuery, vias: []const router.Via, ) std.mem.Allocator.Error!Join
 src/placement/router.zig::LoopRouter struct_
 src/placement/router.zig::NetRouted struct_
 src/placement/router.zig::PadObs struct_

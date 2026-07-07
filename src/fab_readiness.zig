@@ -24,6 +24,7 @@ const std = @import("std");
 const optimizer = @import("placement/optimizer.zig");
 const router = @import("placement/router.zig");
 const drc = @import("placement/drc.zig");
+const pour = @import("placement/pour.zig");
 const export_gerber = @import("export_gerber.zig");
 const export_fab = @import("export_fab.zig");
 const pad_shape = @import("placement/pad_shape.zig");
@@ -329,7 +330,8 @@ fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
 const NetConn = struct { locations: usize, groups: usize };
 
 /// One pad terminal of a net, reduced to its world box + centre. `part` lets us
-/// treat two pads of the same part on the same net as one location.
+/// treat two pads of the same part on the same net as one location; `thru`/
+/// `side` let the pour decide which copper layers the pad reaches.
 const PadNode = struct {
     x0: f64,
     y0: f64,
@@ -339,12 +341,14 @@ const PadNode = struct {
     cx: f64,
     cy: f64,
     part: usize,
+    thru: bool,
+    side: optimizer.Side,
 };
 
 /// Compute `net`'s connectivity over the persisted copper. Pads, track
-/// segments, and vias are all union-find nodes, so connectivity propagates
-/// through multi-segment route chains and via layer-jumps; a plane-carried
-/// net unions every pad (the plane is the connection). `groups` counts the
+/// segments, vias, AND the computed copper-pour components are all union-find
+/// nodes, so connectivity propagates through multi-segment route chains, via
+/// layer-jumps, and the real (island-verified) plane fill. `groups` counts the
 /// connected components over the PADS; `locations` counts distinct pad
 /// positions (so a net whose every pad sits at one point isn't "routable").
 fn netComponents(
@@ -370,6 +374,8 @@ fn netComponents(
             .cx = (sh.x0 + sh.x1) / 2,
             .cy = (sh.y0 + sh.y1) / 2,
             .part = pi,
+            .thru = pad.thru,
+            .side = part.side,
         });
     }
     const items = nodes.items;
@@ -390,10 +396,6 @@ fn netComponents(
     }
     if (locations < 2) return .{ .locations = locations, .groups = if (items.len == 0) 0 else 1 };
 
-    // A plane-carried net is connected through the plane copper — every pad on
-    // it lands on (or vias down to) the plane, so treat them all as one group.
-    if (netHasPlane(placement, net.name)) return .{ .locations = locations, .groups = 1 };
-
     // Union pads bridged by same-net copper — TRANSITIVELY through track
     // chains and via jumps. A maze route is many short segments and only its
     // END segments touch the pads, so tracks (and vias) must be union-find
@@ -408,10 +410,20 @@ fn netComponents(
     for (copper.vias) |v| {
         if (sameNet(v.net, net_i)) try vs.append(arena, v);
     }
+    // The computed copper POUR is the honest replacement for the old "any
+    // plane-carried net is one group" short-circuit: a pad counts as
+    // plane-connected iff it lands in a KEPT pour component (thermal-relieved
+    // pads still count — the spokes keep them in-component). A pad the pour
+    // cannot reach (isolated by its antipad ring, a plane a foreign trace
+    // split, the wrong side of a single-sided pour) stays its own group → an
+    // honest airwire, no longer believed-connected.
+    const qpads = try planeQueries(arena, items);
+    const join = try pour.planeConnect(arena, placement, .{ .tracks = copper.tracks, .vias = copper.vias }, net.name, qpads, vs.items);
     const n_pads = items.len;
     const n_tracks = segs.items.len;
-    const parent = try arena.alloc(usize, n_pads + n_tracks + vs.items.len);
+    const parent = try arena.alloc(usize, n_pads + n_tracks + vs.items.len + join.n_comp);
     for (parent, 0..) |*p, i| p.* = i;
+    planeUnite(parent, join, n_pads, n_tracks);
 
     for (segs.items, 0..) |t, ti| {
         // pad ↔ track (pads union with copper on any layer, matching the
@@ -450,6 +462,28 @@ fn netComponents(
     var group_root: std.AutoHashMap(usize, void) = .init(arena);
     for (0..n_pads) |i| try group_root.put(find(parent, i), {});
     return .{ .locations = locations, .groups = group_root.count() };
+}
+
+/// Reduce the net's pad nodes to the pour engine's membership queries.
+fn planeQueries(arena: std.mem.Allocator, items: []const PadNode) std.mem.Allocator.Error![]const pour.PadQuery {
+    const out = try arena.alloc(pour.PadQuery, items.len);
+    for (items, 0..) |p, i| {
+        out[i] = .{ .cx = p.cx, .cy = p.cy, .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1, .thru = p.thru, .side = p.side };
+    }
+    return out;
+}
+
+/// Fold the pour-component assignment into the union-find: unite each pad / via
+/// with the (arena-tail) node for the kept pour component it landed in. Pads /
+/// vias in no component (-1) touch no pour node and stay their own group.
+fn planeUnite(parent: []usize, join: pour.Join, n_pads: usize, n_tracks: usize) void {
+    const base = n_pads + n_tracks + join.via_comp.len;
+    for (join.pad_comp, 0..) |c, i| {
+        if (c >= 0) unite(parent, i, base + @as(usize, @intCast(c)));
+    }
+    for (join.via_comp, 0..) |c, j| {
+        if (c >= 0) unite(parent, n_pads + n_tracks + j, base + @as(usize, @intCast(c)));
+    }
 }
 
 /// Shortest distance from point (px,py) to segment (ax,ay)-(bx,by).
@@ -748,6 +782,55 @@ test "a plane-carried net counts as connected" {
     const r = try check(arena, placement, .{}, .{});
     try testing.expect(!hasError(r, "unrouted-net"));
     try testing.expectEqual(@as(usize, 1), r.stats.connected_nets);
+}
+
+// spec: fab_readiness - a surface pad isolated from the plane is flagged until a plane via bridges it
+test "a plane via bridges a surface pad to the ground plane" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Two GND SURFACE-MOUNT pads (no barrel) over the implicit inner ground
+    // plane. With no via they do not reach the inner plane — honestly isolated
+    // (the old short-circuit believed them connected). The router's plane-via
+    // pass drops a via on each pad; those vias land in the plane and bridge the
+    // pads to it, so a routed board is one connected group again.
+    const u_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const c_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &u_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &c_pads, .fallback = false, .x = 10, .y = 0 },
+    };
+    const pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const nets = [_]export_kicad.FlatNet{.{ .name = "GND", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 12,
+        .maxy = 2,
+        .generated = false,
+        .board_rect = .{ .minx = -2, .miny = -2, .w = 16, .h = 6 },
+    };
+
+    // Unrouted: the surface pads cannot reach the inner plane → an airwire.
+    const bare = try check(arena, placement, .{}, .{});
+    try testing.expect(hasError(bare, "unrouted-net"));
+
+    // A GND plane via on each pad bridges it to the plane → one group.
+    const vias = [_]router.Via{
+        .{ .x = 0, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 10, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 },
+    };
+    const wired = try check(arena, placement, .{ .vias = &vias }, .{});
+    try testing.expect(!hasError(wired, "unrouted-net"));
+    try testing.expectEqual(@as(usize, 1), wired.stats.connected_nets);
 }
 
 // spec: fab_readiness - a missing outline, off-board part, drill-less via, and DNP all surface
