@@ -17,17 +17,27 @@ const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
 const pad_shape = @import("pad_shape.zig");
 const outline = @import("outline.zig");
+const font = @import("../font5x7.zig");
 const export_kicad = @import("../export_kicad.zig");
+
+/// Silkscreen ref-des pixel pitch (mm) — mirrors `export_gerber.zig`'s
+/// `TEXT_PX_MM`, so the ref-des bounding box the `silk_over_pad` check measures
+/// matches the strokes the Gerber writer actually draws.
+const SILK_TEXT_PX_MM: f64 = 0.15;
 
 const FlatNet = export_kicad.FlatNet;
 
 /// What two features clash. Used for the marker label on the page.
 /// `annular` = a via's copper ring around its drill is thinner than the
-/// fab minimum; `board_edge` = routed copper closer to the board outline than
+/// fab minimum; `pad_annular` = the same, for a plated through-hole PAD;
+/// `board_edge` = routed copper closer to the board outline than
 /// the copper-to-edge rule; `courtyard` = two placed parts' courtyards overlap
 /// (on the same board side); `hole_hole` = two drilled holes' walls sit closer
 /// than the hole-to-hole rule; `min_drill` = a drilled hole below the minimum
-/// drill diameter.
+/// drill diameter; `min_width` was replaced by `track_width` = a track thinner
+/// than its net class / the board minimum; `mask_sliver` = a solder-mask web
+/// between two adjacent openings below the minimum; `silk_over_pad` = silkscreen
+/// (footprint art or a ref-des) crossing a foreign pad's mask opening.
 pub const Kind = enum {
     via_pad,
     via_via,
@@ -36,11 +46,22 @@ pub const Kind = enum {
     track_pad,
     pad_pad,
     annular,
+    pad_annular,
     board_edge,
     courtyard,
     hole_hole,
     min_drill,
+    track_width,
+    mask_sliver,
+    silk_over_pad,
 };
+
+/// Severity of a violation. `err` blocks the fab-readiness gate (a 409 on the
+/// Gerber download); `warn` flows through as an informational gate warning and
+/// a differently-counted viewer chip, but never blocks. Every `Violation`
+/// defaults to `err`; only the assembly-hygiene checks (courtyard overlap,
+/// mask slivers, silkscreen over a pad) mark themselves `warn`.
+pub const Severity = enum { err, warn };
 
 // The drill-station rule DEFAULTS (min-annular 0.1, min-drill 0.2,
 // hole-to-hole 0.25 mm) live on `optimizer.DesignRules` — one source of truth
@@ -51,12 +72,15 @@ pub const Kind = enum {
 // thinner (net-class) via trips the annular check.
 
 /// One clearance violation, located at the midpoint of the offending gap.
+/// `severity` defaults to `err` so every existing check keeps blocking the fab
+/// gate; the assembly-hygiene checks set `warn` explicitly.
 pub const Violation = struct {
     x: f64,
     y: f64,
     gap: f64, // actual edge-to-edge distance (mm); < clearance
     clearance: f64, // the rule that was broken (mm)
     kind: Kind,
+    severity: Severity = .err,
 };
 
 /// A pad reduced to its world bounding box, its real copper outline (`poly`;
@@ -76,6 +100,12 @@ const PadBox = struct {
     part: usize,
     layer: u8 = 0,
     thru: bool = false,
+    /// Non-plated (mounting hole) — has no copper ring, so it's exempt from the
+    /// pad-annular check even though it carries a drill.
+    npth: bool = false,
+    /// Oval-slot drill — `drill` is only the larger axis, so a scalar annular
+    /// ring is meaningless; the pad-annular check skips these.
+    drill_oval: bool = false,
     drill: f64 = 0,
     hx: f64 = 0,
     hy: f64 = 0,
@@ -120,6 +150,13 @@ const ClearanceResolver = struct {
         return @max(self.ofNet(a), self.ofNet(b));
     }
 };
+
+/// Largest copper min-dimension (mm) a plated through-hole pad may have and
+/// still be treated as a VIA-scale feature (via-in-pad stitch, thermal via, or
+/// castellated edge pad) exempt from the component-lead `pad_annular` check.
+/// Real component through-hole leads pad out well above this (≥ ~0.8 mm), so it
+/// cleanly separates "a via someone drew as a pad" from "a connector/header pin".
+const VIA_PAD_MAX_MM: f64 = 0.65;
 
 /// Run the check. All output is allocated in `arena`. `clearance` is the
 /// board-default copper-to-copper rule (mm); two features of different nets must
@@ -225,6 +262,9 @@ pub fn check(
     try checkDrillRules(arena, &out, pads, vias, rules);
     try checkBoardEdge(arena, &out, placement, tracks, vias, rules.edgeClearance());
     try checkCourtyards(arena, &out, placement);
+    try checkMaskSlivers(arena, &out, pads, rules.mask_margin, rules.mask_web);
+    try checkSilkOverPad(arena, &out, placement, pads, rules.mask_margin);
+    try checkTrackWidth(arena, &out, placement, tracks, rules.min_width);
     // pad ↔ pad (different parts, layer-aware): two SMD pads clash only when
     // their copper shares a face; a through pad's barrel reaches every layer,
     // so it clashes with anything. Opposite-face SMD pads may overlap in 2D
@@ -269,6 +309,25 @@ fn checkDrillRules(
         const ring = (v.dia - v.drill) / 2;
         if (ring < rules.min_annular - EPS) {
             try out.append(arena, .{ .x = v.x, .y = v.y, .gap = ring, .clearance = rules.min_annular, .kind = .annular });
+        }
+    }
+    // pad annular ring: a PLATED component through-hole pad's copper ring around
+    // its drill must also meet the fab minimum (vias were the only annular check
+    // before). Ring = (min copper dimension − drill) / 2. Exemptions: NPTH pads
+    // (drilled but not plated — no ring); OVAL slots (annular is axis-dependent,
+    // and the scalar `drill` is only the larger axis); and VIA-SCALE pads (min
+    // copper dim ≤ VIA_PAD_MAX_MM) — a via-in-pad stitch, thermal via, or
+    // castellated edge pad, whose tight-by-design ring is governed by the via
+    // annular rule / fab process, not a component-lead requirement. SMD pads
+    // (drill 0) never reach here.
+    for (pads) |p| {
+        if (p.drill <= 0 or p.drill_oval) continue;
+        if (!p.thru or p.npth) continue; // SMD / non-plated → no plated ring
+        const min_dim = @min(p.x1 - p.x0, p.y1 - p.y0);
+        if (min_dim <= VIA_PAD_MAX_MM) continue; // via-scale stitch/thermal/castellated
+        const ring = (min_dim - p.drill) / 2;
+        if (ring < rules.min_annular - EPS) {
+            try out.append(arena, .{ .x = p.hx, .y = p.hy, .gap = ring, .clearance = rules.min_annular, .kind = .pad_annular });
         }
     }
     // min drill: no drilled hole smaller than the minimum drill (vias + pads).
@@ -380,10 +439,218 @@ fn checkCourtyards(
             if (cb.w <= 0 or cb.h <= 0) continue;
             const ov = rectOverlap(ca, cb);
             if (ov.depth > EPS) {
-                try out.append(arena, .{ .x = ov.x, .y = ov.y, .gap = -ov.depth, .clearance = 0, .kind = .courtyard });
+                // Assembly concern, not a copper defect → warn, and record the
+                // interpenetration depth in `gap` (clearance stays 0 — there is
+                // no clearance rule; the presentation layer reads this as an
+                // "overlap by |gap| mm" message, not a "gap < 0" nonsense line).
+                try out.append(arena, .{ .x = ov.x, .y = ov.y, .gap = -ov.depth, .clearance = 0, .kind = .courtyard, .severity = .warn });
             }
         }
     }
+}
+
+/// mask sliver: the solder-mask WEB between two adjacent pad mask openings
+/// (each pad box grown by `mask_margin` per side) must not fall below `min_web`,
+/// or the thin remaining strip of mask can flake off in fab and bridge. Only
+/// cross-part pairs whose openings share a board side are considered — a
+/// footprint's own inter-pad pitch is inherent geometry, not a placement
+/// defect. Merged openings (web ≤ 0) are skipped (there is no web to lose). A
+/// warning, not an error: it never blocks the fab gate.
+fn checkMaskSlivers(
+    arena: std.mem.Allocator,
+    out: *Viol,
+    pads: []const PadBox,
+    mask_margin: f64,
+    min_web: f64,
+) std.mem.Allocator.Error!void {
+    if (min_web <= 0) return;
+    const m2 = 2 * mask_margin;
+    for (pads, 0..) |a, i| {
+        for (pads[i + 1 ..]) |b| {
+            if (a.part == b.part) continue;
+            // Openings must share a face (SMD → its part's side; thru → both).
+            if (!(a.thru or b.thru or a.layer == b.layer)) continue;
+            // Opening-to-opening gap per axis = raw pad-box gap − 2·margin.
+            const wgx = @max(a.x0 - b.x1, b.x0 - a.x1) - m2;
+            const wgy = @max(a.y0 - b.y1, b.y0 - a.y1) - m2;
+            // If either axis alone already clears the rule, the web (≥ that
+            // axis' gap) can't be a sliver — cheap reject + correctness.
+            if (wgx >= min_web - EPS or wgy >= min_web - EPS) continue;
+            // Web width: a diagonal corner gap when separated on both axes,
+            // else the one positive axis (overlap on the other).
+            const web = if (wgx > 0 and wgy > 0) std.math.hypot(wgx, wgy) else @max(wgx, wgy);
+            if (web > EPS and web < min_web - EPS) {
+                const mx = ((a.x0 + a.x1) + (b.x0 + b.x1)) / 4;
+                const my = ((a.y0 + a.y1) + (b.y0 + b.y1)) / 4;
+                try out.append(arena, .{ .x = mx, .y = my, .gap = web, .clearance = min_web, .kind = .mask_sliver, .severity = .warn });
+            }
+        }
+    }
+}
+
+/// silk over pad: silkscreen ink (a footprint's silk lines/circles or its
+/// auto ref-des strokes) printed across a pad's solder-mask opening keeps
+/// solder from wetting cleanly. Each part's silk features are tested — on the
+/// part's own board side — against every OTHER part's pad opening (pad box
+/// grown by `mask_margin`); a footprint's silk over its own pads is treated as
+/// footprint geometry, not a placement defect, so same-part pairs are skipped.
+/// At most ONE finding is emitted per owner part (a single "this part's silk
+/// crosses a foreign pad" advisory) — otherwise a dense/overlapping layout
+/// would produce a finding per crossed pad and drown the report. Board-level
+/// `(Text …)` silk lives in the layout sidecar and is not plumbed into
+/// `drc.check`, so it is not covered here. A warning, never a blocker.
+fn checkSilkOverPad(
+    arena: std.mem.Allocator,
+    out: *Viol,
+    placement: optimizer.Placement,
+    pads: []const PadBox,
+    mask_margin: f64,
+) std.mem.Allocator.Error!void {
+    for (placement.parts, 0..) |part, pi| {
+        if (part.silk_lines.len == 0 and part.silk_circles.len == 0 and part.ref_des.len == 0) continue;
+        const s_layer: u8 = if (part.side == .bottom) 1 else 0;
+        if (silkOverPadHit(part, pads, pi, s_layer, mask_margin)) |hit| {
+            try out.append(arena, .{ .x = hit[0], .y = hit[1], .gap = 0, .clearance = 0, .kind = .silk_over_pad, .severity = .warn });
+        }
+    }
+}
+
+/// The first place `part`'s silkscreen (lines, circles, or ref-des text) crosses
+/// a foreign pad's mask opening on side `s_layer`, or null when it's clear.
+fn silkOverPadHit(part: optimizer.Part, pads: []const PadBox, pi: usize, s_layer: u8, mask_margin: f64) ?[2]f64 {
+    for (pads) |p| {
+        if (p.part == pi) continue; // own footprint's silk-vs-pad = geometry
+        const ob = padOpening(p, s_layer, mask_margin) orelse continue;
+        for (part.silk_lines) |l| {
+            const a = optimizer.worldPadCenter(part, l.x1, l.y1);
+            const b = optimizer.worldPadCenter(part, l.x2, l.y2);
+            if (segRectHit(a[0], a[1], b[0], b[1], ob)) |hit| return hit;
+        }
+        for (part.silk_circles) |ci| {
+            const c = optimizer.worldPadCenter(part, ci.cx, ci.cy);
+            if (circleRectHit(c[0], c[1], ci.r, ob)) return .{ c[0], c[1] };
+        }
+        if (refDesBox(part)) |rb| {
+            if (boxOverlap(rb, ob)) |hit| return hit;
+        }
+    }
+    return null;
+}
+
+/// track width: every routed/hand-drawn track must be at least as wide as its
+/// net's `(net-class (width …))` when one is declared, else the board-wide
+/// `min_width` rule. A track thinner than its class won't carry the current the
+/// class sizes it for — an error. Width-less (synthetic) tracks are skipped.
+fn checkTrackWidth(
+    arena: std.mem.Allocator,
+    out: *Viol,
+    placement: optimizer.Placement,
+    tracks: []const router.Track,
+    min_width: f64,
+) std.mem.Allocator.Error!void {
+    const nrules = placement.rules.net;
+    for (tracks) |t| {
+        if (t.width <= EPS) continue; // no recorded width — not a real defect
+        var want = min_width;
+        if (t.net >= 0) {
+            const ni: usize = @intCast(t.net);
+            if (ni < nrules.len and nrules[ni].width > 0) want = nrules[ni].width;
+        }
+        if (t.width < want - EPS) {
+            try out.append(arena, .{ .x = (t.x1 + t.x2) / 2, .y = (t.y1 + t.y2) / 2, .gap = t.width, .clearance = want, .kind = .track_width });
+        }
+    }
+}
+
+/// The mask opening box of a pad on side `s_layer` (pad world box grown by
+/// `margin` per side), or null when the pad doesn't open on that side. SMD pads
+/// open on their part's side only; through/NPTH pads open on both.
+fn padOpening(p: PadBox, s_layer: u8, margin: f64) ?[4]f64 {
+    if (!(p.thru or p.layer == s_layer)) return null;
+    return .{ p.x0 - margin, p.y0 - margin, p.x1 + margin, p.y1 + margin };
+}
+
+/// The world-space bounding box of a part's auto ref-des silk strokes, laid out
+/// exactly as `export_gerber.drawRefDes` places them (5×7 glyphs at
+/// `SILK_TEXT_PX_MM` pitch, centred above the courtyard). Null when the part
+/// has no ref-des. Quarter-turned parts use the rotated courtyard half-height.
+fn refDesBox(p: optimizer.Part) ?[4]f64 {
+    if (p.ref_des.len == 0) return null;
+    const px = SILK_TEXT_PX_MM;
+    const gh: f64 = @floatFromInt(font.GH);
+    const adv = @as(f64, @floatFromInt(font.GW + 1)) * px;
+    const total_w = @as(f64, @floatFromInt(p.ref_des.len)) * adv - px;
+    const height = gh * px;
+    const q = quarterRot(p.rot);
+    const hh = if (q) p.hw else p.hh;
+    const cc = optimizer.worldPadCenter(p, p.ccx, p.ccy);
+    const cy = cc[1] - hh - height / 2 - 0.2;
+    return .{ cc[0] - total_w / 2, cy - height / 2, cc[0] + total_w / 2, cy + height / 2 };
+}
+
+/// True for 90°/270° poses (courtyard w/h swap) — mirrors the same rule in
+/// `export_gerber`/`pad_shape` so the ref-des box lines up with the drawn text.
+fn quarterRot(rot: f64) bool {
+    const qm = @mod(@round(rot), 360);
+    return qm == 90 or qm == 270;
+}
+
+/// If segment (ax,ay)-(bx,by) penetrates the interior of the AABB `box`
+/// [x0,y0,x1,y1], return an interior point; else null. Liang–Barsky clip; a
+/// segment that merely grazes an edge (clipped midpoint on the boundary, not
+/// strictly inside) is not counted as a penetration, so footprint silk running
+/// along a pad edge stays quiet.
+fn segRectHit(ax: f64, ay: f64, bx: f64, by: f64, box: [4]f64) ?[2]f64 {
+    const dx = bx - ax;
+    const dy = by - ay;
+    var t0: f64 = 0;
+    var t1: f64 = 1;
+    const p = [_]f64{ -dx, dx, -dy, dy };
+    const qv = [_]f64{ ax - box[0], box[2] - ax, ay - box[1], box[3] - ay };
+    for (p, qv) |pi, qi| {
+        if (@abs(pi) < 1e-12) {
+            if (qi < 0) return null; // parallel and outside this slab
+        } else {
+            const r = qi / pi;
+            if (pi < 0) {
+                if (r > t1) return null;
+                if (r > t0) t0 = r;
+            } else {
+                if (r < t0) return null;
+                if (r < t1) t1 = r;
+            }
+        }
+    }
+    if (t1 < t0) return null;
+    const tm = (t0 + t1) / 2;
+    const mx = ax + tm * dx;
+    const my = ay + tm * dy;
+    if (mx > box[0] + EPS and mx < box[2] - EPS and my > box[1] + EPS and my < box[3] - EPS) return .{ mx, my };
+    return null;
+}
+
+/// True when a stroked circle of radius `r` centred at (cx,cy) crosses the AABB
+/// `box`: the nearest box point is inside the disc AND the farthest box corner
+/// is outside it (so the RING actually passes through the rectangle, rather
+/// than the whole pad sitting inside an encircling marker).
+fn circleRectHit(cx: f64, cy: f64, r: f64, box: [4]f64) bool {
+    const nx = std.math.clamp(cx, box[0], box[2]);
+    const ny = std.math.clamp(cy, box[1], box[3]);
+    if (std.math.hypot(cx - nx, cy - ny) >= r - EPS) return false;
+    const fx = if (cx - box[0] > box[2] - cx) box[0] else box[2];
+    const fy = if (cy - box[1] > box[3] - cy) box[1] else box[3];
+    return std.math.hypot(cx - fx, cy - fy) > r + EPS;
+}
+
+/// Overlap of two AABBs → the centre of the shared region, or null when they
+/// don't properly overlap (touching edges don't count).
+fn boxOverlap(a: [4]f64, b: [4]f64) ?[2]f64 {
+    const ox0 = @max(a[0], b[0]);
+    const oy0 = @max(a[1], b[1]);
+    const ox1 = @min(a[2], b[2]);
+    const oy1 = @min(a[3], b[3]);
+    if (ox1 <= ox0 + EPS or oy1 <= oy0 + EPS) return null;
+    return .{ (ox0 + ox1) / 2, (oy0 + oy1) / 2 };
 }
 
 /// Two features may touch only if they share a (real) net. Net index -1 means
@@ -429,6 +696,8 @@ fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Al
                 .part = pi,
                 .layer = layer,
                 .thru = pad.thru,
+                .npth = pad.npth,
+                .drill_oval = pad.isSlot(),
                 .drill = pad.drill,
                 .hx = c[0],
                 .hy = c[1],
@@ -1204,6 +1473,8 @@ test "check default rules equal the legacy constants" {
     try testing.expectEqual(@as(f64, 0.1), d.min_annular);
     try testing.expectEqual(@as(f64, 0.2), d.min_drill);
     try testing.expectEqual(@as(f64, 0.25), d.hole_to_hole);
+    try testing.expectEqual(@as(f64, 0.2), d.mask_web);
+    try testing.expectEqual(@as(f64, 0.1), d.min_width);
     try testing.expectEqual(@as(f64, 0.05), d.mask_margin);
     try testing.expectEqual(@as(f64, 0.3), d.pour_clearance);
     // copper_edge unset ⇒ the DRC edge clearance falls back to the plain
@@ -1333,4 +1604,179 @@ test "check measures an oval slot as a capsule for hole-to-hole" {
     const v = try check(arena, placement, routed, 0.127);
     try testing.expectEqual(@as(usize, 1), countKind(v, .hole_hole));
     try testing.expectApproxEqAbs(@as(f64, 0.1), firstOfKind(v, .hole_hole).?.gap, 1e-9);
+}
+
+// spec: placement/drc - flags a thin solder-mask web between two adjacent pad openings, and is a warning
+test "check flags a mask sliver between adjacent openings" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+
+    // Two 0.4×0.4 SMD pads on different parts. Copper gap 0.2 mm ⇒ mask
+    // openings (0.05 mm/side) leave a 0.1 mm web — under the 0.2 mm default.
+    // Small courtyards (hw 0.25) keep them from a courtyard overlap.
+    const a_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    const b_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var close = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.25, .hh = 0.25, .pads = &a_pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.25, .hh = 0.25, .pads = &b_pad, .fallback = false, .x = 0.6, .y = 0 },
+    };
+    const v = try check(arena, partsOnly(&close), routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .mask_sliver));
+    // It's an assembly-hygiene WARNING, never a blocker.
+    try testing.expectEqual(Severity.warn, firstOfKind(v, .mask_sliver).?.severity);
+
+    // Slide R2 far away ⇒ openings well clear ⇒ no sliver.
+    var apart = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.25, .hh = 0.25, .pads = &a_pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.25, .hh = 0.25, .pads = &b_pad, .fallback = false, .x = 3, .y = 0 },
+    };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&apart), routed, 0.127), .mask_sliver));
+}
+
+// spec: placement/drc - flags silkscreen that crosses a foreign pad's mask opening, as a warning
+test "check flags silkscreen over a foreign pad" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+
+    // U1 draws a silk line that runs across R1's pad (a 0.6×0.6 pad at x=2).
+    // Own-footprint silk is exempt, so only the cross-part crossing counts.
+    const r_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const over = [_]G.SilkLine{.{ .x1 = 1.5, .y1 = 0, .x2 = 2.5, .y2 = 0 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 0, .y = 0, .silk_lines = &over },
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &r_pad, .fallback = false, .x = 2, .y = 0 },
+    };
+    const v = try check(arena, partsOnly(&parts), routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .silk_over_pad));
+    try testing.expectEqual(Severity.warn, firstOfKind(v, .silk_over_pad).?.severity);
+
+    // Move the silk line 5 mm up, clear of the pad ⇒ no finding.
+    const clear = [_]G.SilkLine{.{ .x1 = 1.5, .y1 = 5, .x2 = 2.5, .y2 = 5 }};
+    var ok_parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 0, .y = 0, .silk_lines = &clear },
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &r_pad, .fallback = false, .x = 2, .y = 0 },
+    };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&ok_parts), routed, 0.127), .silk_over_pad));
+}
+
+// spec: placement/drc - flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt
+test "check flags a thin pad annular ring" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+
+    // Pad 1: a COMPONENT through-hole lead, 0.9 mm copper over a 0.8 mm drill ⇒
+    // 0.05 mm ring (< 0.1 floor) ⇒ flags. Pad 2: 1.4 mm over 0.5 mm ⇒ 0.45 mm
+    // ring (healthy). Pad 3: NPTH mounting hole ⇒ exempt. Pad 4: a via-scale
+    // stitch (0.5 mm ≤ 0.65 mm) with an even thinner ring ⇒ exempt (not a
+    // component lead). Pad 5: an oval slot ⇒ exempt (axis-dependent annular).
+    // Spaced 5 mm apart so no hole-to-hole.
+    const pads = [_]G.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.9, .h = 0.9, .thru = true, .drill = 0.8 },
+        .{ .number = "2", .x = 5, .y = 0, .w = 1.4, .h = 1.4, .thru = true, .drill = 0.5 },
+        .{ .number = "3", .x = 10, .y = 0, .w = 0.6, .h = 0.6, .thru = true, .npth = true, .drill = 0.5 },
+        .{ .number = "4", .x = 15, .y = 0, .w = 0.5, .h = 0.5, .thru = true, .drill = 0.45 },
+        .{ .number = "5", .x = 20, .y = 0, .w = 1.0, .h = 1.6, .thru = true, .drill = 1.0, .slot_half = .{ 0, 0.25 } },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "J1", .kind = .hub, .hw = 12, .hh = 1, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+    };
+    const v = try check(arena, partsOnly(&parts), routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .pad_annular));
+    // It's a fab error (blocks the gate).
+    try testing.expectEqual(Severity.err, firstOfKind(v, .pad_annular).?.severity);
+}
+
+// spec: placement/drc - flags a track narrower than its net-class width, else the board minimum, as an error
+test "check flags sub-width tracks against class and board rules" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // Net 0 carries a (net-class (width 0.3)) rule; net -1 (unruled) falls back
+    // to the 0.1 mm board min-width default.
+    const net_rules = [_]optimizer.NetRule{.{ .width = 0.3 }};
+    const nets = [_]FlatNet{.{ .name = "PWR", .pins = &.{} }};
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -5,
+        .miny = -5,
+        .maxx = 5,
+        .maxy = 5,
+        .generated = true,
+        .rules = .{ .net = &net_rules },
+    };
+    // A: net 0 at 0.2 mm < its 0.3 mm class ⇒ flag. B: net 0 at 0.35 ⇒ clean.
+    // C: unruled at 0.08 mm < the 0.1 mm min-width ⇒ flag. D: unruled at 0.12
+    // ⇒ clean. A width-less (0) synthetic track is skipped.
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 0, .y1 = 1, .x2 = 1, .y2 = 1, .layer = 0, .width = 0.35, .net = 0 },
+        .{ .x1 = 0, .y1 = 2, .x2 = 1, .y2 = 2, .layer = 0, .width = 0.08, .net = -1 },
+        .{ .x1 = 0, .y1 = 3, .x2 = 1, .y2 = 3, .layer = 0, .width = 0.12, .net = -1 },
+        .{ .x1 = 0, .y1 = 4, .x2 = 1, .y2 = 4, .layer = 0, .width = 0, .net = -1 },
+    };
+    const rr = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 0, .total = 0 };
+    const v = try check(arena, placement, rr, 0.127);
+    try testing.expectEqual(@as(usize, 2), countKind(v, .track_width));
+    try testing.expectEqual(Severity.err, firstOfKind(v, .track_width).?.severity);
+
+    // Widen everything past both rules ⇒ no width violations.
+    const wide = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.4, .net = 0 },
+        .{ .x1 = 0, .y1 = 2, .x2 = 1, .y2 = 2, .layer = 0, .width = 0.15, .net = -1 },
+    };
+    const wr = router.RouteResult{ .tracks = &wide, .vias = &.{}, .routed = 0, .total = 0 };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, wr, 0.127), .track_width));
+}
+
+// spec: placement/drc - existing copper violations are error-severity; only the hygiene checks are warnings
+test "check severity: copper checks are errors, courtyard is a warning" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // A via crowding a foreign pad (an error) plus two overlapping courtyards
+    // (a warning) in one placement.
+    const pads = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 1, .y = 0 },
+    };
+    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
+
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 2,
+        .maxy = 2,
+        .generated = true,
+    };
+    const vias = [_]router.Via{.{ .x = 0.5, .y = 0, .dia = 0.6, .drill = 0.3, .net = 99 }};
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 1, .total = 1 };
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(Severity.err, firstOfKind(v, .via_pad).?.severity);
+    try testing.expectEqual(Severity.warn, firstOfKind(v, .courtyard).?.severity);
 }

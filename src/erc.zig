@@ -40,7 +40,6 @@ pub const ViolationKind = enum {
     no_connect,
     missing_value,
     missing_footprint,
-    multiple_drivers,
     voltage_mismatch,
     missing_decoupling,
     decoupling_unbound,

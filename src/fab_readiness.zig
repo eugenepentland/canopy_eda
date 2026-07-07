@@ -10,13 +10,15 @@
 //!
 //! Errors (block the export): a multi-location net whose persisted copper does
 //! not connect all its pads (an airwire remaining — plane/pour nets count as
-//! connected), a DRC violation against the persisted copper at the current
-//! poses, a part unplaced / stranded in the off-board staging band, a via with
-//! drill = 0 (a legacy synthetic via that would emit a bad Excellon hole), and
-//! a missing board outline (the profile would fall back to the parts bbox — a
-//! guess a fab shouldn't cut to). Warnings (informational): DNP parts still in
-//! the centroid, a layout coming from the optimizer cache rather than a saved
-//! snapshot.
+//! connected), an error-severity DRC violation against the persisted copper at
+//! the current poses, a part unplaced / stranded in the off-board staging band,
+//! a via with drill = 0 (a legacy synthetic via that would emit a bad Excellon
+//! hole), and a missing board outline (the profile would fall back to the parts
+//! bbox — a guess a fab shouldn't cut to). Warnings (informational): warning-
+//! severity DRC findings (courtyard/mask-sliver/silk-over-pad), DNP parts kept
+//! in the centroid when `?dnp=keep` overrides the drop-by-default, a malformed
+//! (< 3 point) custom outline that fell back to the bounding rect, and a layout
+//! coming from the optimizer cache rather than a saved snapshot.
 
 const std = @import("std");
 const optimizer = @import("placement/optimizer.zig");
@@ -78,12 +80,17 @@ pub const Report = struct {
 };
 
 /// Extra context the serve handler knows but the placement doesn't: whether the
-/// blessed layout came from a saved/starred snapshot (vs. the optimizer cache).
-/// Defaults keep the pure/test path free of server concerns.
+/// blessed layout came from a saved/starred snapshot (vs. the optimizer cache),
+/// and whether the centroid CSV keeps DNP parts (`?dnp=keep`). Defaults keep the
+/// pure/test path free of server concerns.
 pub const Context = struct {
     /// False ⇒ the layout is the single-slot optimizer cache, not a saved
     /// snapshot — a soft warning (a fab run should come off a blessed layout).
     from_saved_layout: bool = true,
+    /// True ⇒ the caller asked to KEEP Do-Not-Populate parts in the centroid
+    /// CSV (`?dnp=keep`). Since the default now DROPS them, the
+    /// `dnp-in-centroid` warning fires only in keep-mode.
+    keep_dnp: bool = false,
 };
 
 /// Run the readiness report. `copper` is the blessed layout's persisted routed
@@ -167,12 +174,28 @@ pub fn check(
     };
     const violations = drc.check(arena, placement, routed, clearance) catch &.{};
     stats.drc_violations = violations.len;
-    if (violations.len > 0) {
+    // Partition by severity: error-severity violations block the gate; warnings
+    // (courtyard overlap, mask slivers, silkscreen over a pad) flow through as
+    // an informational finding but never 409 the download.
+    var drc_errs: std.ArrayListUnmanaged(drc.Violation) = .empty;
+    var drc_warns: std.ArrayListUnmanaged(drc.Violation) = .empty;
+    for (violations) |v| {
+        if (v.severity == .warn) try drc_warns.append(arena, v) else try drc_errs.append(arena, v);
+    }
+    if (drc_errs.items.len > 0) {
         try errors.append(arena, .{
             .id = "drc",
             .message = try std.fmt.allocPrint(arena, "{d} DRC violation(s) in the persisted copper ({s})" ++
-                " — open the board's Route/DRC view to inspect them", .{ violations.len, drcSummary(arena, violations) }),
-            .count = violations.len,
+                " — open the board's Route/DRC view to inspect them", .{ drc_errs.items.len, drcSummary(arena, drc_errs.items) }),
+            .count = drc_errs.items.len,
+        });
+    }
+    if (drc_warns.items.len > 0) {
+        try warnings.append(arena, .{
+            .id = "drc-warn",
+            .message = try std.fmt.allocPrint(arena, "{d} DRC warning(s) in the persisted copper ({s})" ++
+                " — assembly-hygiene advisories; they don't block the fab package", .{ drc_warns.items.len, drcSummary(arena, drc_warns.items) }),
+            .count = drc_warns.items.len,
         });
     }
 
@@ -206,13 +229,28 @@ pub fn check(
         if (inst.dnp) dnp += 1;
     }
     stats.dnp_parts = dnp;
-    if (dnp > 0) {
+    // DNP parts are dropped from the centroid by default now, so this only
+    // warns when the caller opted back in with `?dnp=keep`.
+    if (dnp > 0 and ctx.keep_dnp) {
         try warnings.append(arena, .{
             .id = "dnp-in-centroid",
-            .message = try std.fmt.allocPrint(arena, "{d} Do-Not-Populate part(s) are still listed in the centroid CSV" ++
-                " — drop them from the pick-and-place file if your assembler wants only stuffed parts", .{dnp}),
+            .message = try std.fmt.allocPrint(arena, "{d} Do-Not-Populate part(s) are kept in the centroid CSV (?dnp=keep)" ++
+                " — drop the ?dnp=keep opt-in if your assembler wants only stuffed parts", .{dnp}),
             .count = dnp,
         });
+    }
+
+    // A custom outline polygon with < 3 points is degenerate: every fab writer
+    // silently falls back to the bounding rectangle, which may not be the shape
+    // the user drew. Surface it so the profile isn't a silent guess.
+    if (placement.board_poly) |poly| {
+        if (poly.len < 3) {
+            try warnings.append(arena, .{
+                .id = "malformed-outline",
+                .message = "malformed custom outline (< 3 points) — the board profile falls back to the bounding" ++
+                    " rectangle; redraw the outline to cut the intended shape",
+            });
+        }
     }
     if (!ctx.from_saved_layout) {
         try warnings.append(arena, .{
@@ -745,11 +783,16 @@ test "outline, off-board, drill-less via, and DNP findings" {
         .generated = false,
     };
     const vias = [_]router.Via{.{ .x = 5, .y = 5, .dia = 0.4, .drill = 0, .net = 0 }};
-    const no_outline = try check(arena, placement, .{ .vias = &vias }, .{ .from_saved_layout = false });
+    // keep_dnp mode: the DNP part is listed in the centroid, so the warning fires.
+    const no_outline = try check(arena, placement, .{ .vias = &vias }, .{ .from_saved_layout = false, .keep_dnp = true });
     try testing.expect(hasError(no_outline, "no-outline"));
     try testing.expect(hasError(no_outline, "via-no-drill"));
     try testing.expect(hasWarning(no_outline, "dnp-in-centroid"));
     try testing.expect(hasWarning(no_outline, "cache-layout"));
+
+    // Default (drop DNP): the same DNP part no longer warrants the warning.
+    const drop_dnp = try check(arena, placement, .{ .vias = &vias }, .{ .from_saved_layout = false });
+    try testing.expect(!hasWarning(drop_dnp, "dnp-in-centroid"));
 
     // Now give it an outline: U2 (at x=60) is >10 mm outside the 10×10 board.
     placement.board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 };
@@ -850,6 +893,106 @@ test "fab gate DRC uses the design's clearance, not a hardcoded default" {
     strict.rules = .{ .design = .{ .clearance = 0.3 } };
     const r1 = try check(arena, strict, empty, .{});
     try testing.expect(hasError(r1, "drc"));
+}
+
+// spec: fab_readiness - a warning-severity DRC finding flows through as a gate warning; an error-severity one blocks
+test "the gate blocks on error-severity DRC but not on warnings" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Two pad-less hubs whose 2×2 courtyards overlap (a warning-only finding)
+    // on an otherwise clean, outlined board.
+    var warn_parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 3, .y = 3 },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 3.5, .y = 3 },
+    };
+    const warn_pl = optimizer.Placement{
+        .parts = &warn_parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 6,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 6 },
+    };
+    const wr = try check(arena, warn_pl, .{}, .{});
+    try testing.expect(wr.ok()); // a courtyard overlap alone never 409s
+    try testing.expect(!hasError(wr, "drc"));
+    try testing.expect(hasWarning(wr, "drc-warn"));
+
+    // Two hubs with pads on DIFFERENT nets sitting on top of each other — a
+    // pad↔pad copper clash (error severity) — must block.
+    const a_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const b_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var err_parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &a_pad, .fallback = false, .x = 3, .y = 3 },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &b_pad, .fallback = false, .x = 3.2, .y = 3 },
+    };
+    const a_pin = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const b_pin = [_]export_kicad.FlatPin{.{ .ref_des = "U2", .pin = "1" }};
+    const enets = [_]export_kicad.FlatNet{ .{ .name = "A", .pins = &a_pin }, .{ .name = "B", .pins = &b_pin } };
+    const err_pl = optimizer.Placement{
+        .parts = &err_parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &enets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 6,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 6 },
+    };
+    const er = try check(arena, err_pl, .{}, .{});
+    try testing.expect(!er.ok()); // the pad clash blocks the download
+    try testing.expect(hasError(er, "drc"));
+}
+
+// spec: fab_readiness - a custom outline polygon with fewer than 3 points warns that the profile fell back to a rect
+test "a malformed custom outline surfaces a warning" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 5, .y = 3 },
+    };
+    // A board_poly with only 2 points is degenerate — the writers fall back to
+    // the bbox rect, so warn.
+    const bad_poly = [_][2]f64{ .{ 0, 0 }, .{ 10, 6 } };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 6,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 6 },
+        .board_poly = &bad_poly,
+    };
+    const r = try check(arena, placement, .{}, .{});
+    try testing.expect(hasWarning(r, "malformed-outline"));
+    // A well-formed (≥ 3 point) polygon does not warn.
+    var good = placement;
+    const good_poly = [_][2]f64{ .{ 0, 0 }, .{ 10, 0 }, .{ 10, 6 }, .{ 0, 6 } };
+    good.board_poly = &good_poly;
+    try testing.expect(!hasWarning(try check(arena, good, .{}, .{}), "malformed-outline"));
 }
 
 fn hasError(r: Report, id: []const u8) bool {

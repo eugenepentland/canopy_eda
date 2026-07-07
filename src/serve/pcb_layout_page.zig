@@ -1220,6 +1220,20 @@ fn queryFlag(req: *httpz.Request, key: []const u8) bool {
     return !(v.len == 0 or std.mem.eql(u8, v, "0"));
 }
 
+/// True when the request asks to KEEP Do-Not-Populate parts in the centroid
+/// CSV (`?dnp=keep`). Default (absent / any other value) drops them — the
+/// assembler's pick-and-place file should only carry stuffed parts.
+fn queryKeepDnp(req: *httpz.Request) bool {
+    const q = req.query() catch return false;
+    const v = q.get("dnp") orelse return false;
+    return std.mem.eql(u8, v, "keep");
+}
+
+/// `?dnp=keep` → keep DNP parts in the centroid; anything else drops them.
+fn dnpMode(req: *httpz.Request) export_fab.DnpMode {
+    return if (queryKeepDnp(req)) .keep else .drop;
+}
+
 /// Query `key` as a float, or -1 when absent/unparseable — the "unset" sentinel
 /// the PNG path uses to keep the optimizer's own default for a group knob.
 fn pngFloatOpt(req: *httpz.Request, key: []const u8) f64 {
@@ -1865,7 +1879,9 @@ pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     try w.writeAll("{\"drc\":[");
     for (violations, 0..) |vio, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\"}}", .{ vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind) });
+        try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\",\"sev\":\"{s}\"}}", .{
+            vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind), drcSevStr(vio.severity),
+        });
     }
     try w.print("],\"n\":{d}}}", .{violations.len});
     res.content_type = .JSON;
@@ -1961,7 +1977,8 @@ fn blessedFabView(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, name
 /// GET /api/pcb-centroid/:name — the pick-and-place centroid CSV at the
 /// design's blessed poses (see `blessedPlacement`), side-aware, in the
 /// shared fab frame. The assembly half of the fab package; pairs with the
-/// BOM CSV.
+/// BOM CSV. Do-Not-Populate parts are dropped by default; `?dnp=keep` lists
+/// them (a fully-populated variant).
 pub fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -1969,7 +1986,7 @@ pub fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     };
     const fv = blessedFabView(ctx, req, res, name) orelse return;
     var aw: std.Io.Writer.Allocating = .init(req.arena);
-    try export_fab.centroidCsv(&aw.writer, fv.placement.parts, fv.placement.instances, fv.frame);
+    try export_fab.centroidCsv(&aw.writer, fv.placement.parts, fv.placement.instances, fv.frame, dnpMode(req));
     res.header(CT_HDR, "text/csv; charset=utf-8");
     res.body = aw.written();
 }
@@ -1994,7 +2011,10 @@ pub fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 /// Gerber export builds), so the check and the files describe the same board.
 fn fabReadinessFor(req: *httpz.Request, fv: FabView) HandlerError!fab_readiness.Report {
     const copper = export_gerber.Copper{ .tracks = fv.tracks, .vias = fv.vias };
-    return fab_readiness.check(req.arena, fv.placement, copper, .{ .from_saved_layout = fv.from_saved });
+    return fab_readiness.check(req.arena, fv.placement, copper, .{
+        .from_saved_layout = fv.from_saved,
+        .keep_dnp = queryKeepDnp(req),
+    });
 }
 
 /// GET /api/fab-readiness/:name — the pre-fab correctness report for `name`'s
@@ -2026,7 +2046,8 @@ pub fn pcbFabReadinessApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// blocking errors, this returns **HTTP 409** with the report JSON and writes
 /// nothing — unless `?force=1` overrides the gate (the viewer's "Download
 /// anyway"). Warnings never block. A clean (or forced) request downloads the
-/// ZIP as before.
+/// ZIP as before. `?dnp=keep` keeps Do-Not-Populate parts in the centroid CSV
+/// (dropped by default).
 pub fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -2080,7 +2101,7 @@ pub fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         .data = npth.written(),
     });
     var cw: std.Io.Writer.Allocating = .init(req.arena);
-    try export_fab.centroidCsv(&cw.writer, fv.placement.parts, fv.placement.instances, fv.frame);
+    try export_fab.centroidCsv(&cw.writer, fv.placement.parts, fv.placement.instances, fv.frame, dnpMode(req));
     try entries.append(req.arena, .{
         .name = try std.fmt.allocPrint(req.arena, "{s}-centroid.csv", .{name}),
         .data = cw.written(),
@@ -5343,7 +5364,9 @@ fn writeRoutedArrays(
     try w.writeAll("],\"drc\":[");
     for (violations, 0..) |vio, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\"}}", .{ vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind) });
+        try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\",\"sev\":\"{s}\"}}", .{
+            vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind), drcSevStr(vio.severity),
+        });
     }
     // Names of the nets the router could NOT fully connect — the actionable
     // half of the routed/total count (which connections are missing, not just
@@ -5486,10 +5509,24 @@ fn drcKindStr(k: drc.Kind) []const u8 {
         .track_pad => "track↔pad",
         .pad_pad => "pad↔pad",
         .annular => "annular ring",
+        .pad_annular => "pad annular ring",
         .board_edge => "board edge",
         .courtyard => "courtyard overlap",
         .hole_hole => "hole↔hole",
         .min_drill => "min drill",
+        .track_width => "track width",
+        .mask_sliver => "mask sliver",
+        .silk_over_pad => "silk over pad",
+    };
+}
+
+/// The severity word for a DRC violation kind, matching `drc.Violation.severity`
+/// — surfaced in the JSON so the viewer chip can split the error / warning
+/// counts and the client tooltip can style them apart.
+fn drcSevStr(sev: drc.Severity) []const u8 {
+    return switch (sev) {
+        .err => "err",
+        .warn => "warn",
     };
 }
 

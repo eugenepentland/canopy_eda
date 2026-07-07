@@ -664,6 +664,12 @@ pub const DesignRules = struct {
     hole_to_hole: f64 = 0.25,
     /// Minimum via annular ring, copper radius − drill radius (mm).
     min_annular: f64 = 0.1,
+    /// Smallest solder-mask web (mm) between two adjacent mask openings before
+    /// the remaining sliver risks flaking off in fab — the `mask_sliver` DRC.
+    mask_web: f64 = 0.2,
+    /// Narrowest legal track width (mm) — the `track_width` DRC floor. A
+    /// per-net `(net-class (width …))` overrides this for its own nets.
+    min_width: f64 = 0.1,
     /// Default routed trace width (mm) — the autorouter's `RouteParams` seed.
     /// Matches `RouteParams.track_width`, so an absent form seeds the router
     /// exactly as before. A per-net `(net-class (width …))` still overrides it.
@@ -5730,6 +5736,8 @@ fn designRulesOf(block: *const DesignBlock) DesignRules {
     if (s.track_width > 0) d.track_width = s.track_width;
     if (s.via_dia > 0) d.via_dia = s.via_dia;
     if (s.via_drill > 0) d.via_drill = s.via_drill;
+    if (s.mask_web > 0) d.mask_web = s.mask_web;
+    if (s.min_width > 0) d.min_width = s.min_width;
     return d;
 }
 

@@ -388,9 +388,10 @@ src/eval/validate.zig::trackNetFormSource | fn trackNetFormSource(self: *Evaluat
 src/eval/validate.zig::validateDesign | fn validateDesign(self: *Evaluator, block: *const DesignBlock) EvalError!void
 src/eval/validate.zig::warnCombinableNets | fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged(u32)) EvalError!void
 src/export_fab.zig::AUTO_OUTLINE_MARGIN_MM value
+src/export_fab.zig::DnpMode enum_
 src/export_fab.zig::DrillClass enum_
 src/export_fab.zig::Frame struct_
-src/export_fab.zig::centroidCsv | fn centroidCsv( w: *std.Io.Writer, parts: []const optimizer.Part, instances: []const export_kicad.FlatInstance, frame: Frame, ) std.Io.Writer.Error!void
+src/export_fab.zig::centroidCsv | fn centroidCsv( w: *std.Io.Writer, parts: []const optimizer.Part, instances: []const export_kicad.FlatInstance, frame: Frame, dnp: DnpMode, ) std.Io.Writer.Error!void
 src/export_fab.zig::excellonDrill | fn excellonDrill( w: *std.Io.Writer, alloc: std.mem.Allocator, parts: []const optimizer.Part, vias: []const router.Via, class: DrillClass, frame: Frame, ) (std.Io.Writer.Error || std.mem.Allocator.Error)!void
 src/export_fab.zig::frameFor | fn frameFor(placement: optimizer.Placement) Frame
 src/export_fab.zig::outlineRect | fn outlineRect(placement: optimizer.Placement) optimizer.BoardRect
@@ -540,6 +541,7 @@ src/paths.zig::designSiblingPath | fn designSiblingPath( allocator: std.mem.Allo
 src/paths.zig::designSourcePath | fn designSourcePath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) PathError![]u8
 src/placement/drc.zig::Kind enum_
 src/placement/drc.zig::STAGING_EXEMPT_MM value
+src/placement/drc.zig::Severity enum_
 src/placement/drc.zig::Violation struct_
 src/placement/drc.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, ) std.mem.Allocator.Error![]Violation
 src/placement/drc.zig::countKind | fn countKind(v: []const Violation, k: Kind) usize
