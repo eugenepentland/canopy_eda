@@ -4472,6 +4472,25 @@ const STATUSBAR_HTML =
     "<button class=\"st-seg st-btn\" id=\"pcb-help\" title=\"Keyboard &amp; mouse shortcuts (?)\">?</button>" ++
     "</div>";
 
+/// Align / distribute cluster (full page only). Hidden until ≥2 parts are
+/// marquee-selected; BOARD_JS's `refreshAlignBar` reveals it and updates the
+/// count, and the data-attributed buttons drive alignSel / distributeSel.
+const ALIGNBAR_HTML =
+    "<div class=\"align-bar\" id=\"align-bar\" hidden>" ++
+    "<div class=\"align-h\"><span id=\"align-n\">0 parts selected</span></div>" ++
+    "<div class=\"align-grid\">" ++
+    "<button class=\"al-btn\" data-align=\"left\" title=\"Align left edges\">\u{21E4}</button>" ++
+    "<button class=\"al-btn\" data-align=\"cx\" title=\"Align horizontal centres\">\u{2194}</button>" ++
+    "<button class=\"al-btn\" data-align=\"right\" title=\"Align right edges\">\u{21E5}</button>" ++
+    "<button class=\"al-btn\" data-align=\"top\" title=\"Align top edges\">\u{2912}</button>" ++
+    "<button class=\"al-btn\" data-align=\"cy\" title=\"Align vertical centres\">\u{2195}</button>" ++
+    "<button class=\"al-btn\" data-align=\"bottom\" title=\"Align bottom edges\">\u{2913}</button>" ++
+    "</div>" ++
+    "<div class=\"align-dist\">" ++
+    "<button class=\"al-btn wide\" data-distribute=\"h\" title=\"Distribute horizontally \u{2014} even origin spacing\">\u{21D4} H</button>" ++
+    "<button class=\"al-btn wide\" data-distribute=\"v\" title=\"Distribute vertically \u{2014} even origin spacing\">\u{21D5} V</button>" ++
+    "</div></div>";
+
 /// Saved-layouts panel: the named history (manual snapshots + auto-recorded
 /// optimizer runs), newest first, each row showing its kind, score, and delta
 /// of (HPWL+loop) versus the layout currently on screen (`auto`). The Load /
@@ -5064,6 +5083,7 @@ const SidebarOpts = struct {
 fn writeSidebar(w: *std.Io.Writer, p: optimizer.Placement, sch_base: []const u8, o: SidebarOpts) HandlerError!void {
     try w.writeAll("<aside class=\"pcb-side\">");
     try w.writeAll("<div class=\"side-h\">Properties</div>");
+    try w.writeAll(ALIGNBAR_HTML);
     try w.writeAll("<div id=\"prop-body\" class=\"prop-body\" data-schbase=\"");
     try writeAttr(w, sch_base);
     try w.print(
@@ -6240,6 +6260,40 @@ const PAGE_CSS =
     \\.prop-row{display:flex;justify-content:space-between;gap:10px;padding:2.5px 0;font-size:12px}
     \\.prop-row .k{color:#9b9ca3}
     \\.prop-row .v{color:#e4e5e9;font-variant-numeric:tabular-nums;text-align:right}
+    \\/* Editable properties: numeric mm inputs + preset selects. */
+    \\.prop-row .pv-in{width:96px;font:inherit;font-size:12px;text-align:right;font-variant-numeric:tabular-nums;
+    \\  background:#1a1b1e;border:1px solid #3a3b40;color:#e4e5e9;border-radius:4px;padding:1px 5px}
+    \\.prop-row select.pv-in{text-align:left;text-align-last:right}
+    \\.prop-row .pv-in:focus{outline:none;border-color:#5a8fd6;background:#15161a}
+    \\.prop-row .pv-in:disabled{opacity:.5;cursor:not-allowed}
+    \\.prop-lock{padding:6px 12px;font-size:11px;color:#d8a03c;border-bottom:1px solid #2c2d31}
+    \\.prop-lock kbd{background:#2c2d31;border:1px solid #3a3b40;border-radius:3px;padding:0 4px;font-family:ui-monospace,monospace;font-size:10.5px}
+    \\/* Align / distribute cluster (shown for a ≥2 part multi-selection). */
+    \\.align-bar{border-bottom:1px solid #2c2d31;padding:8px 12px;background:#202126}
+    \\.align-bar[hidden]{display:none}
+    \\.align-h{font-size:11px;color:#9b9ca3;margin-bottom:6px}
+    \\.align-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-bottom:5px}
+    \\.align-dist{display:grid;grid-template-columns:repeat(2,1fr);gap:4px}
+    \\.al-btn{font:inherit;font-size:14px;line-height:1;border:1px solid #3a3b40;background:#2c2d31;color:#d6d7db;
+    \\  border-radius:5px;padding:5px 0;cursor:pointer;text-align:center}
+    \\.al-btn.wide{font-size:12px}
+    \\.al-btn:hover:not(:disabled){background:#37383d;border-color:#5a8fd6;color:#f0f1f3}
+    \\.al-btn:disabled{opacity:.4;cursor:not-allowed}
+    \\/* DRC violations list — toggled open by the Route panel's DRC count chip. */
+    \\.drc-list{flex-basis:100%;width:100%;margin-top:6px;max-height:200px;overflow-y:auto;
+    \\  border:1px solid #2c2d31;border-radius:6px;background:#191a1d}
+    \\.drc-list[hidden]{display:none}
+    \\.drc-empty{padding:8px 10px;font-size:11.5px;color:#85868d}
+    \\.drc-row{display:flex;align-items:center;gap:7px;padding:4px 9px;font-size:11px;cursor:pointer;
+    \\  border-left:2px solid #b23c30;border-bottom:1px solid #232428}
+    \\.drc-row:last-child{border-bottom:0}
+    \\.drc-row:hover{background:#232428}
+    \\.drc-row.cur{background:#2a1c1a}
+    \\.drc-row.warn{border-left-color:#d8a03c}
+    \\.drc-row.err{border-left-color:#e05b4b}
+    \\.drc-k{color:#e4e5e9;font-weight:600;white-space:nowrap}
+    \\.drc-loc{color:#8ab8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,monospace}
+    \\.drc-gap{margin-left:auto;color:#9b9ca3;font-variant-numeric:tabular-nums;white-space:nowrap}
     \\.prop-fp{display:block;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid #2c2d31;
     \\  padding:8px 12px;cursor:pointer;font-family:inherit;font-size:11px;color:#85868d}
     \\.prop-fp:hover{color:#6ba1e8;text-decoration:underline}
