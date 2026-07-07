@@ -976,16 +976,20 @@ function snapPoses(){return P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,s
 function cloneCopper(){return {tracks:(PCB.tracks||[]).map(function(t){return {x1:t.x1,y1:t.y1,x2:t.x2,y2:t.y2,l:t.l||0,w:t.w,net:t.net||"",g:t.g};}),
  vias:(PCB.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g};})};}
 function cloneTexts(){return (PCB.texts||[]).map(function(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t.size||1,text:t.text};});}
+// Deep-copy the drawn board outline ({x,y,w,h,pts?}) so a snapshot holds its
+// own vertex array — an in-place vertex drag must not mutate a stored undo step.
+function cloneOutline(){var o=PCB.outline;if(!o)return null;
+ return {x:o.x,y:o.y,w:o.w,h:o.h,pts:o.pts?o.pts.map(function(p){return [p[0],p[1]];}):null};}
 // Build a full snapshot. `poses` optionally overrides the current poses (a
-// drag's captured pre-move state); copper + texts are always current.
-function snapAll(poses){var c=cloneCopper();return {poses:poses||snapPoses(),tracks:c.tracks,vias:c.vias,texts:cloneTexts()};}
+// drag's captured pre-move state); copper + texts + outline are always current.
+function snapAll(poses){var c=cloneCopper();return {poses:poses||snapPoses(),tracks:c.tracks,vias:c.vias,texts:cloneTexts(),outline:cloneOutline()};}
 function undoBtns(){var u=document.getElementById("pcb-undo"),r=document.getElementById("pcb-redo");
  if(u)u.disabled=!undoStack.length;if(r)r.disabled=!redoStack.length;}
 // recordUndo accepts a full snapshot {poses,tracks,vias}, a bare pose array
 // (legacy drag capture — copper filled from the current model), or nothing.
 function recordUndo(snap){var e=(snap&&snap.poses)?snap:snapAll(Array.isArray(snap)?snap:null);
  undoStack.push(e);if(undoStack.length>200)undoStack.shift();
- redoStack.length=0;undoBtns();}
+ redoStack.length=0;undoBtns();markDirty();}
 function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y=q.y;P[i].rot=q.rot;P[i].side=q.side||"top";P[i].locked=!!q.locked;}});
  // applyAll() clears copper (a moved part invalidates routing), so restore the
  // snapshot's copper AFTER it, then repaint + re-DRC.
@@ -996,7 +1000,12 @@ function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y
  // pointing at a label the restored state no longer has.
  PCB.texts=(s.texts||[]).map(function(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t.size||1,text:t.text};});
  if(typeof txSel!=="undefined"&&txSel>=0){txSel=-1;txPopClose();}
- PCB.drc=[];drawRoute();drawDrc();scheduleDrc();}
+ // The board outline rewinds too (undo/redo of an outline draw/poly/vertex
+ // edit / clear); repaint it and mark the board dirty like any restored edit.
+ PCB.outline=s.outline?{x:s.outline.x,y:s.outline.y,w:s.outline.w,h:s.outline.h,
+  pts:s.outline.pts?s.outline.pts.map(function(p){return [p[0],p[1]];}):null}:null;
+ drawBoardRect();
+ PCB.drc=[];drawRoute();drawDrc();scheduleDrc();markDirty();}
 function doUndo(){if(!undoStack.length)return;redoStack.push(snapAll());restoreSnap(undoStack.pop());undoBtns();}
 function doRedo(){if(!redoStack.length)return;undoStack.push(snapAll());restoreSnap(redoStack.pop());undoBtns();}
 var undoBtn=document.getElementById("pcb-undo");if(undoBtn)undoBtn.addEventListener("click",doUndo);
@@ -1006,6 +1015,59 @@ document.addEventListener("keydown",function(ev){if(!(ev.ctrlKey||ev.metaKey)||k
  if(k==="z"&&!ev.shiftKey){ev.preventDefault();doUndo();}
  else if((k==="z"&&ev.shiftKey)||k==="y"){ev.preventDefault();doRedo();}});
 undoBtns();
+// ── Unsaved-work protection ─────────────────────────────────────────────
+// A dirty flag tracks edits since the last successful Save/Update. It arms a
+// beforeunload prompt and a debounced localStorage draft, so a refresh/crash
+// can offer to restore in-progress hand-routing/placement. RO pages never edit,
+// so they opt out entirely.
+var DRAFT_KEY="pcb-draft:"+PCB.name+(PCB.sub?(":"+PCB.sub):"");
+var pcbDirty=false,draftTimer=null;
+function markDirty(){if(RO)return;pcbDirty=true;scheduleDraft();}
+function clearDirty(){pcbDirty=false;if(draftTimer){clearTimeout(draftTimer);draftTimer=null;}clearDraft();}
+function scheduleDraft(){if(RO)return;if(draftTimer)clearTimeout(draftTimer);
+ draftTimer=setTimeout(function(){draftTimer=null;saveDraft();},5000);}
+function draftPoses(){return P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,
+ side:p.side||"top",locked:!!p.locked,origin:p.origin||""};});}
+// Persist the working state to localStorage. On a quota error (large boards)
+// retry a poses-only draft, then give up with a console warning.
+function saveDraft(){if(RO)return;var ts=Math.floor(Date.now()/1000);
+ try{localStorage.setItem(DRAFT_KEY,JSON.stringify({poses:draftPoses(),
+   tracks:PCB.tracks||[],vias:PCB.vias||[],texts:PCB.texts||[],outline:PCB.outline||null,
+   rev:PCB.rev||0,ts:ts}));}
+ catch(e){
+  try{localStorage.setItem(DRAFT_KEY,JSON.stringify({poses:draftPoses(),rev:PCB.rev||0,ts:ts,partial:true}));}
+  catch(e2){console.warn("pcb: could not save layout draft (localStorage full)");}}}
+function clearDraft(){try{localStorage.removeItem(DRAFT_KEY);}catch(e){}}
+// Standard unsaved-changes prompt. Returning a string arms the browser dialog.
+window.addEventListener("beforeunload",function(e){if(!pcbDirty)return;
+ e.preventDefault();e.returnValue="";return "";});
+// Apply a restored draft to the board (undoable), then re-mark dirty so the
+// user can Save it. Matches poses by ref (drafts are same-design, refs stable).
+function applyDraft(d){recordUndo();
+ (d.poses||[]).forEach(function(q){for(var i=0;i<P.length;i++){if(P[i].ref===q.ref){
+   P[i].x=q.x;P[i].y=q.y;P[i].rot=q.rot||0;P[i].side=q.side||"top";P[i].locked=!!q.locked;break;}}});
+ applyAll();
+ if(!d.partial){
+  if((d.tracks&&d.tracks.length)||(d.vias&&d.vias.length)){PCB.tracks=d.tracks||[];PCB.vias=d.vias||[];PCB.drc=[];drawRoute();drawDrc();}
+  PCB.texts=(d.texts||[]).map(function(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t.size||1,text:t.text};});
+  PCB.outline=d.outline||null;drawBoardRect();}
+ paintSoon();markDirty();}
+// Banner offering Restore/Discard of a found draft (fixed bar at top of page).
+function showDraftBanner(d,stale){if(document.getElementById("pcb-draft-banner"))return;
+ var bar=mkEl("div");bar.id="pcb-draft-banner";
+ bar.style.cssText="position:fixed;top:0;left:0;right:0;z-index:10000;background:#1f6feb;color:#fff;"+
+  "padding:8px 14px;display:flex;gap:12px;align-items:center;font:13px/1.4 system-ui,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35)";
+ var when="";try{when=new Date((d.ts||0)*1000).toLocaleString();}catch(e){}
+ var lbl=mkEl("span",null,(stale?"Unsaved layout work (the board changed in another window) ":"Unsaved layout work ")+(when?("from "+when+" "):"")+"was found.");
+ lbl.style.flex="1";
+ var rb=mkEl("button",null,"Restore"),db=mkEl("button",null,"Discard");
+ [rb,db].forEach(function(b){b.style.cssText="border:0;border-radius:4px;padding:5px 12px;cursor:pointer;font:inherit;font-weight:600";});
+ rb.style.background="#fff";rb.style.color="#0d1117";
+ db.style.background="transparent";db.style.color="#fff";db.style.border="1px solid rgba(255,255,255,.6)";
+ function close(){if(bar.parentNode)bar.parentNode.removeChild(bar);}
+ rb.addEventListener("click",function(){applyDraft(d);close();});
+ db.addEventListener("click",function(){clearDraft();close();});
+ bar.appendChild(lbl);bar.appendChild(rb);bar.appendChild(db);document.body.appendChild(bar);}
 var outBtn=document.getElementById("pcb-outline");
 if(outBtn)outBtn.addEventListener("click",function(){outlineArm(!outlineMode);});
 var polyBtn=document.getElementById("pcb-outline-poly");
@@ -1128,16 +1190,24 @@ function persistLayout(nm,verb){var msg=document.getElementById("pcb-savemsg");
  var routes=((PCB.tracks||[]).length||(PCB.vias||[]).length)?{tracks:PCB.tracks||[],vias:PCB.vias||[]}:null;
  var texts=(PCB.texts||[]).filter(function(t){return t&&t.text;});
  if(msg){msg.style.color="#8b949e";msg.textContent=verb+"\u{2026}";}
+ // Echo the sidecar rev the page loaded so the server can 409 a stale write
+ // (another window saved since) instead of silently clobbering it.
  return fetch("/api/pcb-layouts/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",
-   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts,routes:routes,outline:PCB.outline||null,texts:texts})})
-  .then(function(r){if(!r.ok)throw 0;return r.json();})
-  .then(function(){
+   headers:{"Content-Type":"application/json"},body:JSON.stringify({name:nm,parts:parts,routes:routes,outline:PCB.outline||null,texts:texts,rev:PCB.rev||0})})
+  .then(function(r){
+    if(r.status===409){return r.json().catch(function(){return {};}).then(function(j){
+      var e=new Error("conflict");e.conflict=true;if(j&&typeof j.rev==="number")e.rev=j.rev;throw e;});}
+    if(!r.ok)throw 0;return r.json();})
+  .then(function(j){
+    // Adopt the server's bumped rev so the next Save from this window matches.
+    if(j&&typeof j.rev==="number")PCB.rev=j.rev;
     var pmap={};parts.forEach(function(p){pmap[p.ref]={x:p.x,y:p.y,rot:p.rot,origin:p.origin||"",side:p.side,locked:p.locked};});
     var Ls=PCB.layouts||(PCB.layouts=[]),found=null;
     for(var i=0;i<Ls.length;i++)if(Ls[i].name===nm){found=Ls[i];break;}
-    if(found){found.parts=pmap;found.kind="manual";found.routes=routes;found.outline=PCB.outline||null;found.texts=texts;}
-    else Ls.push({name:nm,kind:"manual",parts:pmap,score:null,routes:routes,outline:PCB.outline||null,texts:texts});
+    if(found){found.parts=pmap;found.kind="manual";found.routes=routes;found.outline=PCB.outline||null;found.texts=texts;found.ts=Math.floor(Date.now()/1000);}
+    else Ls.push({name:nm,kind:"manual",parts:pmap,score:null,routes:routes,outline:PCB.outline||null,texts:texts,ts:Math.floor(Date.now()/1000)});
     upsertLayoutPanel(nm);setActiveLayout(nm);loadLayoutScores();
+    clearDirty();/* saved cleanly — drop the dirty flag + localStorage draft */
     // The URL may still carry a layout-selection flag from an earlier Rough/
     // Regenerate (?show=cache, ?regen, tuning params) that outranks the starred
     // layout on reload. You just SAVED — a refresh must show the saved board,
@@ -1149,8 +1219,15 @@ function persistLayout(nm,verb){var msg=document.getElementById("pcb-savemsg");
      window.history.replaceState(null,"",u.pathname+(u.searchParams.toString()?"?"+u.searchParams.toString():"")+u.hash);}catch(e){}
     if(msg){msg.style.color="#3fb950";msg.textContent=(verb==="updating"?"updated":"saved")+" \u{2713}";}
     scheduleDrc();/* re-DRC the just-saved copper (audit 1.1d) */})
-  .catch(function(){if(msg){msg.style.color="#f85149";
-    msg.textContent=(verb==="updating"?"update":"save")+" failed";}});}
+  .catch(function(e){
+    if(e&&e.conflict){
+     // The board changed under us — keep the dirty state + draft so nothing is
+     // lost, and do NOT adopt the server rev; the user reloads to pick up the
+     // other window's version, then re-saves.
+     if(msg){msg.style.color="#d29922";msg.textContent="layout changed in another window \u{2014} reload to continue";}
+     return;}
+    if(msg){msg.style.color="#f85149";
+     msg.textContent=(verb==="updating"?"update":"save")+" failed";}});}
 document.getElementById("pcb-saveas").addEventListener("click",function(){
  if(PCB.single){persistLayout("layout","saving");return;} // designs keep ONE layout
  var nm=window.prompt("Name this layout:","layout "+stamp());
@@ -1324,10 +1401,13 @@ function outlineBboxSync(){var o=PCB.outline;if(!o||!o.pts)return;
  o.x=ax;o.y=ay;o.w=bx-ax;o.h=by-ay;}
 function polyClose(){
  if(!polyPts||polyPts.length<3){polyArm(false);drawBoardRect();return;}
+ // Snapshot the pre-close outline so a committed polygon is one undo step.
+ var pre=snapAll();
  var prev=PCB.outline,pts=polyPts.slice();polyPts=null;polyCur=null;
  PCB.outline={x:0,y:0,w:0,h:0,pts:pts};outlineBboxSync();
  var ok=PCB.outline.w>=2&&PCB.outline.h>=2;
  if(!ok)PCB.outline=prev;
+ else recordUndo(pre);
  polyArm(false);drawBoardRect();
  outlineMsg(ok?"polygon outline set — Save/Update to keep":"polygon too small — outline unchanged");}
 function polyPop(){if(polyPts&&polyPts.length){polyPts.pop();if(!polyPts.length)polyPts=null;drawBoardRect();}}
@@ -1388,7 +1468,7 @@ svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.pre
   if(ti>=0){txSelect(ti);txDrag={i:ti,ox:PCB.texts[ti].x-tm.x,oy:PCB.texts[ti].y-tm.y,moved:false,snap:snapAll()};pcap(ev);}
   else{txSelect(-1);txPlace(tm);}return;}
  if((outlineMode||polyMode)&&ev.button===0&&!polyPts){var hv=vtxAt(mm(ev));
-  if(hv>=0){vdrag={i:hv,moved:false};pcap(ev);return;}}
+  if(hv>=0){vdrag={i:hv,moved:false,snap:snapAll()};pcap(ev);return;}}
  if(polyMode){if(ev.button!==0)return;
   var pm=mm(ev);
   if(polyPts&&polyPts.length>=3){var pf=polyPts[0];
@@ -1403,7 +1483,7 @@ svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.pre
  if(ev.pointerType==="touch"){touchDown(ev);return;}
  var m=mm(ev),hi=partAt(m.x,m.y);
  if(hi<0){
-  if(!RO){var uv=vtxAt(m);if(uv>=0){vdrag={i:uv,moved:false};pcap(ev);return;}}
+  if(!RO){var uv=vtxAt(m);if(uv>=0){vdrag={i:uv,moved:false,snap:snapAll()};pcap(ev);return;}}
   marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false};pcap(ev);
   marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);return;}
  // Part gesture (hit-tested — parts are canvas-painted, not DOM).
@@ -1463,7 +1543,9 @@ function clickPart(ev,i){var m=mm(ev),pd=padAt(i,m.x,m.y);
 svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.pointerId);}catch(e){}
  if(ev.pointerType==="touch")touchUp(ev);
  if(vdrag){var vd=vdrag;vdrag=null;
-  if(vd.moved)outlineMsg("outline edited — Save/Update to keep");
+  // The vertex moved in place during the drag; commit the pre-drag snapshot as
+  // one undo step (Ctrl+Z reverts the whole vertex move).
+  if(vd.moved){if(vd.snap)recordUndo(vd.snap);else markDirty();outlineMsg("outline edited — Save/Update to keep");}
   return;}
  if(txDrag){var moved=txDrag.moved,ti=txDrag.i,tsnap=txDrag.snap;txDrag=null;if(moved){recordUndo(tsnap);txDirty();txPopReposition(ti);}return;}
  if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap,gdn=gdrag.down;gdrag=null;svg.style.cursor="";
@@ -1479,6 +1561,9 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
  if(outDraw){var d=outDraw;outDraw=null;outlineArm(false);var og=snapG();
   var ax=Math.round(Math.min(d.x0,d.x1)/og)*og,ay=Math.round(Math.min(d.y0,d.y1)/og)*og;
   var bx=Math.round(Math.max(d.x0,d.x1)/og)*og,by=Math.round(Math.max(d.y0,d.y1)/og)*og;
+  // Undo the outline set/clear as one step — snapshot the pre-commit outline
+  // (the drag only previewed it via drawBoardRect, so PCB.outline is unchanged).
+  recordUndo();
   PCB.outline=(bx-ax>=2&&by-ay>=2)?{x:ax,y:ay,w:bx-ax,h:by-ay}:null;
   drawBoardRect();
   var msg=document.getElementById("pcb-savemsg");
@@ -2515,5 +2600,18 @@ function xpSend(ref){if(!xpc||xpMuted)return;
  try{want=new URLSearchParams(location.search).get("focus")||"";}catch(e){}
  if(!want&&location.hash.length>1)want=decodeURIComponent(location.hash.slice(1));
  if(want)focusPart(want);
+})();
+// On load, offer to restore a localStorage draft when one exists that is newer
+// than the served layout's save-time OR based on a different sidecar rev (the
+// board changed in another window). Neither → the draft is obsolete; drop it.
+(function(){if(RO)return;
+ var raw=null;try{raw=localStorage.getItem(DRAFT_KEY);}catch(e){}
+ if(!raw)return;
+ var d=null;try{d=JSON.parse(raw);}catch(e){clearDraft();return;}
+ if(!d||!d.poses||!d.poses.length){clearDraft();return;}
+ var servedTs=0;(PCB.layouts||[]).forEach(function(L){if(L&&L.ts>servedTs)servedTs=L.ts;});
+ var stale=(d.rev!==(PCB.rev||0));
+ if(!((d.ts||0)>servedTs||stale)){clearDraft();return;}
+ showDraftBanner(d,stale);
 })();
 })();
