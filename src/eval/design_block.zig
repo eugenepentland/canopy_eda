@@ -1822,11 +1822,13 @@ fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_m
 }
 
 /// Parse a top-level `(design-rules (clearance MM) (min-drill MM)
-/// (mask-margin MM) (copper-edge MM) (hole-to-hole MM) (min-annular MM))`
-/// form into a `DesignRulesSpec`. Every sub-form is optional; an unset field
-/// stays 0 so the consumer falls back to its built-in default. `present` is
-/// set whenever the form appears (even empty), so a bare `(design-rules)` is a
-/// harmless no-op rather than an error.
+/// (mask-margin MM) (copper-edge MM) (hole-to-hole MM) (min-annular MM)
+/// (track-width MM) (via DIA DRILL))` form into a `DesignRulesSpec`. Every
+/// sub-form is optional; an unset field stays 0 so the consumer falls back to
+/// its built-in default. `present` is set whenever the form appears (even
+/// empty), so a bare `(design-rules)` is a harmless no-op rather than an error.
+/// `(track-width …)` and `(via …)` are the board's default routing geometry —
+/// they seed the autorouter's `RouteParams` (clearance/track/via).
 fn parseDesignRules(self: *Evaluator, form_children: []const Node) env_mod.DesignRulesSpec {
     var spec = env_mod.DesignRulesSpec{ .present = true };
     for (form_children[1..]) |child| {
@@ -1846,9 +1848,15 @@ fn parseDesignRules(self: *Evaluator, form_children: []const Node) env_mod.Desig
             spec.hole_to_hole = val orelse 0;
         } else if (std.mem.eql(u8, head, "min-annular")) {
             spec.min_annular = val orelse 0;
+        } else if (std.mem.eql(u8, head, "track-width")) {
+            spec.track_width = val orelse 0;
+        } else if (std.mem.eql(u8, head, "via")) {
+            // (via DIA DRILL) — the board-default via geometry (both mm).
+            spec.via_dia = val orelse 0;
+            if (c.len >= 3) spec.via_drill = c[2].asNumber() orelse 0;
         } else {
             self.warnFmt(c[0].span, "unknown (design-rules …) sub-form ({s} …) — expected " ++
-                "clearance/min-drill/mask-margin/copper-edge/hole-to-hole/min-annular", .{head});
+                "clearance/min-drill/mask-margin/copper-edge/hole-to-hole/min-annular/track-width/via", .{head});
         }
     }
     return spec;
@@ -2003,7 +2011,8 @@ test "design-block captures (design-rules …)" {
     const src =
         \\(design-block "test"
         \\  (design-rules (clearance 0.15) (min-drill 0.25) (mask-margin 0.06)
-        \\    (copper-edge 0.4) (hole-to-hole 0.3) (min-annular 0.13)))
+        \\    (copper-edge 0.4) (hole-to-hole 0.3) (min-annular 0.13)
+        \\    (track-width 0.2) (via 0.5 0.25)))
     ;
     const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
@@ -2024,6 +2033,10 @@ test "design-block captures (design-rules …)" {
     try testing.expectEqual(@as(f64, 0.4), dr.copper_edge);
     try testing.expectEqual(@as(f64, 0.3), dr.hole_to_hole);
     try testing.expectEqual(@as(f64, 0.13), dr.min_annular);
+    // Board-default routing geometry: (track-width) + (via DIA DRILL).
+    try testing.expectEqual(@as(f64, 0.2), dr.track_width);
+    try testing.expectEqual(@as(f64, 0.5), dr.via_dia);
+    try testing.expectEqual(@as(f64, 0.25), dr.via_drill);
 }
 
 // spec: eval/design_block - a design with no design-rules form leaves every rule at its zero (default) sentinel

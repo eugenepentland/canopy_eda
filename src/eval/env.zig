@@ -1151,6 +1151,11 @@ pub const NetClassSpec = struct {
 ///   • `copper_edge` — copper-to-board-outline clearance (mm; Gerber pullback + DRC).
 ///   • `hole_to_hole`— wall-to-wall spacing between two drilled holes (mm; DRC).
 ///   • `min_annular` — minimum via annular ring, copper radius − drill radius (mm; DRC).
+/// `track_width`/`via_dia`/`via_drill` are the board's DEFAULT routing geometry
+/// (mm) — the seed for the autorouter's `RouteParams` when no query/panel
+/// override is given. A per-net `(net-class …)` still overrides them for its
+/// own nets, and an omitted value keeps the router default (track 0.127, via
+/// 0.4 ⌀ / 0.2 drill).
 pub const DesignRulesSpec = struct {
     clearance: f64 = 0,
     min_drill: f64 = 0,
@@ -1158,6 +1163,9 @@ pub const DesignRulesSpec = struct {
     copper_edge: f64 = 0,
     hole_to_hole: f64 = 0,
     min_annular: f64 = 0,
+    track_width: f64 = 0,
+    via_dia: f64 = 0,
+    via_drill: f64 = 0,
     present: bool = false,
 };
 

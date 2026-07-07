@@ -87,12 +87,44 @@ const Hole = struct { x: f64, y: f64, drill: f64 };
 
 const EPS: f64 = 1e-6;
 
+/// Resolves the effective copper-to-copper clearance between two features,
+/// honouring per-net `(net-class (clearance …))` overrides. The clearance
+/// between two objects is the MAX of the board-default clearance and each
+/// object's own net-class clearance — a net that asks for wider spacing gets it
+/// against everything it neighbours, while a net with no override just uses the
+/// board default. Net index −1 ("no net" / not-connected) contributes nothing
+/// beyond the board default. `net` is `placement.rules.net` (index-aligned with
+/// the flattened nets); empty ⇒ every pair resolves to `base`, byte-identical to
+/// the pre-net-class scalar behaviour.
+const ClearanceResolver = struct {
+    base: f64,
+    net: []const optimizer.NetRule,
+
+    /// The clearance net index `n` demands: its class override raised to at
+    /// least the board base, or the base for an unruled / no-net feature.
+    fn ofNet(self: ClearanceResolver, n: i32) f64 {
+        if (n < 0) return self.base;
+        const i: usize = @intCast(n);
+        if (i < self.net.len and self.net[i].clearance > 0) return @max(self.net[i].clearance, self.base);
+        return self.base;
+    }
+
+    /// The clearance a pair of features on nets `a` and `b` must satisfy.
+    fn between(self: ClearanceResolver, a: i32, b: i32) f64 {
+        return @max(self.ofNet(a), self.ofNet(b));
+    }
+};
+
 /// Run the check. All output is allocated in `arena`. `clearance` is the
-/// copper-to-copper rule (mm); two features of different nets must be at least
-/// this far apart, edge to edge. The board-level `(design-rules …)` values
-/// (min-annular, min-drill, hole-to-hole, copper-edge) are read from
-/// `placement.rules.design`; an absent form leaves each at its built-in
-/// default, so the output is unchanged for existing designs.
+/// board-default copper-to-copper rule (mm); two features of different nets must
+/// be at least this far apart, edge to edge. Per-net `(net-class (clearance …))`
+/// overrides are layered on top via `placement.rules.net`: each pair is judged
+/// against `max(each net's clearance, base)` (see `ClearanceResolver`), so a net
+/// asking for wider spacing gets it against every neighbour. The board-level
+/// `(design-rules …)` values (min-annular, min-drill, hole-to-hole, copper-edge)
+/// are read from `placement.rules.design`. With no net-classes and an absent
+/// form, every pair resolves to `clearance` and each rule keeps its built-in
+/// default, so the output is byte-identical for existing designs.
 pub fn check(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -104,15 +136,19 @@ pub fn check(
     const vias = routed.vias;
     const tracks = routed.tracks;
     const rules = placement.rules.design;
+    // Per-net clearance overrides layered on the board-default `clearance`: each
+    // pair below is judged against max(its two nets' clearances, base).
+    const clr = ClearanceResolver{ .base = clearance, .net = placement.rules.net };
 
     // via ↔ pad
     for (vias) |v| {
         const vr = v.dia / 2;
         for (pads) |p| {
             if (sameNet(v.net, p.net)) continue;
-            const gap = pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, v.x, v.y, vr + clearance) - vr;
-            if (gap < clearance - EPS) {
-                try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = clearance, .kind = .via_pad });
+            const eff = clr.between(v.net, p.net);
+            const gap = pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, v.x, v.y, vr + eff) - vr;
+            if (gap < eff - EPS) {
+                try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = eff, .kind = .via_pad });
             }
         }
     }
@@ -120,9 +156,10 @@ pub fn check(
     for (vias, 0..) |a, i| {
         for (vias[i + 1 ..]) |b| {
             if (sameNet(a.net, b.net)) continue;
+            const eff = clr.between(a.net, b.net);
             const gap = std.math.hypot(a.x - b.x, a.y - b.y) - a.dia / 2 - b.dia / 2;
-            if (gap < clearance - EPS) {
-                try out.append(arena, .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2, .gap = gap, .clearance = clearance, .kind = .via_via });
+            if (gap < eff - EPS) {
+                try out.append(arena, .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2, .gap = gap, .clearance = eff, .kind = .via_via });
             }
         }
     }
@@ -131,9 +168,10 @@ pub fn check(
         const vr = v.dia / 2;
         for (tracks) |t| {
             if (sameNet(v.net, t.net)) continue;
+            const eff = clr.between(v.net, t.net);
             const gap = segPointDist(t.x1, t.y1, t.x2, t.y2, v.x, v.y) - vr - t.width / 2;
-            if (gap < clearance - EPS) {
-                try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = clearance, .kind = .via_track });
+            if (gap < eff - EPS) {
+                try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = eff, .kind = .via_track });
             }
         }
     }
@@ -145,11 +183,12 @@ pub fn check(
     for (tracks, 0..) |a, i| {
         for (tracks[i + 1 ..]) |b| {
             if (a.layer != b.layer or sameNet(a.net, b.net)) continue;
+            const eff = clr.between(a.net, b.net);
             const gap = segSegDist(a.x1, a.y1, a.x2, a.y2, b.x1, b.y1, b.x2, b.y2) - a.width / 2 - b.width / 2;
-            if (gap < clearance - EPS) {
+            if (gap < eff - EPS) {
                 const mx = (a.x1 + a.x2 + b.x1 + b.x2) / 4;
                 const my = (a.y1 + a.y2 + b.y1 + b.y2) / 4;
-                try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = clearance, .kind = .track_track });
+                try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = eff, .kind = .track_track });
             }
         }
     }
@@ -158,18 +197,19 @@ pub fn check(
     // off-grid — this is what catches a breakout stub drawn across a QFN
     // neighbour pad. Sampled along the track against the pad's real outline.
     for (tracks) |t| {
-        const need = t.width / 2 + clearance;
         for (pads) |p| {
             if (sameNet(t.net, p.net)) continue;
             if (!p.thru and p.layer != t.layer) continue;
+            const eff = clr.between(t.net, p.net);
+            const need = t.width / 2 + eff;
             // Cheap reject: track bbox vs pad bbox inflated by the rule.
             if (@min(t.x1, t.x2) > p.x1 + need or @max(t.x1, t.x2) < p.x0 - need or
                 @min(t.y1, t.y2) > p.y1 + need or @max(t.y1, t.y2) < p.y0 - need) continue;
             const gap = segShapeDist(t, p, need) - t.width / 2;
-            if (gap < clearance - EPS) {
+            if (gap < eff - EPS) {
                 const mx = std.math.clamp((p.x0 + p.x1) / 2, @min(t.x1, t.x2), @max(t.x1, t.x2));
                 const my = std.math.clamp((p.y0 + p.y1) / 2, @min(t.y1, t.y2), @max(t.y1, t.y2));
-                try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = clearance, .kind = .track_pad });
+                try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = eff, .kind = .track_pad });
             }
         }
     }
@@ -188,15 +228,16 @@ pub fn check(
             if (a.part == b.part or sameNet(a.net, b.net)) continue;
             const share_face = a.thru or b.thru or a.layer == b.layer;
             if (!share_face) continue;
+            const eff = clr.between(a.net, b.net);
             const gap = pad_shape.shapeGap(
                 .{ .x0 = a.x0, .y0 = a.y0, .x1 = a.x1, .y1 = a.y1, .poly = a.poly },
                 .{ .x0 = b.x0, .y0 = b.y0, .x1 = b.x1, .y1 = b.y1, .poly = b.poly },
-                clearance,
+                eff,
             );
-            if (gap < clearance - EPS) {
+            if (gap < eff - EPS) {
                 const mx = (std.math.clamp((a.x0 + a.x1) / 2, b.x0, b.x1) + std.math.clamp((b.x0 + b.x1) / 2, a.x0, a.x1)) / 2;
                 const my = (std.math.clamp((a.y0 + a.y1) / 2, b.y0, b.y1) + std.math.clamp((b.y0 + b.y1) / 2, a.y0, a.y1)) / 2;
-                try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = clearance, .kind = .pad_pad });
+                try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = eff, .kind = .pad_pad });
             }
         }
     }
@@ -1177,4 +1218,59 @@ test "check honours a design-rules override" {
 
     // The default (no override) still flags it.
     try testing.expectEqual(@as(usize, 1), countKind(try check(arena, partsOnly(&parts), routed, 0.127), .hole_hole));
+}
+
+// spec: placement/drc - a wider board clearance flags copper the default rule allowed
+test "check honours the design's base copper clearance rule" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // Two parallel same-layer tracks on different nets, 0.2 mm edge-to-edge apart
+    // (centres 0.327 mm, width 0.127). At the 0.127 mm default they clear; a
+    // (design-rules (clearance 0.3)) — which reaches the DRC as the base rule —
+    // must flag them because 0.2 mm < 0.3 mm, and report the 0.3 mm rule.
+    var parts = [_]optimizer.Part{};
+    const placement = partsOnly(&parts);
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 5, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 },
+        .{ .x1 = 0, .y1 = 0.327, .x2 = 5, .y2 = 0.327, .layer = 0, .width = 0.127, .net = 1 },
+    };
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 2, .total = 2 };
+
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, routed, 0.127), .track_track));
+    const v = try check(arena, placement, routed, 0.3);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .track_track));
+    try testing.expectEqual(@as(f64, 0.3), firstOfKind(v, .track_track).?.clearance);
+}
+
+// spec: placement/drc - a net-class clearance override is enforced against that net's neighbours server-side
+test "check enforces a per-net class clearance from placement.rules.net" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // Same two tracks 0.2 mm apart on nets 0 and 1, but the board base stays at
+    // the 0.127 mm default (so the pair is legal by the board rule). A per-net
+    // (net-class (clearance 0.3)) on net 1 — carried on placement.rules.net — must
+    // flag the pair against net 1's wider rule: proof the authoritative server DRC
+    // reads per-net clearances, not just the browser preview. The reported
+    // clearance is the resolved 0.3 mm (max of the two nets and the base).
+    var parts = [_]optimizer.Part{};
+    var placement = partsOnly(&parts);
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 5, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 },
+        .{ .x1 = 0, .y1 = 0.327, .x2 = 5, .y2 = 0.327, .layer = 0, .width = 0.127, .net = 1 },
+    };
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 2, .total = 2 };
+
+    // No class ⇒ legal at the 0.127 mm base (unruled nets keep the board default).
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, routed, 0.127), .track_track));
+
+    // Net 1 asks for 0.3 mm clearance; the base is unchanged at 0.127 mm.
+    const net_rules = [_]optimizer.NetRule{ .{}, .{ .clearance = 0.3 } };
+    placement.rules.net = &net_rules;
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .track_track));
+    try testing.expectEqual(@as(f64, 0.3), firstOfKind(v, .track_track).?.clearance);
 }

@@ -858,7 +858,7 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
     // Optional `?route=1`: route the board and summarise the real copper so layouts
     // are directly comparable (trace length, via count, DRC) without scraping HTML.
-    const ro = parseRoute(req);
+    const ro = parseRoute(req, placement.rules.design.routeParams());
     const routed_metrics: ?RoutedMetrics = if (ro.run) blk: {
         const r = router.route(ctx.allocator, placement, ro.params) catch break :blk null;
         const v = drc.check(ctx.allocator, placement, r, ro.params.clearance) catch &.{};
@@ -1078,7 +1078,9 @@ pub fn renderDesignPng(
     const name_mode = opts.names orelse
         (if (spec_status != null) render_pcb_png.NameMode.origin else render_pcb_png.NameMode.ref);
 
-    const route_params = router.RouteParams{};
+    // Seed the router/DRC from the design's resolved `(design-rules …)` so the
+    // PNG mirrors the same rules the interactive viewer and fab gate use.
+    const route_params = placement.rules.design.routeParams();
     const routed: ?router.RouteResult = if (opts.route) (router.route(alloc, placement, route_params) catch null) else null;
     const violations: []const drc.Violation = if (routed) |r|
         (drc.check(alloc, placement, r, route_params.clearance) catch &.{})
@@ -1804,12 +1806,11 @@ pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     }
 
     // Copper-to-copper clearance rule the check measures against — the body's
-    // `clearance` (mm), else the router default (matches ?route=1 and the
-    // client's PCB.clr).
-    const default_rp = router.RouteParams{};
-    var clearance = default_rp.clearance;
-    const cl = jsonNum(root.object.get(CLEARANCE_KEY));
-    if (cl > 0) clearance = cl;
+    // `clearance` (mm) overrides; else the design's resolved `(design-rules …)`
+    // base, applied after the placement is built below (matches ?route=1 and the
+    // client's PCB.clr). Per-net `(net-class …)` overrides are applied inside
+    // `drc.check` from `placement.rules.net`.
+    const body_clearance = jsonNum(root.object.get(CLEARANCE_KEY));
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
@@ -1856,6 +1857,7 @@ pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     else
         empty_rr;
 
+    const clearance = if (body_clearance > 0) body_clearance else placement.rules.design.clearance;
     const violations: []const drc.Violation = drc.check(ctx.allocator, placement, rr, clearance) catch &.{};
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
@@ -3130,7 +3132,7 @@ fn resolveShownView(
     const outline_drawn = applyShownOutline(placement, layouts, shown);
     // Routing runs only on demand (?route=1); otherwise the shown saved
     // layout's persisted copper is restored (see shownSavedRoutes).
-    const ro = parseRoute(req);
+    const ro = parseRoute(req, placement.rules.design.routeParams());
     var routed: ?router.RouteResult = if (ro.run) (router.route(ctx.allocator, placement.*, ro.params) catch null) else null;
     var saved: ?SavedRoutes = null;
     if (routed == null) {
@@ -4039,8 +4041,13 @@ fn parseF(s: []const u8, dflt: f64) f64 {
 /// (`?route=1`, set by the Route button).
 const RouteOpts = struct { params: router.RouteParams, run: bool };
 
-fn parseRoute(req: *httpz.Request) RouteOpts {
-    var p = router.RouteParams{};
+/// `base` is the router geometry seeded from the design's resolved
+/// `(design-rules …)` (via `DesignRules.routeParams()`); an explicit query param
+/// still overrides it, so interactive experimentation wins over the board
+/// default. A design with no `(design-rules …)` seeds the built-in RouteParams
+/// defaults, so the parsed result is unchanged for existing boards.
+fn parseRoute(req: *httpz.Request, base: router.RouteParams) RouteOpts {
+    var p = base;
     const q = req.query() catch return .{ .params = p, .run = false };
     if (q.get("track_width")) |v| p.track_width = parseF(v, p.track_width);
     if (q.get(CLEARANCE_KEY)) |v| p.clearance = parseF(v, p.clearance);
