@@ -1,27 +1,16 @@
-# guardian-snapshot v1
-src/bom_resolve.zig:129: line is 184 chars (cap 160)
-src/commands.zig:488: line is 177 chars (cap 160)
-src/eval/builders.zig:687: line is 260 chars (cap 160)
-src/eval/ids.zig:476: line is 175 chars (cap 160)
-src/eval/ids.zig:478: line is 192 chars (cap 160)
-src/eval/modules.zig:190: line is 171 chars (cap 160)
-src/eval/modules.zig:545: line is 183 chars (cap 160)
-src/eval/modules.zig:95: line is 162 chars (cap 160)
-src/export_kicad.zig:259: line is 176 chars (cap 160)
-src/export_kicad.zig:422: line is 187 chars (cap 160)
-src/export_kicad_footprint.zig:333: line is 171 chars (cap 160)
-src/placement/optimizer.zig:1296: line is 193 chars (cap 160)
-src/placement/optimizer.zig:1354: line is 182 chars (cap 160)
-src/placement/optimizer.zig:1485: line is 191 chars (cap 160)
-src/req_checks.zig:493: line is 180 chars (cap 160)
-src/serve/layout_match.zig:161: line is 206 chars (cap 160)
-src/serve/pcb_describe.zig:465: line is 190 chars (cap 160)
-src/serve/pcb_describe.zig:505: line is 172 chars (cap 160)
-src/serve/pcb_describe.zig:93: line is 161 chars (cap 160)
-src/serve/pcb_layout_page.zig:1281: line is 179 chars (cap 160)
-src/serve/pcb_layout_page.zig:4537: line is 185 chars (cap 160)
-src/serve/templates/account.zig:21: line is 194 chars (cap 160)
-src/serve/templates/account.zig:242: line is 220 chars (cap 160)
-src/serve/templates/auth.zig:14: line is 213 chars (cap 160)
-src/serve/templates/auth.zig:15: line is 212 chars (cap 160)
-src/serve/templates/oauth.zig:25: line is 225 chars (cap 160)
+# guardian-snapshot v2
+1 src/bom_resolve.zig
+1 src/commands.zig
+1 src/eval/builders.zig
+2 src/eval/ids.zig
+3 src/eval/modules.zig
+2 src/export_kicad.zig
+1 src/export_kicad_footprint.zig
+3 src/placement/optimizer.zig
+1 src/req_checks.zig
+1 src/serve/layout_match.zig
+2 src/serve/pcb_describe.zig
+2 src/serve/pcb_layout_page.zig
+2 src/serve/templates/account.zig
+2 src/serve/templates/auth.zig
+1 src/serve/templates/oauth.zig

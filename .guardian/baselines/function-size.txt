@@ -1,1 +1,1 @@
-# guardian-snapshot v1
+# guardian-snapshot v2

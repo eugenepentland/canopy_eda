@@ -1,10 +1,9 @@
-# guardian-snapshot v1
-src/eval/ids.zig:328: condition has 6 boolean ops (cap 3)
-src/placement/optimizer.zig:3028: condition has 5 boolean ops (cap 3)
-src/serve/bom_html.zig:150: condition has 4 boolean ops (cap 3)
-src/serve/bom_html.zig:337: condition has 4 boolean ops (cap 3)
-src/serve/bom_html.zig:99: condition has 4 boolean ops (cap 3)
-src/serve/edit.zig:2731: condition has 6 boolean ops (cap 3)
-src/serve/edit.zig:2822: condition has 5 boolean ops (cap 3)
-src/serve/edit.zig:2862: condition has 5 boolean ops (cap 3)
-src/serve/edit.zig:2863: condition has 5 boolean ops (cap 3)
+# guardian-snapshot v2
+6 src/eval/ids.zig|componentPrefix
+5 src/placement/optimizer.zig|assignSides
+4 src/serve/bom_html.zig|collectMissing
+4 src/serve/bom_html.zig|writeBomCsv
+4 src/serve/bom_html.zig|writeSchematicBomHtml
+6 src/serve/edit.zig|findPinInForm
+5 src/serve/edit.zig|movePinCore
+5 src/serve/edit.zig|swapPinsCore

@@ -1,17 +1,17 @@
-# guardian-snapshot v1
-src/convert/alt_functions.zig:24: fn mergePinoutWithAlts reaches nesting depth 7 (cap 6)
-src/convert/symbol.zig:111: fn generatePackage reaches nesting depth 8 (cap 6)
-src/eval/instance.zig:93: fn buildInstance reaches nesting depth 8 (cap 6)
-src/eval/modules.zig:202: fn loadComponent reaches nesting depth 9 (cap 6)
-src/parts.zig:103: fn loadFamily reaches nesting depth 7 (cap 6)
-src/render_json.zig:1303: fn collectGroupConnections reaches nesting depth 10 (cap 6)
-src/render_json.zig:456: fn mergeAwareGroupHeights reaches nesting depth 8 (cap 6)
-src/render_svg/connection.zig:262: fn getConnTerminal reaches nesting depth 8 (cap 6)
-src/render_svg/connection.zig:323: fn tryChainConns reaches nesting depth 8 (cap 6)
-src/render_svg/connection.zig:38: fn renderGroupedConnections reaches nesting depth 10 (cap 6)
-src/serve/api.zig:167: fn pinoutApi reaches nesting depth 8 (cap 6)
-src/serve/auth.zig:1884: fn createInviteApi reaches nesting depth 7 (cap 6)
-src/serve/bom_html.zig:481: fn buildSymbolPinCache reaches nesting depth 7 (cap 6)
-src/serve/bom_html.zig:54: fn collectMissing reaches nesting depth 7 (cap 6)
-src/serve/pcb_describe.zig:105: fn writeDescribeJson reaches nesting depth 7 (cap 6)
-src/sexpr/tokenizer.zig:176: fn readNumber reaches nesting depth 7 (cap 6)
+# guardian-snapshot v2
+7 src/convert/alt_functions.zig|mergePinoutWithAlts
+8 src/convert/symbol.zig|generatePackage
+8 src/eval/instance.zig|buildInstance
+9 src/eval/modules.zig|loadComponent
+7 src/parts.zig|loadFamily
+10 src/render_json.zig|collectGroupConnections
+8 src/render_json.zig|mergeAwareGroupHeights
+8 src/render_svg/connection.zig|getConnTerminal
+10 src/render_svg/connection.zig|renderGroupedConnections
+8 src/render_svg/connection.zig|tryChainConns
+8 src/serve/api.zig|pinoutApi
+7 src/serve/auth.zig|createInviteApi
+7 src/serve/bom_html.zig|buildSymbolPinCache
+7 src/serve/bom_html.zig|collectMissing
+7 src/serve/pcb_describe.zig|writeDescribeJson
+7 src/sexpr/tokenizer.zig|readNumber
