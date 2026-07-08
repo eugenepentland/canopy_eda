@@ -17,6 +17,8 @@ max_file_lines = 10000
 # in code review.
 [baseline]
 enabled = true
+# A refresh may never grow the spec baseline (fix the debt, or remove "spec" to override).
+deny_growth = ["spec"]
 
 # ── Per-check cap relaxations ────────────────────────────────────────
 # This codebase is dominated by single-pass interpreters (eval/), AST
