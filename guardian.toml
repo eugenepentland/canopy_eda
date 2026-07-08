@@ -48,14 +48,6 @@ max_lines = 200
 [nesting_depth]
 max_depth = 6
 
-# Cognitive complexity counts each branch + nesting level. Eval and
-# render functions stitch many small branches but each is locally
-# readable. Ratcheted 50→45 with the recalibrated suite (2026-07);
-# current worst is analyze (eval/power_budget.zig) at 42.
-# Framework default is 25.
-[complexity]
-max_score = 45
-
 # HTML / SVG / KiCad-S-expression template literals (multi-line
 # `\\` block strings) and JSON-schema definitions in src/serve/
 # routinely run 130-160 chars. Wrapping them across lines breaks the
