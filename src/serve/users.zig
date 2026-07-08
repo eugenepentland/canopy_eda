@@ -248,9 +248,9 @@ pub fn deleteUser(
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
-// spec: serve/users - The user/role store persists to and resolves from auth_dir, not the project dir (users.json lives at <auth_dir>/users.json)
 // Locks the invariant the account-page and MCP role checks rely on: every
 // caller must pass `auth_dir` to read the same data that was written there.
+// spec: serve/users - The user/role store persists to and resolves from auth_dir, not the project dir (users.json lives at <auth_dir>/users.json)
 test "user store reads and writes under auth_dir" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});

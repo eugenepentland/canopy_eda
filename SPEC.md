@@ -40,9 +40,11 @@ CLI-driven electronic design automation for schematic capture using S-expression
 
 ## kicad_pcb/format
 
-Public functions: padNumberText
+Public functions: padNumberText, sexprEscape, sexprUnescape
 
 - padNumberText reads quoted, bare-atom, and bare-int pad numbers
+- sexprEscape escapes embedded quotes and trailing backslash so the printed token round-trips
+- sexprUnescape inverts sexprEscape so a load→save round-trip does not double-escape
 
 ## kicad_pcb/reader
 
@@ -122,15 +124,10 @@ Public functions: solve
 - zone-pack snaps a rail direction to an IC edge
 - zone-pack rotates a cap so its power pad faces the IC
 - zone-pack lays a group into an aligned row/column
-- the manual placement block keeps authored order and resolves rotations
-- the manual floorplan docks sides around the anchor IC and stages unlisted parts
 - rough seed keeps each module a rigid, non-interleaved block
 - (board ...) edge default rotation turns connector pads toward the board interior
 - (board ...) docks edge parts flush inside the outline and pins corners
 - (board ...) edge parts wanting the same spot de-overlap along the edge
-- a long manual side wraps into multiple depth lanes
-- (no-refine) packs courtyards flush (touching) and symmetric
-- (centered) docks each side on the IC centerline, not its rail pad
 - a series part's rotation aligns its pad axis with its matched hub pins
 - series detection pairs a 2-pad part with two single-hub legs to one hub
 - series rotations are applied and pinned; authored spec rotations win
@@ -367,13 +364,6 @@ Public functions: worldShape, pointDist, shapeGap
 - findMatchingClose handles strings containing parens
 - insertPendingIds aborts on a duplicate pending token
 - insertPendingIds writes a child (ids …) sidecar and stays idempotent
-
-## lint
-
-- flags an (id …) form attached to a note or net
-- flags a nested (id (id …)) residue form
-- flags a token that is not 8 hex chars starting a-f
-- flags a duplicate id token within one design
 
 ## convert/footprint
 
@@ -696,7 +686,6 @@ Public functions: analyze
 - layout edge form parses left/right edge-pinned block keys
 - hosts form records the sub-block instance names a section owns
 - board form parses outline size, corner radius, edge lists, and corners
-- placement-group expands into a placement-order (pins) and a group (cohesion)
 - revision form captures id, date, and newest-first changelog
 - revision form with only an id is present with empty date/changelog
 - a design with no (revision …) form is unversioned (present=false)
@@ -941,6 +930,10 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 - list_library with a query returns only fuzzily-matching entries ranked best-first
 - list_library without a query (or a blank one) lists every entry
 - The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
+
+## serve/users
+
+- The user/role store persists to and resolves from auth_dir, not the project dir (users.json lives at <auth_dir>/users.json)
 
 ## config
 

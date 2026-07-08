@@ -72,11 +72,11 @@ pub fn sexprUnescape(arena: std.mem.Allocator, s: []const u8) std.mem.Allocator.
     return out.toOwnedSlice(arena);
 }
 
+// spec: kicad_pcb/format - sexprUnescape inverts sexprEscape so a load→save round-trip does not double-escape
 test "sexprUnescape inverts sexprEscape and is a no-op on clean text" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // spec: kicad_pcb/format - sexprUnescape inverts sexprEscape so a load→save round-trip does not double-escape
     try std.testing.expectEqualStrings("VIN", try sexprUnescape(a, "VIN"));
     inline for (.{ "a\"b", "path\\", "he said \"hi\" \\", "plain" }) |raw| {
         const round = try sexprUnescape(a, try sexprEscape(a, raw));
@@ -84,11 +84,11 @@ test "sexprUnescape inverts sexprEscape and is a no-op on clean text" {
     }
 }
 
+// spec: kicad_pcb/format - sexprEscape escapes embedded quotes and trailing backslash so the printed token round-trips
 test "sexprEscape escapes quotes and backslashes, passes clean text through" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // spec: kicad_pcb/format - sexprEscape escapes embedded quotes and trailing backslash so the printed token round-trips
     try std.testing.expectEqualStrings("VIN", try sexprEscape(a, "VIN"));
     try std.testing.expectEqualStrings("a\\\"b", try sexprEscape(a, "a\"b"));
     try std.testing.expectEqualStrings("path\\\\", try sexprEscape(a, "path\\"));
@@ -111,12 +111,12 @@ test "sexprEscape escapes quotes and backslashes, passes clean text through" {
     try std.testing.expectEqualStrings(raw, decoded.items);
 }
 
+// spec: kicad_pcb/format - padNumberText reads quoted, bare-atom, and bare-int pad numbers
 test "padNumberText reads quoted, bare-atom, and bare-int pad numbers" {
     const parser = @import("../sexpr/parser.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // spec: kicad_pcb/format - padNumberText reads quoted, bare-atom, and bare-int pad numbers
     const quoted = (try parser.parse(a, "(pad \"1\" smd)"))[0].asList().?[1];
     const atom = (try parser.parse(a, "(pad A1 smd)"))[0].asList().?[1];
     const int = (try parser.parse(a, "(pad 2 smd)"))[0].asList().?[1];
