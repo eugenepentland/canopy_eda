@@ -27,16 +27,6 @@ deny_growth = ["spec"]
 # styles. The bumps below match the precedent set by guardian-zig's
 # own toml, with a per-knob justification.
 
-# parseCheck (eval/env.zig), runDrc (drc.zig), renderHub
-# (render_svg/hub.zig), evalDesignBlock, and several renderer
-# entry points are single-pass interpreters/dispatchers whose data
-# flow lives in one function. Tried 150 with the recalibrated suite
-# (2026-07): ~24 functions sit in the 150-200 band, so 200 stands;
-# the six above 200 (worst: registerCompletePage in serve/auth.zig,
-# 339 lines) are ratcheted in the baseline. Framework default is 120.
-[function_length]
-max_lines = 200
-
 # The evaluator's switch-on-token-tag dispatch nests inside a switch
 # inside a for-loop, and the DRC's grid-clearance check uses
 # nested-loop spatial scans. Tried the default 5 with the recalibrated
