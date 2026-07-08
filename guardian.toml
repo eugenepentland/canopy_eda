@@ -57,15 +57,3 @@ max_len = 160
 # any clearer. New consumers should keep the framework default 7.
 [type_size]
 max_fields = 16
-
-# Recursive AST walkers (`evalSection`, `evalSubSection`, `evalPinsForm`,
-# `processPinForm`, `emitDecoupleItems`) carry collector pointers; the
-# Gerber layer generators (`generateCopperLayer` at 10 params, `writeFootprint`
-# at 12, `collectMergedPassive` at 12) take pre-computed scratch buffers
-# alongside several formatting flags. Bundling into context structs
-# would touch ~50 call sites for marginal clarity. The 12 cap is the
-# current worst case; DO NOT INCREASE — ratchet downward via
-# context-struct refactors instead. New consumers should keep the
-# framework default 4.
-[function_size]
-max_params = 12
