@@ -1,5 +1,4 @@
 spec_file = "SPEC.md"
-max_file_lines = 10000
 
 # Baseline mode: every check records its current violations into
 # .guardian/baselines/<check>.txt on the first build and only fails
