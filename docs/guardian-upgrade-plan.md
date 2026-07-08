@@ -15,6 +15,36 @@ nothing here is visible to our builds.
 
 ---
 
+## Rollout status (2026-07-08) — all phases executed
+
+| Phase | Landed as | Notes |
+|---|---|---|
+| 0 Migration | `c2c6068` | v2 ratchets live; mutate steps auto-wired; sinks on |
+| 2 Spec debt | `68c29a1`, `ed5ed86` | debt 124→109; `deny_growth=["spec"]` proven to refuse growth; remaining 101 entries are tests-without-bullets (writing work) |
+| 3 Caps | `2ac896a`…`1c27f4e` | all 7 overrides deleted; 479 offenders under personal only-shrinks ceilings; toml is defaults-only |
+| 4 Workflow | `6ad050a`, `8b12c2d` | nightly units in `systemd/` (**not enabled** — run `systemctl --user enable --now netlisp-guardian-nightly.timer`); CLAUDE.md accurate |
+| 5 Opt-ins | `2ec125d` | completeness live on `placement/drc` (8 honest waivers); 80-section exemption ledger is the TODO list |
+| 1 Mutation | `5d0d1bd`, `5f79b91` | **first whole-tree score: 28%** (28/100 killed, 72 survivors); gate floored at the measured 28, ratchet in `.guardian/mutation.txt` |
+
+**The 28% is the headline.** 856 tests, and 72 of 100 sampled mutants survive —
+concentrated in `placement/optimizer` (12/15), `router` (4/4), `drc` (2/2),
+`pour`, `pad_shape`, `pin_roles`, and the render/diagram layer, i.e. exactly the
+subsystems whose bugs shipped to users. Parser/writer/ERC/export mutants died —
+those tests bite. Standing worklist, in value order:
+
+1. **Kill survivors** (`.guardian/cache/last-mutate.jsonl` has file:line + the
+   flipped operator + original line for each): add the assertion a mutant
+   slipped past, re-run `zig build mutate-full`, watch the ratchet rise. Raise
+   `min_score_pct` as it climbs; target 80.
+2. **Enable the nightly timer** so the ratchet is enforced while you sleep.
+3. **Author the ~101 missing SPEC bullets** for already-tested behaviors
+   (spec baseline names them); `deny_growth` holds the line meanwhile.
+4. **Un-exempt completeness sections** as their specs gain category coverage
+   (router/optimizer next — their survivor density says boundary bullets are
+   overdue).
+
+---
+
 ## The short version
 
 | Phase | Action | Effort | Payoff |
