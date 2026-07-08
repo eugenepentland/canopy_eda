@@ -18,21 +18,3 @@ spec_file = "SPEC.md"
 enabled = true
 # A refresh may never grow the spec baseline (fix the debt, or remove "spec" to override).
 deny_growth = ["spec"]
-
-# ── Per-check cap relaxations ────────────────────────────────────────
-# This codebase is dominated by single-pass interpreters (eval/), AST
-# walkers, geometric DRC, and SVG/HTML renderers. Several Guardian
-# defaults are calibrated for typical application code and produce a
-# wall of false positives against state-machine and pattern-matching
-# styles. The bumps below match the precedent set by guardian-zig's
-# own toml, with a per-knob justification.
-
-# HTML / SVG / KiCad-S-expression template literals (multi-line
-# `\\` block strings) and JSON-schema definitions in src/serve/
-# routinely run 130-160 chars. Wrapping them across lines breaks the
-# template's visual structure. The hard outliers (200+ chars in
-# mcp_tools.zig and the page-render handlers) get extracted to
-# module-level const blocks rather than relying on this cap.
-# New consumers should keep the framework recommendation 100-120.
-[line_length]
-max_len = 160
