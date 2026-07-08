@@ -1,0 +1,36 @@
+# Guardian nightly gate for the netlisp/eda repo.
+#
+# What it does: runs Guardian's full nightly tier against this checkout —
+#   1. `zig build`        — the whole 59-check `all` suite in baseline mode.
+#   2. `zig build mutate-full` — whole-tree mutation testing that ratchets the
+#      kill score in .guardian/mutation.txt (the score can only ever climb;
+#      a nightly drop fails the unit). This is the guardian-check `nightly`
+#      tier expressed as two build steps, so it needs no prebuilt
+#      guardian-check binary path — just the repo's own `zig build`.
+# The `&&` gates step 2 on a green step 1: a red build never ratchets mutation.
+#
+# Install / enable (user-level, matching netlisp.service — this repo's units run
+# under `systemctl --user`, see the deploy hook in CLAUDE.md):
+#   mkdir -p ~/.config/systemd/user
+#   ln -sf /home/epentland/ai/canopy/eda/systemd/netlisp-guardian-nightly.service ~/.config/systemd/user/
+#   ln -sf /home/epentland/ai/canopy/eda/systemd/netlisp-guardian-nightly.timer   ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now netlisp-guardian-nightly.timer
+# Inspect results:   journalctl --user -u netlisp-guardian-nightly.service
+# Run once by hand:  systemctl --user start netlisp-guardian-nightly.service
+# The mutation-score ratchet it maintains lives in .guardian/mutation.txt
+# (committed); commit any bump it produces.
+
+[Unit]
+Description=Guardian nightly gate (all suite + whole-tree mutation ratchet) for netlisp/eda
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/epentland/ai/canopy/eda
+# Login shell (-l) so the user's PATH (and thus `zig`) is available, mirroring
+# how netlisp.service pins absolute paths rather than trusting a bare env.
+ExecStart=/bin/sh -lc 'cd /home/epentland/ai/canopy/eda && zig build && zig build mutate-full'
+# A whole-tree mutation run is sequential and long; the systemd default
+# (~90s) would kill it. Cap generously instead of disabling the guard.
+TimeoutStartSec=6h

@@ -1,0 +1,22 @@
+# Timer for netlisp-guardian-nightly.service — fires the Guardian nightly gate
+# (full `all` suite + whole-tree mutation ratchet) once a day around 03:00.
+#
+# Install / enable (user-level, same as the .service — see that file's header):
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now netlisp-guardian-nightly.timer
+# Check schedule:  systemctl --user list-timers netlisp-guardian-nightly.timer
+# The mutation-score ratchet the service maintains lives in .guardian/mutation.txt.
+
+[Unit]
+Description=Nightly Guardian gate for netlisp/eda (around 03:00)
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# Spread the wakeup over 30 min so it never pins a fixed instant.
+RandomizedDelaySec=1800
+# Run as soon as possible after boot if the machine was off at 03:00.
+Persistent=true
+Unit=netlisp-guardian-nightly.service
+
+[Install]
+WantedBy=timers.target
