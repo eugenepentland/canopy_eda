@@ -197,6 +197,14 @@ Public functions: check, countKind
 - flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt
 - flags a track narrower than its net-class width, else the board minimum, as an error
 - existing copper violations are error-severity; only the hygiene checks are warnings
+- completeness-waiver: empty inputs (each rule iterates the geometry present, so a design with no copper or parts yields no violations by construction)
+- completeness-waiver: large inputs (a bounded pairwise geometry scan; working memory stays proportional to the parsed design, with no unbounded buffering)
+- completeness-waiver: unauthorized access (a pure in-memory computation with no auth surface here; access control lives in serve/users)
+- completeness-waiver: i/o failure (operates on already-parsed in-memory geometry; all file and network I/O is upstream in the reader and exporter layers)
+- completeness-waiver: concurrent access (runs single-threaded over an immutable design snapshot, with no shared mutable state)
+- completeness-waiver: malformed encoding (consumes typed geometry from the parser; malformed-input rejection is upstream in sexpr and kicad_pcb parsing)
+- completeness-waiver: integer overflow (clearance and distance geometry is computed in f64 over bounded board coordinates; the only integers are net-id indices, not accumulating arithmetic)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
 ## placement/outline
 

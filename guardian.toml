@@ -18,3 +18,14 @@ spec_file = "SPEC.md"
 enabled = true
 # A refresh may never grow the spec baseline (fix the debt, or remove "spec" to override).
 deny_growth = ["spec"]
+
+# Completeness checklist (opt-in). Every SPEC.md `## ` feature section must
+# ADDRESS or explicitly WAIVE all 8 scenario categories (empty inputs, large
+# inputs, unauthorized access, I/O failure, concurrent access, malformed
+# encoding, integer overflow, panic-free). `exempt_sections` is the visible
+# TODO ledger: a section stays exempt until its bullets/waivers cover the
+# categories; drop a name from the list to put that section live. The array
+# must stay on ONE line — guardian's toml parser only reads inline arrays.
+[completeness]
+enabled = true
+exempt_sections = ["sexpr/tokenizer", "sexpr/parser", "sexpr/printer", "sexpr/ast", "kicad_pcb/format", "kicad_pcb/reader", "kicad_pcb/writer", "placement/geometry", "placement/optimizer", "placement/router", "placement/outline", "placement/pour", "placement/module_policy", "placement/layout_lint", "placement/pin_roles", "placement/pad_shape", "eval/builtins", "eval/forms", "docgen", "eval/fmt", "eval/env", "eval/pin_enrichment", "eval/modules", "eval/suggest", "eval/evaluator", "id_insert", "convert/footprint", "convert/symbol", "import_kicad", "import_fold", "convert/alt-functions", "emit", "parts", "export_kicad", "export_fab", "export_gerber", "zipfile", "bom", "bom-resolve", "render_html", "diagram/types", "diagram/membership", "diagram/classify", "diagram/collect", "diagram/layout", "diagram/lod", "diagram/render", "diagram/diagram", "render_svg", "erc", "eval/power_budget", "eval/power_sequencing", "eval/design_block", "eval/test_point", "eval/electrical", "eval/rails", "coverage", "review", "review_json", "review_md", "req_checks", "review_html", "serve", "serve/sync", "serve/vfs", "serve/component_info", "serve/mcp_docs", "serve/notes", "serve/upload_datasheet", "serve/edit", "serve/edit_assist", "serve/component_search", "serve/digikey", "serve/rate_limiter", "serve/mcp_tools", "serve/users", "config", "paths", "Web Server", "fab_readiness"]
