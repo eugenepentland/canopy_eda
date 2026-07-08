@@ -27,17 +27,6 @@ deny_growth = ["spec"]
 # styles. The bumps below match the precedent set by guardian-zig's
 # own toml, with a per-knob justification.
 
-# The evaluator's switch-on-token-tag dispatch nests inside a switch
-# inside a for-loop, and the DRC's grid-clearance check uses
-# nested-loop spatial scans. Tried the default 5 with the recalibrated
-# suite (2026-07): 40 functions sit at depth 6, so 6 stands; the 16
-# deeper ones (worst: depth 10 in render_json.zig
-# collectGroupConnections and render_svg/connection.zig
-# renderGroupedConnections) are ratcheted in the baseline.
-# Framework default is 5.
-[nesting_depth]
-max_depth = 6
-
 # HTML / SVG / KiCad-S-expression template literals (multi-line
 # `\\` block strings) and JSON-schema definitions in src/serve/
 # routinely run 130-160 chars. Wrapping them across lines breaks the
