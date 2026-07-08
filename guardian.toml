@@ -47,13 +47,3 @@ max_depth = 6
 # New consumers should keep the framework recommendation 100-120.
 [line_length]
 max_len = 160
-
-# `Instance` (16 fields), `RenderCtx` (15), `Block` (14), `ViolationKind`
-# (14 enum cases), `Summary` (13), `ReviewDoc` (12), `Port` (12), `Rail`
-# (11), `Section` (11), `Board` (11) are domain-natural aggregates: an
-# electrical instance has 16 attributes; an ERC report has 14 distinct
-# kinds. Splitting them into nested sub-structs adds `inst.foo.bar`
-# access noise across hundreds of call sites without making the model
-# any clearer. New consumers should keep the framework default 7.
-[type_size]
-max_fields = 16
