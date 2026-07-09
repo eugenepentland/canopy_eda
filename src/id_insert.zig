@@ -311,3 +311,13 @@ test "applyInserts extends an existing ids sidecar" {
     try std.testing.expect(std.mem.indexOf(u8, r1, "(\"a\" b1c2d3e4)") != null);
     try std.testing.expect(std.mem.indexOf(u8, r1, "(\"b\" f5061728)") != null);
 }
+
+test "sourceHasToken matches only a whole delimited atom" {
+    // A whole atom mid-string (delimiter before and after) is a match. The
+    // `or`→`and` flip would additionally demand pos==0, missing this one.
+    try std.testing.expect(sourceHasToken("(ids abcd1234)", "abcd1234"));
+    // A whole atom at the very start (pos == 0) matches without reading before it.
+    try std.testing.expect(sourceHasToken("abcd1234 tail", "abcd1234"));
+    // A mere substring of a longer atom must not match.
+    try std.testing.expect(!sourceHasToken("(ids abcd12345)", "abcd1234"));
+}

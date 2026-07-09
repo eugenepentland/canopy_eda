@@ -661,7 +661,12 @@ fn lookupInstance(ctx: *RenderCtx, ref_des: []const u8) ?env_mod.Instance {
 test "renderToMarkdown header" {
     // Smoke test: ensure the function compiles and handles an empty doc.
     // A full integration test lives in the e2e curl/unzip checks.
-    const allocator = std.testing.allocator;
+    // renderToMarkdown builds a RenderCtx that never frees (it is arena-scoped
+    // by design — the live caller passes the per-request arena), so drive it
+    // through an arena here too rather than the leak-checked testing allocator.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
     var block: DesignBlock = .{
         .name = "test",
         .instances = &.{},
@@ -696,10 +701,35 @@ test "renderToMarkdown header" {
         .unresolved = &.{},
     };
     const out = try renderToMarkdown(allocator, &block, "/tmp", "test", doc, "abc1234");
-    defer allocator.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "# Design Review: test") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "## Summary") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "## Validation") != null);
     // The verbatim source is shipped as separate zip files, never embedded.
     try std.testing.expect(std.mem.indexOf(u8, out, "## Source") == null);
+}
+
+test "writeRequirementEntry badges a verified fail as overridden" {
+    const alloc = std.testing.allocator;
+    const reqs = [_]env_mod.Requirement{
+        .{ .text = "Rail within tolerance" },
+        .{ .text = "Cap present" },
+    };
+    const results = [_]req_checks.Result{
+        // A failing check carrying a sign-off must render the overridden badge…
+        .{ .status = .fail, .verification = .{ .req_id = "r1", .rationale = "waived" } },
+        // …while a plain failing check keeps the bare FAIL badge.
+        .{ .status = .fail },
+    };
+    const entry = review.ComponentRequirementEntry{
+        .ref_des = "U1",
+        .component = "reg",
+        .requirements = &reqs,
+        .req_results = &results,
+    };
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+    _ = try writeRequirementEntry(alloc, &aw.writer, entry);
+    // The overridden badge must sit on the verified requirement, not the plain
+    // one — a `!=`→`==` flip swaps the two badges.
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "*(overridden)* — Rail within tolerance") != null);
 }

@@ -350,3 +350,49 @@ fn familyMember(ctx: *fold.FoldCtx, template: []const u8, k: u64) ?[]const u8 {
     }
     return null;
 }
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+const ast = @import("sexpr/ast.zig");
+
+fn emptyFoldCtx(arena: std.mem.Allocator, parts: []const ik.Part) FoldError!fold.FoldCtx {
+    return .{
+        .arena = arena,
+        .parts = parts,
+        .net_parts = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena),
+        .seed = std.StringHashMap(u64).init(arena),
+        .seed_template = std.StringHashMap([]const u8).init(arena),
+        .claim = try arena.alloc(u64, parts.len),
+        .prefix = "",
+    };
+}
+
+test "NetNaming.build drops unconnected pad nets" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var pads = [_]ik.Pad{.{ .number = "1", .net = ik.UNCONNECTED_PREFIX ++ "(R1-Pad1)", .func = "" }};
+    const parts = [_]ik.Part{.{
+        .ref = "R1",
+        .value = "10k",
+        .lib_id = "",
+        .descr = "",
+        .mpn = "",
+        .manufacturer = "",
+        .dnp = false,
+        .rot = 0,
+        .pads = &pads,
+        .node = ast.Node.list(ast.Span.zero, &.{}),
+    }};
+    var ctx = try emptyFoldCtx(arena, &parts);
+    const cluster = [_]usize{0};
+
+    // The `net.len == 0 or startsWith(UNCONNECTED_PREFIX)` skip must drop this
+    // pad. An `or`→`and` flip stops skipping, so the unconnected net leaks in
+    // as a shared port / local mapping.
+    var names = try NetNaming.build(&ctx, &cluster, 0);
+    try testing.expectEqual(@as(usize, 0), names.sharedNetList().len);
+    try testing.expectEqual(@as(u32, 0), names.local.count());
+}

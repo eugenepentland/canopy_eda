@@ -238,6 +238,14 @@ test "format amperage" {
         defer alloc.free(r);
         try std.testing.expectEqualStrings("50uA", r);
     }
+    {
+        // Exactly the milli threshold (0.001 A) must land in mA, not fall to uA
+        // — guards the `>=` bound (a `>` flip renders "1000uA").
+        const args = [_]Value{.{ .number = 0.001 }};
+        const r = try format(alloc, "~A", &args);
+        defer alloc.free(r);
+        try std.testing.expectEqualStrings("1mA", r);
+    }
 }
 
 // spec: eval/fmt - Formats tilde escape sequences in format strings

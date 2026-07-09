@@ -256,6 +256,20 @@ test "parseAltCsv extracts rows" {
     try std.testing.expectEqualStrings("B12", rows[2].position);
 }
 
+test "parseAltCsv skips a row with too few columns" {
+    const alloc = std.testing.allocator;
+    // `function` is column 1; a single-cell data row can't index it, so the
+    // `len <= max(p_idx, f_idx)` guard drops it. A `<` flip lets it through and
+    // reads cells.items[1] out of bounds.
+    const csv =
+        \\position,function
+        \\PA0
+    ;
+    const rows = try parseAltCsv(alloc, csv);
+    defer alloc.free(rows);
+    try std.testing.expectEqual(@as(usize, 0), rows.len);
+}
+
 // spec: convert/alt-functions - Parses ST open-pin-data XML into alt-function rows
 test "parseAltXml extracts signals" {
     const alloc = std.testing.allocator;

@@ -769,6 +769,36 @@ test "evalFanoutForm stars one component from common to each target net" {
     try testing.expectEqualStrings("VC", all_pin_nets.items[5].net);
 }
 
+test "evalFanoutForm places one instance for the minimal 4-child form" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    eval.hierarchical_ids = true;
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    try eval.component_cache.put(alloc, "ferrite-0402", .{
+        .name = "ferrite-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+
+    // Exactly 4 children — (fanout COMMON comp NET) — is the arity floor; the
+    // `< 4` guard must let it through and place one branch (a `<= 4` flip drops it).
+    const nodes = try parser_mod.parse(alloc, "(fanout \"V1P8\" (ferrite-0402 \"600R\") \"VA\")");
+    const form_children = nodes[0].asList().?;
+    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+
+    try evalFanoutForm(&eval, form_children, &env, &instances, &all_pin_nets);
+
+    try testing.expectEqual(@as(usize, 1), instances.items.len);
+    try testing.expectEqual(@as(usize, 2), all_pin_nets.items.len);
+    try testing.expectEqualStrings("V1P8", all_pin_nets.items[0].net);
+    try testing.expectEqualStrings("VA", all_pin_nets.items[1].net);
+}
+
 // spec: eval/instance - (decouples "IC" PIN) binds a cap to a specific hub pad
 test "decouples form sets the instance pin binding" {
     const alloc = std.heap.page_allocator;

@@ -394,6 +394,8 @@ test {
     _ = @import("sexpr/parser.zig");
     _ = @import("sexpr/printer.zig");
     _ = @import("eval/env.zig");
+    _ = @import("eval/instance.zig");
+    _ = @import("eval/builders.zig");
     _ = @import("eval/forms.zig");
     _ = @import("eval/builtins.zig");
     _ = @import("eval/fmt.zig");
@@ -411,6 +413,8 @@ test {
     _ = @import("eval/power_budget.zig");
     _ = @import("eval/power_sequencing.zig");
     _ = @import("erc.zig");
+    _ = @import("review_md.zig");
+    _ = @import("id_insert.zig");
     _ = @import("emit.zig");
     _ = @import("convert/footprint.zig");
     _ = @import("convert/symbol.zig");

@@ -1445,6 +1445,18 @@ pub const Env = struct {
     }
 };
 
+const parser_mod = @import("../sexpr/parser.zig");
+
+test "parseCheck accepts a two-child not-connected body" {
+    const alloc = std.testing.allocator;
+    // (not-connected (pin "5")) has exactly two children — the arity floor for
+    // this kind. The `< 2` guard must accept it; a `<= 2` flip returns null.
+    const nodes = try parser_mod.parse(alloc, "(check (not-connected (pin \"5\")))");
+    defer parser_mod.freeNodes(alloc, nodes);
+    const chk = parseCheck(alloc, nodes[0]).?;
+    try std.testing.expectEqualStrings("5", chk.not_connected.pin);
+}
+
 // spec: eval/env - Stores and retrieves values by name in an environment
 test "env get and put" {
     const alloc = std.testing.allocator;

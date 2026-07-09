@@ -1225,6 +1225,21 @@ fn spliceChecksIntoDesignBlock(
 
 const testing = std.testing;
 
+test "parseSectionPort reads the class keyword value" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    // `class KEY` steps forward past the keyword to read its value; the `si += 1`
+    // advance is what makes that terminate. (A `-=` flip re-reads "class" forever,
+    // so a parse that terminates with class="diff" pins the operator.)
+    const nodes = try parser_mod.parse(alloc, "(port \"NET\" in class \"diff\")");
+    const port = (try parseSectionPort(&eval, nodes[0].asList().?, &env)).?;
+    try testing.expectEqualStrings("diff", port.class);
+}
+
 /// Register a minimal component family so `(name "val")` evaluates to a
 /// `component_instance` without needing lib/components/ fixtures on disk.
 fn putTestFamily(eval: *Evaluator, alloc: std.mem.Allocator, name: []const u8) !void {

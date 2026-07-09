@@ -1028,6 +1028,11 @@ test "net name sanitization" {
     // Distinct raw names may never merge after sanitization.
     try testing.expectEqualStrings("AB", (try nets.resolve("A(B")).?);
     try testing.expectEqualStrings("AB_2", (try nets.resolve("A)B")).?);
+
+    // An empty raw name must not index trimmed[0]; it sanitizes to the "NET"
+    // fallback. (The `trimmed.len > 0` bound guards the read; a `>=` flip
+    // reads trimmed[0] out of bounds.)
+    try testing.expectEqualStrings("NET", try sanitizeNetName(arena, ""));
 }
 
 // spec: import_kicad - Emits a design with family-mapped passives, custom-part imports, net-grouped pins, and deduped thermal pads

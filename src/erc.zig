@@ -3539,6 +3539,17 @@ test "signed voltage rails count as power" {
     try std.testing.expect(!isSignedVoltRail("-X5V"));
 }
 
+// spec: erc - Recognizes V_ underscore rails (V_3V3D, V_RF_3P3) as power nets
+test "underscore voltage rails count as power" {
+    // Both the leading 'V' and the '_' are required; a `!=`→`==` flip on either
+    // bound rejects these valid rails (or accepts the invalid X_/VX cases).
+    try std.testing.expect(isUnderscoreRail("V_3V3D"));
+    try std.testing.expect(isUnderscoreRail("V_RF_3P3"));
+    try std.testing.expect(!isUnderscoreRail("V_SENSE")); // no digit ⇒ not a rail
+    try std.testing.expect(!isUnderscoreRail("X_3V3")); // wrong first char
+    try std.testing.expect(!isUnderscoreRail("VX3V3")); // no underscore
+}
+
 // spec: erc - Accepts an MPN-identified fixed component as a valued passive (no missing_value)
 test "passive ref on an MPN-identified fixed component is not missing a value" {
     const instances = [_]Instance{
