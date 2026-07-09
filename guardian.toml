@@ -43,11 +43,12 @@ exempt_sections = ["sexpr/tokenizer", "sexpr/parser", "sexpr/printer", "sexpr/as
 # PERMANENT: deterministic sampling must stay consistent across nightly runs,
 # so changing it re-rolls which mutants are tested. Do not bump it casually.
 [mutation]
-# measured baseline 2026-07-08: first whole-tree run scored 28% (27 killed +
-# 1 timeout of 100 sampled; 72 survivors, 0 unviable). Floor the gate at the
-# measured score and RAISE toward 80 as survivors get killing tests — the
-# mutation.txt ratchet already prevents any backsliding below 28.
-min_score_pct = 28   # fail below this kill rate (gated tiers only); raise toward 80
+# measured baseline 2026-07-08: 28%. Survivor campaign 2026-07-09 (commits
+# 5cfefa6/254b685/0d5b34e/ed39d46) killed 50 of 72 sampled survivors; the
+# re-measure on the shifted sample scored 32%. Floor the gate at the measured
+# score and RAISE toward 80 as future survivor campaigns land — the
+# mutation.txt ratchet already prevents any backsliding.
+min_score_pct = 32   # fail below this kill rate (gated tiers only); raise toward 80
 max_mutants   = 100  # deterministic sample cap for --full (see sizing note above)
 timeout_secs  = 300  # per-phase child-build timeout (a timeout counts as killed)
 min_mutants   = 4    # below this many viable mutants: informational, not gated

@@ -1,2 +1,2 @@
 # guardian-snapshot v1
-score_pct=28
+score_pct=32

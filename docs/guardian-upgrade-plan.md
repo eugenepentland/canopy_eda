@@ -25,6 +25,7 @@ nothing here is visible to our builds.
 | 4 Workflow | `6ad050a`, `8b12c2d` | nightly units in `systemd/` (**not enabled** — run `systemctl --user enable --now netlisp-guardian-nightly.timer`); CLAUDE.md accurate |
 | 5 Opt-ins | `2ec125d` | completeness live on `placement/drc` (8 honest waivers); 80-section exemption ledger is the TODO list |
 | 1 Mutation | `5d0d1bd`, `5f79b91` | **first whole-tree score: 28%** (28/100 killed, 72 survivors); gate floored at the measured 28, ratchet in `.guardian/mutation.txt` |
+| 1b Survivor campaign (07-09) | `5cfefa6`, `254b685`, `0d5b34e`, `ed39d46` | 50/72 survivors killed (splice-verified), 5 waived equivalent, 16 need harnesses (top: the auth email guard, `serve/auth.zig:1317`); 6 files' dead tests re-wired into the aggregator (+29 revived tests, suite now 897); re-measure on the shifted sample: **32%**, ratchet raised, gate floored at 32. Nightly timer installed + enabled. |
 
 **The 28% is the headline.** 856 tests, and 72 of 100 sampled mutants survive —
 concentrated in `placement/optimizer` (12/15), `router` (4/4), `drc` (2/2),
