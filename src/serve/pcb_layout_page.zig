@@ -7874,3 +7874,40 @@ test "mcp origin-key strips the sub-block prefix" {
     try std.testing.expectEqualStrings("C3", mcpOriginOf("C3"));
     try std.testing.expectEqualStrings("C_IN", mcpOriginOf("mcu/sub/C_IN"));
 }
+
+test "safeFootprintName accepts a 128-char stem but rejects 129" {
+    // `fp.len > 128` bounds the name; a `>`->`>=` flip rejects the exact
+    // 128-char boundary a valid long footprint stem can hit.
+    try std.testing.expect(safeFootprintName("a" ** 128));
+    try std.testing.expect(!safeFootprintName("a" ** 129));
+}
+
+test "poseMapByOrigin keeps poses for non-empty origin keys" {
+    // `if (ok.len == 0) continue;` skips only entries with no origin key; an
+    // `==`->`!=` flip skips every REAL (non-empty) key instead, dropping all
+    // poses.
+    const alloc = std.testing.allocator;
+    var ok_of = std.StringHashMap([]const u8).init(alloc);
+    defer ok_of.deinit();
+    try ok_of.put("C1", "C_IN");
+    const layout = [_]optimizer.RefPose{.{ .ref = "C1", .x = 1, .y = 2, .rot = 0 }};
+    var pose = poseMapByOrigin(alloc, &ok_of, &layout) orelse return error.TestPoseMapNull;
+    defer pose.deinit();
+    try std.testing.expectEqual(@as(u32, 1), pose.count());
+    const p = pose.get("C_IN") orelse return error.TestOriginMissing;
+    try std.testing.expectEqual(@as(f64, 1), p.x);
+}
+
+test "mcpSetPartPoses rejects an empty poses array before resolving" {
+    // `if (reqs.len == 0)` fails fast with `"poses" is empty`; an `==`->`!=`
+    // flip lets an empty request through to layout resolution, which fails
+    // with a different ("could not resolve") message instead.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"name\":\"x\",\"poses\":[]}", .{});
+    const ok = try mcpSetPartPoses(alloc, "/no/such/project", args, &out);
+    try std.testing.expect(!ok);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "is empty") != null);
+}

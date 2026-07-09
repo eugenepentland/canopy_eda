@@ -580,3 +580,12 @@ test "writeModelConfig round-trips through loadModelConfig, preserving other ent
     // And the sibling survived the rewrite.
     try std.testing.expectApproxEqAbs(@as(f64, 23.75), cfg2.get("plain").?.offset[0], tol);
 }
+
+test "writeJsonString emits a literal space, escaping only sub-0x20 controls" {
+    // The `c < 0x20` guard escapes control chars only; a `<`->`<=` flip would
+    // also escape 0x20 (space) as \\u0020 instead of writing it verbatim.
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeJsonString(&aw.writer, "a b");
+    try std.testing.expectEqualStrings("\"a b\"", aw.written());
+}

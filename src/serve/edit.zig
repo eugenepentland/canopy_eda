@@ -3106,3 +3106,19 @@ test "findInstancePinForm finds a pin in a section (pins label) map" {
     toks.clearRetainingCapacity();
     try std.testing.expect((try findInstancePinForm(a, src, inst_open, inst_end, "ZZ9", &toks)) == null);
 }
+
+test "parseSrcOff reads the digits that follow the srcOff key" {
+    // `m + JSON_SRC_OFF_KEY.len` steps FORWARD past the key onto the digits;
+    // a `+`->`-` flip rewinds before the key, landing on a non-digit and
+    // yielding 0 instead of the real offset.
+    try std.testing.expectEqual(@as(usize, 42), parseSrcOff("{\"aaaaaaaa\":1,\"srcOff\":42}"));
+}
+
+test "findPinInForm locates a bareword pin token before any net string" {
+    // The `(c == ')' or c == '\"')` bailout must fire only on the form close
+    // or a net string; flipping either `==` to `!=` makes it bail on the very
+    // first ordinary token char, so the pin is never found.
+    const src = "(pin W12 \"CNV\")";
+    const loc = findPinInForm(src, "(pin ".len, src.len, "W12") orelse return error.TestPinNotFound;
+    try std.testing.expectEqualStrings("W12", src[loc.start..loc.end]);
+}

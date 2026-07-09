@@ -398,3 +398,13 @@ test "source snapshot list ignores the layouts subdir" {
     try std.testing.expectEqual(@as(usize, 1), snaps.len);
     try std.testing.expectEqualStrings("2026-01-01T00-00-02", snaps[0].id);
 }
+
+test "restore rejects traversal chars only, letting a clean id reach the lookup" {
+    // The `c == '/'/'\\'/0` guard must reject ONLY those chars; flipping any
+    // `==` to `!=` rejects an ordinary id too, so a clean id must instead fall
+    // through to the on-disk lookup and fail with SnapshotNotFound.
+    try std.testing.expectError(
+        error.SnapshotNotFound,
+        restore(std.testing.allocator, "/no/such/project/dir", "design", "cleanid123"),
+    );
+}

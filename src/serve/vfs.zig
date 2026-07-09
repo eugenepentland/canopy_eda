@@ -1244,3 +1244,24 @@ test "libraryEntityFor maps lib paths to entity descriptors" {
     try std.testing.expect(libraryEntityFor("src/foo.sexp") == null);
     try std.testing.expect(libraryEntityFor("lib/components/sub/nested.sexp") == null);
 }
+
+test "editFile applies a non-empty single-match replacement" {
+    // `old_string.len == 0` short-circuits with an error; flipping `==` to
+    // `!=` would reject a legitimate non-empty edit. A real single-match
+    // replace must succeed and rewrite the file.
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("src");
+    try tmp.dir.writeFile(.{ .sub_path = "src/f.sexp", .data = "hello world" });
+    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(proj);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(alloc);
+    try std.testing.expect(try editFile(alloc, proj, "src/f.sexp", "world", "there", null, .single, &out));
+
+    const after = try tmp.dir.readFileAlloc(alloc, "src/f.sexp", 1 << 20);
+    defer alloc.free(after);
+    try std.testing.expectEqualStrings("hello there", after);
+}

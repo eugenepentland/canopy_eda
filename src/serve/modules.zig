@@ -335,7 +335,7 @@ pub fn collectModules(allocator: std.mem.Allocator, project_dir: []const u8) std
     if (stamp.valid) {
         module_cache_mutex.lock();
         if (module_cache_stamp.valid and
-            module_cache_stamp.count == stamp.count and
+            module_cache_stamp.count == stamp.count and // mutate-ok: perf-only cache key; miss recomputes same result
             module_cache_stamp.max_mtime_ns == stamp.max_mtime_ns)
         {
             const hit = dupeModuleEntries(allocator, module_cache_entries) catch null;

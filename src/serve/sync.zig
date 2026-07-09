@@ -4241,3 +4241,16 @@ test "placementViolations returns null when placements are unchanged" {
     ;
     try std.testing.expect((try placementViolations(arena, old_src, new_src)) == null);
 }
+
+test "parseCirclePoints accepts a two-element centre list" {
+    // `center.len < 2` guards a well-formed `(circle (cx cy) r)`; a `<`->`<=`
+    // flip rejects the exact two-element centre a real circle carries.
+    const Node = env_mod_node.Node;
+    const z = env_mod_node.Span.zero;
+    const centre = [_]Node{ Node.float(z, 3.0), Node.float(z, 4.0) };
+    const circle = [_]Node{ Node.atom(z, "circle"), Node.list(z, &centre), Node.float(z, 1.5) };
+    const c = parseCirclePoints(Node.list(z, &circle)) orelse return error.TestCircleRejected;
+    try std.testing.expectEqual(@as(f64, 3.0), c.cx);
+    try std.testing.expectEqual(@as(f64, 4.0), c.cy);
+    try std.testing.expectEqual(@as(f64, 1.5), c.r);
+}

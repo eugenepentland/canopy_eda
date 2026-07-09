@@ -807,3 +807,10 @@ pub fn countBom(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock)
     }
     return counts;
 }
+
+test "footprintHasPads reports false when the path allocation fails" {
+    // The `catch return false` on the path allocPrint must stay false on
+    // failure; a `false`->`true` flip would claim pads exist on OOM.
+    var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expect(!footprintHasPads(fa.allocator(), "/proj", "some_fp"));
+}

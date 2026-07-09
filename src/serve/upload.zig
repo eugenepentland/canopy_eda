@@ -511,3 +511,11 @@ pub fn writeComponentFile(
 
     return if (existed) .replaced else .created;
 }
+
+test "isEscapedWhitespace reads the escape letter after the backslash" {
+    // `raw[i + 1]` looks one byte FORWARD at the escape letter; a `+`->`-`
+    // flip reads `raw[i - 1]` (the char before the backslash), misclassifying
+    // a real `\\n` escape as ordinary text.
+    try std.testing.expect(isEscapedWhitespace("x\\n", 1));
+    try std.testing.expect(!isEscapedWhitespace("x\\q", 1));
+}

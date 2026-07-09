@@ -998,3 +998,26 @@ test "add/list/remove requirement round-trips through the component file on disk
     try std.testing.expect(try listRequirements(alloc, proj, "foo", &out));
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"requirements\":[]") != null);
 }
+
+test "writeComponentJson emits the first requirement without a leading comma" {
+    // `req_first` suppresses the separator before the first requirement; a
+    // `true`->`false` flip prefixes it with a stray comma (`[,{`), breaking
+    // the JSON.
+    const alloc = std.testing.allocator;
+    const z = ast.Span.zero;
+    const req = [_]ast.Node{ ast.Node.atom(z, "requirement"), ast.Node.string(z, "Tie pin 1 to GND") };
+    const root_body = [_]ast.Node{ast.Node.list(z, &req)};
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(alloc);
+    const w = out.writer(alloc);
+    try writeComponentJson(
+        alloc,
+        w,
+        "foo",
+        .{ .name = "foo", .is_family = false },
+        &.{},
+        .{ .pins = null, .source = null },
+        &root_body,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"requirements\":[{") != null);
+}

@@ -2752,3 +2752,15 @@ fn jsonMatchesToolTable(alloc: std.mem.Allocator) !bool {
 test "tools table matches tools_list_result.json" {
     try std.testing.expect(try jsonMatchesToolTable(std.testing.allocator));
 }
+
+test "finishDatasheet returns false when the store rejects the bytes" {
+    // The `return false` after a store failure must signal failure; a
+    // `false`->`true` flip would report success on a rejected datasheet.
+    // Non-PDF bytes make storeDatasheet fail with NotPdf before any write.
+    const alloc = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(alloc);
+    const w = out.writer(alloc);
+    const ok = try finishDatasheet(w, alloc, "/proj", "digikey", "x.pdf", "not a pdf", "PART", "MFR", "url");
+    try std.testing.expect(!ok);
+}

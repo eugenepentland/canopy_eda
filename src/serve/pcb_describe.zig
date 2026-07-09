@@ -821,3 +821,37 @@ test "writeDescribeJson emits parts with sides, nets and hub pad map" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"VIN\",\"class\":\"input_rail\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"ref\":\"C9\",\"origin\":\"C_IN\",\"role\":\"input_cap\"") != null);
 }
+
+test "buildNetEdgeMap maps a net to its non-centre hub pad edge" {
+    // `if (e == .center) continue;` skips only centre (exposed-pad) pads; a
+    // `==`->`!=` flip skips every EDGE pad instead, so the net→edge map comes
+    // back empty and the VIN pad's left edge is lost.
+    const geometry = @import("../placement/geometry.zig");
+    const alloc = std.testing.allocator;
+    var pads = [_]geometry.Pad{.{ .number = "1", .x = -1.8, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+    };
+    const p = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 0,
+        .maxy = 0,
+        .generated = true,
+    };
+    var pad_net = std.StringHashMap([]const u8).init(alloc);
+    defer pad_net.deinit();
+    try pad_net.put("U1|1", "VIN");
+    var out = std.StringHashMap(?Side).init(alloc);
+    defer out.deinit();
+    try buildNetEdgeMap(p, &pad_net, &out);
+    const e = out.get("VIN") orelse return error.TestNetMissing;
+    try std.testing.expectEqual(Side.left, e.?);
+}

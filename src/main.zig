@@ -453,6 +453,8 @@ test {
     _ = @import("serve/pcb_describe.zig");
     _ = @import("serve/diag_format.zig");
     _ = @import("serve/edit_assist.zig");
+    _ = @import("serve/upload.zig");
+    _ = @import("serve/component_info.zig");
     _ = @import("serve/design_diff.zig");
     _ = @import("serve/datasheet_attach.zig");
     _ = @import("serve/page_cache.zig");
