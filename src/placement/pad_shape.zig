@@ -315,3 +315,28 @@ test "shapeGap frees a pad sitting in a concave pad's notch" {
     const r2 = Shape{ .x0 = 1.4, .y0 = 0, .x1 = 2.4, .y1 = 1 };
     try testing.expect(@abs(shapeGap(r1, r2, 1.0) - 0.4) < 1e-9);
 }
+
+// A non-quarter part rotation drives the arbitrary-angle rotated-bbox branch:
+// the box corners are centre ∓ half-extent, so a sign flip on x0/y0 would push
+// the corner the wrong side of the pad centre.
+test "worldShape rotated-rectangle box corners are centre minus/plus the half-extent" {
+    const part = optimizer.Part{
+        .ref_des = "R1",
+        .kind = .passive,
+        .hw = 1,
+        .hh = 1,
+        .pads = &.{},
+        .fallback = false,
+        .x = 10,
+        .y = 20,
+        .rot = 45,
+    };
+    const pad = geometry.Pad{ .number = "1", .x = 0, .y = 0, .w = 2, .h = 2 };
+    const s = try worldShape(testing.allocator, part, pad);
+    // hw = hh = (w/2)·cos45 + (h/2)·sin45 = √2; box centre is the pose (10,20).
+    const r = @sqrt(2.0);
+    try testing.expectApproxEqAbs(@as(f64, 10) - r, s.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 20) - r, s.y0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10) + r, s.x1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 20) + r, s.y1, 1e-9);
+}

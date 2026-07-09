@@ -10985,3 +10985,161 @@ test "overlapCount sees an overlapping pair, clean pair scores 0" {
     parts[1].x = 2;
     try testing.expectEqual(@as(usize, 0), overlapCount(pl));
 }
+
+test "nearestSharedHub excludes the anchor itself and finds no secondary hub" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    var parts = [_]Part{
+        .{ .ref_des = "IC", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "M", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "VOUT", .pins = &.{ .{ .ref_des = "IC", .pin = "1" }, .{ .ref_des = "M", .pin = "1" } } },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("IC", 0);
+    try idx_of.put("M", 1);
+    const members = [_]usize{1};
+    // The net's only hub pin is the anchor IC (index 0). All three conditions
+    // are ANDed, so the anchor is excluded and no secondary hub remains — an
+    // `and`→`or` flip would instead return the anchor.
+    try testing.expectEqual(@as(?usize, null), nearestSharedHub(&members, 0, &parts, &nets, &idx_of));
+}
+
+test "placeSwitchHub docks above the anchor when the top/bottom edge counts tie" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    var parts = [_]Part{
+        .{ .ref_des = "IC", .kind = .hub, .hw = 2, .hh = 3, .pads = &.{}, .fallback = false, .x = 0, .y = 10 },
+        .{ .ref_des = "SW", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+    };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("IC", 0);
+    try idx_of.put("SW", 1);
+    var lock_axis = [_]u8{ 0, 0 };
+    var lock_val = [_]f64{ 0, 0 };
+    // No blocks ⇒ top == bottom == 0, so the `top <= bot` tie takes the ABOVE
+    // branch: y = ic.y − effHh(ic) − gap − e.y = 10 − 3 − 0.5 − 1 = 5.5. A
+    // `<=`→`<` flip would drop it BELOW at 14.5.
+    placeSwitchHub(&parts, 0, 1, &.{}, &idx_of, &.{}, 0.5, &lock_axis, &lock_val);
+    try testing.expectApproxEqAbs(@as(f64, 5.5), parts[1].y, 1e-9);
+}
+
+test "hubPadsOnNet skips a zero-size pad and keeps the real one" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    const pads = [_]geometry.Pad{
+        .{ .number = "1", .x = 1, .y = 2, .w = 0, .h = 0 },
+        .{ .number = "2", .x = 3, .y = 4, .w = 0.5, .h = 0.5 },
+    };
+    const hub = Part{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false };
+    var idx_of = std.StringHashMap(usize).init(arena);
+    try idx_of.put("U1", 0);
+    const net = FlatNet{
+        .name = "N",
+        .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "U1", .pin = "2" } },
+    };
+    const got = try hubPadsOnNet(arena, hub, 0, net, &idx_of);
+    // The zero-size pad 1 is dropped (w==0 AND h==0); only pad 2 survives. A
+    // `==`→`!=` flip on either term would keep the zero pad, giving length 2.
+    try testing.expectEqual(@as(usize, 1), got.len);
+    try testing.expectApproxEqAbs(@as(f64, 3), got[0][0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 4), got[0][1], 1e-9);
+}
+
+test "trueHub bounds-checks the instance index for a hub past the instance list" {
+    const parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+    };
+    // No instances: index 0 is out of range for the (empty) instance list, so
+    // the origin-key branch must be skipped (`pi < instances.len` is false) and
+    // the part trusted. A `<`→`<=` flip reads instances[0] out of bounds.
+    try testing.expect(trueHub(&parts, &.{}, 0));
+}
+
+test "partGap measures the diagonal courtyard gap from both lower corners" {
+    const a = Part{
+        .ref_des = "A",
+        .kind = .passive,
+        .hw = 1,
+        .hh = 1,
+        .pads = &.{},
+        .fallback = false,
+        .x = 0,
+        .y = 0,
+    };
+    const b = Part{
+        .ref_des = "B",
+        .kind = .passive,
+        .hw = 1,
+        .hh = 1,
+        .pads = &.{},
+        .fallback = false,
+        .x = 5,
+        .y = 5,
+    };
+    // Courtyards [−1,−1,1,1] and [4,4,6,6]: 3 mm clear on each axis ⇒ √18. A
+    // sign flip on b's x0 or y0 corner would report √34 instead.
+    try testing.expectApproxEqAbs(@as(f64, @sqrt(18.0)), partGap(a, b), 1e-9);
+}
+
+test "classify leaves a zero-value cap's loop weight neutral at 1" {
+    var parts = [_]Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .value = "" },
+    };
+    var loops = [_]Loop{
+        .{
+            .cap = 0,
+            .hub = 0,
+            .cap_pwr = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+            .cap_gnd = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+            .hub_pwr = &.{},
+            .hub_gnd = &.{},
+        },
+    };
+    const priority = [_]u32{0};
+    // C1's value parses to 0 F, so the value-weight branch must be skipped and
+    // the weight left at its neutral 1. A `> 0`→`>= 0` flip enters the branch,
+    // divides vref by 0, and lifts the weight off 1.
+    classify(&parts, &loops, &.{}, 5.0, 1.0, &priority);
+    try testing.expectEqual(@as(f64, 1.0), loops[0].weight);
+}
+
+test "resolveRoughAnchor bounds-checks the instance index past the instance list" {
+    var parts = [_]Part{
+        .{ .ref_des = "H0", .kind = .hub, .hw = 4, .hh = 4, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "H1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+    };
+    const insts = [_]export_kicad.FlatInstance{
+        .{ .ref_des = "H0", .component = "x", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
+    };
+    const block = env.DesignBlock{
+        .name = "",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .rough = .{ .anchor = "ZZZ", .present = true },
+    };
+    var prep = Prepared{
+        .parts = &parts,
+        .idx_of = undefined,
+        .instances = &insts,
+        .nets = undefined,
+        .built = undefined,
+        .priority = undefined,
+        .lowered = undefined,
+        .block = &block,
+        .project_dir = undefined,
+    };
+    // Anchor "ZZZ" matches nothing, so the scan visits H1 at index 1 — one past
+    // the single instance. The guard (`i < instances.len`) must hold, or the
+    // origin lookup reads out of bounds; a `<`→`<=` flip does exactly that.
+    // Falls back to the biggest-courtyard hub (H0).
+    try testing.expectEqual(@as(?usize, 0), resolveRoughAnchor(&parts, &prep, &.{}));
+}

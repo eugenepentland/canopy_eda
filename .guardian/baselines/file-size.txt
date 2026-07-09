@@ -9,8 +9,8 @@
 1012 src/export_gerber.zig
 1009 src/import_kicad.zig
 1646 src/kicad_pcb/writer.zig
-9400 src/placement/optimizer.zig
-2464 src/placement/router.zig
+9407 src/placement/optimizer.zig
+2466 src/placement/router.zig
 2072 src/render_html.zig
 2226 src/render_json.zig
 1318 src/render_pcb_png.zig

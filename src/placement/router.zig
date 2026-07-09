@@ -3515,3 +3515,25 @@ fn diagCornersReserved(ctx: *Ctx, lo: usize, hi: usize, net: i32) bool {
     }
     return true;
 }
+
+test "segSegDist returns zero for a proper crossing away from the origin" {
+    // Two unit diagonals crossing at (1.5,1.5); the intersection parameter's
+    // numerator must read b1−a1 (not b1+a1), or the crossing is missed and a
+    // positive endpoint distance is returned instead of 0.
+    try testing.expectEqual(@as(f64, 0), segSegDist(.{ 1, 1 }, .{ 2, 2 }, .{ 1, 2 }, .{ 2, 1 }));
+}
+
+test "copperHalo sums via radius, half track, and clearance under the sqrt" {
+    var ctx = Ctx{
+        .arena = testing.allocator,
+        .grid = .{ .ox = 0, .oy = 0, .g = 1.0, .nx = 1, .ny = 1 },
+        .obs = &.{},
+        .reach = 0,
+        .occ = &.{},
+        .resv = &.{},
+        .params = .{ .via_dia = 0.8, .track_width = 0.2, .clearance = 0.3 },
+    };
+    // d = viaR + track_width/2 + clearance = 0.4 + 0.1 + 0.3 = 0.8;
+    // halo = √(d² + g²·0.5) = √(0.64 + 0.5) = √1.14. Any +→− flip changes d.
+    try testing.expectApproxEqAbs(@as(f64, @sqrt(1.14)), copperHalo(&ctx), 1e-9);
+}

@@ -494,6 +494,19 @@ fn prefixThenDigits(tok: []const u8, prefix: []const u8) bool {
 
 const testing = std.testing;
 
+test "isTranslatorChannel rejects names shorter than 2 or longer than 16 chars" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var fn_set: std.StringHashMapUnmanaged(void) = .empty;
+    try fn_set.put(arena, "B1", {});
+    // A well-formed "A<n>" whose "B<n>" twin is present IS a translator channel.
+    try testing.expect(isTranslatorChannel("A1", &fn_set));
+    // Length guard: too short (1) and too long (17) must return false, not true.
+    try testing.expect(!isTranslatorChannel("A", &fn_set));
+    try testing.expect(!isTranslatorChannel("A0000000000000000", &fn_set));
+}
+
 // spec: placement/pin_roles - groundy function names are recognised, straps are not
 test "isGroundFn separates real grounds from config straps" {
     try testing.expect(isGroundFn("GND"));

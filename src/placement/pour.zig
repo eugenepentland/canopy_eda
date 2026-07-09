@@ -838,6 +838,34 @@ fn ufUnite(uf: []usize, a: usize, b: usize) void {
 
 const testing = std.testing;
 
+// The pitch guard is load-bearing: a zero pitch would divide by zero and feed
+// @ceil(inf) into @intFromFloat. (The sibling `extent <= 0` term is equivalent
+// under ≤ vs <, since ⌈0/pitch⌉ is also 0 — only the pitch guard is testable.)
+test "gridCount guards a non-positive pitch against division by zero" {
+    try testing.expectEqual(@as(usize, 0), gridCount(10, 0));
+    // A normal extent/pitch counts the covering cells: ⌈10/2⌉ = 5.
+    try testing.expectEqual(@as(usize, 5), gridCount(10, 2));
+}
+
+test "emitCellEdges emits the bottom boundary edge for a cell empty below" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    // 3×3 label grid (component 1). Cell (1,1) has solid top/left/right
+    // neighbours and an EMPTY cell below (index 7). So exactly one boundary
+    // edge is emitted: the bottom, dir .e, between vertices (2*w+1)=9 and 10.
+    // The `jj + 1` neighbour offset and the vertex-index arithmetic must all
+    // hold — a +→− flip either checks the wrong neighbour or misnumbers a vertex.
+    var labels = [_]i32{ 0, 1, 0, 1, 1, 1, 0, 0, 0 };
+    const g = Grid{ .minx = 0, .miny = 0, .pitch = 1, .nx = 3, .ny = 3, .labels = &labels };
+    var edges: std.ArrayListUnmanaged(Edge) = .empty;
+    try emitCellEdges(arena, &edges, g, 1, 1, 1, 4);
+    try testing.expectEqual(@as(usize, 1), edges.items.len);
+    try testing.expectEqual(Dir.e, edges.items[0].dir);
+    try testing.expectEqual(@as(u32, 9), edges.items[0].a);
+    try testing.expectEqual(@as(u32, 10), edges.items[0].b);
+}
+
 fn testPlacement(parts: []optimizer.Part, nets: []const @import("../export_kicad.zig").FlatNet, rules: optimizer.BoardRules) optimizer.Placement {
     return .{
         .parts = parts,

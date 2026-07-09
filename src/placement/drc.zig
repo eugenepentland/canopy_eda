@@ -1780,3 +1780,56 @@ test "check severity: copper checks are errors, courtyard is a warning" {
     try testing.expectEqual(Severity.err, firstOfKind(v, .via_pad).?.severity);
     try testing.expectEqual(Severity.warn, firstOfKind(v, .courtyard).?.severity);
 }
+
+test "checkDrillRules measures oval-slot walls from the true ± endpoints" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    // Two oval slots: a from (−0.5,−2)→(0.5,2), b from (2,1)→(4,3), each a
+    // 0.4 mm bore. Their capsule walls sit ~1.2977 mm apart; a loose 5 mm rule
+    // reports the gap. Any sign flip on a slot endpoint moves an end and shifts
+    // the reported gap, so pinning it exactly kills every `±shx/±shy` mutant.
+    const pads = [_]PadBox{
+        .{
+            .x0 = -1,
+            .y0 = -3,
+            .x1 = 1,
+            .y1 = 3,
+            .net = -1,
+            .part = 0,
+            .drill = 0.4,
+            .hx = 0,
+            .hy = 0,
+            .shx = 0.5,
+            .shy = 2.0,
+        },
+        .{
+            .x0 = 1,
+            .y0 = 0,
+            .x1 = 5,
+            .y1 = 4,
+            .net = -1,
+            .part = 1,
+            .drill = 0.4,
+            .hx = 3,
+            .hy = 2,
+            .shx = 1.0,
+            .shy = 1.0,
+        },
+    };
+    var out: Viol = .empty;
+    try checkDrillRules(arena, &out, &pads, &.{}, optimizer.DesignRules{ .hole_to_hole = 5.0 });
+    try testing.expectEqual(@as(usize, 1), countKind(out.items, .hole_hole));
+    try testing.expectApproxEqAbs(@as(f64, 1.2977493752543308), firstOfKind(out.items, .hole_hole).?.gap, 1e-6);
+}
+
+test "boxOverlap treats a sub-epsilon overlap on either axis as no overlap" {
+    // x-overlap exactly EPS wide (y fully overlapping): touching within EPS ⇒ null.
+    try testing.expect(boxOverlap(.{ 0, 0, 1e-6, 1 }, .{ 0, 0, 2, 1 }) == null);
+    // y-overlap exactly EPS wide (x fully overlapping): likewise null.
+    try testing.expect(boxOverlap(.{ 0, 0, 1, 1e-6 }, .{ 0, 0, 1, 2 }) == null);
+    // A proper overlap returns the shared-region centre.
+    const c = boxOverlap(.{ 0, 0, 2, 2 }, .{ 1, 1, 3, 3 }).?;
+    try testing.expectApproxEqAbs(@as(f64, 1.5), c[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1.5), c[1], 1e-9);
+}
