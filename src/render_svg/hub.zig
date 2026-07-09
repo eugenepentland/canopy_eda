@@ -393,3 +393,22 @@ pub fn estimateBranchCount(self: *RenderCtx, spoke_rd: []const u8, hub_ref: []co
     }
     return 1;
 }
+
+const testing = std.testing;
+
+test "groupHubPins merges two consecutive pins on the same net into one group" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ctx = RenderCtx.init(arena_state.allocator());
+    const pins = [_][]const u8{ "1", "2" };
+    const adj = [_]AdjEntry{
+        .{ .pin = "1", .endpoint = .{ .net = "VDD" } },
+        .{ .pin = "2", .endpoint = .{ .net = "VDD" } },
+    };
+    var names: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const groups = try groupHubPins(&ctx, &pins, &adj, &names);
+    // Both pins share net VDD, so the should-merge flag (a `break :blk true`)
+    // collapses them into a single group; flipping it to false yields two.
+    try testing.expectEqual(@as(usize, 1), groups.len);
+    try testing.expectEqualStrings("1,2", groups[0].pin_numbers);
+}

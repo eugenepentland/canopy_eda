@@ -105,7 +105,7 @@ pub fn buildGlanceEntities(
         minx = @min(minx, e.x);
         miny = @min(miny, e.y);
     }
-    if (ents.len > 0) {
+    if (ents.len > 0) { // mutate-ok: len==0 keeps minx/miny at floatMax, so dx=dy=0 and the loop is empty
         const dx: f64 = if (minx < layout.pad) layout.pad - minx else 0;
         const dy: f64 = if (miny < layout.pad) layout.pad - miny else 0;
         for (ents) |*e| {
@@ -753,4 +753,38 @@ test "groupCoverage flags blocks outside every group cluster" {
     try testing.expectEqual(@as(u32, 3), cov.total);
     try testing.expectEqual(@as(usize, 1), cov.ungrouped.len);
     try testing.expectEqualStrings("Sensor", cov.ungrouped[0]);
+}
+
+/// Parse the `y` of the `dg-chip-sub` caption `<text>` out of a chip's SVG.
+fn subCaptionY(svg: []const u8) f64 {
+    const marker = "\" class=\"dg-chip-sub\"";
+    const m = std.mem.indexOf(u8, svg, marker) orelse return std.math.nan(f64);
+    const ykey = "y=\"";
+    const ys = (std.mem.lastIndexOf(u8, svg[0..m], ykey) orelse return std.math.nan(f64)) + ykey.len;
+    return std.fmt.parseFloat(f64, svg[ys..m]) catch std.math.nan(f64);
+}
+
+test "writeChip places the caption below the chip centre" {
+    const e = Entity{
+        .label = "Compute",
+        .x = 0,
+        .y = 0,
+        .w = 2000,
+        .h = 100,
+        .zx = 0,
+        .zy = 0,
+        .zw = 2000,
+        .zh = 100,
+        .color = "#58a6ff",
+        .count = 2,
+        .members = &[_][]const u8{ "AA", "BB" },
+    };
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeChip(arena_state.allocator(), &aw.writer, e);
+    // Chip centre is y = 0 + 100/2 = 50; the caption sits at cy + cfs·1.35 > cy.
+    // A `+`→`-` sign flip would hoist it above centre (cy - cfs·1.35 < cy).
+    try testing.expect(subCaptionY(aw.written()) > 50.0);
 }

@@ -2114,3 +2114,18 @@ fn writeUrlEncoded(w: anytype, s: []const u8) !void {
 /// pub so `static_assets.zig` can register it without re-`@embedFile`-ing
 /// the source file.
 pub const SCHEMATIC_CSS = @embedFile("assets/schematic_inline.css") ++ block_diagram.DIAGRAM_CSS;
+
+test "loadPinoutNames rejects a top list whose head is not pinout" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try tmp.dir.writeFile(.{ .sub_path = "notpinout.sexp", .data = "(notpinout a b)" });
+    const dir = try tmp.dir.realpathAlloc(arena, ".");
+    const path = try std.fmt.allocPrint(arena, "{s}/notpinout.sexp", .{dir});
+    // The guard `top.len < 2 or top[0] != "pinout"` bails on any non-pinout head.
+    // `or`→`and` only bails when BOTH hold, so a well-formed non-pinout list would
+    // parse into a spurious map instead of null.
+    try std.testing.expect(loadPinoutNames(arena, path) == null);
+}

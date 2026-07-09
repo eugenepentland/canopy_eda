@@ -1515,3 +1515,24 @@ test "writeJobFile reports the stackup board thickness" {
     try writeJobFile(&tw.writer, placement, files, "demo");
     try testing.expect(std.mem.indexOf(u8, tw.written(), "\"BoardThickness\": 0.8") != null);
 }
+
+test "padRegion sweeps a roundrect top-right corner arc outward" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const pad = geometry.Pad{ .number = "1", .x = 0, .y = 0, .w = 10, .h = 10, .shape = "roundrect", .rratio = 0.25 };
+    const part = optimizer.Part{ .ref_des = "U1", .kind = .passive, .hw = 5, .hh = 5, .pads = &.{}, .fallback = false };
+    const pts = try padRegion(arena_state.allocator(), part, pad, 0);
+    // r = 0.25·10 = 2.5, so the inner-rect corner sits at (2.5, 2.5). The
+    // top-right corner arc must bulge OUTWARD past it — some vertex with both
+    // x>2.5 and y>2.5. A sign flip on the arc angle sweeps it the other way
+    // (y<2.5), leaving no such vertex.
+    try testing.expect(anyBeyond(pts, 2.5, 2.5));
+}
+
+/// True when some point of `pts` lies strictly past (mx, my) on both axes.
+fn anyBeyond(pts: []const [2]f64, mx: f64, my: f64) bool {
+    for (pts) |q| {
+        if (q[0] > mx + 1e-6 and q[1] > my + 1e-6) return true;
+    }
+    return false;
+}

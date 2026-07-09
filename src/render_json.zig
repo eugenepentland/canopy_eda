@@ -2337,3 +2337,77 @@ test "serializeScene emits hub sec, pin role, and sheet_meta" {
         "\"stack\":2,\"hosts\":[\"Boot NOR Flash\",\"Aux\"]}]";
     try std.testing.expect(std.mem.indexOf(u8, out, want_fns) != null);
 }
+
+test "collectPassiveChainLeft steps the chain leftward by pin offset and body width" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var scene = SceneGraph.init(arena);
+    const spokes = [_]FlatInst{
+        .{ .ref_des = "R1", .component = "res", .value = "", .symbol = "" },
+        .{ .ref_des = "R2", .component = "res", .value = "", .symbol = "" },
+    };
+    const start_x: f64 = 1000;
+    const end_x = try collectPassiveChainLeft(&scene, arena, start_x, 50, &spokes);
+    // First spoke steps back one body width; the second adds a pin-offset hop
+    // then another body. `x -= PIN_OFFSET`→`+=` walks the second spoke the wrong
+    // way, moving the chain end by +2·PIN_OFFSET.
+    try std.testing.expectEqual(start_x - 2 * passive_bw - PIN_OFFSET, end_x);
+    try std.testing.expectEqual(@as(usize, 2), scene.passives.items.len);
+    try std.testing.expectEqual(start_x - 2 * passive_bw - PIN_OFFSET, scene.passives.items[1].x);
+}
+
+/// Parse the numeric `viewBox` height out of a rendered scene-graph JSON.
+fn viewBoxHeight(json: []const u8) f64 {
+    const vb = std.mem.indexOf(u8, json, "\"viewBox\"") orelse return std.math.nan(f64);
+    const hk = "\"h\":";
+    const hs = (std.mem.indexOfPos(u8, json, vb, hk) orelse return std.math.nan(f64)) + hk.len;
+    var e = hs;
+    while (e < json.len and (std.ascii.isDigit(json[e]) or json[e] == '.' or json[e] == '-')) e += 1;
+    return std.fmt.parseFloat(f64, json[hs..e]) catch std.math.nan(f64);
+}
+
+test "renderSceneGraph sizes the viewBox to its section's stacked cell height" {
+    // U1 is a tall hub (eight distinct rail pins, each with a bypass cap); its
+    // one section's height accumulates every cell height. `sec_height += …`
+    // flipped to `-=` drives that sum negative, collapsing the row to zero and
+    // the viewBox to the MIN_VB_HEIGHT floor.
+    const insts = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C1", .component = "cap", .value = "100nF", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C2", .component = "cap", .value = "100nF", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C3", .component = "cap", .value = "100nF", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C4", .component = "cap", .value = "100nF", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C5", .component = "cap", .value = "100nF", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C6", .component = "cap", .value = "100nF", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C7", .component = "cap", .value = "100nF", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C8", .component = "cap", .value = "100nF", .footprint = "", .symbol = "" },
+    };
+    const p1 = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const p2 = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C2", .pin = "1" } };
+    const p3 = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "C3", .pin = "1" } };
+    const p4 = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "4" }, .{ .ref_des = "C4", .pin = "1" } };
+    const p5 = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "5" }, .{ .ref_des = "C5", .pin = "1" } };
+    const p6 = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "6" }, .{ .ref_des = "C6", .pin = "1" } };
+    const p7 = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "7" }, .{ .ref_des = "C7", .pin = "1" } };
+    const p8 = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "8" }, .{ .ref_des = "C8", .pin = "1" } };
+    const nets = [_]env_mod.Net{
+        .{ .name = "V1", .pins = &p1 }, .{ .name = "V2", .pins = &p2 },
+        .{ .name = "V3", .pins = &p3 }, .{ .name = "V4", .pins = &p4 },
+        .{ .name = "V5", .pins = &p5 }, .{ .name = "V6", .pins = &p6 },
+        .{ .name = "V7", .pins = &p7 }, .{ .name = "V8", .pins = &p8 },
+    };
+    var block: DesignBlock = .{
+        .name = "vb-height-test",
+        .instances = &insts,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json = try renderSceneGraph(arena.allocator(), &block, "");
+    try std.testing.expect(viewBoxHeight(json) > MIN_VB_HEIGHT);
+}

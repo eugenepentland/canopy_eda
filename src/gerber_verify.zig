@@ -464,3 +464,12 @@ test "round-trip covers both board sides" {
     const bot_flash = [_]ExpectFlash{.{ .x = 14, .y = 6, .kind = .r, .w = 0.6, .h = 0.6 }};
     try testing.expect((try verifyCopperLayer(arena, bw.written(), frame, &bot_flash, &.{})).ok());
 }
+
+test "parseCoordLine reports MalformedCoord for a coord letter at end of line" {
+    // "X" ends exactly at the line boundary: the sign-peek guard `i < line.len`
+    // stops the read, so the missing digits surface as MalformedCoord. Relaxing
+    // it to `i <= line.len` reads one past the end (a panic), so this must be a
+    // clean error, not a crash.
+    try testing.expectError(error.MalformedCoord, parseCoordLine("X", 0, 0));
+    try testing.expectError(error.MalformedCoord, parseCoordLine("Y", 1.5, 2.5));
+}

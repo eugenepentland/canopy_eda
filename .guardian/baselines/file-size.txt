@@ -1,18 +1,18 @@
 # guardian-snapshot v2
 1130 src/diagram/collect.zig
-2622 src/diagram/layout.zig
-1331 src/diagram/render.zig
+2624 src/diagram/layout.zig
+1332 src/diagram/render.zig
 2664 src/erc.zig
 1269 src/eval/builders.zig
 2029 src/eval/design_block.zig
 1450 src/eval/env.zig
-1012 src/export_gerber.zig
+1021 src/export_gerber.zig
 1009 src/import_kicad.zig
 1646 src/kicad_pcb/writer.zig
 9407 src/placement/optimizer.zig
 2466 src/placement/router.zig
-2072 src/render_html.zig
-2226 src/render_json.zig
+2073 src/render_html.zig
+2238 src/render_json.zig
 1318 src/render_pcb_png.zig
 1952 src/serve/auth.zig
 3011 src/serve/edit.zig

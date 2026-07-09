@@ -924,3 +924,12 @@ test "decouples binding docks each cap on its served hub pad" {
     try testing.expect(!hubReachesSpokeOnPin(&ctx, "U1", "1", "C1"));
     try testing.expect(!hubReachesSpokeOnPin(&ctx, "U1", "2", "C2"));
 }
+
+test "isStdRefDes rejects a ref shorter than two characters" {
+    // "U10"/"R5" are standard; a lone letter is not (a length-guard `return
+    // false` flipped to `return true` would misclassify "U" as standard).
+    try std.testing.expect(isStdRefDes("U10"));
+    try std.testing.expect(isStdRefDes("R5"));
+    try std.testing.expect(!isStdRefDes("U"));
+    try std.testing.expect(!isStdRefDes(""));
+}

@@ -60,7 +60,7 @@ pub fn loadModelConfig(allocator: std.mem.Allocator, project_dir: []const u8) Mo
     defer allocator.free(content);
 
     var pos: usize = 0;
-    while (pos < content.len) {
+    while (pos < content.len) { // mutate-ok: at pos==len the first indexOfPos returns null and breaks — a no-op pass
         const q1 = std.mem.indexOfPos(u8, content, pos, "\"") orelse break;
         const q2 = std.mem.indexOfPos(u8, content, q1 + 1, "\"") orelse break;
         const key = content[q1 + 1 .. q2];

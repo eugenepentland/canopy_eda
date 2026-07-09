@@ -1574,3 +1574,21 @@ test "truncate never splits a multi-byte UTF-8 character" {
     try testing.expectEqualStrings("USB 2.0 HS via USB-C \u{2026}", t);
     try expectAllCutsValidUtf8(a, sub);
 }
+
+test "buildVoltPalette dedups power edges that share a voltage" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var nodes = [_]types.Node{ mkNode("REG"), mkNode("A"), mkNode("B") };
+    // Two power edges at the SAME 3.3 V collapse to one palette level; a distinct
+    // 5.0 V edge adds a second. `@abs(x-v)` measures the level gap — flipped to
+    // `@abs(x+v)` two equal voltages (|3.3+3.3|=6.6) no longer match, so the
+    // duplicate would leak a spurious second level.
+    var edges = [_]types.Edge{
+        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "V1", .voltage = 3.3 },
+        .{ .from = 0, .to = 2, .class = types.CLASS_POWER, .label = "V2", .voltage = 3.3 },
+    };
+    var graph = Graph{ .nodes = &nodes, .edges = &edges };
+    const pal = try buildVoltPalette(arena_state.allocator(), &graph);
+    try testing.expectEqual(@as(usize, 1), pal.len);
+    try testing.expectEqual(@as(f64, 3.3), pal[0].v);
+}

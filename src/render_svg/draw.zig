@@ -436,3 +436,14 @@ test "drawNetWire escapes a quote/angle-bracket in the net name" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "<script>") == null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-net=\"&quot;&gt;&lt;script&gt;") != null);
 }
+
+test "drawWire emits a straight line for a horizontal (y1==y2) wire" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const w = buf.writer(std.testing.allocator);
+    // Equal endpoints on y ⇒ the horizontal branch: a single <line>, not the
+    // H-V-H <polyline> the y1!=y2 branch draws. `==`→`!=` swaps the two branches.
+    try drawWire(w, 0, 5, 10, 5);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<line ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<polyline") == null);
+}

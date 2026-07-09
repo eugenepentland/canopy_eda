@@ -782,7 +782,7 @@ pub fn computeFreeLayout(arena: Allocator, graph: *const Graph) Allocator.Error!
         try lnodes.append(arena, .{ .gid = @intCast(i), .x = x, .y = y });
         // A stacked block's cards extend right by (stack-1)*offset.
         const right_extent: f64 = if (nd.stack > 1)
-            @as(f64, @floatFromInt(nd.stack - 1)) * stack_card_offset
+            @as(f64, @floatFromInt(nd.stack - 1)) * stack_card_offset // mutate-ok: dead; max_x reset+recomputed below
         else
             0;
         max_x = @max(max_x, x + node_w + right_extent);
@@ -2974,6 +2974,7 @@ fn expectRouteOrthAndClear(r: Route, g: GroupBox) !void {
         const sx1 = @max(r.pts[i].x, r.pts[i + 1].x);
         const sy0 = @min(r.pts[i].y, r.pts[i + 1].y);
         const sy1 = @max(r.pts[i].y, r.pts[i + 1].y);
+        // mutate-ok: g.x-g.w < g.x+g.w, so a shrunk-x overlap implies a real one; clear routes assert equal.
         try testing.expect(!(sx1 > g.x and sx0 < g.x + g.w and sy1 > g.y and sy0 < g.y + g.h));
     }
 }
@@ -3315,4 +3316,22 @@ test "computeChainLayout orders blocks by declared narrative stage" {
     }
     try testing.expect(x_b < x_a); // B (stage 0) sits left of A (stage 1)
     try testing.expect(x_a < x_c); // A (stage 1) sits left of C (stage 2)
+}
+
+test "routeSystemEdges keeps the target-port index non-negative for a right-column node 0" {
+    // Edge 1→0 with node 0 placed one column to the RIGHT of node 1: the target
+    // face is side_l (1), so the port key is `to*4 + ts` = 0·4 + 1 = 1. Flipping
+    // the `+` to `-` gives 0·4 - 1, an unsigned underflow / OOB — the call must
+    // instead route the one edge cleanly.
+    var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b") };
+    var edges = [_]types.Edge{.{ .from = 1, .to = 0, .class = types.CLASS_CONTROL, .label = "x" }};
+    const graph = Graph{ .nodes = &nodes, .edges = &edges };
+    var lnodes = [_]LNode{
+        .{ .gid = 0, .x = pad + (node_w + h_gap), .y = 0 },
+        .{ .gid = 1, .x = pad, .y = 0 },
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const routes = try routeSystemEdges(arena.allocator(), &graph, &lnodes, 200);
+    try testing.expectEqual(@as(usize, 1), routes.len);
 }
