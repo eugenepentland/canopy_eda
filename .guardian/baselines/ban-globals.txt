@@ -1,7 +1,49 @@
 # guardian-snapshot v1
-src/serve.zig:48: pub var (mutable global) outside wiring/main
-src/serve.zig:49: pub var (mutable global) outside wiring/main
-src/serve.zig:70: pub var (mutable global) outside wiring/main
-src/serve.zig:71: pub var (mutable global) outside wiring/main
-src/serve/rate_limiter.zig:64: pub var (mutable global) outside wiring/main
-src/serve/rate_limiter.zig:68: pub var (mutable global) outside wiring/main
+src/bench_layout.zig:44: mutable global var outside wiring/main
+src/placement/optimizer.zig:2832: mutable global var outside wiring/main
+src/placement/optimizer.zig:2833: mutable global var outside wiring/main
+src/placement/optimizer.zig:302: mutable global var outside wiring/main
+src/placement/optimizer.zig:895: mutable global var outside wiring/main
+src/placement/optimizer.zig:903: mutable global var outside wiring/main
+src/placement/optimizer.zig:910: mutable global var outside wiring/main
+src/placement/optimizer.zig:917: mutable global var outside wiring/main
+src/placement/optimizer.zig:924: mutable global var outside wiring/main
+src/placement/optimizer.zig:930: mutable global var outside wiring/main
+src/placement/optimizer.zig:939: mutable global var outside wiring/main
+src/placement/optimizer.zig:945: mutable global var outside wiring/main
+src/placement/optimizer.zig:975: mutable global var outside wiring/main
+src/serve.zig:124: mutable global var outside wiring/main
+src/serve.zig:125: mutable global var outside wiring/main
+src/serve.zig:48: mutable global var outside wiring/main
+src/serve.zig:49: mutable global var outside wiring/main
+src/serve.zig:70: mutable global var outside wiring/main
+src/serve.zig:71: mutable global var outside wiring/main
+src/serve/auth.zig:230: mutable global var outside wiring/main
+src/serve/auth.zig:231: mutable global var outside wiring/main
+src/serve/auth.zig:93: mutable global var outside wiring/main
+src/serve/auth.zig:94: mutable global var outside wiring/main
+src/serve/auth.zig:95: mutable global var outside wiring/main
+src/serve/mcp_tools.zig:2252: mutable global var outside wiring/main
+src/serve/mcp_tools.zig:2253: mutable global var outside wiring/main
+src/serve/modules.zig:294: mutable global var outside wiring/main
+src/serve/modules.zig:295: mutable global var outside wiring/main
+src/serve/modules.zig:296: mutable global var outside wiring/main
+src/serve/oauth_store.zig:54: mutable global var outside wiring/main
+src/serve/oauth_store.zig:55: mutable global var outside wiring/main
+src/serve/oauth_store.zig:56: mutable global var outside wiring/main
+src/serve/oauth_store.zig:57: mutable global var outside wiring/main
+src/serve/oauth_store.zig:58: mutable global var outside wiring/main
+src/serve/oauth_store.zig:65: mutable global var outside wiring/main
+src/serve/oauth_store.zig:66: mutable global var outside wiring/main
+src/serve/plugin_tokens.zig:18: mutable global var outside wiring/main
+src/serve/plugin_tokens.zig:19: mutable global var outside wiring/main
+src/serve/plugin_tokens.zig:20: mutable global var outside wiring/main
+src/serve/rate_limiter.zig:64: mutable global var outside wiring/main
+src/serve/rate_limiter.zig:68: mutable global var outside wiring/main
+src/serve/schematic_page.zig:46: mutable global var outside wiring/main
+src/serve/schematic_page.zig:47: mutable global var outside wiring/main
+src/serve/static_assets.zig:106: mutable global var outside wiring/main
+src/serve/upload.zig:25: mutable global var outside wiring/main
+src/serve/users.zig:51: mutable global var outside wiring/main
+src/serve/users.zig:52: mutable global var outside wiring/main
+src/serve/users.zig:53: mutable global var outside wiring/main
