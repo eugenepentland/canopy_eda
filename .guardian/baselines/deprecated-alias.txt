@@ -1,0 +1,1769 @@
+# guardian-snapshot v1
+src/asserted_fns.zig:36: std.ArrayListUnmanaged reference outside allowed paths
+src/bom.zig:102: std.ArrayListUnmanaged reference outside allowed paths
+src/bom.zig:103: std.ArrayListUnmanaged reference outside allowed paths
+src/bom.zig:168: std.ArrayListUnmanaged reference outside allowed paths
+src/bom.zig:171: std.ArrayListUnmanaged reference outside allowed paths
+src/bom.zig:171: std.StringHashMap (managed) reference outside allowed paths
+src/bom.zig:275: std.StringHashMap (managed) reference outside allowed paths
+src/bom.zig:291: std.StringHashMap (managed) reference outside allowed paths
+src/bom.zig:86: std.ArrayListUnmanaged reference outside allowed paths
+src/bom_resolve.zig:104: std.StringHashMap (managed) reference outside allowed paths
+src/bom_resolve.zig:109: std.StringHashMap (managed) reference outside allowed paths
+src/bom_resolve.zig:118: std.StringHashMap (managed) reference outside allowed paths
+src/bom_resolve.zig:179: std.ArrayListUnmanaged reference outside allowed paths
+src/bom_resolve.zig:210: std.ArrayListUnmanaged reference outside allowed paths
+src/bom_resolve.zig:231: std.StringHashMap (managed) reference outside allowed paths
+src/bom_resolve.zig:232: std.StringHashMap (managed) reference outside allowed paths
+src/bom_resolve.zig:267: std.StringHashMap (managed) reference outside allowed paths
+src/bom_resolve.zig:268: std.StringHashMap (managed) reference outside allowed paths
+src/bom_resolve.zig:270: std.ArrayListUnmanaged reference outside allowed paths
+src/bom_resolve.zig:30: std.ArrayListUnmanaged reference outside allowed paths
+src/bom_resolve.zig:331: std.ArrayListUnmanaged reference outside allowed paths
+src/bom_resolve.zig:403: std.ArrayListUnmanaged reference outside allowed paths
+src/bom_resolve.zig:413: std.ArrayListUnmanaged reference outside allowed paths
+src/bom_resolve.zig:51: std.StringHashMap (managed) reference outside allowed paths
+src/bom_resolve.zig:89: std.ArrayListUnmanaged reference outside allowed paths
+src/bom_resolve.zig:93: std.StringHashMap (managed) reference outside allowed paths
+src/bom_resolve.zig:95: std.StringHashMap (managed) reference outside allowed paths
+src/commands.zig:134: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/alt_functions.zig:109: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/alt_functions.zig:133: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/alt_functions.zig:170: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/alt_functions.zig:39: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/alt_functions.zig:51: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/footprint.zig:46: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol.zig:120: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol.zig:125: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol.zig:154: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol.zig:214: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol.zig:22: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol.zig:38: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol.zig:65: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol.zig:81: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol.zig:94: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol_helpers.zig:136: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol_helpers.zig:247: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol_helpers.zig:255: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol_helpers.zig:61: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol_helpers.zig:74: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol_helpers.zig:76: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol_helpers.zig:78: std.ArrayListUnmanaged reference outside allowed paths
+src/convert/symbol_helpers.zig:80: std.ArrayListUnmanaged reference outside allowed paths
+src/coverage.zig:109: std.ArrayListUnmanaged reference outside allowed paths
+src/coverage.zig:159: std.ArrayListUnmanaged reference outside allowed paths
+src/coverage.zig:175: std.ArrayListUnmanaged reference outside allowed paths
+src/coverage.zig:204: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/classify.zig:29: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:120: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:180: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:215: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:221: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:222: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:249: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:255: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:256: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:291: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:456: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:471: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:532: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:533: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:549: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:550: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:576: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:581: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:605: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:607: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:610: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:67: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:713: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:718: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:764: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:765: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:773: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:853: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:854: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:876: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:877: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/collect.zig:902: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1088: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1094: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1139: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1147: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1221: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1241: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1394: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1395: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1425: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1431: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:144: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:145: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1526: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1539: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1554: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1555: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1604: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1610: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1684: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1686: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1707: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1724: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1735: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1752: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1764: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1784: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1785: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1793: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1814: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1815: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1843: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1850: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1902: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:1922: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2042: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:209: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:210: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2130: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2149: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2155: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2165: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2178: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2297: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:229: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2305: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:230: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2315: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2353: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2361: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2362: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2363: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2393: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2394: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:244: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2501: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:2503: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:267: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:268: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:302: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:751: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:851: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:854: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:932: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/layout.zig:979: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/lod.zig:210: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/lod.zig:217: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/lod.zig:291: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/lod.zig:344: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/lod.zig:361: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/render.zig:1169: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/render.zig:215: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/render.zig:227: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/render.zig:818: std.ArrayListUnmanaged reference outside allowed paths
+src/diagram/render.zig:858: std.ArrayListUnmanaged reference outside allowed paths
+src/docgen.zig:29: std.ArrayListUnmanaged reference outside allowed paths
+src/emit.zig:12: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1023: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1028: std.StringHashMap (managed) reference outside allowed paths
+src/erc.zig:1037: std.StringHashMap (managed) reference outside allowed paths
+src/erc.zig:1038: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1113: std.StringHashMap (managed) reference outside allowed paths
+src/erc.zig:1120: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1120: std.StringHashMap (managed) reference outside allowed paths
+src/erc.zig:1158: std.StringHashMap (managed) reference outside allowed paths
+src/erc.zig:1229: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1234: std.StringHashMap (managed) reference outside allowed paths
+src/erc.zig:123: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1243: std.StringHashMap (managed) reference outside allowed paths
+src/erc.zig:1244: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:134: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1356: std.StringHashMap (managed) reference outside allowed paths
+src/erc.zig:1384: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1389: std.StringHashMap (managed) reference outside allowed paths
+src/erc.zig:1398: std.StringHashMap (managed) reference outside allowed paths
+src/erc.zig:1399: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1490: std.StringHashMap (managed) reference outside allowed paths
+src/erc.zig:1526: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1530: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1533: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1553: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1619: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1621: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1623: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1642: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1692: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1693: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1724: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1761: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1765: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1769: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1790: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1804: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1806: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1847: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:186: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1872: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:1979: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2093: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2173: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:223: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2259: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2303: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2319: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2408: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:240: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2422: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2440: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2448: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2457: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2553: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2570: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2591: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2666: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2687: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2706: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2729: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2752: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2771: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:279: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2832: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2848: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2860: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2873: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2918: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2933: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2948: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:2997: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3012: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3055: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3069: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3112: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3139: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3156: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3171: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3201: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3270: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3287: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:332: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3340: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3392: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:343: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3461: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3521: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3584: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:359: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3613: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3642: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3676: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3706: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3741: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3771: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3801: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3836: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3867: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3868: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3888: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3902: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3917: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3951: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:3989: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:472: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:528: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:624: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:682: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:717: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:726: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:764: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:81: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:827: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:836: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:910: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:948: std.ArrayListUnmanaged reference outside allowed paths
+src/erc.zig:971: std.ArrayListUnmanaged reference outside allowed paths
+src/escape.zig:26: std.ArrayListUnmanaged reference outside allowed paths
+src/escape.zig:34: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1148: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1267: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1268: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1291: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1292: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1313: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1314: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1335: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1336: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1378: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1379: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1404: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1405: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1418: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1430: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1435: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1451: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1455: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1469: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:1474: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:173: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:197: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:249: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:272: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:283: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:295: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:354: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:355: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:356: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:452: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:453: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:454: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:502: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:503: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:53: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:607: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:710: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:714: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:964: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/builders.zig:998: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1002: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:105: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1106: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1106: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1107: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1165: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1197: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1232: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1342: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1365: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1369: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1411: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1464: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1508: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1509: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1510: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1511: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1520: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1533: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1544: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1564: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1614: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1620: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1652: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1706: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:1801: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:2091: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:2095: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:2111: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:2116: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:2131: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:2134: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:2152: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:2155: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:232: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:2547: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:2573: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:2604: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:2629: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:314: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:363: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:381: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:417: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:461: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:491: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:514: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:537: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:586: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:587: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:637: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:638: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:639: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:640: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:715: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:716: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:717: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:718: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:719: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:724: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:725: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:727: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:728: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:729: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:730: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:731: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:735: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:87: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:888: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:889: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:88: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:890: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:891: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:89: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:908: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:90: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:91: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:92: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:931: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:932: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:933: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:934: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:935: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:936: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:941: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:942: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:944: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:945: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:946: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:947: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:94: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:95: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:96: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:97: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:98: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/design_block.zig:99: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/env.zig:448: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/env.zig:469: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/evaluator.zig:128: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/evaluator.zig:143: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/evaluator.zig:147: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/evaluator.zig:176: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/evaluator.zig:181: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/evaluator.zig:371: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/evaluator.zig:433: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/evaluator.zig:463: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/fmt.zig:49: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/ids.zig:690: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:163: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:164: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:165: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:166: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:171: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:172: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:299: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:300: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:314: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:334: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:357: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:405: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:434: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:502: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:519: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:520: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:585: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:586: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:587: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:665: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:666: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:725: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:726: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:727: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:755: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:756: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:791: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/instance.zig:792: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/modules.zig:219: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/modules.zig:220: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/modules.zig:221: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/modules.zig:222: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/modules.zig:223: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/modules.zig:293: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/modules.zig:394: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/modules.zig:396: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/modules.zig:595: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/net_analysis.zig:106: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/power_budget.zig:148: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/power_budget.zig:158: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/power_budget.zig:305: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/power_budget.zig:354: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/power_sequencing.zig:106: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/rails.zig:102: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/rails.zig:127: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/special_forms.zig:84: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/test_point.zig:33: std.ArrayListUnmanaged reference outside allowed paths
+src/eval/validate.zig:95: std.ArrayListUnmanaged reference outside allowed paths
+src/export_fab.zig:126: std.ArrayListUnmanaged reference outside allowed paths
+src/export_fab.zig:155: std.ArrayListUnmanaged reference outside allowed paths
+src/export_gerber.zig:376: std.StringHashMap (managed) reference outside allowed paths
+src/export_gerber.zig:569: std.ArrayListUnmanaged reference outside allowed paths
+src/export_gerber.zig:689: std.StringHashMap (managed) reference outside allowed paths
+src/export_gerber.zig:690: std.StringHashMap (managed) reference outside allowed paths
+src/export_gerber.zig:701: std.StringHashMap (managed) reference outside allowed paths
+src/export_gerber.zig:863: std.ArrayListUnmanaged reference outside allowed paths
+src/export_gerber.zig:87: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad.zig:164: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad.zig:165: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad.zig:208: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad.zig:210: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad.zig:218: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad.zig:220: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad.zig:224: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad.zig:230: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad.zig:334: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad.zig:336: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad.zig:342: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad.zig:344: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad.zig:381: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad.zig:383: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad.zig:389: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad.zig:391: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad.zig:394: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad.zig:398: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad.zig:480: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad.zig:483: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad.zig:502: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad.zig:516: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad_footprint.zig:164: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_footprint.zig:614: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_footprint.zig:677: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_footprint.zig:681: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_footprint.zig:87: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_model.zig:153: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_model.zig:157: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad_model.zig:223: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_model.zig:243: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad_model.zig:257: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_model.zig:49: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad_netlist.zig:121: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_netlist.zig:175: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_netlist.zig:223: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_netlist.zig:270: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_netlist.zig:28: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad_netlist.zig:29: std.StringHashMap (managed) reference outside allowed paths
+src/export_kicad_netlist.zig:300: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_netlist.zig:307: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_netlist.zig:309: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_netlist.zig:317: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_netlist.zig:318: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_netlist.zig:31: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_netlist.zig:331: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_netlist.zig:409: std.ArrayListUnmanaged reference outside allowed paths
+src/export_kicad_netlist.zig:71: std.StringHashMap (managed) reference outside allowed paths
+src/fab_readiness.zig:105: std.ArrayListUnmanaged reference outside allowed paths
+src/fab_readiness.zig:106: std.ArrayListUnmanaged reference outside allowed paths
+src/fab_readiness.zig:181: std.ArrayListUnmanaged reference outside allowed paths
+src/fab_readiness.zig:182: std.ArrayListUnmanaged reference outside allowed paths
+src/fab_readiness.zig:362: std.ArrayListUnmanaged reference outside allowed paths
+src/fab_readiness.zig:405: std.ArrayListUnmanaged reference outside allowed paths
+src/fab_readiness.zig:409: std.ArrayListUnmanaged reference outside allowed paths
+src/fab_readiness.zig:462: std.AutoHashMap (managed) reference outside allowed paths
+src/fab_readiness.zig:592: std.ArrayListUnmanaged reference outside allowed paths
+src/gerber_verify.zig:259: std.ArrayListUnmanaged reference outside allowed paths
+src/gerber_verify.zig:53: std.ArrayListUnmanaged reference outside allowed paths
+src/gerber_verify.zig:54: std.ArrayListUnmanaged reference outside allowed paths
+src/gerber_verify.zig:55: std.ArrayListUnmanaged reference outside allowed paths
+src/id_insert.zig:115: std.StringHashMap (managed) reference outside allowed paths
+src/id_insert.zig:121: std.StringHashMap (managed) reference outside allowed paths
+src/id_insert.zig:140: std.ArrayListUnmanaged reference outside allowed paths
+src/id_insert.zig:143: std.ArrayListUnmanaged reference outside allowed paths
+src/id_insert.zig:143: std.AutoHashMap (managed) reference outside allowed paths
+src/id_insert.zig:174: std.ArrayListUnmanaged reference outside allowed paths
+src/id_insert.zig:72: std.ArrayListUnmanaged reference outside allowed paths
+src/id_insert.zig:89: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:105: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:139: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:139: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold.zig:151: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:160: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold.zig:193: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold.zig:223: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:223: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold.zig:224: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold.zig:225: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold.zig:243: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:243: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold.zig:244: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold.zig:245: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold.zig:251: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:389: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:393: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:421: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:432: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:442: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:446: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:468: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:473: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:487: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:499: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:499: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold.zig:514: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:556: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:559: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:577: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:656: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:662: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:684: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold.zig:85: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold.zig:90: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold_emit.zig:113: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold_emit.zig:138: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold_emit.zig:139: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold_emit.zig:140: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold_emit.zig:141: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold_emit.zig:146: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold_emit.zig:149: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold_emit.zig:211: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold_emit.zig:229: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold_emit.zig:249: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold_emit.zig:255: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold_emit.zig:303: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold_emit.zig:304: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold_emit.zig:304: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold_emit.zig:363: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold_emit.zig:363: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold_emit.zig:364: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold_emit.zig:365: std.StringHashMap (managed) reference outside allowed paths
+src/import_fold_emit.zig:46: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold_emit.zig:49: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold_emit.zig:55: std.ArrayListUnmanaged reference outside allowed paths
+src/import_fold_emit.zig:93: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:174: std.AutoHashMap (managed) reference outside allowed paths
+src/import_kicad.zig:184: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:197: std.AutoHashMap (managed) reference outside allowed paths
+src/import_kicad.zig:215: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:265: std.AutoHashMap (managed) reference outside allowed paths
+src/import_kicad.zig:266: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:354: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:355: std.StringHashMap (managed) reference outside allowed paths
+src/import_kicad.zig:440: std.StringHashMap (managed) reference outside allowed paths
+src/import_kicad.zig:470: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:494: std.StringHashMap (managed) reference outside allowed paths
+src/import_kicad.zig:495: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:506: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:534: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:688: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:693: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:783: std.StringHashMap (managed) reference outside allowed paths
+src/import_kicad.zig:784: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:784: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:851: std.StringHashMap (managed) reference outside allowed paths
+src/import_kicad.zig:852: std.StringHashMap (managed) reference outside allowed paths
+src/import_kicad.zig:857: std.StringHashMap (managed) reference outside allowed paths
+src/import_kicad.zig:858: std.StringHashMap (managed) reference outside allowed paths
+src/import_kicad.zig:897: std.ArrayListUnmanaged reference outside allowed paths
+src/import_kicad.zig:925: std.ArrayListUnmanaged reference outside allowed paths
+src/json_writer.zig:49: std.ArrayListUnmanaged reference outside allowed paths
+src/json_writer.zig:57: std.ArrayListUnmanaged reference outside allowed paths
+src/json_writer.zig:65: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/format.zig:105: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/format.zig:48: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/format.zig:64: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/reader.zig:151: std.AutoHashMap (managed) reference outside allowed paths
+src/kicad_pcb/reader.zig:152: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/reader.zig:32: std.AutoHashMap (managed) reference outside allowed paths
+src/kicad_pcb/reader.zig:33: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/reader.zig:59: std.AutoHashMap (managed) reference outside allowed paths
+src/kicad_pcb/reader.zig:77: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:1270: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:1271: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:1276: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:1322: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:1350: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:1351: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:1386: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:1387: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:1417: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:142: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:143: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:150: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:151: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:152: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:153: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:1567: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:1568: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:1585: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:1589: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:198: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:214: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:2281: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:233: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:234: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:259: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:260: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:261: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:265: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:266: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:266: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:278: std.AutoHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:279: std.AutoHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:280: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:281: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:282: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:283: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:284: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:403: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:618: std.StringHashMap (managed) reference outside allowed paths
+src/kicad_pcb/writer.zig:619: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:660: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:717: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:763: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:885: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:903: std.ArrayListUnmanaged reference outside allowed paths
+src/kicad_pcb/writer.zig:968: std.ArrayListUnmanaged reference outside allowed paths
+src/leak_tests/import_export.zig:100: std.StringHashMap (managed) reference outside allowed paths
+src/leak_tests/import_export.zig:86: std.StringHashMap (managed) reference outside allowed paths
+src/leak_tests/review_bom.zig:185: std.ArrayListUnmanaged reference outside allowed paths
+src/leak_tests/review_bom.zig:216: std.ArrayListUnmanaged reference outside allowed paths
+src/leak_tests/review_bom.zig:241: std.ArrayListUnmanaged reference outside allowed paths
+src/parts.zig:120: std.ArrayListUnmanaged reference outside allowed paths
+src/parts.zig:137: std.ArrayListUnmanaged reference outside allowed paths
+src/parts.zig:52: std.ArrayListUnmanaged reference outside allowed paths
+src/parts.zig:63: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/drc.zig:177: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/drc.zig:293: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/drc.zig:665: std.StringHashMap (managed) reference outside allowed paths
+src/placement/drc.zig:672: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/drc.zig:715: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/geometry.zig:110: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/geometry.zig:111: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/geometry.zig:112: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/geometry.zig:158: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/geometry.zig:159: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/geometry.zig:277: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/geometry.zig:380: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/geometry.zig:423: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/geometry.zig:457: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/geometry.zig:458: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/layout_lint.zig:121: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/layout_lint.zig:122: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/layout_lint.zig:148: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/layout_lint.zig:160: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/layout_lint.zig:182: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/layout_lint.zig:229: std.StringHashMap (managed) reference outside allowed paths
+src/placement/layout_lint.zig:66: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/layout_lint.zig:87: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/layout_lint.zig:88: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/module_policy.zig:134: std.StringHashMap (managed) reference outside allowed paths
+src/placement/module_policy.zig:189: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/module_policy.zig:97: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:10013: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:10110: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:10112: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:10163: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:10211: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:10251: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:10257: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:10298: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:10336: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:10380: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:10426: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:10459: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:10626: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:10701: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:10747: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:10798: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:10918: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:11000: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:11018: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:11039: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:1158: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:1182: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:1211: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:1333: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:1522: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:1597: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:1602: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:1742: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:1749: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:1773: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:1818: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:1822: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:1880: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:1886: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:2247: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:2255: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:2256: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:2257: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:2258: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:2318: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:2319: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:2341: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:2385: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:2410: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:2436: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:2450: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:2451: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:2648: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:2752: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:2760: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:2769: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:2770: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:2786: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:2848: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:2955: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:3025: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:3031: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:3032: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:3157: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:3160: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:3225: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:3263: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:3333: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:3336: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:3342: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:3413: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:3451: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:3452: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:3489: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:3491: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:3494: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:3540: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:3594: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:3632: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:3654: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:3772: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:3773: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:3975: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:4014: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:4098: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:4174: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:4256: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:4306: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:4316: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:4401: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:4404: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:4421: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:4439: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:4463: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:4538: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:4597: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:4605: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:4718: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:4720: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:4875: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:4917: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:5090: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:5099: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:5308: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:5367: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:5368: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:5380: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:5390: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:5412: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:5415: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:5475: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:5483: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:6095: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:6166: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:6189: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:6190: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:6195: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:6208: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:6209: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:6210: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:6395: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:6396: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:6455: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:6457: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:6480: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:6534: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:6576: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:6578: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:6585: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:6599: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:6608: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:6611: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:6721: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:6755: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:6788: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:7051: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:7092: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:7145: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:7168: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:7441: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:7443: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:7526: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:7559: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:7595: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:7701: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:7900: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:8099: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:8105: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8106: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8107: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8112: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8153: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8338: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8339: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8340: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8406: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8407: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8446: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8496: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8497: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8506: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8532: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8575: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:8578: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8600: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/optimizer.zig:8622: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:8637: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:8704: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:9414: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:9446: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:9501: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:9702: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:9922: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:9966: std.StringHashMap (managed) reference outside allowed paths
+src/placement/optimizer.zig:997: std.StringHashMap (managed) reference outside allowed paths
+src/placement/pad_shape.zig:111: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/pad_shape.zig:87: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/pour.zig:200: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/pour.zig:271: std.StringHashMap (managed) reference outside allowed paths
+src/placement/pour.zig:272: std.StringHashMap (managed) reference outside allowed paths
+src/placement/pour.zig:282: std.StringHashMap (managed) reference outside allowed paths
+src/placement/pour.zig:300: std.StringHashMap (managed) reference outside allowed paths
+src/placement/pour.zig:329: std.StringHashMap (managed) reference outside allowed paths
+src/placement/pour.zig:443: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/pour.zig:464: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/pour.zig:493: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/pour.zig:493: std.AutoHashMap (managed) reference outside allowed paths
+src/placement/pour.zig:501: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/pour.zig:537: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/pour.zig:560: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/pour.zig:636: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/pour.zig:652: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/pour.zig:673: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/pour.zig:702: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/pour.zig:799: std.AutoHashMap (managed) reference outside allowed paths
+src/placement/pour.zig:861: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:138: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:1391: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:139: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:140: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:143: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1527: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1527: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1540: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1548: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1585: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1621: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1706: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1718: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1732: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1732: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1797: std.AutoHashMap (managed) reference outside allowed paths
+src/placement/router.zig:1863: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:1871: std.AutoHashMap (managed) reference outside allowed paths
+src/placement/router.zig:1873: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1902: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1928: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:192: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:1930: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1931: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1959: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1960: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:196: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:197: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1984: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:1985: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:199: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:2004: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:2006: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:2007: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:2065: std.AutoHashMap (managed) reference outside allowed paths
+src/placement/router.zig:2083: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:2109: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:2110: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:2251: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:2252: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:2258: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:2320: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:243: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:244: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:245: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:248: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:2756: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:2773: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:2986: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:3036: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:316: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:333: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:3486: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:3487: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:432: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:433: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:507: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:574: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:575: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:644: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:651: std.ArrayListUnmanaged reference outside allowed paths
+src/placement/router.zig:692: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:726: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:753: std.StringHashMap (managed) reference outside allowed paths
+src/placement/router.zig:754: std.ArrayListUnmanaged reference outside allowed paths
+src/query.zig:111: std.ArrayListUnmanaged reference outside allowed paths
+src/query.zig:128: std.ArrayListUnmanaged reference outside allowed paths
+src/query.zig:154: std.ArrayListUnmanaged reference outside allowed paths
+src/query.zig:168: std.ArrayListUnmanaged reference outside allowed paths
+src/query.zig:267: std.ArrayListUnmanaged reference outside allowed paths
+src/query.zig:286: std.ArrayListUnmanaged reference outside allowed paths
+src/query.zig:97: std.ArrayListUnmanaged reference outside allowed paths
+src/render_html.zig:1052: std.ArrayListUnmanaged reference outside allowed paths
+src/render_html.zig:1291: std.ArrayListUnmanaged reference outside allowed paths
+src/render_html.zig:1314: std.ArrayListUnmanaged reference outside allowed paths
+src/render_html.zig:1667: std.ArrayListUnmanaged reference outside allowed paths
+src/render_html.zig:1817: std.ArrayListUnmanaged reference outside allowed paths
+src/render_html.zig:1841: std.ArrayListUnmanaged reference outside allowed paths
+src/render_html.zig:1928: std.ArrayListUnmanaged reference outside allowed paths
+src/render_html.zig:196: std.ArrayListUnmanaged reference outside allowed paths
+src/render_html.zig:217: std.ArrayListUnmanaged reference outside allowed paths
+src/render_html.zig:458: std.ArrayListUnmanaged reference outside allowed paths
+src/render_html.zig:610: std.ArrayListUnmanaged reference outside allowed paths
+src/render_html.zig:895: std.ArrayListUnmanaged reference outside allowed paths
+src/render_html.zig:998: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:1057: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:1247: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:127: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:128: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:1333: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:1418: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:1499: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:1500: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:156: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:1654: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:1737: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:1781: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:1904: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:202: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:311: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:351: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:352: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:353: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:354: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:355: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:356: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:389: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:467: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:576: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:600: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:601: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:602: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:603: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:633: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:689: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:708: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:738: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:742: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:743: std.StringHashMap (managed) reference outside allowed paths
+src/render_json.zig:751: std.StringHashMap (managed) reference outside allowed paths
+src/render_json.zig:795: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:796: std.StringHashMap (managed) reference outside allowed paths
+src/render_json.zig:797: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:798: std.ArrayListUnmanaged reference outside allowed paths
+src/render_json.zig:990: std.ArrayListUnmanaged reference outside allowed paths
+src/render_pcb_png.zig:1253: std.ArrayListUnmanaged reference outside allowed paths
+src/render_pcb_png.zig:1267: std.ArrayListUnmanaged reference outside allowed paths
+src/render_pcb_png.zig:1292: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:199: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:201: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:206: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:209: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:211: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:219: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:244: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:323: std.ArrayListUnmanaged reference outside allowed paths
+src/render_pcb_png.zig:335: std.ArrayListUnmanaged reference outside allowed paths
+src/render_pcb_png.zig:409: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:410: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:437: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:438: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:439: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:444: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:446: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:448: std.StringHashMap (managed) reference outside allowed paths
+src/render_pcb_png.zig:450: std.StringHashMap (managed) reference outside allowed paths
+src/render_svg/branch.zig:67: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/branch.zig:94: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/connection.zig:126: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/connection.zig:299: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/connection.zig:306: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/connection.zig:353: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/connection.zig:368: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/connection.zig:377: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/connection.zig:383: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/connection.zig:409: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/connection.zig:473: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/connection.zig:57: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/context.zig:173: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/context.zig:174: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/context.zig:175: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/context.zig:179: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/context.zig:180: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/context.zig:231: std.StringHashMap (managed) reference outside allowed paths
+src/render_svg/context.zig:232: std.StringHashMap (managed) reference outside allowed paths
+src/render_svg/context.zig:250: std.StringHashMap (managed) reference outside allowed paths
+src/render_svg/context.zig:331: std.StringHashMap (managed) reference outside allowed paths
+src/render_svg/context.zig:335: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/context.zig:335: std.StringHashMap (managed) reference outside allowed paths
+src/render_svg/context.zig:370: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/context.zig:460: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/context.zig:568: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/context.zig:569: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/draw.zig:428: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/draw.zig:441: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:112: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:137: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:138: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:140: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:144: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:189: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:190: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:223: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:244: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:284: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:285: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:286: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:287: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:47: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:48: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:58: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:64: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:70: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:71: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/hub.zig:73: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/section_inset.zig:147: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/section_inset.zig:53: std.ArrayListUnmanaged reference outside allowed paths
+src/render_svg/section_inset.zig:59: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:266: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:277: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:307: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:316: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:390: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:425: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:485: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:505: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:512: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:569: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:622: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:623: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:640: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:645: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:659: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:707: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:721: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:799: std.ArrayListUnmanaged reference outside allowed paths
+src/review.zig:980: std.ArrayListUnmanaged reference outside allowed paths
+src/review_json.zig:18: std.ArrayListUnmanaged reference outside allowed paths
+src/review_md.zig:119: std.ArrayListUnmanaged reference outside allowed paths
+src/review_md.zig:442: std.ArrayListUnmanaged reference outside allowed paths
+src/review_md.zig:465: std.ArrayListUnmanaged reference outside allowed paths
+src/review_md.zig:502: std.ArrayListUnmanaged reference outside allowed paths
+src/review_md.zig:60: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/api.zig:121: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/api.zig:199: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/api.zig:472: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/api.zig:555: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/api.zig:565: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/api.zig:600: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/api.zig:698: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/api.zig:746: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/api.zig:802: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:1025: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:102: std.StringHashMap (managed) reference outside allowed paths
+src/serve/auth.zig:1038: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:104: std.StringHashMap (managed) reference outside allowed paths
+src/serve/auth.zig:1353: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:140: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:1414: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:162: std.StringHashMap (managed) reference outside allowed paths
+src/serve/auth.zig:164: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:1786: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:1853: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:1917: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:231: std.StringHashMap (managed) reference outside allowed paths
+src/serve/auth.zig:233: std.StringHashMap (managed) reference outside allowed paths
+src/serve/auth.zig:234: std.StringHashMap (managed) reference outside allowed paths
+src/serve/auth.zig:240: std.StringHashMap (managed) reference outside allowed paths
+src/serve/auth.zig:349: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:400: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:426: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:452: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:788: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:801: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/auth.zig:94: std.StringHashMap (managed) reference outside allowed paths
+src/serve/bom_html.zig:127: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:139: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:142: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:163: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:314: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:326: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:329: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:350: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:436: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:454: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:504: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:546: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:58: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:59: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:60: std.StringHashMap (managed) reference outside allowed paths
+src/serve/bom_html.zig:61: std.StringHashMap (managed) reference outside allowed paths
+src/serve/bom_html.zig:678: std.StringHashMap (managed) reference outside allowed paths
+src/serve/bom_html.zig:692: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:692: std.StringArrayHashMap reference outside allowed paths
+src/serve/bom_html.zig:697: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:697: std.StringArrayHashMap reference outside allowed paths
+src/serve/bom_html.zig:773: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/bom_html.zig:782: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:1010: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:154: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:235: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:266: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:436: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:46: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:473: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:525: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:602: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:619: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:638: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:681: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:703: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:721: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:772: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:79: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:869: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_info.zig:965: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_search.zig:320: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_search.zig:375: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_search.zig:391: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_search.zig:438: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_search.zig:473: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/component_search.zig:498: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/datasheet_attach.zig:190: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/datasheet_attach.zig:198: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/datasheet_attach.zig:226: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/datasheet_attach.zig:50: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/design_diff.zig:128: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/design_diff.zig:131: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/design_diff.zig:134: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/design_diff.zig:135: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/design_diff.zig:136: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/design_diff.zig:137: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/design_diff.zig:160: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/design_diff.zig:204: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/design_diff.zig:214: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/design_diff.zig:218: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/design_diff.zig:310: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/design_diff.zig:378: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/design_diff.zig:81: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/diag_format.zig:111: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/diag_format.zig:143: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/digikey.zig:159: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/digikey.zig:164: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/digikey.zig:223: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/digikey.zig:258: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/digikey.zig:287: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/digikey.zig:306: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/digikey.zig:384: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/digikey.zig:464: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1016: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1081: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1132: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1215: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1320: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:136: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1383: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1387: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1414: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1478: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1485: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1501: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1598: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1605: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1697: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:1711: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:2147: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:2472: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:2547: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:2648: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:2792: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:2828: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:2836: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:2869: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:2885: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:2917: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:2991: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:3067: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:3099: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:350: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:387: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:446: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:518: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:552: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:575: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:584: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:788: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:846: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:913: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit.zig:963: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit_assist.zig:182: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit_assist.zig:432: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/edit_assist.zig:85: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/footprint_preview.zig:106: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/footprint_preview.zig:249: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/footprint_preview.zig:46: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/footprint_preview.zig:47: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/footprint_preview.zig:48: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/footprint_preview.zig:498: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/footprint_preview.zig:49: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/footprint_preview.zig:50: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/footprint_preview.zig:51: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/footprint_preview.zig:52: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/footprint_preview.zig:649: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/history.zig:116: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/history.zig:223: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/layout_match.zig:102: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/layout_match.zig:134: std.StringHashMap (managed) reference outside allowed paths
+src/serve/layout_match.zig:193: std.StringHashMap (managed) reference outside allowed paths
+src/serve/layout_match.zig:194: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/layout_match.zig:70: std.StringHashMap (managed) reference outside allowed paths
+src/serve/layout_match.zig:74: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/layout_match.zig:90: std.StringHashMap (managed) reference outside allowed paths
+src/serve/library.zig:187: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/library.zig:202: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/library.zig:254: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/library.zig:256: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/library.zig:264: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/library.zig:452: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/library.zig:475: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/library.zig:67: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/library.zig:68: std.StringHashMap (managed) reference outside allowed paths
+src/serve/library.zig:69: std.StringHashMap (managed) reference outside allowed paths
+src/serve/library_3d.zig:427: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp.zig:121: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp.zig:124: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp.zig:134: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp.zig:137: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp.zig:169: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp.zig:203: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp.zig:222: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp.zig:235: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp.zig:246: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_docs.zig:116: std.StringHashMap (managed) reference outside allowed paths
+src/serve/mcp_docs.zig:123: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_docs.zig:131: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_docs.zig:162: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_docs.zig:90: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:1033: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:1144: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:1187: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:1237: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:1345: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:1359: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:1410: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:1576: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:192: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:2065: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:2071: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:2157: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:223: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:2351: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:2399: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:2444: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:2485: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:248: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:2597: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:2687: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:268: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:2712: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:2761: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:291: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:310: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:326: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:340: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:353: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:371: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:379: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:384: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:401: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:413: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:434: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:458: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:540: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:557: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:562: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:568: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:574: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:579: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:591: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:621: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:778: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:798: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:815: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:857: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:872: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:879: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:884: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:904: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:906: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:922: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:927: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:933: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:941: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:947: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:952: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:957: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:963: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/mcp_tools.zig:978: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/modules.zig:244: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/modules.zig:251: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/modules.zig:377: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/notes.zig:164: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/notes.zig:301: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/notes.zig:346: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/notes.zig:370: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/notes.zig:436: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/notes.zig:461: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/notes.zig:82: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/notes.zig:83: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/oauth.zig:242: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/oauth_store.zig:105: std.StringHashMap (managed) reference outside allowed paths
+src/serve/oauth_store.zig:176: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/oauth_store.zig:242: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/oauth_store.zig:446: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/oauth_store.zig:535: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/oauth_store.zig:55: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/oauth_store.zig:56: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/oauth_store.zig:57: std.StringHashMap (managed) reference outside allowed paths
+src/serve/page_cache.zig:121: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pages.zig:103: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pages.zig:118: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pages.zig:141: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pages.zig:143: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pages.zig:84: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_describe.zig:133: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:141: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:143: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:151: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:154: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_describe.zig:334: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:335: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:358: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:359: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:501: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:504: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_describe.zig:528: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_describe.zig:552: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:553: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_describe.zig:576: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:590: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_describe.zig:592: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_describe.zig:594: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_describe.zig:720: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:728: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:849: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_describe.zig:852: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:1294: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:1626: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:1738: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:1847: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:2113: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:2277: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:2403: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:2435: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:2494: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:2864: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:2866: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:2867: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:2915: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:2987: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:3029: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:3057: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:3076: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:3171: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:3243: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:3583: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:3649: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:3667: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:3680: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:3798: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:3848: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:3850: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:3868: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:3882: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:3884: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:3899: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:3901: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:3902: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:3945: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:3947: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:3963: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:4005: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:4007: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:4037: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:4039: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:4041: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:4055: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:4057: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:4058: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:4787: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:5286: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:5335: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:5338: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:5341: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:5343: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:5510: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:6550: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:6568: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:6579: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:6667: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:6743: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:6744: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:6745: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:6763: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:6766: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:6767: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:6787: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:6789: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:6790: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:680: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:6825: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:683: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:6868: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:6889: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:6890: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:6899: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:6900: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:6991: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:7058: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:7083: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:7153: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:7197: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:7211: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:7297: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:737: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:738: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:759: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:760: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:762: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:7715: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:7718: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:7854: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:7890: std.StringHashMap (managed) reference outside allowed paths
+src/serve/pcb_layout_page.zig:7908: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/pcb_layout_page.zig:792: std.StringHashMap (managed) reference outside allowed paths
+src/serve/plugin_tokens.zig:19: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/plugin_tokens.zig:65: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/rough_best.zig:200: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/rough_best.zig:64: std.StringHashMap (managed) reference outside allowed paths
+src/serve/rough_best.zig:65: std.StringHashMap (managed) reference outside allowed paths
+src/serve/rough_best.zig:91: std.StringHashMap (managed) reference outside allowed paths
+src/serve/style_score.zig:129: std.StringHashMap (managed) reference outside allowed paths
+src/serve/style_score.zig:133: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/style_score.zig:162: std.StringHashMap (managed) reference outside allowed paths
+src/serve/style_score.zig:272: std.StringHashMap (managed) reference outside allowed paths
+src/serve/style_score.zig:68: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/style_score.zig:83: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:1117: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1136: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1210: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:1269: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1301: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1302: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1384: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:1422: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1423: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1474: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:1499: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:1575: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:1576: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1612: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:1616: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1663: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:1664: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1683: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:1684: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1787: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1799: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1801: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:1801: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1802: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:1815: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1829: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1830: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1838: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1842: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1848: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1853: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1854: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1858: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1859: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:1859: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1864: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1873: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1877: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:1881: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1882: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1888: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1894: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1924: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1926: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:192: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:1936: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:201: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2053: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2054: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2055: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2056: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2083: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2084: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:208: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2145: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2147: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2161: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2171: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2182: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2201: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2202: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2205: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2206: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2207: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2211: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2220: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2220: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2246: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2246: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2353: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2357: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2357: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2358: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2358: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2618: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2619: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2620: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2620: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2622: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2634: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2736: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2767: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2866: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2879: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2896: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2896: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2897: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2932: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:2992: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:2994: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3047: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3048: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3049: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3050: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3051: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3052: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3053: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3123: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3157: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3160: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3161: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3161: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3162: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3167: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3199: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3200: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3201: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3260: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3276: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3277: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:327: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3285: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3321: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3325: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3325: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3326: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3373: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3380: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3380: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3381: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3427: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3430: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3602: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3602: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3603: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3668: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3704: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3746: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3784: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3786: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3788: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3790: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3804: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3806: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3808: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3810: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3829: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3831: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3833: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3835: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3855: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3857: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3859: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3861: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3876: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3878: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3880: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3882: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3895: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3897: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3911: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3913: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3944: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3945: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3946: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3946: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3955: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3958: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3974: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3975: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3976: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3976: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:3984: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:3987: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:4002: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:4042: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:4102: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:4119: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:771: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:772: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:773: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:774: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:774: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:777: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:829: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:831: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:836: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:837: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:838: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:839: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:839: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:846: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:858: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:860: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:861: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:862: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:881: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:882: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:907: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/sync.zig:911: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:912: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:920: std.StringHashMap (managed) reference outside allowed paths
+src/serve/sync.zig:982: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/upload.zig:343: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/upload.zig:363: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/upload.zig:425: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/upload.zig:463: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/upload_datasheet.zig:152: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/upload_datasheet.zig:169: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/upload_datasheet.zig:62: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/users.zig:52: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/users.zig:96: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:1076: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:1260: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:367: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:387: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:417: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:491: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:574: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:593: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:633: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:697: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:798: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:823: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:912: std.ArrayListUnmanaged reference outside allowed paths
+src/serve/vfs.zig:949: std.ArrayListUnmanaged reference outside allowed paths
+src/sexpr/parser.zig:112: std.ArrayListUnmanaged reference outside allowed paths
+src/sexpr/parser.zig:36: std.ArrayListUnmanaged reference outside allowed paths
+src/sexpr/printer.zig:18: std.ArrayListUnmanaged reference outside allowed paths
