@@ -62,3 +62,4 @@ min_mutants   = 4    # below this many viable mutants: informational, not gated
 # Arrays MUST stay on ONE line — guardian's toml parser only reads inline arrays.
 [int_from_float]
 guard_fns = ["checkedInt"]
+require_guard = ["src/eval/", "src/placement/", "src/kicad_pcb/", "src/import_kicad.zig"]

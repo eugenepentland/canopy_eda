@@ -1,2 +1,2 @@
 # guardian-snapshot v1
-casts 88
+casts 0
