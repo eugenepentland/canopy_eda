@@ -10,7 +10,6 @@ const httpz = @import("httpz");
 const server_mod = @import("../serve.zig");
 const Server = server_mod.Server;
 const auth = @import("auth.zig");
-const store = @import("oauth_store.zig");
 const users = @import("users.zig");
 const account_template = @import("templates/account.zig");
 
@@ -42,14 +41,14 @@ pub fn accountPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         return;
     };
 
-    const clients = try store.listClientsByEmail(ctx.allocator, ctx.auth_dir, email);
+    const clients = try ctx.state.oauth.listClientsByEmail(ctx.allocator, ctx.auth_dir, email);
     defer ctx.allocator.free(clients);
 
-    const current_role = users.getRole(ctx.allocator, ctx.auth_dir, email);
+    const current_role = ctx.state.users.getRole(ctx.allocator, ctx.auth_dir, email);
     const is_admin = current_role.canAdmin();
 
     const user_list: []users.User = if (is_admin)
-        try users.listUsers(ctx.allocator, ctx.auth_dir)
+        try ctx.state.users.listUsers(ctx.allocator, ctx.auth_dir)
     else
         &[_]users.User{};
     defer if (is_admin) ctx.allocator.free(user_list);
@@ -95,7 +94,7 @@ pub fn createClientApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         return;
     }
 
-    const r = try store.createClient(ctx.allocator, ctx.auth_dir, name, email, redirect_uri);
+    const r = try ctx.state.oauth.createClient(ctx.allocator, ctx.auth_dir, name, email, redirect_uri);
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(
         req.arena,
@@ -117,7 +116,7 @@ pub fn revokeClientApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         res.body = "missing id";
         return;
     };
-    const ok = store.revokeClient(ctx.allocator, ctx.auth_dir, id, email);
+    const ok = ctx.state.oauth.revokeClient(ctx.allocator, ctx.auth_dir, id, email);
     if (!ok) {
         res.status = 404;
         res.body = "client not found";
@@ -140,7 +139,7 @@ fn requireAdmin(ctx: *Server, req: *httpz.Request, res: *httpz.Response) ?[]cons
         res.body = "{\"error\":\"sign in required\"}";
         return null;
     };
-    if (!users.getRole(ctx.allocator, ctx.auth_dir, email).canAdmin()) {
+    if (!ctx.state.users.getRole(ctx.allocator, ctx.auth_dir, email).canAdmin()) {
         res.status = 403;
         res.content_type = .JSON;
         res.body = "{\"error\":\"admin role required\"}";
@@ -181,7 +180,7 @@ pub fn updateUserRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
         return;
     };
 
-    const ok = users.setRole(ctx.allocator, ctx.auth_dir, target, new_role, actor) catch |err| {
+    const ok = ctx.state.users.setRole(ctx.allocator, ctx.auth_dir, target, new_role, actor) catch |err| {
         if (err == error.LastAdmin) {
             res.status = 409;
             res.content_type = .JSON;
@@ -228,7 +227,7 @@ pub fn deleteUserApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     }
 
-    const ok = users.deleteUser(ctx.allocator, ctx.auth_dir, target, actor) catch |err| {
+    const ok = ctx.state.users.deleteUser(ctx.allocator, ctx.auth_dir, target, actor) catch |err| {
         res.status = 409;
         res.content_type = .JSON;
         res.body = switch (err) {
@@ -245,7 +244,7 @@ pub fn deleteUserApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
     }
 
     // Cascade: revoke OAuth clients, drop passkeys + sessions.
-    store.revokeAllClientsForEmail(ctx.allocator, ctx.auth_dir, target);
+    ctx.state.oauth.revokeAllClientsForEmail(ctx.allocator, ctx.auth_dir, target);
     auth.purgeIdentity(&ctx.state.sessions, ctx.allocator, ctx.auth_dir, target);
 
     res.content_type = .JSON;

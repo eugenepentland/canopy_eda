@@ -115,7 +115,7 @@ pub fn registerEndpoint(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     if (client_name.len > 200) return registerError(req, res, err_invalid_request, "client_name too long");
 
     // Empty email = unclaimed; first /oauth/authorize approval will set it.
-    const minted = store.createClient(ctx.allocator, ctx.auth_dir, client_name, "", redirect_uri) catch {
+    const minted = ctx.state.oauth.createClient(ctx.allocator, ctx.auth_dir, client_name, "", redirect_uri) catch {
         res.status = 500;
         res.content_type = .JSON;
         res.body = "{\"error\":\"server_error\",\"error_description\":\"could not register client\"}";
@@ -175,7 +175,8 @@ pub fn authorizePage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
     if (code_challenge.len == 0) return badRequest(res, "missing code_challenge (PKCE required)");
     if (!std.mem.eql(u8, code_challenge_method, "S256")) return badRequest(res, "code_challenge_method must be \"S256\"");
 
-    const client = store.findClient(ctx.allocator, ctx.auth_dir, client_id) orelse return badRequest(res, "unknown client_id");
+    const client = ctx.state.oauth.findClient(ctx.allocator, ctx.auth_dir, client_id) orelse
+        return badRequest(res, "unknown client_id");
     if (!redirectUriMatches(client.redirect_uri, redirect_uri)) {
         const msg = try std.fmt.allocPrint(
             req.arena,
@@ -218,17 +219,24 @@ pub fn authorizeApprove(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     const code_challenge = form.get("code_challenge") orelse return badRequest(res, "missing code_challenge");
     const scope = form.get("scope") orelse "mcp";
 
-    const client = store.findClient(ctx.allocator, ctx.auth_dir, client_id) orelse return badRequest(res, "unknown client_id");
+    const client = ctx.state.oauth.findClient(ctx.allocator, ctx.auth_dir, client_id) orelse
+        return badRequest(res, "unknown client_id");
     if (!redirectUriMatches(client.redirect_uri, redirect_uri)) return badRequest(res, "redirect_uri mismatch");
 
     // Dynamically-registered clients have no owner email until the first
     // user signs in and approves. Claim it now so the user can revoke it
     // from /account later. Already-owned clients are left alone.
     if (client.email.len == 0) {
-        store.claimClient(ctx.allocator, ctx.auth_dir, client_id, email);
+        ctx.state.oauth.claimClient(ctx.allocator, ctx.auth_dir, client_id, email);
     }
 
-    const code = try store.issueCode(ctx.allocator, ctx.auth_dir, client_id, redirect_uri, email, code_challenge, scope);
+    const code = try ctx.state.oauth.issueCode(ctx.allocator, ctx.auth_dir, .{
+        .client_id = client_id,
+        .redirect_uri = redirect_uri,
+        .email = email,
+        .code_challenge = code_challenge,
+        .scope = scope,
+    });
 
     const separator: []const u8 = if (std.mem.indexOfScalar(u8, redirect_uri, '?') == null) "?" else "&";
     // Percent-encode `state` (client-supplied) so it can't smuggle extra query
@@ -273,10 +281,15 @@ pub fn tokenEndpoint(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
     const client_secret = form.get("client_secret") orelse return tokenError(req, res, err_invalid_request, "missing client_secret");
     const code_verifier = form.get("code_verifier") orelse return tokenError(req, res, err_invalid_request, "missing code_verifier");
 
-    const verified_client = try store.verifyClientSecret(ctx.allocator, ctx.auth_dir, client_id, client_secret);
+    const verified_client = try ctx.state.oauth.verifyClientSecret(
+        ctx.allocator,
+        ctx.auth_dir,
+        client_id,
+        client_secret,
+    );
     if (verified_client == null) return tokenError(req, res, "invalid_client", "bad client_id or client_secret");
 
-    const auth_code = store.consumeCode(ctx.allocator, ctx.auth_dir, code) orelse
+    const auth_code = ctx.state.oauth.consumeCode(ctx.allocator, ctx.auth_dir, code) orelse
         return tokenError(req, res, err_invalid_grant, "code expired or already used");
     if (!std.mem.eql(u8, auth_code.client_id, client_id)) return tokenError(req, res, err_invalid_grant, "code was issued to a different client");
     if (!redirectUriMatches(auth_code.redirect_uri, redirect_uri)) return tokenError(req, res, err_invalid_grant, "redirect_uri mismatch");
@@ -284,7 +297,13 @@ pub fn tokenEndpoint(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
     const pkce_ok = try store.verifyPkce(ctx.allocator, code_verifier, auth_code.code_challenge);
     if (!pkce_ok) return tokenError(req, res, err_invalid_grant, "PKCE verification failed");
 
-    const access_token = try store.issueToken(ctx.allocator, ctx.auth_dir, client_id, auth_code.email, auth_code.scope);
+    const access_token = try ctx.state.oauth.issueToken(
+        ctx.allocator,
+        ctx.auth_dir,
+        client_id,
+        auth_code.email,
+        auth_code.scope,
+    );
 
     res.content_type = .JSON;
     res.header("cache-control", "no-store");

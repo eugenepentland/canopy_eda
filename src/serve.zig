@@ -38,6 +38,9 @@ const layout_match = @import("serve/layout_match.zig");
 const rough_best = @import("serve/rough_best.zig");
 const modules_page = @import("serve/modules.zig");
 const auth = @import("serve/auth.zig");
+const users_store = @import("serve/users.zig");
+const oauth_store = @import("serve/oauth_store.zig");
+const plugin_tokens = @import("serve/plugin_tokens.zig");
 const mcp = @import("serve/mcp.zig");
 const oauth = @import("serve/oauth.zig");
 const account_page = @import("serve/account_page.zig");
@@ -234,6 +237,9 @@ pub fn pcbJobSnapshot(alloc: std.mem.Allocator, name: []const u8) ?PcbJobView {
 pub const ServerState = struct {
     sessions: auth.SessionStore = .{},
     challenges: auth.ChallengeStore = .{},
+    users: users_store.UserStore = .{},
+    oauth: oauth_store.OAuthStore = .{},
+    plugin_tokens: plugin_tokens.PluginTokenStore = .{},
 };
 
 // ── Server ─────────────────────────────────────────────────────────────

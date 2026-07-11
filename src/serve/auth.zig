@@ -15,7 +15,6 @@ const log = @import("../infra/log.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const oauth_store = @import("oauth_store.zig");
-const plugin_tokens = @import("plugin_tokens.zig");
 const users = @import("users.zig");
 const infra_random = @import("../infra/random.zig");
 const auth_template = @import("templates/auth.zig");
@@ -769,7 +768,7 @@ fn getBearerToken(req: *httpz.Request) ?[]const u8 {
 /// transport for remote Claude Code clients.
 pub fn validateBearerToken(ctx: *Server, req: *httpz.Request) bool {
     const raw = getBearerToken(req) orelse return false;
-    const tok = oauth_store.validateToken(ctx.allocator, ctx.auth_dir, raw) catch return false;
+    const tok = ctx.state.oauth.validateToken(ctx.allocator, ctx.auth_dir, raw) catch return false;
     return tok != null;
 }
 
@@ -802,14 +801,14 @@ fn mcpUnauthorized(req: *httpz.Request, res: *httpz.Response) HandlerError!bool 
 /// but are scoped to read-only schematic/PCB consumers.
 pub fn validatePluginBearerToken(ctx: *Server, req: *httpz.Request) bool {
     const raw = getBearerToken(req) orelse return false;
-    return plugin_tokens.validate(ctx.allocator, ctx.auth_dir, raw);
+    return ctx.state.plugin_tokens.validate(ctx.allocator, ctx.auth_dir, raw);
 }
 
 /// If the request carries a valid OAuth bearer token, return the token
 /// owner's email. Used by MCP role resolution.
 pub fn getBearerEmail(ctx: *Server, req: *httpz.Request) ?[]const u8 {
     const raw = getBearerToken(req) orelse return null;
-    const tok = oauth_store.validateToken(ctx.allocator, ctx.auth_dir, raw) catch return null;
+    const tok = ctx.state.oauth.validateToken(ctx.allocator, ctx.auth_dir, raw) catch return null;
     return if (tok) |t| t.email else null;
 }
 
@@ -897,7 +896,7 @@ fn requiresWrite(req: *httpz.Request) bool {
 /// when the caller should stop (response written), false to continue dispatch.
 fn denyIfInsufficientRole(ctx: *Server, req: *httpz.Request, res: *httpz.Response, email: []const u8) bool {
     if (!requiresWrite(req)) return false;
-    const role = users.getRole(ctx.allocator, ctx.auth_dir, email);
+    const role = ctx.state.users.getRole(ctx.allocator, ctx.auth_dir, email);
     if (role.canWrite()) return false;
     res.status = 403;
     res.content_type = .JSON;
@@ -1422,7 +1421,7 @@ pub fn registerCompletePage(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
     // Ensure a user record exists with the correct role. ensureUser is a no-op
     // if this email already has a record (e.g. when a logged-in user adds
     // another passkey to their own account).
-    _ = users.ensureUser(ctx.allocator, ctx.auth_dir, resolved_email, invited_role) catch |e| {
+    _ = ctx.state.users.ensureUser(ctx.allocator, ctx.auth_dir, resolved_email, invited_role) catch |e| {
         log.warn("ensureUser failed: {s}", .{@errorName(e)});
     };
 
@@ -1933,7 +1932,7 @@ pub fn createInviteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     };
 
     // Admin-only.
-    if (!users.getRole(ctx.allocator, ctx.auth_dir, email).canAdmin()) {
+    if (!ctx.state.users.getRole(ctx.allocator, ctx.auth_dir, email).canAdmin()) {
         res.status = 403;
         res.content_type = .JSON;
         res.body = "{\"error\":\"admin role required\"}";

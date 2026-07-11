@@ -43,10 +43,10 @@ pub const Context = struct {
 
 fn resolveRole(ctx: *server_mod.Server, req: *httpz.Request) users.Role {
     // Bearer-token path: look up the token's email.
-    if (auth.getBearerEmail(ctx, req)) |em| return users.getRole(ctx.allocator, ctx.auth_dir, em);
+    if (auth.getBearerEmail(ctx, req)) |em| return ctx.state.users.getRole(ctx.allocator, ctx.auth_dir, em);
     // Session path: look up the session's email.
     if (auth.getSessionToken(req)) |tok| {
-        if (ctx.state.sessions.validate(ctx.allocator, ctx.auth_dir, tok)) |em| return users.getRole(ctx.allocator, ctx.auth_dir, em);
+        if (ctx.state.sessions.validate(ctx.allocator, ctx.auth_dir, tok)) |em| return ctx.state.users.getRole(ctx.allocator, ctx.auth_dir, em);
     }
     // Localhost dev bypass (opt-in NETLISP_DEV + loopback + not proxied).
     if (auth.isLocalhostRequest(ctx, req)) return .admin;
@@ -288,6 +288,9 @@ pub const Client = struct {
     project_dir: []const u8,
     auth_dir: []const u8,
     email: []const u8,
+    /// Borrowed per-server state — owned by `serve()`, which outlives every
+    /// WebSocket connection, so the role lookup below reads the live stores.
+    state: *server_mod.ServerState,
 
     pub fn init(conn: *websocket.Conn, ctx: *const Context) !Client {
         return .{
@@ -299,6 +302,7 @@ pub const Client = struct {
             .allocator = std.heap.page_allocator,
             .project_dir = ctx.handler.project_dir,
             .auth_dir = ctx.handler.auth_dir,
+            .state = ctx.handler.state,
             // Dupe into the process allocator: `ctx.email` may be borrowed from
             // the upgrade request's arena, which is reset once upgrade returns.
             .email = try std.heap.page_allocator.dupe(u8, ctx.email),
@@ -316,7 +320,7 @@ pub const Client = struct {
         // fell through to admin, so any bearer-authenticated client — which has
         // no session cookie — became admin over the WebSocket transport.)
         const role = if (self.email.len > 0)
-            users.getRole(self.allocator, self.auth_dir, self.email)
+            self.state.users.getRole(self.allocator, self.auth_dir, self.email)
         else
             users.Role.reader;
         const reply_opt = dispatchFrame(aa, self.project_dir, data, role) catch |err| blk: {

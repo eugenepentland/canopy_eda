@@ -2,7 +2,8 @@
 //! (JSON files under the auth dir, written atomically with a backup). Client
 //! secrets and tokens are stored as SHA-256 hashes only — the plaintext is
 //! returned once at creation and is never recoverable. Codes are single-use,
-//! consumed on redemption.
+//! consumed on redemption. The mutable tables live on `OAuthStore` (per-server
+//! instance state carried on `ServerState`, formerly file-scope globals).
 
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");
@@ -55,61 +56,18 @@ pub const Token = struct {
     expires_at: i64,
 };
 
-// ── Global state (lazy init, matches auth.zig pattern) ──────────────────
+/// Returned by `createClient`: the fresh `client_id` and the *plaintext*
+/// `client_secret` shown to the user exactly once on the account page.
+/// Only the secret's hash is persisted to disk after this point.
+pub const NewClientResult = struct {
+    id: []const u8,
+    secret: []const u8,
+};
 
-var mu = std.Thread.Mutex{};
-var clients_list: std.ArrayList(Client) = .empty;
-var tokens_list: std.ArrayList(Token) = .empty;
-var codes_map: ?std.StringHashMapUnmanaged(AuthCode) = null;
-var loaded_auth_dir: ?[]const u8 = null;
-/// Set when `loadClients` successfully read a non-empty file. Used by
-/// `saveClients` as a tripwire: if the in-memory list is empty but the
-/// loaded file had content, refuse to write — that's the signature of a
-/// silent parse failure that would otherwise blow away all the credentials
-/// on the next createClient/revokeClient call. The user has to fix the
-/// file (or reset the flag) before the server will overwrite it.
-var clients_file_was_nonempty: bool = false;
-var tokens_file_was_nonempty: bool = false;
-
-// Everything held in the module-global lists/maps above outlives any single
-// request — handlers call in with a per-request arena, so persistent rows,
-// codes, and the containers themselves are allocated from the process
-// allocator instead of the caller's.
+// Everything held in the store's lists/maps outlives any single request —
+// handlers call in with a per-request arena, so persistent rows, codes, and
+// the containers themselves are allocated from the process allocator instead.
 const store_alloc = std.heap.page_allocator;
-
-fn ensureLoaded(allocator: std.mem.Allocator, auth_dir: []const u8) void {
-    if (loaded_auth_dir) |d| {
-        if (std.mem.eql(u8, d, auth_dir)) return;
-        // auth_dir is changing — reset the in-memory state so we don't end
-        // up with the union of two files' contents (the previous behaviour
-        // when callers passed inconsistent paths). This shouldn't happen in
-        // normal operation but did slip in via a typo bug at one point;
-        // making it well-defined keeps the failure mode "load the wrong
-        // file" rather than "merge two files into a duplicated mess that
-        // then writes back."
-        for (clients_list.items) |c| {
-            store_alloc.free(@constCast(c.id));
-            store_alloc.free(@constCast(c.secret_hash));
-            store_alloc.free(@constCast(c.name));
-            store_alloc.free(@constCast(c.email));
-            store_alloc.free(@constCast(c.redirect_uri));
-        }
-        clients_list.clearRetainingCapacity();
-        for (tokens_list.items) |t| {
-            store_alloc.free(@constCast(t.hash));
-            store_alloc.free(@constCast(t.client_id));
-            store_alloc.free(@constCast(t.email));
-            store_alloc.free(@constCast(t.scope));
-        }
-        tokens_list.clearRetainingCapacity();
-        clients_file_was_nonempty = false;
-        tokens_file_was_nonempty = false;
-    }
-    loaded_auth_dir = auth_dir;
-    loadClients(allocator, auth_dir);
-    loadTokens(allocator, auth_dir);
-    if (codes_map == null) codes_map = std.StringHashMapUnmanaged(AuthCode).empty;
-}
 
 fn clientsPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/oauth_clients.json", .{auth_dir});
@@ -121,145 +79,538 @@ fn tokensPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
 
 const ensureAuthDir = auth_store.ensureAuthDir;
 
-fn loadClients(allocator: std.mem.Allocator, auth_dir: []const u8) void {
-    const path = clientsPath(allocator, auth_dir) catch return;
-    defer allocator.free(path);
-    const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch |e| {
-        if (e != error.FileNotFound) {
-            log.warn("oauth: read {s} failed: {s}", .{ path, @errorName(e) });
+/// The client + PKCE + scope context `issueCode` binds into a fresh
+/// authorization code (bundled so the call stays a handful of arguments).
+pub const CodeParams = struct {
+    client_id: []const u8,
+    redirect_uri: []const u8,
+    email: []const u8,
+    code_challenge: []const u8,
+    scope: []const u8,
+};
+
+/// Per-server OAuth store: clients + access tokens (persisted to JSON under
+/// `auth_dir`) and the in-memory authorization-code map. This is instance
+/// state carried on `ServerState` (it used to be a set of file-scope globals);
+/// all rows/codes live in `store_alloc` (process lifetime), never the
+/// per-request arena.
+pub const OAuthStore = struct {
+    mu: std.Thread.Mutex = .{},
+    clients_list: std.ArrayList(Client) = .empty,
+    tokens_list: std.ArrayList(Token) = .empty,
+    codes_map: ?std.StringHashMapUnmanaged(AuthCode) = null,
+    loaded_auth_dir: ?[]const u8 = null,
+    /// Set when `loadClients` successfully read a non-empty file. Used by
+    /// `saveClients` as a tripwire: if the in-memory list is empty but the
+    /// loaded file had content, refuse to write — that's the signature of a
+    /// silent parse failure that would otherwise blow away all the credentials
+    /// on the next createClient/revokeClient call. The user has to fix the
+    /// file (or reset the flag) before the server will overwrite it.
+    clients_file_was_nonempty: bool = false,
+    tokens_file_was_nonempty: bool = false,
+
+    fn ensureLoaded(self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8) void {
+        if (self.loaded_auth_dir) |d| {
+            if (std.mem.eql(u8, d, auth_dir)) return;
+            // auth_dir is changing — reset the in-memory state so we don't end
+            // up with the union of two files' contents (the previous behaviour
+            // when callers passed inconsistent paths). This shouldn't happen in
+            // normal operation but did slip in via a typo bug at one point;
+            // making it well-defined keeps the failure mode "load the wrong
+            // file" rather than "merge two files into a duplicated mess that
+            // then writes back."
+            for (self.clients_list.items) |c| {
+                store_alloc.free(@constCast(c.id));
+                store_alloc.free(@constCast(c.secret_hash));
+                store_alloc.free(@constCast(c.name));
+                store_alloc.free(@constCast(c.email));
+                store_alloc.free(@constCast(c.redirect_uri));
+            }
+            self.clients_list.clearRetainingCapacity();
+            for (self.tokens_list.items) |t| {
+                store_alloc.free(@constCast(t.hash));
+                store_alloc.free(@constCast(t.client_id));
+                store_alloc.free(@constCast(t.email));
+                store_alloc.free(@constCast(t.scope));
+            }
+            self.tokens_list.clearRetainingCapacity();
+            self.clients_file_was_nonempty = false;
+            self.tokens_file_was_nonempty = false;
         }
-        return;
-    };
-    const file_had_content = data.len > 2; // "[]" is the only possible empty-but-valid file.
-    const Entry = struct {
-        id: []const u8,
-        secret_hash: []const u8,
+        self.loaded_auth_dir = auth_dir;
+        self.loadClients(allocator, auth_dir);
+        self.loadTokens(allocator, auth_dir);
+        if (self.codes_map == null) self.codes_map = std.StringHashMapUnmanaged(AuthCode).empty;
+    }
+
+    fn loadClients(self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8) void {
+        const path = clientsPath(allocator, auth_dir) catch return;
+        defer allocator.free(path);
+        const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch |e| {
+            if (e != error.FileNotFound) {
+                log.warn("oauth: read {s} failed: {s}", .{ path, @errorName(e) });
+            }
+            return;
+        };
+        const file_had_content = data.len > 2; // "[]" is the only possible empty-but-valid file.
+        const Entry = struct {
+            id: []const u8,
+            secret_hash: []const u8,
+            name: []const u8,
+            email: []const u8,
+            redirect_uri: []const u8,
+            created_at: i64,
+            revoked: bool = false,
+        };
+        const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch |e| {
+            // Parse failed — file is corrupt or in an unexpected schema. Trip
+            // the safety so the next save refuses to clobber it; the operator
+            // has to fix the file by hand. Without this, a parse failure
+            // followed by createClient would write a fresh file with a single
+            // entry and silently destroy the rest.
+            log.warn("oauth: parse {s} failed: {s} — load skipped, saves locked", .{ path, @errorName(e) });
+            if (file_had_content) self.clients_file_was_nonempty = true;
+            return;
+        };
+        defer parsed.deinit();
+        for (parsed.value) |e| {
+            self.clients_list.append(store_alloc, .{
+                .id = store_alloc.dupe(u8, e.id) catch continue,
+                .secret_hash = store_alloc.dupe(u8, e.secret_hash) catch continue,
+                .name = store_alloc.dupe(u8, e.name) catch continue,
+                .email = store_alloc.dupe(u8, e.email) catch continue,
+                .redirect_uri = store_alloc.dupe(u8, e.redirect_uri) catch continue,
+                .created_at = e.created_at,
+                .revoked = e.revoked,
+            }) catch continue;
+        }
+        if (file_had_content) self.clients_file_was_nonempty = true;
+    }
+
+    fn saveClients(self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8) void {
+        ensureAuthDir(auth_dir);
+        const path = clientsPath(allocator, auth_dir) catch return;
+        defer allocator.free(path);
+
+        // Empty-list guard: refuse to overwrite a file that previously had
+        // content. Catches the case where loadClients silently failed (parse
+        // error, transient I/O blip) and a subsequent createClient/revokeClient
+        // would otherwise write `[]` and destroy every credential.
+        if (self.clients_list.items.len == 0 and self.clients_file_was_nonempty) {
+            log.warn("oauth: refusing to overwrite {s} with empty list (file had content; possible prior load failure)", .{path});
+            return;
+        }
+
+        var bw: std.ArrayList(u8) = .empty;
+        defer bw.deinit(allocator);
+        const w = bw.writer(allocator);
+        w.writeAll("[") catch return;
+        for (self.clients_list.items, 0..) |c, i| {
+            if (i > 0) w.writeAll(",") catch return;
+            w.print("{{\"id\":\"{s}\",\"secret_hash\":\"{s}\",\"name\":", .{ c.id, c.secret_hash }) catch return;
+            json_writer.writeString(w, c.name) catch return;
+            w.print(",\"email\":\"{s}\",\"redirect_uri\":", .{c.email}) catch return;
+            json_writer.writeString(w, c.redirect_uri) catch return;
+            w.print(",\"created_at\":{d},\"revoked\":{}}}", .{ c.created_at, c.revoked }) catch return;
+        }
+        w.writeAll("]") catch return;
+        writeFileAtomicWithBackup(allocator, path, bw.items);
+        if (self.clients_list.items.len > 0) self.clients_file_was_nonempty = true;
+    }
+
+    fn loadTokens(self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8) void {
+        const path = tokensPath(allocator, auth_dir) catch return;
+        defer allocator.free(path);
+        const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch |e| {
+            if (e != error.FileNotFound) {
+                log.warn("oauth: read {s} failed: {s}", .{ path, @errorName(e) });
+            }
+            return;
+        };
+        const file_had_content = data.len > 2;
+        const Entry = struct {
+            hash: []const u8,
+            client_id: []const u8,
+            email: []const u8,
+            scope: []const u8,
+            expires_at: i64,
+        };
+        const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch |e| {
+            log.warn("oauth: parse {s} failed: {s} — load skipped, saves locked", .{ path, @errorName(e) });
+            if (file_had_content) self.tokens_file_was_nonempty = true;
+            return;
+        };
+        defer parsed.deinit();
+        const now = clock.timestamp();
+        for (parsed.value) |e| {
+            if (e.expires_at < now) continue;
+            self.tokens_list.append(store_alloc, .{
+                .hash = store_alloc.dupe(u8, e.hash) catch continue,
+                .client_id = store_alloc.dupe(u8, e.client_id) catch continue,
+                .email = store_alloc.dupe(u8, e.email) catch continue,
+                .scope = store_alloc.dupe(u8, e.scope) catch continue,
+                .expires_at = e.expires_at,
+            }) catch continue;
+        }
+        if (file_had_content) self.tokens_file_was_nonempty = true;
+    }
+
+    fn saveTokens(self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8) void {
+        ensureAuthDir(auth_dir);
+        const path = tokensPath(allocator, auth_dir) catch return;
+        defer allocator.free(path);
+
+        // Same empty-list guard as saveClients: don't overwrite a previously
+        // populated tokens file with `[]` after a load failure.
+        if (self.tokens_list.items.len == 0 and self.tokens_file_was_nonempty) {
+            log.warn("oauth: refusing to overwrite {s} with empty list (file had content; possible prior load failure)", .{path});
+            return;
+        }
+
+        var bw: std.ArrayList(u8) = .empty;
+        defer bw.deinit(allocator);
+        const w = bw.writer(allocator);
+        w.writeAll("[") catch return;
+        for (self.tokens_list.items, 0..) |t, i| {
+            if (i > 0) w.writeAll(",") catch return;
+            w.print(
+                "{{\"hash\":\"{s}\",\"client_id\":\"{s}\"," ++
+                    "\"email\":\"{s}\",\"scope\":\"{s}\",\"expires_at\":{d}}}",
+                .{ t.hash, t.client_id, t.email, t.scope, t.expires_at },
+            ) catch return;
+        }
+        w.writeAll("]") catch return;
+        writeFileAtomicWithBackup(allocator, path, bw.items);
+        if (self.tokens_list.items.len > 0) self.tokens_file_was_nonempty = true;
+    }
+
+    /// Mint a new `eda_c_…` client_id and `eda_s_…` secret pair, persist the
+    /// client (with hashed secret) to `oauth_clients.json`, and return the
+    /// plaintext secret for one-time display in the account UI.
+    pub fn createClient(
+        self: *OAuthStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
         name: []const u8,
         email: []const u8,
         redirect_uri: []const u8,
-        created_at: i64,
-        revoked: bool = false,
-    };
-    const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch |e| {
-        // Parse failed — file is corrupt or in an unexpected schema. Trip
-        // the safety so the next save refuses to clobber it; the operator
-        // has to fix the file by hand. Without this, a parse failure
-        // followed by createClient would write a fresh file with a single
-        // entry and silently destroy the rest.
-        log.warn("oauth: parse {s} failed: {s} — load skipped, saves locked", .{ path, @errorName(e) });
-        if (file_had_content) clients_file_was_nonempty = true;
-        return;
-    };
-    defer parsed.deinit();
-    for (parsed.value) |e| {
-        clients_list.append(store_alloc, .{
-            .id = store_alloc.dupe(u8, e.id) catch continue,
-            .secret_hash = store_alloc.dupe(u8, e.secret_hash) catch continue,
-            .name = store_alloc.dupe(u8, e.name) catch continue,
-            .email = store_alloc.dupe(u8, e.email) catch continue,
-            .redirect_uri = store_alloc.dupe(u8, e.redirect_uri) catch continue,
-            .created_at = e.created_at,
-            .revoked = e.revoked,
-        }) catch continue;
-    }
-    if (file_had_content) clients_file_was_nonempty = true;
-}
+    ) std.mem.Allocator.Error!NewClientResult {
+        self.mu.lock();
+        defer self.mu.unlock();
+        self.ensureLoaded(allocator, auth_dir);
 
-fn saveClients(allocator: std.mem.Allocator, auth_dir: []const u8) void {
-    ensureAuthDir(auth_dir);
-    const path = clientsPath(allocator, auth_dir) catch return;
-    defer allocator.free(path);
+        const id_suffix = try randomHex(allocator, 16);
+        defer allocator.free(id_suffix);
+        // `id` is both stored and returned — allocate it from the store so the
+        // persisted row survives the caller's request arena.
+        const id = try std.fmt.allocPrint(store_alloc, "eda_c_{s}", .{id_suffix});
 
-    // Empty-list guard: refuse to overwrite a file that previously had
-    // content. Catches the case where loadClients silently failed (parse
-    // error, transient I/O blip) and a subsequent createClient/revokeClient
-    // would otherwise write `[]` and destroy every credential.
-    if (clients_list.items.len == 0 and clients_file_was_nonempty) {
-        log.warn("oauth: refusing to overwrite {s} with empty list (file had content; possible prior load failure)", .{path});
-        return;
+        const secret_suffix = try randomHex(allocator, 32);
+        defer allocator.free(secret_suffix);
+        const secret = try std.fmt.allocPrint(allocator, "eda_s_{s}", .{secret_suffix});
+
+        const secret_hash = try sha256Hex(store_alloc, secret);
+
+        try self.clients_list.append(store_alloc, .{
+            .id = id,
+            .secret_hash = secret_hash,
+            .name = try store_alloc.dupe(u8, name),
+            .email = try store_alloc.dupe(u8, email),
+            .redirect_uri = try store_alloc.dupe(u8, redirect_uri),
+            .created_at = clock.timestamp(),
+            .revoked = false,
+        });
+
+        self.saveClients(allocator, auth_dir);
+        return .{ .id = id, .secret = secret };
     }
 
-    var bw: std.ArrayList(u8) = .empty;
-    defer bw.deinit(allocator);
-    const w = bw.writer(allocator);
-    w.writeAll("[") catch return;
-    for (clients_list.items, 0..) |c, i| {
-        if (i > 0) w.writeAll(",") catch return;
-        w.print("{{\"id\":\"{s}\",\"secret_hash\":\"{s}\",\"name\":", .{ c.id, c.secret_hash }) catch return;
-        json_writer.writeString(w, c.name) catch return;
-        w.print(",\"email\":\"{s}\",\"redirect_uri\":", .{c.email}) catch return;
-        json_writer.writeString(w, c.redirect_uri) catch return;
-        w.print(",\"created_at\":{d},\"revoked\":{}}}", .{ c.created_at, c.revoked }) catch return;
-    }
-    w.writeAll("]") catch return;
-    writeFileAtomicWithBackup(allocator, path, bw.items);
-    if (clients_list.items.len > 0) clients_file_was_nonempty = true;
-}
-
-fn loadTokens(allocator: std.mem.Allocator, auth_dir: []const u8) void {
-    const path = tokensPath(allocator, auth_dir) catch return;
-    defer allocator.free(path);
-    const data = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch |e| {
-        if (e != error.FileNotFound) {
-            log.warn("oauth: read {s} failed: {s}", .{ path, @errorName(e) });
+    /// Return the active client with the given id, or null when no match
+    /// exists or the row has been revoked. Used during the authorize flow to
+    /// confirm the client_id parameter is one we know about.
+    pub fn findClient(
+        self: *OAuthStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
+        id: []const u8,
+    ) ?Client {
+        self.mu.lock();
+        defer self.mu.unlock();
+        self.ensureLoaded(allocator, auth_dir);
+        for (self.clients_list.items) |c| {
+            if (c.revoked) continue;
+            if (std.mem.eql(u8, c.id, id)) return c;
         }
-        return;
-    };
-    const file_had_content = data.len > 2;
-    const Entry = struct {
-        hash: []const u8,
+        return null;
+    }
+
+    /// Look up the client and constant-compare its stored hash against
+    /// `sha256(secret)`. Returns the client record on a match, null on
+    /// unknown/revoked id or wrong secret. Called from the token endpoint.
+    pub fn verifyClientSecret(
+        self: *OAuthStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
+        id: []const u8,
+        secret: []const u8,
+    ) std.mem.Allocator.Error!?Client {
+        const client = self.findClient(allocator, auth_dir, id) orelse return null;
+        const hash = try sha256Hex(allocator, secret);
+        defer allocator.free(hash);
+        if (!std.mem.eql(u8, hash, client.secret_hash)) return null;
+        return client;
+    }
+
+    /// Set an unowned client's email. Called when the first user approves a
+    /// dynamically-registered client on `/oauth/authorize` — assigns ownership
+    /// so they can revoke it later from `/account`. No-op if the client
+    /// already has an owner (different email) or doesn't exist.
+    pub fn claimClient(
+        self: *OAuthStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
+        id: []const u8,
+        owner_email: []const u8,
+    ) void {
+        self.mu.lock();
+        defer self.mu.unlock();
+        self.ensureLoaded(allocator, auth_dir);
+        var changed = false;
+        for (self.clients_list.items) |*c| {
+            if (!std.mem.eql(u8, c.id, id)) continue;
+            if (c.email.len != 0) return; // already owned
+            const dup = store_alloc.dupe(u8, owner_email) catch return;
+            store_alloc.free(@constCast(c.email));
+            c.email = dup;
+            changed = true;
+            break;
+        }
+        if (changed) self.saveClients(allocator, auth_dir);
+    }
+
+    /// Mark a single client as revoked, but only when `owner_email` matches —
+    /// users can't accidentally (or maliciously) revoke another user's client.
+    /// Returns true when a row was modified.
+    pub fn revokeClient(
+        self: *OAuthStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
+        id: []const u8,
+        owner_email: []const u8,
+    ) bool {
+        self.mu.lock();
+        defer self.mu.unlock();
+        self.ensureLoaded(allocator, auth_dir);
+        var changed = false;
+        for (self.clients_list.items) |*c| {
+            if (std.mem.eql(u8, c.id, id) and std.mem.eql(u8, c.email, owner_email)) {
+                c.revoked = true;
+                changed = true;
+                break;
+            }
+        }
+        if (changed) self.saveClients(allocator, auth_dir);
+        return changed;
+    }
+
+    /// Mass-revoke every active client owned by `owner_email`. Called by the
+    /// admin user-deletion path so a removed user can't keep using cached
+    /// `client_id`/`client_secret` pairs from Claude Code.
+    pub fn revokeAllClientsForEmail(
+        self: *OAuthStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
+        owner_email: []const u8,
+    ) void {
+        self.mu.lock();
+        defer self.mu.unlock();
+        self.ensureLoaded(allocator, auth_dir);
+        var changed = false;
+        for (self.clients_list.items) |*c| {
+            if (!c.revoked and std.mem.eql(u8, c.email, owner_email)) {
+                c.revoked = true;
+                changed = true;
+            }
+        }
+        if (changed) self.saveClients(allocator, auth_dir);
+    }
+
+    /// Return every non-revoked client owned by `owner_email`. Backs the
+    /// account page's "Your Claude Code clients" list. Caller owns the slice.
+    pub fn listClientsByEmail(
+        self: *OAuthStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
+        owner_email: []const u8,
+    ) std.mem.Allocator.Error![]Client {
+        self.mu.lock();
+        defer self.mu.unlock();
+        self.ensureLoaded(allocator, auth_dir);
+        var out: std.ArrayList(Client) = .empty;
+        for (self.clients_list.items) |c| {
+            if (c.revoked) continue;
+            if (std.mem.eql(u8, c.email, owner_email)) try out.append(allocator, c);
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    /// Generate and stash a fresh authorization code (10-minute TTL, in
+    /// memory only) the user's browser will redirect with after consenting on
+    /// `/oauth/authorize`. Bound to the PKCE `code_challenge`.
+    pub fn issueCode(
+        self: *OAuthStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
+        p: CodeParams,
+    ) std.mem.Allocator.Error![]const u8 {
+        self.mu.lock();
+        defer self.mu.unlock();
+        self.ensureLoaded(allocator, auth_dir);
+        self.sweepExpiredCodes(); // bound the map: reclaim codes that were never exchanged
+
+        const code = try randomHex(store_alloc, 32);
+        const entry = AuthCode{
+            .code = code,
+            .client_id = try store_alloc.dupe(u8, p.client_id),
+            .redirect_uri = try store_alloc.dupe(u8, p.redirect_uri),
+            .email = try store_alloc.dupe(u8, p.email),
+            .code_challenge = try store_alloc.dupe(u8, p.code_challenge),
+            .scope = try store_alloc.dupe(u8, p.scope),
+            .expires_at = clock.timestamp() + auth_code_ttl_secs,
+        };
+        try self.codes_map.?.put(store_alloc, code, entry);
+        return code;
+    }
+
+    /// Single-use lookup: pop the AuthCode out of the in-memory map and
+    /// return it (only when not yet expired). The code is gone after this
+    /// call — replays at the token endpoint return null. The returned
+    /// strings are duped into `allocator` (the request arena); the original
+    /// `store_alloc` (page_allocator) copies are freed here, so a consumed
+    /// code leaves nothing behind.
+    pub fn consumeCode(
+        self: *OAuthStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
+        code: []const u8,
+    ) ?AuthCode {
+        self.mu.lock();
+        defer self.mu.unlock();
+        self.ensureLoaded(allocator, auth_dir);
+        self.sweepExpiredCodes();
+        const entry = self.codes_map.?.fetchRemove(code) orelse return null;
+        // The popped strings are store_alloc (page_allocator) owned and must be
+        // freed here — the request arena can't reclaim them. Copy the fields the
+        // caller needs into `allocator` (the request arena) FIRST, so the deferred
+        // free of the originals is never a use-after-free.
+        defer freeAuthCode(entry.value);
+        if (entry.value.expires_at < clock.timestamp()) return null;
+        return AuthCode{
+            .code = allocator.dupe(u8, entry.value.code) catch return null,
+            .client_id = allocator.dupe(u8, entry.value.client_id) catch return null,
+            .redirect_uri = allocator.dupe(u8, entry.value.redirect_uri) catch return null,
+            .email = allocator.dupe(u8, entry.value.email) catch return null,
+            .code_challenge = allocator.dupe(u8, entry.value.code_challenge) catch return null,
+            .scope = allocator.dupe(u8, entry.value.scope) catch return null,
+            .expires_at = entry.value.expires_at,
+        };
+    }
+
+    /// Evict + free every auth code past its TTL. Bounds `codes_map` so codes
+    /// that are issued but never exchanged (abandoned consent, closed tab)
+    /// don't accumulate forever. Caller must hold `mu`.
+    fn sweepExpiredCodes(self: *OAuthStore) void {
+        if (self.codes_map == null) return;
+        const map = &self.codes_map.?;
+        const now = clock.timestamp();
+        // Collect expired keys first; mutating the map mid-iteration is undefined.
+        var expired: std.ArrayList([]const u8) = .empty;
+        defer expired.deinit(store_alloc);
+        var it = map.iterator();
+        while (it.next()) |kv| {
+            if (kv.value_ptr.expires_at >= now) continue;
+            // On the (benign) OOM here, skip this key — the next sweep reclaims it.
+            expired.append(store_alloc, kv.key_ptr.*) catch continue;
+        }
+        for (expired.items) |k| {
+            if (map.fetchRemove(k)) |e| freeAuthCode(e.value);
+        }
+    }
+
+    /// Mint a new `eda_t_…` access token (30-day TTL), persist its hash to
+    /// `oauth_tokens.json`, and return the plaintext token to hand back at the
+    /// `/oauth/token` endpoint.
+    pub fn issueToken(
+        self: *OAuthStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
         client_id: []const u8,
         email: []const u8,
         scope: []const u8,
-        expires_at: i64,
-    };
-    const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch |e| {
-        log.warn("oauth: parse {s} failed: {s} — load skipped, saves locked", .{ path, @errorName(e) });
-        if (file_had_content) tokens_file_was_nonempty = true;
-        return;
-    };
-    defer parsed.deinit();
-    const now = clock.timestamp();
-    for (parsed.value) |e| {
-        if (e.expires_at < now) continue;
-        tokens_list.append(store_alloc, .{
-            .hash = store_alloc.dupe(u8, e.hash) catch continue,
-            .client_id = store_alloc.dupe(u8, e.client_id) catch continue,
-            .email = store_alloc.dupe(u8, e.email) catch continue,
-            .scope = store_alloc.dupe(u8, e.scope) catch continue,
-            .expires_at = e.expires_at,
-        }) catch continue;
-    }
-    if (file_had_content) tokens_file_was_nonempty = true;
-}
+    ) std.mem.Allocator.Error![]const u8 {
+        self.mu.lock();
+        defer self.mu.unlock();
+        self.ensureLoaded(allocator, auth_dir);
 
-fn saveTokens(allocator: std.mem.Allocator, auth_dir: []const u8) void {
-    ensureAuthDir(auth_dir);
-    const path = tokensPath(allocator, auth_dir) catch return;
-    defer allocator.free(path);
+        const raw_suffix = try randomHex(allocator, 32);
+        defer allocator.free(raw_suffix);
+        const raw = try std.fmt.allocPrint(allocator, "eda_t_{s}", .{raw_suffix});
+        const hash = try sha256Hex(store_alloc, raw);
 
-    // Same empty-list guard as saveClients: don't overwrite a previously
-    // populated tokens file with `[]` after a load failure.
-    if (tokens_list.items.len == 0 and tokens_file_was_nonempty) {
-        log.warn("oauth: refusing to overwrite {s} with empty list (file had content; possible prior load failure)", .{path});
-        return;
+        try self.tokens_list.append(store_alloc, .{
+            .hash = hash,
+            .client_id = try store_alloc.dupe(u8, client_id),
+            .email = try store_alloc.dupe(u8, email),
+            .scope = try store_alloc.dupe(u8, scope),
+            .expires_at = clock.timestamp() + access_token_ttl_secs,
+        });
+        self.saveTokens(allocator, auth_dir);
+        return raw;
     }
 
-    var bw: std.ArrayList(u8) = .empty;
-    defer bw.deinit(allocator);
-    const w = bw.writer(allocator);
-    w.writeAll("[") catch return;
-    for (tokens_list.items, 0..) |t, i| {
-        if (i > 0) w.writeAll(",") catch return;
-        w.print(
-            "{{\"hash\":\"{s}\",\"client_id\":\"{s}\"," ++
-                "\"email\":\"{s}\",\"scope\":\"{s}\",\"expires_at\":{d}}}",
-            .{ t.hash, t.client_id, t.email, t.scope, t.expires_at },
-        ) catch return;
+    /// Return the Token record matching `sha256(raw)` when it has not
+    /// expired and its owning client is still active. Used by the auth
+    /// middleware on every request that carries a Bearer header.
+    pub fn validateToken(
+        self: *OAuthStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
+        raw: []const u8,
+    ) std.mem.Allocator.Error!?Token {
+        self.mu.lock();
+        defer self.mu.unlock();
+        self.ensureLoaded(allocator, auth_dir);
+        const hash = try sha256Hex(allocator, raw);
+        defer allocator.free(hash);
+        const now = clock.timestamp();
+        for (self.tokens_list.items) |t| {
+            if (t.expires_at < now) continue;
+            if (std.mem.eql(u8, t.hash, hash)) {
+                // Check client still active
+                var client_ok = false;
+                for (self.clients_list.items) |c| {
+                    if (!c.revoked and std.mem.eql(u8, c.id, t.client_id)) {
+                        client_ok = true;
+                        break;
+                    }
+                }
+                if (client_ok) return t;
+                return null;
+            }
+        }
+        return null;
     }
-    w.writeAll("]") catch return;
-    writeFileAtomicWithBackup(allocator, path, bw.items);
-    if (tokens_list.items.len > 0) tokens_file_was_nonempty = true;
+};
+
+/// Free the six `store_alloc`-owned strings of an `AuthCode`. The map key
+/// aliases `code` (same allocation), so this releases the key too.
+fn freeAuthCode(c: AuthCode) void {
+    store_alloc.free(@constCast(c.code));
+    store_alloc.free(@constCast(c.client_id));
+    store_alloc.free(@constCast(c.redirect_uri));
+    store_alloc.free(@constCast(c.email));
+    store_alloc.free(@constCast(c.code_challenge));
+    store_alloc.free(@constCast(c.scope));
 }
 
 /// Atomic save with rolling backup:
@@ -309,306 +660,6 @@ pub fn writeFileAtomicWithBackup(allocator: std.mem.Allocator, path: []const u8,
         log.warn("atomic-write: finish {s} failed: {s}", .{ path, @errorName(e) });
         return;
     };
-}
-
-// ── Client CRUD ─────────────────────────────────────────────────────────
-
-/// Returned by `createClient`: the fresh `client_id` and the *plaintext*
-/// `client_secret` shown to the user exactly once on the account page.
-/// Only the secret's hash is persisted to disk after this point.
-pub const NewClientResult = struct {
-    id: []const u8,
-    secret: []const u8,
-};
-
-/// Mint a new `eda_c_…` client_id and `eda_s_…` secret pair, persist the
-/// client (with hashed secret) to `oauth_clients.json`, and return the
-/// plaintext secret for one-time display in the account UI.
-pub fn createClient(
-    allocator: std.mem.Allocator,
-    auth_dir: []const u8,
-    name: []const u8,
-    email: []const u8,
-    redirect_uri: []const u8,
-) std.mem.Allocator.Error!NewClientResult {
-    mu.lock();
-    defer mu.unlock();
-    ensureLoaded(allocator, auth_dir);
-
-    const id_suffix = try randomHex(allocator, 16);
-    defer allocator.free(id_suffix);
-    // `id` is both stored and returned — allocate it from the store so the
-    // persisted row survives the caller's request arena.
-    const id = try std.fmt.allocPrint(store_alloc, "eda_c_{s}", .{id_suffix});
-
-    const secret_suffix = try randomHex(allocator, 32);
-    defer allocator.free(secret_suffix);
-    const secret = try std.fmt.allocPrint(allocator, "eda_s_{s}", .{secret_suffix});
-
-    const secret_hash = try sha256Hex(store_alloc, secret);
-
-    try clients_list.append(store_alloc, .{
-        .id = id,
-        .secret_hash = secret_hash,
-        .name = try store_alloc.dupe(u8, name),
-        .email = try store_alloc.dupe(u8, email),
-        .redirect_uri = try store_alloc.dupe(u8, redirect_uri),
-        .created_at = clock.timestamp(),
-        .revoked = false,
-    });
-
-    saveClients(allocator, auth_dir);
-    return .{ .id = id, .secret = secret };
-}
-
-/// Return the active client with the given id, or null when no match
-/// exists or the row has been revoked. Used during the authorize flow to
-/// confirm the client_id parameter is one we know about.
-pub fn findClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8) ?Client {
-    mu.lock();
-    defer mu.unlock();
-    ensureLoaded(allocator, auth_dir);
-    for (clients_list.items) |c| {
-        if (c.revoked) continue;
-        if (std.mem.eql(u8, c.id, id)) return c;
-    }
-    return null;
-}
-
-/// Look up the client and constant-compare its stored hash against
-/// `sha256(secret)`. Returns the client record on a match, null on
-/// unknown/revoked id or wrong secret. Called from the token endpoint.
-pub fn verifyClientSecret(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, secret: []const u8) std.mem.Allocator.Error!?Client {
-    const client = findClient(allocator, auth_dir, id) orelse return null;
-    const hash = try sha256Hex(allocator, secret);
-    defer allocator.free(hash);
-    if (!std.mem.eql(u8, hash, client.secret_hash)) return null;
-    return client;
-}
-
-/// Set an unowned client's email. Called when the first user approves a
-/// dynamically-registered client on `/oauth/authorize` — assigns ownership
-/// so they can revoke it later from `/account`. No-op if the client
-/// already has an owner (different email) or doesn't exist.
-pub fn claimClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, owner_email: []const u8) void {
-    mu.lock();
-    defer mu.unlock();
-    ensureLoaded(allocator, auth_dir);
-    var changed = false;
-    for (clients_list.items) |*c| {
-        if (!std.mem.eql(u8, c.id, id)) continue;
-        if (c.email.len != 0) return; // already owned
-        const dup = store_alloc.dupe(u8, owner_email) catch return;
-        store_alloc.free(@constCast(c.email));
-        c.email = dup;
-        changed = true;
-        break;
-    }
-    if (changed) saveClients(allocator, auth_dir);
-}
-
-/// Mark a single client as revoked, but only when `owner_email` matches —
-/// users can't accidentally (or maliciously) revoke another user's client.
-/// Returns true when a row was modified.
-pub fn revokeClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, owner_email: []const u8) bool {
-    mu.lock();
-    defer mu.unlock();
-    ensureLoaded(allocator, auth_dir);
-    var changed = false;
-    for (clients_list.items) |*c| {
-        if (std.mem.eql(u8, c.id, id) and std.mem.eql(u8, c.email, owner_email)) {
-            c.revoked = true;
-            changed = true;
-            break;
-        }
-    }
-    if (changed) saveClients(allocator, auth_dir);
-    return changed;
-}
-
-/// Mass-revoke every active client owned by `owner_email`. Called by the
-/// admin user-deletion path so a removed user can't keep using cached
-/// `client_id`/`client_secret` pairs from Claude Code.
-pub fn revokeAllClientsForEmail(allocator: std.mem.Allocator, auth_dir: []const u8, owner_email: []const u8) void {
-    mu.lock();
-    defer mu.unlock();
-    ensureLoaded(allocator, auth_dir);
-    var changed = false;
-    for (clients_list.items) |*c| {
-        if (!c.revoked and std.mem.eql(u8, c.email, owner_email)) {
-            c.revoked = true;
-            changed = true;
-        }
-    }
-    if (changed) saveClients(allocator, auth_dir);
-}
-
-/// Return every non-revoked client owned by `owner_email`. Backs the
-/// account page's "Your Claude Code clients" list. Caller owns the slice.
-pub fn listClientsByEmail(allocator: std.mem.Allocator, auth_dir: []const u8, owner_email: []const u8) std.mem.Allocator.Error![]Client {
-    mu.lock();
-    defer mu.unlock();
-    ensureLoaded(allocator, auth_dir);
-    var out: std.ArrayList(Client) = .empty;
-    for (clients_list.items) |c| {
-        if (c.revoked) continue;
-        if (std.mem.eql(u8, c.email, owner_email)) try out.append(allocator, c);
-    }
-    return out.toOwnedSlice(allocator);
-}
-
-// ── Auth codes (in-memory, 10 min TTL) ──────────────────────────────────
-
-/// Generate and stash a fresh authorization code (10-minute TTL, in
-/// memory only) the user's browser will redirect with after consenting on
-/// `/oauth/authorize`. Bound to the PKCE `code_challenge`.
-pub fn issueCode(
-    allocator: std.mem.Allocator,
-    auth_dir: []const u8,
-    client_id: []const u8,
-    redirect_uri: []const u8,
-    email: []const u8,
-    code_challenge: []const u8,
-    scope: []const u8,
-) std.mem.Allocator.Error![]const u8 {
-    mu.lock();
-    defer mu.unlock();
-    ensureLoaded(allocator, auth_dir);
-    sweepExpiredCodes(); // bound the map: reclaim codes that were never exchanged
-
-    const code = try randomHex(store_alloc, 32);
-    const entry = AuthCode{
-        .code = code,
-        .client_id = try store_alloc.dupe(u8, client_id),
-        .redirect_uri = try store_alloc.dupe(u8, redirect_uri),
-        .email = try store_alloc.dupe(u8, email),
-        .code_challenge = try store_alloc.dupe(u8, code_challenge),
-        .scope = try store_alloc.dupe(u8, scope),
-        .expires_at = clock.timestamp() + auth_code_ttl_secs,
-    };
-    try codes_map.?.put(store_alloc, code, entry);
-    return code;
-}
-
-/// Single-use lookup: pop the AuthCode out of the in-memory map and
-/// return it (only when not yet expired). The code is gone after this
-/// call — replays at the token endpoint return null. The returned
-/// strings are duped into `allocator` (the request arena); the original
-/// `store_alloc` (page_allocator) copies are freed here, so a consumed
-/// code leaves nothing behind.
-pub fn consumeCode(allocator: std.mem.Allocator, auth_dir: []const u8, code: []const u8) ?AuthCode {
-    mu.lock();
-    defer mu.unlock();
-    ensureLoaded(allocator, auth_dir);
-    sweepExpiredCodes();
-    const entry = codes_map.?.fetchRemove(code) orelse return null;
-    // The popped strings are store_alloc (page_allocator) owned and must be
-    // freed here — the request arena can't reclaim them. Copy the fields the
-    // caller needs into `allocator` (the request arena) FIRST, so the deferred
-    // free of the originals is never a use-after-free.
-    defer freeAuthCode(entry.value);
-    if (entry.value.expires_at < clock.timestamp()) return null;
-    return AuthCode{
-        .code = allocator.dupe(u8, entry.value.code) catch return null,
-        .client_id = allocator.dupe(u8, entry.value.client_id) catch return null,
-        .redirect_uri = allocator.dupe(u8, entry.value.redirect_uri) catch return null,
-        .email = allocator.dupe(u8, entry.value.email) catch return null,
-        .code_challenge = allocator.dupe(u8, entry.value.code_challenge) catch return null,
-        .scope = allocator.dupe(u8, entry.value.scope) catch return null,
-        .expires_at = entry.value.expires_at,
-    };
-}
-
-/// Free the six `store_alloc`-owned strings of an `AuthCode`. The map key
-/// aliases `code` (same allocation), so this releases the key too.
-fn freeAuthCode(c: AuthCode) void {
-    store_alloc.free(@constCast(c.code));
-    store_alloc.free(@constCast(c.client_id));
-    store_alloc.free(@constCast(c.redirect_uri));
-    store_alloc.free(@constCast(c.email));
-    store_alloc.free(@constCast(c.code_challenge));
-    store_alloc.free(@constCast(c.scope));
-}
-
-/// Evict + free every auth code past its TTL. Bounds `codes_map` so codes that
-/// are issued but never exchanged (abandoned consent, closed tab) don't
-/// accumulate forever. Caller must hold `mu`.
-fn sweepExpiredCodes() void {
-    if (codes_map == null) return;
-    const map = &codes_map.?;
-    const now = clock.timestamp();
-    // Collect expired keys first; mutating the map mid-iteration is undefined.
-    var expired: std.ArrayList([]const u8) = .empty;
-    defer expired.deinit(store_alloc);
-    var it = map.iterator();
-    while (it.next()) |kv| {
-        if (kv.value_ptr.expires_at >= now) continue;
-        // On the (benign) OOM here, skip this key — the next sweep reclaims it.
-        expired.append(store_alloc, kv.key_ptr.*) catch continue;
-    }
-    for (expired.items) |k| {
-        if (map.fetchRemove(k)) |e| freeAuthCode(e.value);
-    }
-}
-
-// ── Access tokens (persisted, 30 day TTL) ───────────────────────────────
-
-/// Mint a new `eda_t_…` access token (30-day TTL), persist its hash to
-/// `oauth_tokens.json`, and return the plaintext token to hand back at the
-/// `/oauth/token` endpoint.
-pub fn issueToken(
-    allocator: std.mem.Allocator,
-    auth_dir: []const u8,
-    client_id: []const u8,
-    email: []const u8,
-    scope: []const u8,
-) std.mem.Allocator.Error![]const u8 {
-    mu.lock();
-    defer mu.unlock();
-    ensureLoaded(allocator, auth_dir);
-
-    const raw_suffix = try randomHex(allocator, 32);
-    defer allocator.free(raw_suffix);
-    const raw = try std.fmt.allocPrint(allocator, "eda_t_{s}", .{raw_suffix});
-    const hash = try sha256Hex(store_alloc, raw);
-
-    try tokens_list.append(store_alloc, .{
-        .hash = hash,
-        .client_id = try store_alloc.dupe(u8, client_id),
-        .email = try store_alloc.dupe(u8, email),
-        .scope = try store_alloc.dupe(u8, scope),
-        .expires_at = clock.timestamp() + access_token_ttl_secs,
-    });
-    saveTokens(allocator, auth_dir);
-    return raw;
-}
-
-/// Return the Token record matching `sha256(raw)` when it has not
-/// expired and its owning client is still active. Used by the auth
-/// middleware on every request that carries a Bearer header.
-pub fn validateToken(allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8) std.mem.Allocator.Error!?Token {
-    mu.lock();
-    defer mu.unlock();
-    ensureLoaded(allocator, auth_dir);
-    const hash = try sha256Hex(allocator, raw);
-    defer allocator.free(hash);
-    const now = clock.timestamp();
-    for (tokens_list.items) |t| {
-        if (t.expires_at < now) continue;
-        if (std.mem.eql(u8, t.hash, hash)) {
-            // Check client still active
-            var client_ok = false;
-            for (clients_list.items) |c| {
-                if (!c.revoked and std.mem.eql(u8, c.id, t.client_id)) {
-                    client_ok = true;
-                    break;
-                }
-            }
-            if (client_ok) return t;
-            return null;
-        }
-    }
-    return null;
 }
 
 // ── Crypto helpers ──────────────────────────────────────────────────────

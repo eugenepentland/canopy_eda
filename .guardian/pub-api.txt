@@ -1120,21 +1120,23 @@ src/serve/oauth.zig::registerEndpoint | fn registerEndpoint(ctx: *Server, req: *
 src/serve/oauth.zig::tokenEndpoint | fn tokenEndpoint(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/oauth_store.zig::AuthCode struct_
 src/serve/oauth_store.zig::Client struct_
+src/serve/oauth_store.zig::CodeParams struct_
 src/serve/oauth_store.zig::NewClientResult struct_
+src/serve/oauth_store.zig::OAuthStore struct_
 src/serve/oauth_store.zig::Token struct_
-src/serve/oauth_store.zig::claimClient | fn claimClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, owner_email: []const u8) void
-src/serve/oauth_store.zig::consumeCode | fn consumeCode(allocator: std.mem.Allocator, auth_dir: []const u8, code: []const u8) ?AuthCode
-src/serve/oauth_store.zig::createClient | fn createClient( allocator: std.mem.Allocator, auth_dir: []const u8, name: []const u8, email: []const u8, redirect_uri: []const u8, ) std.mem.Allocator.Error!NewClientResult
-src/serve/oauth_store.zig::findClient | fn findClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8) ?Client
-src/serve/oauth_store.zig::issueCode | fn issueCode( allocator: std.mem.Allocator, auth_dir: []const u8, client_id: []const u8, redirect_uri: []const u8, email: []const u8, code_challenge: []const u8, scope: []const u8, ) std.mem.Allocator.Error![]const u8
-src/serve/oauth_store.zig::issueToken | fn issueToken( allocator: std.mem.Allocator, auth_dir: []const u8, client_id: []const u8, email: []const u8, scope: []const u8, ) std.mem.Allocator.Error![]const u8
-src/serve/oauth_store.zig::listClientsByEmail | fn listClientsByEmail(allocator: std.mem.Allocator, auth_dir: []const u8, owner_email: []const u8) std.mem.Allocator.Error![]Client
-src/serve/oauth_store.zig::revokeAllClientsForEmail | fn revokeAllClientsForEmail(allocator: std.mem.Allocator, auth_dir: []const u8, owner_email: []const u8) void
-src/serve/oauth_store.zig::revokeClient | fn revokeClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, owner_email: []const u8) bool
+src/serve/oauth_store.zig::claimClient | fn claimClient( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, owner_email: []const u8, ) void
+src/serve/oauth_store.zig::consumeCode | fn consumeCode( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, code: []const u8, ) ?AuthCode
+src/serve/oauth_store.zig::createClient | fn createClient( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, name: []const u8, email: []const u8, redirect_uri: []const u8, ) std.mem.Allocator.Error!NewClientResult
+src/serve/oauth_store.zig::findClient | fn findClient( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, ) ?Client
+src/serve/oauth_store.zig::issueCode | fn issueCode( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, p: CodeParams, ) std.mem.Allocator.Error![]const u8
+src/serve/oauth_store.zig::issueToken | fn issueToken( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, client_id: []const u8, email: []const u8, scope: []const u8, ) std.mem.Allocator.Error![]const u8
+src/serve/oauth_store.zig::listClientsByEmail | fn listClientsByEmail( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, owner_email: []const u8, ) std.mem.Allocator.Error![]Client
+src/serve/oauth_store.zig::revokeAllClientsForEmail | fn revokeAllClientsForEmail( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, owner_email: []const u8, ) void
+src/serve/oauth_store.zig::revokeClient | fn revokeClient( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, owner_email: []const u8, ) bool
 src/serve/oauth_store.zig::sha256Base64Url | fn sha256Base64Url(allocator: std.mem.Allocator, input: []const u8) std.mem.Allocator.Error![]u8
 src/serve/oauth_store.zig::sha256Hex value
-src/serve/oauth_store.zig::validateToken | fn validateToken(allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8) std.mem.Allocator.Error!?Token
-src/serve/oauth_store.zig::verifyClientSecret | fn verifyClientSecret(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, secret: []const u8) std.mem.Allocator.Error!?Client
+src/serve/oauth_store.zig::validateToken | fn validateToken( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8, ) std.mem.Allocator.Error!?Token
+src/serve/oauth_store.zig::verifyClientSecret | fn verifyClientSecret( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, secret: []const u8, ) std.mem.Allocator.Error!?Client
 src/serve/oauth_store.zig::verifyPkce | fn verifyPkce(allocator: std.mem.Allocator, code_verifier: []const u8, code_challenge: []const u8) std.mem.Allocator.Error!bool
 src/serve/oauth_store.zig::writeFileAtomicWithBackup | fn writeFileAtomicWithBackup(allocator: std.mem.Allocator, path: []const u8, data: []const u8) void
 src/serve/page_cache.zig::FileSet struct_
@@ -1203,9 +1205,10 @@ src/serve/pcb_layout_page.zig::writeJsonStr | fn writeJsonStr(w: *std.Io.Writer,
 src/serve/pcb_layout_page.zig::writePerNetJson | fn writePerNetJson(w: *std.Io.Writer, per_net: []const router.NetRouted) std.Io.Writer.Error!void
 src/serve/pdf_viewer.zig::HandlerError value
 src/serve/pdf_viewer.zig::pdfViewerPage | fn pdfViewerPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/plugin_tokens.zig::PluginTokenStore struct_
 src/serve/plugin_tokens.zig::Token struct_
-src/serve/plugin_tokens.zig::mint | fn mint(allocator: std.mem.Allocator, auth_dir: []const u8, label: []const u8) std.mem.Allocator.Error![]const u8
-src/serve/plugin_tokens.zig::validate | fn validate(allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8) bool
+src/serve/plugin_tokens.zig::mint | fn mint( self: *PluginTokenStore, allocator: std.mem.Allocator, auth_dir: []const u8, label: []const u8, ) std.mem.Allocator.Error![]const u8
+src/serve/plugin_tokens.zig::validate | fn validate(self: *PluginTokenStore, allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8) bool
 src/serve/rate_limiter.zig::RateLimiter struct_
 src/serve/rate_limiter.zig::acquire | fn acquire(self: *RateLimiter) void
 src/serve/rate_limiter.zig::configureFromEnv | fn configureFromEnv(allocator: std.mem.Allocator) void
@@ -1374,14 +1377,15 @@ src/serve/upload_package.zig::HandlerError value
 src/serve/upload_package.zig::uploadPackageApi | fn uploadPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/users.zig::Role enum_
 src/serve/users.zig::User struct_
+src/serve/users.zig::UserStore struct_
 src/serve/users.zig::canAdmin | fn canAdmin(self: Role) bool
 src/serve/users.zig::canWrite | fn canWrite(self: Role) bool
-src/serve/users.zig::deleteUser | fn deleteUser( allocator: std.mem.Allocator, auth_dir: []const u8, target_email: []const u8, acting_email: []const u8, ) (std.mem.Allocator.Error || error{ CannotDeleteSelf, LastAdmin })!bool
-src/serve/users.zig::ensureUser | fn ensureUser( allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8, requested_role: Role, ) std.mem.Allocator.Error!Role
+src/serve/users.zig::deleteUser | fn deleteUser( self: *UserStore, allocator: std.mem.Allocator, auth_dir: []const u8, target_email: []const u8, acting_email: []const u8, ) (std.mem.Allocator.Error || error{ CannotDeleteSelf, LastAdmin })!bool
+src/serve/users.zig::ensureUser | fn ensureUser( self: *UserStore, allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8, requested_role: Role, ) std.mem.Allocator.Error!Role
 src/serve/users.zig::fromString | fn fromString(s: []const u8) ?Role
-src/serve/users.zig::getRole | fn getRole(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) Role
-src/serve/users.zig::listUsers | fn listUsers(allocator: std.mem.Allocator, auth_dir: []const u8) std.mem.Allocator.Error![]User
-src/serve/users.zig::setRole | fn setRole( allocator: std.mem.Allocator, auth_dir: []const u8, target_email: []const u8, new_role: Role, acting_email: []const u8, ) (std.mem.Allocator.Error || error{LastAdmin})!bool
+src/serve/users.zig::getRole | fn getRole(self: *UserStore, allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) Role
+src/serve/users.zig::listUsers | fn listUsers( self: *UserStore, allocator: std.mem.Allocator, auth_dir: []const u8, ) std.mem.Allocator.Error![]User
+src/serve/users.zig::setRole | fn setRole( self: *UserStore, allocator: std.mem.Allocator, auth_dir: []const u8, target_email: []const u8, new_role: Role, acting_email: []const u8, ) (std.mem.Allocator.Error || error{LastAdmin})!bool
 src/serve/users.zig::toString | fn toString(self: Role) []const u8
 src/serve/vfs.zig::ListMode enum_
 src/serve/vfs.zig::ReplaceMode enum_
