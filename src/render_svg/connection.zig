@@ -1,3 +1,8 @@
+//! Connection rendering: walks a hub's pin group out to its terminals,
+//! following passive spoke chains across the net (`findSpokeChain`) to resolve
+//! what each pin ultimately reaches, then emits the grouped wires and branch
+//! bodies. The bridge between a hub's pins and `branch.zig`'s trees.
+
 const std = @import("std");
 const env_mod = @import("../eval/env.zig");
 const PinRef = env_mod.PinRef;

@@ -1,3 +1,9 @@
+//! Shared render context for the hub-and-spoke schematic SVG. Defines the
+//! flattened scene types the renderer works on — `FlatInst`/`FlatNet` (a
+//! sub-block-flattened, path-qualified view of the design), adjacency, and
+//! `PinGroup` — plus `RenderCtx`, the per-render state the `render_svg/*`
+//! drawing modules thread through. Built once per page from a `DesignBlock`.
+
 const std = @import("std");
 const log = @import("../infra/log.zig");
 const env_mod = @import("../eval/env.zig");

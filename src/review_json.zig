@@ -1,3 +1,6 @@
+//! Renders the assembled `review.ReviewDoc` to JSON — the machine-readable
+//! twin of `review_html.zig`, for API and MCP consumers of the design review.
+
 const std = @import("std");
 const json_writer = @import("json_writer.zig");
 const review = @import("review.zig");

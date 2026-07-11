@@ -1,3 +1,8 @@
+//! Spoke-side SVG drawing: renders the branch tree hanging off a hub pin — the
+//! recursive left/right junction fan-out, terminal symbols (GND/NC/net label),
+//! and inline passive chains (series R/C/L drawn on the wire). Pure geometry
+//! emission onto the render context's writer.
+
 const std = @import("std");
 const env_mod = @import("../eval/env.zig");
 const ctx_mod = @import("context.zig");

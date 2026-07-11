@@ -1,3 +1,8 @@
+//! Assembles the design-review document: the overall pass/warn/fail summary,
+//! missing-MPN and port coverage, per-section reports, and the resolved BOM.
+//! The data model behind the review panels embedded in the schematic page —
+//! `review_html.zig` / `review_json.zig` render it. Built on the caller's arena.
+
 const std = @import("std");
 const clock = @import("infra/clock.zig");
 const env_mod = @import("eval/env.zig");
