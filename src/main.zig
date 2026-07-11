@@ -1,3 +1,9 @@
+//! CLI entry point: parses the subcommand from argv and dispatches to the
+//! `commands.zig` handlers (build/check/export/import) or the local
+//! convert/parse/token helpers, printing usage on an unknown command. Also
+//! resolves the auth directory (CLI flag -> `EDA_AUTH_DIR` -> `<project>/auth`)
+//! shared with the long-running `serve` flow.
+
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const parser = @import("sexpr/parser.zig");

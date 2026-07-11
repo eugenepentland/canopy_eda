@@ -1,3 +1,9 @@
+//! CLI subcommand implementations dispatched from `main.zig`: `check` (runs ERC,
+//! non-zero exit on any error-severity violation), `build` (+`--push`),
+//! `export-kicad`, `import-kicad`, and the convert commands. These own the
+//! program's visible stdout output — the point of running `netlisp <cmd>` —
+//! distinct from diagnostics, which go through `infra/log.zig`.
+
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const paths = @import("paths.zig");

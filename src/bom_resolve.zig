@@ -1,3 +1,8 @@
+//! BOM identity resolution: matches each flattened instance to its part
+//! identity (MPN, value, DNP) from the BOM sidecar and library, then writes the
+//! resolved properties back into the `.sexp` source (`setBomProperty`). The
+//! bridge between the netlist and the manufacturing BOM.
+
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const log = @import("infra/log.zig");

@@ -1,3 +1,7 @@
+//! KiCad footprint conversion: parses a `.kicad_mod` and emits the equivalent
+//! netlisp `(footprint …)` sexpr, mapping KiCad pad types and shapes onto
+//! netlisp's. Backs the `convert-footprint` command and the library-import path.
+
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");

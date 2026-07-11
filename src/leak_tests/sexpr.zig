@@ -1,3 +1,8 @@
+//! Allocation-leak tests for the S-expression layer: exercises parse/freeNodes,
+//! print, and tokenize through `std.testing.allocator` so any node slice or
+//! scratch buffer the teardown path forgets is caught at test end. A pure test
+//! module — the ownership contracts it drives are the point.
+
 const std = @import("std");
 
 // Modules under test. Paths are relative to src/leak_tests/.

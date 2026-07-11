@@ -1,3 +1,8 @@
+//! Emits a fully-resolved, flattened `.sexp` from a built `DesignBlock` —
+//! sub-blocks inlined, ids and resolved values baked in. The canonical export
+//! back to source text (`netlisp build` stdout); the flattened twin of the
+//! hierarchical design source.
+
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
 const DesignBlock = env_mod.DesignBlock;

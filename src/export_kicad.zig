@@ -1,3 +1,8 @@
+//! KiCad export orchestration: flattens the `DesignBlock` and drives the netlist,
+//! footprint, and model writers to hand a design off to KiCad's PCB editor.
+//! Owns `uuidFromId` — the deterministic 8-char id -> KiCad UUID map that keeps
+//! footprint placements stable across re-exports.
+
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const log = @import("infra/log.zig");

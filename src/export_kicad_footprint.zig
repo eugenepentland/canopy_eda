@@ -1,3 +1,8 @@
+//! KiCad footprint export: locates a part's source `.kicad_mod` (reusing it
+//! verbatim when present) or emits one from the netlisp footprint, mapping
+//! netlisp pad types back to KiCad's. Produces the footprint files of a KiCad
+//! export alongside the netlist.
+
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const ast = @import("sexpr/ast.zig");
