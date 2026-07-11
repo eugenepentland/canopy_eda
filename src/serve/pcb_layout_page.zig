@@ -39,7 +39,7 @@ const pages_tmpl = @import("templates/pages.zig");
 const serve_root = @import("../serve.zig");
 const history = @import("history.zig");
 const numeric = @import("../numeric.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 // SVG framing.
@@ -364,7 +364,7 @@ fn placeForChoice(
 
 /// GET /pcb-layout/:name — evaluate the design, run the optimizer, and return
 /// the interactive (drag + live-score) inline-SVG preview with a sidebar.
-pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbLayoutPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -618,7 +618,7 @@ fn descendToSub(
 /// this — there's no sidecar key for an individual sub-block yet. A `single`
 /// (top-level design) page keeps exactly ONE saved layout, so it writes the
 /// cache slot only — never an "auto · …" history row alongside it.
-fn persistGeneratedLayout(ctx: *Handler, name: []const u8, placement: optimizer.Placement, params: optimizer.Params, sub: ?[]const u8, single: bool) void {
+fn persistGeneratedLayout(ctx: *Server, name: []const u8, placement: optimizer.Placement, params: optimizer.Params, sub: ?[]const u8, single: bool) void {
     if (sub != null or !placement.generated) return;
     writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, params);
     if (!single) recordAutoLayout(ctx.allocator, ctx.project_dir, name, placement, params);
@@ -816,7 +816,7 @@ fn parseToggles(req: *httpz.Request) Toggles {
 /// and alignment terms the optimizer actually minimises, so a layout that looks
 /// worse on the visible metric but wins on the true objective can be told apart.
 /// Honours the same ?regen / tuning query as the page.
-pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbLayoutJsonApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1229,7 +1229,7 @@ pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngReq
 /// Request-scoped allocation uses `req.arena` (freed after the response is sent;
 /// `res.body` stays valid until then) — `ctx.allocator` is the global page
 /// allocator, so a leaked image per call would never be reclaimed.
-pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbPngApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const arena = req.arena;
     const name = req.param("name") orelse {
         res.status = 404;
@@ -1438,7 +1438,7 @@ fn writeBreakdownFields(w: *std.Io.Writer, b: optimizer.Breakdown, params: optim
 // layout.
 
 /// Work item for a background live-regen solve. `name` is page_allocator-owned
-/// (freed by the thread); `project_dir` is borrowed from the long-lived Handler,
+/// (freed by the thread); `project_dir` is borrowed from the long-lived Server,
 /// which outlives every request thread.
 const RegenJob = struct {
     name: []const u8,
@@ -1522,7 +1522,7 @@ fn regenThread(job: *RegenJob) void {
 /// same tuning query (?w_align / loop_w / w_congest / grid) as ?regen=1.
 /// If a run for this design is already in flight, its generation is returned and
 /// no second solver is spawned (one per design at a time).
-pub fn pcbRegenStartApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbRegenStartApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1563,7 +1563,7 @@ pub fn pcbRegenStartApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 /// it already drew), run/done/err flags, and the latest best-so-far `frame`
 /// (`{pass,score,parts}`) or null. `{"gen":0,"none":true}` means no run has been
 /// started for this design.
-pub fn pcbProgressApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbProgressApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1591,7 +1591,7 @@ pub fn pcbProgressApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// reusing the optimizer's own objective code (no metric duplicated in JS). Body
 /// is the same `{"parts":[{ref,x,y,rot}, …]}` the save endpoint takes; returns
 /// the full breakdown for those exact positions. Honours the ?tuning query.
-pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbScoreApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1708,7 +1708,7 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 /// Response `{tracks, vias, drc, routed, total}` is the same routed-copper shape
 /// the page embeds, so the client redraws in place — no page reload, which is
 /// what used to snap the layout back to auto.
-pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbRouteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1817,7 +1817,7 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 /// `drc.check` against it, and returns `{"drc":[…],"n":N}`. This lets the viewer
 /// verify hand-drawn copper continuously (debounced after any copper edit + on
 /// Save) instead of only when the user clicks Route.
-pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1933,7 +1933,7 @@ pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
 /// preference the KiCad sync seeds from). Null (+ a client error status) when
 /// the design/module doesn't resolve or has no saved layout at all — fab
 /// outputs are only meaningful for a deliberately placed board.
-fn blessedPlacement(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, name: []const u8) ?optimizer.Placement {
+fn blessedPlacement(ctx: *Server, req: *httpz.Request, res: *httpz.Response, name: []const u8) ?optimizer.Placement {
     var eval = Evaluator.init(req.arena, ctx.project_dir);
     var module_res: ?modules_mod.ResolvedBlock = null;
     const block: *env_mod.DesignBlock = resolveBlock(req.arena, ctx.project_dir, name, &eval, &module_res) orelse {
@@ -1991,7 +1991,7 @@ fn blessedLayout(layouts: []const SavedLayout) ?*const SavedLayout {
 
 /// Resolve `name`'s fab view (see `FabView`); null (+ client error status)
 /// when the design/module doesn't resolve or has no saved layout.
-fn blessedFabView(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, name: []const u8) ?FabView {
+fn blessedFabView(ctx: *Server, req: *httpz.Request, res: *httpz.Response, name: []const u8) ?FabView {
     var placement = blessedPlacement(ctx, req, res, name) orelse return null;
     var tracks: []const router.Track = &.{};
     var vias: []const router.Via = &.{};
@@ -2019,7 +2019,7 @@ fn blessedFabView(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, name
 /// shared fab frame. The assembly half of the fab package; pairs with the
 /// BOM CSV. Do-Not-Populate parts are dropped by default; `?dnp=keep` lists
 /// them (a fully-populated variant).
-pub fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbCentroidApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -2034,7 +2034,7 @@ pub fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// GET /api/pcb-drill/:name[?npth=1] — the Excellon drill file at the design's
 /// blessed poses: plated through-hole pads + the ★ layout's persisted routed
 /// vias (PTH), or the non-plated mounting holes (`?npth=1`).
-pub fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbDrillApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -2062,7 +2062,7 @@ fn fabReadinessFor(req: *httpz.Request, fv: FabView) HandlerError!fab_readiness.
 /// computed against the SAME blessed-layout selection the Gerber export uses.
 /// The viewer fetches this before download and gates on it; `pcbGerbersApi`
 /// enforces it server-side (409 on errors unless `?force=1`).
-pub fn pcbFabReadinessApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbFabReadinessApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -2088,7 +2088,7 @@ pub fn pcbFabReadinessApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// anyway"). Warnings never block. A clean (or forced) request downloads the
 /// ZIP as before. `?dnp=keep` keeps Do-Not-Populate parts in the centroid CSV
 /// (dropped by default).
-pub fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbGerbersApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -2158,7 +2158,7 @@ pub fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 /// Body: `{"name","parts":[{ref,x,y,rot,origin?}, …]}`; the score is computed on the
 /// server (no client-side metric). Upserts by name (re-save overwrites in
 /// place); a new name is prepended so the newest sits at the top of the list.
-pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -2312,7 +2312,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// GET /api/pcb-layout-history/:name — list the design's `.layouts.json`
 /// snapshots (newest first) as `{"snapshots":[{"id":…}, …]}`. Each Save/Update
 /// rolls the previous sidecar into history; this backs a restore picker.
-pub fn pcbLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbLayoutHistoryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -2342,7 +2342,7 @@ pub fn pcbLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
 /// any window still holding the pre-restore rev 409s on its next save instead
 /// of clobbering the restored state. Design-level only (sub circuits keep
 /// multi-snapshot in-file history). Returns `{"ok":true,"rev":N}`.
-pub fn restoreLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn restoreLayoutHistoryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -2384,7 +2384,7 @@ pub fn restoreLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.R
 }
 
 /// POST /api/pcb-layouts/:name/delete — drop a named layout. Body: `{"name"}`.
-pub fn deleteNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn deleteNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -2415,7 +2415,7 @@ pub fn deleteNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 /// that entry as the (single) default; an empty/blank name clears the default.
 /// A name that matches no entry just clears it. Persists the top-level
 /// `"default"` field to `.layouts.json`; returns `{"ok":true}`.
-pub fn setDefaultLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn setDefaultLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -2454,7 +2454,7 @@ pub fn setDefaultLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
 /// measured by the live engine again, making the column comparable. Body is
 /// ignored; returns `{"ok":true,"rescored":N}`. A layout with no stored parts,
 /// or one whose scoring fails, keeps its previous score.
-pub fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn rescoreLayoutsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -2522,7 +2522,7 @@ pub fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 /// with each layout's full raw breakdown; read-only (unlike `pcb-rescore`, it
 /// persists nothing). The raw terms the client re-weighs are weight-independent,
 /// so the result is stable regardless of `?tuning` (honoured only for parity).
-pub fn pcbScoreBatchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pcbScoreBatchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -2641,7 +2641,7 @@ fn courtFloorGrid(v: f64) f64 {
 ///   `{"fp":"c-0402","mode":"size","hw":1.2,"hh":0.8}` — legacy symmetric
 ///     *effective* half-extents about the origin.
 /// Mode defaults to "size" when absent. Then re-pack via `?regen=1`.
-pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn savePcbCourtyardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;
         res.body = "no body";
@@ -3287,7 +3287,7 @@ const ShownView = struct {
 /// layout's persisted copper, and DRC whatever copper is shown. `shown` is
 /// null for ?sub scoped pages (no whole-design layout applies).
 fn resolveShownView(
-    ctx: *Handler,
+    ctx: *Server,
     req: *httpz.Request,
     placement: *optimizer.Placement,
     layouts: []const SavedLayout,

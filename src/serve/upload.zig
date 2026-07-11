@@ -10,7 +10,7 @@ const infra_fs = @import("../infra/fs.zig");
 const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 
 // ── Constants ─────────────────────────────────────────────────────
 const http_bad_request: u16 = 400;
@@ -272,7 +272,7 @@ pub fn extractStepBytes(allocator: std.mem.Allocator, zip_bytes: []const u8, fil
 /// system `unzip`, convert each part, and write `lib/components`,
 /// `lib/footprints`, `lib/pinouts`, and `lib/models` entries for it.
 /// The heavy lifting lives in `importZipBytes`, shared with the MCP path.
-pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn uploadZipApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = http_bad_request;
         res.body = "No data";

@@ -10,7 +10,7 @@ const log = @import("../infra/log.zig");
 const export_kicad = @import("../export_kicad.zig");
 const footprint_mod = @import("../export_kicad_footprint.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 const library_template = @import("templates/library.zig");
 const footprint_preview = @import("footprint_preview.zig");
 const upload = @import("upload.zig");
@@ -219,7 +219,7 @@ fn buildSearchText(
 /// GET /library — render the component-library browser: a searchable
 /// listing of every symbol/family/footprint/pinout under `lib/` plus a
 /// drag-drop upload box that posts to the `/api/upload-*` endpoints.
-pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn libraryPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const rows = try collectRows(ctx.allocator, ctx.project_dir);
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
@@ -236,7 +236,7 @@ pub fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
 /// each the tool's own JSON (or null on a non-JSON internal error). The heavy
 /// allocations (zip + PDF, several MB) go through a dedicated arena freed at
 /// return, mirroring the `/mcp` POST handler.
-pub fn cseFetchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn cseFetchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const mcp_tools = @import("mcp_tools.zig");
     res.content_type = .JSON;
     const body = req.body() orelse {
@@ -320,7 +320,7 @@ fn sendErr(res: *httpz.Response, status: u16, json_body: []const u8) void {
 /// (add-or-replace). The drop target is a component or footprint card: for a
 /// component, the footprint is read from its `.sexp`; for a footprint card,
 /// `:name` is itself the footprint.
-pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn uploadModelApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     const name_raw = req.param("name") orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing name\"}");
     const body = req.body() orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing body\"}");
@@ -376,7 +376,7 @@ fn writeModelStep(allocator: std.mem.Allocator, project_dir: []const u8, fp: []c
 /// POST /api/library-delete/:kind/:name — soft-delete a library entry by moving
 /// `lib/<subdir>/<name>.sexp` into `lib/<subdir>/.deleted/` (recoverable, and
 /// not scanned by the listing). `kind` ∈ component|family|footprint|pinout.
-pub fn deleteLibraryEntryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn deleteLibraryEntryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     const kind = req.param("kind") orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing kind\"}");
     const name = req.param("name") orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing name\"}");

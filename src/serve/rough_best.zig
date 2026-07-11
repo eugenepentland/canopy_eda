@@ -32,7 +32,7 @@ const pcb_layout_page = @import("pcb_layout_page.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const modules_mod = @import("modules.zig");
-const Handler = @import("../serve.zig").Handler;
+const Server = @import("../serve.zig").Server;
 
 /// One scored candidate in the family.
 const Candidate = struct {
@@ -290,7 +290,7 @@ pub fn bestRoughJson(alloc: std.mem.Allocator, project_dir: []const u8, name: []
 
 /// GET /api/rough-best-png/:name — render the best-of-family winner as a PNG so
 /// the generated layout is directly viewable (not just its pose JSON).
-pub fn bestRoughPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void {
+pub fn bestRoughPngApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -331,7 +331,7 @@ pub fn bestRoughPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 }
 
 /// GET /api/rough-best/:name — best-of-family rough generation scoreboard + poses.
-pub fn bestRoughApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void {
+pub fn bestRoughApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;

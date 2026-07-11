@@ -7,7 +7,7 @@ const std = @import("std");
 const httpz = @import("httpz");
 
 const server_mod = @import("../serve.zig");
-const Handler = server_mod.Handler;
+const Server = server_mod.Server;
 const auth = @import("auth.zig");
 const store = @import("oauth_store.zig");
 const oauth_template = @import("templates/oauth.zig");
@@ -26,7 +26,7 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.File.WriteError || std.fs.File.OpenError ||
     error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence };
 
-fn requestUrl(ctx: *Handler, req: *httpz.Request) ![]const u8 {
+fn requestUrl(ctx: *Server, req: *httpz.Request) ![]const u8 {
     const host = req.header("host") orelse "localhost";
     const scheme = if (isTls(req)) "https" else "http";
     return std.fmt.allocPrint(ctx.allocator, "{s}://{s}", .{ scheme, host });
@@ -43,7 +43,7 @@ fn isTls(req: *httpz.Request) bool {
 /// GET /.well-known/oauth-protected-resource — RFC 9728 metadata that
 /// tells Claude Code which authorization server protects this MCP
 /// resource and which bearer mechanism (header) it expects.
-pub fn metadataProtectedResource(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn metadataProtectedResource(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const base = try requestUrl(ctx, req);
     defer ctx.allocator.free(base);
     res.content_type = .JSON;
@@ -59,7 +59,7 @@ pub fn metadataProtectedResource(ctx: *Handler, req: *httpz.Request, res: *httpz
 /// GET /.well-known/oauth-authorization-server — RFC 8414 metadata
 /// describing this server's authorization and token endpoints, supported
 /// PKCE method (S256), and the `mcp` scope used by Claude Code.
-pub fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn metadataAuthServer(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const base = try requestUrl(ctx, req);
     defer ctx.allocator.free(base);
     res.content_type = .JSON;
@@ -91,7 +91,7 @@ pub fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// `/oauth/authorize` claims it via `store.claimClient`. Until then it
 /// can't actually do anything — `/oauth/authorize` still requires the
 /// user to sign in before issuing any auth code.
-pub fn registerEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn registerEndpoint(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse "";
     const Body = struct {
         client_name: ?[]const u8 = null,
@@ -115,7 +115,7 @@ pub fn registerEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     if (client_name.len > 200) return registerError(req, res, err_invalid_request, "client_name too long");
 
     // Empty email = unclaimed; first /oauth/authorize approval will set it.
-    const minted = store.createClient(ctx.allocator, ctx.auth_dir, client_name, "", redirect_uri) catch {
+    const minted = ctx.state.oauth.createClient(ctx.allocator, ctx.auth_dir, client_name, "", redirect_uri) catch {
         res.status = 500;
         res.content_type = .JSON;
         res.body = "{\"error\":\"server_error\",\"error_description\":\"could not register client\"}";
@@ -161,7 +161,7 @@ fn registerError(req: *httpz.Request, res: *httpz.Response, code: []const u8, de
 ///
 /// If signed in, render a consent page. If not, render a "please sign in" page
 /// with a link to /auth/login.
-pub fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn authorizePage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const q = try req.query();
     const client_id = q.get(key_client_id) orelse return badRequest(res, err_missing_client_id);
     const redirect_uri = q.get(key_redirect_uri) orelse return badRequest(res, err_missing_redirect_uri);
@@ -175,7 +175,8 @@ pub fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     if (code_challenge.len == 0) return badRequest(res, "missing code_challenge (PKCE required)");
     if (!std.mem.eql(u8, code_challenge_method, "S256")) return badRequest(res, "code_challenge_method must be \"S256\"");
 
-    const client = store.findClient(ctx.allocator, ctx.auth_dir, client_id) orelse return badRequest(res, "unknown client_id");
+    const client = ctx.state.oauth.findClient(ctx.allocator, ctx.auth_dir, client_id) orelse
+        return badRequest(res, "unknown client_id");
     if (!redirectUriMatches(client.redirect_uri, redirect_uri)) {
         const msg = try std.fmt.allocPrint(
             req.arena,
@@ -208,7 +209,7 @@ pub fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 /// POST /oauth/authorize/approve
 /// User has clicked "Authorize" on the consent page. Re-validate everything,
 /// mint an auth code, and 302-redirect to the client's redirect_uri.
-pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn authorizeApprove(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = auth.currentEmail(ctx, req) orelse return unauthorized(res);
 
     const form = try req.formData();
@@ -218,17 +219,24 @@ pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const code_challenge = form.get("code_challenge") orelse return badRequest(res, "missing code_challenge");
     const scope = form.get("scope") orelse "mcp";
 
-    const client = store.findClient(ctx.allocator, ctx.auth_dir, client_id) orelse return badRequest(res, "unknown client_id");
+    const client = ctx.state.oauth.findClient(ctx.allocator, ctx.auth_dir, client_id) orelse
+        return badRequest(res, "unknown client_id");
     if (!redirectUriMatches(client.redirect_uri, redirect_uri)) return badRequest(res, "redirect_uri mismatch");
 
     // Dynamically-registered clients have no owner email until the first
     // user signs in and approves. Claim it now so the user can revoke it
     // from /account later. Already-owned clients are left alone.
     if (client.email.len == 0) {
-        store.claimClient(ctx.allocator, ctx.auth_dir, client_id, email);
+        ctx.state.oauth.claimClient(ctx.allocator, ctx.auth_dir, client_id, email);
     }
 
-    const code = try store.issueCode(ctx.allocator, ctx.auth_dir, client_id, redirect_uri, email, code_challenge, scope);
+    const code = try ctx.state.oauth.issueCode(ctx.allocator, ctx.auth_dir, .{
+        .client_id = client_id,
+        .redirect_uri = redirect_uri,
+        .email = email,
+        .code_challenge = code_challenge,
+        .scope = scope,
+    });
 
     const separator: []const u8 = if (std.mem.indexOfScalar(u8, redirect_uri, '?') == null) "?" else "&";
     // Percent-encode `state` (client-supplied) so it can't smuggle extra query
@@ -260,7 +268,7 @@ fn percentEncode(a: std.mem.Allocator, s: []const u8) ![]const u8 {
 /// POST /oauth/token
 /// Form body: grant_type=authorization_code, code, redirect_uri, client_id,
 /// client_secret, code_verifier
-pub fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn tokenEndpoint(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const form = try req.formData();
 
     const grant_type = form.get("grant_type") orelse return tokenError(req, res, err_invalid_request, "missing grant_type");
@@ -273,10 +281,15 @@ pub fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const client_secret = form.get("client_secret") orelse return tokenError(req, res, err_invalid_request, "missing client_secret");
     const code_verifier = form.get("code_verifier") orelse return tokenError(req, res, err_invalid_request, "missing code_verifier");
 
-    const verified_client = try store.verifyClientSecret(ctx.allocator, ctx.auth_dir, client_id, client_secret);
+    const verified_client = try ctx.state.oauth.verifyClientSecret(
+        ctx.allocator,
+        ctx.auth_dir,
+        client_id,
+        client_secret,
+    );
     if (verified_client == null) return tokenError(req, res, "invalid_client", "bad client_id or client_secret");
 
-    const auth_code = store.consumeCode(ctx.allocator, ctx.auth_dir, code) orelse
+    const auth_code = ctx.state.oauth.consumeCode(ctx.allocator, ctx.auth_dir, code) orelse
         return tokenError(req, res, err_invalid_grant, "code expired or already used");
     if (!std.mem.eql(u8, auth_code.client_id, client_id)) return tokenError(req, res, err_invalid_grant, "code was issued to a different client");
     if (!redirectUriMatches(auth_code.redirect_uri, redirect_uri)) return tokenError(req, res, err_invalid_grant, "redirect_uri mismatch");
@@ -284,7 +297,13 @@ pub fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const pkce_ok = try store.verifyPkce(ctx.allocator, code_verifier, auth_code.code_challenge);
     if (!pkce_ok) return tokenError(req, res, err_invalid_grant, "PKCE verification failed");
 
-    const access_token = try store.issueToken(ctx.allocator, ctx.auth_dir, client_id, auth_code.email, auth_code.scope);
+    const access_token = try ctx.state.oauth.issueToken(
+        ctx.allocator,
+        ctx.auth_dir,
+        client_id,
+        auth_code.email,
+        auth_code.scope,
+    );
 
     res.content_type = .JSON;
     res.header("cache-control", "no-store");

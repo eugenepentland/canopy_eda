@@ -16,7 +16,7 @@ const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
 const edit_mod = @import("edit.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 
 /// Error set for the HTTP handler.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -160,7 +160,7 @@ fn detectIndent(source: []const u8, form_start: usize) []const u8 {
 /// `lib/datasheets/<file>` both exist, then splices the `(datasheet …)` form
 /// into the component. Idempotent: an already-linked file returns
 /// `{"ok":true,"note":"already linked"}`.
-pub fn attachDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn attachDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     const body = req.body() orelse {
         res.status = 400;
@@ -205,7 +205,7 @@ pub fn attachDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// `fmt` (one `{s}` for the name) exists. Writes a 4xx JSON error and
 /// returns false otherwise.
 fn requireExists(
-    ctx: *Handler,
+    ctx: *Server,
     res: *httpz.Response,
     comptime fmt: []const u8,
     name: []const u8,

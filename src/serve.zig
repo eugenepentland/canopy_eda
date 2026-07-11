@@ -1,4 +1,4 @@
-//! HTTP server entry point: builds the httpz router, owns the `Handler`
+//! HTTP server entry point: builds the httpz router, owns the `Server`
 //! shared across every request, and holds the global live schematic state
 //! (scene-graph JSON behind `live_mutex`). Handlers run on httpz's per-request
 //! arena; anything cached past the response — like the live layout JSON — is
@@ -13,9 +13,9 @@ const deflate = @import("deflate.zig");
 /// intentionally broad because the http server's own surface is wide; we
 /// derive it from the actual `listen()` return type so it stays in sync.
 pub const ServeError = std.mem.Allocator.Error ||
-    @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Handler).listen)).@"fn".return_type.?).error_union.error_set ||
-    @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Handler).router)).@"fn".return_type.?).error_union.error_set ||
-    @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Handler).init)).@"fn".return_type.?).error_union.error_set ||
+    @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Server).listen)).@"fn".return_type.?).error_union.error_set ||
+    @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Server).router)).@"fn".return_type.?).error_union.error_set ||
+    @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Server).init)).@"fn".return_type.?).error_union.error_set ||
     error{ InvalidIPAddressFormat, ThreadQuotaExceeded };
 
 // Sub-modules
@@ -38,6 +38,9 @@ const layout_match = @import("serve/layout_match.zig");
 const rough_best = @import("serve/rough_best.zig");
 const modules_page = @import("serve/modules.zig");
 const auth = @import("serve/auth.zig");
+const users_store = @import("serve/users.zig");
+const oauth_store = @import("serve/oauth_store.zig");
+const plugin_tokens = @import("serve/plugin_tokens.zig");
 const mcp = @import("serve/mcp.zig");
 const oauth = @import("serve/oauth.zig");
 const account_page = @import("serve/account_page.zig");
@@ -216,13 +219,36 @@ pub fn pcbJobSnapshot(alloc: std.mem.Allocator, name: []const u8) ?PcbJobView {
     return .{ .gen = e.gen, .seq = e.seq, .running = e.running, .done = e.done, .err = e.err, .frame = fr };
 }
 
+// ── Per-server instance state ──────────────────────────────────────────
+//
+// The serve layer's mutable stores and caches used to be file-scope `var`s —
+// process-global singletons that made per-test and multi-instance servers
+// impossible and hid store-init failures behind a shared slot. They now live
+// on one `ServerState`, constructed in `serve()`, owned there, and reached by
+// every route handler through `Server.state`. Persisted stores keep their
+// exact on-disk formats and paths; only the in-memory containers moved.
+
+/// Mutable per-server state: the auth session + WebAuthn-challenge stores
+/// today, with the OAuth/user/plugin-token stores, HTML/module/summary caches,
+/// live-version + PCB-job tables, and rate limiters folding in as the
+/// serve-state migration lands. One instance per running server; two instances
+/// are fully independent, which is what makes per-test servers possible. Every
+/// field defaults to empty so `.{}` yields a fresh, unloaded server.
+pub const ServerState = struct {
+    sessions: auth.SessionStore = .{},
+    challenges: auth.ChallengeStore = .{},
+    users: users_store.UserStore = .{},
+    oauth: oauth_store.OAuthStore = .{},
+    plugin_tokens: plugin_tokens.PluginTokenStore = .{},
+};
+
 // ── Server ─────────────────────────────────────────────────────────────
 
 /// httpz request handler shared across every route and worker thread. Owns
 /// the long-lived allocator and project directory, runs the auth middleware
 /// before dispatch, and exposes the MCP WebSocket client type so the server
 /// can upgrade `GET /mcp` connections.
-pub const Handler = struct {
+pub const Server = struct {
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     /// Directory holding the auth state files (`credentials.json`,
@@ -244,15 +270,21 @@ pub const Handler = struct {
     /// a `Host: localhost` header used to grant unauthenticated admin remotely.
     dev_mode: bool = false,
 
+    /// Per-server mutable state (session/challenge stores today; OAuth/user/
+    /// plugin-token stores, caches, live versions, PCB jobs, and rate limiters
+    /// as the migration lands). Borrowed — the single instance is owned by
+    /// `serve()` and shared, by pointer, with every per-request `Server` copy.
+    state: *ServerState,
+
     pub const WebsocketHandler = mcp.Client;
 
     pub fn dispatch(
-        self: *Handler,
-        action: *const fn (*Handler, *httpz.Request, *httpz.Response) anyerror!void,
+        self: *Server,
+        action: *const fn (*Server, *httpz.Request, *httpz.Response) anyerror!void,
         req: *httpz.Request,
         res: *httpz.Response,
     ) !void {
-        // Hand the route handler a request-scoped view of the Handler whose
+        // Hand the route handler a request-scoped view of the Server whose
         // allocator is httpz's per-request arena (reset after the response is
         // written). Every per-request allocation — evaluator state, rendered
         // HTML, scene graphs, PNG canvases — dies with the request instead of
@@ -261,11 +293,14 @@ pub const Handler = struct {
         // that must outlive the request (live versions, regen-job frames,
         // auth/oauth stores, the MCP websocket client) dupes into
         // page_allocator internally and was audited to do so.
-        var req_handler = Handler{
+        var req_handler = Server{
             .allocator = res.arena,
             .project_dir = self.project_dir,
             .auth_dir = self.auth_dir,
             .dev_mode = self.dev_mode,
+            // The per-request copy borrows the same long-lived state instance,
+            // so every route handler reaches the same stores/caches/limiters.
+            .state = self.state,
         };
         // Auth middleware: check before dispatching to route handler
         if (!try auth.authMiddleware(&req_handler, req, res)) return;
@@ -276,7 +311,7 @@ pub const Handler = struct {
         maybeCompress(req, res);
     }
 
-    pub fn notFound(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    pub fn notFound(_: *Server, _: *httpz.Request, res: *httpz.Response) !void {
         res.status = 404;
         res.body = "Not found";
     }
@@ -367,12 +402,13 @@ pub fn serve(
     rate_limiter.configureFromEnv(allocator);
     const effective_auth: []const u8 = if (auth_dir) |d| d else try std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
     // Opt-in local-dev auth bypass. Off in production (no env var) → every
-    // request must authenticate. See Handler.dev_mode. Read via config.zig so
+    // request must authenticate. See Server.dev_mode. Read via config.zig so
     // the ban-env policy holds (only config.zig touches the environment).
     const dev_mode = @import("config.zig").devMode(allocator);
     if (dev_mode) std.debug.print("netlisp: NETLISP_DEV set — loopback requests bypass auth as dev@localhost\n", .{});
-    var handler = Handler{ .allocator = allocator, .project_dir = project_dir, .auth_dir = effective_auth, .dev_mode = dev_mode };
-    var server = try httpz.Server(*Handler).init(allocator, .{
+    var state: ServerState = .{}; // owned here; shared by pointer (see ServerState)
+    var handler = Server{ .allocator = allocator, .project_dir = project_dir, .auth_dir = effective_auth, .dev_mode = dev_mode, .state = &state };
+    var server = try httpz.Server(*Server).init(allocator, .{
         .address = .all(port),
         .request = .{
             // 64 MiB so datasheet PDFs and large KiCad zips fit. Individual
@@ -534,7 +570,6 @@ pub fn serve(
     router.post("/api/users/role", account_page.updateUserRoleApi, .{});
     router.post("/api/users/delete", account_page.deleteUserApi, .{});
 
-    std.debug.print("Listening on http://localhost:{d}\n", .{port});
-    std.debug.print("Project: {s}\n", .{project_dir});
+    std.debug.print("Listening on http://localhost:{d}\nProject: {s}\n", .{ port, project_dir });
     try server.listen();
 }

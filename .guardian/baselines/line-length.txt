@@ -78,7 +78,7 @@
 8 src/review_md.zig
 2 src/serve.zig
 5 src/serve/api.zig
-7 src/serve/auth.zig
+6 src/serve/auth.zig
 8 src/serve/bom_html.zig
 3 src/serve/component_info.zig
 3 src/serve/component_search.zig
@@ -97,8 +97,8 @@
 87 src/serve/mcp_tools.zig
 4 src/serve/modules.zig
 6 src/serve/notes.zig
-16 src/serve/oauth.zig
-9 src/serve/oauth_store.zig
+13 src/serve/oauth.zig
+6 src/serve/oauth_store.zig
 1 src/serve/page_cache.zig
 2 src/serve/pages.zig
 16 src/serve/pcb_describe.zig

@@ -152,7 +152,8 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, command, "mint-plugin-token")) {
         const label = optionalArg(args[2..], "--label") orelse "plugin";
         const auth_dir = try resolveAuthDir(allocator, args[2..]);
-        const raw = try plugin_tokens.mint(allocator, auth_dir, label);
+        var pts: plugin_tokens.PluginTokenStore = .{};
+        const raw = try pts.mint(allocator, auth_dir, label);
         defer allocator.free(raw);
         const stdout = std.fs.File.stdout();
         try stdout.writeAll(raw);

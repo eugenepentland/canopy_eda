@@ -22,7 +22,7 @@ const assets_css = @import("assets_css.zig");
 const mcp_tools = @import("mcp_tools.zig");
 const pages = @import("templates/pages.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -148,7 +148,7 @@ fn fileExists(path: []const u8) bool {
 /// GET /api/module-source?src=<module-name-or-path> — return the raw `.sexp`
 /// text behind a sub-block. `src` is the `SubBlock.source` value emitted into
 /// the schematic page's "copy source" buttons.
-pub fn moduleSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn moduleSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.header("Access-Control-Allow-Origin", "*");
     const query = req.query() catch {
         res.status = 400;
@@ -399,7 +399,7 @@ fn collectModulesUncached(allocator: std.mem.Allocator, project_dir: []const u8)
 /// GET /modules — the standalone module list was merged into the home page
 /// (`GET /`), which now lists designs and modules together as one tagged,
 /// searchable grid. Redirect any lingering links there.
-pub fn modulesListPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn modulesListPage(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.status = 302;
     res.header("Location", "/");
 }
@@ -439,7 +439,7 @@ pub fn resolveModuleBlock(
 /// GET /modules/:name — render a module as a standalone schematic page. Falls
 /// back to a raw-source view when the module can't be instantiated (e.g. a
 /// parameterized module that no design currently uses).
-pub fn moduleViewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn moduleViewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -454,7 +454,7 @@ pub fn moduleViewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// `/modules/` chrome — falling back to the raw-source view when the module
 /// can't be instantiated or the renderer errors. The `sourceIsSafe` guard is
 /// kept here so both entry points are protected.
-pub fn renderModulePage(ctx: *Handler, res: *httpz.Response, name: []const u8) HandlerError!void {
+pub fn renderModulePage(ctx: *Server, res: *httpz.Response, name: []const u8) HandlerError!void {
     if (!sourceIsSafe(name)) {
         res.status = 400;
         res.body = "bad module name";
@@ -500,7 +500,7 @@ pub fn renderModulePage(ctx: *Handler, res: *httpz.Response, name: []const u8) H
 /// instantiated. `render_failed` distinguishes "needs args" from "rendered
 /// but the renderer errored" so the note text can be honest.
 fn writeSourceOnlyPage(
-    ctx: *Handler,
+    ctx: *Server,
     res: *httpz.Response,
     name: []const u8,
     src_path: []const u8,

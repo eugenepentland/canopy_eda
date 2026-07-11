@@ -10,7 +10,7 @@ const bom_resolve = @import("../bom_resolve.zig");
 const env_mod = @import("../eval/env.zig");
 const eval_modules = @import("../eval/modules.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 const bom_html = @import("bom_html.zig");
 const history = @import("history.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
@@ -83,7 +83,7 @@ fn warnResolveIdentities(name: []const u8, err: anyerror) void {
 /// POST /api/edit-value/:name — patch a single instance's value string in
 /// the source `.sexp` (e.g. C3 → `0.5pF`), re-evaluate the design, and
 /// bump the live version so the schematic viewer redraws on its next poll.
-pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn editValueApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -253,7 +253,7 @@ fn findComponentTokenInInstance(source: []const u8, ref: []const u8, component: 
 /// `oldComponent` token (located at `srcOff`, or via `ref` when srcOff points
 /// at the instance form), ensures the new family is imported, rebuilds, and
 /// returns the refreshed `components` map.
-pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -459,7 +459,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 /// Module body:    {"kind":"module","component":"tpsm84338","name":"pwr","args":"(rfbt 220k) (rfbb 47k)"}
 /// A module emits a top-level (sub-block "<name>" (<module> <args>)); the
 /// section field is ignored for modules (sub-blocks are not evaluated in a section).
-pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -647,7 +647,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// Scaffold a fresh design file src/<name>.sexp = (design-block "<title>") so a
 /// design can be started from the home page / editor instead of hand-writing the
 /// stub. 409 if a design with that basename already exists; 400 on an unsafe name.
-pub fn newDesignApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn newDesignApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = 400;
         res.body = "no body";
@@ -732,7 +732,7 @@ fn designBlockInsertPos(source: []const u8) ?usize {
 }
 
 /// Emit `{"ok":true,"version":N}` (or rebuild-failure 500) for a finished mutation.
-fn finishMutation(ctx: *Handler, name: []const u8, new_source: []const u8, desc: []const u8, res: *httpz.Response) HandlerError!void {
+fn finishMutation(ctx: *Server, name: []const u8, new_source: []const u8, desc: []const u8, res: *httpz.Response) HandlerError!void {
     const result = writeAndRebuild(ctx.allocator, ctx.project_dir, name, new_source, desc) catch {
         res.status = 500;
         res.body = err_rebuild_failed;
@@ -744,7 +744,7 @@ fn finishMutation(ctx: *Handler, name: []const u8, new_source: []const u8, desc:
 
 /// POST /api/add-section/:name  Body: {"section":"Power","subtitle":"3V3 buck"}
 /// Splice an empty `(section "Name" "subtitle"?)` into the design-block.
-pub fn addSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn addSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -801,7 +801,7 @@ pub fn addSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 }
 
 /// POST /api/rename-section/:name  Body: {"from":"Power","to":"Power Rails"}
-pub fn renameSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn renameSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -858,7 +858,7 @@ pub fn renameSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
 /// POST /api/remove-section/:name  Body: {"section":"Power"}
 /// Deletes an EMPTY section (metadata only); refuses one holding parts (409).
-pub fn removeSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn removeSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -919,7 +919,7 @@ pub fn removeSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 }
 
 /// POST /api/add-port/:name  Body: {"net":"VDD","dir":"in"}  (dir: in|out|bidi)
-pub fn addPortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn addPortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -974,7 +974,7 @@ pub fn addPortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
 }
 
 /// POST /api/remove-port/:name  Body: {"net":"VDD"}
-pub fn removePortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn removePortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1022,7 +1022,7 @@ pub fn removePortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 }
 
 /// POST /api/rename-refdes/:name  Body: {"ref":"C3","to":"C10","srcOff":1234}
-pub fn renameRefdesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn renameRefdesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1093,7 +1093,7 @@ pub fn renameRefdesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
 /// POST /api/set-dnp/:name  Body: {"ref":"R7","dnp":true,"srcOff":1234}
 /// Toggle a `(dnp)` marker inside an instance (Do-Not-Populate).
-pub fn setDnpApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn setDnpApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1161,7 +1161,7 @@ pub fn setDnpApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
 
 /// POST /api/remove-instance/:name
 /// Body: {"ref":"C3"}
-pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn removeInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1243,7 +1243,7 @@ const pin_head = "(pin ";
 /// embedded quotes/backslashes) — the frontend's `postEdit` parses the body as
 /// JSON, so error paths must speak JSON too (a plaintext body trips its
 /// `JSON.parse`, surfacing a cryptic "Unexpected token" to the user).
-fn sendJsonError(ctx: *Handler, res: *httpz.Response, status: u16, msg: []const u8) void {
+fn sendJsonError(ctx: *Server, res: *httpz.Response, status: u16, msg: []const u8) void {
     res.status = status;
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
@@ -1428,7 +1428,7 @@ fn findInstancePinForm(
 
 /// POST /api/rewire-pin/:name
 /// Body: {"ref":"U1","pin":"5","net":"VDD_NEW","srcOff":1234}
-pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1544,7 +1544,7 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 /// `boundHubPin` in render_svg/context.zig) — instead of whichever hub on a
 /// shared net renders first — and the PCB placer keeps it there too. Body:
 /// `{"ref":"C4","ic":"U2","pin":"6","srcOff":N}`.
-pub fn bindDecoupleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn bindDecoupleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1639,7 +1639,7 @@ pub fn bindDecoupleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// with a unique non-standard placeholder ("C2-copy") so `autoAssignRefDes`
 /// gives it a brand-new ref instead of colliding with the original. Body:
 /// `{"ref":"C2","srcOff":N}`.
-pub fn duplicateInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn duplicateInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1736,7 +1736,7 @@ pub fn duplicateInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 /// touch a longer string that merely contains the name (a note, a wider net like
 /// "VDD3V3"). Renaming onto an existing net merges them (intentional). Body:
 /// `{"from":"LED2_DRV","to":"GP11_NET"}`.
-pub fn renameNetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn renameNetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1798,7 +1798,7 @@ pub fn renameNetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 /// Move a single-pin form `(pin OLD "NET")` to `(pin NEW "NET")` within an
 /// instance. Body: `{"ref":"U1","old_pin":"V11","new_pin":"V12"}`. Returns
 /// HTTP 409 with a structured error if the destination pin is already used.
-pub fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn movePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
 
@@ -1874,7 +1874,7 @@ pub fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
 
 /// Swap the net assignments of two pins on the same instance.
 /// Body: `{"ref":"U1","pin_a":"V11","pin_b":"V12"}`.
-pub fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn swapPinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
 
@@ -1941,7 +1941,7 @@ pub fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 }
 
 /// Rebuild design, render SVG, and push live update.
-fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) HandlerError!void {
+fn rebuildAndPush(ctx: *Server, name: []const u8, res: *httpz.Response) HandlerError!void {
     const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(board_path);
 
@@ -2311,7 +2311,7 @@ pub fn editMpnCore(
 /// Either the `mpn` or `manufacturer` field may be omitted; only the present
 /// ones are persisted. Persists to the `.bom` sidecar and bumps the live
 /// version. Returns `{"ok":true,"version":N}`.
-pub fn editMpnApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn editMpnApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
         return;
@@ -2897,7 +2897,7 @@ pub fn swapPinsCore(
 }
 
 /// GET /api/source/:name — returns `{"source":"<raw .sexp text>"}`.
-pub fn getSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn getSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
 
@@ -2926,7 +2926,7 @@ pub fn getSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 /// syntax, writes the file, rebuilds, bumps version. Returns
 /// `{"ok":true,"version":N,"snapshot":...}` on success or
 /// `{"ok":false,"error":"..."}` with HTTP 400 on invalid source.
-pub fn saveSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn saveSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
 

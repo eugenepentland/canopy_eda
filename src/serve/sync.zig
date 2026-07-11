@@ -23,7 +23,7 @@ const parser_mod = @import("../sexpr/parser.zig");
 const env_mod_node = @import("../sexpr/ast.zig");
 const env_mod = @import("../eval/env.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 const pcb_layout = @import("pcb_layout_page.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -1031,7 +1031,7 @@ const max_pcb_bytes: usize = 64 * 1024 * 1024;
 /// non-dry write runs the placement guard: if the new board would move,
 /// rotate, or side-flip an existing footprint, the sync answers HTTP 409
 /// and writes nothing.
-pub fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn syncKicadPcbApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
         return;
@@ -1085,7 +1085,7 @@ fn sendError(res: *httpz.Response, status: u16, body: []const u8) void {
 /// returns-per-function cap. The wrapper translates each error variant
 /// to an HTTP status + body.
 fn runKicadPcbSync(
-    ctx: *Handler,
+    ctx: *Server,
     req: *httpz.Request,
     res: *httpz.Response,
     name: []const u8,

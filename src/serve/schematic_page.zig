@@ -20,7 +20,7 @@ const diag_format = @import("diag_format.zig");
 const page_cache = @import("page_cache.zig");
 const modules_page = @import("modules.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error || error{InvalidName};
@@ -116,7 +116,7 @@ fn resolvesToModuleSource(board_path: []const u8) bool {
 /// result: a real design's path points into `src/`; a module-only name falls
 /// back to its `lib/modules/<name>.sexp` (caught by `resolvesToModuleSource`,
 /// or by the path not existing on disk).
-fn isModuleOnly(ctx: *Handler, name: []const u8, board_path: []const u8) bool {
+fn isModuleOnly(ctx: *Server, name: []const u8, board_path: []const u8) bool {
     // A real `src/` design renders normally. Treat as a module only when the
     // resolved path is NOT a real src/ design — either it fell back to the
     // lib/modules path, or it doesn't exist on disk at all.
@@ -133,7 +133,7 @@ fn isModuleOnly(ctx: *Handler, name: []const u8, board_path: []const u8) bool {
 
 /// GET /schematics/:name — HTML schematic page. Evaluates the design, runs
 /// ERC for the status banner, then hands off to render_html.renderToHtml.
-pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn schematicPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;

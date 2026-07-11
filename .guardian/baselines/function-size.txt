@@ -109,7 +109,6 @@
 8 src/serve/library.zig|buildSearchText
 8 src/serve/library_3d.zig|writeViewerDataJson
 9 src/serve/mcp_tools.zig|finishDatasheet
-7 src/serve/oauth_store.zig|issueCode
 7 src/serve/pcb_describe.zig|writeDescribeJson
 7 src/serve/pcb_describe.zig|writeLint
 7 src/serve/pcb_layout_page.zig|chooseLayout

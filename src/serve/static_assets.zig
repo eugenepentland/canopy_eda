@@ -2,7 +2,7 @@ const std = @import("std");
 const httpz = @import("httpz");
 
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 
 const account_page_js = @embedFile("assets/account_page.js");
 const account_page_css = @embedFile("assets/account_page.css");
@@ -117,7 +117,7 @@ fn assetEtag(idx: usize) u64 {
 /// GET /static/:name — serve an embedded asset with a content-hash ETag and
 /// `no-cache` (always revalidate, 304 when unchanged), so deploys can never
 /// leave a browser running a stale script against fresh HTML.
-pub fn staticAsset(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn staticAsset(_: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         res.body = "asset not found";

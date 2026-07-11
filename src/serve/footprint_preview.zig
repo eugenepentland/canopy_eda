@@ -11,7 +11,7 @@ const Node = ast.Node;
 const export_kicad = @import("../export_kicad.zig");
 const footprint_mod = @import("../export_kicad_footprint.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 const numeric = @import("../numeric.zig");
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
@@ -67,7 +67,7 @@ const Shapes = struct {
 /// fabrication geometry). The shared client renderer `/static/footprint_svg.js`
 /// draws it — one engine for the library preview, the schematic sidebar, and
 /// the PCB-layout page — so a pad-shape change lands in exactly one place.
-pub fn footprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn footprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
         return;
@@ -434,7 +434,7 @@ const max_pcb_bytes: usize = 64 * 1024 * 1024;
 /// GET /api/board-footprint/:name?uuid=<kicad-uuid> — one footprint from the
 /// design's declared `.kicad_pcb`, as preview JSON ({bbox, pads, silk, fab,
 /// courtyard}). 404 when the design has no board file or the uuid isn't on it.
-pub fn boardFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn boardFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
         return;

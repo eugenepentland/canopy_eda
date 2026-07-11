@@ -838,21 +838,22 @@ src/review_html.zig::writeTestPoints | fn writeTestPoints(w: anytype, tps: []con
 src/review_json.zig::renderToJson | fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem.Allocator.Error![]const u8
 src/review_md.zig::renderReadme | fn renderReadme( allocator: Allocator, design_name: []const u8, generated_at: []const u8, build_id: []const u8, source_names: []const []const u8, ) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/review_md.zig::renderToMarkdown | fn renderToMarkdown( allocator: Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, doc: review.ReviewDoc, /// Short build/version stamp (the netlisp git hash) — printed in the header /// so a saved report self-identifies which build produced it. build_id: []const u8, ) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
-src/serve.zig::Handler struct_
 src/serve.zig::JobOutcome enum_
 src/serve.zig::PcbJob struct_
 src/serve.zig::PcbJobBegin struct_
 src/serve.zig::PcbJobView struct_
 src/serve.zig::ServeError value
+src/serve.zig::Server struct_
+src/serve.zig::ServerState struct_
 src/serve.zig::WebsocketHandler value
 src/serve.zig::bumpLiveVersion | fn bumpLiveVersion(name: []const u8) u32
-src/serve.zig::dispatch | fn dispatch( self: *Handler, action: *const fn (*Handler, *httpz.Request, *httpz.Response) anyerror!void, req: *httpz.Request, res: *httpz.Response, ) !void
+src/serve.zig::dispatch | fn dispatch( self: *Server, action: *const fn (*Server, *httpz.Request, *httpz.Response) anyerror!void, req: *httpz.Request, res: *httpz.Response, ) !void
 src/serve.zig::getLiveVersion | fn getLiveVersion(name: []const u8) u32
 src/serve.zig::live_layout_json value
 src/serve.zig::live_mutex value
 src/serve.zig::live_version_mutex value
 src/serve.zig::live_versions value
-src/serve.zig::notFound | fn notFound(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void
+src/serve.zig::notFound | fn notFound(_: *Server, _: *httpz.Request, res: *httpz.Response) !void
 src/serve.zig::pcbJobBegin | fn pcbJobBegin(name: []const u8) PcbJobBegin
 src/serve.zig::pcbJobFinish | fn pcbJobFinish(name: []const u8, gen: u32, outcome: JobOutcome) void
 src/serve.zig::pcbJobFrame | fn pcbJobFrame(name: []const u8, gen: u32, json: []const u8) void
@@ -860,57 +861,61 @@ src/serve.zig::pcbJobSnapshot | fn pcbJobSnapshot(alloc: std.mem.Allocator, name
 src/serve.zig::serve | fn serve( allocator: std.mem.Allocator, port: u16, project_dir: []const u8, auth_dir: ?[]const u8, ) ServeError!void
 src/serve.zig::setLiveLayoutJson | fn setLiveLayoutJson(data: ?[]const u8) void
 src/serve/account_page.zig::HandlerError value
-src/serve/account_page.zig::accountPage | fn accountPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/account_page.zig::createClientApi | fn createClientApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/account_page.zig::deleteUserApi | fn deleteUserApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/account_page.zig::manageRedirect | fn manageRedirect(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/account_page.zig::revokeClientApi | fn revokeClientApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/account_page.zig::updateUserRoleApi | fn updateUserRoleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/account_page.zig::accountPage | fn accountPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/account_page.zig::createClientApi | fn createClientApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/account_page.zig::deleteUserApi | fn deleteUserApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/account_page.zig::manageRedirect | fn manageRedirect(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/account_page.zig::revokeClientApi | fn revokeClientApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/account_page.zig::updateUserRoleApi | fn updateUserRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::HandlerError value
-src/serve/api.zig::addComponentDatasheetApi | fn addComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::addSectionNoteApi | fn addSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::designStateApi | fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::designsApi | fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::ercApi | fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::exportBomCsvApi | fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::exportKicadApi | fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::exportNetlistApi | fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::exportReviewPackageApi | fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::freePinsApi | fn freePinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::pinoutApi | fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::pushApi | fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::removeComponentDatasheetApi | fn removeComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::removeSectionNoteApi | fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::sceneGraphApi | fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/api.zig::versionApi | fn versionApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::addComponentDatasheetApi | fn addComponentDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::addSectionNoteApi | fn addSectionNoteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::designStateApi | fn designStateApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::designsApi | fn designsApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::ercApi | fn ercApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::exportBomCsvApi | fn exportBomCsvApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::exportKicadApi | fn exportKicadApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::exportNetlistApi | fn exportNetlistApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::exportReviewPackageApi | fn exportReviewPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::freePinsApi | fn freePinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::pinoutApi | fn pinoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::pushApi | fn pushApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::removeComponentDatasheetApi | fn removeComponentDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::removeSectionNoteApi | fn removeSectionNoteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::sceneGraphApi | fn sceneGraphApi(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::versionApi | fn versionApi(_: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/assets_css.zig::index_css value
 src/serve/assets_css.zig::navbar_css value
+src/serve/auth.zig::ChallengeStore struct_
 src/serve/auth.zig::HandlerError value
-src/serve/auth.zig::authMiddleware | fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!bool
+src/serve/auth.zig::SessionStore struct_
+src/serve/auth.zig::authMiddleware | fn authMiddleware(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!bool
 src/serve/auth.zig::b64url_js value
+src/serve/auth.zig::consume | fn consume(self: *ChallengeStore, cid: []const u8) ?[32]u8
+src/serve/auth.zig::create | fn create( self: *SessionStore, allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8, ) std.mem.Allocator.Error![]const u8
 src/serve/auth.zig::createInvite | fn createInvite(allocator: std.mem.Allocator, auth_dir: []const u8, created_by: []const u8, role: []const u8) HandlerError![]const u8
-src/serve/auth.zig::createInviteApi | fn createInviteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/auth.zig::createSession | fn createSession(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) std.mem.Allocator.Error![]const u8
-src/serve/auth.zig::currentEmail | fn currentEmail(ctx: *Handler, req: *httpz.Request) ?[]const u8
-src/serve/auth.zig::deleteCredentialApi | fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/auth.zig::deleteSession | fn deleteSession(allocator: std.mem.Allocator, auth_dir: []const u8, token: []const u8) void
-src/serve/auth.zig::getBearerEmail | fn getBearerEmail(ctx: *Handler, req: *httpz.Request) ?[]const u8
+src/serve/auth.zig::createInviteApi | fn createInviteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/auth.zig::currentEmail | fn currentEmail(ctx: *Server, req: *httpz.Request) ?[]const u8
+src/serve/auth.zig::delete | fn delete(self: *SessionStore, allocator: std.mem.Allocator, auth_dir: []const u8, token: []const u8) void
+src/serve/auth.zig::deleteCredentialApi | fn deleteCredentialApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/auth.zig::getBearerEmail | fn getBearerEmail(ctx: *Server, req: *httpz.Request) ?[]const u8
 src/serve/auth.zig::getSessionToken | fn getSessionToken(req: *httpz.Request) ?[]const u8
-src/serve/auth.zig::invitePage | fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/auth.zig::isLocalhostRequest | fn isLocalhostRequest(ctx: *Handler, req: *httpz.Request) bool
-src/serve/auth.zig::listCredentialsApi | fn listCredentialsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/auth.zig::loginChallengePage | fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/auth.zig::loginCompletePage | fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/auth.zig::loginPage | fn loginPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/auth.zig::logoutApi | fn logoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/auth.zig::invitePage | fn invitePage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/auth.zig::isLocalhostRequest | fn isLocalhostRequest(ctx: *Server, req: *httpz.Request) bool
+src/serve/auth.zig::listCredentialsApi | fn listCredentialsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/auth.zig::loginChallengePage | fn loginChallengePage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/auth.zig::loginCompletePage | fn loginCompletePage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/auth.zig::loginPage | fn loginPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/auth.zig::logoutApi | fn logoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/auth.zig::mint | fn mint(self: *ChallengeStore, challenge: [32]u8) []const u8
 src/serve/auth.zig::page_style value
-src/serve/auth.zig::purgeIdentity | fn purgeIdentity(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) void
-src/serve/auth.zig::registerChallengePage | fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/auth.zig::registerCompletePage | fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/auth.zig::setupPage | fn setupPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/auth.zig::validateBearerToken | fn validateBearerToken(ctx: *Handler, req: *httpz.Request) bool
-src/serve/auth.zig::validatePluginBearerToken | fn validatePluginBearerToken(ctx: *Handler, req: *httpz.Request) bool
-src/serve/auth.zig::validateSession | fn validateSession(allocator: std.mem.Allocator, auth_dir: []const u8, token: []const u8) ?[]const u8
+src/serve/auth.zig::purgeIdentity | fn purgeIdentity( sessions_store: *SessionStore, allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8, ) void
+src/serve/auth.zig::registerChallengePage | fn registerChallengePage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/auth.zig::registerCompletePage | fn registerCompletePage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/auth.zig::setupPage | fn setupPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/auth.zig::validate | fn validate( self: *SessionStore, allocator: std.mem.Allocator, auth_dir: []const u8, token: []const u8, ) ?[]const u8
+src/serve/auth.zig::validateBearerToken | fn validateBearerToken(ctx: *Server, req: *httpz.Request) bool
+src/serve/auth.zig::validatePluginBearerToken | fn validatePluginBearerToken(ctx: *Server, req: *httpz.Request) bool
 src/serve/auth_store.zig::ensureAuthDir | fn ensureAuthDir(auth_dir: []const u8) void
 src/serve/auth_store.zig::sha256Hex | fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) std.mem.Allocator.Error![]u8
 src/serve/bom_html.zig::BomCounts struct_
@@ -946,7 +951,7 @@ src/serve/component_search.zig::searchComponents | fn searchComponents( allocato
 src/serve/component_search.zig::searchErrorMessage | fn searchErrorMessage(err: SearchError) []const u8
 src/serve/datasheet_attach.zig::HandlerError value
 src/serve/datasheet_attach.zig::SpliceError value
-src/serve/datasheet_attach.zig::attachDatasheetApi | fn attachDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/datasheet_attach.zig::attachDatasheetApi | fn attachDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/datasheet_attach.zig::datasheetStem | fn datasheetStem(name: []const u8) []const u8
 src/serve/datasheet_attach.zig::linksDatasheet | fn linksDatasheet(component_form: []const u8, pdf: []const u8) bool
 src/serve/datasheet_attach.zig::spliceDatasheet | fn spliceDatasheet( allocator: std.mem.Allocator, source: []const u8, pdf: []const u8, ) SpliceError![]u8
@@ -956,9 +961,9 @@ src/serve/design_diff.zig::FieldChange struct_
 src/serve/design_diff.zig::HandlerError value
 src/serve/design_diff.zig::InstanceEntry struct_
 src/serve/design_diff.zig::NetChange struct_
-src/serve/design_diff.zig::diffApi | fn diffApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/design_diff.zig::diffApi | fn diffApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/design_diff.zig::diffBlocks | fn diffBlocks( allocator: std.mem.Allocator, old_block: *const env_mod.DesignBlock, new_block: *const env_mod.DesignBlock, ) DiffError!DesignDiff
-src/serve/design_diff.zig::historyApi | fn historyApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/design_diff.zig::historyApi | fn historyApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/design_diff.zig::writeDiffJson | fn writeDiffJson(w: anytype, diff: DesignDiff) std.mem.Allocator.Error!void
 src/serve/diag_format.zig::Diagnostic struct_
 src/serve/diag_format.zig::build | fn build( allocator: std.mem.Allocator, file_path: []const u8, source: []const u8, err_name: []const u8, last_error: ?evaluator_mod.EvalDiagnostic, ) std.mem.Allocator.Error!Diagnostic
@@ -985,46 +990,46 @@ src/serve/edit.zig::HandlerError value
 src/serve/edit.zig::MpnEditError value
 src/serve/edit.zig::MutationResult struct_
 src/serve/edit.zig::addComponentDatasheetCore | fn addComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
-src/serve/edit.zig::addInstanceApi | fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::addPortApi | fn addPortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::addSectionApi | fn addSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::addInstanceApi | fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::addPortApi | fn addPortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::addSectionApi | fn addSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::addSectionNoteCore | fn addSectionNoteCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, section_name: []const u8, text: []const u8, pdf: []const u8, page: u32, ) EditError!MutationResult
-src/serve/edit.zig::bindDecoupleApi | fn bindDecoupleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::duplicateInstanceApi | fn duplicateInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::editFootprintApi | fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::editMpnApi | fn editMpnApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::bindDecoupleApi | fn bindDecoupleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::duplicateInstanceApi | fn duplicateInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::editFootprintApi | fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::editMpnApi | fn editMpnApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::editMpnCore | fn editMpnCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, mpn: []const u8, manufacturer: []const u8, ) MpnEditError!u32
-src/serve/edit.zig::editValueApi | fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::getSourceApi | fn getSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::movePinApi | fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::editValueApi | fn editValueApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::getSourceApi | fn getSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::movePinApi | fn movePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::movePinCore | fn movePinCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, old_pin: []const u8, new_pin: []const u8, ) EditError!MutationResult
-src/serve/edit.zig::newDesignApi | fn newDesignApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::newDesignApi | fn newDesignApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::rebuildDesign | fn rebuildDesign( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) BuildReport
 src/serve/edit.zig::removeComponentDatasheetCore | fn removeComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
-src/serve/edit.zig::removeInstanceApi | fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::removePortApi | fn removePortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::removeSectionApi | fn removeSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::removeInstanceApi | fn removeInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::removePortApi | fn removePortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::removeSectionApi | fn removeSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::removeSectionNoteCore | fn removeSectionNoteCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, section_name: []const u8, idx: usize, ) EditError!MutationResult
-src/serve/edit.zig::renameNetApi | fn renameNetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::renameRefdesApi | fn renameRefdesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::renameSectionApi | fn renameSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::renameNetApi | fn renameNetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::renameRefdesApi | fn renameRefdesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::renameSectionApi | fn renameSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::restoreDesignCore | fn restoreDesignCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, ) EditError!MutationResult
-src/serve/edit.zig::rewirePinApi | fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::saveSourceApi | fn saveSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::setDnpApi | fn setDnpApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit.zig::swapPinsApi | fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::rewirePinApi | fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::saveSourceApi | fn saveSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::setDnpApi | fn setDnpApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::swapPinsApi | fn swapPinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::swapPinsCore | fn swapPinsCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, pin_a: []const u8, pin_b: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::writeAndRebuild | fn writeAndRebuild( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, new_source: []const u8, description: ?[]const u8, ) EditError!MutationResult
 src/serve/edit.zig::writeDesignCore | fn writeDesignCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, new_source: []const u8, ) EditError!MutationResult
-src/serve/edit_assist.zig::libIndexApi | fn libIndexApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit_assist.zig::saveDiagramLayoutApi | fn saveDiagramLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/edit_assist.zig::validateSourceApi | fn validateSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit_assist.zig::libIndexApi | fn libIndexApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit_assist.zig::saveDiagramLayoutApi | fn saveDiagramLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit_assist.zig::validateSourceApi | fn validateSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/editor_page.zig::HandlerError value
-src/serve/editor_page.zig::editorPage | fn editorPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/editor_page.zig::editorSceneApi | fn editorSceneApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/editor_page.zig::editorPage | fn editorPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/editor_page.zig::editorSceneApi | fn editorSceneApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/footprint_preview.zig::HandlerError value
-src/serve/footprint_preview.zig::boardFootprintApi | fn boardFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/footprint_preview.zig::footprintApi | fn footprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/footprint_preview.zig::boardFootprintApi | fn boardFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/footprint_preview.zig::footprintApi | fn footprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/history.zig::HistoryError value
 src/serve/history.zig::SnapshotInfo struct_
 src/serve/history.zig::layoutSnapshotPath | fn layoutSnapshotPath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, ) HistoryError![]u8
@@ -1038,32 +1043,32 @@ src/serve/layout_match.zig::MatchResult struct_
 src/serve/layout_match.zig::PInfo struct_
 src/serve/layout_match.zig::analyze | fn analyze(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: ?*const std.StringHashMapUnmanaged(void)) std.mem.Allocator.Error![]PInfo
 src/serve/layout_match.zig::compare | fn compare( alloc: std.mem.Allocator, rough: optimizer.Placement, starred: optimizer.Placement, excluded: ?*const std.StringHashMapUnmanaged(void), ) std.mem.Allocator.Error!MatchResult
-src/serve/layout_match.zig::layoutMatchApi | fn layoutMatchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
+src/serve/layout_match.zig::layoutMatchApi | fn layoutMatchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
 src/serve/layout_match.zig::layoutMatchJson | fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) pcb_layout_page.PngError![]u8
 src/serve/layout_match.zig::matchInfos | fn matchInfos(alloc: std.mem.Allocator, rough: []const PInfo, starred: []const PInfo) std.mem.Allocator.Error!MatchResult
 src/serve/library.zig::Datasheet struct_
 src/serve/library.zig::HandlerError value
 src/serve/library.zig::Kind enum_
 src/serve/library.zig::LibraryRow struct_
-src/serve/library.zig::cseFetchApi | fn cseFetchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/library.zig::deleteLibraryEntryApi | fn deleteLibraryEntryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/library.zig::libraryPage | fn libraryPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/library.zig::uploadModelApi | fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/library.zig::cseFetchApi | fn cseFetchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/library.zig::deleteLibraryEntryApi | fn deleteLibraryEntryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/library.zig::libraryPage | fn libraryPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/library.zig::uploadModelApi | fn uploadModelApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/library_3d.zig::HandlerError value
-src/serve/library_3d.zig::modelFileApi | fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/library_3d.zig::saveTransformApi | fn saveTransformApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/library_3d.zig::viewerPage | fn viewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/library_3d.zig::modelFileApi | fn modelFileApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/library_3d.zig::saveTransformApi | fn saveTransformApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/library_3d.zig::viewerPage | fn viewerPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/mcp.zig::Client struct_
 src/serve/mcp.zig::Context struct_
 src/serve/mcp.zig::HandlerError value
 src/serve/mcp.zig::clientMessage | fn clientMessage(self: *Client, data: []const u8) !void
 src/serve/mcp.zig::dispatchFrame | fn dispatchFrame( allocator: std.mem.Allocator, project_dir: []const u8, data: []const u8, role: users.Role, ) HandlerError!?[]const u8
 src/serve/mcp.zig::init | fn init(conn: *websocket.Conn, ctx: *const Context) !Client
-src/serve/mcp.zig::postApi | fn postApi(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/mcp.zig::upgrade | fn upgrade(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/mcp.zig::postApi | fn postApi(ctx: *server_mod.Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/mcp.zig::upgrade | fn upgrade(ctx: *server_mod.Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/mcp_docs.zig::ParamDoc struct_
 src/serve/mcp_docs.zig::ToolDoc struct_
-src/serve/mcp_docs.zig::mcpDocsPage | fn mcpDocsPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/mcp_docs.zig::mcpDocsPage | fn mcpDocsPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/mcp_tools.zig::CallResult struct_
 src/serve/mcp_tools.zig::DesignSummary struct_
 src/serve/mcp_tools.zig::NamedBlock struct_
@@ -1084,52 +1089,54 @@ src/serve/modules.zig::HandlerError value
 src/serve/modules.zig::ModuleEntry struct_
 src/serve/modules.zig::ResolvedBlock struct_
 src/serve/modules.zig::collectModules | fn collectModules(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]ModuleEntry
-src/serve/modules.zig::moduleSourceApi | fn moduleSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/modules.zig::moduleViewPage | fn moduleViewPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/modules.zig::modulesListPage | fn modulesListPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/modules.zig::renderModulePage | fn renderModulePage(ctx: *Handler, res: *httpz.Response, name: []const u8) HandlerError!void
+src/serve/modules.zig::moduleSourceApi | fn moduleSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/modules.zig::moduleViewPage | fn moduleViewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/modules.zig::modulesListPage | fn modulesListPage(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/modules.zig::renderModulePage | fn renderModulePage(ctx: *Server, res: *httpz.Response, name: []const u8) HandlerError!void
 src/serve/modules.zig::resolveModuleBlock | fn resolveModuleBlock( allocator: std.mem.Allocator, project_dir: []const u8, module_name: []const u8, ) ?ResolvedBlock
 src/serve/notes.zig::HandlerError value
 src/serve/notes.zig::Note struct_
 src/serve/notes.zig::NoteStatus enum_
 src/serve/notes.zig::Notes struct_
 src/serve/notes.zig::TaskMutation enum_
-src/serve/notes.zig::addTaskApi | fn addTaskApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/notes.zig::addTaskApi | fn addTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/notes.zig::addTaskCore | fn addTaskCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, text: []const u8, ) !Note
-src/serve/notes.zig::completeTaskApi | fn completeTaskApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/notes.zig::getNotesApi | fn getNotesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/notes.zig::getTasksApi | fn getTasksApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/notes.zig::completeTaskApi | fn completeTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/notes.zig::getNotesApi | fn getNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/notes.zig::getTasksApi | fn getTasksApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/notes.zig::loadNotes | fn loadNotes( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, out_raw: *?[]u8, ) !Notes
 src/serve/notes.zig::mutateTaskCore | fn mutateTaskCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, mode: TaskMutation, ) !?bool
 src/serve/notes.zig::parseNotes | fn parseNotes(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error!Notes
-src/serve/notes.zig::removeTaskApi | fn removeTaskApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/notes.zig::removeTaskApi | fn removeTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/notes.zig::renderNotes | fn renderNotes(allocator: std.mem.Allocator, notes: Notes) ![]u8
-src/serve/notes.zig::reopenTaskApi | fn reopenTaskApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/notes.zig::saveNotesApi | fn saveNotesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/notes.zig::reopenTaskApi | fn reopenTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/notes.zig::saveNotesApi | fn saveNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/oauth.zig::HandlerError value
-src/serve/oauth.zig::authorizeApprove | fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/oauth.zig::authorizePage | fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/oauth.zig::metadataAuthServer | fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/oauth.zig::metadataProtectedResource | fn metadataProtectedResource(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/oauth.zig::registerEndpoint | fn registerEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/oauth.zig::tokenEndpoint | fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/oauth.zig::authorizeApprove | fn authorizeApprove(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/oauth.zig::authorizePage | fn authorizePage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/oauth.zig::metadataAuthServer | fn metadataAuthServer(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/oauth.zig::metadataProtectedResource | fn metadataProtectedResource(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/oauth.zig::registerEndpoint | fn registerEndpoint(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/oauth.zig::tokenEndpoint | fn tokenEndpoint(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/oauth_store.zig::AuthCode struct_
 src/serve/oauth_store.zig::Client struct_
+src/serve/oauth_store.zig::CodeParams struct_
 src/serve/oauth_store.zig::NewClientResult struct_
+src/serve/oauth_store.zig::OAuthStore struct_
 src/serve/oauth_store.zig::Token struct_
-src/serve/oauth_store.zig::claimClient | fn claimClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, owner_email: []const u8) void
-src/serve/oauth_store.zig::consumeCode | fn consumeCode(allocator: std.mem.Allocator, auth_dir: []const u8, code: []const u8) ?AuthCode
-src/serve/oauth_store.zig::createClient | fn createClient( allocator: std.mem.Allocator, auth_dir: []const u8, name: []const u8, email: []const u8, redirect_uri: []const u8, ) std.mem.Allocator.Error!NewClientResult
-src/serve/oauth_store.zig::findClient | fn findClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8) ?Client
-src/serve/oauth_store.zig::issueCode | fn issueCode( allocator: std.mem.Allocator, auth_dir: []const u8, client_id: []const u8, redirect_uri: []const u8, email: []const u8, code_challenge: []const u8, scope: []const u8, ) std.mem.Allocator.Error![]const u8
-src/serve/oauth_store.zig::issueToken | fn issueToken( allocator: std.mem.Allocator, auth_dir: []const u8, client_id: []const u8, email: []const u8, scope: []const u8, ) std.mem.Allocator.Error![]const u8
-src/serve/oauth_store.zig::listClientsByEmail | fn listClientsByEmail(allocator: std.mem.Allocator, auth_dir: []const u8, owner_email: []const u8) std.mem.Allocator.Error![]Client
-src/serve/oauth_store.zig::revokeAllClientsForEmail | fn revokeAllClientsForEmail(allocator: std.mem.Allocator, auth_dir: []const u8, owner_email: []const u8) void
-src/serve/oauth_store.zig::revokeClient | fn revokeClient(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, owner_email: []const u8) bool
+src/serve/oauth_store.zig::claimClient | fn claimClient( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, owner_email: []const u8, ) void
+src/serve/oauth_store.zig::consumeCode | fn consumeCode( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, code: []const u8, ) ?AuthCode
+src/serve/oauth_store.zig::createClient | fn createClient( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, name: []const u8, email: []const u8, redirect_uri: []const u8, ) std.mem.Allocator.Error!NewClientResult
+src/serve/oauth_store.zig::findClient | fn findClient( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, ) ?Client
+src/serve/oauth_store.zig::issueCode | fn issueCode( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, p: CodeParams, ) std.mem.Allocator.Error![]const u8
+src/serve/oauth_store.zig::issueToken | fn issueToken( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, client_id: []const u8, email: []const u8, scope: []const u8, ) std.mem.Allocator.Error![]const u8
+src/serve/oauth_store.zig::listClientsByEmail | fn listClientsByEmail( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, owner_email: []const u8, ) std.mem.Allocator.Error![]Client
+src/serve/oauth_store.zig::revokeAllClientsForEmail | fn revokeAllClientsForEmail( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, owner_email: []const u8, ) void
+src/serve/oauth_store.zig::revokeClient | fn revokeClient( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, owner_email: []const u8, ) bool
 src/serve/oauth_store.zig::sha256Base64Url | fn sha256Base64Url(allocator: std.mem.Allocator, input: []const u8) std.mem.Allocator.Error![]u8
 src/serve/oauth_store.zig::sha256Hex value
-src/serve/oauth_store.zig::validateToken | fn validateToken(allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8) std.mem.Allocator.Error!?Token
-src/serve/oauth_store.zig::verifyClientSecret | fn verifyClientSecret(allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, secret: []const u8) std.mem.Allocator.Error!?Client
+src/serve/oauth_store.zig::validateToken | fn validateToken( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8, ) std.mem.Allocator.Error!?Token
+src/serve/oauth_store.zig::verifyClientSecret | fn verifyClientSecret( self: *OAuthStore, allocator: std.mem.Allocator, auth_dir: []const u8, id: []const u8, secret: []const u8, ) std.mem.Allocator.Error!?Client
 src/serve/oauth_store.zig::verifyPkce | fn verifyPkce(allocator: std.mem.Allocator, code_verifier: []const u8, code_challenge: []const u8) std.mem.Allocator.Error!bool
 src/serve/oauth_store.zig::writeFileAtomicWithBackup | fn writeFileAtomicWithBackup(allocator: std.mem.Allocator, path: []const u8, data: []const u8) void
 src/serve/page_cache.zig::FileSet struct_
@@ -1138,15 +1145,15 @@ src/serve/page_cache.zig::capture | fn capture( scratch: std.mem.Allocator, eval
 src/serve/page_cache.zig::deinit | fn deinit(self: FileSet) void
 src/serve/page_cache.zig::isValid | fn isValid(self: FileSet) bool
 src/serve/pages.zig::HandlerError value
-src/serve/pages.zig::cssPage | fn cssPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pages.zig::indexPage | fn indexPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pages.zig::cssPage | fn cssPage(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pages.zig::indexPage | fn indexPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_describe.zig::DescribeError value
 src/serve/pcb_describe.zig::Side enum_
 src/serve/pcb_describe.zig::aabbHalf | fn aabbHalf(part: optimizer.Part) [2]f64
 src/serve/pcb_describe.zig::anchorIndex | fn anchorIndex(parts: []const optimizer.Part, nets: []const optimizer.FlatNet) ?usize
 src/serve/pcb_describe.zig::describeDesign | fn describeDesign( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: pcb_layout_page.PngRequest, ) pcb_layout_page.PngError![]u8
 src/serve/pcb_describe.zig::originOf | fn originOf(p: optimizer.Placement, pi: usize) []const u8
-src/serve/pcb_describe.zig::pcbDescribeApi | fn pcbDescribeApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
+src/serve/pcb_describe.zig::pcbDescribeApi | fn pcbDescribeApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
 src/serve/pcb_describe.zig::sideOf | fn sideOf(dx: f64, dy: f64, a_half: [2]f64, b_half: [2]f64) Side
 src/serve/pcb_describe.zig::writeDescribeJson | fn writeDescribeJson( w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, spec: ?render_pcb_png.SpecStatus, routed: ?RoutedSummary, name: []const u8, title: []const u8, ) DescribeError!void
 src/serve/pcb_layout_page.zig::HandlerError value
@@ -1158,7 +1165,7 @@ src/serve/pcb_layout_page.zig::SolvedRequest struct_
 src/serve/pcb_layout_page.zig::SubBlockSeeds struct_
 src/serve/pcb_layout_page.zig::SyncPose struct_
 src/serve/pcb_layout_page.zig::SyncVia struct_
-src/serve/pcb_layout_page.zig::deleteNamedLayoutApi | fn deleteNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::deleteNamedLayoutApi | fn deleteNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::layoutCoverage | fn layoutCoverage(L: SavedLayout, p: optimizer.Placement) usize
 src/serve/pcb_layout_page.zig::loadSubBlockPoses | fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock) ?[]const optimizer.RefPose
 src/serve/pcb_layout_page.zig::loadSyncLayout | fn loadSyncLayout( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ?std.StringHashMapUnmanaged(SyncPose)
@@ -1169,38 +1176,39 @@ src/serve/pcb_layout_page.zig::mcpRunFabReadiness | fn mcpRunFabReadiness( alloc
 src/serve/pcb_layout_page.zig::mcpSavePcbLayout | fn mcpSavePcbLayout( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/pcb_layout_page.zig::mcpSetBoardOutline | fn mcpSetBoardOutline( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/pcb_layout_page.zig::mcpSetPartPoses | fn mcpSetPartPoses( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
-src/serve/pcb_layout_page.zig::pcbCentroidApi | fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbDrcApi | fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbDrillApi | fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbFabReadinessApi | fn pcbFabReadinessApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbGerbersApi | fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbLayoutHistoryApi | fn pcbLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbLayoutJsonApi | fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbLayoutPage | fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbPngApi | fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbProgressApi | fn pcbProgressApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbRegenStartApi | fn pcbRegenStartApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbRouteApi | fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbScoreApi | fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbScoreBatchApi | fn pcbScoreBatchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbCentroidApi | fn pcbCentroidApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbDrcApi | fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbDrillApi | fn pcbDrillApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbFabReadinessApi | fn pcbFabReadinessApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbGerbersApi | fn pcbGerbersApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbLayoutHistoryApi | fn pcbLayoutHistoryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbLayoutJsonApi | fn pcbLayoutJsonApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbLayoutPage | fn pcbLayoutPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbPngApi | fn pcbPngApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbProgressApi | fn pcbProgressApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbRegenStartApi | fn pcbRegenStartApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbRouteApi | fn pcbRouteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbScoreApi | fn pcbScoreApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbScoreBatchApi | fn pcbScoreBatchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pngRequestFromQuery | fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngRequest
 src/serve/pcb_layout_page.zig::readLayouts | fn readLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const SavedLayout
 src/serve/pcb_layout_page.zig::renderDesignPng | fn renderDesignPng( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, ) PngError![]u8
-src/serve/pcb_layout_page.zig::rescoreLayoutsApi | fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::restoreLayoutHistoryApi | fn restoreLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::saveNamedLayoutApi | fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::savePcbCourtyardApi | fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::setDefaultLayoutApi | fn setDefaultLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::rescoreLayoutsApi | fn rescoreLayoutsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::restoreLayoutHistoryApi | fn restoreLayoutHistoryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::saveNamedLayoutApi | fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::savePcbCourtyardApi | fn savePcbCourtyardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::setDefaultLayoutApi | fn setDefaultLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::solveForRequest | fn solveForRequest( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, eval: *Evaluator, module_res: *?modules_mod.ResolvedBlock, ) PngError!SolvedRequest
 src/serve/pcb_layout_page.zig::subBlockPoseByOriginKey | fn subBlockPoseByOriginKey( alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock, ) ?SubBlockSeeds
 src/serve/pcb_layout_page.zig::viasForPoses | fn viasForPoses( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, poses: []const optimizer.RefPose, params: optimizer.Params, ) ?[]const SyncVia
 src/serve/pcb_layout_page.zig::writeJsonStr | fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writePerNetJson | fn writePerNetJson(w: *std.Io.Writer, per_net: []const router.NetRouted) std.Io.Writer.Error!void
 src/serve/pdf_viewer.zig::HandlerError value
-src/serve/pdf_viewer.zig::pdfViewerPage | fn pdfViewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pdf_viewer.zig::pdfViewerPage | fn pdfViewerPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/plugin_tokens.zig::PluginTokenStore struct_
 src/serve/plugin_tokens.zig::Token struct_
-src/serve/plugin_tokens.zig::mint | fn mint(allocator: std.mem.Allocator, auth_dir: []const u8, label: []const u8) std.mem.Allocator.Error![]const u8
-src/serve/plugin_tokens.zig::validate | fn validate(allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8) bool
+src/serve/plugin_tokens.zig::mint | fn mint( self: *PluginTokenStore, allocator: std.mem.Allocator, auth_dir: []const u8, label: []const u8, ) std.mem.Allocator.Error![]const u8
+src/serve/plugin_tokens.zig::validate | fn validate(self: *PluginTokenStore, allocator: std.mem.Allocator, auth_dir: []const u8, raw: []const u8) bool
 src/serve/rate_limiter.zig::RateLimiter struct_
 src/serve/rate_limiter.zig::acquire | fn acquire(self: *RateLimiter) void
 src/serve/rate_limiter.zig::configureFromEnv | fn configureFromEnv(allocator: std.mem.Allocator) void
@@ -1208,15 +1216,15 @@ src/serve/rate_limiter.zig::cse value
 src/serve/rate_limiter.zig::digikey value
 src/serve/rate_limiter.zig::init | fn init(min_interval_ms: u64, max_in_flight: u32) RateLimiter
 src/serve/rate_limiter.zig::release | fn release(self: *RateLimiter) void
-src/serve/rough_best.zig::bestRoughApi | fn bestRoughApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
+src/serve/rough_best.zig::bestRoughApi | fn bestRoughApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
 src/serve/rough_best.zig::bestRoughJson | fn bestRoughJson(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) pcb_layout_page.PngError![]u8
-src/serve/rough_best.zig::bestRoughPngApi | fn bestRoughPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
+src/serve/rough_best.zig::bestRoughPngApi | fn bestRoughPngApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
 src/serve/schematic_page.zig::HandlerError value
-src/serve/schematic_page.zig::schematicPage | fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/schematic_page.zig::schematicPage | fn schematicPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/schematic_viewer_js.zig::schematic_viewer_js_asset value
 src/serve/static_assets.zig::HandlerError value
 src/serve/static_assets.zig::editorJsVersion | fn editorJsVersion(buf: []u8) []const u8
-src/serve/static_assets.zig::staticAsset | fn staticAsset(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/static_assets.zig::staticAsset | fn staticAsset(_: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/style_score.zig::HybridScore struct_
 src/serve/style_score.zig::SInfo struct_
 src/serve/style_score.zig::StyleResult struct_
@@ -1240,7 +1248,7 @@ src/serve/sync.zig::ParsedSyncPlan struct_
 src/serve/sync.zig::SyncRunError value
 src/serve/sync.zig::SyncRunResult struct_
 src/serve/sync.zig::runSyncPlan | fn runSyncPlan( arena: std.mem.Allocator, handler_alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, parsed: ParsedSyncPlan, ) SyncRunError!SyncRunResult
-src/serve/sync.zig::syncKicadPcbApi | fn syncKicadPcbApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/sync.zig::syncKicadPcbApi | fn syncKicadPcbApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/templates/account.zig::Account struct_
 src/serve/templates/account.zig::Args value
 src/serve/templates/account.zig::Args value
@@ -1352,31 +1360,32 @@ src/serve/upload.zig::importErrorStatus | fn importErrorStatus(e: ImportError) u
 src/serve/upload.zig::importZipBytes | fn importZipBytes( allocator: std.mem.Allocator, project_dir: []const u8, zip_bytes: []const u8, filename: []const u8, ) ImportError!ImportResult
 src/serve/upload.zig::sanitizeName | fn sanitizeName(allocator: std.mem.Allocator, name: []const u8) []const u8
 src/serve/upload.zig::saveSourceFile | fn saveSourceFile(allocator: std.mem.Allocator, project_dir: []const u8, filename: []const u8, body_data: []const u8) void
-src/serve/upload.zig::uploadZipApi | fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/upload.zig::uploadZipApi | fn uploadZipApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/upload.zig::writeComponentFile | fn writeComponentFile( allocator: std.mem.Allocator, project_dir: []const u8, safe_name: []const u8, pinout_name: []const u8, footprint_name: []const u8, sym_data: []const u8, ) ComponentWrite
 src/serve/upload_datasheet.zig::HandlerError value
 src/serve/upload_datasheet.zig::SanitizeError value
 src/serve/upload_datasheet.zig::StoreError value
 src/serve/upload_datasheet.zig::isPdfMagic | fn isPdfMagic(body: []const u8) bool
-src/serve/upload_datasheet.zig::listDatasheetsApi | fn listDatasheetsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/upload_datasheet.zig::listDatasheetsApi | fn listDatasheetsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/upload_datasheet.zig::sanitizeFilename | fn sanitizeFilename(allocator: std.mem.Allocator, raw: []const u8) SanitizeError![]u8
-src/serve/upload_datasheet.zig::serveDatasheetApi | fn serveDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/upload_datasheet.zig::serveDatasheetApi | fn serveDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/upload_datasheet.zig::storeDatasheet | fn storeDatasheet( allocator: std.mem.Allocator, project_dir: []const u8, raw_filename: []const u8, body: []const u8, ) StoreError!struct { name: []u8, size: usize }
 src/serve/upload_datasheet.zig::storeErrorBody | fn storeErrorBody(e: StoreError) ?[]const u8
 src/serve/upload_datasheet.zig::storeErrorStatus | fn storeErrorStatus(e: StoreError) u16
-src/serve/upload_datasheet.zig::uploadDatasheetApi | fn uploadDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/upload_datasheet.zig::uploadDatasheetApi | fn uploadDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/upload_package.zig::HandlerError value
-src/serve/upload_package.zig::uploadPackageApi | fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/upload_package.zig::uploadPackageApi | fn uploadPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/users.zig::Role enum_
 src/serve/users.zig::User struct_
+src/serve/users.zig::UserStore struct_
 src/serve/users.zig::canAdmin | fn canAdmin(self: Role) bool
 src/serve/users.zig::canWrite | fn canWrite(self: Role) bool
-src/serve/users.zig::deleteUser | fn deleteUser( allocator: std.mem.Allocator, auth_dir: []const u8, target_email: []const u8, acting_email: []const u8, ) (std.mem.Allocator.Error || error{ CannotDeleteSelf, LastAdmin })!bool
-src/serve/users.zig::ensureUser | fn ensureUser( allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8, requested_role: Role, ) std.mem.Allocator.Error!Role
+src/serve/users.zig::deleteUser | fn deleteUser( self: *UserStore, allocator: std.mem.Allocator, auth_dir: []const u8, target_email: []const u8, acting_email: []const u8, ) (std.mem.Allocator.Error || error{ CannotDeleteSelf, LastAdmin })!bool
+src/serve/users.zig::ensureUser | fn ensureUser( self: *UserStore, allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8, requested_role: Role, ) std.mem.Allocator.Error!Role
 src/serve/users.zig::fromString | fn fromString(s: []const u8) ?Role
-src/serve/users.zig::getRole | fn getRole(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) Role
-src/serve/users.zig::listUsers | fn listUsers(allocator: std.mem.Allocator, auth_dir: []const u8) std.mem.Allocator.Error![]User
-src/serve/users.zig::setRole | fn setRole( allocator: std.mem.Allocator, auth_dir: []const u8, target_email: []const u8, new_role: Role, acting_email: []const u8, ) (std.mem.Allocator.Error || error{LastAdmin})!bool
+src/serve/users.zig::getRole | fn getRole(self: *UserStore, allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) Role
+src/serve/users.zig::listUsers | fn listUsers( self: *UserStore, allocator: std.mem.Allocator, auth_dir: []const u8, ) std.mem.Allocator.Error![]User
+src/serve/users.zig::setRole | fn setRole( self: *UserStore, allocator: std.mem.Allocator, auth_dir: []const u8, target_email: []const u8, new_role: Role, acting_email: []const u8, ) (std.mem.Allocator.Error || error{LastAdmin})!bool
 src/serve/users.zig::toString | fn toString(self: Role) []const u8
 src/serve/vfs.zig::ListMode enum_
 src/serve/vfs.zig::ReplaceMode enum_

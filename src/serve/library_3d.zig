@@ -11,7 +11,7 @@ const footprint_mod = @import("../export_kicad_footprint.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const ast = @import("../sexpr/ast.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 
 /// Percent-decode a URL path param. httpz returns params verbatim, so a
 /// footprint whose name embeds a reserved char (a comma → `%2C`, e.g.
@@ -70,7 +70,7 @@ fn resolveModelName(allocator: std.mem.Allocator, project_dir: []const u8, footp
 /// Stream the raw `.step` bytes for a footprint's resolved 3D model, so the
 /// browser-side OpenCASCADE (occt-import-js) WASM can parse it. 404 when the
 /// footprint has no model. Served as binary; the viewer fetches it once.
-pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn modelFileApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const footprint_raw = req.param(param_footprint) orelse return notFound(res);
     const footprint = urlDecode(req.arena, footprint_raw) catch return notFound(res);
     if (!isSafeFootprint(footprint)) return notFound(res);
@@ -89,7 +89,7 @@ pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 /// plus rotation/offset controls that POST to `/api/model-transform/:fp`.
 /// The page embeds the pads + courtyard + current transform as JSON; the
 /// heavy lifting (STEP parse, render, gizmo) lives in `/static/model_viewer_3d.js`.
-pub fn viewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn viewerPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     // `footprint_url` is the raw (still percent-encoded) param — kept for
     // re-emitting into the model-file URL; `footprint` is decoded for display,
     // config lookups, and pad parsing (so commas etc. resolve to the right file).
@@ -363,7 +363,7 @@ fn isPadTypeKeyword(s: []const u8) bool {
 /// part's entry + this part's optional `model` override). Body:
 /// `{"offset":[x,y,z],"rotation":[x,y,z]}`. The KiCad sync's `loadModelConfig`
 /// reads this on the next push, so the orientation lands on the board.
-pub fn saveTransformApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn saveTransformApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     const footprint_raw = req.param(param_footprint) orelse return badRequest(res, "missing footprint");
     const body = req.body() orelse return badRequest(res, "missing body");

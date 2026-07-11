@@ -22,7 +22,7 @@ const render_json = @import("../render_json.zig");
 const assets_css = @import("assets_css.zig");
 const static_assets = @import("static_assets.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -52,7 +52,7 @@ fn writeScriptJson(w: *std.Io.Writer, json: []const u8) std.Io.Writer.Error!void
 
 /// Evaluate `name`'s design source and return its scene-graph JSON, or null
 /// with a reason written into `err`. Mirrors the eval path in `api.pushApi`.
-fn sceneFor(ctx: *Handler, name: []const u8, err: *[]const u8) ?[]const u8 {
+fn sceneFor(ctx: *Server, name: []const u8, err: *[]const u8) ?[]const u8 {
     const board_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
         err.* = "alloc";
         return null;
@@ -80,7 +80,7 @@ fn sceneFor(ctx: *Handler, name: []const u8, err: *[]const u8) ?[]const u8 {
 
 /// GET /api/editor-scene/:name — the per-design scene graph as JSON. The
 /// editor client refetches this after each edit and on the version poll.
-pub fn editorSceneApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn editorSceneApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -103,7 +103,7 @@ pub fn editorSceneApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
 /// GET /editor/:name — the sheet-editor page. Embeds the scene graph + design
 /// name + current live version, then loads the client (`/static/editor.js`).
-pub fn editorPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn editorPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;

@@ -20,7 +20,7 @@ const infra_random = @import("../infra/random.zig");
 const clock = @import("../infra/clock.zig");
 const paths = @import("../paths.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 const json_writer = @import("../json_writer.zig");
 
 const max_notes_bytes: usize = 1 * 1024 * 1024;
@@ -283,7 +283,7 @@ fn setJsonHeaders(res: *httpz.Response) void {
 
 /// GET /api/notes/:name — `{"text":"<raw markdown>"}`. Kept for the
 /// raw textarea fallback and any caller that wants the full document.
-pub fn getNotesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn getNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     setJsonHeaders(res);
 
     const name = req.param("name") orelse return jsonError(res, http_not_found, err_missing_name);
@@ -309,7 +309,7 @@ pub fn getNotesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 /// PUT /api/notes/:name — body `{"text":"<raw markdown>"}`. Writes the
 /// full file. Kept for the raw textarea editor; the structured ops
 /// below are preferred for programmatic edits.
-pub fn saveNotesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn saveNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     setJsonHeaders(res);
 
     const name = req.param("name") orelse return jsonError(res, http_not_found, err_missing_name);
@@ -334,7 +334,7 @@ pub fn saveNotesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 
 /// GET /api/notes/:name/tasks — `{"tasks":[…],"scratchpad":"…"}`. Used
 /// by the web UI to render the structured TODO list.
-pub fn getTasksApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn getTasksApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     setJsonHeaders(res);
     const name = req.param("name") orelse return jsonError(res, http_not_found, err_missing_name);
 
@@ -351,7 +351,7 @@ pub fn getTasksApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 
 /// POST /api/notes/:name/tasks/add — body `{"text":"…"}`. Appends a new
 /// open task with today's date and a fresh id. Returns the new task.
-pub fn addTaskApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn addTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     setJsonHeaders(res);
     const name = req.param("name") orelse return jsonError(res, http_not_found, err_missing_name);
     const body = req.body() orelse return jsonError(res, http_bad_request, err_no_body);
@@ -377,25 +377,25 @@ pub fn addTaskApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
 
 /// POST /api/notes/:name/tasks/complete — body `{"id":"…"}`. Stamps
 /// today's date into `completed`. No-ops if already done.
-pub fn completeTaskApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn completeTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     try mutateTaskByIdApi(ctx, req, res, .complete);
 }
 
 /// POST /api/notes/:name/tasks/reopen — body `{"id":"…"}`. Clears the
 /// completion date so the task moves back to the open list.
-pub fn reopenTaskApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn reopenTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     try mutateTaskByIdApi(ctx, req, res, .reopen);
 }
 
 /// POST /api/notes/:name/tasks/remove — body `{"id":"…"}`. Deletes the
 /// task from the file (the scratchpad is left intact).
-pub fn removeTaskApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn removeTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     try mutateTaskByIdApi(ctx, req, res, .remove);
 }
 
 pub const TaskMutation = enum { complete, reopen, remove };
 
-fn mutateTaskByIdApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, mode: TaskMutation) HandlerError!void {
+fn mutateTaskByIdApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response, mode: TaskMutation) HandlerError!void {
     setJsonHeaders(res);
     const name = req.param("name") orelse return jsonError(res, http_not_found, err_missing_name);
     const body = req.body() orelse return jsonError(res, http_bad_request, err_no_body);

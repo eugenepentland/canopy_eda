@@ -11,7 +11,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 const mcp_tools = @import("mcp_tools.zig");
 const mcp_docs_template = @import("templates/mcp_docs.zig");
 
@@ -43,7 +43,7 @@ pub const ToolDoc = struct {
 };
 
 /// GET /mcp-tools — render the MCP tool reference page.
-pub fn mcpDocsPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn mcpDocsPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const tools = buildToolDocs(req.arena) catch &[_]ToolDoc{};
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
