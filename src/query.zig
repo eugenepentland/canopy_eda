@@ -17,6 +17,7 @@
 //! omits it.
 
 const std = @import("std");
+const exit = @import("exit.zig");
 const infra_fs = @import("infra/fs.zig");
 const json_writer = @import("json_writer.zig");
 const docgen = @import("docgen.zig");
@@ -78,8 +79,7 @@ fn projectDir(args: []const []const u8) []const u8 {
 
 /// Print a usage line and exit non-zero.
 fn usage(line: []const u8) noreturn {
-    std.debug.print("Usage: netlisp {s}\n", .{line});
-    std.process.exit(1);
+    exit.fatal("Usage: netlisp {s}\n", .{line});
 }
 
 /// Write `bytes` to stdout followed by a newline.
@@ -97,11 +97,10 @@ pub fn cmdInstances(allocator: std.mem.Allocator, args: []const []const u8) Quer
     var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     const ok = mcp_tools.listInstances(allocator, projectDir(args), name, w) catch |e| {
-        std.debug.print("instances: {s}: {s}\n", .{ name, @errorName(e) });
-        std.process.exit(1);
+        exit.fatal("instances: {s}: {s}\n", .{ name, @errorName(e) });
     };
     try emit(buf.items);
-    if (!ok) std.process.exit(1);
+    if (!ok) exit.failure();
 }
 
 /// `netlisp net <design> <net>` — every pin + passive on a net, as JSON.
@@ -111,11 +110,10 @@ pub fn cmdNet(allocator: std.mem.Allocator, args: []const []const u8) QueryError
     var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     const ok = mcp_tools.getNet(allocator, projectDir(args), name, net, w) catch |e| {
-        std.debug.print("net: {s}/{s}: {s}\n", .{ name, net, @errorName(e) });
-        std.process.exit(1);
+        exit.fatal("net: {s}/{s}: {s}\n", .{ name, net, @errorName(e) });
     };
     try emit(buf.items);
-    if (!ok) std.process.exit(1);
+    if (!ok) exit.failure();
 }
 
 /// `netlisp free-pins <design> <ref> [--category gpio|power|clock|analog|other]`
@@ -128,11 +126,10 @@ pub fn cmdFreePins(allocator: std.mem.Allocator, args: []const []const u8) Query
     var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     const ok = mcp_tools.listFreePins(allocator, projectDir(args), name, ref, category, w) catch |e| {
-        std.debug.print("free-pins: {s}/{s}: {s}\n", .{ name, ref, @errorName(e) });
-        std.process.exit(1);
+        exit.fatal("free-pins: {s}/{s}: {s}\n", .{ name, ref, @errorName(e) });
     };
     try emit(buf.items);
-    if (!ok) std.process.exit(1);
+    if (!ok) exit.failure();
 }
 
 /// `netlisp schematic <design>` — the full scene-graph JSON (instances, nets,
@@ -140,8 +137,7 @@ pub fn cmdFreePins(allocator: std.mem.Allocator, args: []const []const u8) Query
 pub fn cmdSchematic(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
     const name = nthPositional(args, 0) orelse usage("schematic [--project-dir <d>] <design>");
     const json = mcp_tools.renderSceneGraph(allocator, projectDir(args), name) catch |e| {
-        std.debug.print("schematic: {s}: {s}\n", .{ name, @errorName(e) });
-        std.process.exit(1);
+        exit.fatal("schematic: {s}: {s}\n", .{ name, @errorName(e) });
     };
     defer allocator.free(json);
     try emit(json);
@@ -153,11 +149,10 @@ pub fn cmdDescribe(allocator: std.mem.Allocator, args: []const []const u8) Query
     const name = nthPositional(args, 0) orelse usage("describe [--project-dir <d>] <component>");
     var out: std.ArrayList(u8) = .empty;
     const ok = component_info.describeComponent(allocator, projectDir(args), name, &out) catch |e| {
-        std.debug.print("describe: {s}: {s}\n", .{ name, @errorName(e) });
-        std.process.exit(1);
+        exit.fatal("describe: {s}: {s}\n", .{ name, @errorName(e) });
     };
     try emit(out.items);
-    if (!ok) std.process.exit(1);
+    if (!ok) exit.failure();
 }
 
 /// `netlisp library [query]` — fuzzy-search the library across components,
@@ -201,7 +196,7 @@ pub fn cmdReference(allocator: std.mem.Allocator, args: []const []const u8) Quer
     }
     std.debug.print("reference: no section matching '{s}'. Available sections:\n", .{section.?});
     printSectionHeaders(full);
-    std.process.exit(1);
+    exit.failure();
 }
 
 /// Return the `## ` section whose title contains `query` (case-insensitive),

@@ -387,6 +387,9 @@ src/eval/test_point.zig::parse | fn parse( allocator: std.mem.Allocator, form_ch
 src/eval/validate.zig::trackNetFormSource | fn trackNetFormSource(self: *Evaluator, form_children: []const Node, env: *Env, sources: *std.StringHashMapUnmanaged(u32)) void
 src/eval/validate.zig::validateDesign | fn validateDesign(self: *Evaluator, block: *const DesignBlock) EvalError!void
 src/eval/validate.zig::warnCombinableNets | fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged(u32)) EvalError!void
+src/exit.zig::failure | fn failure() noreturn
+src/exit.zig::failure_status value
+src/exit.zig::fatal | fn fatal(comptime fmt: []const u8, args: anytype) noreturn
 src/export_fab.zig::DnpMode enum_
 src/export_fab.zig::DrillClass enum_
 src/export_fab.zig::Frame struct_

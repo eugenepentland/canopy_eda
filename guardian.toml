@@ -52,3 +52,10 @@ min_score_pct = 32   # fail below this kill rate (gated tiers only); raise towar
 max_mutants   = 100  # deterministic sample cap for --full (see sizing note above)
 timeout_secs  = 300  # per-phase child-build timeout (a timeout counts as killed)
 min_mutants   = 4    # below this many viable mutants: informational, not gated
+
+# src/exit.zig is netlisp's designated fatal helper (like guardian's own
+# src/reporter.zig): the one place a raw std.process.exit(nonzero) is allowed,
+# so every CLI fatal funnels through fatal()/failure() there.
+[[allow]]
+check = "fatal-exit"
+paths = ["src/exit.zig"]

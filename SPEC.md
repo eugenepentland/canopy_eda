@@ -983,3 +983,17 @@ Public functions: check, writeJson
 - the fab gate's DRC measures against the design's resolved clearance rule
 - a warning-severity DRC finding flows through as a gate warning; an error-severity one blocks
 - a custom outline polygon with fewer than 3 points warns that the profile fell back to a rect
+
+## Fatal Exit Helper
+
+Public functions: fatal, failure
+
+- fatal and failure terminate with a nonzero failure status
+- completeness-waiver: empty inputs (a zero-arg format string is valid; the helper prints and terminates regardless of message content)
+- completeness-waiver: large inputs (std.debug.print streams straight to stderr with no buffering, so a large diagnostic cannot exhaust memory here)
+- completeness-waiver: unauthorized access (a process-termination primitive with no access surface; auth lives in serve/users)
+- completeness-waiver: i/o failure (std.debug.print discards a failed stderr write by design; the process still terminates with the failure status)
+- completeness-waiver: concurrent access (stateless with no shared mutable state; concurrent callers each terminate the process independently)
+- completeness-waiver: malformed encoding (the caller supplies a comptime format string and the bytes pass through verbatim to stderr)
+- completeness-waiver: integer overflow (no arithmetic — only the constant failure_status exit code)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)

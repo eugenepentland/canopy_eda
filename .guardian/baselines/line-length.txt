@@ -2,7 +2,7 @@
 6 src/bench_layout.zig
 1 src/bom.zig
 4 src/bom_resolve.zig
-5 src/commands.zig
+4 src/commands.zig
 4 src/convert/footprint.zig
 2 src/convert/symbol_helpers.zig
 3 src/coverage.zig
