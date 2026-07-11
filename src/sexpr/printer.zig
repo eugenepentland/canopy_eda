@@ -1,3 +1,7 @@
+//! S-expression printer: renders an AST back to canonical source text,
+//! round-trip capable (parse -> print -> parse is stable). The inverse of
+//! `parser.zig`, used by the `parse`/format paths and source rewriting.
+
 const std = @import("std");
 const ast = @import("ast.zig");
 const Node = ast.Node;

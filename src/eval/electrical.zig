@@ -1,3 +1,8 @@
+//! Parses a library part's `(electrical "FN" (type input|output|io) …)`
+//! declarations into `ElectricalDecl`s — the per-pin-function electrical type
+//! the ERC strap and no-connect checks consult. Few parts carry it, so those
+//! checks fall back to pin-name heuristics when it is absent.
+
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("env.zig");

@@ -1,3 +1,9 @@
+//! Module and component loading: `(import …)` resolution (searches
+//! `lib/components/` then `lib/modules/`), `(defmodule …)` with lexical closure
+//! capture, and parsing library `component` / `component-family` files into the
+//! component cache. Loaded source buffers are never freed — the cached
+//! component data borrows them directly.
+
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
 const ast = @import("../sexpr/ast.zig");

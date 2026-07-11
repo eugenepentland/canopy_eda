@@ -1,3 +1,8 @@
+//! Stable IDs and ref-des assignment: mints the 8-char hex `id` every part
+//! carries (-> KiCad UUID, survives renumbering) and auto-assigns ref-designators
+//! by prefix (C->C1, C2…; U->U1…), including the sub-block path-qualified pass.
+//! Ref-des are display labels; the `id` is the identity that must stay stable.
+
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");

@@ -1,3 +1,9 @@
+//! The `(fmt …)` string formatter: parses the `~V`/`~R`/`~C`/`~A`/`~S`
+//! directives (voltage, resistance, capacitance, amperage, string) and renders
+//! them from SI-suffixed values. Its directive table is one of the dispatch
+//! tables the auto-generated language reference is built from — keep it in sync
+//! (docgen enforces this on every build).
+
 const std = @import("std");
 const env_mod = @import("env.zig");
 const Value = env_mod.Value;

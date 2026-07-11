@@ -1,3 +1,9 @@
+//! Derives the design's power rails: emits one `PowerRail` per sub-block
+//! output-port source, collapsing ferrite-bead-bridged nets into a single rail
+//! by union-find and resolving each rail's voltage through a three-step fallback
+//! (sub-block port nominal -> section power port -> top-level port). GND is
+//! excluded; the returned slice is caller-owned.
+
 const std = @import("std");
 const env_mod = @import("env.zig");
 const na = @import("net_analysis.zig");

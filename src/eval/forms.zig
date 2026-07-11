@@ -1,3 +1,9 @@
+//! The evaluator's form-dispatch tables: the `SpecialForm`, `Builtin`, and
+//! `ScopeForm` enums (each head atom -> variant) plus their arity/scope schemas.
+//! One central mapping so a typo'd head is a lookup miss, not a silent no-op.
+//! These registries are what `docgen.zig` reads to generate the language
+//! reference — an undocumented variant is a compile error.
+
 const std = @import("std");
 
 /// Top-level special form recognised by `evalForm`. Each variant

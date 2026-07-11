@@ -1,3 +1,8 @@
+//! Power-budget analysis: walks the built design's rails and sums each rail's
+//! declared source current against its consumers, tagging every `Rail`
+//! ok/tight/over/no-source/no-consumers. Feeds the review doc's power-budget
+//! table. Read-only over the `DesignBlock`.
+
 const std = @import("std");
 const env_mod = @import("env.zig");
 const na = @import("net_analysis.zig");
