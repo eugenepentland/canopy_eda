@@ -531,6 +531,7 @@ src/layout_status.zig::ModuleLayoutStatus struct_
 src/layout_status.zig::read | fn read(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ModuleLayoutStatus
 src/main.zig::main | fn main() !void
 src/numeric.zig::checkedInt | fn checkedInt(comptime T: type, f: f64) ?T
+src/numeric.zig::toCount | fn toCount(f: f64) usize
 src/parts.zig::PartEntry struct_
 src/parts.zig::PartsDb struct_
 src/parts.zig::deinit | fn deinit(self: *PartsDb) void

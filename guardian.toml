@@ -52,3 +52,13 @@ min_score_pct = 32   # fail below this kill rate (gated tiers only); raise towar
 max_mutants   = 100  # deterministic sample cap for --full (see sizing note above)
 timeout_secs  = 300  # per-phase child-build timeout (a timeout counts as killed)
 min_mutants   = 4    # below this many viable mutants: informational, not gated
+
+# Float→int cast safety. `guard_fns` names the sanctioned narrowing wrappers
+# (numeric.checkedInt validates isFinite + range in float space before the
+# @intFromFloat); a cast inside such a body IS the guard, so it stops counting
+# toward the snapshot budget. `require_guard` path globs additionally hard-fail
+# ANY raw @intFromFloat under those dirs regardless of the budget — the strict
+# gate for subsystems already fully converted (untrusted eval/import inputs).
+# Arrays MUST stay on ONE line — guardian's toml parser only reads inline arrays.
+[int_from_float]
+guard_fns = ["checkedInt"]

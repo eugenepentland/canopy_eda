@@ -1017,7 +1017,7 @@ pub fn buildFunction(self: *Evaluator, args: []const Node, env: *Env) EvalError!
                 self.setError(sub[1].span, "(stack N) count must be a number");
                 return EvalError.TypeError;
             };
-            spec.stack = if (n < 1) 1 else if (n > 99) 99 else @intFromFloat(n);
+            spec.stack = if (n < 1) 1 else if (n > 99) 99 else (numeric.checkedInt(u8, n) orelse 1);
         } else if (std.mem.eql(u8, head, "hosts")) {
             for (sub[1..]) |m| {
                 const s = m.asString() orelse {
