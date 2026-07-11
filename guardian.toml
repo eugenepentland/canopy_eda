@@ -75,3 +75,14 @@ modules = ["src/sexpr/parser.zig", "src/sexpr/printer.zig", "src/deflate.zig", "
 [[allow]]
 check = "fatal-exit"
 paths = ["src/exit.zig"]
+
+# src/serve/templates/*.zig are build-time artifacts the third-party zt template
+# compiler generates from the checked-in .zt sources (the .zig outputs are
+# git-ignored and regenerated every build, banner: "Auto-generated ... do not
+# edit"). zt emits a fixed prelude — a "// Auto-generated" line comment then its
+# imports — as the first lines, with no hook to author a leading `//!` block, so
+# a module-doc header is structurally impossible here, not merely absent. This
+# documents that impossibility; it is not a way to dodge the check on hand code.
+[[allow]]
+check = "module-doc-header"
+paths = ["src/serve/templates/"]

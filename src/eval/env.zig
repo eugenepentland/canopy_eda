@@ -1,3 +1,10 @@
+//! The evaluator's core data model: the `Value` union the interpreter passes
+//! around, the `Env` lexical scope chain, and the record types the built design
+//! carries — `DesignBlock`, `Instance`, `Net`, `Port`, `Note`, `Group`,
+//! `SubBlock`, `Check`, `Requirement`, … — plus small parse helpers
+//! (`parseCheck`, `parseNoteRef`). String fields borrow the source/AST buffers
+//! (never freed); this module is the shared vocabulary of the whole pipeline.
+
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const numeric = @import("../numeric.zig");

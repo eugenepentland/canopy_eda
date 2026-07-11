@@ -1,3 +1,10 @@
+//! `(design-block …)` evaluation — the core that turns a design-block body (or
+//! a `(defmodule …)` instantiation) into a `*DesignBlock`: dispatches each scope
+//! form, wires instances/nets/ports/sections/sub-blocks, and applies
+//! bus-net/bus-port expansion (capped at `max_bus_expansion` to bound a hostile
+//! file's allocation). Entry points `evalDesignBlock` / `materializeBlock`;
+//! failures propagate as `EvalError`. Pipeline: evaluator → here → DesignBlock.
+
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const numeric = @import("../numeric.zig");

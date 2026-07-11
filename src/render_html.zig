@@ -1,3 +1,10 @@
+//! Schematic HTML renderer: `renderToHtml` turns a `*const DesignBlock` into
+//! the full server-rendered `/schematics/:name` page — hub-and-spoke inline SVG
+//! (via `render_svg/` over a shared `RenderCtx` flatten/classify/adjacency pass)
+//! plus the embedded review panels (power budget, coverage, checks). Read-only
+//! over the block; page HTML is allocated into the caller's allocator. The JSON
+//! scene-graph twin is `render_json.zig`.
+
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
 const parser_mod = @import("sexpr/parser.zig");
