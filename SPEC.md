@@ -15,6 +15,8 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Tracks line and column position for each token
 - Tokenizes KiCad-style unquoted filenames containing +
 - Tokenizes KiCad-style unquoted filenames containing ,
+- Records the source span of an unexpected character for diagnostics
+- Records the opening-quote span of an unterminated string
 
 ## sexpr/parser
 
@@ -25,6 +27,10 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Parses input containing comments by ignoring them
 - Parses multiple top-level forms into separate AST nodes
 - Identifies forms by head atom via isForm helper
+- Reports the line and column of a syntax error midway through a multi-line source
+- A parse diagnostic column locates the offending token so a caret aligns under it
+- An unterminated list is reported at the unclosed open paren
+- Fuzzing the parser tolerates arbitrary bytes without crashing or leaking
 
 ## sexpr/printer
 
@@ -33,6 +39,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Prints long nested lists with multiline indentation
 - Round-trips parse to print to parse producing identical AST
 - Round-trips every .sexp and .kicad_pcb file under projects/designs through parse → print → parse with structurally equal AST
+- Fuzzing parse-print-parse yields a structurally identical AST for accepted input
 
 ## sexpr/ast
 
@@ -56,6 +63,7 @@ Public functions: readBoard
 - reads a bare-integer pad number so the pad still enters the net diff
 - parses the (model …) offset/rotate so the diff can detect 3D-model drift
 - skips a pad net id that is non-finite or out of integer range
+- Fuzzing readBoard with arbitrary bytes never crashes
 
 ## kicad_pcb/writer
 
@@ -317,6 +325,7 @@ Public functions: worldShape, pointDist, shapeGap
 - A positional argument after a named argument is rejected
 - Unbound module parameters are diagnosed by name at the call site
 - Surplus positional arguments are diagnosed with expected and actual counts
+- A syntax error in an imported library file is diagnosed with the file path and location
 
 ## eval/suggest
 
@@ -461,6 +470,7 @@ Public functions: planLayers, writeLayer
 Public functions: write
 
 - packs entries into a store-method archive the standard extractor reads back
+- Fuzzing the writer with arbitrary entry bytes produces a well-formed archive
 
 ## bom
 

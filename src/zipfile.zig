@@ -105,3 +105,39 @@ test "write produces an archive std.zip can extract" {
     // Stored data is byte-visible.
     try testing.expect(std.mem.indexOf(u8, out, "G04 top*") != null);
 }
+
+const zip_fuzz_corpus = [_][]const u8{
+    "",
+    "one",
+    "a/b/c.gtl\nlayer data",
+    &[_]u8{ 0x50, 0x4b, 0x03, 0x04, 0, 0xff, 0x7f },
+};
+
+/// One fuzz iteration for the ZIP writer: building two entries out of arbitrary
+/// bytes must never crash and must emit a well-formed archive — a leading local
+/// header and a trailing end-of-central-directory record. Entry names are kept
+/// short so the u16 name-length field can't overflow. The arena reclaims the
+/// archive buffer, so `testing.allocator` stays leak-free.
+fn fuzzZipWrite(allocator: std.mem.Allocator, input: []const u8) anyerror!void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const split = input.len / 2;
+    const name0 = input[0..@min(input.len, 8)];
+    const entries = [_]Entry{
+        .{ .name = if (name0.len > 0) name0 else "n", .data = input },
+        .{ .name = "second.bin", .data = input[split..] },
+    };
+    var aw: std.Io.Writer.Allocating = .init(a);
+    try write(&aw.writer, &entries);
+    const out = aw.written();
+
+    try testing.expect(std.mem.startsWith(u8, out, "PK\x03\x04"));
+    try testing.expect(std.mem.indexOf(u8, out, "PK\x05\x06") != null);
+}
+
+// spec: zipfile - Fuzzing the writer with arbitrary entry bytes produces a well-formed archive
+test "fuzz: write emits a well-formed archive for arbitrary entry bytes" {
+    try std.testing.fuzz(std.testing.allocator, fuzzZipWrite, .{ .corpus = &zip_fuzz_corpus });
+}

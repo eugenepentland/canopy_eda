@@ -206,8 +206,11 @@ fn cmdParse(allocator: std.mem.Allocator, path: []const u8) !void {
     };
     defer allocator.free(source);
 
-    const nodes = parser.parse(allocator, source) catch |err| {
-        std.debug.print("Parse error: {}\n", .{err});
+    var diag: parser.ParseDiagnostic = .{};
+    const nodes = parser.parseDiag(allocator, source, &diag) catch {
+        // Compiler-style `file:line:col: error: message` — the same shape the
+        // build/check paths and the server use for eval errors.
+        std.debug.print("{s}:{d}:{d}: error: {s}\n", .{ path, diag.span.line, diag.span.col, diag.message });
         std.process.exit(1);
     };
     defer parser.freeNodes(allocator, nodes);

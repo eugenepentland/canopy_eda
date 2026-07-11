@@ -1164,20 +1164,20 @@ pub fn loadFile(self: *Evaluator, path: []const u8) ?[]const Node {
     if (self.loaded_files.get(path)) |nodes| return nodes;
 
     const source = infra_fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch return null;
-    // Note: we don't free source because AST references slices into it
-    const nodes = parser_mod.parse(self.allocator, source) catch return null;
+    // Note: we don't free source because AST references slices into it.
+    var diag: parser_mod.ParseDiagnostic = .{};
+    const nodes = parser_mod.parseDiag(self.allocator, source, &diag) catch {
+        // Stash the located syntax error so callers render file:line:col + caret.
+        self.setError(diag.span, diag.message);
+        return null;
+    };
     self.loaded_files.put(self.allocator, path, nodes) catch return null;
     return nodes;
 }
 
-/// Load a top-level design file. Wraps `loadFile` with an autoloader for a
-/// sibling `<path-without-.sexp>.checks.sexp` file: when present, its
-/// top-level forms are spliced into the trailing `(design-block …)` form's
-/// body before evaluation. This lets a design's verification entries live
-/// next to the schematic instead of inside it.
-///
-/// Library imports continue to call `loadFile` directly so module files
-/// don't get checks-spliced.
+/// Load a top-level design file: `loadFile` plus an autoloader that splices a
+/// sibling `<name>.checks.sexp`'s forms into the trailing `(design-block …)`.
+/// Library imports call `loadFile` directly, so module files aren't spliced.
 pub fn loadDesignFile(self: *Evaluator, path: []const u8) ?[]const Node {
     const nodes = loadFile(self, path) orelse return null;
     if (!std.mem.endsWith(u8, path, ".sexp")) return nodes;

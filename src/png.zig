@@ -101,6 +101,34 @@ fn writeChunk(w: *std.Io.Writer, kind: *const [4]u8, data: []const u8) !void {
     try w.writeAll(&crcb);
 }
 
+const png_fuzz_corpus = [_][]const u8{
+    "",
+    "\x00",
+    "RGBRGBRGB",
+    &[_]u8{ 3, 2, 0xff, 0x00, 0x80, 1, 2, 3, 4, 5, 6, 7 },
+};
+
+/// One fuzz iteration for the PNG encoder: derive a small in-bounds canvas from
+/// the fuzz bytes (so the `rgb.len == w*h*3` precondition always holds) and
+/// require `encodeRgb` to emit a signature-prefixed PNG without crashing. Sides
+/// are clamped to 1..16 so the pixel buffer stays tiny; `testing.allocator`
+/// leak-checks the encode.
+fn fuzzEncodeRgb(allocator: std.mem.Allocator, input: []const u8) anyerror!void {
+    const w: u32 = 1 + @as(u32, if (input.len > 0) input[0] & 0x0f else 0);
+    const h: u32 = 1 + @as(u32, if (input.len > 1) input[1] & 0x0f else 0);
+    const rgb = try allocator.alloc(u8, @as(usize, w) * h * 3);
+    defer allocator.free(rgb);
+    for (rgb, 0..) |*px, i| px.* = if (input.len > 0) input[i % input.len] else 0;
+
+    const png = try encodeRgb(allocator, w, h, rgb);
+    defer allocator.free(png);
+    try std.testing.expect(std.mem.startsWith(u8, png, &SIGNATURE));
+}
+
+test "fuzz: encodeRgb produces a valid PNG for bounded arbitrary pixels" {
+    try std.testing.fuzz(std.testing.allocator, fuzzEncodeRgb, .{ .corpus = &png_fuzz_corpus });
+}
+
 test "encodeRgb produces a decodable 2x2 PNG" {
     const alloc = std.testing.allocator;
     // 2x2: red, green / blue, white.

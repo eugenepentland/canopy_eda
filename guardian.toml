@@ -63,3 +63,9 @@ min_mutants   = 4    # below this many viable mutants: informational, not gated
 [int_from_float]
 guard_fns = ["checkedInt"]
 require_guard = ["src/eval/", "src/placement/", "src/kicad_pcb/", "src/import_kicad.zig"]
+# Fuzz presence: each listed hand-rolled codec that parses untrusted input
+# (MCP / HTTP / file import) must carry a `std.testing.fuzz` harness, so the
+# coverage can never silently lapse. Array MUST stay on ONE line — guardian's
+# toml parser only reads inline arrays. See the "Fuzzing" note in CLAUDE.md.
+[fuzz_presence]
+modules = ["src/sexpr/parser.zig", "src/sexpr/printer.zig", "src/deflate.zig", "src/kicad_pcb/reader.zig", "src/zipfile.zig", "src/png.zig"]

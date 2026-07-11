@@ -306,3 +306,41 @@ test "round-trip every project .sexp file" {
     // Sanity: the walk should have found at least one file.
     try std.testing.expect(count > 0);
 }
+
+// Real S-expressions seed the round-trip property; the malformed tail makes the
+// harness skip cleanly (never-crash on those is the parser's own harness).
+const roundtrip_fuzz_corpus = [_][]const u8{
+    "(design-block \"X\" (instance \"R1\" (res-0402 \"10k\") (pin 1 \"A\") (pin 2 \"B\")))",
+    "(net \"VIN\" (pin \"U1\" 6) (pin \"C1\" 1))",
+    "(pad 1 smd rect (pos -1.25 1.75) (size 0.7 0.3))",
+    "(vals 220k 4.7k 1M 100nF 3.3V 10mA 1.0mm 10mil 42 -5 3.3)",
+    "(a (b (c (d (e (f))))))",
+    "; comment\n(after \"comment\")\n",
+    "(unterminated",
+    ")",
+};
+
+/// One fuzz iteration for the parse → print → parse round trip: any input the
+/// parser accepts must print to text that re-parses into a structurally
+/// identical AST (the printer is round-trip capable — a mismatch is a real
+/// printer bug). Malformed inputs are skipped; their never-crash guarantee is
+/// the parser's own harness. Runs under `testing.allocator` (leak-checked).
+fn fuzzRoundTrip(allocator: std.mem.Allocator, input: []const u8) anyerror!void {
+    const parser = @import("parser.zig");
+    const nodes1 = parser.parse(allocator, input) catch return;
+    defer parser.freeNodes(allocator, nodes1);
+
+    const printed = try print(allocator, nodes1);
+    defer allocator.free(printed);
+    // The printed form of any accepted parse MUST itself re-parse…
+    const nodes2 = try parser.parse(allocator, printed);
+    defer parser.freeNodes(allocator, nodes2);
+    // …to a structurally identical AST.
+    try std.testing.expectEqual(nodes1.len, nodes2.len);
+    for (nodes1, nodes2) |a, b| try expectNodesEqual(a, b);
+}
+
+// spec: sexpr/printer - Fuzzing parse-print-parse yields a structurally identical AST for accepted input
+test "fuzz: parse-print-parse round-trips accepted input" {
+    try std.testing.fuzz(std.testing.allocator, fuzzRoundTrip, .{ .corpus = &roundtrip_fuzz_corpus });
+}

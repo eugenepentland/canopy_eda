@@ -117,6 +117,11 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const result = eval.evalFile(board_path) catch |err| {
+        // Render the stashed diagnostic (span + message, incl. a parse error's
+        // file:line:col) when one exists — the bare error code is the fallback.
+        if (eval.last_error) |diag| {
+            std.debug.print(DIAG_ERROR_FMT, .{ board_path, diag.span.line, diag.span.col, diag.message });
+        }
         std.debug.print("Evaluate error: {}\n", .{err});
         std.process.exit(1);
     };

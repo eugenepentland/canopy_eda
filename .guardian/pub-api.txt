@@ -1403,9 +1403,12 @@ src/sexpr/ast.zig::string | fn string(span: Span, value: []const u8) Node
 src/sexpr/ast.zig::tokenText | fn tokenText(self: Node, arena: std.mem.Allocator) ?[]const u8
 src/sexpr/ast.zig::unitVal | fn unitVal(span: Span, mm_value: f64) Node
 src/sexpr/ast.zig::zero value
+src/sexpr/parser.zig::ParseDiagnostic struct_
 src/sexpr/parser.zig::ParseError value
+src/sexpr/parser.zig::errorMessage | fn errorMessage(err: ParseError) []const u8
 src/sexpr/parser.zig::freeNodes | fn freeNodes(allocator: std.mem.Allocator, nodes: []const Node) void
 src/sexpr/parser.zig::parse | fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError![]const Node
+src/sexpr/parser.zig::parseDiag | fn parseDiag(allocator: std.mem.Allocator, source: []const u8, diag: *ParseDiagnostic) ParseError![]const Node
 src/sexpr/printer.zig::print | fn print(allocator: std.mem.Allocator, nodes: []const Node) std.mem.Allocator.Error![]const u8
 src/sexpr/tokenizer.zig::SiScale struct_
 src/sexpr/tokenizer.zig::Token struct_

@@ -228,6 +228,35 @@ test "gzip round-trips through std flate Decompress" {
     try std.testing.expectEqual(@as(u32, @truncate(text.len)), std.mem.readInt(u32, gz[gz.len - 4 ..][0..4], .little));
 }
 
+const deflate_fuzz_corpus = [_][]const u8{
+    "",
+    "a",
+    "hello, hello, hello world",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "The quick brown fox jumps over the lazy dog.",
+    &[_]u8{ 0, 1, 2, 3, 0xff, 0xfe, 0, 0, 0, 0x80, 0x7f },
+};
+
+/// One fuzz iteration for the DEFLATE encoder — a true round-trip oracle:
+/// inflating `deflateRaw(x)` with std's flate decoder must reproduce `x`
+/// exactly, for any input bytes. This catches Huffman/bit-packing bugs the
+/// encoder's own tests would miss on adversarial inputs. Runs under
+/// `testing.allocator`, so any leak on the compress/decompress path fails.
+fn fuzzDeflateRoundTrip(allocator: std.mem.Allocator, input: []const u8) anyerror!void {
+    const raw = try deflateRaw(allocator, input);
+    defer allocator.free(raw);
+    var in: std.Io.Reader = .fixed(raw);
+    var win: [std.compress.flate.max_window_len]u8 = undefined;
+    var decomp = std.compress.flate.Decompress.init(&in, .raw, &win);
+    const out = try decomp.reader.allocRemaining(allocator, .unlimited);
+    defer allocator.free(out);
+    try std.testing.expectEqualSlices(u8, input, out);
+}
+
+test "fuzz: deflateRaw round-trips through std flate inflate" {
+    try std.testing.fuzz(std.testing.allocator, fuzzDeflateRoundTrip, .{ .corpus = &deflate_fuzz_corpus });
+}
+
 test "gzip handles tiny and empty inputs" {
     const alloc = std.testing.allocator;
     for ([_][]const u8{ "", "a", "ab" }) |text| {
