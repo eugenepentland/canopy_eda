@@ -2,8 +2,3 @@
 src/serve/auth.zig: 1952-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
 src/serve/edit.zig: 3124-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
 src/serve/mcp_tools.zig: 2766-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
-src/serve/templates/account.zig: 589-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
-src/serve/templates/auth.zig: 330-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
-src/serve/templates/library.zig: 397-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
-src/serve/templates/mcp_docs.zig: 292-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
-src/serve/templates/pages.zig: 791-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
