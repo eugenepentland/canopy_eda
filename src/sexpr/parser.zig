@@ -372,6 +372,38 @@ test "parseDiag points an unterminated list at its open paren" {
     try std.testing.expectEqual(@as(u32, 3), diag.span.col);
 }
 
+// A handful of real S-expressions seed the round-trip property; the malformed
+// entries make sure the error paths stay leak-clean under arbitrary bytes.
+const parser_fuzz_corpus = [_][]const u8{
+    "(design-block \"X\" (instance \"R1\" (res-0402 \"10k\") (pin 1 \"A\") (pin 2 \"B\")))",
+    "(net \"VIN\" (pin \"U1\" 6) (pin \"C1\" 1))",
+    "(pad 1 smd rect (pos -1.25 1.75) (size 0.7 0.3))",
+    "(vals 220k 4.7k 1M 100nF 3.3V 10mA 1.0mm 10mil 42 -5 3.3)",
+    "(a (b (c (d (e (f))))))",
+    "; comment\n(after \"comment\")\n",
+    "(unterminated",
+    ")",
+    "\"oops",
+    "(bad ]char)",
+};
+
+/// One fuzz iteration for the S-expression parser: arbitrary bytes must never
+/// crash or overflow — every input either parses or returns a `ParseError`, and
+/// the `MAX_PARSE_DEPTH` bound (covered by its own test) keeps deep input off
+/// the native stack. Runs under `testing.allocator`, so a missed free on any
+/// path — including every error path — fails the test. (The parse→print→parse
+/// round-trip is fuzzed in printer.zig, which owns the printer, to keep the
+/// import graph acyclic.)
+fn fuzzParse(allocator: std.mem.Allocator, input: []const u8) anyerror!void {
+    const nodes = parse(allocator, input) catch return;
+    freeNodes(allocator, nodes);
+}
+
+// spec: sexpr/parser - Fuzzing the parser tolerates arbitrary bytes without crashing or leaking
+test "fuzz: parser never crashes on arbitrary bytes" {
+    try std.testing.fuzz(std.testing.allocator, fuzzParse, .{ .corpus = &parser_fuzz_corpus });
+}
+
 /// Recursively free all allocated slices in a node tree.
 pub fn freeNodes(allocator: std.mem.Allocator, nodes: []const Node) void {
     for (nodes) |node| {

@@ -30,6 +30,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Reports the line and column of a syntax error midway through a multi-line source
 - A parse diagnostic column locates the offending token so a caret aligns under it
 - An unterminated list is reported at the unclosed open paren
+- Fuzzing the parser tolerates arbitrary bytes without crashing or leaking
 
 ## sexpr/printer
 
@@ -38,6 +39,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Prints long nested lists with multiline indentation
 - Round-trips parse to print to parse producing identical AST
 - Round-trips every .sexp and .kicad_pcb file under projects/designs through parse → print → parse with structurally equal AST
+- Fuzzing parse-print-parse yields a structurally identical AST for accepted input
 
 ## sexpr/ast
 
@@ -60,6 +62,7 @@ Public functions: readBoard
 - reads every footprint in a real .kicad_pcb fixture
 - reads a bare-integer pad number so the pad still enters the net diff
 - parses the (model …) offset/rotate so the diff can detect 3D-model drift
+- Fuzzing readBoard with arbitrary bytes never crashes
 
 ## kicad_pcb/writer
 
@@ -465,6 +468,7 @@ Public functions: planLayers, writeLayer
 Public functions: write
 
 - packs entries into a store-method archive the standard extractor reads back
+- Fuzzing the writer with arbitrary entry bytes produces a well-formed archive
 
 ## bom
 

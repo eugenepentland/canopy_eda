@@ -66,6 +66,6 @@ src/serve/upload.zig: 521-line module has no `//!` header (over 200 lines needs 
 src/serve/upload_datasheet.zig: 275-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
 src/serve/upload_package.zig: 222-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
 src/serve/users.zig: 277-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
-src/sexpr/parser.zig: 393-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
-src/sexpr/printer.zig: 308-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
+src/sexpr/parser.zig: 425-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
+src/sexpr/printer.zig: 346-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)
 src/sexpr/tokenizer.zig: 571-line module has no `//!` header (over 200 lines needs a 2+-line or 60+-char module doc)

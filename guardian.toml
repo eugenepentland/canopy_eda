@@ -52,3 +52,10 @@ min_score_pct = 32   # fail below this kill rate (gated tiers only); raise towar
 max_mutants   = 100  # deterministic sample cap for --full (see sizing note above)
 timeout_secs  = 300  # per-phase child-build timeout (a timeout counts as killed)
 min_mutants   = 4    # below this many viable mutants: informational, not gated
+
+# Fuzz presence: each listed hand-rolled codec that parses untrusted input
+# (MCP / HTTP / file import) must carry a `std.testing.fuzz` harness, so the
+# coverage can never silently lapse. Array MUST stay on ONE line — guardian's
+# toml parser only reads inline arrays. See the "Fuzzing" note in CLAUDE.md.
+[fuzz_presence]
+modules = ["src/sexpr/parser.zig", "src/sexpr/printer.zig", "src/deflate.zig", "src/kicad_pcb/reader.zig", "src/zipfile.zig", "src/png.zig"]

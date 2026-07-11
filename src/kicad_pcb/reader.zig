@@ -197,6 +197,33 @@ fn formAtomChildEquals(node: Node, expected: []const u8) bool {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
+const reader_fuzz_corpus = [_][]const u8{
+    "",
+    "(kicad_pcb)",
+    "(kicad_pcb (net 0 \"\") (net 1 \"VDD\")\n" ++
+        "  (footprint \"R\" (at 1 2) (property \"Reference\" \"R1\")\n" ++
+        "    (pad \"1\" smd rect (at 0 0) (net 1 \"VDD\"))))",
+    "(not_a_board 1 2 3)",
+    "((((",
+    "(kicad_pcb (footprint",
+    &[_]u8{ 0x28, 0x00, 0xff, 0x29 },
+};
+
+/// One fuzz iteration for the `.kicad_pcb` reader: arbitrary bytes must never
+/// crash — `readBoard` either returns a board slice or a `ReadError`. Every
+/// allocation lands in an arena that is unconditionally reclaimed, so the outer
+/// `testing.allocator` stays leak-free regardless of where parsing bails out.
+fn fuzzReadBoard(allocator: std.mem.Allocator, input: []const u8) anyerror!void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    _ = readBoard(arena.allocator(), input) catch return;
+}
+
+// spec: kicad_pcb/reader - Fuzzing readBoard with arbitrary bytes never crashes
+test "fuzz: readBoard tolerates arbitrary bytes" {
+    try std.testing.fuzz(std.testing.allocator, fuzzReadBoard, .{ .corpus = &reader_fuzz_corpus });
+}
+
 // spec: kicad_pcb/reader - parses footprint reference, value, kicad_uuid, and canopy_uuid from properties
 test "readBoard extracts ref/value/uuids from a single footprint" {
     const a = std.testing.allocator;

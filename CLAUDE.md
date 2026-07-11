@@ -826,6 +826,29 @@ for d in pma3-14ln stm32n6 adf5901 tpsm84338 lt3045 power-6v; do
 done
 ```
 
+### Fuzzing
+
+The hand-rolled codecs that parse **untrusted** input (S-expressions via
+MCP/HTTP/file import, DEFLATE, `.kicad_pcb`, the fab-package ZIP, PNG) carry
+`std.testing.fuzz` harnesses. Their oracles are property-based: the sexpr
+parser never crashes and its printed output re-parses to a fixed point; DEFLATE
+is a true round-trip (`inflate(deflateRaw(x)) == x` via std's inflater); the
+`.kicad_pcb` reader and ZIP/PNG encoders never crash and stay well-formed on
+arbitrary bytes.
+
+- **Smoke mode (default, every `zig build test`).** With the suite built
+  normally, `std.testing.fuzz` just replays the harness's seed corpus plus the
+  empty input once — a cheap regression check, run under `testing.allocator` so
+  a leak on any path fails. This is what the gate relies on.
+- **Deep mode (`zig build test --fuzz`) is broken on Zig 0.15.1.** The build
+  system's fuzzer driver crashes inside `std/Build/Fuzz.zig` (a `pcs[]` indexing
+  bug) before any harness runs, so coverage-guided fuzzing is unavailable on
+  this toolchain. The harnesses are written to run either way; re-enable deep
+  fuzzing once the toolchain is fixed.
+- **Presence gate.** `guardian.toml [fuzz_presence] modules = [...]` lists the
+  fuzzed files; Guardian fails the build if any listed module loses its
+  `std.testing.fuzz` call, so the coverage can't silently lapse.
+
 ## Worktrees
 
 This repo routinely has several git worktrees in flight under `.claude/worktrees/` (one per feature branch). The directory is `.gitignore`d. A few rules keep them from colliding:
