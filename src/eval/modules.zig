@@ -131,11 +131,15 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
             const file_content = infra_fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch continue;
 
             // A parse failure here means the library file EXISTS but is
-            // malformed — record a diagnostic naming the file so `evalImport`'s
-            // fallback doesn't misreport it as "no lib/... file" to the very
-            // user who needs to fix the syntax error.
-            const nodes = parser_mod.parse(self.allocator, file_content) catch |err| {
-                self.setErrorFmt(.{ .line = 1, .col = 1, .offset = 0 }, "syntax error in '{s}': {s}", .{ path, @errorName(err) });
+            // malformed — record a diagnostic naming the file AND the failing
+            // location within it (carried out of the parser via `parseDiag`),
+            // so `evalImport`'s fallback doesn't misreport it as "no lib/... file"
+            // and the user is pointed at the exact line/col to fix. The span is
+            // into the imported file's buffer, so `diag_format` blanks the
+            // (design-file) source line, but the message is self-describing.
+            var pdiag: parser_mod.ParseDiagnostic = .{};
+            const nodes = parser_mod.parseDiag(self.allocator, file_content, &pdiag) catch {
+                self.setErrorFmt(pdiag.span, "syntax error in '{s}' at {d}:{d}: {s}", .{ path, pdiag.span.line, pdiag.span.col, pdiag.message });
                 return EvalError.ImportError;
             };
 
@@ -729,6 +733,33 @@ test "callModule missing required param with defaults present" {
     try testing.expectError(EvalError.ArityError, r);
     const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
     try testing.expect(std.mem.indexOf(u8, diag.message, "module 'm' missing argument(s): a") != null);
+}
+
+// spec: eval/modules - A syntax error in an imported library file is diagnosed with the file path and location
+test "resolveImport reports imported file syntax error with path and location" {
+    // page_allocator: resolveImport dups the in-progress key + diagnostic
+    // message into self.allocator and intentionally never frees them.
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("lib/modules");
+    // Malformed module: a stray '@' (unexpected character) at line 2, col 3.
+    try tmp.dir.writeFile(.{ .sub_path = "lib/modules/broken.sexp", .data = "(defmodule broken ()\n  @bad)\n" });
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+
+    var eval = Evaluator.init(alloc, root);
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    try testing.expectError(EvalError.ImportError, resolveImport(&eval, "broken", &env));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    // The message names the imported file and its accurate in-file location.
+    try testing.expect(std.mem.indexOf(u8, diag.message, "lib/modules/broken.sexp") != null);
+    try testing.expect(std.mem.indexOf(u8, diag.message, "2:3") != null);
+    // And the recorded span points into the imported file, not a bare 1:1.
+    try testing.expectEqual(@as(u32, 2), diag.span.line);
+    try testing.expectEqual(@as(u32, 3), diag.span.col);
 }
 
 // spec: eval/modules - Surplus positional arguments are diagnosed with expected and actual counts

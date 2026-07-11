@@ -315,7 +315,11 @@ pub const Evaluator = struct {
     /// autoloader. Used by the `/modules` viewer to instantiate a
     /// zero-parameter module inside a synthetic one-line `design-block`.
     pub fn evalSource(self: *Evaluator, source: []const u8) EvalError!Value {
-        const nodes = parser_mod.parse(self.allocator, source) catch return EvalError.ImportError;
+        var diag: parser_mod.ParseDiagnostic = .{};
+        const nodes = parser_mod.parseDiag(self.allocator, source, &diag) catch {
+            self.setError(diag.span, diag.message);
+            return EvalError.ImportError;
+        };
         var env = Env.init(self.allocator, null);
         defer env.deinit();
         modules.loadPassivesPrelude(self, &env);

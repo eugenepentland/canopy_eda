@@ -57,6 +57,11 @@ pub const Tokenizer = struct {
     pos: u32,
     line: u32,
     col: u32,
+    /// Span of the byte that triggered the most recent `next` error
+    /// (`UnexpectedCharacter` / `UnterminatedString`). Meaningful only right
+    /// after such an error — the parser reads it to build a located diagnostic
+    /// instead of reporting the failure at a bare 1:1.
+    error_span: Span = Span.zero,
 
     pub fn init(source: []const u8) Tokenizer {
         return .{
@@ -64,6 +69,7 @@ pub const Tokenizer = struct {
             .pos = 0,
             .line = 1,
             .col = 1,
+            .error_span = Span.zero,
         };
     }
 
@@ -145,6 +151,7 @@ pub const Tokenizer = struct {
         // Operators that are atoms: +, -, *, /, %, >, <, =, !
         if (isOperatorChar(c)) return self.readOperator(s);
 
+        self.error_span = s;
         return error.UnexpectedCharacter;
     }
 
@@ -170,6 +177,9 @@ pub const Tokenizer = struct {
             }
             self.advance();
         }
+        // Point at the opening quote — the most actionable location for a
+        // string that runs off the end of the source.
+        self.error_span = s;
         return error.UnterminatedString;
     }
 
@@ -524,6 +534,28 @@ test "tokenize comparison operators" {
     try std.testing.expectEqualStrings("==", t3.text);
     const t4 = try t.next();
     try std.testing.expectEqualStrings("!=", t4.text);
+}
+
+// spec: sexpr/tokenizer - Records the source span of an unexpected character for diagnostics
+test "records unexpected-character error span" {
+    var t = Tokenizer.init("ab ?");
+    _ = try t.next(); // ab
+    try std.testing.expectError(error.UnexpectedCharacter, t.next());
+    // `?` is at line 1, col 4 (a=1, b=2, space=3, ?=4).
+    try std.testing.expectEqual(@as(u32, 1), t.error_span.line);
+    try std.testing.expectEqual(@as(u32, 4), t.error_span.col);
+    try std.testing.expectEqual(@as(u32, 3), t.error_span.offset);
+}
+
+// spec: sexpr/tokenizer - Records the opening-quote span of an unterminated string
+test "records unterminated-string error span" {
+    var t = Tokenizer.init("(a \"oops");
+    _ = try t.next(); // (
+    _ = try t.next(); // a
+    try std.testing.expectError(error.UnterminatedString, t.next());
+    // Points at the opening quote (col 4), not the EOF where scanning stopped.
+    try std.testing.expectEqual(@as(u32, 1), t.error_span.line);
+    try std.testing.expectEqual(@as(u32, 4), t.error_span.col);
 }
 
 // spec: sexpr/tokenizer - Tracks line and column position for each token
