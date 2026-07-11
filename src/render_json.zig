@@ -1,3 +1,10 @@
+//! Scene-graph JSON renderer: `renderSceneGraph` turns a `*const DesignBlock`
+//! into the `/api/scene-graph/:name` JSON the live-push pipeline consumes. Runs
+//! the same flatten → classify → adjacency → net-index `RenderCtx` pipeline as
+//! `render_html.zig`, then additionally validates net consistency. Read-only
+//! over the block; output is allocated into the caller's allocator. The
+//! server-rendered HTML twin is `render_html.zig`.
+
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");

@@ -1,3 +1,10 @@
+//! Electrical-rule checks (ERC), the post-build validation pass: `runErc`
+//! borrows a fully-evaluated `*const DesignBlock` and returns a `[]Violation`
+//! list (duplicate ref-des, floating/unconnected pins, strap ties, unbound
+//! decoupling, voltage/power-budget/sequencing), each tagged error or warning.
+//! Runs per block, recursing sub-blocks; fail-open on library-reading checks
+//! (empty `project_dir` skips them). `netlisp check` exits non-zero on errors.
+
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");

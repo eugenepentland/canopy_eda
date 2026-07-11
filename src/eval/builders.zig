@@ -1,3 +1,10 @@
+//! Design-block sub-form builders, called by the evaluator while it
+//! materializes a `(design-block …)` body: `(port …)`, `(note …)`, `(group …)`,
+//! `(sub-block …)`, section `(port …)`/`(calc …)`, `(pins …)`/`(pin …)` forms,
+//! and the `(decouple …)` per-pin/series expansions. Methods on `*Evaluator`;
+//! failures propagate as `EvalError` (no panics) and unknown sub-forms warn
+//! rather than abort. Produces the DesignBlock's structural children.
+
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
