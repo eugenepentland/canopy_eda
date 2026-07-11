@@ -32,6 +32,18 @@ zig build run -- serve --project-dir projects/designs
 `zig build` runs the [Guardian](https://github.com/eugenepentland/guardian-zig)
 checks (formatting, file size, boundaries, …) alongside the test suite.
 
+### Production build mode
+
+A plain `zig build` is **Debug** (unpinned — dev/test/mutation keep it that way
+for fast iteration). The **deployed** server is pinned to **ReleaseSafe** at the
+deploy point (`systemd/netlisp.service`'s `ExecStartPre` rebuilds
+`zig build -Doptimize=ReleaseSafe` before serving). The server parses untrusted
+input, so ReleaseSafe turns any residual unguarded cast/overflow into a panic
+that `Restart=on-failure` recovers in ~2s, rather than the silent UB (a wrong
+board) a safety-off build would emit. Editing the unit requires
+`systemctl --user daemon-reload && systemctl --user restart netlisp.service` to
+take effect; the merge-time deploy rebuild should use the same `-Doptimize=ReleaseSafe`.
+
 To rebuild a single design and live-push it to a running server:
 
 ```bash
