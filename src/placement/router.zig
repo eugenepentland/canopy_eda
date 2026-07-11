@@ -21,7 +21,7 @@ const module_policy = @import("module_policy.zig");
 const pad_shape = @import("pad_shape.zig");
 const geometry = @import("geometry.zig");
 const export_kicad = @import("../export_kicad.zig");
-
+const numeric = @import("../numeric.zig");
 const Part = optimizer.Part;
 const FlatNet = export_kicad.FlatNet;
 
@@ -256,8 +256,8 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     const margin = 1.0;
     const ox = placement.minx - margin;
     const oy = placement.miny - margin;
-    const nx: usize = @intFromFloat(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
-    const ny: usize = @intFromFloat(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
+    const nx = numeric.toCount(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
+    const ny = numeric.toCount(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
     if (nx * ny == 0 or nx * ny > MAX_NODES) {
         return .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0, .grid_overflow = nx * ny > MAX_NODES };
     }
@@ -439,8 +439,8 @@ pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, para
     const margin = 1.0;
     const ox = placement.minx - margin;
     const oy = placement.miny - margin;
-    const nx: usize = @intFromFloat(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
-    const ny: usize = @intFromFloat(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
+    const nx = numeric.toCount(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
+    const ny = numeric.toCount(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
     if (nx * ny == 0 or nx * ny > MAX_NODES) return &.{};
     const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
 
@@ -530,8 +530,8 @@ pub const LoopRouter = struct {
         const margin = 1.0;
         const ox = minx - margin;
         const oy = miny - margin;
-        const nx: usize = @intFromFloat(@ceil((maxx - minx + 2 * margin) / g) + 1);
-        const ny: usize = @intFromFloat(@ceil((maxy - miny + 2 * margin) / g) + 1);
+        const nx: usize = numeric.toCount(@ceil((maxx - minx + 2 * margin) / g) + 1);
+        const ny: usize = numeric.toCount(@ceil((maxy - miny + 2 * margin) / g) + 1);
         if (nx * ny == 0 or nx * ny > MAX_NODES) return .{ .ctx = undefined, .ready = false };
         const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
 
@@ -606,7 +606,7 @@ const Grid = struct {
     fn nearest(self: Grid, x: f64, y: f64) [2]usize {
         const fx = std.math.clamp(@round((x - self.ox) / self.g), 0, @as(f64, @floatFromInt(self.nx - 1)));
         const fy = std.math.clamp(@round((y - self.oy) / self.g), 0, @as(f64, @floatFromInt(self.ny - 1)));
-        return .{ @intFromFloat(fx), @intFromFloat(fy) };
+        return .{ numeric.toCount(fx), numeric.toCount(fy) };
     }
     /// World coords of the nearest grid node — snapping a via onto the grid so
     /// the `copperHalo` exclusion (exact only for on-grid centres) holds.
@@ -886,7 +886,7 @@ fn segClearsTracks(ctx: *Ctx, tracks: []const Track, a: [2]f64, b: [2]f64, net: 
 fn segClearsPads(ctx: *Ctx, a: [2]f64, b: [2]f64, net: i32) bool {
     const len = std.math.hypot(b[0] - a[0], b[1] - a[1]);
     const step = ctx.grid.g * 0.1;
-    const steps: usize = @max(1, @as(usize, @intFromFloat(@ceil(len / step))));
+    const steps: usize = @max(1, numeric.toCount(@ceil(len / step)));
     const need = ctx.params.track_width / 2 + ctx.params.clearance + step / 2;
     var i: usize = 0;
     while (i <= steps) : (i += 1) {
@@ -910,7 +910,7 @@ fn trimStub(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, b:
     const len = std.math.hypot(b[0] - a[0], b[1] - a[1]);
     if (len < 1e-9) return a;
     const step = ctx.grid.g * 0.2;
-    const n: usize = @max(1, @as(usize, @intFromFloat(@ceil(len / step))));
+    const n: usize = @max(1, numeric.toCount(@ceil(len / step)));
     // Inflate the clearance by one sample step so a between-sample dip can't slip
     // a sub-clearance crossing past the sampling.
     const need = ctx.params.track_width / 2 + ctx.params.clearance + step;
@@ -1098,7 +1098,7 @@ fn findGroundVia(ctx: *Ctx, placed: []const Via, c: [2]f64, net: i32) ?[2]f64 {
 /// via needs none), so no segment-clearance constraint applies.
 fn findStitchVia(ctx: *Ctx, placed: []const Via, tracks: []const Track, c: [2]f64, net: i32, max_r: f64) ?[2]f64 {
     const grid = ctx.grid;
-    const max_ring: usize = @max(1, @as(usize, @intFromFloat(@floor(max_r / grid.g))));
+    const max_ring: usize = @max(1, numeric.toCount(@floor(max_r / grid.g)));
     var ring: usize = 1;
     while (ring <= max_ring) : (ring += 1) {
         const rad = @as(f64, @floatFromInt(ring)) * grid.g;
@@ -1198,7 +1198,7 @@ fn firstGroundNet(placement: optimizer.Placement) ?i32 {
 /// foreign copper away from it.
 fn stampDisc(ctx: *Ctx, x: f64, y: f64, net: i32, dist: f64, layer: u8, both: bool) void {
     const grid = ctx.grid;
-    const r_nodes: i64 = @intFromFloat(@ceil(dist / grid.g));
+    const r_nodes: i64 = numeric.checkedInt(i64, @ceil(dist / grid.g)) orelse 0;
     const c = grid.nearest(x, y);
     const ci: i64 = @intCast(c[0]);
     const cj: i64 = @intCast(c[1]);
@@ -1243,7 +1243,7 @@ fn stampStubOcc(ctx: *Ctx, a: [2]f64, b: [2]f64, net: i32, layer: u8) void {
     const grid = ctx.grid;
     const d = copperHalo(ctx);
     const len = std.math.hypot(b[0] - a[0], b[1] - a[1]);
-    const steps: usize = @max(1, @as(usize, @intFromFloat(@ceil(len / (grid.g * 0.5)))));
+    const steps: usize = @max(1, numeric.toCount(@ceil(len / (grid.g * 0.5))));
     var s: usize = 0;
     while (s <= steps) : (s += 1) {
         const t = @as(f64, @floatFromInt(s)) / @as(f64, @floatFromInt(steps));
@@ -1261,7 +1261,7 @@ fn viaAllowed(ctx: *Ctx, n: usize, net: i32) bool {
     const y = grid.worldY(n / grid.nx);
     if (!viaClearsPads(ctx, x, y, net)) return false;
     const dist = copperHalo(ctx);
-    const r_nodes: i64 = @intFromFloat(@ceil(dist / grid.g));
+    const r_nodes: i64 = numeric.checkedInt(i64, @ceil(dist / grid.g)) orelse 0;
     const ci: i64 = @intCast(n % grid.nx);
     const cj: i64 = @intCast(n / grid.nx);
     var dj: i64 = -r_nodes;
@@ -1357,7 +1357,7 @@ const PadGrid = struct {
     fn cellFor(w: f64, o: f64, cell: f64, n: usize) usize {
         const f = @floor((w - o) / cell);
         if (f < 0) return 0;
-        const iu: usize = @intFromFloat(f);
+        const iu: usize = numeric.checkedInt(usize, f) orelse return 0;
         return @min(iu, n - 1);
     }
 
@@ -1384,8 +1384,8 @@ const PadGrid = struct {
             maxx = @max(maxx, p.x1 + reach);
             maxy = @max(maxy, p.y1 + reach);
         }
-        const gnx: usize = @as(usize, @intFromFloat(@floor((maxx - minx) / cell))) + 1;
-        const gny: usize = @as(usize, @intFromFloat(@floor((maxy - miny) / cell))) + 1;
+        const gnx = (numeric.checkedInt(usize, @floor((maxx - minx) / cell)) orelse return null) + 1;
+        const gny = (numeric.checkedInt(usize, @floor((maxy - miny) / cell)) orelse return null) + 1;
         const total = std.math.mul(usize, gnx, gny) catch return null;
         if (total > (1 << 22)) return null; // too big — full scan is cheaper
         const lists = arena.alloc(std.ArrayListUnmanaged(u32), total) catch return null;

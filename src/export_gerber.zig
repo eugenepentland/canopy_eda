@@ -25,7 +25,7 @@ const pour = @import("placement/pour.zig");
 const export_kicad = @import("export_kicad.zig");
 const export_fab = @import("export_fab.zig");
 const font = @import("font5x7.zig");
-
+const numeric = @import("numeric.zig");
 // Solder-mask margin and copper-pour isolation are no longer hard-coded here —
 // they live in `optimizer.DesignRules` (`mask_margin` / `pour_clearance` /
 // `copper_edge`), resolved from the design's `(design-rules …)` form with the
@@ -933,7 +933,7 @@ fn regionPoly(g: *Gx, pts: []const [2]f64) Error!void {
 
 /// mm → integer 4.6-format units (1e-6 mm).
 fn mmToUm(mm: f64) i64 {
-    return @intFromFloat(@round(mm * 1e6));
+    return numeric.checkedInt(i64, @round(mm * 1e6)) orelse 0;
 }
 
 /// Integer 4.6 units → mm (aperture-definition printing).

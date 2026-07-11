@@ -11,6 +11,7 @@ const ast = @import("../sexpr/ast.zig");
 const parser = @import("../sexpr/parser.zig");
 const sync = @import("../serve/sync.zig");
 const fmt_const = @import("format.zig");
+const numeric = @import("../numeric.zig");
 
 const Node = ast.Node;
 
@@ -39,7 +40,7 @@ pub fn readBoard(arena: std.mem.Allocator, source: []const u8) ReadError![]const
         if (cl.len < 3) continue;
         const id_num = cl[1].asNumber() orelse continue;
         const name = cl[2].asString() orelse continue;
-        try net_table.put(@intFromFloat(id_num), name);
+        try net_table.put(numeric.checkedInt(i64, id_num) orelse continue, name);
     }
 
     // Pass 2: build a BoardFp per footprint.
@@ -171,7 +172,7 @@ fn readPad(
         // existing board isn't flagged "all pads disconnected" on the
         // first push. The writer always emits the canonical form.
         if (nl[1].asNumber()) |id_num| {
-            if (net_table.get(@intFromFloat(id_num))) |name| net_name = name;
+            if (net_table.get(numeric.checkedInt(i64, id_num) orelse continue)) |name| net_name = name;
         } else if (nl[1].asString()) |name| {
             net_name = name;
         }
@@ -286,6 +287,27 @@ test "readBoard reads a bare-integer, netless pad" {
     try std.testing.expectEqualStrings("1", fps[0].pads[0].number);
     try std.testing.expectEqualStrings("", fps[0].pads[0].net);
     try std.testing.expectEqualStrings("2", fps[0].pads[1].number);
+}
+
+// spec: kicad_pcb/reader - skips a pad net id that is non-finite or out of integer range
+test "readBoard skips a pad net id that overflows the integer range" {
+    const a = std.testing.allocator;
+    // A net id far outside i64 (a corrupt/hand-mangled board) must not reach a
+    // bare @intFromFloat (UB out of range); numeric.checkedInt drops the id so
+    // the net table and the pad lookup both skip it, leaving the pad netless.
+    const src =
+        \\(kicad_pcb
+        \\  (net 1e30 "GND")
+        \\  (footprint "R_0402"
+        \\    (uuid "r-1")
+        \\    (property "Reference" "R1")
+        \\    (pad 1 smd rect (at 0 0) (net 1e30 "GND"))))
+    ;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const fps = try readBoard(arena.allocator(), src);
+    try std.testing.expectEqual(@as(usize, 1), fps[0].pads.len);
+    try std.testing.expectEqualStrings("", fps[0].pads[0].net);
 }
 
 // spec: kicad_pcb/reader - parses (locked yes) as locked footprint

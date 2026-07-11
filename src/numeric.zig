@@ -21,6 +21,15 @@ pub fn checkedInt(comptime T: type, f: f64) ?T {
     return @intFromFloat(r);
 }
 
+/// Narrow `f` to a non-negative count/index, collapsing a non-finite or
+/// out-of-range value to 0. Sugar for `checkedInt(usize, f) orelse 0` at the
+/// many render/layout sites where a degenerate float should yield an empty
+/// span (draw/allocate nothing) rather than crash — the counterpart to the
+/// raster pxIndex clamp for values that index or size a buffer.
+pub fn toCount(f: f64) usize {
+    return checkedInt(usize, f) orelse 0;
+}
+
 test "checkedInt rejects NaN and infinities" {
     try std.testing.expect(checkedInt(i64, std.math.nan(f64)) == null);
     try std.testing.expect(checkedInt(i64, std.math.inf(f64)) == null);
@@ -33,4 +42,11 @@ test "checkedInt rejects out-of-range and rounds in-range" {
     try std.testing.expectEqual(@as(u32, 220000), checkedInt(u32, 220000.4).?);
     try std.testing.expectEqual(@as(i64, -3), checkedInt(i64, -2.6).?);
     try std.testing.expectEqual(@as(u32, 0), checkedInt(u32, 0.0).?);
+}
+
+test "toCount collapses non-finite and negative to zero, rounds valid counts" {
+    try std.testing.expectEqual(@as(usize, 0), toCount(std.math.nan(f64)));
+    try std.testing.expectEqual(@as(usize, 0), toCount(std.math.inf(f64)));
+    try std.testing.expectEqual(@as(usize, 0), toCount(-4.0));
+    try std.testing.expectEqual(@as(usize, 7), toCount(6.6));
 }

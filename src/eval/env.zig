@@ -567,9 +567,9 @@ pub fn parseNoteRef(node: ast.Node) ?NoteRef {
         const sub_head = sub[0].asAtom() orelse continue;
         if (std.mem.eql(u8, sub_head, "page")) {
             if (sub[1].asNumber()) |n| {
-                if (n >= 0 and n < @as(f64, @floatFromInt(std.math.maxInt(u32)))) {
-                    page = @intFromFloat(n);
-                }
+                // checkedInt rejects NaN/negative/out-of-range in float space —
+                // a bare @intFromFloat on those is UB in the safety-off build.
+                if (numeric.checkedInt(u32, n)) |p| page = p;
             }
         } else if (std.mem.eql(u8, sub_head, "quote")) {
             if (sub[1].asString()) |s| quote = s;

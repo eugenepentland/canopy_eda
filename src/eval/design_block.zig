@@ -1430,7 +1430,7 @@ fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResul
         } else if (std.mem.eql(u8, head, "channels")) {
             // (channels N) — this stub stands for N identical channels.
             if (sub[1].asNumber()) |nf| {
-                if (nf >= 1 and nf <= 255) channels = @intFromFloat(nf);
+                if (nf >= 1 and nf <= 255) channels = numeric.checkedInt(u8, nf) orelse channels;
             }
         } else if (std.mem.eql(u8, head, "signal")) {
             // (signal "NAME" class "NET") — class optional in the middle slot.
@@ -1701,7 +1701,7 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
         self.warnFmt(form_children[1].span, "(stackup …) layer count must be a whole number 1–32", .{});
         return .{};
     }
-    const layers: u8 = @intFromFloat(n_raw);
+    const layers: u8 = numeric.checkedInt(u8, n_raw) orelse return .{};
     var thickness: f64 = 0;
     var planes: std.ArrayListUnmanaged(env_mod.StackupPlane) = .empty;
     for (form_children[2..]) |child| {
@@ -1754,7 +1754,7 @@ fn parsePlaneEntry(self: *Evaluator, c: []const Node, layers: u8) ?env_mod.Stack
         self.warnFmt(c[2].span, "(plane …) net must be a name", .{});
         return null;
     };
-    return .{ .index = @intFromFloat(idx_raw), .net = net };
+    return .{ .index = numeric.checkedInt(u8, idx_raw) orelse return null, .net = net };
 }
 
 /// Parse one `(pour top|bottom "NET")` entry — sugar for a `(plane …)` on the
@@ -1814,7 +1814,7 @@ fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_m
             if (c.len >= 2) {
                 const n = c[1].asNumber() orelse 0;
                 if (n < 0 or n > 7) self.warnFmt(c[1].span, "(net-class …) (priority …) is 0-7; clamping {d}", .{n});
-                spec.priority = @intFromFloat(std.math.clamp(n, 0, 7));
+                spec.priority = numeric.checkedInt(u32, std.math.clamp(n, 0, 7)) orelse 0;
             }
         } else if (std.mem.eql(u8, head, "nets")) {
             for (c[1..]) |net_node| {

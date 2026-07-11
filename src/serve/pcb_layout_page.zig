@@ -38,8 +38,8 @@ const assets_css = @import("assets_css.zig");
 const pages_tmpl = @import("templates/pages.zig");
 const serve_root = @import("../serve.zig");
 const history = @import("history.zig");
+const numeric = @import("../numeric.zig");
 const Handler = serve_root.Handler;
-
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 // SVG framing.
@@ -2199,7 +2199,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     if (root.object.get("rev")) |rv| {
         const client_rev: ?i64 = switch (rv) {
             .integer => |i| i,
-            .float => |f| @intFromFloat(f),
+            .float => |f| numeric.checkedInt(i64, f),
             else => null,
         };
         if (client_rev) |cr| if (cr != disk_rev) {
@@ -2997,7 +2997,7 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
         if (it.object.get("hpwl")) |_| score = .{
             .hpwl = jsonNum(it.object.get("hpwl")),
             .loop = jsonNum(it.object.get("loop")),
-            .caps = @intFromFloat(@max(@floor(jsonNum(it.object.get("caps"))), 0)),
+            .caps = numeric.toCount(@max(@floor(jsonNum(it.object.get("caps"))), 0)),
             .objective = jsonNum(it.object.get("objective")), // 0 for legacy entries
         };
         const parts = parsePartPoses(alloc, it.object.get("parts")) orelse &[_]PartPose{};
@@ -3008,7 +3008,7 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
         list.append(alloc, .{
             .name = nm.string,
             .kind = kind,
-            .ts = @intFromFloat(jsonNum(it.object.get("ts"))),
+            .ts = numeric.checkedInt(i64, jsonNum(it.object.get("ts"))) orelse 0,
             .score = score,
             .parts = parts,
             .default = default_name.len > 0 and std.mem.eql(u8, nm.string, default_name),
@@ -3100,7 +3100,7 @@ fn layerIndexFromJson(v: ?std.json.Value) u8 {
     const n = jsonNum(v);
     if (!(n >= 1)) return 0;
     if (n >= 255) return 255;
-    return @intFromFloat(@floor(n));
+    return numeric.checkedInt(u8, @floor(n)) orelse 0;
 }
 
 /// Parse an `{"x","y","w","h"[,"pts":[[x,y],…]]}` outline object; null when
@@ -3431,7 +3431,7 @@ fn readLayoutRev(alloc: std.mem.Allocator, project_dir: []const u8, name: []cons
     const rv = root.object.get("rev") orelse return 0;
     return switch (rv) {
         .integer => |i| i,
-        .float => |f| @intFromFloat(f),
+        .float => |f| numeric.checkedInt(i64, f) orelse 0,
         else => 0,
     };
 }
@@ -4709,7 +4709,7 @@ fn hslHex(buf: *[7]u8, h: f64, s: f64, l: f64) []const u8 {
 }
 
 fn chan(v: f64) u8 {
-    return @intFromFloat(@round(std.math.clamp(v, 0, 1) * 255));
+    return numeric.checkedInt(u8, @round(std.math.clamp(v, 0, 1) * 255)) orelse 0;
 }
 
 /// True for a no-connect net name (mirrors `optimizer.isNoConnect`, private).

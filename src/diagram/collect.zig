@@ -15,7 +15,7 @@ const types = @import("types.zig");
 const classify = @import("classify.zig");
 const membership = @import("membership.zig");
 const layout_status = @import("../layout_status.zig");
-
+const numeric = @import("../numeric.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
 const SubBlock = env_mod.SubBlock;
@@ -169,7 +169,7 @@ fn assignRails(
         const clean = cleanNetName(net.name);
         if (classify.netClass(clean, port_map) != types.CLASS_POWER) continue;
         const v = railVoltageAny(nodes, clean) orelse voltageFromName(clean) orelse continue;
-        const vb: i64 = @intFromFloat(@round(v * 100));
+        const vb: i64 = numeric.checkedInt(i64, @round(v * 100)) orelse 0;
         for (net.pins) |p| {
             const nid = mem.resolve(p.ref_des) orelse continue;
             const gop = try counts.getOrPut(scratch, .{ .node = nid, .vb = vb });

@@ -29,6 +29,7 @@ const eval_modules = @import("eval/modules.zig");
 const optimizer = @import("placement/optimizer.zig");
 const clock = @import("infra/clock.zig");
 const infra_fs = @import("infra/fs.zig");
+const numeric = @import("numeric.zig");
 
 /// Sentinel printed after the last result so a harness driver knows the run
 /// finished (vs. the process dying mid-list).
@@ -56,7 +57,7 @@ const BenchResult = struct {
 /// equal at grid resolution map to the same cell regardless of sub-ULP float
 /// drift, so the checksum is robust to floating-point reassociation.
 fn quantize(v: f64) i64 {
-    return @intFromFloat(@round(v / optimizer.GRID_MM));
+    return numeric.checkedInt(i64, @round(v / optimizer.GRID_MM)) orelse 0;
 }
 
 /// Order-sensitive hash over every part's (ref_des, grid x, grid y, rotation).
@@ -68,7 +69,7 @@ fn poseChecksum(placement: optimizer.Placement) u64 {
         h.update(p.ref_des);
         const qx = quantize(p.x);
         const qy = quantize(p.y);
-        const qr: i64 = @intFromFloat(@round(p.rot));
+        const qr: i64 = numeric.checkedInt(i64, @round(p.rot)) orelse 0;
         h.update(std.mem.asBytes(&qx));
         h.update(std.mem.asBytes(&qy));
         h.update(std.mem.asBytes(&qr));

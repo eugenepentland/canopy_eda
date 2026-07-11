@@ -3,6 +3,15 @@ const zt = @import("zt");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+    // Default mode is Debug (unpinned): dev/test/mutation builds stay Debug for
+    // fast iteration, so the optimize mode is deliberately NOT pinned globally
+    // here. The PRODUCTION build is pinned separately at the deploy point —
+    // `zig build -Doptimize=ReleaseSafe` in systemd/netlisp.service's
+    // ExecStartPre (and the deploy hook). Rationale: the server parses untrusted
+    // input, so a safety-off build (ReleaseFast/Small) turns any remaining
+    // unguarded cast/overflow into silent UB — a wrong board — whereas
+    // ReleaseSafe makes it a panic that systemd `Restart=on-failure` recovers in
+    // ~2s. See the cast-safety campaign (numeric.checkedInt / int_from_float).
     const optimize = b.standardOptimizeOption(.{});
 
     const httpz = b.dependency("httpz", .{

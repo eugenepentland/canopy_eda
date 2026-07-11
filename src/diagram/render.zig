@@ -10,7 +10,7 @@ const layout = @import("layout.zig");
 const lod = @import("lod.zig");
 const rb = @import("../render_block_types.zig");
 const env_mod = @import("../eval/env.zig");
-
+const numeric = @import("../numeric.zig");
 const Allocator = std.mem.Allocator;
 const Graph = types.Graph;
 const ClassId = types.ClassId;
@@ -690,11 +690,11 @@ fn writeNode(arena: Allocator, w: *Writer, gid: u32, node: types.Node, x: f64, y
             );
         }
     }
-    const label_max: usize = @max(min_label_chars, @as(usize, @intFromFloat((layout.node_w - pad_x * 2) / label_char_w)));
+    const label_max: usize = @max(min_label_chars, numeric.toCount((layout.node_w - pad_x * 2) / label_char_w));
     try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-label\">", .{ x + pad_x, y + label_y_off });
     try writeEscaped(w, try truncate(arena, node.label, label_max));
     try w.writeAll("</text>");
-    const sub_max: usize = @max(min_sub_chars, @as(usize, @intFromFloat((layout.node_w - pad_x * 2) / sub_char_w)));
+    const sub_max: usize = @max(min_sub_chars, numeric.toCount((layout.node_w - pad_x * 2) / sub_char_w));
     const tx = x + pad_x;
     const ty = y + sub_y_off;
     var sub_rows: usize = 0;
@@ -1064,12 +1064,12 @@ fn writePowerCard(
         "<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"2\" fill=\"{s}\"/>",
         .{ b.x, b.y, pbox_accent_w, b.h, color },
     );
-    const max_chars: usize = @max(min_label_chars, @as(usize, @intFromFloat((b.w - pbox_pad * 2) / label_char_w)));
+    const max_chars: usize = @max(min_label_chars, numeric.toCount((b.w - pbox_pad * 2) / label_char_w));
     try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-label\">", .{ b.x + pbox_pad, b.y + pbox_title_dy });
     try writeEscaped(w, try truncate(arena, node.label, max_chars));
     try w.writeAll("</text>");
     if (node.subtitle.len > 0) {
-        const sub_max: usize = @max(min_sub_chars, @as(usize, @intFromFloat((b.w - pbox_pad * 2) / sub_char_w)));
+        const sub_max: usize = @max(min_sub_chars, numeric.toCount((b.w - pbox_pad * 2) / sub_char_w));
         try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-sub\">", .{ b.x + pbox_pad, b.y + pbox_sub_dy });
         try writeEscaped(w, try truncate(arena, node.subtitle, sub_max));
         try w.writeAll("</text>");
@@ -1101,7 +1101,7 @@ fn writePowerBucket(arena: Allocator, w: *Writer, graph: *const Graph, b: layout
     const cols = layout.pw_pill_cols;
     const fcols: f64 = @floatFromInt(cols);
     const pill_w = (b.w - 2 * layout.pw_bucket_pad - (fcols - 1) * layout.pw_pill_gap) / fcols;
-    const pill_chars: usize = @max(min_sub_chars, @as(usize, @intFromFloat((pill_w - pbox_pad) / sub_char_w)));
+    const pill_chars: usize = @max(min_sub_chars, numeric.toCount((pill_w - pbox_pad) / sub_char_w));
     for (b.members, 0..) |gid, k| {
         const col: f64 = @floatFromInt(k % cols);
         const row: f64 = @floatFromInt(k / cols);

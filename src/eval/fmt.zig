@@ -1,7 +1,7 @@
 const std = @import("std");
 const env_mod = @import("env.zig");
+const numeric = @import("../numeric.zig");
 const Value = env_mod.Value;
-
 pub const FmtError = error{
     OutOfMemory,
     FormatError,
@@ -148,7 +148,7 @@ fn formatAmperage(writer: anytype, v: f64) !void {
 fn formatNumber(writer: anytype, v: f64) !void {
     // If it's a whole number, print without decimals
     if (v == @floor(v) and @abs(v) < WHOLE_NUMBER_LIMIT) {
-        const i: i64 = @intFromFloat(v);
+        const i: i64 = numeric.checkedInt(i64, v) orelse 0;
         writer.print("{d}", .{i}) catch return error.OutOfMemory;
     } else {
         // Print with reasonable precision, trim trailing zeros

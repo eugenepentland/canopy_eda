@@ -12,7 +12,7 @@ const infra_fs = @import("../infra/fs.zig");
 const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
-
+const numeric = @import("../numeric.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const export_kicad = @import("../export_kicad.zig");
 const netlist_mod = @import("../export_kicad_netlist.zig");
@@ -690,7 +690,7 @@ const NM_PER_MM: f64 = 1_000_000.0;
 /// signed i64 because pad positions are negative on the left half of a
 /// footprint.
 fn mmToNm(mm: f64) i64 {
-    return @intFromFloat(mm * NM_PER_MM);
+    return numeric.checkedInt(i64, mm * NM_PER_MM) orelse 0;
 }
 
 /// Pad numbers in EDA `.sexp` come in three flavors:
@@ -2855,7 +2855,7 @@ fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
 /// Number of part columns for a roughly-square box holding `n` parts.
 fn boxCols(n: usize) usize {
     if (n <= 1) return 1;
-    const c: usize = @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(n)))));
+    const c: usize = numeric.toCount(@ceil(@sqrt(@as(f64, @floatFromInt(n)))));
     return if (c < 1) 1 else c;
 }
 

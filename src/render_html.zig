@@ -33,7 +33,7 @@ const pages_tmpl = @import("serve/templates/pages.zig");
 const layout_status = @import("layout_status.zig");
 const isHub = draw.isHub;
 const pinOrder = draw.pinOrder;
-
+const numeric = @import("numeric.zig");
 const MUTED_EM_DASH = review_html.mutedDash;
 
 // Shared table-row HTML fragments — reused across the port tables and the
@@ -975,7 +975,7 @@ fn loadPinoutNames(allocator: Allocator, path: []const u8) ?std.StringHashMapUnm
 /// Pin identifier as a string: bare number -> "5", atom/string -> itself.
 fn pinIdStr(allocator: Allocator, node: ast.Node) ?[]const u8 {
     if (node.asNumber()) |n| {
-        const i: i64 = @intFromFloat(n);
+        const i: i64 = numeric.checkedInt(i64, n) orelse 0;
         return std.fmt.allocPrint(allocator, "{d}", .{i}) catch null;
     }
     return node.asAtom() orelse node.asString();

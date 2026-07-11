@@ -21,7 +21,7 @@ const branch_mod = @import("render_svg/branch.zig");
 const membership = @import("diagram/membership.zig");
 const rb_types = @import("render_block_types.zig");
 const pin_roles = @import("placement/pin_roles.zig");
-
+const numeric = @import("numeric.zig");
 const hub_width = draw.hub_width;
 const hub_x = draw.hub_x;
 const pin_stub = draw.pin_stub;
@@ -188,7 +188,7 @@ fn loadPinoutNames(allocator: Allocator, path: []const u8) ?std.StringHashMapUnm
         const cl = child.asList() orelse continue;
         if (cl.len < 3 or !std.mem.eql(u8, cl[0].asAtom() orelse "", "pin")) continue;
         const id: []const u8 = if (cl[1].asNumber()) |n|
-            (std.fmt.allocPrint(allocator, "{d}", .{@as(i64, @intFromFloat(n))}) catch continue)
+            (std.fmt.allocPrint(allocator, "{d}", .{numeric.checkedInt(i64, n) orelse continue}) catch continue)
         else
             (cl[1].asAtom() orelse cl[1].asString() orelse continue);
         const name = cl[2].asString() orelse (cl[2].asAtom() orelse continue);

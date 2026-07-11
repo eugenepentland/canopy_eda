@@ -55,6 +55,7 @@ Public functions: readBoard
 - reads every footprint in a real .kicad_pcb fixture
 - reads a bare-integer pad number so the pad still enters the net diff
 - parses the (model …) offset/rotate so the diff can detect 3D-model drift
+- skips a pad net id that is non-finite or out of integer range
 
 ## kicad_pcb/writer
 
@@ -223,6 +224,7 @@ Public functions: compute, planeConnect
 - the fill respects a non-rectangular board outline
 - an isolated same-net pad reports no pour component
 - carryingLayers resolves declared planes and the implicit ground model
+- gridCount collapses a non-finite extent to zero cells instead of an unchecked narrowing
 
 ## placement/module_policy
 
