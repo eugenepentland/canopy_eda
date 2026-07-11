@@ -118,7 +118,7 @@ fn writeBuildErrorJson(
 ) HandlerError!void {
     const d = try diag_format.load(ctx.allocator, board_path, err_name, last_error);
     const text = try diag_format.formatText(ctx.allocator, d);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try w.writeAll("{\"ok\":false,\"error\":");
     try json_writer.writeString(w, text);
@@ -196,7 +196,7 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
         return;
     };
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
 
     try w.writeAll("{\"component\":");
@@ -469,7 +469,7 @@ pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(e) });
     };
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try bom_html.writeBomCsv(ctx.allocator, w, block);
 
@@ -552,7 +552,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
         return;
     };
 
-    var csv_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var csv_buf: std.ArrayList(u8) = .empty;
     bom_html.writeBomCsv(ctx.allocator, csv_buf.writer(ctx.allocator), block) catch {
         res.status = HTTP_INTERNAL_ERROR;
         res.body = "BOM CSV error";
@@ -562,7 +562,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     // Collect every source `.sexp` the evaluator read, each under its path
     // relative to the project dir so the bundle reads as a buildable project
     // tree (src/<design>.sexp, lib/modules/*.sexp, lib/components/*.sexp).
-    var sources: std.ArrayListUnmanaged(fp_mod.ZipEntry) = .empty;
+    var sources: std.ArrayList(fp_mod.ZipEntry) = .empty;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
 
     // The design's own top-level source, added explicitly rather than via
@@ -597,7 +597,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     const md_name = try std.fmt.allocPrint(ctx.allocator, "{s}-review.md", .{name});
     const csv_name = try std.fmt.allocPrint(ctx.allocator, "{s}-bom.csv", .{name});
 
-    var entries: std.ArrayListUnmanaged(fp_mod.ZipEntry) = .empty;
+    var entries: std.ArrayList(fp_mod.ZipEntry) = .empty;
     if (readme.len > 0) try entries.append(ctx.allocator, .{ .name = "README.md", .data = readme });
     try entries.append(ctx.allocator, .{ .name = md_name, .data = md });
     try entries.append(ctx.allocator, .{ .name = csv_name, .data = csv_buf.items });
@@ -695,7 +695,7 @@ pub fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handle
 
     const summaries = mcp_tools.listDesignSummaries(ctx.allocator, ctx.project_dir) catch &[_]mcp_tools.DesignSummary{};
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try w.writeAll("[");
     for (summaries, 0..) |s, i| {
@@ -743,7 +743,7 @@ pub fn freePinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         return;
     };
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     const w = buf.writer(ctx.allocator);
     const ok = mcp_tools.listFreePins(ctx.allocator, ctx.project_dir, name, ref_des, null, w) catch {
@@ -799,7 +799,7 @@ pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
     var sym_cache = try bom_html.buildSymbolPinCache(ctx.allocator, ctx.project_dir);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     const w = buf.writer(ctx.allocator);
     try w.writeAll("{\"components\":{");

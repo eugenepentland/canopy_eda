@@ -59,7 +59,7 @@ pub fn sanitizeFilename(allocator: std.mem.Allocator, raw: []const u8) SanitizeE
     const stem = if (had_pdf) base[0 .. base.len - 4] else base;
     const cleaned = stripDuplicateMarker(stem);
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     for (cleaned) |c| {
         const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_' or c == '-' or c == '.';
         try out.append(allocator, if (ok) c else '_');
@@ -149,7 +149,7 @@ pub fn uploadDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     };
     defer ctx.allocator.free(stored.name);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try w.writeAll("{\"ok\":true,\"name\":\"");
     try w.writeAll(stored.name);
@@ -166,7 +166,7 @@ pub fn listDatasheetsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     const dir_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/datasheets", .{ctx.project_dir});
     defer ctx.allocator.free(dir_path);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try w.writeAll("{\"files\":[");
 

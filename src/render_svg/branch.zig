@@ -64,7 +64,7 @@ pub fn drawBranchTreeLeft(self: *RenderCtx, w: anytype, junction_x: f64, center_
         try drawNetWire(w, bx, start_y, bx, end_y, junction_net);
     }
 
-    var bodies: std.ArrayListUnmanaged(BranchBody) = .empty;
+    var bodies: std.ArrayList(BranchBody) = .empty;
 
     for (branches, 0..) |branch, idx| {
         const by = start_y + @as(f64, @floatFromInt(idx)) * branch_spacing;
@@ -91,7 +91,7 @@ pub fn drawBranchTreeRight(self: *RenderCtx, w: anytype, junction_x: f64, center
         try drawNetWire(w, bx, start_y, bx, end_y, junction_net);
     }
 
-    var bodies: std.ArrayListUnmanaged(BranchBody) = .empty;
+    var bodies: std.ArrayList(BranchBody) = .empty;
 
     for (branches, 0..) |branch, idx| {
         const by = start_y + @as(f64, @floatFromInt(idx)) * branch_spacing;

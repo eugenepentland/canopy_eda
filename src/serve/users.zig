@@ -49,7 +49,7 @@ pub const User = struct {
 };
 
 var mu = std.Thread.Mutex{};
-var users_list: std.ArrayListUnmanaged(User) = .empty;
+var users_list: std.ArrayList(User) = .empty;
 var loaded_auth_dir: ?[]const u8 = null;
 
 // Everything stored in the module-global `users_list` must outlive any single
@@ -93,7 +93,7 @@ fn saveUsers(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     ensureAuthDir(auth_dir);
     const path = usersPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
     w.writeAll("[") catch return;

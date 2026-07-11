@@ -64,9 +64,9 @@ const RowWithMtime = struct {
 /// a flat slice of `LibraryRow`s sorted newest-first by mtime, ready to
 /// feed the `library.zt` template. Strings are allocator-owned.
 fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerError![]LibraryRow {
-    var buf: std.ArrayListUnmanaged(RowWithMtime) = .empty;
-    var referenced_pinouts = std.StringHashMap(void).init(allocator);
-    var referenced_footprints = std.StringHashMap(void).init(allocator);
+    var buf: std.ArrayList(RowWithMtime) = .empty;
+    var referenced_pinouts = std.StringHashMapUnmanaged(void).empty;
+    var referenced_footprints = std.StringHashMapUnmanaged(void).empty;
     const model_cfg = export_kicad.loadModelConfig(allocator, project_dir);
 
     // Components / families.
@@ -90,8 +90,8 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
             const datasheets = try extractDatasheets(allocator, project_dir, content);
             const is_family = std.mem.indexOf(u8, content, "(component-family ") != null;
 
-            if (footprint) |fp| try referenced_footprints.put(fp, {});
-            if (pinout) |po| try referenced_pinouts.put(po, {});
+            if (footprint) |fp| try referenced_footprints.put(allocator, fp, {});
+            if (pinout) |po| try referenced_pinouts.put(allocator, po, {});
 
             const has_model = if (footprint) |fp| blk: {
                 if (model_cfg.get(fp)) |c| {
@@ -184,7 +184,7 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
 
     std.sort.heap(RowWithMtime, buf.items, {}, RowWithMtime.newerFirst);
 
-    var rows: std.ArrayListUnmanaged(LibraryRow) = .empty;
+    var rows: std.ArrayList(LibraryRow) = .empty;
     for (buf.items) |wm| try rows.append(allocator, wm.row);
     return rows.toOwnedSlice(allocator);
 }
@@ -199,7 +199,7 @@ fn buildSearchText(
     mpn: ?[]const u8,
     datasheets: []const LibraryRow.Datasheet,
 ) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll(base);
     if (description) |d| try w.print(" {s}", .{d});
@@ -251,9 +251,9 @@ pub fn cseFetchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     };
     const args = parsed.value;
 
-    var fp_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var fp_buf: std.ArrayList(u8) = .empty;
     _ = mcp_tools.call(aa, ctx.project_dir, "download_footprint", args, &fp_buf);
-    var ds_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var ds_buf: std.ArrayList(u8) = .empty;
     _ = mcp_tools.call(aa, ctx.project_dir, "download_datasheet", args, &ds_buf);
 
     // download_footprint creates the component and download_datasheet saves the
@@ -261,7 +261,7 @@ pub fn cseFetchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     // component's .sexp, the same link the drag-to-card flow performs.
     const linked = linkCseDatasheet(aa, ctx.project_dir, fp_buf.items, ds_buf.items);
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const w = out.writer(aa);
     try w.writeAll("{\"footprint\":");
     try w.writeAll(if (fp_buf.items.len > 0 and fp_buf.items[0] == '{') fp_buf.items else "null");
@@ -449,7 +449,7 @@ fn objStr(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
 /// Scan `content` for `(requirement "...")` forms and return a slice of the
 /// quoted text strings (slices into `content` — no allocation per string).
 fn extractRequirements(allocator: std.mem.Allocator, content: []const u8) ![]const []const u8 {
-    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var list: std.ArrayList([]const u8) = .empty;
     const needle = "(requirement ";
     var pos: usize = 0;
     while (std.mem.indexOfPos(u8, content, pos, needle)) |idx| {
@@ -472,7 +472,7 @@ fn extractDatasheets(
     project_dir: []const u8,
     content: []const u8,
 ) ![]const LibraryRow.Datasheet {
-    var list: std.ArrayListUnmanaged(LibraryRow.Datasheet) = .empty;
+    var list: std.ArrayList(LibraryRow.Datasheet) = .empty;
     const needle = "(datasheet ";
     var pos: usize = 0;
     while (std.mem.indexOfPos(u8, content, pos, needle)) |idx| {

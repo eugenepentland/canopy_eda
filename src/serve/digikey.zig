@@ -156,12 +156,12 @@ pub fn resolveMpn(
 /// query yields a single empty term (the server then matches nothing). Caller
 /// owns the slice and every joined term.
 fn keywordVariants(allocator: std.mem.Allocator, query: []const u8) std.mem.Allocator.Error![]const []const u8 {
-    var toks: std.ArrayListUnmanaged([]const u8) = .empty;
+    var toks: std.ArrayList([]const u8) = .empty;
     defer toks.deinit(allocator); // token slices point into `query`; only the list buffer is owned
     var it = std.mem.tokenizeAny(u8, query, " \t\r\n");
     while (it.next()) |t| try toks.append(allocator, t);
 
-    var out: std.ArrayListUnmanaged([]const u8) = .empty;
+    var out: std.ArrayList([]const u8) = .empty;
     if (toks.items.len == 0) {
         try out.append(allocator, try allocator.dupe(u8, query));
         return out.toOwnedSlice(allocator);
@@ -220,7 +220,7 @@ fn keywordSearch(
     const auth = std.fmt.allocPrint(allocator, "Authorization: Bearer {s}", .{token}) catch return null;
     const client = std.fmt.allocPrint(allocator, "X-DIGIKEY-Client-Id: {s}", .{client_id}) catch return null;
 
-    var body: std.ArrayListUnmanaged(u8) = .empty;
+    var body: std.ArrayList(u8) = .empty;
     const bw = body.writer(allocator);
     bw.writeAll("{\"Keywords\":") catch return null;
     json_writer.writeString(bw, query) catch return null;
@@ -255,7 +255,7 @@ fn collectProducts(allocator: std.mem.Allocator, root: std.json.Value, limit: us
 /// lifecycle status, and the per-packaging price ladders all come from the same
 /// keyword-search response — DigiKey returns them inline, so no second call.
 fn mapProducts(allocator: std.mem.Allocator, items: []std.json.Value, limit: usize) std.mem.Allocator.Error![]Product {
-    var list: std.ArrayListUnmanaged(Product) = .empty;
+    var list: std.ArrayList(Product) = .empty;
     for (items) |item| {
         if (list.items.len >= limit) break;
         const mpn = strField(item, "ManufacturerProductNumber") orelse continue;
@@ -284,7 +284,7 @@ fn mapVariations(allocator: std.mem.Allocator, product: std.json.Value) std.mem.
     if (product != .object) return &.{};
     const pv = product.object.get("ProductVariations") orelse return &.{};
     if (pv != .array) return &.{};
-    var list: std.ArrayListUnmanaged(Variation) = .empty;
+    var list: std.ArrayList(Variation) = .empty;
     for (pv.array.items) |v| {
         try list.append(allocator, .{
             .digikey_part_number = try dupeOpt(allocator, nonEmpty(strField(v, "DigiKeyProductNumber"))),
@@ -303,7 +303,7 @@ fn mapPriceBreaks(allocator: std.mem.Allocator, variation: std.json.Value) std.m
     if (variation != .object) return &.{};
     const sp = variation.object.get("StandardPricing") orelse return &.{};
     if (sp != .array) return &.{};
-    var list: std.ArrayListUnmanaged(PriceBreak) = .empty;
+    var list: std.ArrayList(PriceBreak) = .empty;
     for (sp.array.items) |b| {
         try list.append(allocator, .{
             .break_quantity = u64Field(b, "BreakQuantity"),
@@ -381,7 +381,7 @@ fn dupeOpt(allocator: std.mem.Allocator, s: ?[]const u8) std.mem.Allocator.Error
 fn curl(allocator: std.mem.Allocator, extra: []const []const u8, timeout_secs: []const u8, max_bytes: usize) ?[]u8 {
     rate_limiter.digikey.acquire();
     defer rate_limiter.digikey.release();
-    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+    var argv: std.ArrayList([]const u8) = .empty;
     argv.appendSlice(allocator, &.{ "curl", "-sS", "--max-time", timeout_secs }) catch return null;
     argv.appendSlice(allocator, extra) catch return null;
 
@@ -461,7 +461,7 @@ fn normalizeDatasheetUrl(allocator: std.mem.Allocator, url: []const u8) std.mem.
 
 /// Percent-decode `%XX` escapes; non-escapes pass through verbatim.
 fn percentDecode(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < s.len) {
         const hi = if (s[i] == '%' and i + 2 < s.len) hexVal(s[i + 1]) else null;

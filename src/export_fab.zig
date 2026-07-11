@@ -123,7 +123,7 @@ pub fn excellonDrill(
     frame: Frame,
 ) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
     const plated = class == .plated;
-    var holes: std.ArrayListUnmanaged(Hole) = .empty;
+    var holes: std.ArrayList(Hole) = .empty;
     for (parts) |p| {
         for (p.pads) |pad| {
             if (pad.drill <= 0) continue;
@@ -152,7 +152,7 @@ pub fn excellonDrill(
     }
 
     // Distinct diameters (0.01 mm buckets), ascending — one Excellon tool each.
-    var dias: std.ArrayListUnmanaged(f64) = .empty;
+    var dias: std.ArrayList(f64) = .empty;
     for (holes.items) |h| {
         var known = false;
         for (dias.items) |d| {

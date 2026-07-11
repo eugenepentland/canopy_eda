@@ -189,7 +189,7 @@ pub fn call(
     project_dir: []const u8,
     tool_name: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) CallResult {
     // The image tool returns binary content, so it's handled here (not in
     // `callInner`, which only ever produces text) and tagged with its MIME type
@@ -220,7 +220,7 @@ fn callInner(
     project_dir: []const u8,
     tool_name: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) !bool {
     if (try dispatchVfs(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchProject(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
@@ -245,7 +245,7 @@ fn dispatchProject(
     project_dir: []const u8,
     tool_name: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) !?bool {
     const w = out.writer(allocator);
     if (std.mem.eql(u8, tool_name, "list_designs")) return try toolListDesigns(allocator, project_dir, w);
@@ -265,7 +265,7 @@ fn dispatchInfo(
     project_dir: []const u8,
     tool_name: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) !?bool {
     const w = out.writer(allocator);
     if (std.mem.eql(u8, tool_name, "get_schematic")) return try toolGetSchematic(allocator, project_dir, args_val, out);
@@ -288,7 +288,7 @@ fn dispatchPcbLayout(
     project_dir: []const u8,
     tool_name: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) !?bool {
     if (std.mem.eql(u8, tool_name, "set_part_poses")) return try pcb_layout_page.mcpSetPartPoses(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "set_board_outline")) return try pcb_layout_page.mcpSetBoardOutline(allocator, project_dir, args_val, out);
@@ -307,7 +307,7 @@ fn dispatchParts(
     allocator: std.mem.Allocator,
     tool_name: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) !?bool {
     if (std.mem.eql(u8, tool_name, "search_components")) return try toolSearchComponents(allocator, args_val, out);
     if (std.mem.eql(u8, tool_name, "resolve_mpn")) return try toolResolveMpn(allocator, args_val, out);
@@ -323,7 +323,7 @@ fn dispatchLanguage(
     project_dir: []const u8,
     tool_name: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) !?bool {
     if (std.mem.eql(u8, tool_name, "get_language_reference")) return try toolGetLanguageReference(allocator, args_val, out);
     if (std.mem.eql(u8, tool_name, "preview_module")) return try toolPreviewModule(allocator, project_dir, args_val, out);
@@ -337,7 +337,7 @@ fn dispatchReview(
     project_dir: []const u8,
     tool_name: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) !?bool {
     if (std.mem.eql(u8, tool_name, "restore_version")) return try toolRestoreVersion(allocator, project_dir, args_val, out);
     return null;
@@ -350,7 +350,7 @@ fn dispatchNotes(
     project_dir: []const u8,
     tool_name: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) !?bool {
     if (std.mem.eql(u8, tool_name, "list_design_notes")) return try toolListDesignNotes(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "add_design_note")) return try toolAddDesignNote(allocator, project_dir, args_val, out);
@@ -368,7 +368,7 @@ fn dispatchRequirements(
     project_dir: []const u8,
     tool_name: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) !?bool {
     if (std.mem.eql(u8, tool_name, "list_component_requirements")) return try toolListComponentRequirements(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "add_component_requirement")) return try toolAddComponentRequirement(allocator, project_dir, args_val, out);
@@ -376,12 +376,12 @@ fn dispatchRequirements(
     return null;
 }
 
-fn toolListComponentRequirements(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolListComponentRequirements(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     return component_info.listRequirements(allocator, project_dir, name, out);
 }
 
-fn toolAddComponentRequirement(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolAddComponentRequirement(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const text = requireString(args_val, "text") orelse return missingArg(out, allocator, "text");
     const ref_page: ?u32 = if (optionalU64(args_val, "ref_page")) |p| @intCast(p) else null;
@@ -398,7 +398,7 @@ fn toolAddComponentRequirement(allocator: std.mem.Allocator, project_dir: []cons
     );
 }
 
-fn toolRemoveComponentRequirement(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolRemoveComponentRequirement(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     return component_info.removeRequirement(
         allocator,
@@ -410,7 +410,7 @@ fn toolRemoveComponentRequirement(allocator: std.mem.Allocator, project_dir: []c
     );
 }
 
-fn toolListDesignNotes(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolListDesignNotes(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     var raw: ?[]u8 = null;
     const parsed = notes.loadNotes(allocator, project_dir, name, &raw) catch |e| {
@@ -431,7 +431,7 @@ fn toolListDesignNotes(allocator: std.mem.Allocator, project_dir: []const u8, ar
     return true;
 }
 
-fn toolAddDesignNote(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolAddDesignNote(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const text = requireString(args_val, "text") orelse return missingArg(out, allocator, "text");
     if (text.len == 0) {
@@ -455,7 +455,7 @@ fn toolMutateDesignNote(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
     mode: notes.TaskMutation,
 ) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
@@ -537,7 +537,7 @@ fn toolListLibrary(allocator: std.mem.Allocator, project_dir: []const u8, args_v
     return true;
 }
 
-fn toolListHistory(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolListHistory(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const w = out.writer(allocator);
     const snaps = try history.listSnapshots(allocator, project_dir, name);
@@ -554,29 +554,29 @@ fn toolListHistory(allocator: std.mem.Allocator, project_dir: []const u8, args_v
     return true;
 }
 
-fn toolListInstances(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolListInstances(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     return listInstances(allocator, project_dir, name, out.writer(allocator));
 }
 
-fn toolListFreePins(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolListFreePins(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
     return listFreePins(allocator, project_dir, name, ref, optionalString(args_val, "filter"), out.writer(allocator));
 }
 
-fn toolGetNet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolGetNet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const net = requireString(args_val, "net") orelse return missingArg(out, allocator, "net");
     return getNet(allocator, project_dir, name, net, out.writer(allocator));
 }
 
-fn toolDescribeComponent(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolDescribeComponent(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     return component_info.describeComponent(allocator, project_dir, name, out);
 }
 
-fn toolGetSchematic(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolGetSchematic(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const graph = try renderSceneGraph(allocator, project_dir, name);
     try out.writer(allocator).writeAll(graph);
@@ -588,7 +588,7 @@ fn toolGetSchematic(allocator: std.mem.Allocator, project_dir: []const u8, args_
 /// runs on (identical content to docs/language-forms.md, so it can never
 /// be stale). Optional `section` returns just one `## ` section; an
 /// unknown title errors with the list of valid ones.
-fn toolGetLanguageReference(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolGetLanguageReference(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const doc = try docgen.renderLanguageReference(allocator);
     const section = optionalString(args_val, "section") orelse {
         try out.appendSlice(allocator, doc);
@@ -618,7 +618,7 @@ fn toolGetLanguageReference(allocator: std.mem.Allocator, args_val: ?std.json.Va
 /// needed. For module-level *layout*, pass the module name straight to
 /// `get_pcb_layout_image` / `describe_pcb_layout`, which resolve module names
 /// via a real instantiation (else a zero-arg call).
-fn toolPreviewModule(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolPreviewModule(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const w = out.writer(allocator);
     const module = requireString(args_val, "module") orelse return missingArg(out, allocator, "module");
     if (!isBareModuleName(module)) {
@@ -775,7 +775,7 @@ fn writeModuleSummary(
 /// Structured spatial facts about the solved placement — the textual twin of
 /// `get_pcb_layout_image`, built from the identical placement so the facts
 /// always describe the board the image shows.
-fn toolDescribePcbLayout(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolDescribePcbLayout(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const opts = pcb_layout_page.PngRequest{
         .route = optionalBool(args_val, "route") orelse false,
@@ -795,7 +795,7 @@ fn toolDescribePcbLayout(allocator: std.mem.Allocator, project_dir: []const u8, 
 /// `compare_layout_to_starred` — score the `?rough=1` seed against the starred
 /// (default) saved layout: interchangeable-class-matched same-edge agreement +
 /// drag, the "is the rough in the right general area to finish by hand" check.
-fn toolCompareLayoutToStarred(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolCompareLayoutToStarred(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const body = layout_match.layoutMatchJson(allocator, project_dir, name) catch |e| {
         try out.writer(allocator).print("error comparing layout to starred: {s}", .{@errorName(e)});
@@ -812,7 +812,7 @@ fn toolCompareLayoutToStarred(allocator: std.mem.Allocator, project_dir: []const
 /// overlays: `blame` (cost heatmap + worst-offenders), `loops` (per-loop nH
 /// labels), `dims` (mm dimension leaders), `grid` (mm reference grid), and
 /// `compare` (a saved-layout name to diff against — ghosts + movement arrows).
-fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     var opts = pcb_layout_page.PngRequest{
         .highlight_nets = jsonStrList(allocator, args_val, "nets"),
@@ -854,7 +854,7 @@ fn jsonStrList(allocator: std.mem.Allocator, args_val: ?std.json.Value, key: []c
     const av = args_val orelse return &.{};
     if (av != .object) return &.{};
     const v = av.object.get(key) orelse return &.{};
-    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var list: std.ArrayList([]const u8) = .empty;
     if (v == .array) {
         for (v.array.items) |item| {
             if (item == .string and item.string.len > 0) list.append(allocator, item.string) catch break;
@@ -869,19 +869,19 @@ fn jsonStrList(allocator: std.mem.Allocator, args_val: ?std.json.Value, key: []c
     return list.toOwnedSlice(allocator) catch &.{};
 }
 
-fn toolGetVersion(args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator) !bool {
+fn toolGetVersion(args_val: ?std.json.Value, out: *std.ArrayList(u8), allocator: std.mem.Allocator) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const w = out.writer(allocator);
     try w.print("{{\"version\":{d}}}", .{serve_root.getLiveVersion(name)});
     return true;
 }
 
-fn toolRunChecks(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8), w: anytype) !bool {
+fn toolRunChecks(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), w: anytype) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     return runChecks(allocator, project_dir, name, optionalString(args_val, "severity"), optionalString(args_val, "changed_since"), w);
 }
 
-fn toolRestoreVersion(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolRestoreVersion(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const id = requireString(args_val, "id") orelse return missingArg(out, allocator, "id");
     const result = edit.restoreDesignCore(allocator, project_dir, name, id) catch |err| return editErrorMsg(out, allocator, err);
@@ -901,9 +901,9 @@ fn dispatchVfs(
     project_dir: []const u8,
     tool_name: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) !?bool {
-    const Ctx = struct { allocator: std.mem.Allocator, project_dir: []const u8, args: ?std.json.Value, out: *std.ArrayListUnmanaged(u8) };
+    const Ctx = struct { allocator: std.mem.Allocator, project_dir: []const u8, args: ?std.json.Value, out: *std.ArrayList(u8) };
     const ctx = Ctx{ .allocator = allocator, .project_dir = project_dir, .args = args_val, .out = out };
     if (std.mem.eql(u8, tool_name, "read_file")) return try toolReadFile(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "write_file")) return try toolWriteFile(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
@@ -919,18 +919,18 @@ fn dispatchVfs(
     return null;
 }
 
-fn toolReadFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolReadFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const path = requireString(args_val, "path") orelse return missingArg(out, allocator, "path");
     return vfs.readFile(allocator, project_dir, path, optionalU64(args_val, "offset"), optionalU64(args_val, "limit"), out);
 }
 
-fn toolWriteFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolWriteFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const path = requireString(args_val, "path") orelse return missingArg(out, allocator, "path");
     const content = requireString(args_val, "content") orelse return missingArg(out, allocator, "content");
     return vfs.writeFile(allocator, project_dir, path, content, optionalString(args_val, "expected_sha256"), out);
 }
 
-fn toolEditFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolEditFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const path = requireString(args_val, "path") orelse return missingArg(out, allocator, "path");
     const old_s = requireString(args_val, "old_string") orelse return missingArg(out, allocator, "old_string");
     const new_s = requireString(args_val, "new_string") orelse return missingArg(out, allocator, "new_string");
@@ -938,29 +938,29 @@ fn toolEditFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val:
     return vfs.editFile(allocator, project_dir, path, old_s, new_s, optionalString(args_val, "expected_sha256"), replace_mode, out);
 }
 
-fn toolListDir(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolListDir(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const path = optionalString(args_val, "path") orelse "";
     const list_mode: vfs.ListMode = if (optionalBool(args_val, "recursive") orelse false) .recursive else .flat;
     return vfs.listDir(allocator, project_dir, path, list_mode, optionalU64(args_val, "max_entries"), out);
 }
 
-fn toolGlob(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolGlob(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const pattern = requireString(args_val, "pattern") orelse return missingArg(out, allocator, "pattern");
     return vfs.glob(allocator, project_dir, pattern, optionalString(args_val, "base"), out);
 }
 
-fn toolDeleteFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolDeleteFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const path = requireString(args_val, "path") orelse return missingArg(out, allocator, "path");
     return vfs.deleteFile(allocator, project_dir, path, out);
 }
 
-fn toolMoveFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolMoveFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const from = requireString(args_val, "from") orelse return missingArg(out, allocator, "from");
     const to = requireString(args_val, "to") orelse return missingArg(out, allocator, "to");
     return vfs.moveFile(allocator, project_dir, from, to, out);
 }
 
-fn toolBuild(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolBuild(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const report = edit.rebuildDesign(allocator, project_dir, name);
     const w = out.writer(allocator);
@@ -975,7 +975,7 @@ fn toolBuild(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?s
 /// `config.cseConnectSid`) — never passed over MCP. Returns the created
 /// library names on success, or `{ok:false,error}` if search, download
 /// (expired cookie), or import fails.
-fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const part_number = requireString(args_val, KEY_PART_NUMBER) orelse return missingArg(out, allocator, KEY_PART_NUMBER);
     const manufacturer = optionalString(args_val, "manufacturer");
     const w = out.writer(allocator);
@@ -1030,7 +1030,7 @@ fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, 
 /// interstitial and validating the `%PDF` magic. All credentials are read
 /// server-side, never over MCP. The success envelope's `source` says which
 /// provider supplied it; when both fail, `{ok:false,error,cse_error,digikey_error}`.
-fn toolDownloadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolDownloadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const part_number = requireString(args_val, KEY_PART_NUMBER) orelse return missingArg(out, allocator, KEY_PART_NUMBER);
     const manufacturer = optionalString(args_val, "manufacturer");
     const w = out.writer(allocator);
@@ -1141,7 +1141,7 @@ fn finishDatasheet(
 /// `CSE_CONNECT_SID` is read server-side (never over MCP). Returns
 /// `{ok:true,query,count,results:[{part_number,manufacturer,has_model,has_datasheet}]}`,
 /// or `{ok:false,error}` on a network/auth failure.
-fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const query = requireString(args_val, "query") orelse return missingArg(out, allocator, "query");
     const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, SEARCH_LIMIT_MAX)) else SEARCH_LIMIT_DEFAULT;
     const w = out.writer(allocator);
@@ -1184,7 +1184,7 @@ fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value,
 /// `DIGIKEY_API_BASE` for the sandbox) are read server-side, never over MCP.
 /// Returns `{ok:true,query,count,results:[{mpn,manufacturer,description,
 /// datasheet_url,product_url,digikey_part_number}]}` or `{ok:false,error}`.
-fn toolResolveMpn(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolResolveMpn(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const query = requireString(args_val, "query") orelse return missingArg(out, allocator, "query");
     const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, SEARCH_LIMIT_MAX)) else SEARCH_LIMIT_DEFAULT;
     const w = out.writer(allocator);
@@ -1234,7 +1234,7 @@ fn toolResolveMpn(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: 
 /// variations:[{digikey_part_number,package_type,quantity_available,
 /// minimum_order_quantity,price_breaks:[{break_quantity,unit_price,
 /// total_price}]}]}]}` or `{ok:false,error}`.
-fn toolCheckStock(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolCheckStock(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const query = requireString(args_val, "query") orelse return missingArg(out, allocator, "query");
     const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, SEARCH_LIMIT_MAX)) else STOCK_LIMIT_DEFAULT;
     const w = out.writer(allocator);
@@ -1342,7 +1342,7 @@ fn toolRegeneratePinout(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) !bool {
     const source = requireString(args_val, "source") orelse return missingArg(out, allocator, "source");
     const w = out.writer(allocator);
@@ -1356,7 +1356,7 @@ fn toolRegeneratePinout(
 
     // Read the .kicad_sym through the VFS surface — same path validation,
     // same deny-list rules, no new code path for traversal escapes.
-    var read_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var read_buf: std.ArrayList(u8) = .empty;
     defer read_buf.deinit(allocator);
     const read_ok = try vfs.readFile(allocator, project_dir, source, null, null, &read_buf);
     if (!read_ok) {
@@ -1407,7 +1407,7 @@ fn toolRegeneratePinout(
     const out_path = try std.fmt.allocPrint(allocator, "lib/pinouts/{s}.sexp", .{out_name});
     defer allocator.free(out_path);
 
-    var write_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var write_buf: std.ArrayList(u8) = .empty;
     defer write_buf.deinit(allocator);
     const wrote_ok = try vfs.writeFile(allocator, project_dir, out_path, pinout_text, null, &write_buf);
     if (!wrote_ok) {
@@ -1573,7 +1573,7 @@ pub fn listLibrarySubdir(
     };
 
     // Filtered — score every entry, keep matches, emit ranked best-first.
-    var matches: std.ArrayListUnmanaged(LibMatch) = .empty;
+    var matches: std.ArrayList(LibMatch) = .empty;
     var it = dir.iterate();
     while (try it.next()) |entry| {
         if (entry.kind != .file and entry.kind != .sym_link) continue;
@@ -2062,13 +2062,13 @@ pub fn getNet(
     return true;
 }
 
-fn missingArg(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, key: []const u8) !bool {
+fn missingArg(out: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8) !bool {
     const w = out.writer(allocator);
     try w.print("error: missing argument \"{s}\"", .{key});
     return false;
 }
 
-fn editErrorMsg(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, err: edit.EditError) !bool {
+fn editErrorMsg(out: *std.ArrayList(u8), allocator: std.mem.Allocator, err: edit.EditError) !bool {
     const w = out.writer(allocator);
     try w.print(ERR_LINE_TEMPLATE, .{@errorName(err)});
     return false;
@@ -2154,7 +2154,7 @@ pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) To
     var dir = infra_fs.cwd().openDir(src_path, .{ .iterate = true }) catch return &[_][]const u8{};
     defer dir.close();
 
-    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    var names: std.ArrayList([]const u8) = .empty;
     var walker = try dir.walk(allocator);
     defer walker.deinit();
     while (try walker.next()) |entry| {
@@ -2348,7 +2348,7 @@ pub fn listDesignSummaries(
     var dir = infra_fs.cwd().openDir(src_path, .{ .iterate = true }) catch return &[_]DesignSummary{};
     defer dir.close();
 
-    var summaries: std.ArrayListUnmanaged(DesignSummary) = .empty;
+    var summaries: std.ArrayList(DesignSummary) = .empty;
     var walker = try dir.walk(allocator);
     defer walker.deinit();
     while (try walker.next()) |entry| {
@@ -2396,7 +2396,7 @@ pub fn listDesignSummaries(
             };
             if (block_opt) |block| {
                 summary.title = try allocator.dupe(u8, block.name);
-                var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                var names: std.ArrayList([]const u8) = .empty;
                 for (block.sections) |s| {
                     try names.append(allocator, try allocator.dupe(u8, s.name));
                 }
@@ -2441,7 +2441,7 @@ pub fn listDesignSummaries(
                     if (!a.passed and !a.is_warning) summary.assert_fails += 1;
                 }
 
-                var used: std.ArrayListUnmanaged([]const u8) = .empty;
+                var used: std.ArrayList([]const u8) = .empty;
                 try collectModuleUses(allocator, block, &used);
                 summary.modules_used = try used.toOwnedSlice(allocator);
             }
@@ -2482,7 +2482,7 @@ fn countOpenNotes(allocator: std.mem.Allocator, project_dir: []const u8, name: [
 fn collectModuleUses(
     allocator: std.mem.Allocator,
     block: *const env_mod.DesignBlock,
-    out: *std.ArrayListUnmanaged([]const u8),
+    out: *std.ArrayList([]const u8),
 ) std.mem.Allocator.Error!void {
     for (block.sub_blocks) |sb| {
         if (sb.source.len > 0) {
@@ -2594,7 +2594,7 @@ pub fn renderSceneGraph(
     return render_json.renderSceneGraph(allocator, nb.block, project_dir);
 }
 
-fn toolReadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayListUnmanaged(u8)) !bool {
+fn toolReadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const raw_name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const w = out.writer(allocator);
 
@@ -2684,7 +2684,7 @@ test "list_library query returns only matching entries ranked best-first" {
     try tmp.dir.writeFile(.{ .sub_path = "lib/components/lt3045.sexp", .data = "(component \"lt3045\" (description \"LDO designed for STM32 rails\"))\n" });
     const proj = try tmp.dir.realpathAlloc(alloc, ".");
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     try listLibrarySubdir(alloc, proj, "components", "stm32", out.writer(alloc));
 
     // The matching part appears; the unrelated cap is filtered out.
@@ -2709,7 +2709,7 @@ test "list_library without a query lists every entry" {
     try tmp.dir.writeFile(.{ .sub_path = "lib/components/bbb.sexp", .data = "(component \"bbb\")\n" });
     const proj = try tmp.dir.realpathAlloc(alloc, ".");
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     try listLibrarySubdir(alloc, proj, "components", null, out.writer(alloc));
     try std.testing.expect(std.mem.indexOf(u8, out.items, "aaa") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "bbb") != null);
@@ -2758,7 +2758,7 @@ test "finishDatasheet returns false when the store rejects the bytes" {
     // `false`->`true` flip would report success on a rejected datasheet.
     // Non-PDF bytes make storeDatasheet fail with NotPdf before any write.
     const alloc = std.testing.allocator;
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);
     const w = out.writer(alloc);
     const ok = try finishDatasheet(w, alloc, "/proj", "digikey", "x.pdf", "not a pdf", "PART", "MFR", "url");

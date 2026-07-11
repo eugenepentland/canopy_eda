@@ -108,7 +108,7 @@ pub fn caretLine(allocator: std.mem.Allocator, source_line: []const u8, col: u32
 /// `file:line:col: message`, then the source line, then the caret line.
 /// Omits the source/caret lines when the source line is unavailable.
 pub fn formatText(allocator: std.mem.Allocator, d: Diagnostic) std.mem.Allocator.Error![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.print("{s}:{d}:{d}: {s}", .{ d.file, d.line, d.col, d.message });
     if (d.source_line.len > 0) {
@@ -140,7 +140,7 @@ pub fn renderErrorPage(
     design_name: []const u8,
     d: Diagnostic,
 ) std.mem.Allocator.Error![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">" ++

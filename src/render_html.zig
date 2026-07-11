@@ -193,7 +193,7 @@ pub fn renderToHtml(
     );
 
     for (block.sections, 0..) |sec, sec_idx| {
-        var attached: std.ArrayListUnmanaged(env_mod.SubBlock) = .empty;
+        var attached: std.ArrayList(env_mod.SubBlock) = .empty;
         defer attached.deinit(allocator);
         for (block.sub_blocks, 0..) |sb, sb_idx| {
             if (sub_attachments[sb_idx]) |idx| {
@@ -214,7 +214,7 @@ pub fn renderToHtml(
     @memset(sb_grouped, false);
     for (block.sub_blocks, 0..) |sb, sb_idx| {
         if (sub_attachments[sb_idx] != null or sb_grouped[sb_idx]) continue;
-        var group_names: std.ArrayListUnmanaged(u8) = .empty;
+        var group_names: std.ArrayList(u8) = .empty;
         var copies: usize = 1;
         if (sb.source.len > 0) {
             for (block.sub_blocks[sb_idx + 1 ..], sb_idx + 1..) |other, oi| {
@@ -455,7 +455,7 @@ fn tallyRefCounts(
 /// Sub-block refs are walked separately by `tocEntryForSubBlock`.
 fn collectSectionRefsRec(
     sec: Section,
-    out: *std.ArrayListUnmanaged([]const u8),
+    out: *std.ArrayList([]const u8),
     allocator: Allocator,
 ) std.mem.Allocator.Error!void {
     for (sec.pin_groups) |pg| try out.append(allocator, pg.ref_des);
@@ -607,7 +607,7 @@ fn writeSection(
     try writeSectionBoundaryContracts(w, sec);
 
     // Collect hubs in this section
-    var hub_refs: std.ArrayListUnmanaged([]const u8) = .empty;
+    var hub_refs: std.ArrayList([]const u8) = .empty;
     defer hub_refs.deinit(allocator);
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(allocator);
@@ -892,7 +892,7 @@ fn renderGroupedHubSvgs(
     allocator: Allocator,
     h: HubAnalysis,
 ) !void {
-    var buckets: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged(PinGroup)) = .empty;
+    var buckets: std.StringArrayHashMapUnmanaged(std.ArrayList(PinGroup)) = .empty;
     defer {
         var it = buckets.iterator();
         while (it.next()) |e| e.value_ptr.deinit(allocator);
@@ -995,7 +995,7 @@ fn analyzeHub(
 
     // Bucket pin_ids by `(pins ref (group "X") ...)` feature label so each
     // bucket can render as its own SVG with the label as a heading.
-    var buckets: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty;
+    var buckets: std.StringArrayHashMapUnmanaged(std.ArrayList([]const u8)) = .empty;
     defer {
         var it = buckets.iterator();
         while (it.next()) |e| e.value_ptr.deinit(allocator);
@@ -1049,7 +1049,7 @@ fn analyzeHub(
     var pn_map = pinNameMapFor(ctx, allocator, hub_inst);
     defer pn_map.deinit(allocator);
 
-    var all_groups: std.ArrayListUnmanaged(PinGroup) = .empty;
+    var all_groups: std.ArrayList(PinGroup) = .empty;
     var total_pins: usize = 0;
     var it = buckets.iterator();
     while (it.next()) |e| {
@@ -1288,7 +1288,7 @@ fn writeSubBlockCard(
     try writeHtmlEscaped(w, sb.block.name);
     try w.writeAll("</p>");
 
-    var hub_refs: std.ArrayListUnmanaged([]const u8) = .empty;
+    var hub_refs: std.ArrayList([]const u8) = .empty;
     defer hub_refs.deinit(allocator);
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(allocator);
@@ -1311,7 +1311,7 @@ fn writeSubBlockCard(
     // sub-block's sections so the hub renders one labelled SVG per group instead
     // of a single flat pin list. (ref_des is remapped to the flattened hub by
     // ids.assignSubBlockRefDes, so it matches hub_refs above.)
-    var sb_pin_groups: std.ArrayListUnmanaged(env_mod.PinGroup) = .empty;
+    var sb_pin_groups: std.ArrayList(env_mod.PinGroup) = .empty;
     defer sb_pin_groups.deinit(allocator);
     for (sb.block.sections) |sec| {
         for (sec.pin_groups) |pg| try sb_pin_groups.append(allocator, pg);
@@ -1664,7 +1664,7 @@ fn writeFlatHubs(
     try writeHtmlEscaped(w, block.name);
     try w.writeAll("</h2></div>");
 
-    var hub_refs: std.ArrayListUnmanaged([]const u8) = .empty;
+    var hub_refs: std.ArrayList([]const u8) = .empty;
     defer hub_refs.deinit(allocator);
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(allocator);
@@ -1814,7 +1814,7 @@ fn writeSearchIndex(
         const sb_cat = rb.classifyByName(sb.name, sb.block.instances);
         // Roll up requirement counts for this sub-block (uses every
         // instance ref_des inside the sub-block design).
-        var sb_refs: std.ArrayListUnmanaged([]const u8) = .empty;
+        var sb_refs: std.ArrayList([]const u8) = .empty;
         defer sb_refs.deinit(allocator);
         for (sb.block.instances) |inst| try sb_refs.append(allocator, inst.ref_des);
         const sb_counts = countsForRefs(check_results, sb_refs.items);
@@ -1838,7 +1838,7 @@ fn writeSearchIndex(
         if (!first) try w.writeAll(",");
         first = false;
         const flat_cat = rb.classifyByName(block.name, block.instances);
-        var flat_refs: std.ArrayListUnmanaged([]const u8) = .empty;
+        var flat_refs: std.ArrayList([]const u8) = .empty;
         defer flat_refs.deinit(allocator);
         for (block.instances) |inst| try flat_refs.append(allocator, inst.ref_des);
         const flat_counts = countsForRefs(check_results, flat_refs.items);
@@ -1925,7 +1925,7 @@ fn emitSectionEntry(
 
     // Roll up requirement counts across this section + every nested
     // sub-section so the sidebar status reflects the worst child too.
-    var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+    var refs: std.ArrayList([]const u8) = .empty;
     defer refs.deinit(allocator);
     try collectSectionRefsRec(sec, &refs, allocator);
     const counts = countsForRefs(check_results, refs.items);

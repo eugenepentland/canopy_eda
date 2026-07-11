@@ -239,7 +239,7 @@ pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 /// Percent-encode `s` for use as a URL query-parameter value (RFC 3986
 /// unreserved set kept literal; everything else `%XX`). Allocates from `a`.
 fn percentEncode(a: std.mem.Allocator, s: []const u8) ![]const u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     for (s) |c| {
         const unreserved = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
             (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or c == '~';

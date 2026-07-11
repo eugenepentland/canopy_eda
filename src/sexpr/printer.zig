@@ -15,7 +15,7 @@ const NODE_EQ_FLOAT_TOLERANCE: f64 = 0.0;
 
 /// Pretty-print a list of top-level nodes as S-expression text.
 pub fn print(allocator: std.mem.Allocator, nodes: []const Node) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     const writer = buf.writer(allocator);
 

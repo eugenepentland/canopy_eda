@@ -81,7 +81,7 @@ pub fn evalFmt(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value 
         return EvalError.TypeError;
     };
 
-    var fmt_args: std.ArrayListUnmanaged(Value) = .empty;
+    var fmt_args: std.ArrayList(Value) = .empty;
     defer fmt_args.deinit(self.allocator);
     for (args[1..]) |arg| {
         const v = try self.evalNode(arg, env);

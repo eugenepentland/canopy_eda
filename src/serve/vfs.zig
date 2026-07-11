@@ -364,7 +364,7 @@ fn isKnownLibSubdir(norm: []const u8) bool {
 /// for `writeError(out, allocator, sandboxErrorMsg(e))` at sites where the
 /// agent benefits from a redirection (list_dir on lib, write to datasheets).
 fn writeSandboxError(
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     err: SandboxError,
     rel_path: []const u8,
@@ -384,7 +384,7 @@ fn writeSandboxError(
     return false;
 }
 
-fn writeError(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, msg: []const u8) !bool {
+fn writeError(out: *std.ArrayList(u8), allocator: std.mem.Allocator, msg: []const u8) !bool {
     out.clearRetainingCapacity();
     const w = out.writer(allocator);
     try w.writeAll("{\"error\":");
@@ -414,7 +414,7 @@ pub fn readFile(
     rel_path: []const u8,
     offset: ?u64,
     limit: ?u64,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) VfsError!bool {
     const resolved = resolveSandboxedWithRel(allocator, project_dir, rel_path, .read) catch |e| {
         return writeSandboxError(out, allocator, e, rel_path, .read);
@@ -488,7 +488,7 @@ pub fn writeFile(
     rel_path: []const u8,
     content: []const u8,
     expected_sha256: ?[]const u8,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) VfsError!bool {
     if (content.len > MAX_FILE_BYTES) {
         return writeError(out, allocator, "content too large");
@@ -571,7 +571,7 @@ fn readForEdit(allocator: std.mem.Allocator, abs: []const u8) ReadForEditError![
     };
 }
 
-fn writeStaleSha(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, current: []const u8) VfsError!bool {
+fn writeStaleSha(out: *std.ArrayList(u8), allocator: std.mem.Allocator, current: []const u8) VfsError!bool {
     out.clearRetainingCapacity();
     const w = out.writer(allocator);
     try w.print("{{\"error\":\"stale\",\"stale\":true,\"current_sha256\":\"{s}\"}}", .{current});
@@ -590,7 +590,7 @@ pub fn editFile(
     new_string: []const u8,
     expected_sha256: ?[]const u8,
     replace_mode: ReplaceMode,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) VfsError!bool {
     if (old_string.len == 0) {
         return writeError(out, allocator, "old_string must be non-empty");
@@ -630,7 +630,7 @@ pub fn editFile(
         return writeError(out, allocator, "ambiguous match (old_string occurs more than once; pass replace_all=true or expand context)");
     }
 
-    var new_content: std.ArrayListUnmanaged(u8) = .empty;
+    var new_content: std.ArrayList(u8) = .empty;
     defer new_content.deinit(allocator);
     const cw = new_content.writer(allocator);
 
@@ -694,7 +694,7 @@ pub fn listDir(
     rel_path: []const u8,
     list_mode: ListMode,
     max_entries: ?u64,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) VfsError!bool {
     const cap_u64 = max_entries orelse DEFAULT_LIST_ENTRIES;
     const cap: usize = @intCast(@min(cap_u64, @as(u64, std.math.maxInt(usize))));
@@ -795,7 +795,7 @@ pub fn glob(
     project_dir: []const u8,
     pattern: []const u8,
     base: ?[]const u8,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) VfsError!bool {
     if (pattern.len == 0) return writeError(out, allocator, "empty pattern");
 
@@ -820,7 +820,7 @@ pub fn glob(
     };
     defer dir.close();
 
-    var matches: std.ArrayListUnmanaged([]const u8) = .empty;
+    var matches: std.ArrayList([]const u8) = .empty;
     defer {
         for (matches.items) |m| allocator.free(m);
         matches.deinit(allocator);
@@ -909,7 +909,7 @@ pub fn deleteFile(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     rel_path: []const u8,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) VfsError!bool {
     const resolved = resolveSandboxedWithRel(allocator, project_dir, rel_path, .write) catch |e| {
         return writeSandboxError(out, allocator, e, rel_path, .write);
@@ -946,7 +946,7 @@ pub fn moveFile(
     project_dir: []const u8,
     from_rel: []const u8,
     to_rel: []const u8,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) VfsError!bool {
     const from = resolveSandboxedWithRel(allocator, project_dir, from_rel, .write) catch |e| {
         return writeSandboxError(out, allocator, e, from_rel, .write);
@@ -1073,7 +1073,7 @@ pub fn dirtyDesignsForPath(
     project_dir: []const u8,
     rel_path: []const u8,
 ) (std.mem.Allocator.Error || std.fs.Dir.OpenError || std.fs.Dir.Iterator.Error)![][]const u8 {
-    var out: std.ArrayListUnmanaged([]const u8) = .empty;
+    var out: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (out.items) |item| allocator.free(item);
         out.deinit(allocator);
@@ -1257,7 +1257,7 @@ test "editFile applies a non-empty single-match replacement" {
     const proj = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(proj);
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);
     try std.testing.expect(try editFile(alloc, proj, "src/f.sexp", "world", "there", null, .single, &out));
 

@@ -212,7 +212,7 @@ fn writeBlocksBody(arena: Allocator, graph: *const Graph, w: *Writer) (Allocator
     const claimed = try arena.alloc(bool, graph.nodes.len);
     @memset(claimed, false);
     for (graph.layout.groups) |grp| {
-        var ids: std.ArrayListUnmanaged(u32) = .empty;
+        var ids: std.ArrayList(u32) = .empty;
         for (grp.members) |name| {
             const id = lod.nodeByKey(graph, name) orelse continue;
             if (claimed[id]) continue;
@@ -224,7 +224,7 @@ fn writeBlocksBody(arena: Allocator, graph: *const Graph, w: *Writer) (Allocator
     }
     // Trailing "Other": real, unclaimed, placeable nodes (skip synthesised
     // antennas/crystals, which carry no authoring key).
-    var other: std.ArrayListUnmanaged(u32) = .empty;
+    var other: std.ArrayList(u32) = .empty;
     for (graph.nodes, 0..) |nd, i| {
         if (claimed[i] or nd.is_boundary or nd.key.len == 0) continue;
         try other.append(arena, @intCast(i));
@@ -815,7 +815,7 @@ const RailColor = struct { name: []const u8, color: []const u8 };
 /// resolved voltage, so voltage-coloring can't tell them apart — coloring by
 /// net name gives every rail its own traceable hue. Sorted for stable colors.
 fn buildRailPalette(arena: Allocator, graph: *const Graph) Allocator.Error![]const RailColor {
-    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    var names: std.ArrayList([]const u8) = .empty;
     for (graph.edges) |e| {
         if (e.class != types.CLASS_POWER or e.label.len == 0) continue;
         var seen = false;
@@ -855,7 +855,7 @@ const volt_palette = [_][]const u8{
 /// Distinct power-edge voltages (ascending) each assigned a palette color, so
 /// the wires and the legend stay in lock-step.
 fn buildVoltPalette(arena: Allocator, graph: *const Graph) Allocator.Error![]const VoltColor {
-    var vs: std.ArrayListUnmanaged(f64) = .empty;
+    var vs: std.ArrayList(f64) = .empty;
     for (graph.edges) |e| {
         if (e.class != types.CLASS_POWER) continue;
         const v = e.voltage orelse continue;
@@ -1166,7 +1166,7 @@ fn truncate(arena: Allocator, s: []const u8, max: usize) Allocator.Error![]const
 /// ellipsised onto it. Returns the line slices (all borrowed from `s` except a
 /// possibly-allocated ellipsised final line).
 fn wrapText(arena: Allocator, s: []const u8, max: usize, max_lines: usize) Allocator.Error![][]const u8 {
-    var lines: std.ArrayListUnmanaged([]const u8) = .empty;
+    var lines: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
     while (i < s.len and lines.items.len < max_lines) {
         while (i < s.len and s[i] == ' ') i += 1; // skip leading spaces

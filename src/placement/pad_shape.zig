@@ -84,7 +84,7 @@ fn simplifyRing(arena: std.mem.Allocator, pts: []const [2]f64, tol: f64) std.mem
     @memset(keep, false);
     keep[0] = true;
     keep[pts.len - 1] = true;
-    var stack: std.ArrayListUnmanaged([2]usize) = .empty;
+    var stack: std.ArrayList([2]usize) = .empty;
     try stack.append(arena, .{ 0, pts.len - 1 });
     while (stack.items.len > 0) {
         const seg = stack.items[stack.items.len - 1];
@@ -108,7 +108,7 @@ fn simplifyRing(arena: std.mem.Allocator, pts: []const [2]f64, tol: f64) std.mem
             try stack.append(arena, .{ best, hi });
         }
     }
-    var out: std.ArrayListUnmanaged([2]f64) = .empty;
+    var out: std.ArrayList([2]f64) = .empty;
     for (pts, 0..) |p, i| if (keep[i]) try out.append(arena, p);
     return out.toOwnedSlice(arena);
 }

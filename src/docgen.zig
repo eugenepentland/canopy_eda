@@ -26,7 +26,7 @@ const block_types = @import("render_block_types.zig");
 /// build's docs-check step and the drift test below compare it to the
 /// checked-in `docs/language-forms.md`. Caller owns the returned slice.
 pub fn renderLanguageReference(allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try renderTo(buf.writer(allocator));
     return buf.toOwnedSlice(allocator);

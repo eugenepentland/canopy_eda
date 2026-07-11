@@ -161,9 +161,9 @@ fn buildPadMap(
     allocator: std.mem.Allocator,
     instances: []const FlatInstance,
     project_dir: []const u8,
-) ExportError!std.StringHashMap([]const []const u8) {
-    var fp_pad_map = std.StringHashMap([]const []const u8).init(allocator);
-    errdefer fp_pad_map.deinit();
+) ExportError!std.StringHashMapUnmanaged([]const []const u8) {
+    var fp_pad_map = std.StringHashMapUnmanaged([]const []const u8).empty;
+    errdefer fp_pad_map.deinit(allocator);
     for (instances) |inst| {
         if (inst.footprint.len == 0) continue;
         if (fp_pad_map.contains(inst.footprint)) continue;
@@ -172,7 +172,7 @@ fn buildPadMap(
         const fp_src = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
         defer allocator.free(fp_src);
         const pad_names = extractPadNames(allocator, fp_src) catch continue;
-        try fp_pad_map.put(inst.footprint, pad_names);
+        try fp_pad_map.put(allocator, inst.footprint, pad_names);
     }
     return fp_pad_map;
 }
@@ -205,9 +205,9 @@ pub fn exportKicad(
     };
 
     // Flatten hierarchy
-    var instances: std.ArrayListUnmanaged(FlatInstance) = .empty;
+    var instances: std.ArrayList(FlatInstance) = .empty;
     defer instances.deinit(allocator);
-    var nets: std.ArrayListUnmanaged(FlatNet) = .empty;
+    var nets: std.ArrayList(FlatNet) = .empty;
     defer nets.deinit(allocator);
 
     try collectInstances(allocator, block, "", &instances, block.refStyle());
@@ -215,30 +215,30 @@ pub fn exportKicad(
 
     // Build footprint name map: internal name -> KiCad declared name
     // Also track which footprints we've already processed
-    var fp_name_map = std.StringHashMap([]const u8).init(allocator);
-    defer fp_name_map.deinit();
-    var processed_fps = std.StringHashMap(void).init(allocator);
-    defer processed_fps.deinit();
+    var fp_name_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer fp_name_map.deinit(allocator);
+    var processed_fps = std.StringHashMapUnmanaged(void).empty;
+    defer processed_fps.deinit(allocator);
 
     // Collect unique footprint names and their associated component names
-    var fp_components = std.StringHashMap([]const u8).init(allocator);
-    defer fp_components.deinit();
+    var fp_components = std.StringHashMapUnmanaged([]const u8).empty;
+    defer fp_components.deinit(allocator);
 
     // Declared KiCad name → source footprint id, to warn when two distinct
     // internal footprints declare the same name (the second .kicad_mod would
     // silently overwrite the first, exporting one part with the other's geometry).
-    var seen_kicad_names = std.StringHashMap([]const u8).init(allocator);
-    defer seen_kicad_names.deinit();
+    var seen_kicad_names = std.StringHashMapUnmanaged([]const u8).empty;
+    defer seen_kicad_names.deinit(allocator);
 
     // Load 3D model config for offset/rotation
     var model_cfg = loadModelConfig(allocator, project_dir);
-    defer model_cfg.deinit();
+    defer model_cfg.deinit(allocator);
 
     for (instances.items) |inst| {
         if (inst.footprint.len == 0) continue;
         if (processed_fps.contains(inst.footprint)) continue;
-        try processed_fps.put(inst.footprint, {});
-        try fp_components.put(inst.footprint, inst.component);
+        try processed_fps.put(allocator, inst.footprint, {});
+        try fp_components.put(allocator, inst.footprint, inst.component);
 
         // Load and parse footprint .sexp to get declared name
         const fp_path = try std.fmt.allocPrint(allocator, FOOTPRINT_PATH_TEMPLATE, .{ project_dir, inst.footprint });
@@ -246,7 +246,7 @@ pub fn exportKicad(
 
         const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch |err| {
             log.warn("cannot read footprint {s}: {}", .{ fp_path, err });
-            try fp_name_map.put(inst.footprint, inst.footprint);
+            try fp_name_map.put(allocator, inst.footprint, inst.footprint);
             continue;
         };
         defer allocator.free(fp_source);
@@ -258,9 +258,9 @@ pub fn exportKicad(
             if (!std.mem.eql(u8, first, inst.footprint))
                 log.warn("export-kicad: footprints '{s}' and '{s}' both declare KiCad name '{s}' — the .kicad_mod will be overwritten", .{ first, inst.footprint, kicad_name });
         } else {
-            try seen_kicad_names.put(kicad_name, inst.footprint);
+            try seen_kicad_names.put(allocator, kicad_name, inst.footprint);
         }
-        try fp_name_map.put(inst.footprint, kicad_name);
+        try fp_name_map.put(allocator, inst.footprint, kicad_name);
 
         // Check for matching STEP model (config override > auto-discovery)
         const mcfg = model_cfg.get(inst.footprint);
@@ -313,7 +313,7 @@ pub fn exportKicad(
 
     // Build footprint pad map for NC pin handling
     var fp_pad_map = try buildPadMap(allocator, instances.items, project_dir);
-    defer fp_pad_map.deinit();
+    defer fp_pad_map.deinit(allocator);
 
     const netlist = try writeNetlist(allocator, design_name, instances.items, nets.items, &fp_name_map, &fp_pad_map);
     defer allocator.free(netlist);
@@ -331,40 +331,40 @@ pub fn exportNetlistOnly(
     project_dir: []const u8,
     design_name: []const u8,
 ) ExportError![]const u8 {
-    var instances: std.ArrayListUnmanaged(FlatInstance) = .empty;
+    var instances: std.ArrayList(FlatInstance) = .empty;
     defer instances.deinit(allocator);
-    var nets: std.ArrayListUnmanaged(FlatNet) = .empty;
+    var nets: std.ArrayList(FlatNet) = .empty;
     defer nets.deinit(allocator);
 
     try collectInstances(allocator, block, "", &instances, block.refStyle());
     try flattenAndMergeNets(allocator, block, &nets);
 
-    var fp_name_map = std.StringHashMap([]const u8).init(allocator);
-    defer fp_name_map.deinit();
-    var processed_fps = std.StringHashMap(void).init(allocator);
-    defer processed_fps.deinit();
+    var fp_name_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer fp_name_map.deinit(allocator);
+    var processed_fps = std.StringHashMapUnmanaged(void).empty;
+    defer processed_fps.deinit(allocator);
 
     for (instances.items) |inst| {
         if (inst.footprint.len == 0) continue;
         if (processed_fps.contains(inst.footprint)) continue;
-        try processed_fps.put(inst.footprint, {});
+        try processed_fps.put(allocator, inst.footprint, {});
 
         const fp_path = try std.fmt.allocPrint(allocator, FOOTPRINT_PATH_TEMPLATE, .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
 
         const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch {
-            try fp_name_map.put(inst.footprint, inst.footprint);
+            try fp_name_map.put(allocator, inst.footprint, inst.footprint);
             continue;
         };
         defer allocator.free(fp_source);
 
         const kicad_name = extractFootprintName(allocator, fp_source) catch inst.footprint;
-        try fp_name_map.put(inst.footprint, kicad_name);
+        try fp_name_map.put(allocator, inst.footprint, kicad_name);
     }
 
     // Build footprint pad map for NC pin handling
     var fp_pad_map = try buildPadMap(allocator, instances.items, project_dir);
-    defer fp_pad_map.deinit();
+    defer fp_pad_map.deinit(allocator);
 
     return writeNetlist(allocator, design_name, instances.items, nets.items, &fp_name_map, &fp_pad_map);
 }
@@ -378,39 +378,39 @@ pub fn exportKicadZip(
     project_dir: []const u8,
     design_name: []const u8,
 ) ExportError![]const u8 {
-    var instances: std.ArrayListUnmanaged(FlatInstance) = .empty;
+    var instances: std.ArrayList(FlatInstance) = .empty;
     defer instances.deinit(allocator);
-    var nets: std.ArrayListUnmanaged(FlatNet) = .empty;
+    var nets: std.ArrayList(FlatNet) = .empty;
     defer nets.deinit(allocator);
 
     try collectInstances(allocator, block, "", &instances, block.refStyle());
     try flattenAndMergeNets(allocator, block, &nets);
 
-    var fp_name_map = std.StringHashMap([]const u8).init(allocator);
-    defer fp_name_map.deinit();
-    var processed_fps = std.StringHashMap(void).init(allocator);
-    defer processed_fps.deinit();
+    var fp_name_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer fp_name_map.deinit(allocator);
+    var processed_fps = std.StringHashMapUnmanaged(void).empty;
+    defer processed_fps.deinit(allocator);
     // Same duplicate-name / zip-slip guard as exportFootprints (see there).
-    var seen_kicad_names = std.StringHashMap([]const u8).init(allocator);
-    defer seen_kicad_names.deinit();
+    var seen_kicad_names = std.StringHashMapUnmanaged([]const u8).empty;
+    defer seen_kicad_names.deinit(allocator);
 
     // Collect zip entries
-    var zip_files: std.ArrayListUnmanaged(ZipEntry) = .empty;
+    var zip_files: std.ArrayList(ZipEntry) = .empty;
     defer zip_files.deinit(allocator);
 
     var model_cfg = loadModelConfig(allocator, project_dir);
-    defer model_cfg.deinit();
+    defer model_cfg.deinit(allocator);
 
     for (instances.items) |inst| {
         if (inst.footprint.len == 0) continue;
         if (processed_fps.contains(inst.footprint)) continue;
-        try processed_fps.put(inst.footprint, {});
+        try processed_fps.put(allocator, inst.footprint, {});
 
         const fp_path = try std.fmt.allocPrint(allocator, FOOTPRINT_PATH_TEMPLATE, .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
 
         const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch {
-            try fp_name_map.put(inst.footprint, inst.footprint);
+            try fp_name_map.put(allocator, inst.footprint, inst.footprint);
             continue;
         };
         defer allocator.free(fp_source);
@@ -421,9 +421,9 @@ pub fn exportKicadZip(
             if (!std.mem.eql(u8, first, inst.footprint))
                 log.warn("export-kicad: footprints '{s}' and '{s}' both declare KiCad name '{s}' — the .kicad_mod will be overwritten in the zip", .{ first, inst.footprint, kicad_name });
         } else {
-            try seen_kicad_names.put(kicad_name, inst.footprint);
+            try seen_kicad_names.put(allocator, kicad_name, inst.footprint);
         }
-        try fp_name_map.put(inst.footprint, kicad_name);
+        try fp_name_map.put(allocator, inst.footprint, kicad_name);
 
         const mcfg = model_cfg.get(inst.footprint);
         const model_name = if (mcfg) |c|
@@ -457,7 +457,7 @@ pub fn exportKicadZip(
 
     // Build footprint pad map for NC pin handling
     var fp_pad_map = try buildPadMap(allocator, instances.items, project_dir);
-    defer fp_pad_map.deinit();
+    defer fp_pad_map.deinit(allocator);
 
     // Netlist
     const netlist = try writeNetlist(allocator, design_name, instances.items, nets.items, &fp_name_map, &fp_pad_map);
@@ -477,10 +477,10 @@ const FlatTie = netlist_mod.FlatTie;
 pub fn flattenAndMergeNets(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
-    nets: *std.ArrayListUnmanaged(FlatNet),
+    nets: *std.ArrayList(FlatNet),
 ) std.mem.Allocator.Error!void {
     try collectNets(allocator, block, "", nets, block.refStyle());
-    var ties: std.ArrayListUnmanaged(FlatTie) = .empty;
+    var ties: std.ArrayList(FlatTie) = .empty;
     defer ties.deinit(allocator);
     try collectNetTies(allocator, block, "", &ties);
     try applyNetTies(allocator, nets, ties.items);
@@ -499,9 +499,9 @@ const ConvertError = error{
 // spec: export_kicad - Generates a KiCad netlist from a resolved design
 test "netlist generation" {
     const alloc = std.testing.allocator;
-    var fp_map = std.StringHashMap([]const u8).init(alloc);
-    defer fp_map.deinit();
-    try fp_map.put("r-0402", "R_0402_1005Metric");
+    var fp_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer fp_map.deinit(alloc);
+    try fp_map.put(alloc, "r-0402", "R_0402_1005Metric");
 
     const instances = [_]FlatInstance{
         .{ .ref_des = "R1", .component = "res-0402", .value = "220k", .footprint = "r-0402", .properties = &.{}, .uuid = "" },
@@ -513,8 +513,8 @@ test "netlist generation" {
     const nets_arr = [_]FlatNet{
         .{ .name = "VDD", .pins = &pins },
     };
-    var fp_pad_map = std.StringHashMap([]const []const u8).init(alloc);
-    defer fp_pad_map.deinit();
+    var fp_pad_map = std.StringHashMapUnmanaged([]const []const u8).empty;
+    defer fp_pad_map.deinit(alloc);
     const output = try writeNetlist(alloc, "test", &instances, &nets_arr, &fp_map, &fp_pad_map);
     defer alloc.free(output);
 

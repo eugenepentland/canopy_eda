@@ -189,7 +189,7 @@ pub const ParsedSyncPlan = struct {
     /// agent rewrites this set from `<board>.applied_ops.json` on
     /// every sync; deleting that sidecar is the user-facing escape
     /// hatch to force a full re-emit.
-    applied_ops: std.StringHashMap(void),
+    applied_ops: std.StringHashMapUnmanaged(void),
     /// Explicit per-sub-circuit layout-seeding selection (the Push modal's
     /// checkboxes; body `{"seed":["mcu","Power Input", …]}`). When non-null,
     /// each NAMED group's freshly-added parts are placed from the design's saved
@@ -198,14 +198,14 @@ pub const ParsedSyncPlan = struct {
     /// labelled box off-board (see `seedSelectedGroups`). Null ⇒ no selection,
     /// the default staging flow runs unchanged. `seed_all` is the `"*"` / `"all"`
     /// shorthand selecting every seedable group.
-    seed_groups: ?std.StringHashMap(void) = null,
+    seed_groups: ?std.StringHashMapUnmanaged(void) = null,
     seed_all: bool = false,
     /// Live footprint positions on the target board (KiCad-uuid → placement),
     /// from `collectPlacements`. Lets `computeGroupAnchors` find where a group's
     /// anchor currently sits so `seedSelectedGroups` can place the rest around
     /// it. Null/empty ⇒ no anchor is on the board (every selected group boxes
     /// off-board).
-    board_positions: ?*const std.StringHashMap(FpPlacement) = null,
+    board_positions: ?*const std.StringHashMapUnmanaged(FpPlacement) = null,
 };
 
 /// Compose the fingerprint string used as the key in
@@ -324,7 +324,7 @@ fn loadFootprintDefImpl(
     const children = nodes[0].asList() orelse return null;
     if (children.len < 2) return null;
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(spc.arena);
     try w.writeAll("{\"id\":{\"libraryNickname\":\"eda-sync\",\"entryName\":");
     try json_writer.writeString(w, fp_name);
@@ -768,17 +768,17 @@ pub const SyncRunError = error{ NotADesign, BuildFailed } || HandlerError;
 fn populatePadNetMaps(
     arena: std.mem.Allocator,
     nets: []const export_kicad.FlatNet,
-    pad_net_map: *std.StringHashMap([]const u8),
-    pad_full_net: *std.StringHashMap([]const u8),
-    net_pad_count: *std.StringHashMap(u32),
-    net_hub_pins: *std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)),
+    pad_net_map: *std.StringHashMapUnmanaged([]const u8),
+    pad_full_net: *std.StringHashMapUnmanaged([]const u8),
+    net_pad_count: *std.StringHashMapUnmanaged(u32),
+    net_hub_pins: *std.StringHashMapUnmanaged(std.ArrayList(export_kicad.FlatPin)),
     dot_nets: bool,
 ) !void {
-    var bare_counts = std.StringHashMap(u32).init(arena);
+    var bare_counts = std.StringHashMapUnmanaged(u32).empty;
     for (nets) |net| {
         if (net.name.len == 0) continue;
         const bare = bareNetName(maybeCollapseDotSubNet(net.name, dot_nets));
-        const e = try bare_counts.getOrPut(bare);
+        const e = try bare_counts.getOrPut(arena, bare);
         if (!e.found_existing) e.value_ptr.* = 0;
         e.value_ptr.* += 1;
     }
@@ -789,14 +789,14 @@ fn populatePadNetMaps(
         const display = if ((bare_counts.get(bare) orelse 0) == 1) bare else post_dot;
         for (net.pins) |pin| {
             const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, pin.pin });
-            try pad_net_map.put(key, display);
-            try pad_full_net.put(key, net.name);
+            try pad_net_map.put(arena, key, display);
+            try pad_full_net.put(arena, key, net.name);
             const ck = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, display });
-            const e = try net_pad_count.getOrPut(ck);
+            const e = try net_pad_count.getOrPut(arena, ck);
             if (!e.found_existing) e.value_ptr.* = 0;
             e.value_ptr.* += 1;
             if (isHubRef(pin.ref_des)) {
-                const he = try net_hub_pins.getOrPut(net.name);
+                const he = try net_hub_pins.getOrPut(arena, net.name);
                 if (!he.found_existing) he.value_ptr.* = .empty;
                 try he.value_ptr.append(arena, pin);
             }
@@ -826,27 +826,27 @@ pub fn runSyncPlan(
     const bom_path = try paths.designSiblingPath(arena, project_dir, name, ".bom");
     bom.resolveIdentities(handler_alloc, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
-    var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    var instances: std.ArrayList(export_kicad.FlatInstance) = .empty;
     try netlist_mod.collectInstances(arena, block, "", &instances, block.refStyle());
-    var nets: std.ArrayListUnmanaged(export_kicad.FlatNet) = .empty;
+    var nets: std.ArrayList(export_kicad.FlatNet) = .empty;
     try export_kicad.flattenAndMergeNets(arena, block, &nets);
 
     // Pin→net maps used by the diff loop, the passive `canopy_net` field,
     // and the stale-pad heuristic. Built in one pass — see `populatePadNetMaps`.
-    var pad_net_map = std.StringHashMap([]const u8).init(arena);
-    var net_pad_count = std.StringHashMap(u32).init(arena);
-    var pad_full_net = std.StringHashMap([]const u8).init(arena);
-    var net_hub_pins = std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)).init(arena);
+    var pad_net_map = std.StringHashMapUnmanaged([]const u8).empty;
+    var net_pad_count = std.StringHashMapUnmanaged(u32).empty;
+    var pad_full_net = std.StringHashMapUnmanaged([]const u8).empty;
+    var net_hub_pins = std.StringHashMapUnmanaged(std.ArrayList(export_kicad.FlatPin)).empty;
     try populatePadNetMaps(arena, nets.items, &pad_net_map, &pad_full_net, &net_pad_count, &net_hub_pins, parsed.dot_nets);
 
     // ref-des → section name. Top-level `section.instances` already carries
     // every nested sub-section + decouple/series child, so one shallow pass
     // covers the whole design tree. Sub-block parts (ref-des like "usb/U1")
     // are attributed to their sub-block in `sectionForRef`, not here.
-    var ref_to_section = std.StringHashMap([]const u8).init(arena);
+    var ref_to_section = std.StringHashMapUnmanaged([]const u8).empty;
     for (block.sections) |sec| {
         if (sec.name.len == 0) continue;
-        for (sec.instances) |si| try ref_to_section.put(si.ref_des, sec.name);
+        for (sec.instances) |si| try ref_to_section.put(arena, si.ref_des, sec.name);
     }
     // Fixed staging seats for every part, computed once from the full roster so
     // a part's staging coordinate doesn't shift with the push's composition.
@@ -855,15 +855,15 @@ pub fn runSyncPlan(
     // names land at that exact pose (below) so a fresh import reproduces the
     // tool's layout instead of a staging pile. Null → every add stages as before.
     const premade_layout = pcb_layout.loadSyncLayout(arena, project_dir, name);
-    var pending_adds: std.ArrayListUnmanaged(PendingAdd) = .empty;
+    var pending_adds: std.ArrayList(PendingAdd) = .empty;
 
-    var by_uuid = std.StringHashMap(BoardFp).init(arena);
-    var by_ref = std.StringHashMap(BoardFp).init(arena);
-    var by_kicad_uuid = std.StringHashMap(BoardFp).init(arena);
+    var by_uuid = std.StringHashMapUnmanaged(BoardFp).empty;
+    var by_ref = std.StringHashMapUnmanaged(BoardFp).empty;
+    var by_kicad_uuid = std.StringHashMapUnmanaged(BoardFp).empty;
     for (parsed.board) |bfp| {
-        if (bfp.uuid.len > 0) try by_uuid.put(bfp.uuid, bfp);
-        if (bfp.ref.len > 0) try by_ref.put(bfp.ref, bfp);
-        if (bfp.kicad_uuid.len > 0) try by_kicad_uuid.put(bfp.kicad_uuid, bfp);
+        if (bfp.uuid.len > 0) try by_uuid.put(arena, bfp.uuid, bfp);
+        if (bfp.ref.len > 0) try by_ref.put(arena, bfp.ref, bfp);
+        if (bfp.kicad_uuid.len > 0) try by_kicad_uuid.put(arena, bfp.kicad_uuid, bfp);
     }
 
     // Per-sub-circuit anchors for the explicit-seeding path (Push modal): which
@@ -878,8 +878,8 @@ pub fn runSyncPlan(
     // (parent_path, footprint_name, value) signature. Pairing within a
     // group is deterministic-by-ref so the user gets a reproducible
     // shuffle even when individual identities can't be recovered.
-    var by_migration = std.StringHashMap(BoardFp).init(arena);
-    var by_netsig = std.StringHashMap(BoardFp).init(arena);
+    var by_migration = std.StringHashMapUnmanaged(BoardFp).empty;
+    var by_netsig = std.StringHashMapUnmanaged(BoardFp).empty;
     if (parsed.migrate_heuristic) {
         try buildMigrationIndex(arena, parsed.board, instances.items, &by_migration);
         // Net-signature relink runs after (parent_path, value) migration so
@@ -901,15 +901,15 @@ pub fn runSyncPlan(
     }
 
     var model_cfg = export_kicad.loadModelConfig(arena, project_dir);
-    defer model_cfg.deinit();
+    defer model_cfg.deinit(arena);
     var spc = SyncPlanContext{ .arena = arena, .project_dir = project_dir, .model_cfg = &model_cfg };
 
-    var ops_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var ops_buf: std.ArrayList(u8) = .empty;
     const w = ops_buf.writer(arena);
     var first_op = true;
     var summary = SyncSummary{};
-    var matched_uuids = std.StringHashMap(void).init(arena);
-    var canonical_fp_name = std.StringHashMap([]const u8).init(arena);
+    var matched_uuids = std.StringHashMapUnmanaged(void).empty;
+    var canonical_fp_name = std.StringHashMapUnmanaged([]const u8).empty;
 
     // Pre-walk instances to find every board fp that some design instance
     // will claim via its canopy_uuid. The by_ref tier in matchInstance
@@ -917,10 +917,10 @@ pub fn runSyncPlan(
     // collide on one fp (one via by_uuid, the other via by_ref) and emit
     // contradictory set_field ops, producing the flip-flop where every
     // sync rewrites the same fp's reference and canopy_uuid.
-    var reserved_kicad_uuids = std.StringHashMap(void).init(arena);
+    var reserved_kicad_uuids = std.StringHashMapUnmanaged(void).empty;
     for (instances.items) |inst| {
         if (by_uuid.get(inst.uuid)) |m| {
-            if (m.kicad_uuid.len > 0) try reserved_kicad_uuids.put(m.kicad_uuid, {});
+            if (m.kicad_uuid.len > 0) try reserved_kicad_uuids.put(arena, m.kicad_uuid, {});
         }
     }
 
@@ -979,7 +979,7 @@ pub fn runSyncPlan(
     const sub_circuits_json = try buildSubCircuitsJson(arena, &diff_ctx);
 
     // Final response envelope.
-    var resp_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var resp_buf: std.ArrayList(u8) = .empty;
     const rw = resp_buf.writer(handler_alloc);
     const version = serve_root.getLiveVersion(name);
     try rw.print(
@@ -1114,7 +1114,7 @@ fn runKicadPcbSync(
 
     // Live footprint positions (KiCad-uuid → x/y/rot/layer), so a selected
     // sub-circuit whose anchor is already on the board can be re-centred there.
-    const board_positions = try req.arena.create(std.StringHashMap(FpPlacement));
+    const board_positions = try req.arena.create(std.StringHashMapUnmanaged(FpPlacement));
     board_positions.* = try collectPlacements(req.arena, src);
 
     // Explicit per-sub-circuit seeding selection from the POST body
@@ -1133,7 +1133,7 @@ fn runKicadPcbSync(
         .dot_nets = dot_nets,
         .refresh = refresh,
         .emit_layout_vias = !isQueryFlagSet(req, "no_layout_vias"),
-        .applied_ops = std.StringHashMap(void).init(req.arena),
+        .applied_ops = std.StringHashMapUnmanaged(void).empty,
         .seed_groups = seed.groups,
         .seed_all = seed.all,
         .board_positions = board_positions,
@@ -1207,7 +1207,7 @@ fn runKicadPcbSync(
     else
         copyKicadModels(req.arena, ctx.project_dir, block, pcb_path);
 
-    var resp_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var resp_buf: std.ArrayList(u8) = .empty;
     const rw = resp_buf.writer(ctx.allocator);
     try rw.print(
         "{{\"ok\":true,\"design_version\":{d}," ++
@@ -1266,7 +1266,7 @@ fn isQueryFlagSet(req: *httpz.Request, key: []const u8) bool {
 }
 
 /// Parsed per-sub-circuit seeding selection (the Push modal checkboxes).
-const SeedSelection = struct { groups: ?std.StringHashMap(void) = null, all: bool = false };
+const SeedSelection = struct { groups: ?std.StringHashMapUnmanaged(void) = null, all: bool = false };
 
 /// True for the "seed every group" tokens.
 fn isSeedAllToken(s: []const u8) bool {
@@ -1298,12 +1298,12 @@ fn parseSeedSelection(arena: std.mem.Allocator, req: *httpz.Request) SeedSelecti
 }
 
 /// Build a name set from JSON string values (non-strings skipped). Null on OOM.
-fn seedNameSet(arena: std.mem.Allocator, items: []const std.json.Value) ?std.StringHashMap(void) {
-    var set = std.StringHashMap(void).init(arena);
+fn seedNameSet(arena: std.mem.Allocator, items: []const std.json.Value) ?std.StringHashMapUnmanaged(void) {
+    var set = std.StringHashMapUnmanaged(void).empty;
     for (items) |it| {
         if (it != .string) continue;
         const nm = arena.dupe(u8, it.string) catch return null;
-        set.put(nm, {}) catch return null;
+        set.put(arena, nm, {}) catch return null;
     }
     return set;
 }
@@ -1381,7 +1381,7 @@ fn pruneBackupsImpl(arena: std.mem.Allocator, path: []const u8) !void {
         else => return e,
     };
     defer dir.close();
-    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    var names: std.ArrayList([]const u8) = .empty;
     var it = dir.iterate();
     while (try it.next()) |entry| {
         if (entry.kind != .file) continue;
@@ -1419,8 +1419,8 @@ const FpPlacement = struct { ref: []const u8, x: f64, y: f64, rot: f64, layer: [
 /// board text. Unparseable input yields an empty map (the guard degrades to
 /// a no-op rather than blocking the sync on its own bug — both texts were
 /// already parsed upstream by the reader/writer in any real request).
-fn collectPlacements(arena: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error!std.StringHashMap(FpPlacement) {
-    var out = std.StringHashMap(FpPlacement).init(arena);
+fn collectPlacements(arena: std.mem.Allocator, src: []const u8) !std.StringHashMapUnmanaged(FpPlacement) {
+    var out = std.StringHashMapUnmanaged(FpPlacement).empty;
     const nodes = parser_mod.parse(arena, src) catch return out;
     if (nodes.len == 0) return out;
     const root = nodes[0].asList() orelse return out;
@@ -1452,7 +1452,7 @@ fn collectPlacements(arena: std.mem.Allocator, src: []const u8) std.mem.Allocato
                 if (std.mem.eql(u8, pk, "Reference")) ref = sl[2].asString() orelse ref;
             }
         }
-        if (uuid.len > 0) try out.put(uuid, .{ .ref = ref, .x = x, .y = y, .rot = rot, .layer = layer });
+        if (uuid.len > 0) try out.put(arena, uuid, .{ .ref = ref, .x = x, .y = y, .rot = rot, .layer = layer });
     }
     return out;
 }
@@ -1471,7 +1471,7 @@ const FORM_HEAD_FOOTPRINT = "footprint";
 fn placementViolations(arena: std.mem.Allocator, old_src: []const u8, new_src: []const u8) std.mem.Allocator.Error!?[]const u8 {
     var old_map = try collectPlacements(arena, old_src);
     const new_map = try collectPlacements(arena, new_src);
-    var list: std.ArrayListUnmanaged(u8) = .empty;
+    var list: std.ArrayList(u8) = .empty;
     const w = list.writer(arena);
     var count: usize = 0;
     var it = old_map.iterator();
@@ -1496,7 +1496,7 @@ fn placementViolations(arena: std.mem.Allocator, old_src: []const u8, new_src: [
         }
     }
     if (count == 0) return null;
-    var msg: std.ArrayListUnmanaged(u8) = .empty;
+    var msg: std.ArrayList(u8) = .empty;
     const mw = msg.writer(arena);
     try mw.print(
         "placement guard: this sync would change the position/side of {d} existing part(s) — write aborted, board file unchanged: {s}",
@@ -1572,8 +1572,8 @@ fn copyDesignSources(
     const board_dir = std.fs.path.dirname(pcb_path) orelse ".";
     const dest_root = std.fmt.allocPrint(arena, "{s}/{s}{s}", .{ board_dir, design_name, SOURCE_DIR_SUFFIX }) catch return 0;
 
-    var rels: std.ArrayListUnmanaged([]const u8) = .empty;
-    var seen = std.StringHashMap(void).init(arena);
+    var rels: std.ArrayList([]const u8) = .empty;
+    var seen = std.StringHashMapUnmanaged(void).empty;
     // The design file itself: its read path is `<project_dir>/src/…`, so strip
     // the prefix to get the mirror-relative path.
     addRel(arena, &rels, &seen, projectRelative(board_path, project_dir));
@@ -1609,11 +1609,11 @@ fn copyKicadModels(
         return 0;
     };
 
-    var instances: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    var instances: std.ArrayList(export_kicad.FlatInstance) = .empty;
     netlist_mod.collectInstances(arena, block, "", &instances, block.refStyle()) catch return 0;
 
     var model_cfg = export_kicad.loadModelConfig(arena, project_dir);
-    var seen = std.StringHashMap(void).init(arena);
+    var seen = std.StringHashMapUnmanaged(void).empty;
 
     var copied: usize = 0;
     for (instances.items) |inst| {
@@ -1625,7 +1625,7 @@ fn copyKicadModels(
             fp_mod.findModelFile(arena, project_dir, inst.footprint, inst.component);
         const mname = model_name orelse continue;
         if (seen.contains(mname)) continue;
-        seen.put(mname, {}) catch |e| log.warn("model-copy: track {s} failed: {s}", .{ mname, @errorName(e) });
+        seen.put(arena, mname, {}) catch |e| log.warn("model-copy: track {s} failed: {s}", .{ mname, @errorName(e) });
         if (copyOneModel(arena, project_dir, models_dir, mname)) copied += 1;
     }
     return copied;
@@ -1660,8 +1660,8 @@ fn copyOneModel(
 /// built without provenance) are skipped. Dedupes via `seen`.
 fn collectSubBlockSources(
     arena: std.mem.Allocator,
-    rels: *std.ArrayListUnmanaged([]const u8),
-    seen: *std.StringHashMap(void),
+    rels: *std.ArrayList([]const u8),
+    seen: *std.StringHashMapUnmanaged(void),
     block: *const env_mod.DesignBlock,
 ) void {
     for (block.sub_blocks) |sb| {
@@ -1680,12 +1680,12 @@ fn collectSubBlockSources(
 /// several sub-blocks down to one copy).
 fn addRel(
     arena: std.mem.Allocator,
-    rels: *std.ArrayListUnmanaged([]const u8),
-    seen: *std.StringHashMap(void),
+    rels: *std.ArrayList([]const u8),
+    seen: *std.StringHashMapUnmanaged(void),
     rel: []const u8,
 ) void {
     if (seen.contains(rel)) return;
-    seen.put(rel, {}) catch return;
+    seen.put(arena, rel, {}) catch return;
     rels.append(arena, rel) catch |e| log.warn("source-copy: track {s} failed: {s}", .{ rel, @errorName(e) });
 }
 
@@ -1784,7 +1784,7 @@ const StagingSlot = struct { gi: usize, slot: usize };
 /// on top of the still-unplaced boxes from the previous push. `max_n` (the
 /// largest section's part count across the design) drives a uniform box size.
 const StagingLayout = struct {
-    by_ref: std.StringHashMap(StagingSlot),
+    by_ref: std.StringHashMapUnmanaged(StagingSlot),
     max_n: usize,
 };
 
@@ -1796,14 +1796,14 @@ const StagingLayout = struct {
 fn buildStagingLayout(
     arena: std.mem.Allocator,
     insts: []const export_kicad.FlatInstance,
-    ref_to_section: *std.StringHashMap([]const u8),
+    ref_to_section: *std.StringHashMapUnmanaged([]const u8),
 ) !StagingLayout {
-    var buckets = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(arena);
-    var order: std.ArrayListUnmanaged([]const u8) = .empty;
+    var buckets = std.StringHashMapUnmanaged(std.ArrayList([]const u8)).empty;
+    var order: std.ArrayList([]const u8) = .empty;
     for (insts) |inst| {
         const raw = sectionForRef(inst.ref_des, ref_to_section);
         const key = if (raw.len > 0) raw else "(unsectioned)";
-        const e = try buckets.getOrPut(key);
+        const e = try buckets.getOrPut(arena, key);
         if (!e.found_existing) {
             e.value_ptr.* = .empty;
             try order.append(arena, key);
@@ -1812,22 +1812,22 @@ fn buildStagingLayout(
     }
     std.mem.sort([]const u8, order.items, {}, lessThanStr);
 
-    var by_ref = std.StringHashMap(StagingSlot).init(arena);
+    var by_ref = std.StringHashMapUnmanaged(StagingSlot).empty;
     var max_n: usize = 0;
     for (order.items, 0..) |sec, gi| {
         const refs = buckets.get(sec) orelse continue;
         std.mem.sort([]const u8, refs.items, {}, lessThanStr);
         if (refs.items.len > max_n) max_n = refs.items.len;
         for (refs.items, 0..) |ref, slot| {
-            try by_ref.put(ref, .{ .gi = gi, .slot = slot });
+            try by_ref.put(arena, ref, .{ .gi = gi, .slot = slot });
         }
     }
     return .{ .by_ref = by_ref, .max_n = max_n };
 }
 
 const DiffContext = struct {
-    by_uuid: *std.StringHashMap(BoardFp),
-    by_ref: *std.StringHashMap(BoardFp),
+    by_uuid: *std.StringHashMapUnmanaged(BoardFp),
+    by_ref: *std.StringHashMapUnmanaged(BoardFp),
     /// Board fp KiCad-internal uuid → BoardFp. The add path stamps a new
     /// footprint's KiCad `(uuid …)` equal to the design's canopy_uuid, so
     /// when the canopy_uuid *property* later gets stripped (a swap that
@@ -1835,33 +1835,33 @@ const DiffContext = struct {
     /// surviving link back to the design instance is this field. Consulted
     /// as a last resort in matchInstance to adopt such orphans in place
     /// instead of spawning a duplicate at the origin.
-    by_kicad_uuid: *std.StringHashMap(BoardFp),
+    by_kicad_uuid: *std.StringHashMapUnmanaged(BoardFp),
     /// Migration mode: design instance uuid → BoardFp it should adopt
     /// placement from. Populated by `buildMigrationIndex`; empty when
     /// --migrate is off.
-    by_migration: *std.StringHashMap(BoardFp),
+    by_migration: *std.StringHashMapUnmanaged(BoardFp),
     /// Net-signature relink: design instance uuid → BoardFp it should
     /// adopt. Populated by `buildNetSignatureRelinkIndex` for orphans the
     /// (parent_path, value) migration tier couldn't pair — typically
     /// cross-hierarchy moves like top-level `Q1` → `disp/Q3`. Gated on
     /// --migrate alongside the migration index.
-    by_netsig: *std.StringHashMap(BoardFp),
+    by_netsig: *std.StringHashMapUnmanaged(BoardFp),
     /// Set of board fp kicad_uuids that some design instance will claim
     /// via its canopy_uuid (by_uuid tier). matchInstance's by_ref fallback
     /// refuses to return any fp whose kicad_uuid is in this set, so two
     /// instances can't collide on one fp via different tiers.
-    reserved_kicad_uuids: *std.StringHashMap(void),
-    pad_net_map: *std.StringHashMap([]const u8),
+    reserved_kicad_uuids: *std.StringHashMapUnmanaged(void),
+    pad_net_map: *std.StringHashMapUnmanaged([]const u8),
     /// "ref|pin" → full (pre-collapse) net name, and full net → the hub pins
     /// on it. Together they let a passive's `canopy_net` field name the device
     /// pin each pad routes to (`U8.C3.VDD33USB / GND`). Passives only.
-    pad_full_net: *std.StringHashMap([]const u8),
-    net_hub_pins: *std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)),
+    pad_full_net: *std.StringHashMapUnmanaged([]const u8),
+    net_hub_pins: *std.StringHashMapUnmanaged(std.ArrayList(export_kicad.FlatPin)),
     /// ref-des → the design `(section …)` it was declared in, for the
     /// `canopy_section` field and the section-grouped staging layout. Built
     /// from the design block's top-level sections (whose `.instances` already
     /// include nested sub-section + decouple/series children).
-    ref_to_section: *std.StringHashMap([]const u8),
+    ref_to_section: *std.StringHashMapUnmanaged([]const u8),
     /// Diff-independent staging seats for every design part, so `emitStagedAdds`
     /// places a new part at the same coordinate on every push. See StagingLayout.
     staging_layout: *const StagingLayout,
@@ -1870,28 +1870,28 @@ const DiffContext = struct {
     /// layout names is placed at that exact pose instead of the staging grid;
     /// parts the layout omits still fall back to staging. Existing/matched
     /// footprints are never moved. See `loadSyncLayout` and `emitStagedAdds`.
-    premade_layout: ?std.StringHashMap(pcb_layout.SyncPose),
+    premade_layout: ?std.StringHashMapUnmanaged(pcb_layout.SyncPose),
     /// Newly-added instances, buffered during the diff walk so the staging
     /// pass can lay them out grouped by section (positions + section boxes)
     /// after every match has been resolved. See `emitStagedAdds`.
-    pending_adds: *std.ArrayListUnmanaged(PendingAdd),
+    pending_adds: *std.ArrayList(PendingAdd),
     /// "ref_des|net" → count of design pads carrying that net on the instance.
     /// `emitPadNetOps` clears a stale board pad only when its net is a count==1
     /// signal the design moved elsewhere, never a multi-pad GND/power net.
-    net_pad_count: *std.StringHashMap(u32),
-    matched_uuids: *std.StringHashMap(void),
+    net_pad_count: *std.StringHashMapUnmanaged(u32),
+    matched_uuids: *std.StringHashMapUnmanaged(void),
     /// short EDA footprint name ("c-0201") → canonical KiCad name inside
     /// the lib/footprints/<short>.sexp file ("C_0201_0603Metric"). Used to
     /// skip swap_footprint ops when a manually-placed board fp carries the
     /// KiCad-canonical name but resolves to the same physical footprint as
     /// the design's short name. Populated lazily on first lookup.
-    canonical_fp_name: *std.StringHashMap([]const u8),
+    canonical_fp_name: *std.StringHashMapUnmanaged([]const u8),
     /// Fingerprint set of state-asserting ops the agent already pushed
     /// in prior syncs. Owned by ParsedSyncPlan; the diff loop consults
     /// it via the `emitOpUnlessApplied` helper to skip re-emitting ops
     /// that already landed (some KiCad IPC writes don't round-trip via
     /// GetItems, which would otherwise cause indefinite re-emission).
-    applied_ops: *std.StringHashMap(void),
+    applied_ops: *std.StringHashMapUnmanaged(void),
     spc: *SyncPlanContext,
     summary: *SyncSummary,
     migrate_heuristic: bool,
@@ -1921,9 +1921,9 @@ const DiffContext = struct {
     /// group's `group_anchors` entry when it's already on the board, else an
     /// off-board box) and everything else to the plain staging grid. Null/false
     /// ⇒ the default staging flow runs unchanged. See `ParsedSyncPlan.seed_*`.
-    seed_groups: ?std.StringHashMap(void) = null,
+    seed_groups: ?std.StringHashMapUnmanaged(void) = null,
     seed_all: bool = false,
-    group_anchors: *const std.StringHashMap(GroupAnchor),
+    group_anchors: *const std.StringHashMapUnmanaged(GroupAnchor),
 };
 
 /// Walk every board fp that didn't match any design instance and emit the
@@ -1933,7 +1933,7 @@ const DiffContext = struct {
 /// sync never flips the padlock on (or off) a part.
 fn emitStaleOps(
     parsed: ParsedSyncPlan,
-    matched_uuids: *std.StringHashMap(void),
+    matched_uuids: *std.StringHashMapUnmanaged(void),
     w: anytype,
     first_op: *bool,
     summary: *SyncSummary,
@@ -2008,14 +2008,14 @@ fn canonicalFootprintNameImpl(d: *DiffContext, short: []const u8) !?[]const u8 {
     }
     const fp_path = try std.fmt.allocPrint(d.spc.arena, PATH_FMT_FP_SEXP, .{ d.spc.project_dir, short });
     const fp_source = infra_fs.cwd().readFileAlloc(d.spc.arena, fp_path, MAX_FOOTPRINT_BYTES) catch {
-        try d.canonical_fp_name.put(short, "");
+        try d.canonical_fp_name.put(d.spc.arena, short, "");
         return null;
     };
     const name = netlist_mod.extractFootprintName(d.spc.arena, fp_source) catch {
-        try d.canonical_fp_name.put(short, "");
+        try d.canonical_fp_name.put(d.spc.arena, short, "");
         return null;
     };
-    try d.canonical_fp_name.put(short, name);
+    try d.canonical_fp_name.put(d.spc.arena, short, name);
     return name;
 }
 
@@ -2050,10 +2050,10 @@ fn heuristicKey(arena: std.mem.Allocator, parent: []const u8, _: []const u8, val
 fn pickByUuidOrRef(
     inst_uuid: []const u8,
     inst_ref: []const u8,
-    by_uuid: *std.StringHashMap(BoardFp),
-    by_ref: *std.StringHashMap(BoardFp),
-    reserved_kicad_uuids: *std.StringHashMap(void),
-    already_claimed: *std.StringHashMap(void),
+    by_uuid: *std.StringHashMapUnmanaged(BoardFp),
+    by_ref: *std.StringHashMapUnmanaged(BoardFp),
+    reserved_kicad_uuids: *std.StringHashMapUnmanaged(void),
+    already_claimed: *std.StringHashMapUnmanaged(void),
 ) ?BoardFp {
     if (by_uuid.get(inst_uuid)) |m| {
         if (!already_claimed.contains(m.kicad_uuid)) return m;
@@ -2080,8 +2080,8 @@ fn pickByUuidOrRef(
 /// claimed in this walk. Pure; extracted from `matchInstance` to be testable.
 fn pickByKicadUuid(
     inst_uuid: []const u8,
-    by_kicad_uuid: *std.StringHashMap(BoardFp),
-    already_claimed: *std.StringHashMap(void),
+    by_kicad_uuid: *std.StringHashMapUnmanaged(BoardFp),
+    already_claimed: *std.StringHashMapUnmanaged(void),
 ) ?BoardFp {
     if (by_kicad_uuid.get(inst_uuid)) |m| {
         if (!already_claimed.contains(m.kicad_uuid)) return m;
@@ -2142,9 +2142,9 @@ fn heuristicMatch(d: *DiffContext, inst: export_kicad.FlatInstance) ?BoardFp {
 fn designInstanceNetSig(
     arena: std.mem.Allocator,
     inst_ref_des: []const u8,
-    pad_net_map: *std.StringHashMap([]const u8),
+    pad_net_map: *std.StringHashMapUnmanaged([]const u8),
 ) ![]const u8 {
-    var pairs: std.ArrayListUnmanaged(struct { pad: []const u8, net: []const u8 }) = .empty;
+    var pairs: std.ArrayList(struct { pad: []const u8, net: []const u8 }) = .empty;
     var it = pad_net_map.iterator();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
@@ -2158,7 +2158,7 @@ fn designInstanceNetSig(
             return std.mem.lessThan(u8, a.pad, b.pad);
         }
     }.lessThan);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     for (pairs.items) |p| try w.print("{s}={s};", .{ p.pad, p.net });
     return buf.items;
@@ -2168,7 +2168,7 @@ fn designInstanceNetSig(
 /// pad list the agent reported for a board fp. Empty when the fp has no
 /// pads on named nets.
 fn boardFpNetSig(arena: std.mem.Allocator, bfp: BoardFp) ![]const u8 {
-    var pairs: std.ArrayListUnmanaged(struct { pad: []const u8, net: []const u8 }) = .empty;
+    var pairs: std.ArrayList(struct { pad: []const u8, net: []const u8 }) = .empty;
     for (bfp.pads) |p| {
         if (p.net.len == 0) continue;
         try pairs.append(arena, .{ .pad = p.number, .net = p.net });
@@ -2179,7 +2179,7 @@ fn boardFpNetSig(arena: std.mem.Allocator, bfp: BoardFp) ![]const u8 {
             return std.mem.lessThan(u8, a.pad, b.pad);
         }
     }.lessThan);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     for (pairs.items) |p| try w.print("{s}={s};", .{ p.pad, p.net });
     return buf.items;
@@ -2198,26 +2198,26 @@ fn buildNetSignatureRelinkIndex(
     project_dir: []const u8,
     board: []const BoardFp,
     instances: []const export_kicad.FlatInstance,
-    by_uuid: *std.StringHashMap(BoardFp),
-    _: *std.StringHashMap(BoardFp), // by_ref — unused since the netsig tier
+    by_uuid: *std.StringHashMapUnmanaged(BoardFp),
+    _: *std.StringHashMapUnmanaged(BoardFp), // by_ref — unused since the netsig tier
     // deliberately considers insts that already match by_ref so it can
     // pair them with an orphan instead of an agent-created duplicate.
-    by_migration: *std.StringHashMap(BoardFp),
-    pad_net_map: *std.StringHashMap([]const u8),
-    out: *std.StringHashMap(BoardFp),
+    by_migration: *std.StringHashMapUnmanaged(BoardFp),
+    pad_net_map: *std.StringHashMapUnmanaged([]const u8),
+    out: *std.StringHashMapUnmanaged(BoardFp),
 ) !void {
     // The migration index is keyed by design uuid → BoardFp; mark which
     // board fps it already claimed so we don't double-pair them.
-    var migration_claimed_kids = std.StringHashMap(void).init(arena);
+    var migration_claimed_kids = std.StringHashMapUnmanaged(void).empty;
     var mit = by_migration.iterator();
     while (mit.next()) |entry| {
         const m = entry.value_ptr.*;
-        if (m.kicad_uuid.len > 0) try migration_claimed_kids.put(m.kicad_uuid, {});
+        if (m.kicad_uuid.len > 0) try migration_claimed_kids.put(arena, m.kicad_uuid, {});
     }
 
     // Bucket orphan board fps by netsig (with footprint name appended so
     // a stray `c-0201`-vs-`r-0201` collision on pads can't pair).
-    var board_by_sig = std.StringHashMap(std.ArrayListUnmanaged(BoardFp)).init(arena);
+    var board_by_sig = std.StringHashMapUnmanaged(std.ArrayList(BoardFp)).empty;
     for (board) |bfp| {
         if (bfp.uuid.len == 0) continue;
         if (migration_claimed_kids.contains(bfp.kicad_uuid)) continue;
@@ -2228,7 +2228,7 @@ fn buildNetSignatureRelinkIndex(
         const sig = try boardFpNetSig(arena, bfp);
         if (sig.len == 0) continue;
         const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ bfp.footprint_name, sig });
-        const e = try board_by_sig.getOrPut(key);
+        const e = try board_by_sig.getOrPut(arena, key);
         if (!e.found_existing) e.value_ptr.* = .empty;
         try e.value_ptr.append(arena, bfp);
     }
@@ -2243,7 +2243,7 @@ fn buildNetSignatureRelinkIndex(
     //
     // Migration-tier matches are already a deterministic pairing so we
     // skip those — netsig overriding them would just churn.
-    var design_by_sig = std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatInstance)).init(arena);
+    var design_by_sig = std.StringHashMapUnmanaged(std.ArrayList(export_kicad.FlatInstance)).empty;
     // We don't skip ANY insts (not by_uuid, by_ref, or by_migration) so
     // netsig can override every other tier when it finds a unique
     // matching orphan. The pair only fires when the signature is unique
@@ -2255,7 +2255,7 @@ fn buildNetSignatureRelinkIndex(
         if (sig.len == 0) continue;
         const fp_short = stripLibPrefix(inst.footprint);
         const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ fp_short, sig });
-        const e = try design_by_sig.getOrPut(key);
+        const e = try design_by_sig.getOrPut(arena, key);
         if (!e.found_existing) e.value_ptr.* = .empty;
         try e.value_ptr.append(arena, inst);
     }
@@ -2309,7 +2309,7 @@ fn buildNetSignatureRelinkIndex(
         }
         if (ambiguous) continue;
         const board_fp = found_board orelse continue;
-        try out.put(inst.uuid, board_fp);
+        try out.put(arena, inst.uuid, board_fp);
     }
 }
 
@@ -2350,23 +2350,23 @@ fn buildMigrationIndex(
     arena: std.mem.Allocator,
     board: []const BoardFp,
     instances: []const export_kicad.FlatInstance,
-    out: *std.StringHashMap(BoardFp),
+    out: *std.StringHashMapUnmanaged(BoardFp),
 ) !void {
     // Index design + board by heuristic key. Hash → list of refs; we sort
     // the lists later for deterministic pairing.
-    var board_groups = std.StringHashMap(std.ArrayListUnmanaged(BoardFp)).init(arena);
-    var design_groups = std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatInstance)).init(arena);
+    var board_groups = std.StringHashMapUnmanaged(std.ArrayList(BoardFp)).empty;
+    var design_groups = std.StringHashMapUnmanaged(std.ArrayList(export_kicad.FlatInstance)).empty;
 
     for (board) |bfp| {
         const key = try heuristicKey(arena, parentPathOf(bfp.ref), bfp.footprint_name, bfp.value);
-        const e = try board_groups.getOrPut(key);
+        const e = try board_groups.getOrPut(arena, key);
         if (!e.found_existing) e.value_ptr.* = .empty;
         try e.value_ptr.append(arena, bfp);
     }
     for (instances) |inst| {
         const fp_name = stripLibPrefix(inst.footprint);
         const key = try heuristicKey(arena, parentPathOf(inst.ref_des), fp_name, inst.value);
-        const e = try design_groups.getOrPut(key);
+        const e = try design_groups.getOrPut(arena, key);
         if (!e.found_existing) e.value_ptr.* = .empty;
         try e.value_ptr.append(arena, inst);
     }
@@ -2382,7 +2382,7 @@ fn buildMigrationIndex(
         std.mem.sort(BoardFp, bgroup.items, {}, lessByRef);
         std.mem.sort(export_kicad.FlatInstance, dgroup.items, {}, lessByDesignRef);
         for (dgroup.items, bgroup.items) |inst, bfp| {
-            try out.put(inst.uuid, bfp);
+            try out.put(arena, inst.uuid, bfp);
         }
     }
 }
@@ -2420,7 +2420,7 @@ fn handleMatched(
     // Track matches by KiCad-internal UUID — that field is always
     // populated, whereas canopy_uuid is empty for ref-des-fallback
     // matches until the backfill op lands on a future sync.
-    if (m.kicad_uuid.len > 0) try d.matched_uuids.put(m.kicad_uuid, {});
+    if (m.kicad_uuid.len > 0) try d.matched_uuids.put(d.spc.arena, m.kicad_uuid, {});
     const target = opTargetUuid(m);
     if (!footprintNameMatches(d, m.footprint_name, fp_name_short)) {
         if (loadKicadMod(d.spc, fp_name_short, inst.component)) |kmod| {
@@ -2615,11 +2615,11 @@ fn lessByPadNum(_: void, a: CanopyPad, b: CanopyPad) bool {
 fn buildCanopyNetValue(
     arena: std.mem.Allocator,
     ref_des: []const u8,
-    pad_net_map: *std.StringHashMap([]const u8),
-    pad_full_net: *std.StringHashMap([]const u8),
-    net_hub_pins: *std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)),
+    pad_net_map: *std.StringHashMapUnmanaged([]const u8),
+    pad_full_net: *std.StringHashMapUnmanaged([]const u8),
+    net_hub_pins: *std.StringHashMapUnmanaged(std.ArrayList(export_kicad.FlatPin)),
 ) !?[]const u8 {
-    var pads: std.ArrayListUnmanaged(CanopyPad) = .empty;
+    var pads: std.ArrayList(CanopyPad) = .empty;
     var it = pad_net_map.iterator();
     while (it.next()) |entry| {
         const k = entry.key_ptr.*;
@@ -2631,7 +2631,7 @@ fn buildCanopyNetValue(
     if (pads.items.len == 0) return null;
     std.mem.sort(CanopyPad, pads.items, {}, lessByPadNum);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     for (pads.items, 0..) |p, i| {
         if (i > 0) try w.writeAll(" / ");
@@ -2733,7 +2733,7 @@ fn handleInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, 
 /// (hierarchical ref-des like "usb/U1") are attributed to their sub-block
 /// name; top-level parts use the `(section …)` they were declared in;
 /// anything else returns "" (no box, no canopy_section field).
-fn sectionForRef(ref_des: []const u8, ref_to_section: *std.StringHashMap([]const u8)) []const u8 {
+fn sectionForRef(ref_des: []const u8, ref_to_section: *std.StringHashMapUnmanaged([]const u8)) []const u8 {
     if (std.mem.indexOfScalar(u8, ref_des, '/')) |i| return ref_des[0..i];
     return ref_to_section.get(ref_des) orelse "";
 }
@@ -2764,7 +2764,7 @@ fn emitAddOp(
     fp_name: []const u8,
     kmod: []const u8,
     fp_def_json: ?[]const u8,
-    pad_net_map: *std.StringHashMap([]const u8),
+    pad_net_map: *std.StringHashMapUnmanaged([]const u8),
     pose: AddPose,
     canopy_net: ?[]const u8,
     section: []const u8,
@@ -2863,7 +2863,7 @@ fn boxCols(n: usize) usize {
 /// an Any-wrapped proto-canonical object string. Mirrors `writeBoardShapeOpen`
 /// + geometry but standalone rather than an inline footprint child.
 fn boardRectItem(arena: std.mem.Allocator, x1: f64, y1: f64, x2: f64, y2: f64) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     try w.writeAll(PROTO_ANY_OPEN ++ PROTO_TYPE_URL_BOARDSHAPE ++ "\",\"layer\":\"" ++ PROTO_LAYER_DWGS_USER ++ "\",");
     try w.writeAll("\"shape\":{\"attributes\":{\"stroke\":{\"width\":");
@@ -2876,7 +2876,7 @@ fn boardRectItem(arena: std.mem.Allocator, x1: f64, y1: f64, x2: f64, y2: f64) !
 
 /// Build a BoardText label on Dwgs.User as an Any-wrapped proto string.
 fn boardLabelItem(arena: std.mem.Allocator, x: f64, y: f64, text: []const u8) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     try w.writeAll(PROTO_ANY_OPEN ++ PROTO_TYPE_URL_BOARDTEXT ++ "\",\"layer\":\"" ++ PROTO_LAYER_DWGS_USER ++ "\",\"text\":{\"position\":");
     try writeProtoVec2(w, x, y);
@@ -2893,12 +2893,12 @@ fn boardLabelItem(arena: std.mem.Allocator, x: f64, y: f64, text: []const u8) ![
 fn groupAddsBySection(
     arena: std.mem.Allocator,
     adds: []const PendingAdd,
-    buckets: *std.StringHashMap(std.ArrayListUnmanaged(usize)),
-    order: *std.ArrayListUnmanaged([]const u8),
+    buckets: *std.StringHashMapUnmanaged(std.ArrayList(usize)),
+    order: *std.ArrayList([]const u8),
 ) !void {
     for (adds, 0..) |pa, i| {
         const key = if (pa.section.len > 0) pa.section else "(unsectioned)";
-        const e = try buckets.getOrPut(key);
+        const e = try buckets.getOrPut(arena, key);
         if (!e.found_existing) {
             e.value_ptr.* = .empty;
             try order.append(arena, key);
@@ -2929,7 +2929,7 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
     const adds = d.pending_adds.items;
     if (adds.len == 0) return;
 
-    var leftover: std.ArrayListUnmanaged(PendingAdd) = .empty;
+    var leftover: std.ArrayList(PendingAdd) = .empty;
 
     // Explicit selection: seed the chosen sub-circuits from the saved layout,
     // send the rest (unselected groups + parts the layout doesn't name) to the
@@ -2989,9 +2989,9 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
     // Fresh boards only — on a populated board the layout's coordinates land
     // in the middle of existing placement/routing, so everything left over
     // goes to the off-board staging grid instead.
-    const layout_if_fresh: ?std.StringHashMap(pcb_layout.SyncPose) = if (d.board_fresh) d.premade_layout else null;
+    const layout_if_fresh = if (d.board_fresh) d.premade_layout else null;
     const layout = layout_if_fresh orelse return emitStagingGrid(d, w, first, rest);
-    var grid_rest: std.ArrayListUnmanaged(PendingAdd) = .empty;
+    var grid_rest: std.ArrayList(PendingAdd) = .empty;
     for (rest) |pa| {
         const pose = layout.get(pa.inst.ref_des) orelse {
             try grid_rest.append(arena, pa);
@@ -3044,13 +3044,13 @@ fn anchorRank(ref_des: []const u8) u8 {
 fn computeGroupAnchors(
     arena: std.mem.Allocator,
     instances: []const export_kicad.FlatInstance,
-    by_uuid: *std.StringHashMap(BoardFp),
-    by_ref: *std.StringHashMap(BoardFp),
-    board_positions: ?*const std.StringHashMap(FpPlacement),
-    ref_to_section: *std.StringHashMap([]const u8),
-) !std.StringHashMap(GroupAnchor) {
-    var out = std.StringHashMap(GroupAnchor).init(arena);
-    var rank_of = std.StringHashMap(u8).init(arena);
+    by_uuid: *std.StringHashMapUnmanaged(BoardFp),
+    by_ref: *std.StringHashMapUnmanaged(BoardFp),
+    board_positions: ?*const std.StringHashMapUnmanaged(FpPlacement),
+    ref_to_section: *std.StringHashMapUnmanaged([]const u8),
+) !std.StringHashMapUnmanaged(GroupAnchor) {
+    var out = std.StringHashMapUnmanaged(GroupAnchor).empty;
+    var rank_of = std.StringHashMapUnmanaged(u8).empty;
     for (instances) |inst| {
         const sec = sectionForRef(inst.ref_des, ref_to_section);
         if (sec.len == 0) continue;
@@ -3076,8 +3076,8 @@ fn computeGroupAnchors(
                 }
             }
         }
-        try rank_of.put(sec, rank);
-        try out.put(sec, ga);
+        try rank_of.put(arena, sec, rank);
+        try out.put(arena, sec, ga);
     }
     return out;
 }
@@ -3120,7 +3120,7 @@ const SEED_BOX_LABEL = "Seeded layout — drag onto board";
 /// `FlatInstance.origin_key`, which survives `(hierarchical-ids)` renumbering).
 /// Everything else (sections, sub-blocks with no module layout) falls back to
 /// the parent design cache: `is_module = false`, keyed by full flattened ref.
-const SubCircuitSrc = struct { map: std.StringHashMap(pcb_layout.SyncPose), is_module: bool };
+const SubCircuitSrc = struct { map: std.StringHashMapUnmanaged(pcb_layout.SyncPose), is_module: bool };
 
 /// Resolve the pose source for sub-circuit `sec` (see `SubCircuitSrc`). Null when
 /// neither a module layout nor the parent cache can supply poses.
@@ -3154,17 +3154,17 @@ fn subCircuitSource(d: *DiffContext, sec: []const u8) !?SubCircuitSrc {
 fn planSelectedGroups(
     d: *DiffContext,
     adds: []const PendingAdd,
-    leftover: *std.ArrayListUnmanaged(PendingAdd),
+    leftover: *std.ArrayList(PendingAdd),
 ) !SeedPlan {
     const arena = d.spc.arena;
-    var placed: std.ArrayListUnmanaged(PositionedAdd) = .empty;
-    var buckets = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena);
-    var order: std.ArrayListUnmanaged([]const u8) = .empty;
+    var placed: std.ArrayList(PositionedAdd) = .empty;
+    var buckets = std.StringHashMapUnmanaged(std.ArrayList(usize)).empty;
+    var order: std.ArrayList([]const u8) = .empty;
     try groupAddsBySection(arena, adds, &buckets, &order);
 
     // Off-board parts accumulate here (pre-offset board coords); the whole block
     // then shifts clear of the board with ONE shared offset.
-    var block: std.ArrayListUnmanaged(NamedAdd) = .empty;
+    var block: std.ArrayList(NamedAdd) = .empty;
     for (order.items) |sec| {
         const idxs = (buckets.get(sec) orelse continue).items;
         if (!groupSelected(d, sec)) {
@@ -3196,9 +3196,9 @@ fn placeOneSelected(
     adds: []const PendingAdd,
     src: SubCircuitSrc,
     anchor: ?GroupAnchor,
-    leftover: *std.ArrayListUnmanaged(PendingAdd),
-    placed: *std.ArrayListUnmanaged(PositionedAdd),
-    block: *std.ArrayListUnmanaged(NamedAdd),
+    leftover: *std.ArrayList(PendingAdd),
+    placed: *std.ArrayList(PositionedAdd),
+    block: *std.ArrayList(NamedAdd),
 ) !void {
     const arena = d.spc.arena;
     var offx: f64 = 0;
@@ -3257,7 +3257,7 @@ fn anchorOriginKey(adds: []const PendingAdd, idxs: []const usize, ref: []const u
 fn finishOffBoardBlock(
     arena: std.mem.Allocator,
     block: []const NamedAdd,
-    placed: *std.ArrayListUnmanaged(PositionedAdd),
+    placed: *std.ArrayList(PositionedAdd),
 ) ![]const SeedBox {
     if (block.len == 0) return &.{};
     // ONE shared offset from the whole block's collective min-corner.
@@ -3273,16 +3273,16 @@ fn finishOffBoardBlock(
         try placed.append(arena, .{ .pa = n.pa, .x_mm = n.bx + dx, .y_mm = n.by + dy, .rot = n.rot });
     }
     // One box + group per sub-circuit, in first-seen order.
-    var boxes: std.ArrayListUnmanaged(SeedBox) = .empty;
-    var seen = std.StringHashMap(void).init(arena);
+    var boxes: std.ArrayList(SeedBox) = .empty;
+    var seen = std.StringHashMapUnmanaged(void).empty;
     for (block) |first| {
         if (seen.contains(first.sec)) continue;
-        try seen.put(first.sec, {});
+        try seen.put(arena, first.sec, {});
         var bx0: f64 = std.math.floatMax(f64);
         var by0: f64 = std.math.floatMax(f64);
         var bx1: f64 = -std.math.floatMax(f64);
         var by1: f64 = -std.math.floatMax(f64);
-        var members: std.ArrayListUnmanaged([]const u8) = .empty;
+        var members: std.ArrayList([]const u8) = .empty;
         for (block) |n| {
             if (!std.mem.eql(u8, n.sec, first.sec)) continue;
             const x = n.bx + dx;
@@ -3318,12 +3318,12 @@ fn finishOffBoardBlock(
 /// group with no seedable source is skipped. Computed from the still-populated
 /// `pending_adds` after `emitStagedAdds`. Result lives on `arena`.
 fn buildSubCircuitsJson(arena: std.mem.Allocator, d: *DiffContext) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     try w.writeByte('[');
     const adds = d.pending_adds.items;
-    var buckets = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena);
-    var order: std.ArrayListUnmanaged([]const u8) = .empty;
+    var buckets = std.StringHashMapUnmanaged(std.ArrayList(usize)).empty;
+    var order: std.ArrayList([]const u8) = .empty;
     try groupAddsBySection(arena, adds, &buckets, &order);
     var emitted_first = true;
     for (order.items) |sec| {
@@ -3370,17 +3370,17 @@ const BLOCK_STAGE_GAP_MM: f64 = 12.0;
 /// or a sub-block part the module layout doesn't name — are appended to
 /// `leftover` for tiers 2–3. Only the *missing* parts are placed (already-placed
 /// parts never reach `pending_adds`), so this fills a partly-placed block too.
-fn seedSubBlocks(d: *DiffContext, w: anytype, first: *bool, adds: []const PendingAdd, leftover: *std.ArrayListUnmanaged(PendingAdd)) !void {
+fn seedSubBlocks(d: *DiffContext, w: anytype, f: *bool, add: []const PendingAdd, lo: *std.ArrayList(PendingAdd)) !void {
     const arena = d.spc.arena;
     if (d.sub_blocks.len == 0) {
-        for (adds) |pa| try leftover.append(arena, pa);
+        for (add) |pa| try lo.append(arena, pa);
         return;
     }
     // Group add indices by section, in a stable (sorted) block order.
-    var buckets = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena);
-    var order: std.ArrayListUnmanaged([]const u8) = .empty;
-    for (adds, 0..) |pa, i| {
-        const e = try buckets.getOrPut(pa.section);
+    var buckets = std.StringHashMapUnmanaged(std.ArrayList(usize)).empty;
+    var order: std.ArrayList([]const u8) = .empty;
+    for (add, 0..) |pa, i| {
+        const e = try buckets.getOrPut(arena, pa.section);
         if (!e.found_existing) {
             e.value_ptr.* = .empty;
             try order.append(arena, pa.section);
@@ -3394,16 +3394,16 @@ fn seedSubBlocks(d: *DiffContext, w: anytype, first: *bool, adds: []const Pendin
         const idxs = (buckets.get(sec) orelse continue).items;
         // Not a sub-block, or a sub-block with no module default layout → defer.
         const sb = subBlockNamed(d.sub_blocks, sec) orelse {
-            for (idxs) |idx| try leftover.append(arena, adds[idx]);
+            for (idxs) |idx| try lo.append(arena, add[idx]);
             continue;
         };
         // Poses re-keyed onto this sub-block's own flattened refs (by origin_key)
         // so a module layout saved in a different design's ref-namespace still maps.
         const poses = pcb_layout.loadSubBlockPoses(arena, d.spc.project_dir, sb) orelse {
-            for (idxs) |idx| try leftover.append(arena, adds[idx]);
+            for (idxs) |idx| try lo.append(arena, add[idx]);
             continue;
         };
-        if (try seedOneSubBlock(d, w, first, sb, sec, adds, idxs, poses, cursor_x, leftover)) |advance|
+        if (try seedOneSubBlock(d, w, f, sb, sec, add, idxs, poses, cursor_x, lo)) |advance|
             cursor_x += advance;
     }
 }
@@ -3424,16 +3424,16 @@ fn seedOneSubBlock(
     idxs: []const usize,
     poses: []const pcb_layout.RefPose,
     cursor_x: f64,
-    leftover: *std.ArrayListUnmanaged(PendingAdd),
+    leftover: *std.ArrayList(PendingAdd),
 ) !?f64 {
     const arena = d.spc.arena;
-    var pmap = std.StringHashMap(pcb_layout.SyncPose).init(arena);
+    var pmap = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
     var minx: f64 = std.math.floatMax(f64);
     var miny: f64 = std.math.floatMax(f64);
     var maxx: f64 = -std.math.floatMax(f64);
     var maxy: f64 = -std.math.floatMax(f64);
     for (poses) |p| {
-        try pmap.put(p.ref, .{ .x = p.x, .y = p.y, .rot = p.rot });
+        try pmap.put(arena, p.ref, .{ .x = p.x, .y = p.y, .rot = p.rot });
         minx = @min(minx, p.x);
         miny = @min(miny, p.y);
         maxx = @max(maxx, p.x);
@@ -3599,8 +3599,8 @@ fn emitStagingGrid(d: *DiffContext, w: anytype, first: *bool, adds: []const Pend
     const arena = d.spc.arena;
     if (adds.len == 0) return;
 
-    var buckets = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena);
-    var order: std.ArrayListUnmanaged([]const u8) = .empty;
+    var buckets = std.StringHashMapUnmanaged(std.ArrayList(usize)).empty;
+    var order: std.ArrayList([]const u8) = .empty;
     try groupAddsBySection(arena, adds, &buckets, &order);
 
     // Uniform box size from the largest section across the *whole design* (not
@@ -3665,7 +3665,7 @@ fn emitSwapOp(
     kmod: []const u8,
     fp_def_json: ?[]const u8,
     ref_des: []const u8,
-    pad_net_map: *std.StringHashMap([]const u8),
+    pad_net_map: *std.StringHashMapUnmanaged([]const u8),
     reason: []const u8,
 ) !void {
     if (!first.*) try w.*.writeAll(",");
@@ -3701,7 +3701,7 @@ fn emitPadNetOps(
     first: *bool,
     uuid: []const u8,
     ref_des: []const u8,
-    pad_net_map: *std.StringHashMap([]const u8),
+    pad_net_map: *std.StringHashMapUnmanaged([]const u8),
     client_pads: []const PadAssign,
 ) !u32 {
     var key_buf: [256]u8 = undefined;
@@ -3743,7 +3743,7 @@ fn emitPadNetOps(
 fn writePadNetsArray(
     w: anytype,
     ref_des: []const u8,
-    pad_net_map: *std.StringHashMap([]const u8),
+    pad_net_map: *std.StringHashMapUnmanaged([]const u8),
 ) !void {
     try w.writeAll("[");
     var it = pad_net_map.iterator();
@@ -3781,18 +3781,18 @@ fn testFp(uuid: []const u8, kicad_uuid: []const u8, ref: []const u8) BoardFp {
 
 test "pickByUuidOrRef returns the by_uuid match when canopy_uuid is on the board" {
     // spec: serve/sync - pickByUuidOrRef returns the by_uuid match when the instance's canopy_uuid is on the board
-    var by_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
-    defer by_uuid.deinit();
-    var by_ref = std.StringHashMap(BoardFp).init(std.testing.allocator);
-    defer by_ref.deinit();
-    var reserved = std.StringHashMap(void).init(std.testing.allocator);
-    defer reserved.deinit();
-    var claimed = std.StringHashMap(void).init(std.testing.allocator);
-    defer claimed.deinit();
+    var by_uuid = std.StringHashMapUnmanaged(BoardFp).empty;
+    defer by_uuid.deinit(std.testing.allocator);
+    var by_ref = std.StringHashMapUnmanaged(BoardFp).empty;
+    defer by_ref.deinit(std.testing.allocator);
+    var reserved = std.StringHashMapUnmanaged(void).empty;
+    defer reserved.deinit(std.testing.allocator);
+    var claimed = std.StringHashMapUnmanaged(void).empty;
+    defer claimed.deinit(std.testing.allocator);
 
     const fp = testFp("aa000001", "kid-A", "charger/C156");
-    try by_uuid.put("aa000001", fp);
-    try by_ref.put("charger/C156", fp);
+    try by_uuid.put(std.testing.allocator, "aa000001", fp);
+    try by_ref.put(std.testing.allocator, "charger/C156", fp);
 
     const got = pickByUuidOrRef("aa000001", "charger/C156", &by_uuid, &by_ref, &reserved, &claimed);
     try std.testing.expect(got != null);
@@ -3801,18 +3801,18 @@ test "pickByUuidOrRef returns the by_uuid match when canopy_uuid is on the board
 
 test "pickByUuidOrRef falls back to by_ref when canopy_uuid is missing and the fp is not reserved" {
     // spec: serve/sync - pickByUuidOrRef falls back to by_ref when canopy_uuid is missing and the fp is not reserved
-    var by_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
-    defer by_uuid.deinit();
-    var by_ref = std.StringHashMap(BoardFp).init(std.testing.allocator);
-    defer by_ref.deinit();
-    var reserved = std.StringHashMap(void).init(std.testing.allocator);
-    defer reserved.deinit();
-    var claimed = std.StringHashMap(void).init(std.testing.allocator);
-    defer claimed.deinit();
+    var by_uuid = std.StringHashMapUnmanaged(BoardFp).empty;
+    defer by_uuid.deinit(std.testing.allocator);
+    var by_ref = std.StringHashMapUnmanaged(BoardFp).empty;
+    defer by_ref.deinit(std.testing.allocator);
+    var reserved = std.StringHashMapUnmanaged(void).empty;
+    defer reserved.deinit(std.testing.allocator);
+    var claimed = std.StringHashMapUnmanaged(void).empty;
+    defer claimed.deinit(std.testing.allocator);
 
     // Board fp has no canopy_uuid yet — by_ref is the only path.
     const fp = testFp("", "kid-B", "charger/C157");
-    try by_ref.put("charger/C157", fp);
+    try by_ref.put(std.testing.allocator, "charger/C157", fp);
 
     const got = pickByUuidOrRef("bb000002", "charger/C157", &by_uuid, &by_ref, &reserved, &claimed);
     try std.testing.expect(got != null);
@@ -3826,20 +3826,20 @@ test "pickByUuidOrRef refuses a by_ref match whose fp is reserved by another ins
     // identity. Without the reservation guard, design instance C156
     // would claim it via by_uuid AND design instance C157 would also
     // claim it via by_ref — contradictory ops every sync.
-    var by_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
-    defer by_uuid.deinit();
-    var by_ref = std.StringHashMap(BoardFp).init(std.testing.allocator);
-    defer by_ref.deinit();
-    var reserved = std.StringHashMap(void).init(std.testing.allocator);
-    defer reserved.deinit();
-    var claimed = std.StringHashMap(void).init(std.testing.allocator);
-    defer claimed.deinit();
+    var by_uuid = std.StringHashMapUnmanaged(BoardFp).empty;
+    defer by_uuid.deinit(std.testing.allocator);
+    var by_ref = std.StringHashMapUnmanaged(BoardFp).empty;
+    defer by_ref.deinit(std.testing.allocator);
+    var reserved = std.StringHashMapUnmanaged(void).empty;
+    defer reserved.deinit(std.testing.allocator);
+    var claimed = std.StringHashMapUnmanaged(void).empty;
+    defer claimed.deinit(std.testing.allocator);
 
     const fp_collision = testFp("aa000001", "kid-X", "charger/C157");
-    try by_uuid.put("aa000001", fp_collision);
-    try by_ref.put("charger/C157", fp_collision);
+    try by_uuid.put(std.testing.allocator, "aa000001", fp_collision);
+    try by_ref.put(std.testing.allocator, "charger/C157", fp_collision);
     // C156 already reserved this fp via its canopy_uuid earlier in the pre-walk.
-    try reserved.put("kid-X", {});
+    try reserved.put(std.testing.allocator, "kid-X", {});
 
     // C157 (uuid bb000002) tries to claim the same fp via by_ref — refused.
     const got = pickByUuidOrRef("bb000002", "charger/C157", &by_uuid, &by_ref, &reserved, &claimed);
@@ -3852,19 +3852,19 @@ test "pickByUuidOrRef refuses a by_uuid match whose fp another instance already 
     // same canopy_uuid. Both their by_uuid lookups return the same fp.
     // The second to be processed must be refused so it doesn't emit
     // contradictory ops on top of the first claim.
-    var by_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
-    defer by_uuid.deinit();
-    var by_ref = std.StringHashMap(BoardFp).init(std.testing.allocator);
-    defer by_ref.deinit();
-    var reserved = std.StringHashMap(void).init(std.testing.allocator);
-    defer reserved.deinit();
-    var claimed = std.StringHashMap(void).init(std.testing.allocator);
-    defer claimed.deinit();
+    var by_uuid = std.StringHashMapUnmanaged(BoardFp).empty;
+    defer by_uuid.deinit(std.testing.allocator);
+    var by_ref = std.StringHashMapUnmanaged(BoardFp).empty;
+    defer by_ref.deinit(std.testing.allocator);
+    var reserved = std.StringHashMapUnmanaged(void).empty;
+    defer reserved.deinit(std.testing.allocator);
+    var claimed = std.StringHashMapUnmanaged(void).empty;
+    defer claimed.deinit(std.testing.allocator);
 
     const fp = testFp("aa000001", "kid-Y", "adc1/C169");
-    try by_uuid.put("aa000001", fp);
+    try by_uuid.put(std.testing.allocator, "aa000001", fp);
     // First instance has already locked in this fp.
-    try claimed.put("kid-Y", {});
+    try claimed.put(std.testing.allocator, "kid-Y", {});
 
     // Second instance with the same canopy_uuid arrives — refused.
     const got = pickByUuidOrRef("aa000001", "adc3/C193", &by_uuid, &by_ref, &reserved, &claimed);
@@ -3873,14 +3873,14 @@ test "pickByUuidOrRef refuses a by_uuid match whose fp another instance already 
 
 test "pickByUuidOrRef returns null when neither tier matches" {
     // spec: serve/sync - pickByUuidOrRef returns null when neither tier matches
-    var by_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
-    defer by_uuid.deinit();
-    var by_ref = std.StringHashMap(BoardFp).init(std.testing.allocator);
-    defer by_ref.deinit();
-    var reserved = std.StringHashMap(void).init(std.testing.allocator);
-    defer reserved.deinit();
-    var claimed = std.StringHashMap(void).init(std.testing.allocator);
-    defer claimed.deinit();
+    var by_uuid = std.StringHashMapUnmanaged(BoardFp).empty;
+    defer by_uuid.deinit(std.testing.allocator);
+    var by_ref = std.StringHashMapUnmanaged(BoardFp).empty;
+    defer by_ref.deinit(std.testing.allocator);
+    var reserved = std.StringHashMapUnmanaged(void).empty;
+    defer reserved.deinit(std.testing.allocator);
+    var claimed = std.StringHashMapUnmanaged(void).empty;
+    defer claimed.deinit(std.testing.allocator);
 
     const got = pickByUuidOrRef("cc000003", "charger/C99", &by_uuid, &by_ref, &reserved, &claimed);
     try std.testing.expect(got == null);
@@ -3892,14 +3892,14 @@ test "pickByKicadUuid adopts an orphan whose KiCad uuid equals the instance cano
     // and left its Reference empty, so by_uuid and by_ref both miss. The
     // footprint's KiCad (uuid …) field still equals the design's canopy_uuid
     // because the add path stamped it there. Adopt in place, not duplicate.
-    var by_kicad_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
-    defer by_kicad_uuid.deinit();
-    var claimed = std.StringHashMap(void).init(std.testing.allocator);
-    defer claimed.deinit();
+    var by_kicad_uuid = std.StringHashMapUnmanaged(BoardFp).empty;
+    defer by_kicad_uuid.deinit(std.testing.allocator);
+    var claimed = std.StringHashMapUnmanaged(void).empty;
+    defer claimed.deinit(std.testing.allocator);
 
     // Orphan: no canopy_uuid property, empty ref, KiCad uuid == canopy uuid.
     const orphan = testFp("", "28f5c311", "");
-    try by_kicad_uuid.put("28f5c311", orphan);
+    try by_kicad_uuid.put(std.testing.allocator, "28f5c311", orphan);
 
     const got = pickByKicadUuid("28f5c311", &by_kicad_uuid, &claimed);
     try std.testing.expect(got != null);
@@ -3908,14 +3908,14 @@ test "pickByKicadUuid adopts an orphan whose KiCad uuid equals the instance cano
 
 test "pickByKicadUuid refuses an fp another instance already claimed" {
     // spec: serve/sync - pickByKicadUuid refuses an fp another instance already claimed in this walk
-    var by_kicad_uuid = std.StringHashMap(BoardFp).init(std.testing.allocator);
-    defer by_kicad_uuid.deinit();
-    var claimed = std.StringHashMap(void).init(std.testing.allocator);
-    defer claimed.deinit();
+    var by_kicad_uuid = std.StringHashMapUnmanaged(BoardFp).empty;
+    defer by_kicad_uuid.deinit(std.testing.allocator);
+    var claimed = std.StringHashMapUnmanaged(void).empty;
+    defer claimed.deinit(std.testing.allocator);
 
     const orphan = testFp("", "28f5c311", "");
-    try by_kicad_uuid.put("28f5c311", orphan);
-    try claimed.put("28f5c311", {});
+    try by_kicad_uuid.put(std.testing.allocator, "28f5c311", orphan);
+    try claimed.put(std.testing.allocator, "28f5c311", {});
 
     const got = pickByKicadUuid("28f5c311", &by_kicad_uuid, &claimed);
     try std.testing.expect(got == null);
@@ -3941,24 +3941,24 @@ test "buildCanopyNetValue names the single hub pin per pad, net name otherwise" 
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    var pad_net_map = std.StringHashMap([]const u8).init(arena);
-    var pad_full_net = std.StringHashMap([]const u8).init(arena);
-    var net_hub_pins = std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)).init(arena);
+    var pad_net_map = std.StringHashMapUnmanaged([]const u8).empty;
+    var pad_full_net = std.StringHashMapUnmanaged([]const u8).empty;
+    var net_hub_pins = std.StringHashMapUnmanaged(std.ArrayList(export_kicad.FlatPin)).empty;
 
     // C84: pad 1 decouples U8.C3 (sub-net VDD.stm32.C3 carries only the cap +
     // that one IC pin); pad 2 → GND, a rail with many pins.
-    try pad_net_map.put("C84|1", "VDD");
-    try pad_net_map.put("C84|2", "GND");
-    try pad_full_net.put("C84|1", "VDD.stm32.C3");
-    try pad_full_net.put("C84|2", "GND");
+    try pad_net_map.put(arena, "C84|1", "VDD");
+    try pad_net_map.put(arena, "C84|2", "GND");
+    try pad_full_net.put(arena, "C84|1", "VDD.stm32.C3");
+    try pad_full_net.put(arena, "C84|2", "GND");
 
-    var vdd_pins: std.ArrayListUnmanaged(export_kicad.FlatPin) = .empty;
+    var vdd_pins: std.ArrayList(export_kicad.FlatPin) = .empty;
     try vdd_pins.append(arena, .{ .ref_des = "U8", .pin = "C3" });
-    try net_hub_pins.put("VDD.stm32.C3", vdd_pins);
-    var gnd_pins: std.ArrayListUnmanaged(export_kicad.FlatPin) = .empty;
+    try net_hub_pins.put(arena, "VDD.stm32.C3", vdd_pins);
+    var gnd_pins: std.ArrayList(export_kicad.FlatPin) = .empty;
     try gnd_pins.append(arena, .{ .ref_des = "U8", .pin = "A1" });
     try gnd_pins.append(arena, .{ .ref_des = "U8", .pin = "B1" });
-    try net_hub_pins.put("GND", gnd_pins);
+    try net_hub_pins.put(arena, "GND", gnd_pins);
 
     const got = try buildCanopyNetValue(arena, "C84", &pad_net_map, &pad_full_net, &net_hub_pins);
     try std.testing.expect(got != null);
@@ -3971,22 +3971,22 @@ test "buildCanopyNetValue lists pads in numeric order and returns null when unco
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    var pad_net_map = std.StringHashMap([]const u8).init(arena);
-    var pad_full_net = std.StringHashMap([]const u8).init(arena);
-    var net_hub_pins = std.StringHashMap(std.ArrayListUnmanaged(export_kicad.FlatPin)).init(arena);
+    var pad_net_map = std.StringHashMapUnmanaged([]const u8).empty;
+    var pad_full_net = std.StringHashMapUnmanaged([]const u8).empty;
+    var net_hub_pins = std.StringHashMapUnmanaged(std.ArrayList(export_kicad.FlatPin)).empty;
 
     // Series resistor R7 between two ICs. Insert pad 2 before pad 1 to prove
     // the output is sorted by pad number, not insertion/hash order.
-    try pad_net_map.put("R7|2", "SENSE_N");
-    try pad_net_map.put("R7|1", "SENSE_P");
-    try pad_full_net.put("R7|1", "SENSE_P");
-    try pad_full_net.put("R7|2", "SENSE_N");
-    var p_pins: std.ArrayListUnmanaged(export_kicad.FlatPin) = .empty;
+    try pad_net_map.put(arena, "R7|2", "SENSE_N");
+    try pad_net_map.put(arena, "R7|1", "SENSE_P");
+    try pad_full_net.put(arena, "R7|1", "SENSE_P");
+    try pad_full_net.put(arena, "R7|2", "SENSE_N");
+    var p_pins: std.ArrayList(export_kicad.FlatPin) = .empty;
     try p_pins.append(arena, .{ .ref_des = "U1", .pin = "PA0" });
-    try net_hub_pins.put("SENSE_P", p_pins);
-    var n_pins: std.ArrayListUnmanaged(export_kicad.FlatPin) = .empty;
+    try net_hub_pins.put(arena, "SENSE_P", p_pins);
+    var n_pins: std.ArrayList(export_kicad.FlatPin) = .empty;
     try n_pins.append(arena, .{ .ref_des = "U3", .pin = "AIN" });
-    try net_hub_pins.put("SENSE_N", n_pins);
+    try net_hub_pins.put(arena, "SENSE_N", n_pins);
 
     const got = try buildCanopyNetValue(arena, "R7", &pad_net_map, &pad_full_net, &net_hub_pins);
     try std.testing.expect(got != null);
@@ -3999,10 +3999,10 @@ test "buildCanopyNetValue lists pads in numeric order and returns null when unco
 
 test "sectionForRef attributes sub-block parts to their sub-block and top-level parts to their section" {
     // spec: serve/sync - sectionForRef attributes a sub-block part to its sub-block name and a top-level part to its declared section, else ""
-    var ref_to_section = std.StringHashMap([]const u8).init(std.testing.allocator);
-    defer ref_to_section.deinit();
-    try ref_to_section.put("C84", "STM32N657L0H3Q Core System");
-    try ref_to_section.put("U8", "STM32N657L0H3Q Core System");
+    var ref_to_section = std.StringHashMapUnmanaged([]const u8).empty;
+    defer ref_to_section.deinit(std.testing.allocator);
+    try ref_to_section.put(std.testing.allocator, "C84", "STM32N657L0H3Q Core System");
+    try ref_to_section.put(std.testing.allocator, "U8", "STM32N657L0H3Q Core System");
 
     // Sub-block part → first path segment (the sub-block name), never the map.
     try std.testing.expectEqualStrings("usb", sectionForRef("usb/U1", &ref_to_section));
@@ -4039,10 +4039,10 @@ test "buildStagingLayout seats each part by identity, independent of roster orde
     defer aa.deinit();
     const arena = aa.allocator();
 
-    var ref_to_section = std.StringHashMap([]const u8).init(arena);
-    try ref_to_section.put("C1", "Alpha");
-    try ref_to_section.put("C2", "Alpha");
-    try ref_to_section.put("R1", "Beta");
+    var ref_to_section = std.StringHashMapUnmanaged([]const u8).empty;
+    try ref_to_section.put(arena, "C1", "Alpha");
+    try ref_to_section.put(arena, "C2", "Alpha");
+    try ref_to_section.put(arena, "R1", "Beta");
 
     const mk = struct {
         fn i(ref: []const u8) export_kicad.FlatInstance {
@@ -4099,7 +4099,7 @@ test "writeGeomBlockProtoJson ships a fab block on the F.Fab layer" {
     defer aa.deinit();
     const arena = aa.allocator();
     const nodes = try parser_mod.parse(arena, "(fab (line (-3.05 3.05) (3.05 3.05)))");
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     var first = true;
     try writeGeomBlockProtoJson(w, nodes[0], PROTO_LAYER_F_FAB, FAB_STROKE_MM, &first);
@@ -4116,7 +4116,7 @@ test "writeGeomBlockProtoJson traces a poly as one segment per edge" {
     const arena = aa.allocator();
     // A 4-vertex polygon → 4 boundary segments (closing back to vertex 0).
     const nodes = try parser_mod.parse(arena, "(silkscreen (poly (0 0) (1 0) (1 1) (0 1)))");
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     var first = true;
     try writeGeomBlockProtoJson(w, nodes[0], PROTO_LAYER_F_SILK, SILK_STROKE_MM, &first);

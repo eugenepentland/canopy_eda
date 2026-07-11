@@ -994,7 +994,7 @@ pub const SeedMode = enum {
 /// The smooth-surrogate objective (the value `scorePoses` reports and the viewer
 /// shows) for the CURRENT poses in `parts`, computed in place — no `prepare()`
 /// rebuild, so it is cheap to call mid-pipeline as a candidate comparator.
-fn surrogateObjective(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet, loops: []const Loop, params: Params) f64 {
+fn surrogateObjective(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), nets: []const FlatNet, loops: []const Loop, params: Params) f64 {
     const score = scoreLayout(parts, idx_of, nets, loops);
     const lsum = surrogateLoops(parts, loops);
     return breakdownWith(parts, idx_of, nets, params, score, lsum).objective;
@@ -1155,7 +1155,7 @@ fn analyzeTopology(parts: []const Part, lowered: Lowered) ?ZoneTopo {
 /// inductor for an output-cap bank, since a switcher's output rail terminates on
 /// the inductor, not an IC pad. Used to recover a docking edge when the IC-anchored
 /// `railDir` is zero (the bank touches no IC pad). Null when none.
-fn nearestSharedHub(members: []const usize, ic: usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) ?usize {
+fn nearestSharedHub(members: []const usize, ic: usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) ?usize {
     for (nets) |net| {
         if (isGroundName(shortName(net.name))) continue;
         var has_member = false;
@@ -1179,7 +1179,7 @@ fn nearestSharedHub(members: []const usize, ic: usize, parts: []const Part, nets
 /// the direction (IC-local; IC is at rot 0 so == world) toward the group's rail
 /// side. Ground is excluded (it is scattered all round the IC and would average
 /// the side away). Zero when the members touch only ground / no IC pad.
-fn railDir(members: []const usize, ic: usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) Pt {
+fn railDir(members: []const usize, ic: usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) Pt {
     const ic_ref = parts[ic].ref_des;
     var sx: f64 = 0;
     var sy: f64 = 0;
@@ -1208,7 +1208,7 @@ fn railDir(members: []const usize, ic: usize, parts: []const Part, nets: []const
 /// World cross-coordinate (y for a side edge, x for a top/bottom edge) of the IC's
 /// non-ground pads the members connect to — the point a block docks opposite, so
 /// its decoupling pad sits across from the supply pad. Null when there's no rail pad.
-fn railPadCross(members: []const usize, ic: usize, edge: Edge, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) ?f64 {
+fn railPadCross(members: []const usize, ic: usize, edge: Edge, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) ?f64 {
     const ic_ref = parts[ic].ref_des;
     const side = (edge == .left or edge == .right); // cross axis = y
     var s: f64 = 0;
@@ -1330,7 +1330,7 @@ const DISTRIBUTE_MM: f64 = 0.6;
 /// its own pad (returns `pin_order=true`); otherwise keep the criticality order for
 /// the centre-out HF placement (`pin_order=false`). Fixes boot caps landing on the
 /// wrong lateral side of the IC.
-fn orderForBlock(arena: std.mem.Allocator, ordered: []usize, ic: usize, edge: Edge, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) std.mem.Allocator.Error!bool {
+fn orderForBlock(arena: std.mem.Allocator, ordered: []usize, ic: usize, edge: Edge, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) std.mem.Allocator.Error!bool {
     if (ordered.len < 2) return false;
     const tgt = try arena.alloc(f64, ordered.len);
     var lo = std.math.inf(f64);
@@ -1519,7 +1519,7 @@ fn dockEdge(parts: []Part, ic: usize, blocks: []const PackBlock, edge: Edge, gap
 /// edge, so it straddles SW1/SW2 instead of floating off. Locks its x to the
 /// switch-pad centroid so the finish keeps it centred. Falls back to the top edge
 /// when no switch pad is found.
-fn placeSwitchHub(parts: []Part, ic: usize, sec: usize, nets: []const FlatNet, idx_of: *std.StringHashMap(usize), blocks: []const PackBlock, gap: f64, lock_axis: []u8, lock_val: []f64) void {
+fn placeSwitchHub(parts: []Part, ic: usize, sec: usize, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize), blocks: []const PackBlock, gap: f64, lock_axis: []u8, lock_val: []f64) void {
     const ic_ref = parts[ic].ref_des;
     var sx: f64 = 0;
     var nsw: usize = 0;
@@ -1594,12 +1594,12 @@ fn packZoned(
     @memset(lock_axis, 0);
     const lock_val = try arena.alloc(f64, parts.len);
 
-    var blocks: std.ArrayListUnmanaged(PackBlock) = .empty;
+    var blocks: std.ArrayList(PackBlock) = .empty;
     const gap = @max(g_route_gap, FINAL_CLEAR);
 
     // Functional-group blocks (hub members dropped — IC at origin, inductor below).
     for (g_lowered.groups) |g| {
-        var ml: std.ArrayListUnmanaged(usize) = .empty;
+        var ml: std.ArrayList(usize) = .empty;
         for (g.members) |m| {
             if (parts[m].kind == .hub or claimed[m]) continue;
             try ml.append(arena, m);
@@ -1739,14 +1739,14 @@ const AUTOFILL_GND_W: f64 = 0.25;
 fn autofillUnlisted(
     arena: std.mem.Allocator,
     parts: []Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
 ) std.mem.Allocator.Error!void {
     const staged_refs = g_placement_diag.unplaced;
     if (staged_refs.len == 0 or staged_refs.len > AUTOFILL_MAX) return;
 
-    var idxs: std.ArrayListUnmanaged(usize) = .empty;
+    var idxs: std.ArrayList(usize) = .empty;
     for (staged_refs) |ref| {
         if (idx_of.get(ref)) |i| {
             if (!parts[i].locked) try idxs.append(arena, i);
@@ -1770,7 +1770,7 @@ fn autofillUnlisted(
     while (sweep < AUTOFILL_SWEEPS) : (sweep += 1) {
         var improved = false;
         const sweep_poses = try capturePoses(arena, parts);
-        var sweep_filled: std.ArrayListUnmanaged(usize) = .empty;
+        var sweep_filled: std.ArrayList(usize) = .empty;
         for (idxs.items) |i| {
             if (!staged[i]) continue; // already filled in an earlier sweep
             const anchors = try autofillAnchors(arena, parts, nets, staged, i);
@@ -1815,11 +1815,11 @@ fn autofillUnlisted(
         if (!improved) break;
     }
 
-    var filled: std.ArrayListUnmanaged([]const u8) = .empty;
+    var filled: std.ArrayList([]const u8) = .empty;
     // Append to (not replace) earlier fills — the board-dock path runs a
     // second pass for the connectors' partners.
     try filled.appendSlice(arena, g_placement_diag.auto_filled);
-    var remaining: std.ArrayListUnmanaged([]const u8) = .empty;
+    var remaining: std.ArrayList([]const u8) = .empty;
     var any_filled = false;
     for (idxs.items) |i| {
         if (!staged[i]) {
@@ -1877,13 +1877,13 @@ fn autofillAnchors(
     staged: []const bool,
     i: usize,
 ) std.mem.Allocator.Error![]PadAnchor {
-    var out: std.ArrayListUnmanaged(PadAnchor) = .empty;
+    var out: std.ArrayList(PadAnchor) = .empty;
     const me = parts[i];
     for (nets) |net| {
         for (net.pins) |pin| {
             if (!std.mem.eql(u8, pin.ref_des, me.ref_des)) continue;
             const pad = padByNumber(me, pin.pin) orelse continue;
-            var targets: std.ArrayListUnmanaged([2]f64) = .empty;
+            var targets: std.ArrayList([2]f64) = .empty;
             for (net.pins) |op| {
                 if (std.mem.eql(u8, op.ref_des, me.ref_des)) continue;
                 const j = indexOfRef(parts, op.ref_des) orelse continue;
@@ -2244,18 +2244,18 @@ fn buildSubMacro(
     // (design `buck/U2` vs module `U1`) — fall back to the renumber-proof
     // origin-key match. Both fallback sides are restricted to first-level
     // children (no nested `/`), where module-local origin keys are unique.
-    var origin_idx = std.StringHashMap(usize).init(arena);
+    var origin_idx = std.StringHashMapUnmanaged(usize).empty;
     const prefix = try std.fmt.allocPrint(arena, "{s}/", .{sub.name});
     for (prep.instances, 0..) |inst, i| {
         if (!std.mem.startsWith(u8, inst.ref_des, prefix)) continue;
         if (inst.origin_key.len == 0) continue;
         if (std.mem.indexOfScalar(u8, inst.ref_des[prefix.len..], '/') != null) continue;
-        try origin_idx.put(inst.origin_key, i);
+        try origin_idx.put(arena, inst.origin_key, i);
     }
-    var members: std.ArrayListUnmanaged(usize) = .empty;
-    var xs: std.ArrayListUnmanaged(f64) = .empty;
-    var ys: std.ArrayListUnmanaged(f64) = .empty;
-    var rots: std.ArrayListUnmanaged(f64) = .empty;
+    var members: std.ArrayList(usize) = .empty;
+    var xs: std.ArrayList(f64) = .empty;
+    var ys: std.ArrayList(f64) = .empty;
+    var rots: std.ArrayList(f64) = .empty;
     for (sp.parts, 0..) |part, j| {
         const ref = try std.fmt.allocPrint(arena, "{s}/{s}", .{ sub.name, part.ref_des });
         const key = if (j < sp.instances.len and sp.instances[j].origin_key.len > 0)
@@ -2315,8 +2315,8 @@ fn starredModulePoses(
     if (pv != .array) return null;
     // Saved poses keyed by module-local origin, plus by saved ref for
     // origin-less legacy entries.
-    var by_origin = std.StringHashMap(RefPose).init(arena);
-    var by_ref = std.StringHashMap(RefPose).init(arena);
+    var by_origin = std.StringHashMapUnmanaged(RefPose).empty;
+    var by_ref = std.StringHashMapUnmanaged(RefPose).empty;
     for (pv.array.items) |it| {
         if (it != .object) continue;
         const rv = it.object.get("ref") orelse continue;
@@ -2330,15 +2330,15 @@ fn starredModulePoses(
         };
         const ov = it.object.get("origin");
         if (ov != null and ov.? == .string and ov.?.string.len > 0) {
-            try by_origin.put(ov.?.string, pose);
+            try by_origin.put(arena, ov.?.string, pose);
         } else {
-            try by_ref.put(rv.string, pose);
+            try by_ref.put(arena, rv.string, pose);
         }
     }
     // Translate into the child's current refs via the parent's first-level
     // `slug/<ref>` instances (their origin keys are the module-local keys).
     const prefix = try std.fmt.allocPrint(arena, "{s}/", .{slug});
-    var out: std.ArrayListUnmanaged(RefPose) = .empty;
+    var out: std.ArrayList(RefPose) = .empty;
     for (instances) |inst| {
         if (!std.mem.startsWith(u8, inst.ref_des, prefix)) continue;
         const child_ref = inst.ref_des[prefix.len..];
@@ -2382,7 +2382,7 @@ fn buildGlueMacros(
     prep: *Prepared,
     nets: []const FlatNet,
     macro_of: []?usize,
-    macros: *std.ArrayListUnmanaged(Macro),
+    macros: *std.ArrayList(Macro),
 ) std.mem.Allocator.Error!void {
     const hub_of = try arena.alloc(?usize, parts.len);
     @memset(hub_of, null);
@@ -2407,7 +2407,7 @@ fn buildGlueMacros(
     }
     for (parts, 0..) |p, hpi| {
         if (macro_of[hpi] != null or p.kind != .hub or p.locked) continue;
-        var members: std.ArrayListUnmanaged(usize) = .empty;
+        var members: std.ArrayList(usize) = .empty;
         for (hub_of, 0..) |h, pi| {
             if (h != null and h.? == hpi) try members.append(arena, pi);
         }
@@ -2433,22 +2433,22 @@ fn ringGlueMacro(
 ) std.mem.Allocator.Error!Macro {
     const n = members.len + 1;
     const local = try arena.alloc(Part, n);
-    var idx_of = std.StringHashMap(usize).init(arena);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
     local[0] = parts[hpi];
     local[0].x = 0;
     local[0].y = 0;
     local[0].rot = 0;
     local[0].locked = false;
-    try idx_of.put(parts[hpi].ref_des, 0);
+    try idx_of.put(arena, parts[hpi].ref_des, 0);
     for (members, 0..) |pi, k| {
         local[k + 1] = parts[pi];
         local[k + 1].locked = false;
-        try idx_of.put(parts[pi].ref_des, k + 1);
+        try idx_of.put(arena, parts[pi].ref_des, k + 1);
     }
     const hkb = keepBoxOf(local[0]);
     const roles = pin_roles.load(arena, prep.project_dir, if (hpi < prep.instances.len) prep.instances[hpi].component else "");
-    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
-    var leftover: std.ArrayListUnmanaged(usize) = .empty;
+    var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
+    var leftover: std.ArrayList(usize) = .empty;
     const ci = try buildClusters(arena, local, 0, nets, &idx_of);
     const tier_of = try arena.alloc(usize, n);
     @memset(tier_of, 0);
@@ -2645,7 +2645,7 @@ fn runRough(
     var child_params = params;
     child_params.rough = false; // nested module solves place normally…
     child_params.fast = true; // …with the bare force relax — a quick seed, N modules deep
-    var macros: std.ArrayListUnmanaged(Macro) = .empty;
+    var macros: std.ArrayList(Macro) = .empty;
     for (prep.block.sub_blocks) |sub| {
         if (try buildSubMacro(arena, sub, null, prep, prep.project_dir, child_params)) |m| {
             try macros.append(arena, m);
@@ -2749,7 +2749,7 @@ fn leafRefPrefix(ref: []const u8) u8 {
 }
 
 /// True when part index `pi` has a pin on `net`.
-fn netHasPart(net: FlatNet, pi: usize, idx_of: *std.StringHashMap(usize)) bool {
+fn netHasPart(net: FlatNet, pi: usize, idx_of: *std.StringHashMapUnmanaged(usize)) bool {
     for (net.pins) |pr| {
         if ((idx_of.get(pr.ref_des) orelse continue) == pi) return true;
     }
@@ -2757,7 +2757,7 @@ fn netHasPart(net: FlatNet, pi: usize, idx_of: *std.StringHashMap(usize)) bool {
 }
 
 /// The hub's physical pad id on `net` (for pin-role lookup), or "" if absent.
-fn hubPinOnNet(net: FlatNet, hi: usize, idx_of: *std.StringHashMap(usize)) []const u8 {
+fn hubPinOnNet(net: FlatNet, hi: usize, idx_of: *std.StringHashMapUnmanaged(usize)) []const u8 {
     for (net.pins) |pr| {
         if ((idx_of.get(pr.ref_des) orelse continue) == hi) return pr.pin;
     }
@@ -2766,8 +2766,8 @@ fn hubPinOnNet(net: FlatNet, hi: usize, idx_of: *std.StringHashMap(usize)) []con
 
 /// Footprint-local centres of every hub pad on `net` — a rail lands on many, a
 /// signal on one, so the caller can both rank nets and spread parts across pads.
-fn hubPadsOnNet(arena: std.mem.Allocator, hub: Part, hi: usize, net: FlatNet, idx_of: *std.StringHashMap(usize)) std.mem.Allocator.Error![][2]f64 {
-    var out: std.ArrayListUnmanaged([2]f64) = .empty;
+fn hubPadsOnNet(arena: std.mem.Allocator, hub: Part, hi: usize, net: FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) std.mem.Allocator.Error![][2]f64 {
+    var out: std.ArrayList([2]f64) = .empty;
     for (net.pins) |pr| {
         if ((idx_of.get(pr.ref_des) orelse continue) != hi) continue;
         const pad = padLocal(hub, pr.pin);
@@ -2783,7 +2783,7 @@ fn hubPadsOnNet(arena: std.mem.Allocator, hub: Part, hi: usize, net: FlatNet, id
 /// cross-hub binding: a `(decouples "U2" 8)` cap names U2's pad 8, and the anchor
 /// U1 may carry an unrelated pad 8 on a different net — without the on-net check it
 /// would mis-resolve to U1's pad 8. Null when `tok` is empty or names no on-net hub pad.
-fn servedPadLocal(parts: []const Part, hi: usize, pi: usize, tok: []const u8, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) ?[2]f64 {
+fn servedPadLocal(parts: []const Part, hi: usize, pi: usize, tok: []const u8, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) ?[2]f64 {
     if (tok.len == 0) return null;
     for (nets) |net| {
         if (!netHasPart(net, pi, idx_of)) continue;
@@ -2845,7 +2845,7 @@ const SidePart = struct { i: usize, tier: usize, along: f64, half_along: f64, de
 /// busy side spreads tangentially rather than stacking many lanes radially; each
 /// lane is flush at its inner radius and the next clears only the deepest part in
 /// THIS lane (a per-lane pitch — one big part widens its own lane, not the side).
-fn dockSidesByTier(parts: []Part, sides: *[4]std.ArrayListUnmanaged(SidePart), hkb: KeepBox) void {
+fn dockSidesByTier(parts: []Part, sides: *[4]std.ArrayList(SidePart), hkb: KeepBox) void {
     const lessTierAlong = struct {
         fn lt(_: void, a: SidePart, b: SidePart) bool {
             if (a.tier != b.tier) return a.tier < b.tier;
@@ -2952,7 +2952,7 @@ fn buildClusters(
     parts: []const Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) std.mem.Allocator.Error!ClusterInfo {
     const n = parts.len;
     const p = try arena.alloc(usize, n);
@@ -3022,14 +3022,14 @@ fn assignSides(
     parts: []Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     roles: pin_roles.PartRoles,
     ci: ClusterInfo,
     tier_of: []const usize,
     sig_side: []u8,
     served_pad: []const ?[2]f64,
-    sides: *[4]std.ArrayListUnmanaged(SidePart),
-    leftover: *std.ArrayListUnmanaged(usize),
+    sides: *[4]std.ArrayList(SidePart),
+    leftover: *std.ArrayList(usize),
 ) std.mem.Allocator.Error!void {
     var net_next: std.AutoHashMapUnmanaged(usize, usize) = .empty;
     for (parts, 0..) |p, pi| {
@@ -3154,10 +3154,10 @@ fn cohereGroups(
     tier_of: []const usize,
     sig_side: []const u8,
     cohere_side: []u8,
-    sides: *[4]std.ArrayListUnmanaged(SidePart),
+    sides: *[4]std.ArrayList(SidePart),
 ) std.mem.Allocator.Error!void {
     for (groups) |g| {
-        var members: std.ArrayListUnmanaged(usize) = .empty;
+        var members: std.ArrayList(usize) = .empty;
         var votes = [_]usize{ 0, 0, 0, 0 };
         for (g.members) |want| {
             for (parts, 0..) |p, pi| {
@@ -3222,7 +3222,7 @@ fn rrPad(
     parts: []const Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     net_next: *std.AutoHashMapUnmanaged(usize, usize),
     net: usize,
 ) std.mem.Allocator.Error!?[2]f64 {
@@ -3260,7 +3260,7 @@ fn sidePullTarget(
     hi: usize,
     pi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) std.mem.Allocator.Error!PullTarget {
     var sx: f64 = 0;
     var sy: f64 = 0;
@@ -3330,16 +3330,16 @@ fn refineSidesByPull(
     parts: []Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     tier_of: []const usize,
     cohere_side: []const u8,
-    sides: *[4]std.ArrayListUnmanaged(SidePart),
+    sides: *[4]std.ArrayList(SidePart),
     hkb: KeepBox,
 ) std.mem.Allocator.Error!void {
     // The ringed parts (everything currently docked to a side; leftover
     // ground-only parts stay put) and each one's current side, seeded from the
     // initial buckets so we can detect convergence.
-    var ring: std.ArrayListUnmanaged(usize) = .empty;
+    var ring: std.ArrayList(usize) = .empty;
     const cur_side = try arena.alloc(u8, parts.len);
     @memset(cur_side, 255);
     for (sides, 0..) |list, s| {
@@ -3410,7 +3410,7 @@ fn segsCross(a1: [2]f64, a2: [2]f64, b1: [2]f64, b2: [2]f64) bool {
 /// Euclidean minimum spanning tree (Prim's) over `pts`, appending its edges as
 /// segments to `out`. An MST is planar, so a net never crosses ITSELF — the
 /// crossing metric then measures only the inter-net tangle that placement controls.
-fn primEdges(arena: std.mem.Allocator, pts: []const [2]f64, out: *std.ArrayListUnmanaged([4]f64)) std.mem.Allocator.Error!void {
+fn primEdges(arena: std.mem.Allocator, pts: []const [2]f64, out: *std.ArrayList([4]f64)) std.mem.Allocator.Error!void {
     const n = pts.len;
     const intree = try arena.alloc(bool, n);
     @memset(intree, false);
@@ -3448,8 +3448,8 @@ fn appendCapLoop(
     hi: usize,
     pi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
-    out: *std.ArrayListUnmanaged([4]f64),
+    idx_of: *std.StringHashMapUnmanaged(usize),
+    out: *std.ArrayList([4]f64),
 ) std.mem.Allocator.Error!void {
     for (nets) |net| {
         if (!netHasPart(net, pi, idx_of)) continue;
@@ -3486,12 +3486,12 @@ fn crossingMetric(
     parts: []const Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) std.mem.Allocator.Error!usize {
-    var segs: std.ArrayListUnmanaged([4]f64) = .empty;
+    var segs: std.ArrayList([4]f64) = .empty;
     for (nets) |net| {
         if (pin_roles.isGroundFn(shortName(net.name))) continue;
-        var pts: std.ArrayListUnmanaged([2]f64) = .empty;
+        var pts: std.ArrayList([2]f64) = .empty;
         for (net.pins) |pr| {
             const idx = idx_of.get(pr.ref_des) orelse continue;
             const pad = padOnNet(parts[idx], idx, net, idx_of);
@@ -3537,7 +3537,7 @@ fn polishCrossings(
     parts: []Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     want_side: []const u8,
 ) std.mem.Allocator.Error!void {
     const ax = parts[hi].x;
@@ -3591,7 +3591,7 @@ fn importantPadLocal(
     pi: usize,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) ?[2]f64 {
     var best: ?FlatNet = null;
     var best_cnt: usize = std.math.maxInt(usize);
@@ -3629,7 +3629,7 @@ fn orientPadsToIC(
     hi: usize,
     owner_of: ?[]const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) void {
     for (parts, 0..) |*p, pi| {
         if (pi == hi or p.kind == .hub or p.pads.len != 2) continue;
@@ -3651,7 +3651,7 @@ fn orientPadsToIC(
 /// hub's non-ground nets AND the hub touches an input-rail or switch-node
 /// class net. A clock module's ferrite beads don't ride VIN/SW-class nets,
 /// so it doesn't qualify.
-fn isSwitcherBoard(parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) bool {
+fn isSwitcherBoard(parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) bool {
     const hi = pickAnchorHub(parts, nets) orelse return false;
     var has_ind = false;
     var has_hot = false;
@@ -3769,8 +3769,8 @@ fn packPadAnchored(
 
     // One bucket per side (0 left, 1 right, 2 top, 3 bottom) of `SidePart`s; the
     // lane packing (tier order, per-lane pitch) lives in `dockSidesByTier`.
-    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
-    var leftover: std.ArrayListUnmanaged(usize) = .empty;
+    var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
+    var leftover: std.ArrayList(usize) = .empty;
 
     // Cluster connected signal subsystems, then bucket each part onto a side of
     // the IC. Decoupling caps spread across their rail; signal parts sit by their
@@ -3972,7 +3972,7 @@ fn pinTargets(
     owner: usize,
     owner_of: []const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     built: Built,
     compass: ?[]const ?u2,
 ) std.mem.Allocator.Error![]?PinTarget {
@@ -4011,7 +4011,7 @@ fn pinTargets(
                 // Flow-edge disambiguation: keep only the rail pads that sit on
                 // the port's edge — when the owner has any there. One pad, or a
                 // rail entirely elsewhere, keeps pad truth untouched.
-                var on_edge: std.ArrayListUnmanaged([2]f64) = .empty;
+                var on_edge: std.ArrayList([2]f64) = .empty;
                 for (pads) |q| {
                     if (pinTargetFromPad(hkb, q[0], q[1]).edge == e) try on_edge.append(arena, q);
                 }
@@ -4095,7 +4095,7 @@ fn pinChainAttach(
     hi: usize,
     owner_of: ?[]const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     placed: []bool,
     gap: f64,
 ) void {
@@ -4171,7 +4171,7 @@ fn pinOwners(
     parts: []const Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     built: Built,
 ) std.mem.Allocator.Error![]usize {
     const owner_of = try arena.alloc(usize, parts.len);
@@ -4253,7 +4253,7 @@ fn overlayAuthoredGroups(
     block: *const DesignBlock,
     instances: []const export_kicad.FlatInstance,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) std.mem.Allocator.Error!void {
     for (block.groups) |vg| {
         const m = try resolveGroupMembers(arena, instances, vg.members, null);
@@ -4303,7 +4303,7 @@ fn ringOwner(
     owner: usize,
     owner_of: []const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     built: Built,
     compass: ?[]const ?u2,
     placed: []bool,
@@ -4313,7 +4313,7 @@ fn ringOwner(
     const tgt = try pinTargets(arena, parts, owner, owner_of, nets, idx_of, built, compass);
     var ext = [4]f64{ 0, 0, 0, 0 };
 
-    var edges = [_]std.ArrayListUnmanaged(PinItem){ .empty, .empty, .empty, .empty };
+    var edges = [_]std.ArrayList(PinItem){ .empty, .empty, .empty, .empty };
     for (parts, 0..) |*p, pi| {
         const t = tgt[pi] orelse continue;
         if (pi == owner) continue;
@@ -4398,10 +4398,10 @@ fn buildPinGroups(
     owner_of: []usize,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     built: Built,
 ) std.mem.Allocator.Error![]PinGroup {
-    var groups: std.ArrayListUnmanaged(PinGroup) = .empty;
+    var groups: std.ArrayList(PinGroup) = .empty;
     for (parts, 0..) |_, oi| {
         if (oi == hi or owner_of[oi] != oi) continue;
         var owns = false;
@@ -4418,7 +4418,7 @@ fn buildPinGroups(
         _ = try ringOwner(arena, parts, oi, owner_of, nets, idx_of, built, null, placed);
         pinChainAttach(parts, oi, owner_of, nets, idx_of, placed, FINAL_CLEAR);
         orientPadsToIC(parts, oi, owner_of, nets, idx_of);
-        var members: std.ArrayListUnmanaged(usize) = .empty;
+        var members: std.ArrayList(usize) = .empty;
         var bb = [4]f64{ 1e18, 1e18, -1e18, -1e18 };
         growKeepBBox(&bb, parts[oi]);
         for (parts, 0..) |q, qi| {
@@ -4436,7 +4436,7 @@ fn buildPinGroups(
 }
 
 /// True when `net` lands on the group — on its owner hub or any owned member.
-fn netTouchesGroup(net: FlatNet, owner: usize, owner_of: []const usize, idx_of: *std.StringHashMap(usize)) bool {
+fn netTouchesGroup(net: FlatNet, owner: usize, owner_of: []const usize, idx_of: *std.StringHashMapUnmanaged(usize)) bool {
     for (net.pins) |pr| {
         const qi = idx_of.get(pr.ref_des) orelse continue;
         if (qi == owner or owner_of[qi] == owner) return true;
@@ -4460,7 +4460,7 @@ fn groupAnchorTarget(
     g: PinGroup,
     owner_of: []const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     hkb: KeepBox,
     compass: ?[]const ?u2,
 ) std.mem.Allocator.Error!?PinTarget {
@@ -4535,7 +4535,7 @@ fn groupDockRot(
     g: PinGroup,
     owner_of: []const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     dock: Pt,
 ) std.mem.Allocator.Error!f64 {
     const c = Pt{ .x = (g.bbox[0] + g.bbox[2]) / 2, .y = (g.bbox[1] + g.bbox[3]) / 2 };
@@ -4594,7 +4594,7 @@ fn dockGroups(
     groups: []const PinGroup,
     owner_of: []const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     compass: ?[]const ?u2,
     ring_ext: [4]f64,
     placed: []bool,
@@ -4602,7 +4602,7 @@ fn dockGroups(
     if (groups.len == 0) return;
     const hkb = keepBoxOf(parts[hi]);
     const gap = FINAL_CLEAR;
-    var edges = [_]std.ArrayListUnmanaged(GroupDock){ .empty, .empty, .empty, .empty };
+    var edges = [_]std.ArrayList(GroupDock){ .empty, .empty, .empty, .empty };
     for (groups, 0..) |g, gi| {
         // A group with no net to the anchor still needs a home: bottom edge.
         const t = (try groupAnchorTarget(arena, parts, hi, g, owner_of, nets, idx_of, hkb, compass)) orelse
@@ -4715,9 +4715,9 @@ fn mirrorDiffTwins(
     owner_of: []const usize,
     instances: []const export_kicad.FlatInstance,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) std.mem.Allocator.Error!void {
-    var pairs: std.ArrayListUnmanaged(DiffPair) = .empty;
+    var pairs: std.ArrayList(DiffPair) = .empty;
     for (nets, 0..) |net, pi_net| {
         const mate = (try diffMateOfP(arena, net.name)) orelse continue;
         for (nets, 0..) |cand, ni_net| {
@@ -4872,7 +4872,7 @@ pub fn solvePinAdjacent(
 /// can penalize layouts where they do. Segments sharing an endpoint (a common
 /// pad) aren't crossings. O(S²) — module scale only.
 pub fn importantCrossings(arena: std.mem.Allocator, p: Placement) std.mem.Allocator.Error!usize {
-    var segs: std.ArrayListUnmanaged([4]f64) = .empty;
+    var segs: std.ArrayList([4]f64) = .empty;
     for (p.links) |l| {
         if (l.kind == .ground) continue;
         // Net-NAME classes (not pin functions): `.ground` and `.power` legs (a
@@ -4914,7 +4914,7 @@ fn crossingsOfSprings(
     springs: []const Spring,
     loops: []const Loop,
 ) std.mem.Allocator.Error!usize {
-    var segs: std.ArrayListUnmanaged([4]f64) = .empty;
+    var segs: std.ArrayList([4]f64) = .empty;
     for (springs) |s| {
         if (s.kind == .ground) continue;
         if (s.net.len > 0) {
@@ -5087,7 +5087,7 @@ fn arrangeMacros(
     macros: []const Macro,
     macro_of: []const ?usize,
     nets: []const FlatNet,
-    idx_of: *const std.StringHashMap(usize),
+    idx_of: *const std.StringHashMapUnmanaged(usize),
     parts: []const Part,
     pinned: []const bool,
 ) std.mem.Allocator.Error![][2]f64 {
@@ -5096,7 +5096,7 @@ fn arrangeMacros(
     // of its block pairs, so heavily-interconnected modules attract hardest.
     const w = try arena.alloc(f64, n * n);
     @memset(w, 0);
-    var touch: std.ArrayListUnmanaged(usize) = .empty;
+    var touch: std.ArrayList(usize) = .empty;
     for (nets) |net| {
         touch.clearRetainingCapacity();
         for (net.pins) |pin| {
@@ -5305,7 +5305,7 @@ fn edgeInwardRot(p: Part, edge: Edge) f64 {
 /// non-ground net with (ground nets touch everything, pulling every connector
 /// to the board centre). Falls back to ground-net partners, then null. The
 /// docked connector slides along its edge toward this point.
-fn attachCentroid(parts: []const Part, idx_of: *const std.StringHashMap(usize), nets: []const FlatNet, pi: usize) ?Pt {
+fn attachCentroid(parts: []const Part, idx_of: *const std.StringHashMapUnmanaged(usize), nets: []const FlatNet, pi: usize) ?Pt {
     var sx: f64 = 0;
     var sy: f64 = 0;
     var n: f64 = 0;
@@ -5364,8 +5364,8 @@ fn resolveBoardClaims(
 ) std.mem.Allocator.Error!BoardClaims {
     const claimed = try arena.alloc(bool, nparts);
     @memset(claimed, false);
-    var unresolved: std.ArrayListUnmanaged([]const u8) = .empty;
-    var side_lists: [4]std.ArrayListUnmanaged(SideRef) = .{ .empty, .empty, .empty, .empty };
+    var unresolved: std.ArrayList([]const u8) = .empty;
+    var side_lists: [4]std.ArrayList(SideRef) = .{ .empty, .empty, .empty, .empty };
     for (spec.sides) |s| {
         const ei: usize = @intFromEnum(edgeFromSide(s.side));
         for (s.items) |it| {
@@ -5377,7 +5377,7 @@ fn resolveBoardClaims(
             } else try unresolved.append(arena, it.ref);
         }
     }
-    var corner_list: std.ArrayListUnmanaged(usize) = .empty;
+    var corner_list: std.ArrayList(usize) = .empty;
     for (spec.corners) |it| {
         if (resolvePart(instances, it.ref)) |pi| {
             if (!claimed[pi]) {
@@ -5387,7 +5387,7 @@ fn resolveBoardClaims(
         } else try unresolved.append(arena, it.ref);
     }
     if (record_unresolved and unresolved.items.len > 0) {
-        var all: std.ArrayListUnmanaged([]const u8) = .empty;
+        var all: std.ArrayList([]const u8) = .empty;
         try all.appendSlice(arena, g_placement_diag.unresolved);
         try all.appendSlice(arena, unresolved.items);
         g_placement_diag.unresolved = try all.toOwnedSlice(arena);
@@ -5409,10 +5409,10 @@ fn resolveBoardClaims(
 fn scrubClaimed(
     arena: std.mem.Allocator,
     list: []const []const u8,
-    idx_of: *const std.StringHashMap(usize),
+    idx_of: *const std.StringHashMapUnmanaged(usize),
     claimed: []const bool,
 ) std.mem.Allocator.Error![]const []const u8 {
-    var still: std.ArrayListUnmanaged([]const u8) = .empty;
+    var still: std.ArrayList([]const u8) = .empty;
     for (list) |ref| {
         const pi = idx_of.get(ref) orelse {
             try still.append(arena, ref);
@@ -5472,7 +5472,7 @@ fn packBoard(
     arena: std.mem.Allocator,
     parts: []Part,
     instances: []const export_kicad.FlatInstance,
-    idx_of: *const std.StringHashMap(usize),
+    idx_of: *const std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     spec: env.BoardSpec,
 ) std.mem.Allocator.Error!BoardRect {
@@ -5480,8 +5480,8 @@ fn packBoard(
 
     // Interior bbox: every part that is neither board-claimed nor staged in
     // the spec band (keepout extents — same boxes the collision pass checks).
-    var staged = std.StringHashMap(void).init(arena);
-    for (g_placement_diag.unplaced) |ref| try staged.put(ref, {});
+    var staged = std.StringHashMapUnmanaged(void).empty;
+    for (g_placement_diag.unplaced) |ref| try staged.put(arena, ref, {});
     var ix0 = std.math.inf(f64);
     var iy0 = std.math.inf(f64);
     var ix1 = -std.math.inf(f64);
@@ -5617,7 +5617,7 @@ fn packBoard(
     g_placement_diag.unplaced = try scrubClaimed(arena, g_placement_diag.unplaced, idx_of, bc.claimed);
     g_placement_diag.auto_filled = try scrubClaimed(arena, g_placement_diag.auto_filled, idx_of, bc.claimed);
     staged.clearRetainingCapacity();
-    for (g_placement_diag.unplaced) |ref| try staged.put(ref, {});
+    for (g_placement_diag.unplaced) |ref| try staged.put(arena, ref, {});
 
     // The spec staging band was packed under the *interior*; a board outline
     // can reach further down. Keep the band clear of the rectangle.
@@ -6092,7 +6092,7 @@ fn arrangeGrid(parts: []Part) void {
 /// reads, minus the placed positions.
 const Prepared = struct {
     parts: []Part,
-    idx_of: std.StringHashMap(usize),
+    idx_of: std.StringHashMapUnmanaged(usize),
     instances: []const export_kicad.FlatInstance,
     nets: []const FlatNet,
     built: Built,
@@ -6163,7 +6163,7 @@ fn netCurrents(arena: std.mem.Allocator, block: *const DesignBlock, nets: []cons
 /// The footprint-local pad of part `idx` that sits on net `net`, or a zero-size
 /// pad at the part centre when it has no pin on that net (so a proximity pull
 /// still has a sensible anchor — the part body).
-fn padOnNet(part: Part, idx: usize, net: FlatNet, idx_of: *std.StringHashMap(usize)) PadRect {
+fn padOnNet(part: Part, idx: usize, net: FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) PadRect {
     for (net.pins) |pr| {
         const i = idx_of.get(pr.ref_des) orelse continue;
         if (i != idx) continue;
@@ -6186,13 +6186,13 @@ fn resolveConstraints(
     instances: []const export_kicad.FlatInstance,
     nets: []const FlatNet,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
-    diags: ?*std.ArrayListUnmanaged([]const u8),
+    idx_of: *std.StringHashMapUnmanaged(usize),
+    diags: ?*std.ArrayList([]const u8),
 ) std.mem.Allocator.Error!Lowered {
     const c = block.constraints;
 
     const reject = struct {
-        fn add(a: std.mem.Allocator, d: ?*std.ArrayListUnmanaged([]const u8), comptime fmt: []const u8, args: anytype) void {
+        fn add(a: std.mem.Allocator, d: ?*std.ArrayList([]const u8), comptime fmt: []const u8, args: anytype) void {
             const dd = d orelse return;
             const msg = std.fmt.allocPrint(a, fmt, args) catch return;
             // A dropped diagnostic only loses an authoring hint, never correctness
@@ -6205,9 +6205,9 @@ fn resolveConstraints(
     @memset(net_weight, 1.0);
     var input_rail = try arena.alloc(bool, nets.len);
     @memset(input_rail, false);
-    var prox: std.ArrayListUnmanaged(ProxTerm) = .empty;
-    var keepouts: std.ArrayListUnmanaged(KeepTerm) = .empty;
-    var groups: std.ArrayListUnmanaged(GroupTerm) = .empty;
+    var prox: std.ArrayList(ProxTerm) = .empty;
+    var keepouts: std.ArrayList(KeepTerm) = .empty;
+    var groups: std.ArrayList(GroupTerm) = .empty;
 
     // power-rail (role input) → mark the rail so the input-loop boost fires even
     // with an integrated inductor (no discrete L to reveal the switcher).
@@ -6392,8 +6392,8 @@ fn synthAggressorKeepouts(
     arena: std.mem.Allocator,
     parts: []const Part,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
-    out: *std.ArrayListUnmanaged(KeepTerm),
+    idx_of: *std.StringHashMapUnmanaged(usize),
+    out: *std.ArrayList(KeepTerm),
 ) std.mem.Allocator.Error!void {
     const flags = try arena.alloc(std.EnumSet(module_policy.NetClass), parts.len);
     defer arena.free(flags);
@@ -6452,9 +6452,9 @@ fn resolveGroupMembers(
     arena: std.mem.Allocator,
     instances: []const export_kicad.FlatInstance,
     refs: []const []const u8,
-    diags: ?*std.ArrayListUnmanaged([]const u8),
+    diags: ?*std.ArrayList([]const u8),
 ) std.mem.Allocator.Error![]usize {
-    var members: std.ArrayListUnmanaged(usize) = .empty;
+    var members: std.ArrayList(usize) = .empty;
     for (refs) |ref| {
         if (resolvePart(instances, ref)) |pi|
             try members.append(arena, pi)
@@ -6477,7 +6477,7 @@ fn resolveGroupMembers(
 /// to a left-edge VIN pad would zone *right* purely because more GND pads happen
 /// to sit on the right. The signature rail (VIN, VOUT, SW, …) is what defines a
 /// group's side, so ground is excluded.
-fn makeGroupTerm(arena: std.mem.Allocator, members: []usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) GroupTerm {
+fn makeGroupTerm(arena: std.mem.Allocator, members: []usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) GroupTerm {
     _ = arena;
     var hub: i32 = -1;
     var best_area: f64 = 0;
@@ -6531,7 +6531,7 @@ pub fn validateConstraints(
     params: Params,
 ) std.mem.Allocator.Error![]const []const u8 {
     var prep = try prepare(arena, block, project_dir, params);
-    var diags: std.ArrayListUnmanaged([]const u8) = .empty;
+    var diags: std.ArrayList([]const u8) = .empty;
     _ = try resolveConstraints(arena, block, prep.instances, prep.nets, prep.parts, &prep.idx_of, &diags);
     return diags.toOwnedSlice(arena);
 }
@@ -6573,19 +6573,19 @@ fn prepare(
     // `(sub-block …)`s (hierarchical ref-des like "pwr/U1") and their merged
     // nets are included — a buck design is one sub-block, so `block.instances`
     // alone would be empty.
-    var inst_list: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    var inst_list: std.ArrayList(export_kicad.FlatInstance) = .empty;
     try netlist_mod.collectInstances(arena, block, "", &inst_list, block.refStyle());
-    var net_list: std.ArrayListUnmanaged(FlatNet) = .empty;
+    var net_list: std.ArrayList(FlatNet) = .empty;
     try export_kicad.flattenAndMergeNets(arena, block, &net_list);
     const instances = inst_list.items;
     const nets = net_list.items;
 
     // Pin-count hint per ref: how many net endpoints it has (sizes fallback
     // boxes and is a decent proxy for footprint complexity).
-    var pin_counts = std.StringHashMap(usize).init(arena);
+    var pin_counts = std.StringHashMapUnmanaged(usize).empty;
     for (nets) |net| {
         for (net.pins) |pr| {
-            const gop = try pin_counts.getOrPut(pr.ref_des);
+            const gop = try pin_counts.getOrPut(arena, pr.ref_des);
             if (!gop.found_existing) gop.value_ptr.* = 0;
             gop.value_ptr.* += 1;
         }
@@ -6596,7 +6596,7 @@ fn prepare(
     // once. Only hubs are classified — a passive's pads are always real, and an
     // IC's GND/rail nets are the ones that also carry straps.
     var roles = try arena.alloc(pin_roles.PartRoles, instances.len);
-    var roles_cache = std.StringHashMap(pin_roles.PartRoles).init(arena);
+    var roles_cache = std.StringHashMapUnmanaged(pin_roles.PartRoles).empty;
 
     // Per-footprint geometry cache, keyed by footprint name, mirroring
     // `roles_cache`. A board with 100 cap-0402s used to file-read + parse
@@ -6605,22 +6605,22 @@ fn prepare(
     // margin is constant across a prepare, so caching by name is byte-identical.
     // Fallback geoms (missing file) depend on the per-instance pin-count hint, so
     // they are never cached — `g.fallback` gates the store.
-    var geom_cache = std.StringHashMap(geometry.Geom).init(arena);
+    var geom_cache = std.StringHashMapUnmanaged(geometry.Geom).empty;
 
     var parts = try arena.alloc(Part, instances.len);
-    var idx_of = std.StringHashMap(usize).init(arena);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
     for (instances, 0..) |inst, i| {
         const hint = pin_counts.get(inst.ref_des) orelse 2;
         const g = blk: {
             if (geom_cache.get(inst.footprint)) |cached| break :blk cached;
             const loaded = geometry.load(arena, project_dir, inst.footprint, hint, params.bbox_margin);
             // Fallback geoms depend on the per-instance pin hint — never cache them.
-            if (!loaded.fallback) try geom_cache.put(inst.footprint, loaded);
+            if (!loaded.fallback) try geom_cache.put(arena, inst.footprint, loaded);
             break :blk loaded;
         };
         const is_hub = isHub(inst.ref_des);
         if (is_hub) {
-            const gop = try roles_cache.getOrPut(inst.component);
+            const gop = try roles_cache.getOrPut(arena, inst.component);
             if (!gop.found_existing) gop.value_ptr.* = pin_roles.load(arena, project_dir, inst.component);
             roles[i] = gop.value_ptr.*;
         } else roles[i] = .{};
@@ -6641,7 +6641,7 @@ fn prepare(
             .silk_lines = g.silk_lines,
             .silk_circles = g.silk_circles,
         };
-        try idx_of.put(inst.ref_des, i);
+        try idx_of.put(arena, inst.ref_des, i);
     }
 
     // Per-part priority rank (0 = unranked everywhere now — `(placement-order …)`
@@ -6718,7 +6718,7 @@ fn prepare(
 /// surrogate (`surrogateLoops`) on the score path, so the reported objective is
 /// the same smooth metric the optimizer minimises — and the objective is rebuilt
 /// from its inductance term, so the headline matches.
-fn breakdownWith(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet, params: Params, score: Score, lsum: LoopSums) Breakdown {
+fn breakdownWith(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), nets: []const FlatNet, params: Params, score: Score, lsum: LoopSums) Breakdown {
     // `al` is the *active* compactness term (what the objective minimizes);
     // `footprint` is always the courtyard bbox area — the universal yardstick the
     // UI shows so the two modes are comparable on the same scale.
@@ -6752,7 +6752,7 @@ fn breakdownWith(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: [
 fn routedLoops(
     arena: std.mem.Allocator,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
 ) LoopSums {
@@ -6785,7 +6785,7 @@ fn routedLoops(
 fn routedSubsetWeighted(
     arena: std.mem.Allocator,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     cap: usize,
@@ -7048,7 +7048,7 @@ const Pose = struct { x: f64, y: f64, rot: f64 };
 /// explores side-arrangements); large boards grid-seed (overlap-free start).
 fn runStart(
     parts: []Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     built: Built,
     s: usize,
@@ -7089,7 +7089,7 @@ fn runStart(
 fn routedPolish(
     arena: std.mem.Allocator,
     parts: []Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     params: Params,
@@ -7142,7 +7142,7 @@ fn routedPolish(
 fn routedPolishCost(
     scratch: *std.heap.ArenaAllocator,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     params: Params,
@@ -7165,7 +7165,7 @@ fn routedPolishCost(
 fn routedPolishPart(
     scratch: *std.heap.ArenaAllocator,
     parts: []Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     i: usize,
@@ -7438,9 +7438,9 @@ fn buildEscapeStubs(
     arena: std.mem.Allocator,
     nets: []const FlatNet,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) std.mem.Allocator.Error![]const Stub {
-    var list: std.ArrayListUnmanaged(Stub) = .empty;
+    var list: std.ArrayList(Stub) = .empty;
     for (nets, 0..) |net, ni| {
         const sn = shortName(net.name);
         if (isGroundName(sn) or isNoConnect(sn)) continue;
@@ -7523,7 +7523,7 @@ fn isNoConnect(name: []const u8) bool {
 /// searched — same rule as every other rotation search.
 fn optimizeRotations(
     parts: []Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     params: Params,
@@ -7556,7 +7556,7 @@ fn optimizeRotations(
 /// steer placement, they don't change the headline numbers.
 fn objectiveCost(
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     params: Params,
@@ -7592,7 +7592,7 @@ fn objectiveCost(
 ///     caps in a ≥2-member same-rail bank (twin of `g_loop_force_scale`)
 fn constraintCost(
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     params: Params,
@@ -7698,7 +7698,7 @@ fn partGap(a: Part, b: Part) f64 {
 fn routedObjectiveCost(
     scratch: std.mem.Allocator,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     params: Params,
@@ -7897,7 +7897,7 @@ fn congestPitch(net_index: usize) f64 {
 /// UCLA mPL supply/demand). Ground nets are excluded (they drop to the plane);
 /// a net with a declared current deposits a proportionally wider corridor
 /// (`congestPitch`).
-fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet) f64 {
+fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), nets: []const FlatNet) f64 {
     if (parts.len == 0) return 0;
     var minx: f64 = std.math.inf(f64);
     var miny: f64 = std.math.inf(f64);
@@ -8096,20 +8096,20 @@ fn buildSprings(
     arena: std.mem.Allocator,
     nets: []const FlatNet,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     roles: []const pin_roles.PartRoles,
     explicit_pin: []const []const u8,
     rail_optout: []const bool,
 ) std.mem.Allocator.Error!Built {
     const gnd = try groundPads(arena, nets, parts, idx_of, roles);
-    var springs: std.ArrayListUnmanaged(Spring) = .empty;
-    var loops: std.ArrayListUnmanaged(Loop) = .empty;
-    var legs: std.ArrayListUnmanaged(SeriesCand) = .empty;
+    var springs: std.ArrayList(Spring) = .empty;
+    var loops: std.ArrayList(Loop) = .empty;
+    var legs: std.ArrayList(SeriesCand) = .empty;
 
     for (nets, 0..) |net, net_i| {
         if (isGroundName(shortName(net.name))) continue;
 
-        var eps: std.ArrayListUnmanaged(Endpoint) = .empty;
+        var eps: std.ArrayList(Endpoint) = .empty;
         var hub_idx: ?usize = null;
         var multi_hub = false;
         for (net.pins) |pr| {
@@ -8150,7 +8150,7 @@ const SeriesCand = struct { part: usize, hub: usize, part_pad: PadRect, hub_pad:
 /// hub, and the hub-side targets are distinct (two different pins — a part
 /// strapped twice to one pin has no orientation to decide).
 fn pairSeriesLegs(arena: std.mem.Allocator, cands: []const SeriesCand, parts: []const Part) std.mem.Allocator.Error![]SeriesPair {
-    var out: std.ArrayListUnmanaged(SeriesPair) = .empty;
+    var out: std.ArrayList(SeriesPair) = .empty;
     for (cands, 0..) |c, i| {
         if (parts[c.part].pads.len != 2) continue;
         // Count this part's legs and find the one other than `i` (emit each
@@ -8335,9 +8335,9 @@ fn findHubPin(eps: []const Endpoint, hub: usize, want: []const u8) ?PadRect {
 /// hug spring to the hub's pads on this net.
 fn hugToHub(
     arena: std.mem.Allocator,
-    springs: *std.ArrayListUnmanaged(Spring),
-    loops: *std.ArrayListUnmanaged(Loop),
-    legs: *std.ArrayListUnmanaged(SeriesCand),
+    springs: *std.ArrayList(Spring),
+    loops: *std.ArrayList(Loop),
+    legs: *std.ArrayList(SeriesCand),
     eps: []const Endpoint,
     hub: usize,
     gnd: []const []const PadRect,
@@ -8403,8 +8403,8 @@ fn hubTargets(
     hub: usize,
     roles: []const pin_roles.PartRoles,
 ) std.mem.Allocator.Error!?HubTarget {
-    var hub_all: std.ArrayListUnmanaged(PadRect) = .empty;
-    var hub_real: std.ArrayListUnmanaged(PadRect) = .empty;
+    var hub_all: std.ArrayList(PadRect) = .empty;
+    var hub_real: std.ArrayList(PadRect) = .empty;
     var def_rect: ?PadRect = null;
     var def_pin: []const u8 = "";
     for (eps) |e| {
@@ -8443,7 +8443,7 @@ fn hubTargets(
 /// position. Caller guarantees both the cap and the hub have a ground pad.
 fn emitCapLoop(
     arena: std.mem.Allocator,
-    loops: *std.ArrayListUnmanaged(Loop),
+    loops: *std.ArrayList(Loop),
     eps: []const Endpoint,
     e: Endpoint,
     hub: usize,
@@ -8493,8 +8493,8 @@ fn hubOwningPin(eps: []const Endpoint, want: []const u8) ?usize {
 /// before, so unbound caps and true multi-hub signal nets are unchanged.
 fn clusterMultiHub(
     arena: std.mem.Allocator,
-    springs: *std.ArrayListUnmanaged(Spring),
-    loops: *std.ArrayListUnmanaged(Loop),
+    springs: *std.ArrayList(Spring),
+    loops: *std.ArrayList(Loop),
     eps: []const Endpoint,
     gnd: []const []const PadRect,
     roles: []const pin_roles.PartRoles,
@@ -8503,7 +8503,7 @@ fn clusterMultiHub(
     net_i: i32,
     net_name: []const u8,
 ) std.mem.Allocator.Error!void {
-    var rest: std.ArrayListUnmanaged(Endpoint) = .empty;
+    var rest: std.ArrayList(Endpoint) = .empty;
     for (eps) |e| {
         const bound = !e.is_hub and gnd[e.idx].len > 0 and explicit_pin[e.idx].len > 0;
         if (bound) {
@@ -8529,7 +8529,7 @@ fn clusterMultiHub(
 /// pin-to-pin, not box-centre to box-centre.
 fn weakCluster(
     arena: std.mem.Allocator,
-    springs: *std.ArrayListUnmanaged(Spring),
+    springs: *std.ArrayList(Spring),
     eps: []const Endpoint,
     net_name: []const u8,
 ) std.mem.Allocator.Error!void {
@@ -8572,10 +8572,10 @@ fn groundPads(
     arena: std.mem.Allocator,
     nets: []const FlatNet,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     roles: []const pin_roles.PartRoles,
 ) std.mem.Allocator.Error![]const []const PadRect {
-    var lists = try arena.alloc(std.ArrayListUnmanaged(TaggedPad), parts.len);
+    var lists = try arena.alloc(std.ArrayList(TaggedPad), parts.len);
     for (lists) |*l| l.* = .empty;
     for (nets) |net| {
         if (!isGroundName(shortName(net.name))) continue;
@@ -8597,7 +8597,7 @@ fn groundPads(
 /// first; failing that, anything not a strap; failing that (every pad was a
 /// strap), all of them — so a part with GND pads is never left empty.
 fn selectGroundPads(arena: std.mem.Allocator, tagged: []const TaggedPad) std.mem.Allocator.Error![]const PadRect {
-    var out: std.ArrayListUnmanaged(PadRect) = .empty;
+    var out: std.ArrayList(PadRect) = .empty;
     for (tagged) |t| if (t.cls == .ground) try out.append(arena, t.rect);
     if (out.items.len > 0) return out.toOwnedSlice(arena);
     for (tagged) |t| if (t.cls != .strap) try out.append(arena, t.rect);
@@ -8619,7 +8619,7 @@ const MAX_WIRE_PTS: usize = 64;
 /// — a much closer proxy for routed multi-pin wirelength (Chow & Young; FLUTE).
 /// The `Score.hpwl_mm` / `Breakdown.hpwl` fields keep their historical names but
 /// now carry this RSMT estimate.
-fn wireScore(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet) f64 {
+fn wireScore(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), nets: []const FlatNet) f64 {
     var total: f64 = 0;
     var pts: [MAX_WIRE_PTS]Pt = undefined;
     for (nets) |net| {
@@ -8634,7 +8634,7 @@ fn wireScore(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []con
 /// caller owns. Factored out of `wireScore` so the constraint layer can weight
 /// an individual net's contribution (`net-length` / `deprioritize`) without
 /// re-deriving it. Caller skips ground nets.
-fn netWire(parts: []const Part, idx_of: *std.StringHashMap(usize), net: FlatNet, pts: *[MAX_WIRE_PTS]Pt) f64 {
+fn netWire(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), net: FlatNet, pts: *[MAX_WIRE_PTS]Pt) f64 {
     var minx: f64 = std.math.inf(f64);
     var miny: f64 = std.math.inf(f64);
     var maxx: f64 = -std.math.inf(f64);
@@ -8701,7 +8701,7 @@ fn manhattan(a: Pt, b: Pt) f64 {
 /// override; the maze router is reserved for the finishing passes, not scoring).
 fn scoreLayout(
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
 ) Score {
@@ -9411,10 +9411,10 @@ test "optimizeRotations flips a cap to face both its pinned power and ground pin
         .hub_gnd_pin = .{ .x = 0.5, .y = -1, .w = 0.4, .h = 0.4 },
     }};
 
-    var idx = std.StringHashMap(usize).init(testing.allocator);
-    defer idx.deinit();
-    try idx.put("U1", 0);
-    try idx.put("C1", 1);
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    defer idx.deinit(testing.allocator);
+    try idx.put(testing.allocator, "U1", 0);
+    try idx.put(testing.allocator, "C1", 1);
 
     const before = scoreLayout(&parts, &idx, &.{}, &loops).loop_mm;
     optimizeRotations(&parts, &idx, &.{}, &loops, .{});
@@ -9443,9 +9443,9 @@ test "buildEscapeStubs reserves a corridor for unaccounted single-component nets
     const sig = [_]export_kicad.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "U1", .pin = "1" } };
     const nets = [_]FlatNet{ .{ .name = "RFIN", .pins = &rfin }, .{ .name = "SIG", .pins = &sig } };
 
-    var idx = std.StringHashMap(usize).init(arena);
-    try idx.put("R1", 0);
-    try idx.put("U1", 1);
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    try idx.put(arena, "R1", 0);
+    try idx.put(arena, "U1", 1);
 
     const stubs = try buildEscapeStubs(arena, &nets, &parts, &idx);
     try testing.expectEqual(@as(usize, 1), stubs.len); // RFIN only
@@ -9498,11 +9498,11 @@ test "buildSprings honours explicit decoupling bindings on a multi-hub rail" {
         .{ .name = "VDD", .pins = &vdd },
         .{ .name = "GND", .pins = &gnd_net },
     };
-    var idx = std.StringHashMap(usize).init(arena);
-    try idx.put("U1", 0);
-    try idx.put("U2", 1);
-    try idx.put("C1", 2);
-    try idx.put("C2", 3);
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    try idx.put(arena, "U1", 0);
+    try idx.put(arena, "U2", 1);
+    try idx.put(arena, "C1", 2);
+    try idx.put(arena, "C2", 3);
 
     const roles = [_]pin_roles.PartRoles{ .{}, .{}, .{}, .{} };
     const explicit = [_][]const u8{ "", "", "5", "8" };
@@ -9699,9 +9699,9 @@ test "congestionPenalty fires only on dense regions" {
         .{ .ref_des = "C", .kind = .passive, .hw = 0.05, .hh = 0.05, .pads = &pad, .fallback = false, .x = 0.4, .y = 0.0 },
         .{ .ref_des = "D", .kind = .passive, .hw = 0.05, .hh = 0.05, .pads = &pad, .fallback = false, .x = 0.0, .y = 0.4 },
     };
-    var idx_of = std.StringHashMap(usize).init(testing.allocator);
-    defer idx_of.deinit();
-    for (parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    defer idx_of.deinit(testing.allocator);
+    for (parts, 0..) |p, i| try idx_of.put(testing.allocator, p.ref_des, i);
 
     // No multi-pin signal net → zero congestion.
     const lone = [_]export_kicad.FlatPin{.{ .ref_des = "A", .pin = "1" }};
@@ -9919,10 +9919,10 @@ test "autofillUnlisted places a staged part beside its net" {
         .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &cap_pads, .fallback = true, .x = -5, .y = 0 },
         .{ .ref_des = "C9", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &cap_pads, .fallback = true, .y = 10 }, // staged below
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("C1", 1);
-    try idx_of.put("C9", 2);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "C1", 1);
+    try idx_of.put(arena, "C9", 2);
     const vin_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C9", .pin = "1" } };
     const nets = [_]FlatNet{.{ .name = "VIN", .pins = &vin_pins }};
     var springs = [_]Spring{};
@@ -9963,10 +9963,10 @@ test "packBoard docks edges and corners on the outline" {
         .{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 1.5, .pads = &j_pads, .fallback = true },
         .{ .ref_des = "MK1", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = true },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("J1", 1);
-    try idx_of.put("MK1", 2);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "J1", 1);
+    try idx_of.put(arena, "MK1", 2);
     const instances = [_]export_kicad.FlatInstance{
         .{ .ref_des = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "J1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
@@ -10010,10 +10010,10 @@ test "packBoard de-overlaps edge parts along their edge" {
         .{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 1.5, .pads = &.{}, .fallback = true },
         .{ .ref_des = "J2", .kind = .hub, .hw = 2, .hh = 1.5, .pads = &.{}, .fallback = true },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("J1", 1);
-    try idx_of.put("J2", 2);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "J1", 1);
+    try idx_of.put(arena, "J2", 2);
     const instances = [_]export_kicad.FlatInstance{
         .{ .ref_des = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "J1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
@@ -10107,9 +10107,9 @@ test "synthAggressorKeepouts pairs a feedback passive with the switching inducto
         .{ .name = "SW", .pins = &sw },
         .{ .name = "FB", .pins = &fb },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    for (parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
-    var keepouts: std.ArrayListUnmanaged(KeepTerm) = .empty;
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
+    var keepouts: std.ArrayList(KeepTerm) = .empty;
     try synthAggressorKeepouts(arena, &parts, &nets, &idx_of, &keepouts);
     // Exactly one pair: R1 (on feedback net FB) kept clear of L1 (on the
     // switching node SW). The hub U1, on both nets, is excluded both ways.
@@ -10160,11 +10160,11 @@ test "arrangeMacros + legalize keep modules intact and disjoint" {
     // One net joins the two modules, so the arranger has connectivity to act on.
     const link = [_]export_kicad.FlatPin{ .{ .ref_des = "a/C1", .pin = "1" }, .{ .ref_des = "b/U1", .pin = "1" } };
     const nets = [_]FlatNet{.{ .name = "L", .pins = &link }};
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("a/U1", 0);
-    try idx_of.put("a/C1", 1);
-    try idx_of.put("b/U1", 2);
-    try idx_of.put("b/C1", 3);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "a/U1", 0);
+    try idx_of.put(arena, "a/C1", 1);
+    try idx_of.put(arena, "b/U1", 2);
+    try idx_of.put(arena, "b/C1", 3);
 
     const origins = try arrangeMacros(arena, &macros, &macro_of, &nets, &idx_of, &parts, &.{ false, false });
     stampMacros(&parts, &macros, origins, &.{ false, false });
@@ -10208,7 +10208,7 @@ test "dockSidesByTier fills inner lane by priority, spilling lower tiers outward
     // Both docked on the LEFT (s=0) at the same edge coordinate; C1 is tier 0
     // (highest priority), C2 tier 1. The anchor is tiny so a lane holds only one
     // part — C1 claims the inner lane and C2 spills to the outer lane.
-    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
+    var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
     try sides[0].append(arena, .{ .i = 0, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
     try sides[0].append(arena, .{ .i = 1, .tier = 1, .along = 0, .half_along = 0.5, .depth = 0.5 });
     const hkb = KeepBox{ .cxo = 0, .cyo = 0, .hw = 0.3, .hh = 0.3 };
@@ -10248,13 +10248,13 @@ test "refineSidesByPull re-sides a part toward its signal pad" {
     const nets = [_]FlatNet{
         .{ .name = "SIG", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R1", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("R1", 1);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "R1", 1);
     const tier_of = [_]usize{ 0, 0 };
     const cohere_side = [_]u8{ 255, 255 }; // neither part is group-cohered
 
-    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
+    var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
     try sides[0].append(arena, .{ .i = 1, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
     parts[1].x = -10; // its mis-seeded (left) position
     parts[1].y = 0;
@@ -10295,7 +10295,7 @@ test "cohereGroups coheres an anchored group and leaves a pure-bypass group dist
 
     // Seed each ringed part on a NON-top side so cohesion visibly moves the PWR
     // group: L1,C3→left(0); C1,C4→right(1); C2→bottom(3).
-    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
+    var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
     try sides[0].append(arena, .{ .i = 1, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
     try sides[1].append(arena, .{ .i = 2, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
     try sides[3].append(arena, .{ .i = 3, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
@@ -10333,10 +10333,10 @@ test "servedPadLocal resolves a bound pad on-net and rejects cross-hub bindings"
     const nets = [_]FlatNet{
         .{ .name = "DVDD", .pins = &.{ .{ .ref_des = "U1", .pin = "10" }, .{ .ref_des = "C1", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("U2", 1);
-    try idx_of.put("C1", 2);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "U2", 1);
+    try idx_of.put(arena, "C1", 2);
     // Bound to U1 pad 10 on its own net → resolves to that pad's centre (3,0).
     const got = servedPadLocal(&parts, 0, 2, "10", &nets, &idx_of);
     try testing.expect(got != null);
@@ -10377,9 +10377,9 @@ test "orientPadsToIC turns the important pad toward the anchor" {
         .{ .name = "VDD", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
         .{ .name = "GND", .pins = &.{.{ .ref_des = "C1", .pin = "2" }} },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("C1", 1);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "C1", 1);
     orientPadsToIC(&parts, 0, null, &nets, &idx_of);
     // Flipped 180 → 0 so pad "1" (power, not GND) sits at world +x, toward the IC.
     try testing.expectEqual(@as(f64, 0), parts[1].rot);
@@ -10423,8 +10423,8 @@ test "polishCrossings honours want_side, refusing a wrong-side swap" {
         .{ .name = "N1", .pins = &.{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R3", .pin = "1" } } },
         .{ .name = "N2", .pins = &.{ .{ .ref_des = "R2", .pin = "1" }, .{ .ref_des = "R4", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    inline for (.{ "U1", "R1", "R2", "R3", "R4" }, 0..) |r, i| try idx_of.put(r, i);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    inline for (.{ "U1", "R1", "R2", "R3", "R4" }, 0..) |r, i| try idx_of.put(arena, r, i);
 
     // Unconstrained polish (all 255) DOES swap R1↔R2 to kill the crossing.
     var free = init;
@@ -10456,9 +10456,9 @@ test "surrogateObjective ranks a tighter layout below a spread one" {
     const nets = [_]FlatNet{
         .{ .name = "N", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("C1", 1);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "C1", 1);
     const params = Params{ .w_align = 0 }; // kill alignment; objective ≈ wirelength
     const no_loops = [_]Loop{};
     const tight = surrogateObjective(&parts, &idx_of, &nets, &no_loops, params);
@@ -10623,10 +10623,10 @@ test "isSwitcherBoard detects the buck signature and rejects ferrite-on-rail" {
         .{ .ref_des = "L1", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
         .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("L1", 1);
-    try idx_of.put("C1", 2);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "L1", 1);
+    try idx_of.put(arena, "C1", 2);
     const buck_nets = [_]FlatNet{
         .{ .name = "VIN", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
         .{ .name = "SW", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "L1", .pin = "1" } } },
@@ -10698,14 +10698,14 @@ test "pinOwners assigns passives to the hub they serve" {
         .{ .name = "CS", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "U2", .pin = "1" }, .{ .ref_des = "R1", .pin = "1" } } },
         .{ .name = "RUN", .pins = &.{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "R2", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("U2", 1);
-    try idx_of.put("C1", 2);
-    try idx_of.put("R1", 3);
-    try idx_of.put("R2", 4);
-    try idx_of.put("C2", 5);
-    try idx_of.put("U3", 6);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "U2", 1);
+    try idx_of.put(arena, "C1", 2);
+    try idx_of.put(arena, "R1", 3);
+    try idx_of.put(arena, "R2", 4);
+    try idx_of.put(arena, "C2", 5);
+    try idx_of.put(arena, "U3", 6);
     const zero = PadRect{ .x = 0, .y = 0, .w = 0, .h = 0 };
     // C1's `(decouples "U2" 8)` loop is authoritative even though it sits on the shared rail.
     const loops = try arena.alloc(Loop, 1);
@@ -10744,10 +10744,10 @@ test "buildPinGroups + dockGroups keep a satellite's cap with its owner at the a
         .{ .name = "XIN", .pins = &.{ .{ .ref_des = "U1", .pin = "9" }, .{ .ref_des = "X1", .pin = "2" } } },
         .{ .name = "XOUT", .pins = &.{ .{ .ref_des = "X1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("X1", 1);
-    try idx_of.put("C1", 2);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "X1", 1);
+    try idx_of.put(arena, "C1", 2);
     const built = Built{ .springs = &.{}, .loops = &.{}, .series = &.{} };
     const owner_of = try pinOwners(arena, &parts, 0, &nets, &idx_of, built);
     try testing.expectEqual(@as(usize, 1), owner_of[2]); // the load cap belongs to the crystal
@@ -10795,8 +10795,8 @@ test "overlayAuthoredGroups makes an authored group one island under its core" {
         .{ .name = "EN", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "Q1", .pin = "3" } } },
         .{ .name = "GATE2", .pins = &.{ .{ .ref_des = "Q2", .pin = "3" }, .{ .ref_des = "C9", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    for (parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
     const owner_of = try arena.alloc(usize, parts.len);
     // As pinOwners would leave it: hubs own themselves, C9 claimed by Q2.
     owner_of[0] = 0;
@@ -10915,8 +10915,8 @@ test "mirrorDiffTwins places the N-side twin at the P part plus the lane vector"
         .{ .name = "ETH_TX_P", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "RA", .pin = "1" } } },
         .{ .name = "ETH_TX_N", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "RB", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    for (parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
     const owner_of = [_]usize{ 0, 0, 0 };
     try mirrorDiffTwins(arena, &parts, 0, &owner_of, &instances, &nets, &idx_of);
     // Lane vector = pad2 − pad1 = (0, 1): RB mirrors RA one pitch below, same rot.
@@ -10997,9 +10997,9 @@ test "nearestSharedHub excludes the anchor itself and finds no secondary hub" {
     const nets = [_]FlatNet{
         .{ .name = "VOUT", .pins = &.{ .{ .ref_des = "IC", .pin = "1" }, .{ .ref_des = "M", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("IC", 0);
-    try idx_of.put("M", 1);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "IC", 0);
+    try idx_of.put(arena, "M", 1);
     const members = [_]usize{1};
     // The net's only hub pin is the anchor IC (index 0). All three conditions
     // are ANDed, so the anchor is excluded and no secondary hub remains — an
@@ -11015,9 +11015,9 @@ test "placeSwitchHub docks above the anchor when the top/bottom edge counts tie"
         .{ .ref_des = "IC", .kind = .hub, .hw = 2, .hh = 3, .pads = &.{}, .fallback = false, .x = 0, .y = 10 },
         .{ .ref_des = "SW", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("IC", 0);
-    try idx_of.put("SW", 1);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "IC", 0);
+    try idx_of.put(arena, "SW", 1);
     var lock_axis = [_]u8{ 0, 0 };
     var lock_val = [_]f64{ 0, 0 };
     // No blocks ⇒ top == bottom == 0, so the `top <= bot` tie takes the ABOVE
@@ -11036,8 +11036,8 @@ test "hubPadsOnNet skips a zero-size pad and keeps the real one" {
         .{ .number = "2", .x = 3, .y = 4, .w = 0.5, .h = 0.5 },
     };
     const hub = Part{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
     const net = FlatNet{
         .name = "N",
         .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "U1", .pin = "2" } },

@@ -82,7 +82,7 @@ pub fn validateSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     }
     const source = source_val.string;
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const w = out.writer(ctx.allocator);
 
     // Pre-flight parse so a pure syntax error reports as "syntax error" with
@@ -179,7 +179,7 @@ pub fn libIndexApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
     res.content_type = .JSON;
     res.header(HEADER_CORS, "*");
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const w = out.writer(ctx.allocator);
 
     try w.writeAll("{\"components\":[");
@@ -429,7 +429,7 @@ pub fn saveDiagramLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
         return;
     };
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const w = out.writer(ctx.allocator);
     if (findLayoutForm(source)) |span| {
         try w.writeAll(source[0..span.start]);

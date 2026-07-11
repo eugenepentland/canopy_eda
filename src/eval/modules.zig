@@ -216,11 +216,11 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         "refdes",
     };
 
-    var props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
-    var buses: std.ArrayListUnmanaged(BusDef) = .empty;
-    var datasheets: std.ArrayListUnmanaged([]const u8) = .empty;
-    var requirements: std.ArrayListUnmanaged(env_mod.Requirement) = .empty;
-    var electrical: std.ArrayListUnmanaged(env_mod.ElectricalDecl) = .empty;
+    var props: std.ArrayList(env_mod.Property) = .empty;
+    var buses: std.ArrayList(BusDef) = .empty;
+    var datasheets: std.ArrayList([]const u8) = .empty;
+    var requirements: std.ArrayList(env_mod.Requirement) = .empty;
+    var electrical: std.ArrayList(env_mod.ElectricalDecl) = .empty;
     var requirements_ignored = false;
     // Explicit ref-des class: `(refdes "Y")` declares the single-letter prefix
     // this part's instances get, overriding the name heuristic. 0 = unset.
@@ -290,7 +290,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         } else if (std.mem.eql(u8, field, "bus")) {
             // (bus "name" pin1 pin2 pin3 ...)
             const bus_name = cl[1].asText() orelse continue;
-            var bus_pins: std.ArrayListUnmanaged([]const u8) = .empty;
+            var bus_pins: std.ArrayList([]const u8) = .empty;
             for (cl[2..]) |pin_node| {
                 const pin_name = pin_node.asText() orelse continue;
                 bus_pins.append(self.allocator, pin_name) catch continue;
@@ -391,9 +391,9 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
         return EvalError.InvalidForm;
     };
 
-    var params: std.ArrayListUnmanaged([]const u8) = .empty;
+    var params: std.ArrayList([]const u8) = .empty;
     defer params.deinit(self.allocator);
-    var defaults: std.ArrayListUnmanaged(?Node) = .empty;
+    var defaults: std.ArrayList(?Node) = .empty;
     defer defaults.deinit(self.allocator);
     for (params_node) |p| {
         if (p.asAtom()) |pname| {
@@ -592,7 +592,7 @@ pub fn callModule(self: *Evaluator, mod: BlockDef, call_args: []const Node, call
 /// excluding parameters that declare a default:
 /// `module 'tpsm84338' missing argument(s): rled`.
 fn checkMissingParams(self: *Evaluator, mod: BlockDef, bound: []const ?Value, call_span: ast.Span) EvalError!void {
-    var missing: std.ArrayListUnmanaged(u8) = .empty;
+    var missing: std.ArrayList(u8) = .empty;
     defer missing.deinit(self.allocator);
     for (mod.params, 0..) |param, i| {
         if (bound[i] != null) continue;

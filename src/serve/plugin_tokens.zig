@@ -16,7 +16,7 @@ pub const Token = struct {
 };
 
 var mu: std.Thread.Mutex = .{};
-var tokens_list: std.ArrayListUnmanaged(Token) = .empty;
+var tokens_list: std.ArrayList(Token) = .empty;
 var loaded_auth_dir: ?[]const u8 = null;
 
 // Tokens persist in the module-global `tokens_list` for the life of the
@@ -62,7 +62,7 @@ fn save(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     ensureAuthDir(auth_dir);
     const path = tokensPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
-    var bw: std.ArrayListUnmanaged(u8) = .empty;
+    var bw: std.ArrayList(u8) = .empty;
     defer bw.deinit(allocator);
     const w = bw.writer(allocator);
     w.writeAll("[") catch return;

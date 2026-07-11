@@ -424,7 +424,7 @@ fn writeModelConfig(
 ) !void {
     const cfg = export_kicad.loadModelConfig(arena, project_dir);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     try w.writeAll("{\n");
 

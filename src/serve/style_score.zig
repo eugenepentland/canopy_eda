@@ -65,7 +65,7 @@ pub const StyleResult = struct {
 /// home — `layout_match` imports this.)
 pub fn classKey(alloc: std.mem.Allocator, p: optimizer.Placement, idx: usize) std.mem.Allocator.Error![]const u8 {
     const part = p.parts[idx];
-    var nets: std.ArrayListUnmanaged([]const u8) = .empty;
+    var nets: std.ArrayList([]const u8) = .empty;
     defer nets.deinit(alloc);
     for (p.nets) |net| {
         for (net.pins) |pin| {
@@ -80,7 +80,7 @@ pub fn classKey(alloc: std.mem.Allocator, p: optimizer.Placement, idx: usize) st
             return std.mem.order(u8, a, b) == .lt;
         }
     }.lt);
-    var joined: std.ArrayListUnmanaged(u8) = .empty;
+    var joined: std.ArrayList(u8) = .empty;
     defer joined.deinit(alloc);
     for (nets.items) |n| {
         try joined.appendSlice(alloc, n);
@@ -126,11 +126,11 @@ pub fn rotSide(side: Side, k: usize) Side {
 /// Analyze every non-anchor part into an `SInfo` (edge + gap-band + class),
 /// skipping refs in `excluded` (parts the starred reference doesn't cover — they
 /// would charge the candidate for reference staleness). Empty when no anchor hub.
-pub fn analyzeStyle(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: ?*const std.StringHashMap(void)) std.mem.Allocator.Error![]SInfo {
+pub fn analyzeStyle(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: ?*const std.StringHashMapUnmanaged(void)) std.mem.Allocator.Error![]SInfo {
     const ai = pcb_describe.anchorIndex(p.parts, p.nets) orelse return &.{};
     const anchor = p.parts[ai];
     const a_half = pcb_describe.aabbHalf(anchor);
-    var out: std.ArrayListUnmanaged(SInfo) = .empty;
+    var out: std.ArrayList(SInfo) = .empty;
     for (p.parts, 0..) |part, i| {
         if (i == ai) continue;
         if (excluded) |ex| {
@@ -159,10 +159,10 @@ const SClass = struct {
 /// only the edge term varies with `k`, so the winning `k` is the one maximizing
 /// the weighted total.
 pub fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []const SInfo) std.mem.Allocator.Error!StyleResult {
-    var map = std.StringHashMap(SClass).init(alloc);
-    defer map.deinit();
+    var map = std.StringHashMapUnmanaged(SClass).empty;
+    defer map.deinit(alloc);
     for (starred) |s| {
-        const gop = try map.getOrPut(s.class);
+        const gop = try map.getOrPut(alloc, s.class);
         if (!gop.found_existing) gop.value_ptr.* = .{};
         gop.value_ptr.edge_s[@intFromEnum(s.side)] += 1;
         gop.value_ptr.gap_s[s.gap_band] += 1;
@@ -180,7 +180,7 @@ pub fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []con
         var it = map.iterator();
         while (it.next()) |e| e.value_ptr.edge_r = [_]usize{0} ** N_SIDES;
         for (rough) |r| {
-            const gop = try map.getOrPut(r.class);
+            const gop = try map.getOrPut(alloc, r.class);
             if (!gop.found_existing) gop.value_ptr.* = .{};
             gop.value_ptr.edge_r[@intFromEnum(rotSide(r.side, k))] += 1;
         }
@@ -205,7 +205,7 @@ pub fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []con
         var it = map.iterator();
         while (it.next()) |e| e.value_ptr.gap_r = [_]usize{0} ** N_BANDS;
         for (rough) |r| {
-            const gop = try map.getOrPut(r.class);
+            const gop = try map.getOrPut(alloc, r.class);
             if (!gop.found_existing) gop.value_ptr.* = .{};
             gop.value_ptr.gap_r[r.gap_band] += 1;
         }
@@ -269,7 +269,7 @@ pub fn compareStyle(
     alloc: std.mem.Allocator,
     rough: optimizer.Placement,
     starred: optimizer.Placement,
-    excluded: ?*const std.StringHashMap(void),
+    excluded: ?*const std.StringHashMapUnmanaged(void),
 ) std.mem.Allocator.Error!StyleResult {
     return styleScore(alloc, try analyzeStyle(alloc, rough, excluded), try analyzeStyle(alloc, starred, excluded));
 }

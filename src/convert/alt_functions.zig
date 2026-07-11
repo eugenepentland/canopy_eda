@@ -36,7 +36,7 @@ pub fn mergePinoutWithAlts(
     const pinout_name = top[1].asString() orelse (top[1].asAtom() orelse return error.InvalidPinout);
 
     // Group alt entries by position for O(n) lookup.
-    var by_position: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(AltEntry)) = .empty;
+    var by_position: std.StringHashMapUnmanaged(std.ArrayList(AltEntry)) = .empty;
     defer {
         var it = by_position.valueIterator();
         while (it.next()) |list| list.deinit(allocator);
@@ -48,7 +48,7 @@ pub fn mergePinoutWithAlts(
         try gop.value_ptr.append(allocator, e);
     }
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll(";; Auto-generated pinout — DO NOT EDIT\n");
     try w.writeAll(";; Source of truth for pin ID → function name mapping\n");
@@ -106,7 +106,7 @@ pub fn mergePinoutWithAlts(
 /// Parse a long-format CSV: header row names the columns; required columns are
 /// `position` and `function`. Optional: `etype`. Whitespace in cells is trimmed.
 pub fn parseAltCsv(allocator: std.mem.Allocator, source: []const u8) AltError![]AltEntry {
-    var rows: std.ArrayListUnmanaged(AltEntry) = .empty;
+    var rows: std.ArrayList(AltEntry) = .empty;
 
     var line_iter = std.mem.splitScalar(u8, source, '\n');
     const header_line = line_iter.next() orelse return rows.toOwnedSlice(allocator);
@@ -130,7 +130,7 @@ pub fn parseAltCsv(allocator: std.mem.Allocator, source: []const u8) AltError![]
     while (line_iter.next()) |raw_line| {
         const line = trimCr(raw_line);
         if (line.len == 0) continue;
-        var cells: std.ArrayListUnmanaged([]const u8) = .empty;
+        var cells: std.ArrayList([]const u8) = .empty;
         defer cells.deinit(allocator);
         var cell_iter = std.mem.splitScalar(u8, line, ',');
         while (cell_iter.next()) |raw_cell| {
@@ -167,7 +167,7 @@ pub fn parseAltSource(allocator: std.mem.Allocator, source: []const u8) AltError
 /// emit one row per `<Signal Name="…"/>`, skipping the implicit `GPIO` signal (that's
 /// the primary, already in the pinout). Power / reset / self-closing pins are ignored.
 pub fn parseAltXml(allocator: std.mem.Allocator, source: []const u8) AltError![]AltEntry {
-    var rows: std.ArrayListUnmanaged(AltEntry) = .empty;
+    var rows: std.ArrayList(AltEntry) = .empty;
 
     var cursor: usize = 0;
     while (std.mem.indexOfPos(u8, source, cursor, "<Pin ")) |pin_start| {

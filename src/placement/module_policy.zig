@@ -94,9 +94,9 @@ pub fn analyze(alloc: Allocator, p: Placement) Allocator.Error!ModulePolicy {
     const part_role = try alloc.alloc(PartRole, p.parts.len);
     errdefer alloc.free(part_role);
 
-    var idx = std.StringHashMap(usize).init(alloc);
-    defer idx.deinit();
-    for (p.parts, 0..) |part, i| try idx.put(part.ref_des, i);
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    defer idx.deinit(alloc);
+    for (p.parts, 0..) |part, i| try idx.put(alloc, part.ref_des, i);
 
     classifyNets(p, &idx, net_class);
 
@@ -131,7 +131,7 @@ pub fn isInterestingClass(c: NetClass) bool {
 /// Fill `out` with a `NetClass` per net: the leaf-name class, upgraded to
 /// `switch_node` for an otherwise-plain net that bridges a hub and an inductor
 /// (the SW/LX node, however it's named).
-fn classifyNets(p: Placement, idx: *std.StringHashMap(usize), out: []NetClass) void {
+fn classifyNets(p: Placement, idx: *std.StringHashMapUnmanaged(usize), out: []NetClass) void {
     for (p.nets, 0..) |net, i| {
         var touch_hub = false;
         var touch_ind = false;
@@ -186,7 +186,7 @@ fn capRole(part: Part, fl: std.EnumSet(NetClass)) PartRole {
 /// One `ModuleInfo` per hub. For each hub we collect the classes of the nets it
 /// touches and whether a local inductor shares one, then classify.
 fn detectModules(alloc: Allocator, p: Placement, net_class: []const NetClass) Allocator.Error![]ModuleInfo {
-    var list: std.ArrayListUnmanaged(ModuleInfo) = .empty;
+    var list: std.ArrayList(ModuleInfo) = .empty;
     errdefer list.deinit(alloc);
     for (p.parts, 0..) |part, hi| {
         if (part.kind != .hub) continue;

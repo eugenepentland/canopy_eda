@@ -84,7 +84,7 @@ pub fn useSourceKicadMod(
         return allocator.dupe(u8, source);
     }
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
@@ -161,7 +161,7 @@ pub fn exportFootprintMod(
 
     const name = children[1].asAtom() orelse children[1].asString() orelse return error.InvalidFormat;
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
@@ -611,7 +611,7 @@ pub const ZipEntry = struct {
 
 /// Build a ZIP file in memory using store (no compression).
 pub fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
     // Track offsets for central directory
@@ -674,11 +674,11 @@ pub fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) std.mem
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendU16(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, val: u16) !void {
+fn appendU16(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, val: u16) !void {
     try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToLittle(u16, val)));
 }
 
-fn appendU32(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, val: u32) !void {
+fn appendU32(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, val: u32) !void {
     try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToLittle(u32, val)));
 }
 

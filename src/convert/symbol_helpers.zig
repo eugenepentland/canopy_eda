@@ -58,7 +58,7 @@ pub fn emitSymbol(allocator: std.mem.Allocator, w: anytype, sym_children: []cons
     }
 
     // Collect all pins from main symbol and sub-symbols
-    var pins: std.ArrayListUnmanaged(PinInfo) = .empty;
+    var pins: std.ArrayList(PinInfo) = .empty;
     defer pins.deinit(allocator);
 
     try collectPins(sym_children[2..], &pins, allocator);
@@ -71,13 +71,13 @@ pub fn emitSymbol(allocator: std.mem.Allocator, w: anytype, sym_children: []cons
     computeBodyBBox(sym_children[2..], &body_x1, &body_y1, &body_x2, &body_y2);
 
     // Classify pins by side and assign order
-    var left_pins: std.ArrayListUnmanaged(PinInfo) = .empty;
+    var left_pins: std.ArrayList(PinInfo) = .empty;
     defer left_pins.deinit(allocator);
-    var right_pins: std.ArrayListUnmanaged(PinInfo) = .empty;
+    var right_pins: std.ArrayList(PinInfo) = .empty;
     defer right_pins.deinit(allocator);
-    var top_pins: std.ArrayListUnmanaged(PinInfo) = .empty;
+    var top_pins: std.ArrayList(PinInfo) = .empty;
     defer top_pins.deinit(allocator);
-    var bottom_pins: std.ArrayListUnmanaged(PinInfo) = .empty;
+    var bottom_pins: std.ArrayList(PinInfo) = .empty;
     defer bottom_pins.deinit(allocator);
 
     for (pins.items) |pin| {
@@ -133,7 +133,7 @@ pub fn emitPinGroup(w: anytype, pin_list: []const PinInfo, side: []const u8) std
 /// Walk a KiCad symbol's child nodes, appending each `(pin …)` and recursing
 /// into any nested `(symbol …)` sub-units (e.g. `R_0_1`, `R_1_1`) so a
 /// multi-unit symbol contributes all of its pins to a single flat list.
-pub fn collectPins(children: []const Node, pins: *std.ArrayListUnmanaged(PinInfo), allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
+pub fn collectPins(children: []const Node, pins: *std.ArrayList(PinInfo), allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
     for (children) |child| {
         if (child.isForm("pin")) {
             if (extractPin(child)) |pin| {
@@ -244,7 +244,7 @@ fn classifyPinSide(pin: PinInfo, bx1: f64, by1: f64, bx2: f64, by2: f64) Side {
     }
 }
 
-fn sortPinsByY(list: *std.ArrayListUnmanaged(PinInfo)) void {
+fn sortPinsByY(list: *std.ArrayList(PinInfo)) void {
     std.mem.sortUnstable(PinInfo, list.items, {}, struct {
         fn lessThan(_: void, a: PinInfo, b: PinInfo) bool {
             return a.y < b.y;
@@ -252,7 +252,7 @@ fn sortPinsByY(list: *std.ArrayListUnmanaged(PinInfo)) void {
     }.lessThan);
 }
 
-fn sortPinsByX(list: *std.ArrayListUnmanaged(PinInfo)) void {
+fn sortPinsByX(list: *std.ArrayList(PinInfo)) void {
     std.mem.sortUnstable(PinInfo, list.items, {}, struct {
         fn lessThan(_: void, a: PinInfo, b: PinInfo) bool {
             return a.x < b.x;

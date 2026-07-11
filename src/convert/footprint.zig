@@ -43,7 +43,7 @@ pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) Conver
     }
 
     // Build output
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
 

@@ -50,13 +50,13 @@ fn applyMergeAnnotations(
     ctx: *RenderCtx,
     hub_ref: []const u8,
     groups: []const PinGroup,
-    saved: *std.ArrayListUnmanaged(Saved),
+    saved: *std.ArrayList(Saved),
 ) !void {
     const allocator = ctx.allocator;
 
     for (groups) |g| {
         // For this group, bucket mergeable .pin endpoints by merge key.
-        var buckets: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty;
+        var buckets: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty;
         defer {
             var it = buckets.iterator();
             while (it.next()) |kv| kv.value_ptr.deinit(allocator);
@@ -144,7 +144,7 @@ pub fn renderHubAllPins(
 ) RenderError!void {
     if (groups.len == 0) return;
 
-    var saved: std.ArrayListUnmanaged(Saved) = .empty;
+    var saved: std.ArrayList(Saved) = .empty;
     defer {
         restoreInstMap(ctx, saved.items);
         saved.deinit(ctx.allocator);

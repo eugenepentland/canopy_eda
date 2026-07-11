@@ -78,7 +78,7 @@ fn flatten(
     block: *const env_mod.DesignBlock,
     prefix: []const u8,
     insts: *std.StringHashMapUnmanaged(FlatInst),
-    nets: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)),
+    nets: *std.StringHashMapUnmanaged(std.ArrayList([]const u8)),
 ) DiffError!void {
     for (block.instances) |inst| {
         const ref = try prefixed(allocator, prefix, inst.ref_des);
@@ -125,16 +125,16 @@ pub fn diffBlocks(
     new_block: *const env_mod.DesignBlock,
 ) DiffError!DesignDiff {
     var old_insts: std.StringHashMapUnmanaged(FlatInst) = .empty;
-    var old_nets: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty;
+    var old_nets: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty;
     try flatten(allocator, old_block, "", &old_insts, &old_nets);
     var new_insts: std.StringHashMapUnmanaged(FlatInst) = .empty;
-    var new_nets: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty;
+    var new_nets: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty;
     try flatten(allocator, new_block, "", &new_insts, &new_nets);
 
-    var added: std.ArrayListUnmanaged(InstanceEntry) = .empty;
-    var removed: std.ArrayListUnmanaged(InstanceEntry) = .empty;
-    var value_changes: std.ArrayListUnmanaged(FieldChange) = .empty;
-    var fp_changes: std.ArrayListUnmanaged(FieldChange) = .empty;
+    var added: std.ArrayList(InstanceEntry) = .empty;
+    var removed: std.ArrayList(InstanceEntry) = .empty;
+    var value_changes: std.ArrayList(FieldChange) = .empty;
+    var fp_changes: std.ArrayList(FieldChange) = .empty;
 
     var new_it = new_insts.iterator();
     while (new_it.next()) |kv| {
@@ -157,7 +157,7 @@ pub fn diffBlocks(
         try removed.append(allocator, .{ .ref = oi.ref, .component = oi.component, .value = oi.value });
     }
 
-    var net_changes: std.ArrayListUnmanaged(NetChange) = .empty;
+    var net_changes: std.ArrayList(NetChange) = .empty;
     var nn_it = new_nets.iterator();
     while (nn_it.next()) |kv| {
         const old_pins: []const []const u8 = if (old_nets.getPtr(kv.key_ptr.*)) |p| p.items else &.{};
@@ -201,7 +201,7 @@ fn lessByRef(comptime T: type) fn (void, T, T) bool {
 /// either is non-empty. Membership is set-based ("REF.PIN" strings).
 fn appendNetChange(
     allocator: std.mem.Allocator,
-    out: *std.ArrayListUnmanaged(NetChange),
+    out: *std.ArrayList(NetChange),
     net: []const u8,
     old_pins: []const []const u8,
     new_pins: []const []const u8,
@@ -211,11 +211,11 @@ fn appendNetChange(
     var new_set: std.StringHashMapUnmanaged(void) = .empty;
     for (new_pins) |p| try new_set.put(allocator, p, {});
 
-    var pins_added: std.ArrayListUnmanaged([]const u8) = .empty;
+    var pins_added: std.ArrayList([]const u8) = .empty;
     for (new_pins) |p| {
         if (!old_set.contains(p)) try pins_added.append(allocator, p);
     }
-    var pins_removed: std.ArrayListUnmanaged([]const u8) = .empty;
+    var pins_removed: std.ArrayList([]const u8) = .empty;
     for (old_pins) |p| {
         if (!new_set.contains(p)) try pins_removed.append(allocator, p);
     }
@@ -307,7 +307,7 @@ pub fn historyApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         res.body = "{\"error\":\"failed to list history\"}";
         return;
     };
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try w.writeAll("{\"snapshots\":[");
     for (snaps, 0..) |s, i| {
@@ -375,7 +375,7 @@ pub fn diffApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handler
 
     const diff = try diffBlocks(ctx.allocator, old_block, new_block);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try w.writeAll("{\"name\":");
     try json_writer.writeString(w, name);

@@ -46,14 +46,14 @@ pub const ModelTransform = struct {
     model: ?[]const u8 = null,
 };
 
-pub const ModelConfigMap = std.StringHashMap(ModelTransform);
+pub const ModelConfigMap = std.StringHashMapUnmanaged(ModelTransform);
 
 /// Read `lib/models/model-config.json` and return a footprint-name →
 /// `ModelTransform` map. The JSON is parsed with a minimal hand-rolled
 /// scanner; missing or malformed files yield an empty map rather than
 /// erroring so footprint export still succeeds without a config.
 pub fn loadModelConfig(allocator: std.mem.Allocator, project_dir: []const u8) ModelConfigMap {
-    var map = ModelConfigMap.init(allocator);
+    var map: ModelConfigMap = .empty;
     const path = std.fmt.allocPrint(allocator, "{s}/lib/models/model-config.json", .{project_dir}) catch return map;
     defer allocator.free(path);
     const content = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return map;
@@ -92,7 +92,7 @@ pub fn loadModelConfig(allocator: std.mem.Allocator, project_dir: []const u8) Mo
 
         // OOM mid-parse: stop and return whatever we've collected so far.
         const duped_key = allocator.dupe(u8, key) catch return map;
-        map.put(duped_key, transform) catch return map;
+        map.put(allocator, duped_key, transform) catch return map;
         pos = brace_end + 1;
     }
 
@@ -150,20 +150,20 @@ pub fn exportFootprints(
     defer allocator.free(model_dir);
     try infra_fs.cwd().makePath(model_dir);
 
-    var instances: std.ArrayListUnmanaged(FlatInstance) = .empty;
+    var instances: std.ArrayList(FlatInstance) = .empty;
     defer instances.deinit(allocator);
     try collectInstances(allocator, block, "", &instances, block.refStyle());
 
-    var processed_fps = std.StringHashMap(void).init(allocator);
-    defer processed_fps.deinit();
+    var processed_fps = std.StringHashMapUnmanaged(void).empty;
+    defer processed_fps.deinit(allocator);
 
     var model_cfg = loadModelConfig(allocator, project_dir);
-    defer model_cfg.deinit();
+    defer model_cfg.deinit(allocator);
 
     for (instances.items) |inst| {
         if (inst.footprint.len == 0) continue;
         if (processed_fps.contains(inst.footprint)) continue;
-        try processed_fps.put(inst.footprint, {});
+        try processed_fps.put(allocator, inst.footprint, {});
 
         const fp_path = try std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
@@ -220,7 +220,7 @@ pub fn exportSectionLayout(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
 ) std.mem.Allocator.Error![]const u8 {
-    var flat_sections: std.ArrayListUnmanaged(struct { name: []const u8, instances: []const Instance, pin_groups: []const env_mod.PinGroup }) = .empty;
+    var flat_sections: std.ArrayList(struct { name: []const u8, instances: []const Instance, pin_groups: []const env_mod.PinGroup }) = .empty;
     defer flat_sections.deinit(allocator);
 
     for (block.sections) |sec| {
@@ -240,21 +240,21 @@ pub fn exportSectionLayout(
     var n_cols: usize = 1;
     while (n_cols * n_cols < n) : (n_cols += 1) {}
 
-    var ref_map = std.StringHashMap(usize).init(allocator);
-    defer ref_map.deinit();
+    var ref_map = std.StringHashMapUnmanaged(usize).empty;
+    defer ref_map.deinit(allocator);
 
     for (flat_sections.items, 0..) |sec, si| {
         for (sec.instances) |inst| {
-            try ref_map.put(inst.ref_des, si);
+            try ref_map.put(allocator, inst.ref_des, si);
         }
         for (sec.pin_groups) |pg| {
             if (!ref_map.contains(pg.ref_des)) {
-                try ref_map.put(pg.ref_des, si);
+                try ref_map.put(allocator, pg.ref_des, si);
             }
         }
     }
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
 

@@ -26,7 +26,7 @@ pub const PortClassMap = std.StringHashMapUnmanaged(ClassId);
 /// brand-new circuit gets its own view with no code change. Caller owns the
 /// returned slice (freed by `Graph.deinit`).
 pub fn buildRegistry(allocator: Allocator, block: *const DesignBlock) Allocator.Error![]ClassDef {
-    var list: std.ArrayListUnmanaged(ClassDef) = .empty;
+    var list: std.ArrayList(ClassDef) = .empty;
     errdefer list.deinit(allocator);
     try list.appendSlice(allocator, &types.builtin_classes);
     var discovered: usize = 0;

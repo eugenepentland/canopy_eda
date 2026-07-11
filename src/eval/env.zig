@@ -445,7 +445,7 @@ pub fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check {
         if (pins_form.len < 3) return null;
         const ph = pins_form[0].asAtom() orelse return null;
         if (!std.mem.eql(u8, ph, "pins")) return null;
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .empty;
         for (pins_form[1..]) |pn| {
             const s = pn.asText() orelse continue;
             list.append(allocator, s) catch return null;
@@ -466,7 +466,7 @@ pub fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check {
         if (pins_form.len < 2) return null;
         const ph = pins_form[0].asAtom() orelse return null;
         if (!std.mem.eql(u8, ph, "pins")) return null;
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .empty;
         for (pins_form[1..]) |pn| {
             const s = pn.asText() orelse continue;
             list.append(allocator, s) catch return null;

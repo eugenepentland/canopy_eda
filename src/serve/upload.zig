@@ -340,7 +340,7 @@ pub fn extractPackageName(sym_data: []const u8) []const u8 {
 /// so it's safe to use as a `lib/.../*.sexp` filename. Other characters
 /// pass through unchanged.
 pub fn sanitizeName(allocator: std.mem.Allocator, name: []const u8) []const u8 {
-    var safe_name: std.ArrayListUnmanaged(u8) = .empty;
+    var safe_name: std.ArrayList(u8) = .empty;
     for (name) |c| {
         const sc: u8 = switch (c) {
             'A'...'Z' => c + 32,
@@ -360,7 +360,7 @@ pub fn extractFootprintName(allocator: std.mem.Allocator, footprint: []const u8)
     if (std.mem.indexOf(u8, footprint, FOOTPRINT_PREFIX)) |idx| {
         const ns = idx + FOOTPRINT_PREFIX.len;
         if (std.mem.indexOfPos(u8, footprint, ns, "\"")) |ne| {
-            var fp_safe: std.ArrayListUnmanaged(u8) = .empty;
+            var fp_safe: std.ArrayList(u8) = .empty;
             for (footprint[ns..ne]) |fc| {
                 const fsc: u8 = switch (fc) {
                     'A'...'Z' => fc + 32,
@@ -422,7 +422,7 @@ fn isEscapedWhitespace(raw: []const u8, i: usize) bool {
 }
 
 fn cleanDescription(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]const u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     var sep = false;
     while (i < raw.len) {
@@ -460,7 +460,7 @@ fn renderComponentSexp(
     const manufacturer = extractFirstProperty(sym_data, &.{ "Manufacturer_Name", "Manufacturer", "MANUFACTURER", "MF" });
     const mpn = extractFirstProperty(sym_data, &.{ "Manufacturer_Part_Number", "MPN", "MP" });
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.print("(component \"{s}\"\n", .{safe_name});
     try w.print("  (description \"{s}\")\n", .{description});

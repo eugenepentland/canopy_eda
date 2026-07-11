@@ -83,7 +83,7 @@ pub fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) BomError![]co
     const nodes = parser_mod.parse(allocator, source) catch return &.{};
     defer parser_mod.freeNodes(allocator, nodes);
 
-    var entries: std.ArrayListUnmanaged(BomEntry) = .empty;
+    var entries: std.ArrayList(BomEntry) = .empty;
     errdefer entries.deinit(allocator);
 
     for (nodes) |node| {
@@ -99,8 +99,8 @@ pub fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) BomError![]co
 
         // Parse sub-forms: (id "..."), (key "val"), ...
         var entry_id: []const u8 = "";
-        var props: std.ArrayListUnmanaged(Property) = .empty;
-        var entry_nets: std.ArrayListUnmanaged([]const u8) = .empty;
+        var props: std.ArrayList(Property) = .empty;
+        var entry_nets: std.ArrayList([]const u8) = .empty;
         const start_idx: usize = if (has_component) 4 else 3;
         if (children.len > start_idx) {
             for (children[start_idx..]) |prop_node| {
@@ -165,20 +165,20 @@ pub fn collectFlatInstances(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     prefix: []const u8,
-    list: *std.ArrayListUnmanaged(FlatInfo),
+    list: *std.ArrayList(FlatInfo),
     ref_style: env_mod.RefStyle,
 ) std.mem.Allocator.Error!void {
-    var net_map = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(allocator);
+    var net_map = std.StringHashMapUnmanaged(std.ArrayList([]const u8)).empty;
     defer {
         var it = net_map.iterator();
         while (it.next()) |entry| {
             entry.value_ptr.deinit(allocator);
         }
-        net_map.deinit();
+        net_map.deinit(allocator);
     }
     for (block.nets) |net| {
         for (net.pins) |pin| {
-            const gop = try net_map.getOrPut(pin.ref_des);
+            const gop = try net_map.getOrPut(allocator, pin.ref_des);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
             try gop.value_ptr.append(allocator, net.name);
         }
@@ -272,11 +272,11 @@ pub fn applyBomUuids(
     // hierarchical (`buck/C3`), so uuids must be matched against the same
     // prefixed key — matching on the child's bare ref_des applied a top-level
     // `C3`'s uuid to every same-named sub-block twin (duplicate identities).
-    var uuid_map = std.StringHashMap([]const u8).init(allocator);
-    defer uuid_map.deinit();
+    var uuid_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer uuid_map.deinit(allocator);
     for (entries) |entry| {
         if (entry.uuid.len > 0) {
-            try uuid_map.put(entry.ref_des, entry.uuid);
+            try uuid_map.put(allocator, entry.ref_des, entry.uuid);
         }
     }
 
@@ -288,7 +288,7 @@ pub fn applyBomUuids(
 /// `bom_resolve.applyBom`'s prefix threading).
 fn applyBomUuidsRec(
     block: *const DesignBlock,
-    uuid_map: *const std.StringHashMap([]const u8),
+    uuid_map: *const std.StringHashMapUnmanaged([]const u8),
     allocator: std.mem.Allocator,
     prefix: []const u8,
 ) void {

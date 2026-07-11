@@ -87,7 +87,7 @@ fn buildToolDocs(arena: std.mem.Allocator) ![]ToolDoc {
     const root_obj = asObject(root) orelse return &.{};
     const tools_arr = asArray(root_obj.get("tools") orelse return &.{}) orelse return &.{};
 
-    var out: std.ArrayListUnmanaged(ToolDoc) = .empty;
+    var out: std.ArrayList(ToolDoc) = .empty;
     for (tools_arr.items) |tv| {
         const obj = asObject(tv) orelse continue;
         const name = objStr(obj, "name");
@@ -113,14 +113,14 @@ fn buildParams(arena: std.mem.Allocator, tool_obj: std.json.ObjectMap) ![]ParamD
     const schema = asObject(tool_obj.get("inputSchema") orelse return &.{}) orelse return &.{};
     const props = asObject(schema.get("properties") orelse return &.{}) orelse return &.{};
 
-    var required = std.StringHashMap(void).init(arena);
+    var required = std.StringHashMapUnmanaged(void).empty;
     if (schema.get("required")) |req_v| {
         if (asArray(req_v)) |req_arr| {
-            for (req_arr.items) |rv| try required.put(asStr(rv), {});
+            for (req_arr.items) |rv| try required.put(arena, asStr(rv), {});
         }
     }
 
-    var out: std.ArrayListUnmanaged(ParamDoc) = .empty;
+    var out: std.ArrayList(ParamDoc) = .empty;
     var it = props.iterator();
     while (it.next()) |entry| {
         const pname = entry.key_ptr.*;
@@ -128,7 +128,7 @@ fn buildParams(arena: std.mem.Allocator, tool_obj: std.json.ObjectMap) ![]ParamD
         var enums: []const []const u8 = &.{};
         if (pobj.get("enum")) |ev| {
             if (asArray(ev)) |earr| {
-                var el: std.ArrayListUnmanaged([]const u8) = .empty;
+                var el: std.ArrayList([]const u8) = .empty;
                 for (earr.items) |x| try el.append(arena, asStr(x));
                 enums = el.items;
             }
@@ -159,7 +159,7 @@ fn buildExample(arena: std.mem.Allocator, name: []const u8, params: []const Para
     for (params) |p| {
         if (p.required) required_count += 1;
     }
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     if (required_count == 0) {
         try w.print("{s} {{}}", .{name});

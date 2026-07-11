@@ -33,7 +33,7 @@ pub const ParseError = error{
 /// Parse S-expression source into a list of top-level nodes.
 pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError![]const Node {
     var tok = Tokenizer.init(source);
-    var nodes: std.ArrayListUnmanaged(Node) = .empty;
+    var nodes: std.ArrayList(Node) = .empty;
     errdefer nodes.deinit(allocator);
 
     while (true) {
@@ -109,7 +109,7 @@ fn parseSiValue(text: []const u8) ?f64 {
 
 fn parseList(allocator: std.mem.Allocator, tok: *Tokenizer, open_span: Span, depth: u32) ParseError!Node {
     if (depth >= MAX_PARSE_DEPTH) return ParseError.TooDeep;
-    var children: std.ArrayListUnmanaged(Node) = .empty;
+    var children: std.ArrayList(Node) = .empty;
     errdefer children.deinit(allocator);
 
     while (true) {

@@ -79,8 +79,8 @@ fn notesPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []cons
 /// borrow from `raw`, so the caller must keep `raw` alive while using the
 /// task text/ids.
 pub fn parseNotes(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error!Notes {
-    var tasks: std.ArrayListUnmanaged(Note) = .empty;
-    var scratch: std.ArrayListUnmanaged(u8) = .empty;
+    var tasks: std.ArrayList(Note) = .empty;
+    var scratch: std.ArrayList(u8) = .empty;
     var first_scratch = true;
 
     var it = std.mem.splitScalar(u8, raw, '\n');
@@ -161,7 +161,7 @@ fn isIsoDate(s: []const u8) bool {
 /// Render `Notes` as canonical markdown: tasks first (in given order),
 /// blank line, then scratchpad. Returns allocated bytes the caller owns.
 pub fn renderNotes(allocator: std.mem.Allocator, notes: Notes) ![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const w = out.writer(allocator);
     for (notes.tasks) |t| try writeTaskLine(w, t);
     if (notes.scratchpad.len > 0) {
@@ -298,7 +298,7 @@ pub fn getNotesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     defer if (data) |d| ctx.allocator.free(d);
     const text: []const u8 = data orelse "";
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try w.writeAll("{\"text\":");
     try json_writer.writeString(w, text);
@@ -343,7 +343,7 @@ pub fn getTasksApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         return jsonError(res, HTTP_INTERNAL_ERROR, ERR_READ_NOTES);
     defer if (raw) |d| ctx.allocator.free(d);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try writeTasksJson(ctx.allocator, w, notes);
     res.body = buf.items;
@@ -367,7 +367,7 @@ pub fn addTaskApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     const new_task = addTaskCore(ctx.allocator, ctx.project_dir, name, text_val.string) catch
         return jsonError(res, HTTP_INTERNAL_ERROR, "{\"error\":\"add failed\"}");
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try w.writeAll("{\"ok\":true,\"task\":");
     try writeNoteJson(w, new_task);
@@ -433,7 +433,7 @@ pub fn addTaskCore(
     const id = try generateNoteId(allocator);
     const today = try todayIsoDate(allocator);
 
-    var list = std.ArrayListUnmanaged(Note).fromOwnedSlice(notes.tasks);
+    var list = std.ArrayList(Note).fromOwnedSlice(notes.tasks);
     try list.append(allocator, .{ .id = id, .text = text, .created = today, .completed = null });
 
     const new_notes: Notes = .{ .tasks = list.items, .scratchpad = notes.scratchpad };
@@ -458,7 +458,7 @@ pub fn mutateTaskCore(
     defer if (raw) |d| allocator.free(d);
 
     var found = false;
-    var out_tasks: std.ArrayListUnmanaged(Note) = .empty;
+    var out_tasks: std.ArrayList(Note) = .empty;
     for (notes.tasks) |t| {
         const is_target = std.mem.eql(u8, t.id, id);
         if (is_target) found = true;

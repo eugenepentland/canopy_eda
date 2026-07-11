@@ -43,13 +43,13 @@ const CourtCirc = struct { cx: f64, cy: f64, r: f64 };
 /// Every drawable extracted from a footprint, grouped by primitive. Pads draw
 /// on top; courtyard sits behind everything as a boundary.
 const Shapes = struct {
-    pads: std.ArrayListUnmanaged(Pad) = .empty,
-    segs: std.ArrayListUnmanaged(Seg) = .empty,
-    circs: std.ArrayListUnmanaged(Circ) = .empty,
-    rects: std.ArrayListUnmanaged(RectS) = .empty,
-    polys: std.ArrayListUnmanaged(Poly) = .empty,
-    court_rects: std.ArrayListUnmanaged(CourtRect) = .empty,
-    court_circs: std.ArrayListUnmanaged(CourtCirc) = .empty,
+    pads: std.ArrayList(Pad) = .empty,
+    segs: std.ArrayList(Seg) = .empty,
+    circs: std.ArrayList(Circ) = .empty,
+    rects: std.ArrayList(RectS) = .empty,
+    polys: std.ArrayList(Poly) = .empty,
+    court_rects: std.ArrayList(CourtRect) = .empty,
+    court_circs: std.ArrayList(CourtCirc) = .empty,
 
     fn isEmpty(self: Shapes) bool {
         return self.pads.items.len == 0 and self.segs.items.len == 0 and
@@ -103,7 +103,7 @@ pub fn footprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     }
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     try emitFootprintJson(buf.writer(ctx.allocator), shapes);
 
     res.body = buf.toOwnedSlice(ctx.allocator) catch "";
@@ -246,7 +246,7 @@ fn readRect(node: Node, layer: Layer) ?RectS {
 fn readPolyPts(allocator: std.mem.Allocator, node: Node) HandlerError!?[]const Point {
     const sl = node.asList() orelse return null;
     if (sl.len < 4) return null; // need ≥3 points to be a polygon
-    var pts: std.ArrayListUnmanaged(Point) = .empty;
+    var pts: std.ArrayList(Point) = .empty;
     for (sl[1..]) |pn| {
         const pl = pn.asList() orelse continue;
         if (pl.len < 2) continue;
@@ -495,7 +495,7 @@ pub fn boardFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     // the front-authored library reads 1:1 — without this every Y-asymmetric
     // bottom part looks "re-pinned" even when the geometry matches exactly.
     if (found.back) try mirrorShapesY(req.arena, &shapes);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     try emitFootprintJson(buf.writer(req.arena), shapes);
     res.body = buf.items;
     res.content_type = .JSON;
@@ -646,7 +646,7 @@ fn readBoardPolyPts(allocator: std.mem.Allocator, child: Node) HandlerError!?[]c
     for (cl[1..]) |sub| {
         if (!sub.isForm("pts")) continue;
         const pl = sub.asList() orelse return null;
-        var pts: std.ArrayListUnmanaged(Point) = .empty;
+        var pts: std.ArrayList(Point) = .empty;
         for (pl[1..]) |xy| {
             const xl = xy.asList() orelse continue;
             if (xl.len < 3) continue;

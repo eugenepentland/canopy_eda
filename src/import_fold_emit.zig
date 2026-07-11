@@ -43,16 +43,16 @@ pub fn emitFold(
 
     // Per-channel stitching: indexed ports wired to that channel's family
     // member; ref provenance from signature-sorted correspondence.
-    var channels: std.ArrayListUnmanaged(fold.FoldChannel) = .empty;
+    var channels: std.ArrayList(fold.FoldChannel) = .empty;
     for (fold_set) |k| {
         const k_cluster = try sortedCluster(ctx, k);
-        var wires: std.ArrayListUnmanaged(fold.PortWire) = .empty;
+        var wires: std.ArrayList(fold.PortWire) = .empty;
         for (names.indexed.items) |ip| {
             if (familyMember(ctx, ip.template, k)) |raw| {
                 try wires.append(arena, .{ .port = ip.port, .outer_raw = raw });
             }
         }
-        var map_buf: std.ArrayListUnmanaged(u8) = .empty;
+        var map_buf: std.ArrayList(u8) = .empty;
         for (k_cluster, 0..) |pi, slot| {
             if (slot > 0) try map_buf.appendSlice(arena, " ");
             try map_buf.appendSlice(arena, norm_refs[slot]);
@@ -90,7 +90,7 @@ pub fn emitFold(
 /// Channel cluster part indices, sorted by structural signature so the
 /// ordering corresponds across isomorphic channels.
 fn sortedCluster(ctx: *fold.FoldCtx, chan: u64) FoldError![]usize {
-    var idxs: std.ArrayListUnmanaged(usize) = .empty;
+    var idxs: std.ArrayList(usize) = .empty;
     for (ctx.claim, 0..) |c, i| {
         if (c == chan) try idxs.append(ctx.arena, i);
     }
@@ -110,11 +110,11 @@ fn sortedCluster(ctx: *fold.FoldCtx, chan: u64) FoldError![]usize {
 
 /// "IC1"/"J1"/"FB1"… per cluster slot, counting per original ref prefix.
 fn normalizedRefs(ctx: *fold.FoldCtx, cluster: []const usize) FoldError![][]const u8 {
-    var counters = std.StringHashMap(usize).init(ctx.arena);
+    var counters = std.StringHashMapUnmanaged(usize).empty;
     const refs = try ctx.arena.alloc([]const u8, cluster.len);
     for (cluster, 0..) |pi, slot| {
         const prefix = refPrefix(ctx.parts[pi].ref);
-        const c = try counters.getOrPut(prefix);
+        const c = try counters.getOrPut(ctx.arena, prefix);
         if (!c.found_existing) c.value_ptr.* = 0;
         c.value_ptr.* += 1;
         refs[slot] = try std.fmt.allocPrint(ctx.arena, "{s}{d}", .{ prefix, c.value_ptr.* });
@@ -135,18 +135,18 @@ const IndexedPort = struct { port: []const u8, template: []const u8 };
 /// name, and remembers which ports exist (indexed vs shared).
 const NetNaming = struct {
     arena: std.mem.Allocator,
-    local: std.StringHashMap([]const u8), // raw net → module-local net name
-    indexed: std.ArrayListUnmanaged(IndexedPort),
-    shared: std.ArrayListUnmanaged(fold.SharedNet),
-    taken: std.StringHashMap(void),
+    local: std.StringHashMapUnmanaged([]const u8), // raw net → module-local net name
+    indexed: std.ArrayList(IndexedPort),
+    shared: std.ArrayList(fold.SharedNet),
+    taken: std.StringHashMapUnmanaged(void),
 
     fn build(ctx: *fold.FoldCtx, cluster: []const usize, chan: u64) FoldError!NetNaming {
         var self = NetNaming{
             .arena = ctx.arena,
-            .local = std.StringHashMap([]const u8).init(ctx.arena),
+            .local = std.StringHashMapUnmanaged([]const u8).empty,
             .indexed = .empty,
             .shared = .empty,
-            .taken = std.StringHashMap(void).init(ctx.arena),
+            .taken = std.StringHashMapUnmanaged(void).empty,
         };
         for (cluster) |pi| {
             for (ctx.parts[pi].pads) |pad| {
@@ -156,15 +156,15 @@ const NetNaming = struct {
                 if (class == .indexed) {
                     const template = ctx.seed_template.get(pad.net).?;
                     const port = try self.unique(try portSafe(ctx.arena, try portFromTemplate(ctx.arena, template, ctx.prefix)));
-                    try self.local.put(pad.net, port);
+                    try self.local.put(self.arena, pad.net, port);
                     try self.indexed.append(ctx.arena, .{ .port = port, .template = template });
                 } else if (class == .shared) {
                     const port = try self.unique(try portSafe(ctx.arena, try ik.sanitizeNetName(ctx.arena, pad.net)));
-                    try self.local.put(pad.net, port);
+                    try self.local.put(self.arena, pad.net, port);
                     try self.shared.append(ctx.arena, .{ .raw = pad.net, .port = port });
                 } else {
                     const name = try self.unique(try portSafe(ctx.arena, try internalName(ctx.arena, pad.net)));
-                    try self.local.put(pad.net, name);
+                    try self.local.put(self.arena, pad.net, name);
                 }
             }
         }
@@ -178,7 +178,7 @@ const NetNaming = struct {
             name = try std.fmt.allocPrint(self.arena, "{s}_{d}", .{ want, n });
             n += 1;
         }
-        try self.taken.put(name, {});
+        try self.taken.put(self.arena, name, {});
         return name;
     }
 
@@ -208,7 +208,7 @@ fn portFromTemplate(arena: std.mem.Allocator, template: []const u8, prefix: []co
     while (rest.len > 0 and (rest[0] == '_' or rest[0] == '-')) rest = rest[1..];
     if (rest.len == 0) return arena.dupe(u8, prefix);
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     for (rest) |ch| {
         if (ch != '~') try out.append(arena, ch);
     }
@@ -226,7 +226,7 @@ fn internalName(arena: std.mem.Allocator, raw: []const u8) FoldError![]const u8 
         }
         return ik.sanitizeNetName(arena, body);
     }
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     for (raw) |ch| {
         if (!std.ascii.isDigit(ch)) try out.append(arena, ch);
     }
@@ -246,13 +246,13 @@ fn renderModule(
 ) FoldError![]const u8 {
     _ = chan;
     const arena = ctx.arena;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
 
     w.writeAll(";; Auto-generated by `netlisp import-kicad --fold-channels` — one channel\n") catch return error.OutOfMemory;
     w.print(";; of the {s} repetition. Edit freely; re-import never overwrites.\n", .{ctx.prefix}) catch return error.OutOfMemory;
 
-    var imports: std.ArrayListUnmanaged([]const u8) = .empty;
+    var imports: std.ArrayList([]const u8) = .empty;
     for (cluster) |pi| {
         const part = ctx.parts[pi];
         if (part.family != null) continue;
@@ -300,12 +300,12 @@ fn renderInstance(ctx: *fold.FoldCtx, w: anytype, pi: usize, ref: []const u8, na
     }
 
     // Group pads by module-local net, first-seen order, dedup pad numbers.
-    var order: std.ArrayListUnmanaged([]const u8) = .empty; // local net order
-    var pins_of = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(ctx.arena);
+    var order: std.ArrayList([]const u8) = .empty; // local net order
+    var pins_of = std.StringHashMapUnmanaged(std.ArrayList([]const u8)).empty;
     for (part.pads) |pad| {
         if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.UNCONNECTED_PREFIX)) continue;
         const local = names.local.get(pad.net) orelse continue;
-        const slot = try pins_of.getOrPut(local);
+        const slot = try pins_of.getOrPut(ctx.arena, local);
         if (!slot.found_existing) {
             slot.value_ptr.* = .empty;
             try order.append(ctx.arena, local);
@@ -360,9 +360,9 @@ fn emptyFoldCtx(arena: std.mem.Allocator, parts: []const ik.Part) FoldError!fold
     return .{
         .arena = arena,
         .parts = parts,
-        .net_parts = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena),
-        .seed = std.StringHashMap(u64).init(arena),
-        .seed_template = std.StringHashMap([]const u8).init(arena),
+        .net_parts = std.StringHashMapUnmanaged(std.ArrayList(usize)).empty,
+        .seed = std.StringHashMapUnmanaged(u64).empty,
+        .seed_template = std.StringHashMapUnmanaged([]const u8).empty,
         .claim = try arena.alloc(u64, parts.len),
         .prefix = "",
     };

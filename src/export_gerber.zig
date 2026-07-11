@@ -84,7 +84,7 @@ pub const Error = std.Io.Writer.Error || std.mem.Allocator.Error;
 /// always ship. Slices are arena-allocated.
 pub fn planLayers(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]const LayerFile {
     const rules = placement.rules;
-    var out: std.ArrayListUnmanaged(LayerFile) = .empty;
+    var out: std.ArrayList(LayerFile) = .empty;
     const implicit = rules.plane_nets == null;
     const n: u8 = if (implicit) 4 else @max(2, rules.copper_layers);
 
@@ -373,12 +373,12 @@ const THERMAL_SPOKE_MM: f64 = @max(0.3, (router.RouteParams{}).track_width);
 /// `net` carries: clear an isolation ring (gap = pour clearance) around each,
 /// re-flash its land, and bridge the ring with an axis-aligned copper cross.
 /// SMD same-net pads and vias are left solid (the KiCad default).
-fn thermalReliefs(g: *Gx, placement: optimizer.Placement, nets: std.StringHashMap(usize), net: PlaneNet) Error!void {
-    const gap = placement.rules.design.pour_clearance;
-    for (placement.parts) |p| {
+fn thermalReliefs(g: *Gx, pl: optimizer.Placement, nets: std.StringHashMapUnmanaged(usize), net: PlaneNet) Error!void {
+    const gap = pl.rules.design.pour_clearance;
+    for (pl.parts) |p| {
         for (p.pads) |pad| {
             if (pad.npth or !pad.thru or pad.drill <= 0) continue;
-            if (!planeCarries(net, netOfPad(nets, placement, p.ref_des, pad.number))) continue;
+            if (!planeCarries(net, netOfPad(nets, pl, p.ref_des, pad.number))) continue;
             try thermalRelief(g, p, pad, gap);
         }
     }
@@ -566,7 +566,7 @@ fn padRegion(arena: std.mem.Allocator, p: optimizer.Part, pad: geometry.Pad, exp
     r = std.math.clamp(r, 0, @min(hw, hh));
 
     // Local offsets from the pad centre (before the pad's own rotation).
-    var locals: std.ArrayListUnmanaged([2]f64) = .empty;
+    var locals: std.ArrayList([2]f64) = .empty;
     if (r <= 1e-9) {
         try locals.append(arena, .{ hw, -hh });
         try locals.append(arena, .{ hw, hh });
@@ -686,23 +686,23 @@ fn pourRect(g: *Gx, placement: optimizer.Placement) Error!void {
 
 /// (ref-des NUL pad-number) → flattened-net index, built from the netlist so
 /// plane/pour layers can classify each pad's net. Arena-owned.
-fn padNets(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!std.StringHashMap(usize) {
-    var map = std.StringHashMap(usize).init(arena);
+fn padNets(arena: std.mem.Allocator, placement: optimizer.Placement) !std.StringHashMapUnmanaged(usize) {
+    var map = std.StringHashMapUnmanaged(usize).empty;
     for (placement.nets, 0..) |net, i| {
         for (net.pins) |pin| {
             const key = try std.fmt.allocPrint(arena, "{s}\x00{s}", .{ pin.ref_des, pin.pin });
-            try map.put(key, i);
+            try map.put(arena, key, i);
         }
     }
     return map;
 }
 
 /// The net name a pad is on, or "" when unconnected.
-fn netOfPad(nets: std.StringHashMap(usize), placement: optimizer.Placement, ref: []const u8, pad: []const u8) []const u8 {
+fn netOfPad(n: std.StringHashMapUnmanaged(usize), p: optimizer.Placement, ref: []const u8, pad: []const u8) []const u8 {
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}\x00{s}", .{ ref, pad }) catch return "";
-    const i = nets.get(key) orelse return "";
-    return placement.nets[i].name;
+    const i = n.get(key) orelse return "";
+    return p.nets[i].name;
 }
 
 /// Flattened-net index → name ("" for the router's -1 / out-of-range).
@@ -860,7 +860,7 @@ const Ap = struct { kind: ApKind, w: i64, h: i64 };
 
 /// The file's aperture dictionary: dedups (kind, w, h) → D-code (D10+).
 const Apertures = struct {
-    list: std.ArrayListUnmanaged(Ap) = .empty,
+    list: std.ArrayList(Ap) = .empty,
 
     fn code(self: *Apertures, arena: std.mem.Allocator, kind: ApKind, w: f64, h: f64) std.mem.Allocator.Error!u32 {
         const key = Ap{ .kind = kind, .w = mmToUm(w), .h = mmToUm(h) };

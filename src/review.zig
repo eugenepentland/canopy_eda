@@ -263,7 +263,7 @@ fn collectSubblockRequirements(
     block: *const DesignBlock,
     check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
 ) ![]const ComponentRequirementEntry {
-    var out: std.ArrayListUnmanaged(ComponentRequirementEntry) = .empty;
+    var out: std.ArrayList(ComponentRequirementEntry) = .empty;
     for (block.sub_blocks) |sb| try walkSubblock(allocator, sb.block, sb.name, check_results, &out);
     std.mem.sort(ComponentRequirementEntry, out.items, {}, lessThanByRefDes);
     return out.items;
@@ -274,7 +274,7 @@ fn walkSubblock(
     block: *const DesignBlock,
     prefix: []const u8,
     check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
-    out: *std.ArrayListUnmanaged(ComponentRequirementEntry),
+    out: *std.ArrayList(ComponentRequirementEntry),
 ) !void {
     for (block.instances) |inst| {
         if (inst.requirements.len == 0) continue;
@@ -304,7 +304,7 @@ fn walkSubblock(
 /// sub-blocks, joining each to its pin-1 net and any `(note "TPn" "...")`.
 /// Sorted by ref_des in natural order so TP1, TP2, TP10 stay in sequence.
 fn buildTestPoints(allocator: std.mem.Allocator, block: *const DesignBlock) ![]const TestPointEntry {
-    var out: std.ArrayListUnmanaged(TestPointEntry) = .empty;
+    var out: std.ArrayList(TestPointEntry) = .empty;
     try collectTestPoints(allocator, block, &out);
     std.mem.sort(TestPointEntry, out.items, {}, lessThanTestPoint);
     return out.items;
@@ -313,7 +313,7 @@ fn buildTestPoints(allocator: std.mem.Allocator, block: *const DesignBlock) ![]c
 fn collectTestPoints(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
-    out: *std.ArrayListUnmanaged(TestPointEntry),
+    out: *std.ArrayList(TestPointEntry),
 ) !void {
     for (block.instances) |inst| {
         if (!env_mod.isTestPoint(inst.component)) continue;
@@ -387,7 +387,7 @@ fn buildSummary(
 
     var bom_total: usize = 0;
     var bom_with_mpn: usize = 0;
-    var bom_missing: std.ArrayListUnmanaged(MissingMpn) = .empty;
+    var bom_missing: std.ArrayList(MissingMpn) = .empty;
     try collectMpnCoverage(allocator, block, "", &bom_total, &bom_with_mpn, &bom_missing);
     std.mem.sort(MissingMpn, bom_missing.items, {}, lessThanMissingMpn);
 
@@ -422,7 +422,7 @@ fn collectMpnCoverage(
     path_prefix: []const u8,
     total: *usize,
     with_mpn: *usize,
-    missing: *std.ArrayListUnmanaged(MissingMpn),
+    missing: *std.ArrayList(MissingMpn),
 ) std.mem.Allocator.Error!void {
     for (block.instances) |inst| {
         if (env_mod.isTestPoint(inst.component)) continue;
@@ -482,7 +482,7 @@ fn buildSectionReports(
     violations: []const erc_mod.Violation,
     check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
 ) ![]const SectionReport {
-    var out: std.ArrayListUnmanaged(SectionReport) = .empty;
+    var out: std.ArrayList(SectionReport) = .empty;
     for (block.sections) |sec| {
         const rep = try reportFromSection(allocator, block, sec, violations, check_results);
         try out.append(allocator, rep);
@@ -502,14 +502,14 @@ fn reportFromSection(
     var refs: std.StringHashMapUnmanaged(void) = .empty;
     try collectSectionRefs(allocator, sec, &refs);
 
-    var filtered: std.ArrayListUnmanaged(erc_mod.Violation) = .empty;
+    var filtered: std.ArrayList(erc_mod.Violation) = .empty;
     for (violations) |v| {
         if (v.ref_des.len == 0) continue;
         if (!refs.contains(v.ref_des)) continue;
         try filtered.append(allocator, v);
     }
 
-    var ports: std.ArrayListUnmanaged(PortSummary) = .empty;
+    var ports: std.ArrayList(PortSummary) = .empty;
     for (sec.ports) |p| {
         try ports.append(allocator, .{
             .name = p.name,
@@ -566,7 +566,7 @@ fn collectComponentRequirements(
         }
     }
 
-    var out: std.ArrayListUnmanaged(ComponentRequirementEntry) = .empty;
+    var out: std.ArrayList(ComponentRequirementEntry) = .empty;
     var it2 = by_ref.iterator();
     while (it2.next()) |e| {
         const inst = e.value_ptr.*;
@@ -619,8 +619,8 @@ fn countSectionInstances(sec: Section) usize {
 
 fn buildBom(allocator: std.mem.Allocator, block: *const DesignBlock) ![]const BomGroup {
     // Group by ref_des letter prefix (U, J, C, R, L, D, F, TP, SW, X, Q, ...).
-    var by_prefix: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(BomEntry)) = .empty;
-    var all_instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var by_prefix: std.StringHashMapUnmanaged(std.ArrayList(BomEntry)) = .empty;
+    var all_instances: std.ArrayList(Instance) = .empty;
     try appendInstances(allocator, &all_instances, block);
 
     for (all_instances.items) |inst| {
@@ -637,12 +637,12 @@ fn buildBom(allocator: std.mem.Allocator, block: *const DesignBlock) ![]const Bo
     }
 
     // Sort prefixes alphabetically so rendering is deterministic.
-    var keys: std.ArrayListUnmanaged([]const u8) = .empty;
+    var keys: std.ArrayList([]const u8) = .empty;
     var it = by_prefix.iterator();
     while (it.next()) |e| try keys.append(allocator, e.key_ptr.*);
     std.mem.sort([]const u8, keys.items, {}, lessThanString);
 
-    var groups: std.ArrayListUnmanaged(BomGroup) = .empty;
+    var groups: std.ArrayList(BomGroup) = .empty;
     for (keys.items) |k| {
         const list = by_prefix.get(k) orelse continue;
         // Sort entries inside a group by numeric suffix when available
@@ -656,7 +656,7 @@ fn buildBom(allocator: std.mem.Allocator, block: *const DesignBlock) ![]const Bo
 
 fn appendInstances(
     allocator: std.mem.Allocator,
-    list: *std.ArrayListUnmanaged(Instance),
+    list: *std.ArrayList(Instance),
     block: *const DesignBlock,
 ) std.mem.Allocator.Error!void {
     for (block.instances) |inst| try list.append(allocator, inst);
@@ -704,7 +704,7 @@ fn buildAssertionReports(
     allocator: std.mem.Allocator,
     assertions: []const AssertionResult,
 ) ![]const AssertionReport {
-    var out: std.ArrayListUnmanaged(AssertionReport) = .empty;
+    var out: std.ArrayList(AssertionReport) = .empty;
     for (assertions) |a| {
         const status: AssertionStatus = if (a.passed)
             .pass
@@ -718,7 +718,7 @@ fn buildAssertionReports(
 }
 
 fn filterUnresolved(allocator: std.mem.Allocator, violations: []const erc_mod.Violation) ![]const erc_mod.Violation {
-    var out: std.ArrayListUnmanaged(erc_mod.Violation) = .empty;
+    var out: std.ArrayList(erc_mod.Violation) = .empty;
     for (violations) |v| {
         if (v.severity == .info) continue;
         try out.append(allocator, v);
@@ -796,7 +796,7 @@ pub fn buildPowerTree(
         };
     }
 
-    var edges: std.ArrayListUnmanaged(PowerTreeEdge) = .empty;
+    var edges: std.ArrayList(PowerTreeEdge) = .empty;
     for (block.rails, 0..) |rail, i| {
         if (upstream[i]) |up| try edges.append(allocator, .{ .from = up, .to = rail.name });
     }
@@ -977,7 +977,7 @@ pub fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) std.mem.Allocator
 /// Replace any non-alphanumeric run with a single hyphen; lower-case the rest.
 /// Used for HTML anchor ids like "#sec-usb".
 pub fn slugify(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     var last_hyphen = true; // suppresses leading hyphens
     for (s) |c| {

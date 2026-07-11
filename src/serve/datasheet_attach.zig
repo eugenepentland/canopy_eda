@@ -47,7 +47,7 @@ pub fn spliceDatasheet(
     const insert_at = form_end - 1;
     const indent = detectIndent(source, form_start);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
     try w.writeAll(source[0..insert_at]);
@@ -187,7 +187,7 @@ pub fn attachDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
             return;
         }
         res.status = 500;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         const w = buf.writer(ctx.allocator);
         try w.writeAll("{\"ok\":false,\"error\":");
         try json_writer.writeString(w, @errorName(err));
@@ -195,7 +195,7 @@ pub fn attachDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         res.body = buf.items;
         return;
     };
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try w.print("{{\"ok\":true,\"version\":{d}}}", .{result.version});
     res.body = buf.items;
@@ -223,7 +223,7 @@ fn requireExists(
         } else |_| {}
     }
     res.status = if (bad) 400 else 404;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try w.writeAll("{\"ok\":false,\"error\":");
     try json_writer.writeString(w, if (bad) "invalid name" else not_found_msg);

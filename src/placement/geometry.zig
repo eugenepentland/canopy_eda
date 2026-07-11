@@ -107,9 +107,9 @@ pub fn load(
     const children = nodes[0].asList() orelse return fallbackGeom(pin_count_hint);
     if (children.len < 2) return fallbackGeom(pin_count_hint);
 
-    var pads: std.ArrayListUnmanaged(Pad) = .empty;
-    var silk_lines: std.ArrayListUnmanaged(SilkLine) = .empty;
-    var silk_circles: std.ArrayListUnmanaged(SilkCircle) = .empty;
+    var pads: std.ArrayList(Pad) = .empty;
+    var silk_lines: std.ArrayList(SilkLine) = .empty;
+    var silk_circles: std.ArrayList(SilkCircle) = .empty;
     var court_hw: f64 = 0;
     var court_hh: f64 = 0;
     var have_court = false;
@@ -155,8 +155,8 @@ pub fn load(
 fn parseSilkscreen(
     arena: std.mem.Allocator,
     node: Node,
-    lines: *std.ArrayListUnmanaged(SilkLine),
-    circles: *std.ArrayListUnmanaged(SilkCircle),
+    lines: *std.ArrayList(SilkLine),
+    circles: *std.ArrayList(SilkCircle),
 ) void {
     const cl = node.asList() orelse return;
     if (cl.len < 2) return;
@@ -274,7 +274,7 @@ fn isAtomEql(n: Node, s: []const u8) bool {
 fn parsePadPoly(arena: std.mem.Allocator, node: Node) ?[]const [2]f64 {
     const cl = node.asList() orelse return null;
     if (cl.len < 4) return null; // need ≥3 points
-    var pts: std.ArrayListUnmanaged([2]f64) = .empty;
+    var pts: std.ArrayList([2]f64) = .empty;
     for (cl[1..]) |pn| {
         const pl = pn.asList() orelse continue;
         if (pl.len < 2) continue;
@@ -377,7 +377,7 @@ test "load parses a 0402 footprint's pads and courtyard" {
     const nodes = try parser.parse(arena, src);
     // Drive the same parsing paths load() uses, off an in-memory footprint.
     const children = nodes[0].asList().?;
-    var pads: std.ArrayListUnmanaged(Pad) = .empty;
+    var pads: std.ArrayList(Pad) = .empty;
     var ext: ?Ext = null;
     for (children[2..]) |sub| {
         if (sub.isForm("pad")) {
@@ -420,7 +420,7 @@ test "parsePad reads oval slots, pad rotation, and roundrect ratio" {
     ;
     const nodes = try parser.parse(arena, src);
     const children = nodes[0].asList().?;
-    var pads: std.ArrayListUnmanaged(Pad) = .empty;
+    var pads: std.ArrayList(Pad) = .empty;
     for (children[2..]) |sub| {
         if (sub.isForm("pad")) {
             if (parsePad(arena, sub)) |p| try pads.append(arena, p);
@@ -454,8 +454,8 @@ test "parseSilkscreen collects lines and circles" {
         \\  (circle (-2.90 -2.50) 0.13))
     ;
     const nodes = try parser.parse(arena, src);
-    var lines: std.ArrayListUnmanaged(SilkLine) = .empty;
-    var circles: std.ArrayListUnmanaged(SilkCircle) = .empty;
+    var lines: std.ArrayList(SilkLine) = .empty;
+    var circles: std.ArrayList(SilkCircle) = .empty;
     parseSilkscreen(arena, nodes[0], &lines, &circles);
     try testing.expectEqual(@as(usize, 1), lines.items.len);
     try testing.expectApproxEqAbs(@as(f64, -0.26), lines.items[0].x1, 1e-9);

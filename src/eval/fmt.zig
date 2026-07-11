@@ -46,7 +46,7 @@ pub const directives = [_]Directive{
 
 /// Format a string with ~V, ~R, ~C, ~A, ~S, ~~ specifiers.
 pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const Value) FmtError![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     const writer = buf.writer(allocator);
 

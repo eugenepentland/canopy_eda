@@ -30,7 +30,7 @@ pub fn parse(
     const net = form_children[2].asString() orelse return null;
 
     var purpose: []const u8 = "";
-    var tags: std.ArrayListUnmanaged(TestPointTag) = .empty;
+    var tags: std.ArrayList(TestPointTag) = .empty;
     defer tags.deinit(allocator);
 
     for (form_children[3..]) |sub| {

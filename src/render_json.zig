@@ -124,8 +124,8 @@ const JsonHub = struct {
     /// Section-grid card index this hub renders in — shared with every passive
     /// the card emits, so the editor pairs a module's caps with its own IC.
     slot: ?usize = null,
-    left_pins: std.ArrayListUnmanaged(JsonPin),
-    right_pins: std.ArrayListUnmanaged(JsonPin),
+    left_pins: std.ArrayList(JsonPin),
+    right_pins: std.ArrayList(JsonPin),
 };
 
 /// Cached pinout data: symbol_name -> (pin_id -> []alt_names).
@@ -153,7 +153,7 @@ fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const
         if (!std.mem.eql(u8, ch, "pin")) continue;
         const pin_id = cl[1].asAtom() orelse cl[1].asString() orelse continue;
 
-        var alts: std.ArrayListUnmanaged([]const u8) = .empty;
+        var alts: std.ArrayList([]const u8) = .empty;
         for (cl[3..]) |alt_node| {
             const al = alt_node.asList() orelse continue;
             if (al.len < 2) continue;
@@ -199,7 +199,7 @@ fn loadPinoutNames(allocator: Allocator, path: []const u8) ?std.StringHashMapUnm
 
 const JsonWire = struct {
     net: []const u8,
-    points: std.ArrayListUnmanaged([2]f64),
+    points: std.ArrayList([2]f64),
     is_bus: bool,
 };
 
@@ -308,7 +308,7 @@ fn firstIcInSubBlock(sb: env_mod.SubBlock) []const u8 {
 /// Resolve each `eval/rails` PowerRail to its producing IC ref for the scene.
 fn buildPowerRails(allocator: Allocator, block: *const DesignBlock) Allocator.Error![]const ScenePowerRail {
     const power_rails = try rails_mod.build(allocator, block);
-    var out: std.ArrayListUnmanaged(ScenePowerRail) = .empty;
+    var out: std.ArrayList(ScenePowerRail) = .empty;
     for (power_rails) |r| {
         var hub: []const u8 = "";
         for (block.sub_blocks) |sb| {
@@ -348,12 +348,12 @@ const SceneGraph = struct {
     vb_w: f64 = 0,
     vb_h: f64 = 0,
     design_name: []const u8 = "",
-    sections: std.ArrayListUnmanaged(JsonSection),
-    hubs: std.ArrayListUnmanaged(JsonHub),
-    wires: std.ArrayListUnmanaged(JsonWire),
-    passives: std.ArrayListUnmanaged(JsonPassive),
-    labels: std.ArrayListUnmanaged(JsonLabel),
-    staged: std.ArrayListUnmanaged(JsonStaged),
+    sections: std.ArrayList(JsonSection),
+    hubs: std.ArrayList(JsonHub),
+    wires: std.ArrayList(JsonWire),
+    passives: std.ArrayList(JsonPassive),
+    labels: std.ArrayList(JsonLabel),
+    staged: std.ArrayList(JsonStaged),
     /// Names of the design's authored `(section …)` / sub-block structure, so the
     /// editor's sheet navigator pages by authored section — and collapses to a
     /// single whole-design sheet when there are none — instead of auto per-IC.
@@ -386,7 +386,7 @@ const SceneGraph = struct {
     }
 
     fn addWire(self: *SceneGraph, net: []const u8, x1: f64, y1: f64, x2: f64, y2: f64, is_bus: bool) !void {
-        var pts: std.ArrayListUnmanaged([2]f64) = .empty;
+        var pts: std.ArrayList([2]f64) = .empty;
         if (y1 == y2) {
             try pts.append(self.allocator, .{ x1, y1 });
             try pts.append(self.allocator, .{ x2, y2 });
@@ -464,7 +464,7 @@ fn mergeAwareGroupHeights(ctx: *RenderCtx, allocator: Allocator, groups: []const
         var total_slots: u32 = 0;
 
         // Classify connections for this group (same logic as collectGroupConnections)
-        var classified: std.ArrayListUnmanaged(Classified) = .empty;
+        var classified: std.ArrayList(Classified) = .empty;
         for (group.conns) |conn| {
             switch (conn.endpoint) {
                 .net => |net| {
@@ -573,7 +573,7 @@ const MergeAwareSplit = ctx_mod.MergeAwareSplit;
 /// identical groups ⇒ identical split — a cache hit is only ever returned for
 /// byte-identical inputs. Owned by `allocator` (arena; lives for the render).
 fn splitCacheKey(allocator: Allocator, all_groups: []const PinGroup, hub_ref: []const u8) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     try buf.appendSlice(allocator, hub_ref);
     for (all_groups) |g| {
         try buf.append(allocator, '|');
@@ -597,10 +597,10 @@ fn splitGroupsByMergeAwareHeight(
     const all_heights = try mergeAwareGroupHeights(ctx, allocator, all_groups, hub_ref);
     defer allocator.free(all_heights);
 
-    var left: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var right: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var left_h: std.ArrayListUnmanaged(f64) = .empty;
-    var right_h: std.ArrayListUnmanaged(f64) = .empty;
+    var left: std.ArrayList(PinGroup) = .empty;
+    var right: std.ArrayList(PinGroup) = .empty;
+    var left_h: std.ArrayList(f64) = .empty;
+    var right_h: std.ArrayList(f64) = .empty;
     var left_total: f64 = 0;
     var right_total: f64 = 0;
 
@@ -630,7 +630,7 @@ fn splitGroupsByMergeAwareHeight(
 fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?env_mod.Part) !f64 {
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
 
-    var all_pins_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var all_pins_list: std.ArrayList([]const u8) = .empty;
     defer all_pins_list.deinit(allocator);
 
     if (part) |p| {
@@ -686,7 +686,7 @@ fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, par
 /// editor pages by; when the list is empty the design has no explicit sections
 /// and the editor shows a single whole-design sheet.
 fn collectAuthoredSections(allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize) ![]const []const u8 {
-    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var list: std.ArrayList([]const u8) = .empty;
     for (block.sections) |sec| {
         try list.append(allocator, sec.name);
         for (sec.sub_sections) |sub| try list.append(allocator, sub.name);
@@ -705,7 +705,7 @@ fn collectAuthoredSections(allocator: Allocator, block: *const DesignBlock, sub_
 /// order as `collectAuthoredSections`), each classified with the system-
 /// overview category heuristics so the editor can order bands canonically.
 fn buildSheetMeta(allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize) ![]const SheetMeta {
-    var list: std.ArrayListUnmanaged(SheetMeta) = .empty;
+    var list: std.ArrayList(SheetMeta) = .empty;
     for (block.sections) |sec| {
         try list.append(allocator, .{ .name = sec.name, .cat = @tagName(rb_types.classifySection(sec)), .sub = sec.description });
         for (sec.sub_sections) |sub| {
@@ -735,12 +735,12 @@ const SectionInfo = struct {
     description: []const u8,
     notes: []const env_mod.SectionNote,
     sheet: []const u8,
-    cell_indices: std.ArrayListUnmanaged(usize),
+    cell_indices: std.ArrayList(usize),
 };
 
 const SectionGridState = struct {
-    grid: std.ArrayListUnmanaged(SectionInfo),
-    ref_to_section: std.StringHashMap(usize),
+    grid: std.ArrayList(SectionInfo),
+    ref_to_section: std.StringHashMapUnmanaged(usize),
 };
 
 /// Build the section grid (one slot per authored section, sub-section, and
@@ -748,7 +748,7 @@ const SectionGridState = struct {
 /// keeps its own card but files under the adopting section's sheet, so the
 /// editor's bands match the authored structure.
 fn buildSectionGrid(allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize) !SectionGridState {
-    var st = SectionGridState{ .grid = .empty, .ref_to_section = std.StringHashMap(usize).init(allocator) };
+    var st = SectionGridState{ .grid = .empty, .ref_to_section = std.StringHashMapUnmanaged(usize).empty };
     for (block.sections) |sec| {
         const sec_idx = st.grid.items.len;
         try st.grid.append(allocator, .{
@@ -758,7 +758,7 @@ fn buildSectionGrid(allocator: Allocator, block: *const DesignBlock, sub_attachm
             .sheet = sec.name,
             .cell_indices = .empty,
         });
-        for (sec.instances) |inst| try st.ref_to_section.put(inst.ref_des, sec_idx);
+        for (sec.instances) |inst| try st.ref_to_section.put(allocator, inst.ref_des, sec_idx);
         for (sec.sub_sections) |sub| {
             const sub_idx = st.grid.items.len;
             try st.grid.append(allocator, .{
@@ -768,7 +768,7 @@ fn buildSectionGrid(allocator: Allocator, block: *const DesignBlock, sub_attachm
                 .sheet = sub.name,
                 .cell_indices = .empty,
             });
-            for (sub.instances) |inst| try st.ref_to_section.put(inst.ref_des, sub_idx);
+            for (sub.instances) |inst| try st.ref_to_section.put(allocator, inst.ref_des, sub_idx);
         }
     }
     for (block.sub_blocks, 0..) |sb, sb_idx| {
@@ -781,7 +781,7 @@ fn buildSectionGrid(allocator: Allocator, block: *const DesignBlock, sub_attachm
             .sheet = sheet,
             .cell_indices = .empty,
         });
-        for (sb.block.instances) |inst| try st.ref_to_section.put(inst.ref_des, sec_idx);
+        for (sb.block.instances) |inst| try st.ref_to_section.put(allocator, inst.ref_des, sec_idx);
     }
     return st;
 }
@@ -792,10 +792,10 @@ fn buildSectionGrid(allocator: Allocator, block: *const DesignBlock, sub_attachm
 fn collectGridCells(
     allocator: Allocator,
     ctx: *RenderCtx,
-    section_grid: *std.ArrayListUnmanaged(SectionInfo),
-    ref_to_section: *const std.StringHashMap(usize),
-) !std.ArrayListUnmanaged(GridCell) {
-    var cells: std.ArrayListUnmanaged(GridCell) = .empty;
+    section_grid: *std.ArrayList(SectionInfo),
+    ref_to_section: *const std.StringHashMapUnmanaged(usize),
+) !std.ArrayList(GridCell) {
+    var cells: std.ArrayList(GridCell) = .empty;
     for (ctx.hub_order.items) |hub_ref| {
         const hub_inst = ctx.inst_map.get(hub_ref) orelse continue;
         if (hub_inst.parts.len > 0) {
@@ -987,7 +987,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     // editor reads these (authoritative) instead of inferring a pin's net from
     // drawn wires, so a pin on a fresh single-pin net (no wire yet) still shows
     // its name. Keyed by full ref_des (nets reference instances by full ref).
-    var pinnet_map: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(PinNet)) = .empty;
+    var pinnet_map: std.StringHashMapUnmanaged(std.ArrayList(PinNet)) = .empty;
     for (ctx.nets.items) |net| {
         const bn = baseNetName(net.name);
         for (net.pins) |pin| {
@@ -1054,7 +1054,7 @@ fn collectHubData(
     // Get pin groups (reuse hub.zig logic)
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
 
-    var all_pins_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var all_pins_list: std.ArrayList([]const u8) = .empty;
     defer all_pins_list.deinit(allocator);
 
     if (part) |p| {
@@ -1244,7 +1244,7 @@ fn collectHubConnections(
 ) !void {
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
 
-    var all_pins_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var all_pins_list: std.ArrayList([]const u8) = .empty;
     defer all_pins_list.deinit(allocator);
 
     if (part) |p| {
@@ -1330,7 +1330,7 @@ fn collectGroupConnections(
     const canon_key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ hub_ref, first_pin_id });
     const pin_net_name = ctx.pin_canonical_nets.get(canon_key) orelse "";
 
-    var classified: std.ArrayListUnmanaged(Classified) = .empty;
+    var classified: std.ArrayList(Classified) = .empty;
 
     for (group.conns) |conn| {
         switch (conn.endpoint) {
@@ -1415,7 +1415,7 @@ fn collectGroupConnections(
     var max_cy: f64 = py;
     const total_h2 = @as(f64, @floatFromInt(@max(total_slots, 1) -| 1)) * per_conn_spacing;
 
-    var results: std.ArrayListUnmanaged(BranchResult) = .empty;
+    var results: std.ArrayList(BranchResult) = .empty;
 
     for (merged.items, 0..) |entry, i| {
         const slots = slot_counts[i];
@@ -1496,8 +1496,8 @@ const MergedEntry = struct {
 
 /// Find groups of identical single-passive spoke connections to the same terminal
 /// and collapse them into one entry with a count (e.g. "5x 100nF" to GND).
-fn mergeIdenticalSpokes(ctx: *RenderCtx, allocator: Allocator, classified: []const Classified, hub_ref: []const u8) !std.ArrayListUnmanaged(MergedEntry) {
-    var result: std.ArrayListUnmanaged(MergedEntry) = .empty;
+fn mergeIdenticalSpokes(ctx: *RenderCtx, allocator: Allocator, classified: []const Classified, hub_ref: []const u8) !std.ArrayList(MergedEntry) {
+    var result: std.ArrayList(MergedEntry) = .empty;
 
     // Build a key for each spoke connection: "terminal|value|symbol"
     // Non-spoke connections get unique keys so they never merge.
@@ -1651,7 +1651,7 @@ fn collectConnBody(
                     try ctx.rendered_spokes.put(allocator, c.ref_des, {});
                 }
 
-                var all_spokes: std.ArrayListUnmanaged(FlatInst) = .empty;
+                var all_spokes: std.ArrayList(FlatInst) = .empty;
                 try all_spokes.append(allocator, inst);
                 for (chain_result.chain) |c| try all_spokes.append(allocator, c);
 
@@ -1734,7 +1734,7 @@ fn collectBranchTreeLeft(
     }
 
     const BranchBody = struct { end_x: f64, cy: f64, terminal: []const u8 };
-    var bodies: std.ArrayListUnmanaged(BranchBody) = .empty;
+    var bodies: std.ArrayList(BranchBody) = .empty;
 
     for (branches, 0..) |branch, idx| {
         const by = start_y + @as(f64, @floatFromInt(idx)) * branch_spacing;
@@ -1778,7 +1778,7 @@ fn collectBranchTreeRight(
     }
 
     const BranchBody = struct { end_x: f64, cy: f64, terminal: []const u8 };
-    var bodies: std.ArrayListUnmanaged(BranchBody) = .empty;
+    var bodies: std.ArrayList(BranchBody) = .empty;
 
     for (branches, 0..) |branch, idx| {
         const by = start_y + @as(f64, @floatFromInt(idx)) * branch_spacing;
@@ -1901,7 +1901,7 @@ fn writeRailsJson(w: anytype, power_rails: []const ScenePowerRail) !void {
 }
 
 fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
 
     try w.writeAll("{");

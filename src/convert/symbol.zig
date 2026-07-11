@@ -19,7 +19,7 @@ pub fn convertSymbol(allocator: std.mem.Allocator, source: []const u8, filter: ?
     if (nodes.len == 0) return error.InvalidFormat;
     const root = nodes[0];
 
-    var symbols_to_process: std.ArrayListUnmanaged(Node) = .empty;
+    var symbols_to_process: std.ArrayList(Node) = .empty;
     defer symbols_to_process.deinit(allocator);
 
     if (root.isForm(KICAD_SYMBOL_LIB_FORM)) {
@@ -35,7 +35,7 @@ pub fn convertSymbol(allocator: std.mem.Allocator, source: []const u8, filter: ?
         return error.InvalidFormat;
     }
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
@@ -62,7 +62,7 @@ pub fn generatePinout(allocator: std.mem.Allocator, source: []const u8, filter: 
     if (nodes.len == 0) return error.InvalidFormat;
     const root = nodes[0];
 
-    var symbols_to_process: std.ArrayListUnmanaged(Node) = .empty;
+    var symbols_to_process: std.ArrayList(Node) = .empty;
     defer symbols_to_process.deinit(allocator);
 
     if (root.isForm(KICAD_SYMBOL_LIB_FORM)) {
@@ -78,7 +78,7 @@ pub fn generatePinout(allocator: std.mem.Allocator, source: []const u8, filter: 
         return error.InvalidFormat;
     }
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
@@ -91,7 +91,7 @@ pub fn generatePinout(allocator: std.mem.Allocator, source: []const u8, filter: 
             if (!std.mem.eql(u8, sym_name, f)) continue;
         }
 
-        var pins: std.ArrayListUnmanaged(PinInfo) = .empty;
+        var pins: std.ArrayList(PinInfo) = .empty;
         defer pins.deinit(allocator);
         try helpers.collectPins(sym_children[2..], &pins, allocator);
 
@@ -117,12 +117,12 @@ pub fn generatePackage(
 ) ConvertError![]const u8 {
     // Parse symbol pins
     const sym_nodes = try parser_mod.parse(allocator, sym_source);
-    var sym_pins: std.ArrayListUnmanaged(PinInfo) = .empty;
+    var sym_pins: std.ArrayList(PinInfo) = .empty;
     defer sym_pins.deinit(allocator);
 
     if (sym_nodes.len > 0) {
         const root = sym_nodes[0];
-        var symbols: std.ArrayListUnmanaged(Node) = .empty;
+        var symbols: std.ArrayList(Node) = .empty;
         defer symbols.deinit(allocator);
         if (root.isForm(KICAD_SYMBOL_LIB_FORM)) {
             for ((root.asList().?)[1..]) |child| {
@@ -151,7 +151,7 @@ pub fn generatePackage(
 
     // Parse footprint pads
     const fp_nodes = try parser_mod.parse(allocator, fp_source);
-    var pads: std.ArrayListUnmanaged(PadInfo) = .empty;
+    var pads: std.ArrayList(PadInfo) = .empty;
     defer pads.deinit(allocator);
 
     if (fp_nodes.len > 0) {
@@ -211,7 +211,7 @@ pub fn generatePackage(
     }
 
     // Emit combined package
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
 

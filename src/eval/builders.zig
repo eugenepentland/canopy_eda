@@ -50,7 +50,7 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
     var role: []const u8 = "";
     var protocol: []const u8 = "";
     var class_key: []const u8 = "";
-    var group_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var group_list: std.ArrayList([]const u8) = .empty;
     var is_optional: bool = false;
 
     var elec: ?env_mod.ElectricalDecl = null;
@@ -170,7 +170,7 @@ pub fn expandSectionBusPort(
     self: *Evaluator,
     bp_children: []const Node,
     env: *env_mod.Env,
-    out: *std.ArrayListUnmanaged(env_mod.SectionPort),
+    out: *std.ArrayList(env_mod.SectionPort),
 ) EvalError!void {
     const exp = try parseBusPortHeader(self, bp_children, env) orelse return;
     var idx: i64 = exp.start;
@@ -194,7 +194,7 @@ pub fn expandTopLevelBusPort(
     self: *Evaluator,
     bp_children: []const Node,
     env: *Env,
-    out: *std.ArrayListUnmanaged(Port),
+    out: *std.ArrayList(Port),
 ) EvalError!void {
     const exp = try parseBusPortHeader(self, bp_children, env) orelse return;
     var idx: i64 = exp.start;
@@ -246,7 +246,7 @@ fn parseBusPortHeader(self: *Evaluator, bp_children: []const Node, env: *Env) Ev
     var suffixes: []const []const u8 = &.{""};
     if (bp_children.len > 4 and bp_children[4].isForm("suffixes")) {
         const sf = bp_children[4].asList().?;
-        var suf_buf: std.ArrayListUnmanaged([]const u8) = .empty;
+        var suf_buf: std.ArrayList([]const u8) = .empty;
         for (sf[1..]) |s| {
             const text = s.asText() orelse continue;
             try suf_buf.append(self.allocator, text);
@@ -269,7 +269,7 @@ fn parseBusPortHeader(self: *Evaluator, bp_children: []const Node, env: *Env) Ev
 /// atom (the parser skips index 0), then the synthesized name, then the
 /// shared modifier children.
 fn synthesizeSectionPortChildren(allocator: std.mem.Allocator, name: []const u8, rest: []const Node) EvalError![]Node {
-    var buf: std.ArrayListUnmanaged(Node) = .empty;
+    var buf: std.ArrayList(Node) = .empty;
     try buf.append(allocator, Node.atom(ast.Span.zero, "port"));
     try buf.append(allocator, Node.string(ast.Span.zero, name));
     for (rest) |n| try buf.append(allocator, n);
@@ -280,7 +280,7 @@ fn synthesizeSectionPortChildren(allocator: std.mem.Allocator, name: []const u8,
 /// (no leading `port` atom — buildPort's contract differs from
 /// parseSectionPort's), then the shared modifier children.
 fn synthesizeBuildPortArgs(allocator: std.mem.Allocator, name: []const u8, rest: []const Node) EvalError![]Node {
-    var buf: std.ArrayListUnmanaged(Node) = .empty;
+    var buf: std.ArrayList(Node) = .empty;
     try buf.append(allocator, Node.string(ast.Span.zero, name));
     for (rest) |n| try buf.append(allocator, n);
     return buf.toOwnedSlice(allocator) catch EvalError.OutOfMemory;
@@ -292,7 +292,7 @@ pub fn parseSectionCalc(self: *Evaluator, sf_children: []const Node, env: *env_m
     const calc_name_val = try self.evalNode(sf_children[1], env);
     const calc_name = calc_name_val.asString() orelse return null;
     var calc_env = env_mod.Env.init(self.allocator, env);
-    var calc_results: std.ArrayListUnmanaged(env_mod.CalcResult) = .empty;
+    var calc_results: std.ArrayList(env_mod.CalcResult) = .empty;
 
     for (sf_children[2..]) |cf| {
         const cf_children = cf.asList() orelse continue;
@@ -351,9 +351,9 @@ pub fn processPinForm(
     pins_ref: []const u8,
     pin_func_map: ?*const std.StringHashMapUnmanaged([]const u8),
     env: *env_mod.Env,
-    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
-    pg_pins: *std.ArrayListUnmanaged(env_mod.PartPin),
-    net_ties: *std.ArrayListUnmanaged(NetTie),
+    all_pin_nets: *std.ArrayList(PinNetDecl),
+    pg_pins: *std.ArrayList(env_mod.PartPin),
+    net_ties: *std.ArrayList(NetTie),
 ) EvalError!void {
     if (pin_form.isForm("pin")) {
         const pin_children = pin_form.asList() orelse return;
@@ -449,9 +449,9 @@ fn emitBusLane(
     as_prefix: []const u8,
     bus_idx: *u32,
     pin_func_map: ?*const std.StringHashMapUnmanaged([]const u8),
-    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
-    pg_pins: *std.ArrayListUnmanaged(env_mod.PartPin),
-    net_ties: *std.ArrayListUnmanaged(NetTie),
+    all_pin_nets: *std.ArrayList(PinNetDecl),
+    pg_pins: *std.ArrayList(env_mod.PartPin),
+    net_ties: *std.ArrayList(NetTie),
 ) EvalError!void {
     const raw = ids.pinId(self, node) orelse return;
     const pn = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw) orelse raw) else raw;
@@ -499,8 +499,8 @@ pub fn emitDecoupleItems(
     items: []const Node,
     net_name: []const u8,
     env: *Env,
-    instances: *std.ArrayListUnmanaged(Instance),
-    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
+    instances: *std.ArrayList(Instance),
+    all_pin_nets: *std.ArrayList(PinNetDecl),
     form_id: []const u8,
     sidecar: *ids.ChildIdSidecar,
 ) EvalError!void {
@@ -604,7 +604,7 @@ pub fn emitDecoupleItems(
         // passes through unchanged. Keeps the decouple pin list consistent with
         // how the IC's own pins are declared.
         const pin_func_map = findPinFuncMap(self, instances.items, ref_str);
-        var target_pins: std.ArrayListUnmanaged([]const u8) = .empty;
+        var target_pins: std.ArrayList([]const u8) = .empty;
         defer target_pins.deinit(self.allocator);
         var pin_idx = c;
         while (pin_idx < items.len) : (pin_idx += 1) {
@@ -707,11 +707,11 @@ fn autoHostRef(self: *Evaluator, span: ast.Span, net_name: []const u8) EvalError
 /// visible; zero matches is an error pointing at that ordering contract.
 fn expandPinsOf(
     self: *Evaluator,
-    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
+    all_pin_nets: *std.ArrayList(PinNetDecl),
     ref: []const u8,
     net: []const u8,
     span: ast.Span,
-    target_pins: *std.ArrayListUnmanaged([]const u8),
+    target_pins: *std.ArrayList([]const u8),
 ) EvalError!void {
     const before = target_pins.items.len;
     for (all_pin_nets.items) |pn| {
@@ -961,7 +961,7 @@ pub fn buildGroup(self: *Evaluator, args: []const Node, env: *Env) EvalError!Gro
         return EvalError.InvalidForm;
     };
 
-    var members: std.ArrayListUnmanaged([]const u8) = .empty;
+    var members: std.ArrayList([]const u8) = .empty;
     for (members_node) |m| {
         const s = m.asString() orelse {
             self.setError(m.span, "(group …) members must be ref-des strings");
@@ -995,7 +995,7 @@ pub fn buildFunction(self: *Evaluator, args: []const Node, env: *Env) EvalError!
             return EvalError.TypeError;
         },
     };
-    var hosts: std.ArrayListUnmanaged([]const u8) = .empty;
+    var hosts: std.ArrayList([]const u8) = .empty;
     for (args[1..]) |arg| {
         const sub = arg.asList() orelse {
             const cap_val = try self.evalNode(arg, env);
@@ -1145,7 +1145,7 @@ pub fn buildSubBlock(self: *Evaluator, form_children: []const Node, env: *Env) E
 pub fn addPartToInstance(self: *Evaluator, instances: []Instance, ref_des: []const u8, part_name: []const u8, pins: []const env_mod.PartPin) EvalError!void {
     for (instances) |*inst| {
         if (std.mem.eql(u8, inst.ref_des, ref_des)) {
-            var existing_parts: std.ArrayListUnmanaged(env_mod.Part) = .empty;
+            var existing_parts: std.ArrayList(env_mod.Part) = .empty;
             for (inst.parts) |p| try existing_parts.append(self.allocator, p);
             try existing_parts.append(self.allocator, .{ .name = part_name, .pins = pins });
             inst.parts = existing_parts.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
@@ -1264,8 +1264,8 @@ test "hierarchical decouple derives child ids from form id" {
     try putTestFamily(&eval, alloc, "cap-0201");
 
     const nodes = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin U1 7");
-    var instances: std.ArrayListUnmanaged(Instance) = .empty;
-    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var instances: std.ArrayList(Instance) = .empty;
+    var all_pin_nets: std.ArrayList(PinNetDecl) = .empty;
     var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
 
     try emitDecoupleItems(&eval, nodes, "VDD", &env, &instances, &all_pin_nets, "abcd1234", &sidecar);
@@ -1288,8 +1288,8 @@ test "legacy decouple takes child ids from the sidecar" {
     try putTestFamily(&eval, alloc, "cap-0201");
 
     const nodes = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin U1 7");
-    var instances: std.ArrayListUnmanaged(Instance) = .empty;
-    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var instances: std.ArrayList(Instance) = .empty;
+    var all_pin_nets: std.ArrayList(PinNetDecl) = .empty;
     var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
     try sidecar.map.put(alloc, "100nF@7#0", "deadbeef");
 
@@ -1310,8 +1310,8 @@ test "decouple per-pin emits a cap for each listed pin" {
     try putTestFamily(&eval, alloc, "cap-0201");
 
     const nodes = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin U1 7 8 9");
-    var instances: std.ArrayListUnmanaged(Instance) = .empty;
-    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var instances: std.ArrayList(Instance) = .empty;
+    var all_pin_nets: std.ArrayList(PinNetDecl) = .empty;
     var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
 
     try emitDecoupleItems(&eval, nodes, "VDD", &env, &instances, &all_pin_nets, "abcd1234", &sidecar);
@@ -1332,8 +1332,8 @@ test "decouple per-pin with no pins errors" {
     try putTestFamily(&eval, alloc, "cap-0201");
 
     const nodes = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin U1");
-    var instances: std.ArrayListUnmanaged(Instance) = .empty;
-    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var instances: std.ArrayList(Instance) = .empty;
+    var all_pin_nets: std.ArrayList(PinNetDecl) = .empty;
     var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
 
     try testing.expectError(error.InvalidForm, emitDecoupleItems(&eval, nodes, "VDD", &env, &instances, &all_pin_nets, "abcd1234", &sidecar));
@@ -1375,8 +1375,8 @@ test "decouple uses default bypass and default ic when both omitted" {
 
     // Component omitted (leading count) and host ref omitted (J14 is a pin).
     const nodes = try parser_mod.parse(alloc, "1 per-pin J14 K14");
-    var instances: std.ArrayListUnmanaged(Instance) = .empty;
-    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var instances: std.ArrayList(Instance) = .empty;
+    var all_pin_nets: std.ArrayList(PinNetDecl) = .empty;
     var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
 
     try emitDecoupleItems(&eval, nodes, "VDD", &env, &instances, &all_pin_nets, "abcd1234", &sidecar);
@@ -1401,8 +1401,8 @@ test "decouple without defaults treats the post-per-pin token as the ref" {
 
     // No decouple-defaults declared: U1 is the explicit ref, 7/8 are pins.
     const nodes = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin U1 7 8");
-    var instances: std.ArrayListUnmanaged(Instance) = .empty;
-    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var instances: std.ArrayList(Instance) = .empty;
+    var all_pin_nets: std.ArrayList(PinNetDecl) = .empty;
     var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
 
     try emitDecoupleItems(&eval, nodes, "VDD", &env, &instances, &all_pin_nets, "abcd1234", &sidecar);
@@ -1415,7 +1415,7 @@ test "decouple without defaults treats the post-per-pin token as the ref" {
 /// Shared fixture for the per-pin decouple tests: an evaluator in
 /// hierarchical-ids mode (deterministic child ids), a cap family, and U1's
 /// J14/K14 pins pre-declared on VDD the way an earlier (pins …) form would have.
-fn pinsOfFixture(alloc: std.mem.Allocator, eval: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl)) !void {
+fn pinsOfFixture(alloc: std.mem.Allocator, eval: *Evaluator, all_pin_nets: *std.ArrayList(PinNetDecl)) !void {
     eval.* = Evaluator.init(alloc, ".");
     eval.hierarchical_ids = true;
     try putTestFamily(eval, alloc, "cap-0201");
@@ -1427,12 +1427,12 @@ fn pinsOfFixture(alloc: std.mem.Allocator, eval: *Evaluator, all_pin_nets: *std.
 test "decouple per-pin auto expands the defaults ic pins" {
     const alloc = std.heap.page_allocator;
     var eval: Evaluator = undefined;
-    var nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var nets: std.ArrayList(PinNetDecl) = .empty;
     try pinsOfFixture(alloc, &eval, &nets);
     eval.decouple_defaults.ic = "U1";
     var env = env_mod.Env.init(alloc, null);
     defer env.deinit();
-    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var instances: std.ArrayList(Instance) = .empty;
     var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
 
     const items = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin auto");
@@ -1448,11 +1448,11 @@ test "decouple per-pin auto expands the defaults ic pins" {
 test "decouple per-pin auto without defaults ic errors" {
     const alloc = std.heap.page_allocator;
     var eval: Evaluator = undefined;
-    var nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var nets: std.ArrayList(PinNetDecl) = .empty;
     try pinsOfFixture(alloc, &eval, &nets);
     var env = env_mod.Env.init(alloc, null);
     defer env.deinit();
-    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var instances: std.ArrayList(Instance) = .empty;
     var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
 
     const items = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin auto");
@@ -1466,12 +1466,12 @@ test "decouple per-pin auto without defaults ic errors" {
 test "decouple per-pin auto with zero matches errors" {
     const alloc = std.heap.page_allocator;
     var eval: Evaluator = undefined;
-    var nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var nets: std.ArrayList(PinNetDecl) = .empty;
     try pinsOfFixture(alloc, &eval, &nets);
     eval.decouple_defaults.ic = "U1";
     var env = env_mod.Env.init(alloc, null);
     defer env.deinit();
-    var instances: std.ArrayListUnmanaged(Instance) = .empty;
+    var instances: std.ArrayList(Instance) = .empty;
     var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
 
     // U1 has no pins on VDDA — the (pins …) for that rail hasn't run yet.

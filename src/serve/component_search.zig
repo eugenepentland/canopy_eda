@@ -317,7 +317,7 @@ fn suggestList(
 /// Map `data.suggestions` to owned `SearchHit`s, capped at `limit`.
 fn collectHits(allocator: std.mem.Allocator, root: std.json.Value, limit: usize) std.mem.Allocator.Error![]SearchHit {
     const items = suggestionsArray(root) orelse return &.{};
-    var list: std.ArrayListUnmanaged(SearchHit) = .empty;
+    var list: std.ArrayList(SearchHit) = .empty;
     for (items) |s| {
         if (list.items.len >= limit) break;
         const pn = strField(s, FIELD_PART_NAME) orelse continue;
@@ -372,7 +372,7 @@ const MIN_VARIANT_LEN = 3;
 /// package/grade letter cluster, e.g. `INA228AIDGSR` → `INA228`). Each is
 /// only added when it is at least `MIN_VARIANT_LEN` long and not already listed.
 fn searchVariants(allocator: std.mem.Allocator, part_number: []const u8) std.mem.Allocator.Error![]const []const u8 {
-    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var list: std.ArrayList([]const u8) = .empty;
     try list.append(allocator, part_number);
 
     try addVariant(allocator, &list, std.mem.trimRight(u8, part_number, "+"));
@@ -388,7 +388,7 @@ fn searchVariants(allocator: std.mem.Allocator, part_number: []const u8) std.mem
     return list.toOwnedSlice(allocator);
 }
 
-fn addVariant(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8), term: []const u8) std.mem.Allocator.Error!void {
+fn addVariant(allocator: std.mem.Allocator, list: *std.ArrayList([]const u8), term: []const u8) std.mem.Allocator.Error!void {
     if (term.len < MIN_VARIANT_LEN) return;
     for (list.items) |existing| {
         if (std.mem.eql(u8, existing, term)) return;
@@ -435,7 +435,7 @@ fn httpGet(
 ) ?[]u8 {
     rate_limiter.cse.acquire();
     defer rate_limiter.cse.release();
-    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+    var argv: std.ArrayList([]const u8) = .empty;
     argv.appendSlice(allocator, &.{
         "curl", "-sS",      "-L", "--max-time",   timeout_secs,
         "-A",   USER_AGENT, "-H", REFERER_HEADER,
@@ -470,7 +470,7 @@ fn isUnreserved(c: u8) bool {
 /// `urllib.parse.quote(s, safe="")` — used for query params and path
 /// segments alike.
 fn percentEncode(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     for (s) |c| {
         if (isUnreserved(c)) {
             try out.append(allocator, c);
@@ -495,7 +495,7 @@ fn looksLikePdf(bytes: []const u8) bool {
 /// `LIB_<part>.zip` with every non-`[A-Za-z0-9._-]` byte replaced by `_`,
 /// so it is safe as a temp-file path component.
 fn safeFilename(allocator: std.mem.Allocator, part_name: []const u8) std.mem.Allocator.Error![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(allocator, "LIB_");
     for (part_name) |c| {
         const ok = (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or

@@ -99,7 +99,7 @@ pub fn build(
     // Step 3: attach ferrite-bridged aliases to each rail. Walk net_parent
     // once, group children by their root, then merge into the corresponding
     // rail entry.
-    var aliases_by_root: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty;
+    var aliases_by_root: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty;
     defer {
         var ait = aliases_by_root.valueIterator();
         while (ait.next()) |list| list.deinit(allocator);
@@ -124,7 +124,7 @@ pub fn build(
     }
 
     // Step 4: emit, sorted by name for stable output across builds.
-    var out: std.ArrayListUnmanaged(PowerRail) = .empty;
+    var out: std.ArrayList(PowerRail) = .empty;
     var it = by_root.valueIterator();
     while (it.next()) |rail| try out.append(allocator, rail.*);
     std.mem.sort(PowerRail, out.items, {}, lessThanRail);

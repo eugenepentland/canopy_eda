@@ -102,8 +102,8 @@ pub fn check(
     copper: export_gerber.Copper,
     ctx: Context,
 ) std.mem.Allocator.Error!Report {
-    var errors: std.ArrayListUnmanaged(Item) = .empty;
-    var warnings: std.ArrayListUnmanaged(Item) = .empty;
+    var errors: std.ArrayList(Item) = .empty;
+    var warnings: std.ArrayList(Item) = .empty;
     var stats: Stats = .{
         .parts = placement.parts.len,
         .nets = placement.nets.len,
@@ -178,8 +178,8 @@ pub fn check(
     // Partition by severity: error-severity violations block the gate; warnings
     // (courtyard overlap, mask slivers, silkscreen over a pad) flow through as
     // an informational finding but never 409 the download.
-    var drc_errs: std.ArrayListUnmanaged(drc.Violation) = .empty;
-    var drc_warns: std.ArrayListUnmanaged(drc.Violation) = .empty;
+    var drc_errs: std.ArrayList(drc.Violation) = .empty;
+    var drc_warns: std.ArrayList(drc.Violation) = .empty;
     for (violations) |v| {
         if (v.severity == .warn) try drc_warns.append(arena, v) else try drc_errs.append(arena, v);
     }
@@ -359,7 +359,7 @@ fn netComponents(
     net_i: i32,
 ) std.mem.Allocator.Error!NetConn {
     // ref-des → part index for this net's pins.
-    var nodes: std.ArrayListUnmanaged(PadNode) = .empty;
+    var nodes: std.ArrayList(PadNode) = .empty;
     for (net.pins) |pin| {
         const pi = partIndex(placement, pin.ref_des) orelse continue;
         const part = placement.parts[pi];
@@ -402,11 +402,11 @@ fn netComponents(
     // nodes themselves: pad↔track and pad↔via where the copper lands on the
     // pad, track↔track where a same-layer joint touches, track↔via for the
     // layer jump. Pads are what we count at the end.
-    var segs: std.ArrayListUnmanaged(router.Track) = .empty;
+    var segs: std.ArrayList(router.Track) = .empty;
     for (copper.tracks) |t| {
         if (sameNet(t.net, net_i)) try segs.append(arena, t);
     }
-    var vs: std.ArrayListUnmanaged(router.Via) = .empty;
+    var vs: std.ArrayList(router.Via) = .empty;
     for (copper.vias) |v| {
         if (sameNet(v.net, net_i)) try vs.append(arena, v);
     }
@@ -459,8 +459,8 @@ fn netComponents(
     }
 
     // Count distinct roots over the PAD nodes only.
-    var group_root: std.AutoHashMap(usize, void) = .init(arena);
-    for (0..n_pads) |i| try group_root.put(find(parent, i), {});
+    var group_root: std.AutoHashMapUnmanaged(usize, void) = .empty;
+    for (0..n_pads) |i| try group_root.put(arena, find(parent, i), {});
     return .{ .locations = locations, .groups = group_root.count() };
 }
 
@@ -589,7 +589,7 @@ fn edgeInset(br: optimizer.BoardRect, x: f64, y: f64) f64 {
 fn drcSummary(arena: std.mem.Allocator, violations: []const drc.Violation) []const u8 {
     var counts = std.enums.EnumArray(drc.Kind, usize).initFill(0);
     for (violations) |v| counts.set(v.kind, counts.get(v.kind) + 1);
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     var first = true;
     inline for (@typeInfo(drc.Kind).@"enum".fields) |f| {
         const k: drc.Kind = @enumFromInt(f.value);

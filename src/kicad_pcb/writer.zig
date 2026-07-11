@@ -139,18 +139,18 @@ fn applyOps(arena: std.mem.Allocator, root_children: []const Node, ops: []const 
 /// the board (so a `group` op never duplicates one) and every footprint uuid
 /// already in some group (KiCad forbids a footprint in two groups).
 const GroupIndex = struct {
-    uuids: std.StringHashMap(void),
-    members: std.StringHashMap(void),
+    uuids: std.StringHashMapUnmanaged(void),
+    members: std.StringHashMapUnmanaged(void),
 };
 
 fn indexBoardChildren(
     arena: std.mem.Allocator,
     root_children: []const Node,
     max_net_id: *i64,
-    fp_by_uuid: *std.StringHashMap(usize),
-    net_id_by_name: *std.StringHashMap(i64),
-    existing_canopy_uuids: *std.StringHashMap(void),
-    existing_vias: *std.ArrayListUnmanaged(Vec2Mm),
+    fp_by_uuid: *std.StringHashMapUnmanaged(usize),
+    net_id_by_name: *std.StringHashMapUnmanaged(i64),
+    existing_canopy_uuids: *std.StringHashMapUnmanaged(void),
+    existing_vias: *std.ArrayList(Vec2Mm),
     groups: *GroupIndex,
 ) std.mem.Allocator.Error!void {
     for (root_children, 0..) |child, i| {
@@ -160,30 +160,30 @@ fn indexBoardChildren(
             const id_num = cl[1].asNumber() orelse continue;
             const id_i64: i64 = @intFromFloat(id_num);
             if (id_i64 > max_net_id.*) max_net_id.* = id_i64;
-            if (cl[2].asString()) |name| try net_id_by_name.put(name, id_i64);
+            if (cl[2].asString()) |name| try net_id_by_name.put(arena, name, id_i64);
         } else if (child.isForm(FORM_FOOTPRINT)) {
-            if (footprintKicadUuid(child)) |u| try fp_by_uuid.put(u, i);
-            if (footprintCanopyUuid(child)) |c| try existing_canopy_uuids.put(c, {});
+            if (footprintKicadUuid(child)) |u| try fp_by_uuid.put(arena, u, i);
+            if (footprintCanopyUuid(child)) |c| try existing_canopy_uuids.put(arena, c, {});
         } else if (child.isForm(FORM_VIA)) {
             if (viaCenterMm(child)) |c| try existing_vias.append(arena, c);
         } else if (child.isForm(FORM_GROUP)) {
-            try indexGroupChild(child, groups);
+            try indexGroupChild(arena, child, groups);
         }
     }
 }
 
 /// Record an existing `(group …)`'s uuid + every member uuid into `groups`.
-fn indexGroupChild(child: Node, groups: *GroupIndex) std.mem.Allocator.Error!void {
+fn indexGroupChild(arena: std.mem.Allocator, child: Node, groups: *GroupIndex) std.mem.Allocator.Error!void {
     const cl = child.asList() orelse return;
     for (cl[1..]) |sub| {
         const sl = sub.asList() orelse continue;
         if (sl.len < 2) continue;
         const head = sl[0].asAtom() orelse continue;
         if (std.mem.eql(u8, head, "uuid")) {
-            if (sl[1].asString()) |u| try groups.uuids.put(u, {});
+            if (sl[1].asString()) |u| try groups.uuids.put(arena, u, {});
         } else if (std.mem.eql(u8, head, "members")) {
             for (sl[1..]) |m| {
-                if (m.asString()) |mu| try groups.members.put(mu, {});
+                if (m.asString()) |mu| try groups.members.put(arena, mu, {});
             }
         }
     }
@@ -195,7 +195,7 @@ fn indexGroupChild(child: Node, groups: *GroupIndex) std.mem.Allocator.Error!voi
 fn applyBoardItemOp(
     arena: std.mem.Allocator,
     op_obj: std.json.ObjectMap,
-    extra_graphics: *std.ArrayListUnmanaged(Node),
+    extra_graphics: *std.ArrayList(Node),
     stats: *ApplyStats,
 ) WriteError!void {
     const item_v = op_obj.get("item") orelse return;
@@ -211,7 +211,7 @@ fn applyBoardItemOp(
 fn applyGroupOp(
     arena: std.mem.Allocator,
     op_obj: std.json.ObjectMap,
-    extra_groups: *std.ArrayListUnmanaged(Node),
+    extra_groups: *std.ArrayList(Node),
     groups: *GroupIndex,
     stats: *ApplyStats,
 ) WriteError!void {
@@ -230,8 +230,8 @@ fn applyGroupOp(
 fn applyAddViaOp(
     arena: std.mem.Allocator,
     op_obj: std.json.ObjectMap,
-    existing_vias: *std.ArrayListUnmanaged(Vec2Mm),
-    extra_vias: *std.ArrayListUnmanaged(Node),
+    existing_vias: *std.ArrayList(Vec2Mm),
+    extra_vias: *std.ArrayList(Node),
     stats: *ApplyStats,
 ) WriteError!void {
     const vx = jsonNumNm(op_obj.get("x")) / NM_PER_MM;
@@ -256,14 +256,14 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     //    duplicate canopy_uuids in the design's .bom make it miss
     //    forever and we'd otherwise grow the board by one fp per push).
     var max_net_id: i64 = -1;
-    var fp_by_uuid = std.StringHashMap(usize).init(arena);
-    var net_id_by_name = std.StringHashMap(i64).init(arena);
-    var existing_canopy_uuids = std.StringHashMap(void).init(arena);
+    var fp_by_uuid = std.StringHashMapUnmanaged(usize).empty;
+    var net_id_by_name = std.StringHashMapUnmanaged(i64).empty;
+    var existing_canopy_uuids = std.StringHashMapUnmanaged(void).empty;
     // Centres (mm) of every via already on the board, so an `add_via` at an
     // existing position is a no-op — keeps a re-seed of the same board from
     // doubling its stitching vias.
-    var existing_vias: std.ArrayListUnmanaged(Vec2Mm) = .empty;
-    var groups = GroupIndex{ .uuids = std.StringHashMap(void).init(arena), .members = std.StringHashMap(void).init(arena) };
+    var existing_vias: std.ArrayList(Vec2Mm) = .empty;
+    var groups = GroupIndex{ .uuids = std.StringHashMapUnmanaged(void).empty, .members = std.StringHashMapUnmanaged(void).empty };
     try indexBoardChildren(arena, root_children, &max_net_id, &fp_by_uuid, &net_id_by_name, &existing_canopy_uuids, &existing_vias, &groups);
 
     // Apply each op, accumulating:
@@ -275,13 +275,13 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     //    when the input file already carries top-level declarations; for
     //    pcbnew-saved boards (KiCad 10 v20260206 onward) the declarations
     //    are omitted and we keep that property by leaving extra_nets empty.
-    var mutated_fp = std.AutoHashMap(usize, Node).init(arena);
-    var removed_fp_indices = std.AutoHashMap(usize, void).init(arena);
-    var extra_footprints: std.ArrayListUnmanaged(Node) = .empty;
-    var extra_graphics: std.ArrayListUnmanaged(Node) = .empty;
-    var extra_nets: std.ArrayListUnmanaged(Node) = .empty;
-    var extra_vias: std.ArrayListUnmanaged(Node) = .empty;
-    var extra_groups: std.ArrayListUnmanaged(Node) = .empty;
+    var mutated_fp = std.AutoHashMapUnmanaged(usize, Node).empty;
+    var removed_fp_indices = std.AutoHashMapUnmanaged(usize, void).empty;
+    var extra_footprints: std.ArrayList(Node) = .empty;
+    var extra_graphics: std.ArrayList(Node) = .empty;
+    var extra_nets: std.ArrayList(Node) = .empty;
+    var extra_vias: std.ArrayList(Node) = .empty;
+    var extra_groups: std.ArrayList(Node) = .empty;
     const had_top_level_nets = max_net_id >= 0;
 
     for (ops) |op_val| {
@@ -296,7 +296,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
 
         if (std.mem.eql(u8, op_name, "remove")) {
             if (fp_by_uuid.get(target)) |idx| {
-                try removed_fp_indices.put(idx, {});
+                try removed_fp_indices.put(arena, idx, {});
                 stats.removed += 1;
             }
             continue;
@@ -315,7 +315,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
             if (target.len > 0 and existing_canopy_uuids.contains(target)) continue;
             const new_fp = try buildAddFootprint(arena, op_obj, &max_net_id, &net_id_by_name, &extra_nets);
             try extra_footprints.append(arena, new_fp);
-            if (target.len > 0) try existing_canopy_uuids.put(target, {});
+            if (target.len > 0) try existing_canopy_uuids.put(arena, target, {});
             stats.added += 1;
             continue;
         }
@@ -352,7 +352,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
                 const id = try resolveNetId(arena, net, &max_net_id, &net_id_by_name, &extra_nets);
                 break :blk (try setPadNet(arena, current, pad, id, net)) orelse continue;
             };
-            try mutated_fp.put(idx, updated);
+            try mutated_fp.put(arena, idx, updated);
             stats.pad_nets_set += 1;
             continue;
         }
@@ -362,7 +362,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
             const value = jsonStr(op_obj.get("value"));
             if (field.len == 0) continue;
             const updated = try setProperty(arena, current, field, value) orelse continue;
-            try mutated_fp.put(idx, updated);
+            try mutated_fp.put(arena, idx, updated);
             stats.fields_set += 1;
             continue;
         }
@@ -370,7 +370,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
         if (std.mem.eql(u8, op_name, "set_locked")) {
             const locked = jsonBool(op_obj.get("locked"));
             const updated = try setLocked(arena, current, locked) orelse continue;
-            try mutated_fp.put(idx, updated);
+            try mutated_fp.put(arena, idx, updated);
             stats.locked_changed += 1;
             continue;
         }
@@ -381,7 +381,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
             const pad_nets = op_obj.get("pad_nets");
             if (new_name.len == 0 or kmod.len == 0) continue;
             const updated = try swapFootprint(arena, current, new_name, kmod, pad_nets, &max_net_id, &net_id_by_name, &extra_nets);
-            try mutated_fp.put(idx, updated);
+            try mutated_fp.put(arena, idx, updated);
             stats.swapped += 1;
             continue;
         }
@@ -400,7 +400,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     // mutated ones, append any new top-level (net …) declarations after
     // the last existing one (only when the input had them), and append
     // new footprints at the end.
-    var new_children: std.ArrayListUnmanaged(Node) = .empty;
+    var new_children: std.ArrayList(Node) = .empty;
     var inserted_extra_nets = false;
     var last_net_idx: ?usize = null;
     if (had_top_level_nets) {
@@ -615,13 +615,13 @@ fn resolveNetId(
     arena: std.mem.Allocator,
     name: []const u8,
     max_net_id: *i64,
-    net_id_by_name: *std.StringHashMap(i64),
-    extra_nets: *std.ArrayListUnmanaged(Node),
+    net_id_by_name: *std.StringHashMapUnmanaged(i64),
+    extra_nets: *std.ArrayList(Node),
 ) std.mem.Allocator.Error!i64 {
     if (net_id_by_name.get(name)) |id| return id;
     max_net_id.* += 1;
     const id = max_net_id.*;
-    try net_id_by_name.put(name, id);
+    try net_id_by_name.put(arena, name, id);
     // Build a `(net <id> "<name>")` form. Escape the JSON-decoded name so a
     // top-level declaration with a `"`/`\` in it can't corrupt the board.
     var children = try arena.alloc(Node, 3);
@@ -657,7 +657,7 @@ fn clearPadNet(arena: std.mem.Allocator, fp: Node, pad_num: []const u8) std.mem.
             }
         }
         if (!has_net) continue; // already cleared
-        var kept: std.ArrayListUnmanaged(Node) = .empty;
+        var kept: std.ArrayList(Node) = .empty;
         for (pl) |p| {
             if (p.isForm(FORM_NET)) continue;
             try kept.append(arena, p);
@@ -714,7 +714,7 @@ fn replacePadNet(arena: std.mem.Allocator, pad: Node, net_id: i64, net_name: []c
         break;
     }
 
-    var new_children: std.ArrayListUnmanaged(Node) = .empty;
+    var new_children: std.ArrayList(Node) = .empty;
     var found = false;
     for (pl) |sub| {
         if (sub.isForm("net")) {
@@ -760,7 +760,7 @@ fn setProperty(arena: std.mem.Allocator, fp: Node, key: []const u8, value: []con
     // bogus second copy.
     const canonical_key = canonicalPropertyKey(key);
     const cl = fp.asList() orelse return fp;
-    var new_children: std.ArrayListUnmanaged(Node) = .empty;
+    var new_children: std.ArrayList(Node) = .empty;
     var found = false;
     for (cl) |sub| {
         if (sub.isForm(FORM_PROPERTY)) {
@@ -882,7 +882,7 @@ fn withHideForm(arena: std.mem.Allocator, pl: []const Node) std.mem.Allocator.Er
 /// previously-hidden Reference/Value renders again. Other sub-forms (at,
 /// layer, uuid, effects) are preserved in their original order.
 fn withoutHideForm(arena: std.mem.Allocator, pl: []const Node) std.mem.Allocator.Error!Node {
-    var children: std.ArrayListUnmanaged(Node) = .empty;
+    var children: std.ArrayList(Node) = .empty;
     for (pl) |sub| {
         if (sub.isForm("hide") and formAtomChildEqualsLocal(sub, "yes")) continue;
         try children.append(arena, sub);
@@ -900,7 +900,7 @@ fn withoutHideForm(arena: std.mem.Allocator, pl: []const Node) std.mem.Allocator
 fn normalizePropertyVisibility(arena: std.mem.Allocator, fp: Node, hidden: *u32, shown: *u32) std.mem.Allocator.Error!?Node {
     const cl = fp.asList() orelse return null;
     var changed = false;
-    var new_children: std.ArrayListUnmanaged(Node) = .empty;
+    var new_children: std.ArrayList(Node) = .empty;
     for (cl) |sub| {
         if (propertyNeedsHide(sub)) |pl| {
             try new_children.append(arena, try withHideForm(arena, pl));
@@ -965,7 +965,7 @@ fn setLocked(arena: std.mem.Allocator, fp: Node, locked: bool) std.mem.Allocator
     }
     if (current_locked == locked) return null;
 
-    var new_children: std.ArrayListUnmanaged(Node) = .empty;
+    var new_children: std.ArrayList(Node) = .empty;
     var saw_existing = false;
     for (cl) |sub| {
         if (sub.isForm("locked")) {
@@ -1267,13 +1267,13 @@ fn swapFootprint(
     kmod_text: []const u8,
     pad_nets: ?std.json.Value,
     max_net_id: *i64,
-    net_id_by_name: *std.StringHashMap(i64),
-    extra_nets: *std.ArrayListUnmanaged(Node),
+    net_id_by_name: *std.StringHashMapUnmanaged(i64),
+    extra_nets: *std.ArrayList(Node),
 ) WriteError!Node {
     const cl = fp.asList() orelse return fp;
     // Preserve user state from the existing footprint, and capture the
     // side + rotation the spliced kmod geometry must be adapted to.
-    var preserved: std.ArrayListUnmanaged(Node) = .empty;
+    var preserved: std.ArrayList(Node) = .empty;
     var fp_rot: f64 = 0;
     var is_back = false;
     // `attr` preserves the footprint's assembly flags — `(attr dnp)` /
@@ -1319,7 +1319,7 @@ fn swapFootprint(
     const kmod_children = kmod_nodes[0].asList() orelse return error.InvalidAdd;
     if (kmod_children.len < 2) return error.InvalidAdd;
 
-    var new_fp_children: std.ArrayListUnmanaged(Node) = .empty;
+    var new_fp_children: std.ArrayList(Node) = .empty;
     try new_fp_children.append(arena, Node.atom(Span.zero, FORM_FOOTPRINT));
     try new_fp_children.append(arena, Node.string(Span.zero, new_lib_id));
     // Preserved user state first.
@@ -1347,8 +1347,8 @@ fn applyPadNetsFromJson(
     fp: Node,
     items: []const std.json.Value,
     max_net_id: *i64,
-    net_id_by_name: *std.StringHashMap(i64),
-    extra_nets: *std.ArrayListUnmanaged(Node),
+    net_id_by_name: *std.StringHashMapUnmanaged(i64),
+    extra_nets: *std.ArrayList(Node),
 ) std.mem.Allocator.Error!Node {
     var current = fp;
     for (items) |item| {
@@ -1383,8 +1383,8 @@ fn buildAddFootprint(
     arena: std.mem.Allocator,
     op_obj: std.json.ObjectMap,
     max_net_id: *i64,
-    net_id_by_name: *std.StringHashMap(i64),
-    extra_nets: *std.ArrayListUnmanaged(Node),
+    net_id_by_name: *std.StringHashMapUnmanaged(i64),
+    extra_nets: *std.ArrayList(Node),
 ) WriteError!Node {
     const lib_id = jsonStr(op_obj.get("footprint_name"));
     const kmod = jsonStr(op_obj.get("kicad_mod"));
@@ -1414,7 +1414,7 @@ fn buildAddFootprint(
     const kmod_children = kmod_nodes[0].asList() orelse return error.InvalidAdd;
     if (kmod_children.len < 2) return error.InvalidAdd;
 
-    var children: std.ArrayListUnmanaged(Node) = .empty;
+    var children: std.ArrayList(Node) = .empty;
     try children.append(arena, Node.atom(Span.zero, FORM_FOOTPRINT));
     try children.append(arena, Node.string(Span.zero, lib_id));
     try children.append(arena, try makeAtForm(arena, x_mm, y_mm, rot_deg));
@@ -1564,14 +1564,14 @@ fn buildGroupNode(
     const members_v = op_obj.get("members") orelse return null;
     if (members_v != .array) return null;
 
-    var members: std.ArrayListUnmanaged([]const u8) = .empty;
-    var seed: std.ArrayListUnmanaged(u8) = .empty;
+    var members: std.ArrayList([]const u8) = .empty;
+    var seed: std.ArrayList(u8) = .empty;
     try seed.appendSlice(arena, name);
     for (members_v.array.items) |mv| {
         if (mv != .string) continue;
         const u = mv.string;
         if (u.len == 0 or groups.members.contains(u)) continue;
-        try groups.members.put(u, {});
+        try groups.members.put(arena, u, {});
         try members.append(arena, u);
         try seed.append(arena, '|');
         try seed.appendSlice(arena, u);
@@ -1580,13 +1580,13 @@ fn buildGroupNode(
 
     const guuid = try boardItemUuid(arena, seed.items);
     if (groups.uuids.contains(guuid)) return null;
-    try groups.uuids.put(guuid, {});
+    try groups.uuids.put(arena, guuid, {});
 
-    var children: std.ArrayListUnmanaged(Node) = .empty;
+    var children: std.ArrayList(Node) = .empty;
     try children.append(arena, Node.atom(Span.zero, FORM_GROUP));
     try children.append(arena, Node.string(Span.zero, name));
     try children.append(arena, try makeStringForm(arena, FORM_UUID, guuid));
-    var mchildren: std.ArrayListUnmanaged(Node) = .empty;
+    var mchildren: std.ArrayList(Node) = .empty;
     try mchildren.append(arena, Node.atom(Span.zero, "members"));
     for (members.items) |u| try mchildren.append(arena, Node.string(Span.zero, u));
     try children.append(arena, Node.list(Span.zero, try mchildren.toOwnedSlice(arena)));
@@ -2278,7 +2278,7 @@ test "applyOpsToSource escapes a set_field value containing a quote and backslas
     }
     try std.testing.expect(found != null);
     // The stored token is escaped; decode \x→x and compare to the raw input.
-    var decoded: std.ArrayListUnmanaged(u8) = .empty;
+    var decoded: std.ArrayList(u8) = .empty;
     const raw = found.?;
     var i: usize = 0;
     while (i < raw.len) : (i += 1) {

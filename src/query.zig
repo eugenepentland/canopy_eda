@@ -94,7 +94,7 @@ fn emit(bytes: []const u8) !void {
 /// `netlisp instances <design>` — every placed part as JSON.
 pub fn cmdInstances(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
     const name = nthPositional(args, 0) orelse usage("instances [--project-dir <d>] <design>");
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     const ok = mcp_tools.listInstances(allocator, projectDir(args), name, w) catch |e| {
         std.debug.print("instances: {s}: {s}\n", .{ name, @errorName(e) });
@@ -108,7 +108,7 @@ pub fn cmdInstances(allocator: std.mem.Allocator, args: []const []const u8) Quer
 pub fn cmdNet(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
     const name = nthPositional(args, 0) orelse usage("net [--project-dir <d>] <design> <net>");
     const net = nthPositional(args, 1) orelse usage("net [--project-dir <d>] <design> <net>");
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     const ok = mcp_tools.getNet(allocator, projectDir(args), name, net, w) catch |e| {
         std.debug.print("net: {s}/{s}: {s}\n", .{ name, net, @errorName(e) });
@@ -125,7 +125,7 @@ pub fn cmdFreePins(allocator: std.mem.Allocator, args: []const []const u8) Query
     const name = nthPositional(args, 0) orelse usage(spec);
     const ref = nthPositional(args, 1) orelse usage(spec);
     const category = optArg(args, "--category");
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     const ok = mcp_tools.listFreePins(allocator, projectDir(args), name, ref, category, w) catch |e| {
         std.debug.print("free-pins: {s}/{s}: {s}\n", .{ name, ref, @errorName(e) });
@@ -151,7 +151,7 @@ pub fn cmdSchematic(allocator: std.mem.Allocator, args: []const []const u8) Quer
 /// pinout, footprint, MPN, datasheets, and datasheet `(requirement …)` rules.
 pub fn cmdDescribe(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
     const name = nthPositional(args, 0) orelse usage("describe [--project-dir <d>] <component>");
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const ok = component_info.describeComponent(allocator, projectDir(args), name, &out) catch |e| {
         std.debug.print("describe: {s}: {s}\n", .{ name, @errorName(e) });
         std.process.exit(1);
@@ -165,7 +165,7 @@ pub fn cmdDescribe(allocator: std.mem.Allocator, args: []const []const u8) Query
 pub fn cmdLibrary(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
     const query = nthPositional(args, 0);
     const pdir = projectDir(args);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll("{\"components\":");
     try mcp_tools.listLibrarySubdir(allocator, pdir, "components", query, w);
@@ -264,7 +264,7 @@ pub fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryE
     };
     defer dir.close();
 
-    var rows: std.ArrayListUnmanaged(DesignRow) = .empty;
+    var rows: std.ArrayList(DesignRow) = .empty;
     var walker = try dir.walk(a);
     defer walker.deinit();
     while (walker.next() catch null) |entry| {
@@ -283,7 +283,7 @@ pub fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryE
     }
     std.mem.sort(DesignRow, rows.items, {}, designRowLess);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(a);
     try w.writeAll("{\"designs\":[");
     for (rows.items, 0..) |r, i| {

@@ -103,7 +103,7 @@ pub fn analyze(
         }
     }
 
-    var rows: std.ArrayListUnmanaged(SequenceRow) = .empty;
+    var rows: std.ArrayList(SequenceRow) = .empty;
     for (block.sub_blocks) |sb| {
         for (sb.block.ports) |port| {
             if (!std.mem.eql(u8, port.direction, "out")) continue;

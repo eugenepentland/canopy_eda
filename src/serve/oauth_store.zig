@@ -52,9 +52,9 @@ pub const Token = struct {
 // ── Global state (lazy init, matches auth.zig pattern) ──────────────────
 
 var mu = std.Thread.Mutex{};
-var clients_list: std.ArrayListUnmanaged(Client) = .empty;
-var tokens_list: std.ArrayListUnmanaged(Token) = .empty;
-var codes_map: ?std.StringHashMap(AuthCode) = null;
+var clients_list: std.ArrayList(Client) = .empty;
+var tokens_list: std.ArrayList(Token) = .empty;
+var codes_map: ?std.StringHashMapUnmanaged(AuthCode) = null;
 var loaded_auth_dir: ?[]const u8 = null;
 /// Set when `loadClients` successfully read a non-empty file. Used by
 /// `saveClients` as a tripwire: if the in-memory list is empty but the
@@ -102,7 +102,7 @@ fn ensureLoaded(allocator: std.mem.Allocator, auth_dir: []const u8) void {
     loaded_auth_dir = auth_dir;
     loadClients(allocator, auth_dir);
     loadTokens(allocator, auth_dir);
-    if (codes_map == null) codes_map = std.StringHashMap(AuthCode).init(store_alloc);
+    if (codes_map == null) codes_map = std.StringHashMapUnmanaged(AuthCode).empty;
 }
 
 fn clientsPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
@@ -173,7 +173,7 @@ fn saveClients(allocator: std.mem.Allocator, auth_dir: []const u8) void {
         return;
     }
 
-    var bw: std.ArrayListUnmanaged(u8) = .empty;
+    var bw: std.ArrayList(u8) = .empty;
     defer bw.deinit(allocator);
     const w = bw.writer(allocator);
     w.writeAll("[") catch return;
@@ -239,7 +239,7 @@ fn saveTokens(allocator: std.mem.Allocator, auth_dir: []const u8) void {
         return;
     }
 
-    var bw: std.ArrayListUnmanaged(u8) = .empty;
+    var bw: std.ArrayList(u8) = .empty;
     defer bw.deinit(allocator);
     const w = bw.writer(allocator);
     w.writeAll("[") catch return;
@@ -443,7 +443,7 @@ pub fn listClientsByEmail(allocator: std.mem.Allocator, auth_dir: []const u8, ow
     mu.lock();
     defer mu.unlock();
     ensureLoaded(allocator, auth_dir);
-    var out: std.ArrayListUnmanaged(Client) = .empty;
+    var out: std.ArrayList(Client) = .empty;
     for (clients_list.items) |c| {
         if (c.revoked) continue;
         if (std.mem.eql(u8, c.email, owner_email)) try out.append(allocator, c);
@@ -480,7 +480,7 @@ pub fn issueCode(
         .scope = try store_alloc.dupe(u8, scope),
         .expires_at = clock.timestamp() + AUTH_CODE_TTL_SECS,
     };
-    try codes_map.?.put(code, entry);
+    try codes_map.?.put(store_alloc, code, entry);
     return code;
 }
 
@@ -532,7 +532,7 @@ fn sweepExpiredCodes() void {
     const map = &codes_map.?;
     const now = clock.timestamp();
     // Collect expired keys first; mutating the map mid-iteration is undefined.
-    var expired: std.ArrayListUnmanaged([]const u8) = .empty;
+    var expired: std.ArrayList([]const u8) = .empty;
     defer expired.deinit(store_alloc);
     var it = map.iterator();
     while (it.next()) |kv| {

@@ -687,7 +687,7 @@ pub fn loadPinoutFile(self: *Evaluator, path: []const u8) ?LoadedPinout {
         pin_map.put(self.allocator, pin_id_str, func_name) catch continue;
 
         if (cl.len > 3) {
-            var alts: std.ArrayListUnmanaged(AltFunc) = .empty;
+            var alts: std.ArrayList(AltFunc) = .empty;
             for (cl[3..]) |alt_node| {
                 const al = alt_node.asList() orelse continue;
                 if (al.len < 2) continue;

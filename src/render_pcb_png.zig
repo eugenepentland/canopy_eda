@@ -196,32 +196,32 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
     errdefer cv.deinit();
 
     // Highlight sets: full net names matching any token, and uppercased refs.
-    var hot_nets = std.StringHashMap(void).init(alloc);
-    defer hot_nets.deinit();
-    var hot_refs = std.StringHashMap(void).init(alloc);
-    defer hot_refs.deinit();
+    var hot_nets = std.StringHashMapUnmanaged(void).empty;
+    defer hot_nets.deinit(alloc);
+    var hot_refs = std.StringHashMapUnmanaged(void).empty;
+    defer hot_refs.deinit(alloc);
     try buildHighlightSets(alloc, p, opts, &hot_nets, &hot_refs);
 
     // Pad-label targets and spec-unplaced parts, both uppercased ref sets.
-    var pin_set = std.StringHashMap(void).init(alloc);
-    defer pin_set.deinit();
-    for (opts.pin_refs) |ref| try pin_set.put(try upper(alloc, ref), {});
-    var unplaced_set = std.StringHashMap(void).init(alloc);
-    defer unplaced_set.deinit();
-    var autofill_set = std.StringHashMap(void).init(alloc);
-    defer autofill_set.deinit();
+    var pin_set = std.StringHashMapUnmanaged(void).empty;
+    defer pin_set.deinit(alloc);
+    for (opts.pin_refs) |ref| try pin_set.put(alloc, try upper(alloc, ref), {});
+    var unplaced_set = std.StringHashMapUnmanaged(void).empty;
+    defer unplaced_set.deinit(alloc);
+    var autofill_set = std.StringHashMapUnmanaged(void).empty;
+    defer autofill_set.deinit(alloc);
     if (opts.spec) |sp| {
-        for (sp.unplaced) |ref| try unplaced_set.put(try upper(alloc, ref), {});
-        for (sp.auto_filled) |ref| try autofill_set.put(try upper(alloc, ref), {});
+        for (sp.unplaced) |ref| try unplaced_set.put(alloc, try upper(alloc, ref), {});
+        for (sp.auto_filled) |ref| try autofill_set.put(alloc, try upper(alloc, ref), {});
     }
 
     // ref|pad → full net name, so pads/airwires can resolve their net.
-    var pad_net = std.StringHashMap([]const u8).init(alloc);
-    defer pad_net.deinit();
+    var pad_net = std.StringHashMapUnmanaged([]const u8).empty;
+    defer pad_net.deinit(alloc);
     for (p.nets) |net| {
         for (net.pins) |pin| {
             const key = try std.fmt.allocPrint(alloc, "{s}|{s}", .{ pin.ref_des, pin.pin });
-            try pad_net.put(key, net.name);
+            try pad_net.put(alloc, key, net.name);
         }
     }
 
@@ -241,9 +241,9 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
     }
 
     // ref_des → index into the compare placement (for ghost/arrow lookup).
-    var cmp_idx = std.StringHashMap(usize).init(alloc);
-    defer cmp_idx.deinit();
-    if (opts.compare) |c| for (c.parts, 0..) |cp, i| try cmp_idx.put(cp.ref_des, i);
+    var cmp_idx = std.StringHashMapUnmanaged(usize).empty;
+    defer cmp_idx.deinit(alloc);
+    if (opts.compare) |c| for (c.parts, 0..) |cp, i| try cmp_idx.put(alloc, cp.ref_des, i);
 
     var ctx = Ctx{
         .cv = &cv,
@@ -320,7 +320,7 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
     defer main_cv.deinit();
 
     // Biggest hubs first.
-    var hubs: std.ArrayListUnmanaged(usize) = .empty;
+    var hubs: std.ArrayList(usize) = .empty;
     defer hubs.deinit(alloc);
     for (p.parts, 0..) |part, pi| {
         if (part.kind != .hub) continue;
@@ -332,7 +332,7 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
 
     const ncols: u32 = @min(@as(u32, @intCast(ntiles)), SHEET_COLS);
     const tile_w = @max(main_cv.w / ncols, MIN_W);
-    var tiles: std.ArrayListUnmanaged(raster.Canvas) = .empty;
+    var tiles: std.ArrayList(raster.Canvas) = .empty;
     defer {
         for (tiles.items) |*t| t.deinit();
         tiles.deinit(alloc);
@@ -406,17 +406,17 @@ fn buildHighlightSets(
     alloc: std.mem.Allocator,
     p: optimizer.Placement,
     opts: Options,
-    hot_nets: *std.StringHashMap(void),
-    hot_refs: *std.StringHashMap(void),
+    hot_nets: *std.StringHashMapUnmanaged(void),
+    hot_refs: *std.StringHashMapUnmanaged(void),
 ) !void {
-    for (opts.highlight_refs) |ref| try hot_refs.put(try upper(alloc, ref), {});
+    for (opts.highlight_refs) |ref| try hot_refs.put(alloc, try upper(alloc, ref), {});
     if (opts.highlight_nets.len == 0) return;
     var tokens = try alloc.alloc([]const u8, opts.highlight_nets.len);
     for (opts.highlight_nets, 0..) |t, i| tokens[i] = try upper(alloc, t);
     for (p.nets) |net| {
         for (tokens) |tok| {
             if (eqUpper(net.name, tok) or eqUpper(netKey(net.name), tok) or eqUpper(shortName(net.name), tok)) {
-                try hot_nets.put(net.name, {});
+                try hot_nets.put(alloc, net.name, {});
                 break;
             }
         }
@@ -434,20 +434,20 @@ const Ctx = struct {
     p: optimizer.Placement,
     focus: bool,
     caption: []const u8,
-    hot_nets: *std.StringHashMap(void),
-    hot_refs: *std.StringHashMap(void),
-    pad_net: *std.StringHashMap([]const u8),
+    hot_nets: *std.StringHashMapUnmanaged(void),
+    hot_refs: *std.StringHashMapUnmanaged(void),
+    pad_net: *std.StringHashMapUnmanaged([]const u8),
     opts: Options,
     /// Per-part objective blame, normalized to [0,1]; empty when blame is off.
     blame_norm: []const f64,
     /// ref_des → index into `opts.compare.?.parts`; empty when no compare layout.
-    cmp_idx: *std.StringHashMap(usize),
+    cmp_idx: *std.StringHashMapUnmanaged(usize),
     /// Uppercased `pin_refs` (pad-net-label targets); empty when none requested.
-    pin_set: *std.StringHashMap(void),
+    pin_set: *std.StringHashMapUnmanaged(void),
     /// Uppercased refs the `(placement …)` spec left unplaced (staging band).
-    unplaced_set: *std.StringHashMap(void),
+    unplaced_set: *std.StringHashMapUnmanaged(void),
     /// Uppercased refs the pin-hug auto-fill placed (spec-unlisted, amber).
-    autofill_set: *std.StringHashMap(void),
+    autofill_set: *std.StringHashMapUnmanaged(void),
 
     fn xpx(self: *Ctx, mm: f64) f32 {
         return @floatCast((mm - self.minx + MARGIN_MM) * self.scale);
@@ -1250,7 +1250,7 @@ fn gridStep(span_x: f64, span_y: f64) f64 {
 
 /// Build the focus-mode caption ("FOCUS  NETS: …  REFS: …") in `alloc`.
 fn buildCaption(alloc: std.mem.Allocator, opts: Options) std.mem.Allocator.Error![]const u8 {
-    var b: std.ArrayListUnmanaged(u8) = .empty;
+    var b: std.ArrayList(u8) = .empty;
     try b.appendSlice(alloc, "FOCUS  ");
     if (opts.highlight_nets.len > 0) {
         try b.appendSlice(alloc, "NETS: ");
@@ -1264,7 +1264,7 @@ fn buildCaption(alloc: std.mem.Allocator, opts: Options) std.mem.Allocator.Error
     return b.toOwnedSlice(alloc);
 }
 
-fn joinInto(b: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, items: []const []const u8) std.mem.Allocator.Error!void {
+fn joinInto(b: *std.ArrayList(u8), alloc: std.mem.Allocator, items: []const []const u8) std.mem.Allocator.Error!void {
     for (items, 0..) |it, i| {
         if (i > 0) try b.appendSlice(alloc, ", ");
         try b.appendSlice(alloc, it);
@@ -1289,7 +1289,7 @@ fn isQuarter(rot: f64) bool {
 /// refs (incl. deep sub-block paths); a pathologically long `s` falls back to a
 /// case-insensitive linear scan of the set so the lookup can never silently
 /// miss a key the insertion side accepted — the two paths agree on membership.
-fn upperInSet(set: *std.StringHashMap(void), s: []const u8) bool {
+fn upperInSet(set: *std.StringHashMapUnmanaged(void), s: []const u8) bool {
     var buf: [256]u8 = undefined;
     if (s.len <= buf.len) {
         for (s, 0..) |ch, i| buf[i] = std.ascii.toUpper(ch);

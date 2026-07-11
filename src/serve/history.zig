@@ -113,7 +113,7 @@ pub fn listSnapshots(
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/history/{s}", .{ project_dir, name });
     defer allocator.free(dir_path);
 
-    var entries: std.ArrayListUnmanaged(SnapshotInfo) = .empty;
+    var entries: std.ArrayList(SnapshotInfo) = .empty;
     var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |e| switch (e) {
         error.FileNotFound => return entries.toOwnedSlice(allocator),
         else => return e,
@@ -220,7 +220,7 @@ pub fn listLayoutSnapshots(
     const dir_path = try layoutHistoryDir(allocator, project_dir, name);
     defer allocator.free(dir_path);
 
-    var entries: std.ArrayListUnmanaged(SnapshotInfo) = .empty;
+    var entries: std.ArrayList(SnapshotInfo) = .empty;
     var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |e| switch (e) {
         error.FileNotFound => return entries.toOwnedSlice(allocator),
         else => return e,

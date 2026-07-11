@@ -425,7 +425,7 @@ pub fn pinOrder(a: []const u8, b: []const u8) bool {
 
 // spec: render_svg - Net names are XML-escaped in the emitted SVG markup
 test "drawNetWire escapes a quote/angle-bracket in the net name" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     const w = buf.writer(std.testing.allocator);
     // An import-kicad net name that tries to break out of the data-net attribute
@@ -438,7 +438,7 @@ test "drawNetWire escapes a quote/angle-bracket in the net name" {
 }
 
 test "drawWire emits a straight line for a horizontal (y1==y2) wire" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     const w = buf.writer(std.testing.allocator);
     // Equal endpoints on y ⇒ the horizontal branch: a single <line>, not the

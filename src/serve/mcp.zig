@@ -118,10 +118,10 @@ fn handleToolCall(
     if (tool_name.len == 0) return errorEnvelope(allocator, id_val, JSONRPC_INVALID_PARAMS, "missing tool name");
 
     if (mcp_tools.isMutationTool(tool_name) and !role.canWrite()) {
-        var msg: std.ArrayListUnmanaged(u8) = .empty;
+        var msg: std.ArrayList(u8) = .empty;
         const mw = msg.writer(allocator);
         try mw.print("Your role \"{s}\" cannot use tool \"{s}\" (writer or admin required)", .{ role.toString(), tool_name });
-        var result: std.ArrayListUnmanaged(u8) = .empty;
+        var result: std.ArrayList(u8) = .empty;
         const rw = result.writer(allocator);
         try rw.writeAll("{\"content\":[{\"type\":\"text\",\"text\":");
         try json_writer.writeString(rw, msg.items);
@@ -131,10 +131,10 @@ fn handleToolCall(
 
     const args_val: ?std.json.Value = p.object.get("arguments");
 
-    var content_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var content_buf: std.ArrayList(u8) = .empty;
     const call_result = mcp_tools.call(allocator, project_dir, tool_name, args_val, &content_buf);
 
-    var result: std.ArrayListUnmanaged(u8) = .empty;
+    var result: std.ArrayList(u8) = .empty;
     const rw = result.writer(allocator);
     if (call_result.image_mime) |mime| {
         // `content_buf` holds base64 (no characters needing JSON escaping), so
@@ -166,7 +166,7 @@ fn handleResourcesList(
     project_dir: []const u8,
     id_val: ?std.json.Value,
 ) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll("{\"resources\":[");
     // Static help resource — emitted first so clients with a UI for
@@ -200,7 +200,7 @@ fn handleResourcesRead(
 
     // Static workspace help — embedded markdown, no project access needed.
     if (std.mem.eql(u8, uri, "eda://docs/workspace")) {
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         const w = buf.writer(allocator);
         try w.writeAll("{\"contents\":[{\"uri\":\"");
         try w.writeAll(uri);
@@ -219,7 +219,7 @@ fn handleResourcesRead(
         return errorEnvelope(allocator, id_val, JSONRPC_SERVER_ERROR, @errorName(err));
     };
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll("{\"contents\":[{\"uri\":\"");
     try w.writeAll(uri);
@@ -232,7 +232,7 @@ fn handleResourcesRead(
 // ── JSON-RPC envelope writers ──────────────────────────────────────────
 
 fn resultEnvelope(allocator: std.mem.Allocator, id_val: ?std.json.Value, result_json: []const u8) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll(JSONRPC_ENVELOPE_PREFIX);
     try writeIdTo(w, id_val);
@@ -243,7 +243,7 @@ fn resultEnvelope(allocator: std.mem.Allocator, id_val: ?std.json.Value, result_
 }
 
 fn errorEnvelope(allocator: std.mem.Allocator, id_val: ?std.json.Value, code: i32, msg: []const u8) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll(JSONRPC_ENVELOPE_PREFIX);
     try writeIdTo(w, id_val);

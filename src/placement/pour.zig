@@ -197,7 +197,7 @@ pub fn compute(
     markSeeds(grid, placement, copper, spec, nets, kept);
 
     const n_comp = try remapKept(arena, grid, kept);
-    var contours: std.ArrayListUnmanaged(Contour) = .empty;
+    var contours: std.ArrayList(Contour) = .empty;
     var c: usize = 0;
     while (c < n_comp) : (c += 1) {
         if (try traceOuter(arena, grid, @intCast(c))) |poly| try contours.append(arena, poly);
@@ -268,18 +268,18 @@ fn initInset(g: Grid, placement: optimizer.Placement, r: optimizer.BoardRect, in
 
 /// (ref-des NUL pad) → net name, so the pour can classify each pad foreign vs
 /// carried. Arena-owned.
-fn padNets(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!std.StringHashMap([]const u8) {
-    var map = std.StringHashMap([]const u8).init(arena);
+fn padNets(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]const u8) {
+    var map = std.StringHashMapUnmanaged([]const u8).empty;
     for (placement.nets) |net| {
         for (net.pins) |pin| {
             const key = try std.fmt.allocPrint(arena, "{s}\x00{s}", .{ pin.ref_des, pin.pin });
-            try map.put(key, net.name);
+            try map.put(arena, key, net.name);
         }
     }
     return map;
 }
 
-fn netOfPad(nets: std.StringHashMap([]const u8), ref: []const u8, pad: []const u8) []const u8 {
+fn netOfPad(nets: std.StringHashMapUnmanaged([]const u8), ref: []const u8, pad: []const u8) []const u8 {
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}\x00{s}", .{ ref, pad }) catch return "";
     return nets.get(key) orelse "";
@@ -297,7 +297,7 @@ fn padOnLayer(part: optimizer.Part, pad: geometry.Pad, spec: LayerSpec) bool {
 /// BLOCK every cell within `reach` of a FOREIGN copper feature on this layer
 /// (a pad/track/via whose net the plane does not carry). Same-net features are
 /// left fillable — they are the pour, and seed it.
-fn stampForeign(g: Grid, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, nets: std.StringHashMap([]const u8), reach: f64) void {
+fn stampForeign(g: Grid, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, nets: std.StringHashMapUnmanaged([]const u8), reach: f64) void {
     const inner = spec.side == null;
     for (placement.parts) |p| {
         for (p.pads) |pad| {
@@ -326,7 +326,7 @@ fn stampForeign(g: Grid, placement: optimizer.Placement, copper: Copper, spec: L
 
 /// Mark the component under each same-net SEED (a carried pad/via present on
 /// the layer) KEPT. A component with no seed is an orphan island — dropped.
-fn markSeeds(g: Grid, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, nets: std.StringHashMap([]const u8), kept: []bool) void {
+fn markSeeds(g: Grid, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, nets: std.StringHashMapUnmanaged([]const u8), kept: []bool) void {
     for (placement.parts) |p| {
         for (p.pads) |pad| {
             if (!padOnLayer(p, pad, spec)) continue;
@@ -440,7 +440,7 @@ fn netName(placement: optimizer.Placement, net: i32) []const u8 {
 /// Flood-fill 4-connected UNLABELED cells into components 0..k-1 (relabelled in
 /// place). Returns k. Uses an explicit stack (no recursion).
 fn labelComponents(arena: std.mem.Allocator, g: Grid) std.mem.Allocator.Error!usize {
-    var stack: std.ArrayListUnmanaged(u32) = .empty;
+    var stack: std.ArrayList(u32) = .empty;
     var next: i32 = 0;
     var start: usize = 0;
     while (start < g.labels.len) : (start += 1) {
@@ -461,7 +461,7 @@ fn labelComponents(arena: std.mem.Allocator, g: Grid) std.mem.Allocator.Error!us
     return @intCast(next);
 }
 
-fn floodPush(arena: std.mem.Allocator, g: Grid, stack: *std.ArrayListUnmanaged(u32), idx: usize, comp: i32) std.mem.Allocator.Error!void {
+fn floodPush(arena: std.mem.Allocator, g: Grid, stack: *std.ArrayList(u32), idx: usize, comp: i32) std.mem.Allocator.Error!void {
     if (g.labels[idx] != UNLABELED) return;
     g.labels[idx] = comp;
     try stack.append(arena, @intCast(idx));
@@ -490,7 +490,7 @@ fn remapKept(arena: std.mem.Allocator, g: Grid, kept: []bool) std.mem.Allocator.
 const Dir = enum(u2) { e, s, w, n };
 const Edge = struct { a: u32, b: u32, dir: Dir, used: bool = false };
 /// Corner code → indices of the (still-unused) boundary edges leaving it.
-const TailMap = std.AutoHashMap(u32, std.ArrayListUnmanaged(usize));
+const TailMap = std.AutoHashMapUnmanaged(u32, std.ArrayList(usize));
 
 /// Trace component `comp`'s OUTER boundary as a simplified world polygon. The
 /// boundary is the set of lattice edges between a `comp` cell and a non-`comp`
@@ -498,7 +498,7 @@ const TailMap = std.AutoHashMap(u32, std.ArrayListUnmanaged(usize));
 /// to hug the copper at saddles), the largest-area loop is the outer boundary
 /// (holes are smaller loops — dropped; the Gerber re-punches them as antipads).
 fn traceOuter(arena: std.mem.Allocator, g: Grid, comp: i32) std.mem.Allocator.Error!?Contour {
-    var edges: std.ArrayListUnmanaged(Edge) = .empty;
+    var edges: std.ArrayList(Edge) = .empty;
     const w: u32 = @intCast(g.nx + 1);
     var j: usize = 0;
     while (j < g.ny) : (j += 1) {
@@ -511,9 +511,9 @@ fn traceOuter(arena: std.mem.Allocator, g: Grid, comp: i32) std.mem.Allocator.Er
     if (edges.items.len == 0) return null;
 
     // corner code → indices of unused edges with that tail.
-    var by_tail = TailMap.init(arena);
+    var by_tail: TailMap = .empty;
     for (edges.items, 0..) |e, idx| {
-        const gop = try by_tail.getOrPut(e.a);
+        const gop = try by_tail.getOrPut(arena, e.a);
         if (!gop.found_existing) gop.value_ptr.* = .empty;
         try gop.value_ptr.append(arena, idx);
     }
@@ -534,7 +534,7 @@ fn traceOuter(arena: std.mem.Allocator, g: Grid, comp: i32) std.mem.Allocator.Er
     return null;
 }
 
-fn emitCellEdges(arena: std.mem.Allocator, edges: *std.ArrayListUnmanaged(Edge), g: Grid, comp: i32, i: usize, j: usize, w: u32) std.mem.Allocator.Error!void {
+fn emitCellEdges(arena: std.mem.Allocator, edges: *std.ArrayList(Edge), g: Grid, comp: i32, i: usize, j: usize, w: u32) std.mem.Allocator.Error!void {
     const ii: u32 = @intCast(i);
     const jj: u32 = @intCast(j);
     const solid = struct {
@@ -557,7 +557,7 @@ fn emitCellEdges(arena: std.mem.Allocator, edges: *std.ArrayListUnmanaged(Edge),
 /// the unused outgoing edge that turns most sharply right (copper on the right)
 /// — the standard rule that keeps 4-connected regions separate at saddles.
 fn stitchLoop(arena: std.mem.Allocator, edges: []Edge, by_tail: *TailMap, start: usize) std.mem.Allocator.Error![]const u32 {
-    var corners: std.ArrayListUnmanaged(u32) = .empty;
+    var corners: std.ArrayList(u32) = .empty;
     var cur = start;
     const loop_start = edges[start].a;
     while (true) {
@@ -633,7 +633,7 @@ fn cornersToWorld(arena: std.mem.Allocator, g: Grid, corners: []const u32, w: u3
 /// aligned staircase to a compact polygon without eroding the pour.
 fn simplify(arena: std.mem.Allocator, pts: []const [2]f64, tol: f64) std.mem.Allocator.Error!Contour {
     if (pts.len < 4) return pts;
-    var merged: std.ArrayListUnmanaged([2]f64) = .empty;
+    var merged: std.ArrayList([2]f64) = .empty;
     for (pts, 0..) |p, i| {
         const prev = pts[(i + pts.len - 1) % pts.len];
         const next = pts[(i + 1) % pts.len];
@@ -649,7 +649,7 @@ fn dp(arena: std.mem.Allocator, pts: []const [2]f64, tol: f64) std.mem.Allocator
     @memset(keep, false);
     keep[0] = true;
     keep[pts.len - 1] = true;
-    var stack: std.ArrayListUnmanaged([2]usize) = .empty;
+    var stack: std.ArrayList([2]usize) = .empty;
     try stack.append(arena, .{ 0, pts.len - 1 });
     while (stack.pop()) |seg| {
         const a = seg[0];
@@ -670,7 +670,7 @@ fn dp(arena: std.mem.Allocator, pts: []const [2]f64, tol: f64) std.mem.Allocator
             try stack.append(arena, .{ split, b });
         }
     }
-    var out: std.ArrayListUnmanaged([2]f64) = .empty;
+    var out: std.ArrayList([2]f64) = .empty;
     for (pts, 0..) |p, i| if (keep[i]) try out.append(arena, p);
     return out.toOwnedSlice(arena);
 }
@@ -699,7 +699,7 @@ fn segPointDist(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) f64 {
 /// planes don't), plus — for the legacy implicit model with no stackup form —
 /// one inner ground plane when the net is ground-named.
 fn carryingLayers(arena: std.mem.Allocator, rules: optimizer.BoardRules, net_name: []const u8) std.mem.Allocator.Error![]const LayerSpec {
-    var out: std.ArrayListUnmanaged(LayerSpec) = .empty;
+    var out: std.ArrayList(LayerSpec) = .empty;
     if (rules.plane_nets == null) {
         if (optimizer.isGroundName(leafName(net_name))) try out.append(arena, .{ .net = .ground });
         return out.toOwnedSlice(arena);
@@ -796,13 +796,13 @@ fn padPresent(q: PadQuery, spec: LayerSpec) bool {
 /// Canonicalise every assigned id through the union-find and renumber the live
 /// roots to a dense 0..n. Returns n.
 fn denseRoots(arena: std.mem.Allocator, uf: []usize, pad_comp: []i32, via_comp: []i32) usize {
-    var map = std.AutoHashMap(usize, i32).init(arena);
+    var map = std.AutoHashMapUnmanaged(usize, i32).empty;
     var n: i32 = 0;
     for ([_][]i32{ pad_comp, via_comp }) |slice| {
         for (slice) |*id| {
             if (id.* < 0) continue;
             const root = ufFind(uf, @intCast(id.*));
-            const gop = map.getOrPut(root) catch {
+            const gop = map.getOrPut(arena, root) catch {
                 id.* = 0;
                 continue;
             };
@@ -858,7 +858,7 @@ test "emitCellEdges emits the bottom boundary edge for a cell empty below" {
     // hold — a +→− flip either checks the wrong neighbour or misnumbers a vertex.
     var labels = [_]i32{ 0, 1, 0, 1, 1, 1, 0, 0, 0 };
     const g = Grid{ .minx = 0, .miny = 0, .pitch = 1, .nx = 3, .ny = 3, .labels = &labels };
-    var edges: std.ArrayListUnmanaged(Edge) = .empty;
+    var edges: std.ArrayList(Edge) = .empty;
     try emitCellEdges(arena, &edges, g, 1, 1, 1, 4);
     try testing.expectEqual(@as(usize, 1), edges.items.len);
     try testing.expectEqual(Dir.e, edges.items[0].dir);

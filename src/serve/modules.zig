@@ -241,14 +241,14 @@ fn nodeHasCohesionGroup(node: sexpr_ast.Node) bool {
 /// atom prints as-is; a `(param default)` pair prints `name=default` so the
 /// card shows which arguments are optional. Null on allocation failure.
 fn renderParamList(allocator: std.mem.Allocator, params_node: sexpr_ast.Node) ?[]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     appendParamList(allocator, &buf, params_node) catch return null;
     return buf.items;
 }
 
 fn appendParamList(
     allocator: std.mem.Allocator,
-    buf: *std.ArrayListUnmanaged(u8),
+    buf: *std.ArrayList(u8),
     params_node: sexpr_ast.Node,
 ) std.mem.Allocator.Error!void {
     try buf.append(allocator, '(');
@@ -374,7 +374,7 @@ fn collectModulesUncached(allocator: std.mem.Allocator, project_dir: []const u8)
     var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return &[_]ModuleEntry{};
     defer dir.close();
 
-    var entries: std.ArrayListUnmanaged(ModuleEntry) = .empty;
+    var entries: std.ArrayList(ModuleEntry) = .empty;
     var iter = dir.iterate();
     while (iter.next() catch null) |entry| {
         if (entry.kind != .file) continue;

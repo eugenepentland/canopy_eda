@@ -106,7 +106,7 @@ pub fn computeInstanceCoverage(
     if (inst.ref_des.len == 0) return null;
     const class = classifyByRefDes(inst.ref_des);
 
-    var checks: std.ArrayListUnmanaged(CheckResult) = .empty;
+    var checks: std.ArrayList(CheckResult) = .empty;
     try checks.append(allocator, .{ .category = .value, .ok = inst.value.len > 0 });
     try checks.append(allocator, .{ .category = .footprint, .ok = inst.footprint.len > 0 });
 
@@ -156,7 +156,7 @@ pub fn computeSectionCoverage(
 ) std.mem.Allocator.Error!SectionCoverage {
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(allocator);
-    var instances: std.ArrayListUnmanaged(InstanceCoverage) = .empty;
+    var instances: std.ArrayList(InstanceCoverage) = .empty;
     try walkSection(allocator, sec, check_results, &seen, &instances);
     // Also pick up top-level instances attached via `(pins ref "Uxx" ...)` —
     // STM32-style multipart parts live on `block.instances` and reference
@@ -172,7 +172,7 @@ fn walkSectionPinGroups(
     sec: Section,
     check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
     seen: *std.StringHashMapUnmanaged(void),
-    out: *std.ArrayListUnmanaged(InstanceCoverage),
+    out: *std.ArrayList(InstanceCoverage),
 ) std.mem.Allocator.Error!void {
     for (sec.pin_groups) |pg| {
         if (pg.ref_des.len == 0) continue;
@@ -201,7 +201,7 @@ fn walkSection(
     sec: Section,
     check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
     seen: *std.StringHashMapUnmanaged(void),
-    out: *std.ArrayListUnmanaged(InstanceCoverage),
+    out: *std.ArrayList(InstanceCoverage),
 ) std.mem.Allocator.Error!void {
     for (sec.instances) |inst| {
         if (inst.ref_des.len == 0) continue;

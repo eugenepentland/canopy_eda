@@ -207,14 +207,14 @@ fn buildEntities(
     lay: layout.Layout,
     palette: []const []const u8,
 ) Allocator.Error![]Entity {
-    var ents: std.ArrayListUnmanaged(Entity) = .empty;
+    var ents: std.ArrayList(Entity) = .empty;
     var grouped = try arena.alloc(bool, graph.nodes.len);
     @memset(grouped, false);
     for (lay.groups) |gb| {
         // `color_idx` is the group's index in the *source* spec — stable even
         // when groups with no placed members were dropped from `lay.groups`.
         const src = graph.layout.groups[gb.color_idx];
-        var labels: std.ArrayListUnmanaged([]const u8) = .empty;
+        var labels: std.ArrayList([]const u8) = .empty;
         var count: usize = 0;
         for (src.members) |name| {
             const id = nodeByKey(graph, name) orelse continue;
@@ -288,7 +288,7 @@ fn entityOf(
         // Claim members first-come, exactly as buildEntities does, and count them
         // so a zero-member group is skipped WITHOUT consuming an entity index —
         // matching buildEntities' `if (count == 0) continue;`.
-        var claimed: std.ArrayListUnmanaged(u32) = .empty;
+        var claimed: std.ArrayList(u32) = .empty;
         for (src.members) |name| {
             const id = nodeByKey(graph, name) orelse continue;
             if (grouped[id]) continue;
@@ -341,7 +341,7 @@ pub fn groupCoverage(arena: Allocator, graph: *const Graph) Allocator.Error!Grou
         }
     }
     var total: u32 = 0;
-    var ungrouped: std.ArrayListUnmanaged([]const u8) = .empty;
+    var ungrouped: std.ArrayList([]const u8) = .empty;
     for (graph.nodes, 0..) |nd, i| {
         if (nd.is_boundary or nd.key.len == 0) continue;
         total += 1;
@@ -358,7 +358,7 @@ fn aggregateEdges(
     graph: *const Graph,
     ent_of: []const ?usize,
 ) Allocator.Error![]AggEdge {
-    var aggs: std.ArrayListUnmanaged(AggEdge) = .empty;
+    var aggs: std.ArrayList(AggEdge) = .empty;
     for (graph.edges) |e| {
         if (e.class < graph.classes.len and graph.classes[e.class].is_reference) continue;
         const ea = ent_of[e.from] orelse continue;

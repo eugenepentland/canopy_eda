@@ -677,17 +677,17 @@ fn buildSubSeedsJson(
     var rfirst = true;
     // Lazily-built parent "ref\x00pad" → net-name map (only when some module
     // snapshot actually carries copper to stamp).
-    var dpin_net: ?std.StringHashMap([]const u8) = null;
+    var dpin_net: ?std.StringHashMapUnmanaged([]const u8) = null;
     for (block.sub_blocks) |sb| {
         var s = subBlockPoseByOriginKey(alloc, project_dir, sb) orelse continue;
-        var ok_ref = std.StringHashMap([]const u8).init(alloc);
+        var ok_ref = std.StringHashMapUnmanaged([]const u8).empty;
         var n: usize = 0;
         for (p.instances) |inst| {
             if (inst.ref_des.len <= sb.name.len) continue;
             if (!std.mem.startsWith(u8, inst.ref_des, sb.name) or inst.ref_des[sb.name.len] != '/') continue;
             if (inst.origin_key.len == 0) continue;
             const pose = s.map.get(inst.origin_key) orelse continue;
-            ok_ref.put(inst.origin_key, inst.ref_des) catch return .{};
+            ok_ref.put(alloc, inst.origin_key, inst.ref_des) catch return .{};
             if (!first) w.writeByte(',') catch return .{};
             first = false;
             n += 1;
@@ -734,12 +734,12 @@ fn buildSubSeedsJson(
 
 /// Parent placement "ref\x00pad" → net NAME (raw flattened names, matching
 /// the net names routed copper carries). Null on allocation failure.
-fn designPinNetMap(alloc: std.mem.Allocator, p: optimizer.Placement) ?std.StringHashMap([]const u8) {
-    var m = std.StringHashMap([]const u8).init(alloc);
+fn designPinNetMap(alloc: std.mem.Allocator, p: optimizer.Placement) ?std.StringHashMapUnmanaged([]const u8) {
+    var m = std.StringHashMapUnmanaged([]const u8).empty;
     for (p.nets) |net| {
         for (net.pins) |pin| {
             const key = std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ pin.ref_des, pin.pin }) catch return null;
-            m.put(key, net.name) catch return null;
+            m.put(alloc, key, net.name) catch return null;
         }
     }
     return m;
@@ -756,16 +756,16 @@ fn writeSubRoutesJson(
     slug: []const u8,
     sr: SavedRoutes,
     pin_nets: []const SubPinNet,
-    ok_ref: *const std.StringHashMap([]const u8),
-    dpin_net: *const std.StringHashMap([]const u8),
+    ok_ref: *const std.StringHashMapUnmanaged([]const u8),
+    dpin_net: *const std.StringHashMapUnmanaged([]const u8),
 ) std.Io.Writer.Error!void {
-    var net_map = std.StringHashMap([]const u8).init(alloc);
+    var net_map = std.StringHashMapUnmanaged([]const u8).empty;
     for (pin_nets) |ps| {
         if (net_map.contains(ps.net)) continue;
         const dref = ok_ref.get(ps.origin_key) orelse continue;
         const key = std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ dref, ps.pad }) catch continue;
         const dn = dpin_net.get(key) orelse continue;
-        net_map.put(ps.net, dn) catch break;
+        net_map.put(alloc, ps.net, dn) catch break;
     }
     try w.writeAll("{\"tracks\":[");
     for (sr.tracks, 0..) |t, i| {
@@ -789,7 +789,7 @@ fn writeSubRoutesJson(
 /// flatten's stitching spelling for a module-private net), else "".
 fn mappedNet(
     alloc: std.mem.Allocator,
-    net_map: *const std.StringHashMap([]const u8),
+    net_map: *const std.StringHashMapUnmanaged([]const u8),
     slug: []const u8,
     net: []const u8,
 ) []const u8 {
@@ -1291,7 +1291,7 @@ fn queryOpt(req: *httpz.Request, key: []const u8) ?[]const u8 {
 fn csvParam(arena: std.mem.Allocator, req: *httpz.Request, key: []const u8) []const []const u8 {
     const q = req.query() catch return &.{};
     const v = q.get(key) orelse return &.{};
-    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var list: std.ArrayList([]const u8) = .empty;
     var it = std.mem.tokenizeScalar(u8, v, ',');
     while (it.next()) |tok| {
         const t = std.mem.trim(u8, tok, " \t");
@@ -1623,7 +1623,7 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     // freed: an agent hammering this endpoint for a layout search would OOM the
     // server, since each call allocates the parsed design + full scorePoses set).
     const arena = req.arena;
-    var poses: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
+    var poses: std.ArrayList(optimizer.RefPose) = .empty;
     for (parts_v.array.items) |it| {
         if (it != .object) continue;
         const ref = it.object.get("ref") orelse continue;
@@ -1735,7 +1735,7 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
         res.status = 400;
         return;
     }
-    var poses: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
+    var poses: std.ArrayList(optimizer.RefPose) = .empty;
     for (parts_v.array.items) |it| {
         if (it != .object) continue;
         const ref = it.object.get("ref") orelse continue;
@@ -1844,7 +1844,7 @@ pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
         res.status = 400;
         return;
     }
-    var poses: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
+    var poses: std.ArrayList(optimizer.RefPose) = .empty;
     for (parts_v.array.items) |it| {
         if (it != .object) continue;
         const ref = it.object.get("ref") orelse continue;
@@ -2110,7 +2110,7 @@ pub fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 
     const copper = export_gerber.Copper{ .tracks = fv.tracks, .vias = fv.vias };
 
-    var entries: std.ArrayListUnmanaged(zipfile.Entry) = .empty;
+    var entries: std.ArrayList(zipfile.Entry) = .empty;
     const layers = try export_gerber.planLayers(req.arena, fv.placement);
     for (layers) |f| {
         var aw: std.Io.Writer.Allocating = .init(req.arena);
@@ -2274,7 +2274,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         return;
     }
     const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
-    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var out: std.ArrayList(SavedLayout) = .empty;
     // `replaced` = wrote `entry` in place of a matching row (same name, or an
     // auto run of this exact arrangement, promoted to the named keeper).
     // `dup` = this arrangement is already saved as another named layout, so we
@@ -2400,7 +2400,7 @@ pub fn deleteNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     }
     const sub = subSlug(req);
     const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
-    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var out: std.ArrayList(SavedLayout) = .empty;
     for (existing) |L| {
         if (std.mem.eql(u8, L.name, nm_v.string)) continue;
         try out.append(req.arena, L);
@@ -2432,7 +2432,7 @@ pub fn setDefaultLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
     const want = std.mem.trim(u8, nm_v.string, " \t\n\r");
     const sub = subSlug(req);
     const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
-    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var out: std.ArrayList(SavedLayout) = .empty;
     for (existing) |L| {
         var e = L;
         e.default = want.len > 0 and std.mem.eql(u8, L.name, want);
@@ -2491,7 +2491,7 @@ pub fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     // scores are directly comparable to it (the panel's delta is auto-relative).
     const params = readAutoParams(ctx.allocator, ctx.project_dir, name) orelse optimizer.Params{};
 
-    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var out: std.ArrayList(SavedLayout) = .empty;
     var n: usize = 0;
     for (existing) |L| {
         var updated = L;
@@ -2861,15 +2861,15 @@ fn rekeyPosesByOrigin(
     block: *env_mod.DesignBlock,
     parts: []const PartPose,
 ) ?[]const optimizer.RefPose {
-    var flat: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    var flat: std.ArrayList(export_kicad.FlatInstance) = .empty;
     netlist.collectInstances(alloc, block, "", &flat, block.refStyle()) catch return null;
-    var live = std.StringHashMap(void).init(alloc);
-    var ref_of = std.StringHashMap([]const u8).init(alloc);
+    var live = std.StringHashMapUnmanaged(void).empty;
+    var ref_of = std.StringHashMapUnmanaged([]const u8).empty;
     for (flat.items) |fi| {
-        live.put(fi.ref_des, {}) catch return null;
+        live.put(alloc, fi.ref_des, {}) catch return null;
         if (fi.origin_key.len == 0) continue;
         const key = std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ refPrefix(fi.ref_des), fi.origin_key }) catch return null;
-        ref_of.put(key, fi.ref_des) catch return null;
+        ref_of.put(alloc, key, fi.ref_des) catch return null;
     }
     const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
     for (parts, 0..) |pp, i| {
@@ -2912,7 +2912,7 @@ fn readLayoutPosesFor(
         if (!std.mem.eql(u8, lay.name, want)) continue;
         if (rekeyPosesByOrigin(alloc, block, lay.parts)) |poses| return poses;
         // Re-key failed (flatten error) — fall back to the raw stored refs.
-        var list: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
+        var list: std.ArrayList(optimizer.RefPose) = .empty;
         for (lay.parts) |pp| {
             list.append(alloc, .{ .ref = pp.ref, .x = pp.x, .y = pp.y, .rot = pp.rot, .side = pp.side, .locked = pp.locked }) catch return null;
         }
@@ -2984,7 +2984,7 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
         const dv = root.object.get("default") orelse break :blk "";
         break :blk if (dv == .string) dv.string else "";
     };
-    var list: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var list: std.ArrayList(SavedLayout) = .empty;
     for (arr.array.items) |it| {
         if (it != .object) continue;
         const nm = it.object.get("name") orelse continue;
@@ -3026,7 +3026,7 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
 fn parsePartPoses(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const PartPose {
     const arr = v orelse return null;
     if (arr != .array) return null;
-    var list: std.ArrayListUnmanaged(PartPose) = .empty;
+    var list: std.ArrayList(PartPose) = .empty;
     for (arr.array.items) |it| {
         if (it != .object) continue;
         const ref = it.object.get("ref") orelse continue;
@@ -3054,7 +3054,7 @@ fn parsePartPoses(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const PartPos
 fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedRoutes {
     const obj = v orelse return null;
     if (obj != .object) return null;
-    var tracks: std.ArrayListUnmanaged(SavedTrack) = .empty;
+    var tracks: std.ArrayList(SavedTrack) = .empty;
     if (obj.object.get("tracks")) |tv| if (tv == .array) {
         for (tv.array.items) |it| {
             if (it != .object) continue;
@@ -3073,7 +3073,7 @@ fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedRoutes {
             }) catch return null;
         }
     };
-    var vias: std.ArrayListUnmanaged(SavedVia) = .empty;
+    var vias: std.ArrayList(SavedVia) = .empty;
     if (obj.object.get("vias")) |vv| if (vv == .array) {
         for (vv.array.items) |it| {
             if (it != .object) continue;
@@ -3168,7 +3168,7 @@ fn parseOutlinePts(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const [2]f64
 fn parseSavedTexts(alloc: std.mem.Allocator, v: ?std.json.Value) []const font5x7.BoardText {
     const arr = v orelse return &.{};
     if (arr != .array) return &.{};
-    var list: std.ArrayListUnmanaged(font5x7.BoardText) = .empty;
+    var list: std.ArrayList(font5x7.BoardText) = .empty;
     for (arr.array.items) |it| {
         if (it != .object) continue;
         const tv = it.object.get("text") orelse continue;
@@ -3240,8 +3240,8 @@ fn writeSavedRoutesJson(w: *std.Io.Writer, sr: SavedRoutes) std.Io.Writer.Error!
 /// (unknown names → −1, still drawn + DRC-checked as foreign copper). Lets the
 /// page draw saved routes on open and re-run DRC against the current poses.
 fn restoreRoutes(alloc: std.mem.Allocator, sr: SavedRoutes, nets: []const export_kicad.FlatNet) ?router.RouteResult {
-    var idx = std.StringHashMap(i32).init(alloc);
-    for (nets, 0..) |net, i| idx.put(net.name, @intCast(i)) catch return null;
+    var idx = std.StringHashMapUnmanaged(i32).empty;
+    for (nets, 0..) |net, i| idx.put(alloc, net.name, @intCast(i)) catch return null;
     const tracks = alloc.alloc(router.Track, sr.tracks.len) catch return null;
     for (sr.tracks, 0..) |t, i| tracks[i] = .{
         .x1 = t.x1,
@@ -3580,7 +3580,7 @@ fn layoutLessByScore(_: void, a: SavedLayout, b: SavedLayout) bool {
 /// converged identically). Input order is preserved; each group's survivor keeps
 /// a manual name over an auto stamp and the default flag if any member had it.
 fn dedupLayouts(alloc: std.mem.Allocator, layouts: []const SavedLayout) []const SavedLayout {
-    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var out: std.ArrayList(SavedLayout) = .empty;
     for (layouts) |L| {
         var merged = false;
         for (out.items) |*K| {
@@ -3646,7 +3646,7 @@ fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []c
     // Newest first; keep every manual entry but only the most-recent autos.
     // The entry the user marked default is never pruned (else a default that
     // happens to be an auto run could fall off the cap and dangle the sync).
-    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var out: std.ArrayList(SavedLayout) = .empty;
     out.append(alloc, entry) catch return;
     var autos: usize = 1;
     for (existing) |L| {
@@ -3664,7 +3664,7 @@ fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []c
 /// so the schematic's Module-layouts panel still reads "rough seeded" rather
 /// than recording a duplicate row.
 fn tagRough(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, existing: []const SavedLayout, idx: usize) void {
-    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var out: std.ArrayList(SavedLayout) = .empty;
     for (existing, 0..) |L, i| {
         var e = L;
         if (i == idx) e.rough = true;
@@ -3677,7 +3677,7 @@ fn tagRough(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8,
 /// backfill the objective onto a pre-objective auto entry a regen re-confirms,
 /// without churning the history with a duplicate row.
 fn backfillNewestScore(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, existing: []const SavedLayout, score: LayoutScore) void {
-    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var out: std.ArrayList(SavedLayout) = .empty;
     for (existing, 0..) |L, i| {
         var e = L;
         if (i == 0) e.score = score;
@@ -3795,7 +3795,7 @@ const SnapshotChoice = struct {
 /// may fall back to the volatile cache slot).
 fn chooseModuleSnapshot(
     layouts: []const SavedLayout,
-    ok_of: *const std.StringHashMap([]const u8),
+    ok_of: *const std.StringHashMapUnmanaged([]const u8),
 ) ?SnapshotChoice {
     var starred: ?*const SavedLayout = null;
     var starred_score: usize = 0;
@@ -3845,10 +3845,10 @@ pub fn loadSyncLayout(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
-) ?std.StringHashMap(SyncPose) {
+) ?std.StringHashMapUnmanaged(SyncPose) {
     const poses = chooseSyncPoses(alloc, project_dir, name) orelse return null;
-    var m = std.StringHashMap(SyncPose).init(alloc);
-    for (poses) |p| m.put(p.ref, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return m;
+    var m = std.StringHashMapUnmanaged(SyncPose).empty;
+    for (poses) |p| m.put(alloc, p.ref, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return m;
     return m;
 }
 
@@ -3865,7 +3865,7 @@ pub const SyncVia = struct { x: f64, y: f64, dia: f64, drill: f64, net: []const 
 /// the wrapper still bridges. Strings are duped onto `alloc` (the evaluator is
 /// torn down before returning). Null when the source path can't be evaluated —
 /// e.g. a `lib/modules/` defmodule with no design file.
-fn sourceOriginKeys(alloc: std.mem.Allocator, project_dir: []const u8, source: []const u8) ?std.StringHashMap([]const u8) {
+fn sourceOriginKeys(alloc: std.mem.Allocator, project_dir: []const u8, source: []const u8) ?std.StringHashMapUnmanaged([]const u8) {
     const path = paths.designSourcePath(alloc, project_dir, source) catch return null;
     defer alloc.free(path);
     const eval = alloc.create(Evaluator) catch return null;
@@ -3879,15 +3879,15 @@ fn sourceOriginKeys(alloc: std.mem.Allocator, project_dir: []const u8, source: [
         .design_block => |b| b,
         else => return null,
     };
-    var flat: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    var flat: std.ArrayList(export_kicad.FlatInstance) = .empty;
     netlist.collectInstances(alloc, dblock, "", &flat, dblock.refStyle()) catch return null;
-    var ok_of = std.StringHashMap([]const u8).init(alloc);
+    var ok_of = std.StringHashMapUnmanaged([]const u8).empty;
     for (flat.items) |fi| {
         const ref = alloc.dupe(u8, fi.ref_des) catch return null;
         const ok = alloc.dupe(u8, fi.origin_key) catch return null;
-        ok_of.put(ref, ok) catch return null;
+        ok_of.put(alloc, ref, ok) catch return null;
         if (std.mem.lastIndexOfScalar(u8, ref, '/')) |slash| {
-            ok_of.put(ref[slash + 1 ..], ok) catch return null;
+            ok_of.put(alloc, ref[slash + 1 ..], ok) catch return null;
         }
     }
     return ok_of;
@@ -3896,14 +3896,14 @@ fn sourceOriginKeys(alloc: std.mem.Allocator, project_dir: []const u8, source: [
 /// Re-key layout poses from ref-des to origin_key through `ok_of`.
 fn poseMapByOrigin(
     alloc: std.mem.Allocator,
-    ok_of: *const std.StringHashMap([]const u8),
+    ok_of: *const std.StringHashMapUnmanaged([]const u8),
     layout: []const optimizer.RefPose,
-) ?std.StringHashMap(SyncPose) {
-    var pose_by_ok = std.StringHashMap(SyncPose).init(alloc);
+) ?std.StringHashMapUnmanaged(SyncPose) {
+    var pose_by_ok = std.StringHashMapUnmanaged(SyncPose).empty;
     for (layout) |p| {
         const ok = ok_of.get(p.ref) orelse continue;
         if (ok.len == 0) continue;
-        pose_by_ok.put(ok, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return null;
+        pose_by_ok.put(alloc, ok, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return null;
     }
     return pose_by_ok;
 }
@@ -3942,9 +3942,9 @@ pub fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_
     // Re-key onto sub_block's own flattened refs by origin_key. This is a
     // module-scoped re-key (matched by origin_key), not the grouped root, so
     // keep the prefixed walk regardless of the design's grouped-refdes setting.
-    var flat2: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    var flat2: std.ArrayList(export_kicad.FlatInstance) = .empty;
     netlist.collectInstances(alloc, sub_block.block, "", &flat2, .hierarchical) catch return layout;
-    var out: std.ArrayListUnmanaged(optimizer.RefPose) = .empty;
+    var out: std.ArrayList(optimizer.RefPose) = .empty;
     for (flat2.items) |fi| {
         if (fi.origin_key.len == 0) continue;
         const pose = pose_by_ok.get(fi.origin_key) orelse continue;
@@ -3960,7 +3960,7 @@ pub fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_
 /// fuller non-chosen snapshot when the chosen ★ has gone stale (module grew
 /// since it was starred) — a hint to re-star, never taken automatically.
 pub const SubBlockSeeds = struct {
-    map: std.StringHashMap(SyncPose),
+    map: std.StringHashMapUnmanaged(SyncPose),
     layout_name: []const u8,
     starred: bool,
     alt_name: []const u8 = "",
@@ -4002,10 +4002,10 @@ pub fn subBlockPoseByOriginKey(
 ) ?SubBlockSeeds {
     const resolved = modules_mod.resolveModuleBlock(alloc, project_dir, sub_block.source) orelse return null;
     // Standalone-flatten ref-des → origin_key (its refs key the saved layout).
-    var flat: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    var flat: std.ArrayList(export_kicad.FlatInstance) = .empty;
     netlist.collectInstances(alloc, resolved.block, "", &flat, .hierarchical) catch return null;
-    var ok_of = std.StringHashMap([]const u8).init(alloc);
-    for (flat.items) |fi| ok_of.put(fi.ref_des, fi.origin_key) catch return null;
+    var ok_of = std.StringHashMapUnmanaged([]const u8).empty;
+    for (flat.items) |fi| ok_of.put(alloc, fi.ref_des, fi.origin_key) catch return null;
     const layouts = readLayouts(alloc, project_dir, sub_block.source);
     const choice = chooseModuleSnapshot(layouts, &ok_of) orelse {
         // No snapshot bridges — last resort is the volatile optimizer cache.
@@ -4034,11 +4034,11 @@ pub fn subBlockPoseByOriginKey(
 fn modulePinNets(
     alloc: std.mem.Allocator,
     block: *const env_mod.DesignBlock,
-    ok_of: *const std.StringHashMap([]const u8),
+    ok_of: *const std.StringHashMapUnmanaged([]const u8),
 ) []const SubPinNet {
-    var fnets: std.ArrayListUnmanaged(export_kicad.FlatNet) = .empty;
+    var fnets: std.ArrayList(export_kicad.FlatNet) = .empty;
     netlist.collectNets(alloc, block, "", &fnets, .hierarchical) catch return &.{};
-    var pn: std.ArrayListUnmanaged(SubPinNet) = .empty;
+    var pn: std.ArrayList(SubPinNet) = .empty;
     for (fnets.items) |net| {
         for (net.pins) |pin| {
             const ok = ok_of.get(pin.ref_des) orelse continue;
@@ -4052,14 +4052,14 @@ fn modulePinNets(
 /// Layout ref → origin_key → pose (null when nothing bridges).
 fn seedMapFromPoses(
     alloc: std.mem.Allocator,
-    ok_of: *const std.StringHashMap([]const u8),
+    ok_of: *const std.StringHashMapUnmanaged([]const u8),
     layout: []const optimizer.RefPose,
-) ?std.StringHashMap(SyncPose) {
-    var m = std.StringHashMap(SyncPose).init(alloc);
+) ?std.StringHashMapUnmanaged(SyncPose) {
+    var m = std.StringHashMapUnmanaged(SyncPose).empty;
     for (layout) |p| {
         const ok = ok_of.get(p.ref) orelse continue;
         if (ok.len == 0) continue;
-        m.put(ok, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return null;
+        m.put(alloc, ok, .{ .x = p.x, .y = p.y, .rot = p.rot, .side = p.side }) catch return null;
     }
     if (m.count() == 0) return null;
     return m;
@@ -4784,7 +4784,7 @@ fn writeLinks(w: *std.Io.Writer, links: []const optimizer.Link, rules: optimizer
 /// and steps the per-bucket index so distinct nets get distinct colours.
 fn writeNetColors(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement) HandlerError!void {
     try w.writeAll("\"netcolor\":{");
-    var seen = std.StringHashMap(void).init(alloc);
+    var seen = std.StringHashMapUnmanaged(void).empty;
     var first = true;
     var pi: usize = 0;
     var si: usize = 0;
@@ -4792,7 +4792,7 @@ fn writeNetColors(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Plac
     for (p.nets) |net| {
         const k = netKey(net.name);
         if (seen.contains(k)) continue;
-        try seen.put(k, {});
+        try seen.put(alloc, k, {});
         const hex = netColorHex(net.name, &buf, &pi, &si);
         if (!first) try w.writeAll(",");
         first = false;
@@ -5283,7 +5283,7 @@ fn writePadsJson(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
     pt: optimizer.Part,
-    pin_net: std.StringHashMap([]const u8),
+    pin_net: std.StringHashMapUnmanaged([]const u8),
 ) HandlerError!void {
     try w.writeAll(",\"pads\":[");
     for (pt.pads, 0..) |pad, j| {
@@ -5332,19 +5332,19 @@ fn writePcbData(
     opts: PcbDataOpts,
 ) HandlerError!void {
     // ref → part index, and "ref|pin" → collapsed net (for pad tags).
-    var idx = std.StringHashMap(usize).init(alloc);
-    for (p.parts, 0..) |pt, i| try idx.put(pt.ref_des, i);
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    for (p.parts, 0..) |pt, i| try idx.put(alloc, pt.ref_des, i);
     // ref → footprint name (for the courtyard editor).
-    var fp_of = std.StringHashMap([]const u8).init(alloc);
-    for (p.instances) |inst| try fp_of.put(inst.ref_des, inst.footprint);
+    var fp_of = std.StringHashMapUnmanaged([]const u8).empty;
+    for (p.instances) |inst| try fp_of.put(alloc, inst.ref_des, inst.footprint);
     // ref → display value ("100nF", "STM32…") for the properties panel.
-    var val_of = std.StringHashMap([]const u8).init(alloc);
-    for (p.instances) |inst| try val_of.put(inst.ref_des, instLabel(inst));
-    var pin_net = std.StringHashMap([]const u8).init(alloc);
+    var val_of = std.StringHashMapUnmanaged([]const u8).empty;
+    for (p.instances) |inst| try val_of.put(alloc, inst.ref_des, instLabel(inst));
+    var pin_net = std.StringHashMapUnmanaged([]const u8).empty;
     for (p.nets) |net| {
         for (net.pins) |pin| {
             const key = try std.fmt.allocPrint(alloc, "{s}|{s}", .{ pin.ref_des, pin.pin });
-            try pin_net.put(key, netKey(net.name));
+            try pin_net.put(alloc, key, netKey(net.name));
         }
     }
 
@@ -5507,14 +5507,14 @@ fn writeModelsJson(
     instances: []const export_kicad.FlatInstance,
 ) HandlerError!void {
     const cfg = export_kicad.loadModelConfig(alloc, project_dir);
-    var seen = std.StringHashMap(void).init(alloc);
+    var seen = std.StringHashMapUnmanaged(void).empty;
     try w.writeByte('{');
     var first = true;
     for (instances) |inst| {
         const fp = inst.footprint;
         if (fp.len == 0) continue;
         if (seen.contains(fp)) continue;
-        try seen.put(fp, {});
+        try seen.put(alloc, fp, {});
         const tf = cfg.get(fp);
         // Resolve the STEP model the same way the KiCad export / footprint
         // viewer do: an explicit `model` override wins, else a filesystem
@@ -6547,7 +6547,7 @@ fn mcpArgStrList(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []con
     const av = args_val orelse return &.{};
     if (av != .object) return &.{};
     const v = av.object.get(key) orelse return &.{};
-    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var list: std.ArrayList([]const u8) = .empty;
     if (v == .array) {
         for (v.array.items) |it| {
             if (it == .string and it.string.len > 0) list.append(alloc, it.string) catch break;
@@ -6565,7 +6565,7 @@ fn mcpArgStrList(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []con
 /// Write an `{"ok":false,"error":<msg>}` envelope into `out` and return false
 /// (the MCP layer flags the result `isError`). The single error spelling for
 /// every layout tool.
-fn mcpFail(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, msg: []const u8) !bool {
+fn mcpFail(out: *std.ArrayList(u8), alloc: std.mem.Allocator, msg: []const u8) !bool {
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
     try w.writeAll("{\"ok\":false,\"error\":");
@@ -6576,7 +6576,7 @@ fn mcpFail(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, msg: []co
 }
 
 /// `mcpFail` with a formatted message (built on `alloc`, then escaped).
-fn mcpFailFmt(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !bool {
+fn mcpFailFmt(out: *std.ArrayList(u8), alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !bool {
     const msg = std.fmt.allocPrint(alloc, fmt, args) catch "error";
     return mcpFail(out, alloc, msg);
 }
@@ -6664,7 +6664,7 @@ fn mcpPersistWorking(
         return;
     }
     const existing = readLayouts(alloc, project_dir, name);
-    var out: std.ArrayListUnmanaged(SavedLayout) = .empty;
+    var out: std.ArrayList(SavedLayout) = .empty;
     var replaced = false;
     for (existing) |L| {
         if (!replaced and std.mem.eql(u8, L.name, entry.name)) {
@@ -6740,13 +6740,13 @@ fn mcpSavedRoutesFrom(
 fn mcpNetsTouchingRefs(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
-    moved: *const std.StringHashMap(void),
-) std.mem.Allocator.Error!std.StringHashMap(void) {
-    var set = std.StringHashMap(void).init(alloc);
+    moved: *const std.StringHashMapUnmanaged(void),
+) std.mem.Allocator.Error!std.StringHashMapUnmanaged(void) {
+    var set = std.StringHashMapUnmanaged(void).empty;
     for (placement.nets) |net| {
         for (net.pins) |pin| {
             if (moved.contains(pin.ref_des)) {
-                try set.put(net.name, {});
+                try set.put(alloc, net.name, {});
                 break;
             }
         }
@@ -6760,11 +6760,11 @@ const McpDroppedRoutes = struct { routes: ?SavedRoutes, dropped: usize };
 fn mcpDropRoutesForNets(
     alloc: std.mem.Allocator,
     sr: ?SavedRoutes,
-    drop: *const std.StringHashMap(void),
+    drop: *const std.StringHashMapUnmanaged(void),
 ) std.mem.Allocator.Error!McpDroppedRoutes {
     const s = sr orelse return .{ .routes = null, .dropped = 0 };
-    var tracks: std.ArrayListUnmanaged(SavedTrack) = .empty;
-    var vias: std.ArrayListUnmanaged(SavedVia) = .empty;
+    var tracks: std.ArrayList(SavedTrack) = .empty;
+    var vias: std.ArrayList(SavedVia) = .empty;
     var dropped: usize = 0;
     for (s.tracks) |t| {
         if (t.net.len > 0 and drop.contains(t.net)) dropped += 1 else try tracks.append(alloc, t);
@@ -6784,10 +6784,10 @@ fn mcpDropRoutesForNets(
 fn mcpKeepRoutesForNets(
     alloc: std.mem.Allocator,
     sr: SavedRoutes,
-    keep: *const std.StringHashMap(void),
+    keep: *const std.StringHashMapUnmanaged(void),
 ) std.mem.Allocator.Error!?SavedRoutes {
-    var tracks: std.ArrayListUnmanaged(SavedTrack) = .empty;
-    var vias: std.ArrayListUnmanaged(SavedVia) = .empty;
+    var tracks: std.ArrayList(SavedTrack) = .empty;
+    var vias: std.ArrayList(SavedVia) = .empty;
     for (sr.tracks) |t| {
         if (t.net.len > 0 and keep.contains(t.net)) try tracks.append(alloc, t);
     }
@@ -6822,7 +6822,7 @@ fn mcpParsePoses(alloc: std.mem.Allocator, args_val: ?std.json.Value) ?[]McpReqP
     if (av != .object) return null;
     const v = av.object.get("poses") orelse return null;
     if (v != .array) return null;
-    var list: std.ArrayListUnmanaged(McpReqPose) = .empty;
+    var list: std.ArrayList(McpReqPose) = .empty;
     for (v.array.items) |it| {
         if (it != .object) continue;
         const ref_v = it.object.get("ref") orelse it.object.get("origin") orelse continue;
@@ -6865,7 +6865,7 @@ pub fn mcpSetPartPoses(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) HandlerError!bool {
     const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
     const reqs = mcpParsePoses(alloc, args_val) orelse return mcpFail(out, alloc, "missing or malformed \"poses\" array");
@@ -6886,18 +6886,18 @@ pub fn mcpSetPartPoses(
     const base = posesFromPlacement(alloc, placement) orelse return mcpFail(out, alloc, "out of memory building poses");
 
     // ref/origin → index into `base`, for O(1) resolve + patch.
-    var idx_of = std.StringHashMap(usize).init(alloc);
-    var origin_of = std.StringHashMap(usize).init(alloc);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    var origin_of = std.StringHashMapUnmanaged(usize).empty;
     for (base, 0..) |p, i| {
-        try idx_of.put(p.ref, i);
+        try idx_of.put(alloc, p.ref, i);
         if (p.origin.len > 0) {
             const key = try std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ refPrefix(p.ref), p.origin });
-            try origin_of.put(key, i);
+            try origin_of.put(alloc, key, i);
         }
     }
 
-    var moved = std.StringHashMap(void).init(alloc);
-    var updated: std.ArrayListUnmanaged([]const u8) = .empty;
+    var moved = std.StringHashMapUnmanaged(void).empty;
+    var updated: std.ArrayList([]const u8) = .empty;
     for (reqs) |rq| {
         if (!rq.has_xy) return mcpFailFmt(out, alloc, "pose for \"{s}\" is missing x_mm/y_mm", .{rq.ref});
         const i: usize = idx_of.get(rq.ref) orelse blk: {
@@ -6916,7 +6916,7 @@ pub fn mcpSetPartPoses(
         if (rq.has_side) p.side = rq.side;
         if (rq.has_locked) p.locked = rq.locked;
         if (before_x != p.x or before_y != p.y or before_rot != p.rot or before_side != p.side)
-            try moved.put(p.ref, {});
+            try moved.put(alloc, p.ref, {});
         try updated.append(alloc, p.ref);
     }
 
@@ -6988,7 +6988,7 @@ pub fn mcpSetBoardOutline(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) HandlerError!bool {
     const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
     const layout_arg = mcpArgStr(args_val, "layout");
@@ -7055,7 +7055,7 @@ pub fn mcpRoutePcb(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) HandlerError!bool {
     const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
     const layout_arg = mcpArgStr(args_val, "layout");
@@ -7080,8 +7080,8 @@ pub fn mcpRoutePcb(
     const working = mcpReadWorking(alloc, project_dir, name, single, layout_arg);
     var merged: ?SavedRoutes = undefined;
     if (scope.len > 0) {
-        var keep = std.StringHashMap(void).init(alloc);
-        for (scope) |n| try keep.put(n, {});
+        var keep = std.StringHashMapUnmanaged(void).empty;
+        for (scope) |n| try keep.put(alloc, n, {});
         const base_after_drop = try mcpDropRoutesForNets(alloc, if (working) |wl| wl.routes else null, &keep);
         const fresh_scoped = try mcpKeepRoutesForNets(alloc, fresh, &keep);
         merged = try mcpMergeRoutes(alloc, base_after_drop.routes, fresh_scoped);
@@ -7150,7 +7150,7 @@ pub fn mcpSavePcbLayout(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) HandlerError!bool {
     const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
     const layout_name = mcpArgStr(args_val, "layout_name");
@@ -7194,7 +7194,7 @@ pub fn mcpClearRoutes(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) HandlerError!bool {
     const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
     const layout_arg = mcpArgStr(args_val, "layout");
@@ -7208,8 +7208,8 @@ pub fn mcpClearRoutes(
     var cleared: usize = 0;
     var new_routes: ?SavedRoutes = null;
     if (scope.len > 0) {
-        var drop = std.StringHashMap(void).init(alloc);
-        for (scope) |n| try drop.put(n, {});
+        var drop = std.StringHashMapUnmanaged(void).empty;
+        for (scope) |n| try drop.put(alloc, n, {});
         const res = try mcpDropRoutesForNets(alloc, working.routes, &drop);
         new_routes = res.routes;
         cleared = res.dropped;
@@ -7294,7 +7294,7 @@ pub fn mcpRunFabReadiness(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     args_val: ?std.json.Value,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) HandlerError!bool {
     const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
     const layout_arg = mcpArgStr(args_val, "layout");
@@ -7712,11 +7712,11 @@ test "stamped copper nets map to parent nets with slug fallback" {
     // Module side: pin (origin U1, pad 2) sits on module net "VOUT".
     const pin_nets = [_]SubPinNet{.{ .net = "VOUT", .origin_key = "U1", .pad = "2" }};
     // Bridge: module origin "U1" is design part "buck/U11".
-    var ok_ref = std.StringHashMap([]const u8).init(alloc);
-    try ok_ref.put("U1", "buck/U11");
+    var ok_ref = std.StringHashMapUnmanaged([]const u8).empty;
+    try ok_ref.put(alloc, "U1", "buck/U11");
     // Parent side: design pad buck/U11.2 is on parent net "5V0".
-    var dpin = std.StringHashMap([]const u8).init(alloc);
-    try dpin.put(try std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ "buck/U11", "2" }), "5V0");
+    var dpin = std.StringHashMapUnmanaged([]const u8).empty;
+    try dpin.put(alloc, try std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ "buck/U11", "2" }), "5V0");
 
     const tracks = [_]SavedTrack{
         .{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .w = 0.3, .net = "VOUT" },
@@ -7851,8 +7851,8 @@ test "mcp route_pcb scoped copper drops and merges by net" {
         },
         .vias = &.{},
     };
-    var scope = std.StringHashMap(void).init(alloc);
-    try scope.put("A", {});
+    var scope = std.StringHashMapUnmanaged(void).empty;
+    try scope.put(alloc, "A", {});
 
     const dropped = try mcpDropRoutesForNets(alloc, sr, &scope);
     try std.testing.expectEqual(@as(usize, 1), dropped.dropped); // A removed
@@ -7887,12 +7887,12 @@ test "poseMapByOrigin keeps poses for non-empty origin keys" {
     // `==`->`!=` flip skips every REAL (non-empty) key instead, dropping all
     // poses.
     const alloc = std.testing.allocator;
-    var ok_of = std.StringHashMap([]const u8).init(alloc);
-    defer ok_of.deinit();
-    try ok_of.put("C1", "C_IN");
+    var ok_of = std.StringHashMapUnmanaged([]const u8).empty;
+    defer ok_of.deinit(alloc);
+    try ok_of.put(alloc, "C1", "C_IN");
     const layout = [_]optimizer.RefPose{.{ .ref = "C1", .x = 1, .y = 2, .rot = 0 }};
     var pose = poseMapByOrigin(alloc, &ok_of, &layout) orelse return error.TestPoseMapNull;
-    defer pose.deinit();
+    defer pose.deinit(alloc);
     try std.testing.expectEqual(@as(u32, 1), pose.count());
     const p = pose.get("C_IN") orelse return error.TestOriginMissing;
     try std.testing.expectEqual(@as(f64, 1), p.x);
@@ -7905,7 +7905,7 @@ test "mcpSetPartPoses rejects an empty poses array before resolving" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const args = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"name\":\"x\",\"poses\":[]}", .{});
     const ok = try mcpSetPartPoses(alloc, "/no/such/project", args, &out);
     try std.testing.expect(!ok);

@@ -133,7 +133,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     //    part is added with no value) — wrap it into `(cap-0402 "<value>")` so the
     //    value becomes editable instead of permanently stuck;
     //  • a genuinely fixed component (e.g. `204928-0601`) — nothing to edit.
-    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    var new_source: std.ArrayList(u8) = .empty;
     const nw = new_source.writer(ctx.allocator);
     if (findInstanceValueRange(source, inst_open, inst_end)) |vr| {
         try nw.writeAll(source[0..vr[0]]);
@@ -347,7 +347,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
             return;
         };
 
-    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    var new_source: std.ArrayList(u8) = .empty;
     const nw = new_source.writer(ctx.allocator);
     try nw.writeAll(source[0..comp_offset]);
     try nw.writeAll(new_component);
@@ -384,7 +384,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
             break :blk false;
         };
         if (!found_in_import) {
-            var new_final: std.ArrayListUnmanaged(u8) = .empty;
+            var new_final: std.ArrayList(u8) = .empty;
             const nfw = new_final.writer(ctx.allocator);
             try nfw.writeAll(final_source[0..import_end]);
             try nfw.writeAll(" ");
@@ -443,7 +443,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     _ = serve_root.bumpLiveVersion(name);
 
     // Return updated COMPONENTS so the client can refresh srcOff values
-    var comp_json: std.ArrayListUnmanaged(u8) = .empty;
+    var comp_json: std.ArrayList(u8) = .empty;
     const cw = comp_json.writer(ctx.allocator);
     try cw.writeAll("{\"ok\":true,\"components\":{");
     _ = try bom_html.writeComponentsJson(cw, block, "", &svg_sym_cache, ctx.allocator, ctx.project_dir);
@@ -515,7 +515,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     defer ctx.allocator.free(source);
 
     // Parse pin assignments from body: "pins":{"1":"VDD","2":"GND"}
-    var pin_str: std.ArrayListUnmanaged(u8) = .empty;
+    var pin_str: std.ArrayList(u8) = .empty;
     const pw = pin_str.writer(ctx.allocator);
     if (std.mem.indexOf(u8, body, JSON_PINS_KEY)) |pins_start| {
         // Find the opening brace
@@ -549,7 +549,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     }
 
     // Build the form — a (sub-block …) for modules, otherwise an (instance …).
-    var inst_form: std.ArrayListUnmanaged(u8) = .empty;
+    var inst_form: std.ArrayList(u8) = .empty;
     const iw = inst_form.writer(ctx.allocator);
     if (is_module) {
         if (mod_args.len > 0) {
@@ -572,7 +572,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     // this augmented buffer.
     const eff_source: []const u8 = if (want_import and !hasImport(source, component)) blk: {
         const anchor = std.mem.indexOf(u8, source, "(design-block") orelse break :blk source;
-        var aug: std.ArrayListUnmanaged(u8) = .empty;
+        var aug: std.ArrayList(u8) = .empty;
         const aw = aug.writer(ctx.allocator);
         try aw.writeAll(source[0..anchor]);
         try aw.print("{s}{s})\n", .{ IMPORT_OPEN, component });
@@ -581,7 +581,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     } else source;
 
     // Find insertion point: inside section if specified, otherwise before last closing paren
-    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    var new_source: std.ArrayList(u8) = .empty;
     const nw = new_source.writer(ctx.allocator);
 
     if (!is_module and section.len > 0) {
@@ -785,7 +785,7 @@ pub fn addSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         return;
     };
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     const w = buf.writer(ctx.allocator);
     try w.writeAll(source[0..insert_at]);
@@ -843,7 +843,7 @@ pub fn renameSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     // Replace just the quoted name token: `(section "` is needle minus the name+quote.
     const name_start = at + "(section \"".len;
     const name_end = name_start + from.len; // followed by the closing quote
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     const w = buf.writer(ctx.allocator);
     try w.writeAll(source[0..name_start]);
@@ -910,7 +910,7 @@ pub fn removeSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     var cut_end = sec_end;
     if (cut_end < source.len and source[cut_end] == '\n') cut_end += 1;
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     const w = buf.writer(ctx.allocator);
     try w.writeAll(source[0..cut_start]);
@@ -960,7 +960,7 @@ pub fn addPortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
         res.body = "not a design-block";
         return;
     };
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     const w = buf.writer(ctx.allocator);
     try w.writeAll(source[0..insert_at]);
@@ -1013,7 +1013,7 @@ pub fn removePortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     if (cut_start > 0 and source[cut_start - 1] == '\n') cut_start -= 1;
     var cut_end = p_end;
     if (cut_end < source.len and source[cut_end] == '\n') cut_end += 1;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     const w = buf.writer(ctx.allocator);
     try w.writeAll(source[0..cut_start]);
@@ -1078,7 +1078,7 @@ pub fn renameRefdesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         res.body = ERR_MALFORMED_INSTANCE;
         return;
     };
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     const w = buf.writer(ctx.allocator);
     try w.writeAll(source[0 .. lq + 1]);
@@ -1129,7 +1129,7 @@ pub fn setDnpApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
         return;
     };
     const dnp_rel = std.mem.indexOf(u8, source[open..end], "(dnp)");
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     const w = buf.writer(ctx.allocator);
     if (want_dnp) {
@@ -1212,7 +1212,7 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     var inst_start = inst_pos;
     while (inst_start > 0 and (source[inst_start - 1] == ' ' or source[inst_start - 1] == '\t')) : (inst_start -= 1) {}
 
-    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    var new_source: std.ArrayList(u8) = .empty;
     const nw = new_source.writer(ctx.allocator);
     try nw.writeAll(source[0..inst_start]);
     try nw.writeAll(source[inst_end..]);
@@ -1317,7 +1317,7 @@ fn parsePinForm(
     allocator: std.mem.Allocator,
     source: []const u8,
     form_start: usize,
-    tokens: *std.ArrayListUnmanaged([]const u8),
+    tokens: *std.ArrayList([]const u8),
 ) !?PinForm {
     const form_end = findFormEnd(source, form_start) orelse return null;
     var i = form_start + PIN_HEAD.len - 1; // step back over the trailing space
@@ -1380,11 +1380,11 @@ fn findPinFormInRegion(
     start: usize,
     end: usize,
     pin: []const u8,
-    out_tokens: *std.ArrayListUnmanaged([]const u8),
+    out_tokens: *std.ArrayList([]const u8),
 ) !?PinForm {
     var search = start;
     while (std.mem.indexOfPos(u8, source[0..end], search, PIN_HEAD)) |pf| {
-        var tokens: std.ArrayListUnmanaged([]const u8) = .empty;
+        var tokens: std.ArrayList([]const u8) = .empty;
         defer tokens.deinit(allocator);
         if ((parsePinForm(allocator, source, pf, &tokens) catch null)) |parsed| {
             for (tokens.items) |tk| {
@@ -1411,7 +1411,7 @@ fn findInstancePinForm(
     inst_open: usize,
     inst_end: usize,
     pin: []const u8,
-    out_tokens: *std.ArrayListUnmanaged([]const u8),
+    out_tokens: *std.ArrayList([]const u8),
 ) !?PinForm {
     if (try findPinFormInRegion(allocator, source, inst_open, inst_end, pin, out_tokens)) |m| return m;
     const label = instanceLabel(source, inst_open) orelse return null;
@@ -1475,14 +1475,14 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     // Find the matching `(pin …)` form — in the instance body or a section-level
     // `(pins "<label>" …)` map — covering single forms AND multi-pin shorthand
     // like `(pin 2 4 6 "VDD")` (which the old `(pin N "` needle could not match).
-    var match_tokens: std.ArrayListUnmanaged([]const u8) = .empty;
+    var match_tokens: std.ArrayList([]const u8) = .empty;
     defer match_tokens.deinit(ctx.allocator);
     const p = (try findInstancePinForm(ctx.allocator, source, inst_open, inst_end, pin, &match_tokens)) orelse {
         // Pin not declared inline yet — add `(pin <pin> "<net>")` to the instance
         // body. Lets a staged/unwired part (a freshly-added cap with no pins) be
         // connected by dropping it on a net.
         const close = inst_end - 1; // the instance form's closing ')'
-        var ins: std.ArrayListUnmanaged(u8) = .empty;
+        var ins: std.ArrayList(u8) = .empty;
         const iw = ins.writer(ctx.allocator);
         try iw.writeAll(source[0..close]);
         try iw.print("\n    (pin {s} \"{s}\")", .{ pin, new_net });
@@ -1498,7 +1498,7 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     };
 
-    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    var new_source: std.ArrayList(u8) = .empty;
     const nw = new_source.writer(ctx.allocator);
     if (match_tokens.items.len <= 1) {
         // Single-pin form: replace just the net string, preserving any trailing
@@ -1595,14 +1595,14 @@ pub fn bindDecoupleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
             break;
         }
     }
-    var form: std.ArrayListUnmanaged(u8) = .empty;
+    var form: std.ArrayList(u8) = .empty;
     defer form.deinit(ctx.allocator);
     if (numeric)
         try form.writer(ctx.allocator).print("(decouples \"{s}\" {s})", .{ ic, pad })
     else
         try form.writer(ctx.allocator).print("(decouples \"{s}\" \"{s}\")", .{ ic, pad });
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const ow = out.writer(ctx.allocator);
 
     // Replace an existing (decouples …) in this instance (re-binding to a new
@@ -1694,7 +1694,7 @@ pub fn duplicateInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     }
 
     // Unique non-standard placeholder label so the clone renumbers to a fresh ref.
-    var label_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var label_buf: std.ArrayList(u8) = .empty;
     defer label_buf.deinit(ctx.allocator);
     var n: usize = 1;
     while (n < 10000) : (n += 1) {
@@ -1708,7 +1708,7 @@ pub fn duplicateInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     // Assemble: source up to (and including) the original, a blank line, then the
     // clone (ref swapped, id removed), then the rest of the file.
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(ctx.allocator);
     const ow = out.writer(ctx.allocator);
     try ow.writeAll(source[0..inst_end]);
@@ -2144,7 +2144,7 @@ pub fn rebuildDesign(
         },
     };
 
-    var failures: std.ArrayListUnmanaged(AssertionFailure) = .empty;
+    var failures: std.ArrayList(AssertionFailure) = .empty;
     for (eval.assertions.items) |a| {
         if (a.passed) continue;
         failures.append(allocator, .{ .message = a.message, .is_warning = a.is_warning }) catch break;
@@ -2469,7 +2469,7 @@ pub fn addSectionNoteCore(
     // section body so new notes sit alongside existing forms.
     const indent = detectSectionIndent(source, sec_start);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
     try w.writeAll(source[0..insert_at]);
@@ -2544,7 +2544,7 @@ pub fn removeSectionNoteCore(
                     var trim_end: usize = end;
                     if (trim_end < source.len and source[trim_end] == '\n') trim_end += 1;
 
-                    var buf: std.ArrayListUnmanaged(u8) = .empty;
+                    var buf: std.ArrayList(u8) = .empty;
                     defer buf.deinit(allocator);
                     const w = buf.writer(allocator);
                     try w.writeAll(source[0..trim_start]);
@@ -2645,7 +2645,7 @@ pub fn removeComponentDatasheetCore(
     var trim_end: usize = end;
     if (trim_end < source.len and source[trim_end] == '\n') trim_end += 1;
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
     try w.writeAll(source[0..trim_start]);
@@ -2789,7 +2789,7 @@ fn collectPinRegions(
     allocator: std.mem.Allocator,
     source: []const u8,
     ref_des: []const u8,
-    out: *std.ArrayListUnmanaged(PinRegion),
+    out: *std.ArrayList(PinRegion),
 ) EditError!void {
     const heads = [_][]const u8{ "(instance \"", "(pins \"" };
     inline for (heads) |head| {
@@ -2825,7 +2825,7 @@ pub fn movePinCore(
     const source = try readDesignSource(allocator, project_dir, name);
     defer allocator.free(source);
 
-    var regions: std.ArrayListUnmanaged(PinRegion) = .empty;
+    var regions: std.ArrayList(PinRegion) = .empty;
     defer regions.deinit(allocator);
     try collectPinRegions(allocator, source, ref_des, &regions);
     if (regions.items.len == 0) return error.InstanceNotFound;
@@ -2833,7 +2833,7 @@ pub fn movePinCore(
     if (findPinTokenInRegions(source, regions.items, new_pin) != null) return error.PinAlreadyAssigned;
     const old_loc = findPinTokenInRegions(source, regions.items, old_pin) orelse return error.PinNotFound;
 
-    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    var new_source: std.ArrayList(u8) = .empty;
     defer new_source.deinit(allocator);
     const nw = new_source.writer(allocator);
     try nw.writeAll(source[0..old_loc.start]);
@@ -2866,7 +2866,7 @@ pub fn swapPinsCore(
     const source = try readDesignSource(allocator, project_dir, name);
     defer allocator.free(source);
 
-    var regions: std.ArrayListUnmanaged(PinRegion) = .empty;
+    var regions: std.ArrayList(PinRegion) = .empty;
     defer regions.deinit(allocator);
     try collectPinRegions(allocator, source, ref_des, &regions);
     if (regions.items.len == 0) return error.InstanceNotFound;
@@ -2882,7 +2882,7 @@ pub fn swapPinsCore(
     const second_end = if (a_first) b_loc.end else a_loc.end;
     const second_replace: []const u8 = if (a_first) pin_a else pin_b;
 
-    var new_source: std.ArrayListUnmanaged(u8) = .empty;
+    var new_source: std.ArrayList(u8) = .empty;
     defer new_source.deinit(allocator);
     const nw = new_source.writer(allocator);
     try nw.writeAll(source[0..first_start]);
@@ -2914,7 +2914,7 @@ pub fn getSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     };
     defer ctx.allocator.free(source);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try w.writeAll("{\"source\":\"");
     try bom_html.writeJsonEscaped(w, source);
@@ -2988,7 +2988,7 @@ pub fn saveSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         }
     };
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const w = out.writer(ctx.allocator);
     try w.print("{{\"ok\":true,\"version\":{d},\"snapshot\":", .{result.version});
     if (result.snapshot) |s| {
@@ -3064,7 +3064,7 @@ test "parsePinForm reads single and multi-pin shorthand forms" {
         \\  (pin W16 (as "PG11") "BPSK"))
     ;
     const a = std.testing.allocator;
-    var toks: std.ArrayListUnmanaged([]const u8) = .empty;
+    var toks: std.ArrayList([]const u8) = .empty;
     defer toks.deinit(a);
 
     const shorthand = std.mem.indexOf(u8, src, "(pin 2").?;
@@ -3096,7 +3096,7 @@ test "findInstancePinForm finds a pin in a section (pins label) map" {
     const a = std.testing.allocator;
     const inst_open = std.mem.indexOf(u8, src, "(instance \"stm32\"").?;
     const inst_end = findFormEnd(src, inst_open).?;
-    var toks: std.ArrayListUnmanaged([]const u8) = .empty;
+    var toks: std.ArrayList([]const u8) = .empty;
     defer toks.deinit(a);
     // Not in the (tiny) instance body, but in the section's (pins "stm32" …) map.
     const m = (try findInstancePinForm(a, src, inst_open, inst_end, "W16", &toks)).?;

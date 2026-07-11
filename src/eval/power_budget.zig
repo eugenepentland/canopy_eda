@@ -145,7 +145,7 @@ pub fn analyze(
         /// Ordered list of `(ref_des, net)` group keys for consumer lookup.
         /// Parallel to entries in `consumer_groups` below, keyed by
         /// `{ref}\0{net}` to avoid the cost of a nested hashmap.
-        group_keys: std.ArrayListUnmanaged([]const u8) = .empty,
+        group_keys: std.ArrayList([]const u8) = .empty,
     };
     var loads: std.StringHashMapUnmanaged(RailLoad) = .empty;
 
@@ -155,7 +155,7 @@ pub fn analyze(
         label: []const u8 = "",
         net: []const u8,
         root: []const u8,
-        pins: std.ArrayListUnmanaged([]const u8) = .empty,
+        pins: std.ArrayList([]const u8) = .empty,
         sum_typ: f64 = 0,
         sum_max: f64 = 0,
         any_typ: bool = false,
@@ -302,7 +302,7 @@ pub fn analyze(
 
     // Step 4: build Rail rows — one per root that has a source or nonzero
     // load. GND is excluded from the rollup.
-    var rails: std.ArrayListUnmanaged(Rail) = .empty;
+    var rails: std.ArrayList(Rail) = .empty;
     var emitted_roots: std.StringHashMapUnmanaged(void) = .empty;
 
     const derating = DEFAULT_DERATING;
@@ -351,7 +351,7 @@ fn buildConsumers(
     group_keys: []const []const u8,
     groups: anytype,
 ) std.mem.Allocator.Error![]const RailConsumer {
-    var out: std.ArrayListUnmanaged(RailConsumer) = .empty;
+    var out: std.ArrayList(RailConsumer) = .empty;
     for (group_keys) |key| {
         const g = groups.get(key) orelse continue;
         // Skip groups with no current annotation on either axis — test

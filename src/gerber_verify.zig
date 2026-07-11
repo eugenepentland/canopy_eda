@@ -50,9 +50,9 @@ pub const ParseError = error{ MalformedCoord, MalformedAperture, MissingFormat, 
 /// our own writer (a coordinate that doesn't fit the 4.6 format, an aperture
 /// def we can't read) — those are the regressions this is meant to catch.
 pub fn parse(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
-    var apertures: std.ArrayListUnmanaged(Aperture) = .empty;
-    var flashes: std.ArrayListUnmanaged(Flash) = .empty;
-    var segments: std.ArrayListUnmanaged(Segment) = .empty;
+    var apertures: std.ArrayList(Aperture) = .empty;
+    var flashes: std.ArrayList(Flash) = .empty;
+    var segments: std.ArrayList(Segment) = .empty;
     var regions: usize = 0;
 
     var saw_format = false;
@@ -256,7 +256,7 @@ pub fn verifyCopperLayer(
     segments: []const ExpectSegment,
 ) ParseError!Report {
     const parsed = try parse(arena, gerber_bytes);
-    var misses: std.ArrayListUnmanaged(Miss) = .empty;
+    var misses: std.ArrayList(Miss) = .empty;
 
     for (flashes) |ef| {
         const p = frame.pt(ef.x, ef.y);

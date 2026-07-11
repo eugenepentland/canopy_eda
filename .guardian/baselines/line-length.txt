@@ -9,7 +9,7 @@
 2 src/deflate.zig
 3 src/diagram/classify.zig
 9 src/diagram/collect.zig
-47 src/diagram/layout.zig
+45 src/diagram/layout.zig
 7 src/diagram/lod.zig
 1 src/diagram/membership.zig
 37 src/diagram/render.zig
@@ -34,7 +34,7 @@
 3 src/eval/test_point.zig
 1 src/eval/validate.zig
 10 src/export_fab.zig
-29 src/export_gerber.zig
+28 src/export_gerber.zig
 7 src/export_kicad.zig
 8 src/export_kicad_footprint.zig
 5 src/export_kicad_model.zig
@@ -66,7 +66,7 @@
 2 src/render_block_types.zig
 14 src/render_html.zig
 31 src/render_json.zig
-16 src/render_pcb_png.zig
+15 src/render_pcb_png.zig
 6 src/render_svg/branch.zig
 18 src/render_svg/connection.zig
 6 src/render_svg/context.zig
@@ -75,7 +75,7 @@
 17 src/req_checks.zig
 8 src/review_html.zig
 3 src/review_json.zig
-9 src/review_md.zig
+8 src/review_md.zig
 2 src/serve.zig
 5 src/serve/api.zig
 7 src/serve/auth.zig
@@ -94,7 +94,7 @@
 7 src/serve/library.zig
 2 src/serve/library_3d.zig
 3 src/serve/mcp.zig
-89 src/serve/mcp_tools.zig
+87 src/serve/mcp_tools.zig
 4 src/serve/modules.zig
 6 src/serve/notes.zig
 16 src/serve/oauth.zig
@@ -102,13 +102,13 @@
 1 src/serve/page_cache.zig
 2 src/serve/pages.zig
 16 src/serve/pcb_describe.zig
-149 src/serve/pcb_layout_page.zig
+148 src/serve/pcb_layout_page.zig
 1 src/serve/pdf_viewer.zig
 1 src/serve/plugin_tokens.zig
 12 src/serve/rough_best.zig
 2 src/serve/schematic_page.zig
 10 src/serve/style_score.zig
-32 src/serve/sync.zig
+31 src/serve/sync.zig
 8 src/serve/templates/account.zig
 3 src/serve/templates/auth.zig
 5 src/serve/templates/library.zig

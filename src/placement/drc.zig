@@ -174,7 +174,7 @@ pub fn check(
     routed: router.RouteResult,
     clearance: f64,
 ) std.mem.Allocator.Error![]Violation {
-    var out: std.ArrayListUnmanaged(Violation) = .empty;
+    var out: std.ArrayList(Violation) = .empty;
     const pads = try padBoxes(arena, placement);
     const vias = routed.vias;
     const tracks = routed.tracks;
@@ -290,7 +290,7 @@ pub fn check(
     return out.toOwnedSlice(arena);
 }
 
-const Viol = std.ArrayListUnmanaged(Violation);
+const Viol = std.ArrayList(Violation);
 
 /// The drill-station rules: via annular ring (`min_annular`), minimum drill
 /// diameter (`min_drill`), and hole-to-hole wall clearance (`hole_to_hole`).
@@ -662,14 +662,14 @@ fn sameNet(a: i32, b: i32) bool {
 /// Build the pad-rect list with net + part index, mirroring the world-rect
 /// the router and renderer use (rotation-aware for the 0/90/180/270° poses).
 fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]PadBox {
-    var pin_net = std.StringHashMap(i32).init(arena);
+    var pin_net = std.StringHashMapUnmanaged(i32).empty;
     for (placement.nets, 0..) |net, ni| {
         for (net.pins) |pin| {
             const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, pin.pin });
-            try pin_net.put(key, @intCast(ni));
+            try pin_net.put(arena, key, @intCast(ni));
         }
     }
-    var list: std.ArrayListUnmanaged(PadBox) = .empty;
+    var list: std.ArrayList(PadBox) = .empty;
     for (placement.parts, 0..) |part, pi| {
         const layer: u8 = if (part.side == .bottom) 1 else 0;
         for (part.pads) |pad| {
@@ -712,7 +712,7 @@ fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Al
 /// Every drilled hole on the board unified into one list: each pad with
 /// drill>0 (world centre + diameter) plus each via with drill>0. Arena-owned.
 fn allHoles(arena: std.mem.Allocator, pads: []const PadBox, vias: []const router.Via) std.mem.Allocator.Error![]Hole {
-    var list: std.ArrayListUnmanaged(Hole) = .empty;
+    var list: std.ArrayList(Hole) = .empty;
     for (pads) |p| {
         if (p.drill <= 0) continue;
         try list.append(arena, .{ .x = p.hx, .y = p.hy, .drill = p.drill, .shx = p.shx, .shy = p.shy });

@@ -131,7 +131,7 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
 
     const violations = try erc_mod.runErc(allocator, block, project_dir);
     const stdout = std.fs.File.stdout();
-    var w_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var w_buf: std.ArrayList(u8) = .empty;
     const w = w_buf.writer(allocator);
     var shown: usize = 0;
     var errors: usize = 0;

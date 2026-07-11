@@ -43,7 +43,7 @@ pub fn describeComponent(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) DescribeError!bool {
     if (!validComponentName(name)) {
         return writeJsonError(allocator, out, ERR_INVALID_NAME);
@@ -76,7 +76,7 @@ pub fn describeComponent(
     const declared_name = root_children[1].asString() orelse root_children[1].asAtom() orelse name;
 
     var info = ComponentInfo{ .name = declared_name, .is_family = is_family };
-    var datasheets: std.ArrayListUnmanaged([]const u8) = .empty;
+    var datasheets: std.ArrayList([]const u8) = .empty;
     defer datasheets.deinit(allocator);
 
     for (root_children[2..]) |child| {
@@ -151,7 +151,7 @@ fn collectComponentField(
     allocator: std.mem.Allocator,
     child: ast.Node,
     info: *ComponentInfo,
-    datasheets: *std.ArrayListUnmanaged([]const u8),
+    datasheets: *std.ArrayList([]const u8),
 ) !void {
     const cl = child.asList() orelse return;
     if (cl.len < 2) return;
@@ -232,7 +232,7 @@ fn parsePinoutBody(allocator: std.mem.Allocator, src: []const u8) !?[]PinEntry {
     const head = root_children[0].asAtom() orelse return null;
     if (!std.mem.eql(u8, head, "pinout")) return null;
 
-    var pins: std.ArrayListUnmanaged(PinEntry) = .empty;
+    var pins: std.ArrayList(PinEntry) = .empty;
     errdefer {
         for (pins.items) |p| {
             allocator.free(p.id);
@@ -263,7 +263,7 @@ fn parsePinoutBody(allocator: std.mem.Allocator, src: []const u8) !?[]PinEntry {
             continue;
         };
 
-        var alts: std.ArrayListUnmanaged(PinAlt) = .empty;
+        var alts: std.ArrayList(PinAlt) = .empty;
         errdefer {
             for (alts.items) |a| {
                 allocator.free(a.name);
@@ -433,7 +433,7 @@ fn writeCheckKindName(w: anytype, c: env_mod.Check) !void {
     }
 }
 
-fn writeJsonError(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), msg: []const u8) !bool {
+fn writeJsonError(allocator: std.mem.Allocator, out: *std.ArrayList(u8), msg: []const u8) !bool {
     out.clearRetainingCapacity();
     const w = out.writer(allocator);
     try w.writeAll("{\"ok\":false,\"error\":");
@@ -470,7 +470,7 @@ fn componentPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []
 /// Validate `nodes` is a single `(component ...)` / `(component-family ...)`
 /// form and return its body (children after the declared name). On any
 /// structural problem, writes a JSON error into `out` and returns null.
-fn componentRootBody(nodes: []const ast.Node, allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !?[]const ast.Node {
+fn componentRootBody(nodes: []const ast.Node, allocator: std.mem.Allocator, out: *std.ArrayList(u8)) !?[]const ast.Node {
     if (nodes.len == 0) {
         _ = try writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
         return null;
@@ -522,7 +522,7 @@ fn requirementIdMatches(cl: []const ast.Node, target: []const u8) bool {
 /// escaped the same way the stored value is (the AST keeps source escapes).
 fn requirementTextMatches(allocator: std.mem.Allocator, cl: []const ast.Node, plain: []const u8) bool {
     const stored = if (cl.len >= 2) (cl[1].asString() orelse cl[1].asAtom() orelse "") else "";
-    var esc: std.ArrayListUnmanaged(u8) = .empty;
+    var esc: std.ArrayList(u8) = .empty;
     defer esc.deinit(allocator);
     writeSexprEscaped(esc.writer(allocator), plain) catch return false;
     return std.mem.eql(u8, stored, esc.items);
@@ -599,7 +599,7 @@ fn formEnd(src: []const u8, start: usize) ?usize {
 /// Caller owns the result.
 fn spliceRequirement(allocator: std.mem.Allocator, src: []const u8, form: []const u8) !?[]u8 {
     const close = lastParenIndex(src) orelse return null;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.appendSlice(allocator, src[0..close]);
     try buf.appendSlice(allocator, "\n  ");
@@ -616,7 +616,7 @@ fn spliceRequirement(allocator: std.mem.Allocator, src: []const u8, form: []cons
 fn removeFormSrc(allocator: std.mem.Allocator, src: []const u8, start: usize) !?[]u8 {
     const end = formEnd(src, start) orelse return null;
     const del_start = std.mem.lastIndexOfScalar(u8, src[0..start], '\n') orelse start;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.appendSlice(allocator, src[0..del_start]);
     try buf.appendSlice(allocator, src[end..]);
@@ -635,7 +635,7 @@ pub fn listRequirements(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) ReqError!bool {
     if (!validComponentName(name)) return writeJsonError(allocator, out, ERR_INVALID_NAME);
     const path = try componentPath(allocator, project_dir, name);
@@ -678,7 +678,7 @@ pub fn addRequirement(
     ref_page: ?u32,
     ref_quote: ?[]const u8,
     check_src: ?[]const u8,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) ReqError!bool {
     if (!validComponentName(name)) return writeJsonError(allocator, out, ERR_INVALID_NAME);
     if (text.len == 0) return writeJsonError(allocator, out, "text must be a non-empty string");
@@ -700,7 +700,7 @@ pub fn addRequirement(
 
     // Escaped inner text — what is stored between the quotes, and what the id
     // derives from (so it matches env.requirementIdForText downstream).
-    var esc: std.ArrayListUnmanaged(u8) = .empty;
+    var esc: std.ArrayList(u8) = .empty;
     defer esc.deinit(allocator);
     try writeSexprEscaped(esc.writer(allocator), text);
     var hasher = std.hash.Crc32.init();
@@ -718,7 +718,7 @@ pub fn addRequirement(
         return writeJsonError(allocator, out, msg);
     }
 
-    var form: std.ArrayListUnmanaged(u8) = .empty;
+    var form: std.ArrayList(u8) = .empty;
     defer form.deinit(allocator);
     const fw = form.writer(allocator);
     try fw.print("(requirement \"{s}\"", .{esc.items});
@@ -769,7 +769,7 @@ pub fn removeRequirement(
     name: []const u8,
     target_id: ?[]const u8,
     target_text: ?[]const u8,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) ReqError!bool {
     if (!validComponentName(name)) return writeJsonError(allocator, out, ERR_INVALID_NAME);
     const has_id = target_id != null and target_id.?.len > 0;
@@ -866,7 +866,7 @@ test "findSourceComment extracts the regenerate_pinout source line" {
 test "writeCheckKindName dasherizes underscored variant names" {
     // spec: serve/component_info - kebab-cases every Check variant tag
     const alloc = std.testing.allocator;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
     const w = buf.writer(alloc);
     const variants = [_]env_mod.Check{
@@ -962,7 +962,7 @@ test "add/list/remove requirement round-trips through the component file on disk
     const proj = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(proj);
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);
 
     // Add — with a datasheet ref and a validated (check ...) clause.
@@ -1007,7 +1007,7 @@ test "writeComponentJson emits the first requirement without a leading comma" {
     const z = ast.Span.zero;
     const req = [_]ast.Node{ ast.Node.atom(z, "requirement"), ast.Node.string(z, "Tie pin 1 to GND") };
     const root_body = [_]ast.Node{ast.Node.list(z, &req)};
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(alloc);
     const w = out.writer(alloc);
     try writeComponentJson(

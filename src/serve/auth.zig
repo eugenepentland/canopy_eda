@@ -91,7 +91,7 @@ const SessionData = struct {
 };
 
 var sessions_mutex: std.Thread.Mutex = .{};
-var sessions: ?std.StringHashMap(SessionData) = null;
+var sessions: ?std.StringHashMapUnmanaged(SessionData) = null;
 var sessions_auth_dir: ?[]const u8 = null;
 
 // The session map outlives every request — handlers call in with a
@@ -99,9 +99,9 @@ var sessions_auth_dir: ?[]const u8 = null;
 // must come from the process allocator instead.
 const store_alloc = std.heap.page_allocator;
 
-fn getSessionMap(allocator: std.mem.Allocator, auth_dir: []const u8) *std.StringHashMap(SessionData) {
+fn getSessionMap(allocator: std.mem.Allocator, auth_dir: []const u8) *std.StringHashMapUnmanaged(SessionData) {
     if (sessions == null) {
-        sessions = std.StringHashMap(SessionData).init(store_alloc);
+        sessions = std.StringHashMapUnmanaged(SessionData).empty;
         sessions_auth_dir = auth_dir;
         // Load persisted sessions
         loadSessions(allocator, auth_dir);
@@ -127,7 +127,7 @@ fn loadSessions(allocator: std.mem.Allocator, auth_dir: []const u8) void {
         if (now < entry.expiry) {
             const token_dup = store_alloc.dupe(u8, entry.token) catch continue;
             const email_dup = store_alloc.dupe(u8, entry.email) catch continue;
-            sessions.?.put(token_dup, .{ .email = email_dup, .expiry = entry.expiry }) catch continue;
+            sessions.?.put(store_alloc, token_dup, .{ .email = email_dup, .expiry = entry.expiry }) catch continue;
         }
     }
 }
@@ -137,7 +137,7 @@ fn persistSessions(allocator: std.mem.Allocator) void {
     const path = sessionsPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
     infra_fs.cwd().makePath(auth_dir) catch return;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     w.writeAll("[") catch return;
     var map = &sessions.?;
@@ -159,9 +159,9 @@ fn persistSessions(allocator: std.mem.Allocator) void {
 /// abandoned sessions don't accumulate in memory for the life of the process
 /// (they were previously evicted only when that exact token was looked up
 /// again). Caller must hold `sessions_mutex`.
-fn sweepExpiredSessions(allocator: std.mem.Allocator, map: *std.StringHashMap(SessionData)) void {
+fn sweepExpiredSessions(allocator: std.mem.Allocator, map: *std.StringHashMapUnmanaged(SessionData)) void {
     const now = clock.timestamp();
-    var expired: std.ArrayListUnmanaged([]const u8) = .empty;
+    var expired: std.ArrayList([]const u8) = .empty;
     defer expired.deinit(allocator);
     var it = map.iterator();
     while (it.next()) |e| {
@@ -184,7 +184,7 @@ pub fn createSession(allocator: std.mem.Allocator, auth_dir: []const u8, email: 
     defer sessions_mutex.unlock();
     const map = getSessionMap(allocator, auth_dir);
     sweepExpiredSessions(allocator, map);
-    try map.put(token, .{ .email = email_dup, .expiry = expiry });
+    try map.put(store_alloc, token, .{ .email = email_dup, .expiry = expiry });
     persistSessions(allocator);
     return token;
 }
@@ -228,16 +228,16 @@ const CHALLENGE_TTL_SECS: i64 = 300;
 const CHALLENGE_COOKIE = "authcid";
 const ChallengeEntry = struct { challenge: [32]u8, expiry: i64 };
 var challenge_mutex: std.Thread.Mutex = .{};
-var challenges: ?std.StringHashMap(ChallengeEntry) = null;
+var challenges: ?std.StringHashMapUnmanaged(ChallengeEntry) = null;
 
-fn challengeMap() *std.StringHashMap(ChallengeEntry) {
-    if (challenges == null) challenges = std.StringHashMap(ChallengeEntry).init(store_alloc);
+fn challengeMap() *std.StringHashMapUnmanaged(ChallengeEntry) {
+    if (challenges == null) challenges = std.StringHashMapUnmanaged(ChallengeEntry).empty;
     return &challenges.?;
 }
 
 /// Evict expired challenge entries (bounded batch per call). Caller holds
 /// `challenge_mutex`.
-fn sweepExpiredChallenges(map: *std.StringHashMap(ChallengeEntry), now: i64) void {
+fn sweepExpiredChallenges(map: *std.StringHashMapUnmanaged(ChallengeEntry), now: i64) void {
     var expired: [32][]const u8 = undefined;
     var n: usize = 0;
     var it = map.iterator();
@@ -263,7 +263,7 @@ fn storePendingChallenge(challenge: [32]u8) []const u8 {
     infra_random.bytes(&rand);
     const hex = std.fmt.bytesToHex(rand, .lower);
     const cid = store_alloc.dupe(u8, &hex) catch return "";
-    map.put(cid, .{ .challenge = challenge, .expiry = now + CHALLENGE_TTL_SECS }) catch {
+    map.put(store_alloc, cid, .{ .challenge = challenge, .expiry = now + CHALLENGE_TTL_SECS }) catch {
         store_alloc.free(cid);
         return "";
     };
@@ -346,7 +346,7 @@ fn saveCredentials(allocator: std.mem.Allocator, auth_dir: []const u8, creds: []
     try infra_fs.cwd().makePath(auth_dir);
 
     // Build JSON string
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const bw = buf.writer(allocator);
     try bw.writeAll("[");
     for (creds, 0..) |c, i| {
@@ -397,7 +397,7 @@ fn saveInvites(allocator: std.mem.Allocator, auth_dir: []const u8, invites: []co
 
     try infra_fs.cwd().makePath(auth_dir);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const bw = buf.writer(allocator);
     try bw.writeAll("[");
     for (invites, 0..) |inv, i| {
@@ -423,7 +423,7 @@ pub fn createInvite(allocator: std.mem.Allocator, auth_dir: []const u8, created_
 
     const now = clock.timestamp();
     const existing = try loadInvites(allocator, auth_dir);
-    var invites: std.ArrayListUnmanaged(Invite) = .empty;
+    var invites: std.ArrayList(Invite) = .empty;
     for (existing) |inv| {
         if (now < inv.expiry) try invites.append(allocator, inv);
     }
@@ -449,7 +449,7 @@ fn findInvite(allocator: std.mem.Allocator, auth_dir: []const u8, token: []const
 fn consumeInvite(allocator: std.mem.Allocator, auth_dir: []const u8, token: []const u8) !bool {
     const invites = try loadInvites(allocator, auth_dir);
     const now = clock.timestamp();
-    var remaining: std.ArrayListUnmanaged(Invite) = .empty;
+    var remaining: std.ArrayList(Invite) = .empty;
     var found = false;
     for (invites) |inv| {
         if (std.mem.eql(u8, inv.token, token) and now < inv.expiry) {
@@ -785,7 +785,7 @@ pub fn isLocalhostRequest(ctx: *Handler, req: *httpz.Request) bool {
 /// sessions tied to that email. Called by the admin delete-user flow.
 pub fn purgeIdentity(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) void {
     const creds = loadCredentials(allocator, auth_dir) catch return;
-    var kept: std.ArrayListUnmanaged(StoredCredential) = .empty;
+    var kept: std.ArrayList(StoredCredential) = .empty;
     defer kept.deinit(allocator);
     for (creds) |c| {
         if (!std.mem.eql(u8, c.email, email)) kept.append(allocator, c) catch continue;
@@ -798,7 +798,7 @@ pub fn purgeIdentity(allocator: std.mem.Allocator, auth_dir: []const u8, email: 
     defer sessions_mutex.unlock();
     if (sessions) |*map| {
         var it = map.iterator();
-        var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
+        var to_remove: std.ArrayList([]const u8) = .empty;
         defer to_remove.deinit(allocator);
         while (it.next()) |entry| {
             if (std.mem.eql(u8, entry.value_ptr.email, email)) {
@@ -1022,7 +1022,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 
     // Build excludeCredentials list: passkeys already registered for this email
     // so the browser won't offer to re-use them.
-    var exclude_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var exclude_buf: std.ArrayList(u8) = .empty;
     const xw = exclude_buf.writer(req.arena);
     try xw.writeAll("[");
     var first_excl = true;
@@ -1035,7 +1035,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
     }
     try xw.writeAll("]");
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(req.arena);
     try w.print(
         "{{\"challenge\":\"{s}\",\"rp\":{{\"name\":\"Netlisp\",\"id\":\"{s}\"}}," ++
@@ -1350,7 +1350,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     const id_dup = try ctx.allocator.dupe(u8, cred_id_b64);
     const email_dup = try ctx.allocator.dupe(u8, resolved_email);
 
-    var creds: std.ArrayListUnmanaged(StoredCredential) = .empty;
+    var creds: std.ArrayList(StoredCredential) = .empty;
     for (existing) |c| {
         try creds.append(ctx.allocator, c);
     }
@@ -1411,7 +1411,7 @@ pub fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 
     const creds = try loadCredentials(ctx.allocator, ctx.auth_dir);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(req.arena);
     try w.print("{{\"challenge\":\"{s}\",\"allowCredentials\":[", .{challenge_b64});
     var first = true;
@@ -1783,7 +1783,7 @@ pub fn listCredentialsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 
     const creds = try loadCredentials(ctx.allocator, ctx.auth_dir);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(req.arena);
     try w.print("{{\"email\":\"{s}\",\"credentials\":[", .{email});
     var first = true;
@@ -1850,7 +1850,7 @@ pub fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
         return;
     }
 
-    var kept: std.ArrayListUnmanaged(StoredCredential) = .empty;
+    var kept: std.ArrayList(StoredCredential) = .empty;
     var removed = false;
     for (existing) |c| {
         if (std.mem.eql(u8, c.id, target_id) and std.mem.eql(u8, c.email, email)) {
@@ -1914,7 +1914,7 @@ pub fn createInviteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
     const token = try createInvite(ctx.allocator, ctx.auth_dir, email, role_str);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(req.arena);
     try w.print("{{\"ok\":true,\"token\":\"{s}\",\"path\":\"/auth/invite/{s}\",\"role\":\"{s}\"}}", .{ token, token, role_str });
 

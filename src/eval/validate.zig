@@ -92,7 +92,7 @@ fn checkSinglePinNets(self: *Evaluator, block: *const DesignBlock) !void {
 fn checkVoltageMismatches(self: *Evaluator, block: *const DesignBlock) !void {
     // Collect voltage declarations per net name across sections
     const Entry = struct { section: []const u8, voltage: f64 };
-    var net_voltages: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Entry)) = .empty;
+    var net_voltages: std.StringHashMapUnmanaged(std.ArrayList(Entry)) = .empty;
 
     for (block.sections) |sec| {
         for (sec.ports) |p| {
