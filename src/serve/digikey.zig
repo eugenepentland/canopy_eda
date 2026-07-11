@@ -14,6 +14,7 @@
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const rate_limiter = @import("rate_limiter.zig");
+const numeric = @import("../numeric.zig");
 
 // ── Endpoints / tunables ──────────────────────────────────────────
 /// Production host. A deployment can point at the sandbox by setting
@@ -346,7 +347,7 @@ fn jsonNum(v: std.json.Value) ?f64 {
 fn u64Field(v: std.json.Value, key: []const u8) u64 {
     const n = numField(v, key) orelse return 0;
     if (n <= 0) return 0;
-    return @intFromFloat(n);
+    return numeric.checkedInt(u64, n) orelse 0;
 }
 
 /// `obj[outer][inner]` as a string, or null at any missing/typed-wrong hop.

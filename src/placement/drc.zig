@@ -19,6 +19,7 @@ const pad_shape = @import("pad_shape.zig");
 const outline = @import("outline.zig");
 const font = @import("../font5x7.zig");
 const export_kicad = @import("../export_kicad.zig");
+const numeric = @import("../numeric.zig");
 
 /// Silkscreen ref-des pixel pitch (mm) — mirrors `export_gerber.zig`'s
 /// `TEXT_PX_MM`, so the ref-des bounding box the `silk_over_pad` check measures
@@ -802,7 +803,7 @@ fn segShapeDist(t: router.Track, p: PadBox, win: f64) f64 {
     } else if (t.y1 < p.y0 - win or t.y1 > p.y1 + win) return std.math.inf(f64);
     if (f0 > f1) return std.math.inf(f64);
     const len = std.math.hypot(dx, dy) * (f1 - f0);
-    const steps: usize = @max(1, @as(usize, @intFromFloat(@ceil(len / 0.05))));
+    const steps: usize = @max(1, numeric.toCount(@ceil(len / 0.05)));
     var best = std.math.inf(f64);
     var i: usize = 0;
     while (i <= steps) : (i += 1) {

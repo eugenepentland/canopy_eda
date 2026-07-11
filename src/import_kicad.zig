@@ -32,7 +32,7 @@ const footprint_conv = @import("convert/footprint.zig");
 const kicad_fmt = @import("kicad_pcb/format.zig");
 const infra_fs = @import("infra/fs.zig");
 const import_fold = @import("import_fold.zig");
-
+const numeric = @import("numeric.zig");
 const Node = ast.Node;
 
 /// KiCad's single-pad stub prefix — pads on these nets are unconnected.
@@ -178,7 +178,7 @@ fn parseParts(arena: std.mem.Allocator, root: Node) ImportError![]Part {
         if (cl.len < 3) continue;
         const id_num = cl[1].asNumber() orelse continue;
         const name = cl[2].asString() orelse continue;
-        try net_table.put(@intFromFloat(id_num), name);
+        try net_table.put(numeric.checkedInt(i64, id_num) orelse continue, name);
     }
 
     var parts: std.ArrayListUnmanaged(Part) = .empty;
@@ -277,7 +277,7 @@ fn readPartPad(
             const nl = sub.asList() orelse continue;
             if (nl.len < 2) continue;
             if (nl[1].asNumber()) |id_num| {
-                if (net_table.get(@intFromFloat(id_num))) |name| net_name = name;
+                if (net_table.get(numeric.checkedInt(i64, id_num) orelse continue)) |name| net_name = name;
             } else if (nl[1].asString()) |name| {
                 net_name = name;
             }
@@ -659,7 +659,7 @@ fn padNumText(node: Node, buf: *[32]u8) ?[]const u8 {
     if (node.asString()) |s| return s;
     if (node.asAtom()) |a| return a;
     if (node.asNumber()) |n| {
-        const i: i64 = @intFromFloat(n);
+        const i: i64 = numeric.checkedInt(i64, n) orelse 0;
         return std.fmt.bufPrint(buf, "{d}", .{i}) catch null;
     }
     return null;

@@ -28,6 +28,7 @@ const geometry = @import("geometry.zig");
 const pad_shape = @import("pad_shape.zig");
 const router = @import("router.zig");
 const outline = @import("outline.zig");
+const numeric = @import("../numeric.zig");
 
 /// Which net a poured/plane layer carries: a declared `(plane IDX "NET")` name,
 /// or the legacy implicit model's "every ground-named net".
@@ -77,8 +78,8 @@ pub const Fill = struct {
         const fi = @floor((x - self.minx) / self.pitch);
         const fj = @floor((y - self.miny) / self.pitch);
         if (fi < 0 or fj < 0) return -1;
-        const i: usize = @intFromFloat(fi);
-        const j: usize = @intFromFloat(fj);
+        const i: usize = numeric.checkedInt(usize, fi) orelse return -1;
+        const j: usize = numeric.checkedInt(usize, fj) orelse return -1;
         if (i >= self.nx or j >= self.ny) return -1;
         return self.labels[j * self.nx + i];
     }
@@ -239,7 +240,7 @@ const Grid = struct {
 
 fn gridCount(extent: f64, pitch: f64) usize {
     if (extent <= 0 or pitch <= 0) return 0;
-    return @intFromFloat(@ceil(extent / pitch));
+    return numeric.toCount(@ceil(extent / pitch));
 }
 
 fn emptyFill(r: optimizer.BoardRect, pitch: f64, coarsened: bool) Fill {
@@ -363,8 +364,8 @@ fn labelAtWorld(g: Grid, x: f64, y: f64) i32 {
     const fi = @floor((x - g.minx) / g.pitch);
     const fj = @floor((y - g.miny) / g.pitch);
     if (fi < 0 or fj < 0) return BLOCKED;
-    const i: usize = @intFromFloat(fi);
-    const j: usize = @intFromFloat(fj);
+    const i: usize = numeric.checkedInt(usize, fi) orelse return BLOCKED;
+    const j: usize = numeric.checkedInt(usize, fj) orelse return BLOCKED;
     if (i >= g.nx or j >= g.ny) return BLOCKED;
     return g.labels[j * g.nx + i];
 }
@@ -423,8 +424,8 @@ fn cellRange(g: Grid, x: f64, y: f64) [2]usize {
     const fi = @floor((x - g.minx) / g.pitch);
     const fj = @floor((y - g.miny) / g.pitch);
     return .{
-        if (fi < 0) 0 else @intFromFloat(fi),
-        if (fj < 0) 0 else @intFromFloat(fj),
+        numeric.toCount(fi),
+        numeric.toCount(fj),
     };
 }
 
@@ -845,6 +846,15 @@ test "gridCount guards a non-positive pitch against division by zero" {
     try testing.expectEqual(@as(usize, 0), gridCount(10, 0));
     // A normal extent/pitch counts the covering cells: ⌈10/2⌉ = 5.
     try testing.expectEqual(@as(usize, 5), gridCount(10, 2));
+}
+
+// spec: placement/pour - gridCount collapses a non-finite extent to zero cells instead of an unchecked narrowing
+test "gridCount collapses a non-finite extent to zero cells" {
+    // A NaN/±inf extent (e.g. a corrupt board bound) reaches the count after the
+    // extent<=0 guard; numeric.toCount collapses it to 0 rather than feeding a
+    // bare @intFromFloat, which would be UB in the safety-off prod build.
+    try testing.expectEqual(@as(usize, 0), gridCount(std.math.inf(f64), 0.1));
+    try testing.expectEqual(@as(usize, 0), gridCount(std.math.nan(f64), 0.1));
 }
 
 test "emitCellEdges emits the bottom boundary edge for a cell empty below" {

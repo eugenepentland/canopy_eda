@@ -4,7 +4,7 @@ const env_mod = @import("../eval/env.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const json_writer = @import("../json_writer.zig");
 const escape = @import("../escape.zig");
-
+const numeric = @import("../numeric.zig");
 /// A datasheet href is safe to emit as a link only if it is a same-origin
 /// path or an http(s) URL. Anything else (`javascript:`, `data:`, …) is
 /// rendered as inert text by the caller.
@@ -509,7 +509,7 @@ pub fn buildSymbolPinCache(allocator: std.mem.Allocator, project_dir: []const u8
                     if (!std.mem.eql(u8, ch, "pin")) continue;
                     const pin_id = blk: {
                         if (cl[1].asNumber()) |n| {
-                            const i: i64 = @intFromFloat(n);
+                            const i: i64 = numeric.checkedInt(i64, n) orelse continue;
                             break :blk std.fmt.allocPrint(allocator, "{d}", .{i}) catch continue;
                         }
                         break :blk cl[1].asAtom() orelse continue;

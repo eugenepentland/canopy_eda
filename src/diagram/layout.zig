@@ -15,7 +15,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const env_mod = @import("../eval/env.zig");
 const log = @import("../infra/log.zig");
-
+const numeric = @import("../numeric.zig");
 const Allocator = std.mem.Allocator;
 const Graph = types.Graph;
 const ClassId = types.ClassId;
@@ -620,8 +620,8 @@ fn separateGroupClusters(arena: Allocator, graph: *const Graph, nodes: []LNode, 
     const col = try arena.alloc(i32, nodes.len);
     const row = try arena.alloc(i32, nodes.len);
     for (nodes, 0..) |ln, k| {
-        col[k] = @intFromFloat(@round((ln.x - ox0) / col_pitch));
-        row[k] = @intFromFloat(@round((ln.y - oy0) / row_pitch));
+        col[k] = numeric.checkedInt(i32, @round((ln.x - ox0) / col_pitch)) orelse 0;
+        row[k] = numeric.checkedInt(i32, @round((ln.y - oy0) / row_pitch)) orelse 0;
     }
     // Cluster id per LNode: each group (first-declaring wins) is one cluster,
     // each ungrouped block its own. Map graph gid → LNode index first.
@@ -1233,7 +1233,7 @@ fn portLess(_: void, a: FreePort, b: FreePort) bool {
 }
 
 fn midKey(coord: f64) i64 {
-    return @intFromFloat(@round(coord / 24));
+    return numeric.checkedInt(i64, @round(coord / 24)) orelse 0;
 }
 
 /// Drop duplicate and colinear interior points so the path has clean corners.
@@ -1295,14 +1295,14 @@ fn clearVx(vxs: []const f64, hya: f64, hyb: f64, ax: f64, bx: f64, pref: f64, ob
 
 /// Assemble the horizontal-plan staircase through channel `hy0`, lane-spread.
 fn hStair(arena: Allocator, lanes: *FreeLanes, ea: Pt, eb: Pt, vxa: f64, vxb: f64, hy0: f64) Allocator.Error![]Pt {
-    const hy = hy0 + laneDelta(try bumpLane(arena, &lanes.h, @intFromFloat(@round(hy0 / 4))));
+    const hy = hy0 + laneDelta(try bumpLane(arena, &lanes.h, numeric.checkedInt(i64, @round(hy0 / 4)) orelse 0));
     const stair = [_]Pt{ ea, .{ .x = vxa, .y = ea.y }, .{ .x = vxa, .y = hy }, .{ .x = vxb, .y = hy }, .{ .x = vxb, .y = eb.y }, eb };
     return collapsePts(arena, &stair);
 }
 
 /// Vertical-plan twin of `hStair`: the staircase through channel `vx0`.
 fn vStair(arena: Allocator, lanes: *FreeLanes, ea: Pt, eb: Pt, hya: f64, hyb: f64, vx0: f64) Allocator.Error![]Pt {
-    const vx = vx0 + laneDelta(try bumpLane(arena, &lanes.v, @intFromFloat(@round(vx0 / 4))));
+    const vx = vx0 + laneDelta(try bumpLane(arena, &lanes.v, numeric.checkedInt(i64, @round(vx0 / 4)) orelse 0));
     const stair = [_]Pt{ ea, .{ .x = ea.x, .y = hya }, .{ .x = vx, .y = hya }, .{ .x = vx, .y = hyb }, .{ .x = eb.x, .y = hyb }, eb };
     return collapsePts(arena, &stair);
 }
@@ -1493,7 +1493,7 @@ fn colRightX(col: u32) f64 {
     return colLeftX(col) + node_w;
 }
 fn colOf(x: f64) u32 {
-    return @intFromFloat(@round((x - pad) / (node_w + h_gap)));
+    return numeric.checkedInt(u32, @round((x - pad) / (node_w + h_gap))) orelse 0;
 }
 fn absDiff(a: u32, b: u32) u32 {
     return if (a > b) a - b else b - a;

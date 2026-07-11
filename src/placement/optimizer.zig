@@ -48,7 +48,7 @@ const drc = @import("drc.zig");
 const outline_mod = @import("outline.zig");
 const parser = @import("../sexpr/parser.zig");
 const infra_fs = @import("../infra/fs.zig");
-
+const numeric = @import("../numeric.zig");
 const DesignBlock = env.DesignBlock;
 pub const FlatNet = export_kicad.FlatNet;
 
@@ -2052,7 +2052,7 @@ fn indexOfRef(parts: []const Part, ref: []const u8) ?usize {
 
 /// Round a millimetre offset to the nearest grid-cell count.
 fn cellOffset(mm: f64) i64 {
-    return @intFromFloat(@round(mm / GRID_MM));
+    return numeric.checkedInt(i64, @round(mm / GRID_MM)) orelse 0;
 }
 
 /// Snapshot every part's pose — the strict/overlap retry in `solve` keeps the
@@ -5137,7 +5137,7 @@ fn arrangeMacros(
     // Deterministic initial spread on a square grid, generous spacing so blocks
     // begin non-overlapping and the springs pull connected ones together.
     const centers = try arena.alloc([2]f64, n);
-    const cols: usize = @max(1, @as(usize, @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(n)))))));
+    const cols: usize = @max(1, numeric.toCount(@ceil(@sqrt(@as(f64, @floatFromInt(n))))));
     const spacing = max_span + ROUGH_BLOCK_GAP_MM;
     for (0..n) |i| {
         if (pinned[i]) { // a pinned block anchors at its members' current centre
@@ -6075,7 +6075,7 @@ fn arrangeGrid(parts: []Part) void {
     const GAP_MM: f64 = 2.0;
     cw = ceilToGrid(cw + GAP_MM);
     ch = ceilToGrid(ch + GAP_MM);
-    const cols: usize = @max(1, @as(usize, @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(parts.len)))))));
+    const cols: usize = @max(1, numeric.toCount(@ceil(@sqrt(@as(f64, @floatFromInt(parts.len))))));
     for (parts, 0..) |*p, i| {
         const col: f64 = @floatFromInt(i % cols);
         const row: f64 = @floatFromInt(i / cols);
@@ -7261,7 +7261,7 @@ const ROT_CAND = [_]f64{ 0, 90, 180, 270 };
 /// Rotate a footprint-local offset by `rot` (CCW, matching the page's
 /// `wpt()`). Only the four right-angle cases occur, so this is exact.
 fn rotateLocal(lx: f64, ly: f64, rot: f64) Pt {
-    return switch (@as(i64, @intFromFloat(@round(@mod(rot, 360))))) {
+    return switch (numeric.checkedInt(i64, @round(@mod(rot, 360))) orelse 0) {
         90 => .{ .x = -ly, .y = lx },
         180 => .{ .x = -lx, .y = -ly },
         270 => .{ .x = ly, .y = -lx },
@@ -7858,7 +7858,7 @@ const CONGEST_CAP: f64 = 1.4;
 /// Bin count for one axis of the congestion grid: extent / target bin size,
 /// clamped to `[CONGEST_BINS_MIN, CONGEST_BINS_MAX]`.
 fn congestBins(extent: f64) usize {
-    const n: usize = @intFromFloat(@ceil(@max(extent, 1.0) / CONGEST_BIN_MM));
+    const n: usize = numeric.toCount(@ceil(@max(extent, 1.0) / CONGEST_BIN_MM));
     return std.math.clamp(n, CONGEST_BINS_MIN, CONGEST_BINS_MAX);
 }
 
@@ -7976,7 +7976,7 @@ fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMap(usize), net
 /// Clamp a fractional bin coordinate to a valid `[0, bins-1]` index.
 fn binIndex(f: f64, bins: usize) usize {
     if (f <= 0) return 0;
-    const i: usize = @intFromFloat(@floor(f));
+    const i: usize = numeric.toCount(@floor(f));
     return @min(i, bins - 1);
 }
 
@@ -9035,7 +9035,7 @@ fn seedRing(parts: []Part, start: usize) void {
     for (parts) |p| {
         if (p.kind == .hub) hub_count += 1;
     }
-    const hub_cols = @max(1, @as(usize, @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(@max(hub_count, 1))))))));
+    const hub_cols = @max(1, numeric.toCount(@ceil(@sqrt(@as(f64, @floatFromInt(@max(hub_count, 1)))))));
 
     var placed_hubs: usize = 0;
     var pord: usize = 0;
@@ -9066,7 +9066,7 @@ fn seedGrid(parts: []Part) void {
     var cell: f64 = 1.0;
     for (parts) |p| cell = @max(cell, 2 * @max(p.hw, p.hh));
     cell += SEED_GAP_MM;
-    const cols = @max(1, @as(usize, @intFromFloat(@ceil(@sqrt(@as(f64, @floatFromInt(n)))))));
+    const cols = @max(1, numeric.toCount(@ceil(@sqrt(@as(f64, @floatFromInt(n))))));
     for (parts, 0..) |*p, i| {
         if (p.locked) continue; // pinned — the relax flows around it
         p.x = @as(f64, @floatFromInt(i % cols)) * cell;

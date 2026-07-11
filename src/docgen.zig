@@ -21,6 +21,7 @@ const forms = @import("eval/forms.zig");
 const fmt_mod = @import("eval/fmt.zig");
 const tokenizer_mod = @import("sexpr/tokenizer.zig");
 const block_types = @import("render_block_types.zig");
+const numeric = @import("numeric.zig");
 
 /// Render the full Markdown reference. The output is deterministic — the
 /// build's docs-check step and the drift test below compare it to the
@@ -265,7 +266,7 @@ fn writeArity(writer: anytype, schema: ?forms.FormSchema) !void {
 /// Power-of-ten exponent of an SI multiplier (all entries in
 /// `tokenizer.si_scales` are exact powers of ten).
 fn multiplierExponent(m: f64) i32 {
-    return @intFromFloat(@round(@log10(m)));
+    return numeric.checkedInt(i32, @round(@log10(m))) orelse 0;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

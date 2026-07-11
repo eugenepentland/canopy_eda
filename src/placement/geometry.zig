@@ -12,6 +12,7 @@ const std = @import("std");
 const parser = @import("../sexpr/parser.zig");
 const ast = @import("../sexpr/ast.zig");
 const infra_fs = @import("../infra/fs.zig");
+const numeric = @import("../numeric.zig");
 const Node = ast.Node;
 
 const MAX_FOOTPRINT_BYTES: usize = 1024 * 1024;
@@ -353,7 +354,7 @@ fn fallbackGeom(pin_count_hint: usize) Geom {
 fn nodeText(arena: std.mem.Allocator, n: Node) []const u8 {
     if (n.asText()) |t| return t;
     if (n.asNumber()) |num| {
-        return std.fmt.allocPrint(arena, "{d}", .{@as(i64, @intFromFloat(num))}) catch "";
+        return std.fmt.allocPrint(arena, "{d}", .{numeric.checkedInt(i64, num) orelse 0}) catch "";
     }
     return "";
 }

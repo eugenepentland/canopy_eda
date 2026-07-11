@@ -62,7 +62,7 @@ const STOCK_LIMIT_DEFAULT: usize = 5;
 
 const EvalError = @import("../eval/evaluator.zig").EvalError;
 const RenderError = render_json.RenderError;
-
+const numeric = @import("../numeric.zig");
 /// Error set used by mcp_tools helper fns that orchestrate eval + render
 /// + filesystem walks, plus any writer in JSON-emitting helpers.
 pub const ToolError = std.mem.Allocator.Error || std.Io.Writer.Error || EvalError || RenderError ||
@@ -2097,7 +2097,7 @@ fn optionalU64(args_val: ?std.json.Value, key: []const u8) ?u64 {
     }
     if (v == .float) {
         if (v.float < 0) return null;
-        return @intFromFloat(v.float);
+        return numeric.checkedInt(u64, v.float);
     }
     return null;
 }

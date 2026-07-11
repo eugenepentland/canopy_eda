@@ -14,7 +14,7 @@ const ast = @import("../sexpr/ast.zig");
 const parser = @import("../sexpr/parser.zig");
 const printer = @import("../sexpr/printer.zig");
 const fmt_const = @import("format.zig");
-
+const numeric = @import("../numeric.zig");
 const Node = ast.Node;
 const Span = ast.Span;
 
@@ -158,7 +158,7 @@ fn indexBoardChildren(
             const cl = child.asList() orelse continue;
             if (cl.len < 3) continue;
             const id_num = cl[1].asNumber() orelse continue;
-            const id_i64: i64 = @intFromFloat(id_num);
+            const id_i64: i64 = numeric.checkedInt(i64, id_num) orelse continue;
             if (id_i64 > max_net_id.*) max_net_id.* = id_i64;
             if (cl[2].asString()) |name| try net_id_by_name.put(name, id_i64);
         } else if (child.isForm(FORM_FOOTPRINT)) {
@@ -1147,7 +1147,7 @@ fn adaptPadAt(arena: std.mem.Allocator, at: Node, to_back: bool, fp_rot: f64) st
     out[1] = al[1];
     out[2] = if (to_back) negateCoord(al[2]) else al[2];
     if (stored != 0) {
-        const whole: i64 = @intFromFloat(stored);
+        const whole: i64 = numeric.checkedInt(i64, stored) orelse 0;
         out[3] = if (@as(f64, @floatFromInt(whole)) == stored)
             Node.int(Span.zero, whole)
         else

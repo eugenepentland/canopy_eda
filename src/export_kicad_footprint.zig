@@ -3,7 +3,7 @@ const infra_fs = @import("infra/fs.zig");
 const ast = @import("sexpr/ast.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const geometry = @import("placement/geometry.zig");
-
+const numeric = @import("numeric.zig");
 /// Error set for footprint emission helpers — covers the parse step on the
 /// project source and the allocator failures from string formatting, plus
 /// the local `InvalidFormat` thrown when the input doesn't look like a
@@ -363,7 +363,7 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
 fn padName(node: ast.Node, buf: []u8) ?[]const u8 {
     if (node.asAtom() orelse node.asString()) |s| return s;
     if (node.asNumber()) |num| {
-        return std.fmt.bufPrint(buf, "{d}", .{@as(i64, @intFromFloat(num))}) catch null;
+        return std.fmt.bufPrint(buf, "{d}", .{numeric.checkedInt(i64, num) orelse 0}) catch null;
     }
     return null;
 }

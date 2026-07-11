@@ -1228,7 +1228,7 @@ fn awColor(kind: optimizer.RatKind) Rgb {
 fn mixByte(a: u8, b: u8, t: f64) u8 {
     const af: f64 = @floatFromInt(a);
     const bf: f64 = @floatFromInt(b);
-    return @intFromFloat(@round(af + (bf - af) * t));
+    return numeric.checkedInt(u8, @round(af + (bf - af) * t)) orelse 0;
 }
 /// Blend two colours; `t` clamped to [0,1].
 fn lerpRgb(a: Rgb, b: Rgb, t: f64) Rgb {

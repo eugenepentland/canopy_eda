@@ -11,6 +11,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const layout = @import("layout.zig");
 const rb = @import("../render_block_types.zig");
+const numeric = @import("../numeric.zig");
 
 const Allocator = std.mem.Allocator;
 const Graph = types.Graph;
@@ -533,7 +534,7 @@ fn writeChip(arena: Allocator, w: *Writer, e: Entity) (Allocator.Error || Writer
     const title_max: usize = if (fit >= chip_title_fs_min)
         e.label.len
     else
-        @max(8, @as(usize, @intFromFloat((e.w - 28) / (title_char_w * chip_title_fs_min))));
+        @max(8, numeric.toCount((e.w - 28) / (title_char_w * chip_title_fs_min)));
     // Centre the title+caption pair vertically; a captionless solo chip
     // centres the title alone.
     const ty: f64 = if (caption.len > 0) cy - fs * 0.10 else cy + fs * 0.36;
@@ -547,7 +548,7 @@ fn writeChip(arena: Allocator, w: *Writer, e: Entity) (Allocator.Error || Writer
         const cap_max: usize = if (cap_fit >= chip_sub_fs_min)
             caption.len
         else
-            @max(10, @as(usize, @intFromFloat((e.w - 24) / (sub_char_w * chip_sub_fs_min))));
+            @max(10, numeric.toCount((e.w - 24) / (sub_char_w * chip_sub_fs_min)));
         try w.print("<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-chip-sub\" style=\"font-size:{d:.0}px\">", .{ cx, cy + cfs * 1.35, cfs });
         try writeEscaped(w, try truncate(arena, caption, cap_max));
         try w.writeAll("</text>");

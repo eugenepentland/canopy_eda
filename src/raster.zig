@@ -103,7 +103,7 @@ pub const Canvas = struct {
     fn mix(dst: u8, src: u8, a: f32) u8 {
         const d: f32 = @floatFromInt(dst);
         const s: f32 = @floatFromInt(src);
-        return @intFromFloat(@round(d * (1.0 - a) + s * a));
+        return numeric.checkedInt(u8, @round(d * (1.0 - a) + s * a)) orelse 0;
     }
 
     /// Filled axis-aligned rectangle (final-pixel coords).
@@ -344,9 +344,9 @@ pub const Canvas = struct {
                     }
                 }
                 const oo = (oy * self.w + ox) * 3;
-                out[oo] = @intFromFloat(@round(sr / n));
-                out[oo + 1] = @intFromFloat(@round(sg / n));
-                out[oo + 2] = @intFromFloat(@round(sb / n));
+                out[oo] = numeric.checkedInt(u8, @round(sr / n)) orelse 0;
+                out[oo + 1] = numeric.checkedInt(u8, @round(sg / n)) orelse 0;
+                out[oo + 2] = numeric.checkedInt(u8, @round(sb / n)) orelse 0;
             }
         }
         return png.encodeRgb(alloc, self.w, self.h, out);

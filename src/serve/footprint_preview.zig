@@ -8,7 +8,7 @@ const export_kicad = @import("../export_kicad.zig");
 const footprint_mod = @import("../export_kicad_footprint.zig");
 const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
-
+const numeric = @import("../numeric.zig");
 // ── Constants ─────────────────────────────────────────────────────
 const HTTP_NOT_FOUND: u16 = 404;
 const HTTP_INTERNAL_ERROR: u16 = 500;
@@ -134,7 +134,7 @@ fn parsePad(allocator: std.mem.Allocator, child: Node) ?Pad {
     if (cl.len < 4) return null;
     const id: []const u8 = cl[1].asAtom() orelse cl[1].asString() orelse blk: {
         const n = cl[1].asNumber() orelse break :blk "";
-        break :blk std.fmt.allocPrint(allocator, "{d}", .{@as(i64, @intFromFloat(n))}) catch "";
+        break :blk std.fmt.allocPrint(allocator, "{d}", .{numeric.checkedInt(i64, n) orelse 0}) catch "";
     };
     // Pad type keyword (cl[2]): "smd" (default), "thru", or "npth" (non-plated).
     const ptype: []const u8 = cl[2].asAtom() orelse "smd";
@@ -632,7 +632,7 @@ fn parseBoardPad(allocator: std.mem.Allocator, child: Node) ?Pad {
     if (cl.len < 4) return null;
     const id: []const u8 = cl[1].asString() orelse cl[1].asAtom() orelse blk: {
         const n = cl[1].asNumber() orelse break :blk "";
-        break :blk std.fmt.allocPrint(allocator, "{d}", .{@as(i64, @intFromFloat(n))}) catch "";
+        break :blk std.fmt.allocPrint(allocator, "{d}", .{numeric.checkedInt(i64, n) orelse 0}) catch "";
     };
     const shape: []const u8 = cl[3].asAtom() orelse "rect";
     const at = boardVec2(child, "at") orelse Point{ .x = 0, .y = 0 };

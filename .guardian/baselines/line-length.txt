@@ -12,7 +12,7 @@
 47 src/diagram/layout.zig
 7 src/diagram/lod.zig
 1 src/diagram/membership.zig
-37 src/diagram/render.zig
+36 src/diagram/render.zig
 2 src/docgen.zig
 4 src/emit.zig
 27 src/erc.zig
