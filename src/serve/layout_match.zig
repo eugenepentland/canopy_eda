@@ -27,7 +27,7 @@ const style_score = @import("style_score.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const modules_mod = @import("modules.zig");
-const Handler = @import("../serve.zig").Handler;
+const Server = @import("../serve.zig").Server;
 const Side = pcb_describe.Side;
 
 /// `Side` has 5 variants (left, right, top, bottom, center); index a per-edge
@@ -271,7 +271,7 @@ fn writeSideTally(w: *std.Io.Writer, counts: [n_sides]usize) pcb_layout_page.Png
 }
 
 /// GET /api/layout-match/:name — the rough-vs-starred area-match scoreboard.
-pub fn layoutMatchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void {
+pub fn layoutMatchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
         return;

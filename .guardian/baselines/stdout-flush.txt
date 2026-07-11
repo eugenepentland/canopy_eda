@@ -1,3 +1,3 @@
 # guardian-snapshot v1
-note: a missing flush() truncates output in 0.15 — add w.interface.flush() before returning. report-only: never fails the build.
-src/commands.zig:133: buffers stdout/stderr with no reachable flush() before returning
+note: a missing flush() truncates output in 0.15 — add w.interface.flush() before returning.
+src/commands.zig:141: buffers stdout/stderr with no reachable flush() before returning

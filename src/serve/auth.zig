@@ -1,10 +1,19 @@
+//! Passkey (WebAuthn) authentication and the serve layer's session +
+//! challenge stores. Runs the register/login ceremonies, the auth middleware
+//! that gates every non-`/auth/*` route, invite links, and credential
+//! management — all reading and writing the JSON files under the server's
+//! `auth_dir`. The session table (`SessionStore`) and the per-attempt WebAuthn
+//! challenge table (`ChallengeStore`) are per-server instance state carried on
+//! `ServerState`; their rows live in `page_allocator` (process lifetime, not
+//! the per-request arena) and the sessions persist to `<auth_dir>/sessions.json`.
+
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 const oauth_store = @import("oauth_store.zig");
 const plugin_tokens = @import("plugin_tokens.zig");
 const users = @import("users.zig");
@@ -90,75 +99,144 @@ const SessionData = struct {
     expiry: i64,
 };
 
-var sessions_mutex: std.Thread.Mutex = .{};
-var sessions: ?std.StringHashMapUnmanaged(SessionData) = null;
-var sessions_auth_dir: ?[]const u8 = null;
-
-// The session map outlives every request — handlers call in with a
-// per-request arena, so the map itself and every token/email stored in it
-// must come from the process allocator instead.
+// Rows in the session and challenge stores outlive every request — handlers
+// call in with a per-request arena, so the maps themselves and every
+// token/email/id stored in them come from the process allocator instead.
 const store_alloc = std.heap.page_allocator;
 
-fn getSessionMap(allocator: std.mem.Allocator, auth_dir: []const u8) *std.StringHashMapUnmanaged(SessionData) {
-    if (sessions == null) {
-        sessions = std.StringHashMapUnmanaged(SessionData).empty;
-        sessions_auth_dir = auth_dir;
-        // Load persisted sessions
-        loadSessions(allocator, auth_dir);
+/// Per-server table of 7-day passkey sessions, persisted to
+/// `<auth_dir>/sessions.json`. This is instance state carried on `ServerState`
+/// (it used to be a file-scope global), so two servers — or two tests — keep
+/// independent sessions. The map and its stored tokens/emails live in
+/// `store_alloc` (process lifetime), never the per-request arena.
+pub const SessionStore = struct {
+    mutex: std.Thread.Mutex = .{},
+    map: ?std.StringHashMapUnmanaged(SessionData) = null,
+    auth_dir: ?[]const u8 = null,
+
+    fn getMap(
+        self: *SessionStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
+    ) *std.StringHashMapUnmanaged(SessionData) {
+        if (self.map == null) {
+            self.map = std.StringHashMapUnmanaged(SessionData).empty;
+            self.auth_dir = auth_dir;
+            self.load(allocator, auth_dir); // Load persisted sessions
+        }
+        return &self.map.?;
     }
-    return &sessions.?;
-}
+
+    fn load(self: *SessionStore, allocator: std.mem.Allocator, auth_dir: []const u8) void {
+        const path = sessionsPath(allocator, auth_dir) catch return;
+        defer allocator.free(path);
+        const file = infra_fs.cwd().openFile(path, .{}) catch return;
+        defer file.close();
+        const data = file.readToEndAlloc(allocator, 256 * 1024) catch return;
+        const Entry = struct { token: []const u8, email: []const u8 = "", expiry: i64 };
+        const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return;
+        const now = clock.timestamp();
+        for (parsed.value) |entry| {
+            if (entry.email.len == 0) continue; // Drop legacy sessions without identity
+            if (now < entry.expiry) {
+                const token_dup = store_alloc.dupe(u8, entry.token) catch continue;
+                const email_dup = store_alloc.dupe(u8, entry.email) catch continue;
+                self.map.?.put(store_alloc, token_dup, .{ .email = email_dup, .expiry = entry.expiry }) catch continue;
+            }
+        }
+    }
+
+    fn persist(self: *SessionStore, allocator: std.mem.Allocator) void {
+        const auth_dir = self.auth_dir orelse return;
+        const path = sessionsPath(allocator, auth_dir) catch return;
+        defer allocator.free(path);
+        infra_fs.cwd().makePath(auth_dir) catch return;
+        var buf: std.ArrayList(u8) = .empty;
+        const w = buf.writer(allocator);
+        w.writeAll("[") catch return;
+        var map = &self.map.?;
+        var it = map.iterator();
+        var first = true;
+        while (it.next()) |entry| {
+            if (!first) w.writeAll(",") catch return;
+            w.print("{{\"token\":\"{s}\",\"email\":\"{s}\",\"expiry\":{d}}}", .{ entry.key_ptr.*, entry.value_ptr.email, entry.value_ptr.expiry }) catch return;
+            first = false;
+        }
+        w.writeAll("]") catch return;
+        oauth_store.writeFileAtomicWithBackup(allocator, path, buf.items);
+    }
+
+    /// Mint a new 7-day session for `email` (32-byte hex random token), persist
+    /// it to `<auth_dir>/sessions.json`, and return the token the caller should
+    /// send back as the `session` cookie.
+    pub fn create(
+        self: *SessionStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
+        email: []const u8,
+    ) std.mem.Allocator.Error![]const u8 {
+        var rand_bytes: [32]u8 = undefined;
+        infra_random.bytes(&rand_bytes);
+        const hex = std.fmt.bytesToHex(rand_bytes, .lower);
+        const token = try store_alloc.dupe(u8, &hex);
+        errdefer store_alloc.free(token);
+        const email_dup = try store_alloc.dupe(u8, email);
+        errdefer store_alloc.free(email_dup);
+
+        const now = clock.timestamp();
+        const expiry = now + session_ttl_secs;
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const map = self.getMap(allocator, auth_dir);
+        sweepExpiredSessions(allocator, map);
+        try map.put(store_alloc, token, .{ .email = email_dup, .expiry = expiry });
+        self.persist(allocator);
+        return token;
+    }
+
+    /// Look up `token` in the persisted session map and return the associated
+    /// email if it has not yet expired. Expired entries are evicted as a side
+    /// effect; returns `null` for unknown or expired tokens.
+    pub fn validate(
+        self: *SessionStore,
+        allocator: std.mem.Allocator,
+        auth_dir: []const u8,
+        token: []const u8,
+    ) ?[]const u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const map = self.getMap(allocator, auth_dir);
+        const entry = map.get(token) orelse return null;
+        const now = clock.timestamp();
+        if (now > entry.expiry) {
+            _ = map.fetchRemove(token);
+            self.persist(allocator);
+            return null;
+        }
+        return entry.email;
+    }
+
+    /// Drop `token` from the in-memory map and persist the change to disk so a
+    /// stolen cookie cannot reauthenticate. Used by `logoutApi` and during
+    /// credential-revocation flows.
+    pub fn delete(self: *SessionStore, allocator: std.mem.Allocator, auth_dir: []const u8, token: []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const map = self.getMap(allocator, auth_dir);
+        _ = map.fetchRemove(token);
+        self.persist(allocator);
+    }
+};
 
 fn sessionsPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/sessions.json", .{auth_dir});
 }
 
-fn loadSessions(allocator: std.mem.Allocator, auth_dir: []const u8) void {
-    const path = sessionsPath(allocator, auth_dir) catch return;
-    defer allocator.free(path);
-    const file = infra_fs.cwd().openFile(path, .{}) catch return;
-    defer file.close();
-    const data = file.readToEndAlloc(allocator, 256 * 1024) catch return;
-    const Entry = struct { token: []const u8, email: []const u8 = "", expiry: i64 };
-    const parsed = std.json.parseFromSlice([]const Entry, allocator, data, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch return;
-    const now = clock.timestamp();
-    for (parsed.value) |entry| {
-        if (entry.email.len == 0) continue; // Drop legacy sessions without identity
-        if (now < entry.expiry) {
-            const token_dup = store_alloc.dupe(u8, entry.token) catch continue;
-            const email_dup = store_alloc.dupe(u8, entry.email) catch continue;
-            sessions.?.put(store_alloc, token_dup, .{ .email = email_dup, .expiry = entry.expiry }) catch continue;
-        }
-    }
-}
-
-fn persistSessions(allocator: std.mem.Allocator) void {
-    const auth_dir = sessions_auth_dir orelse return;
-    const path = sessionsPath(allocator, auth_dir) catch return;
-    defer allocator.free(path);
-    infra_fs.cwd().makePath(auth_dir) catch return;
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
-    w.writeAll("[") catch return;
-    var map = &sessions.?;
-    var it = map.iterator();
-    var first = true;
-    while (it.next()) |entry| {
-        if (!first) w.writeAll(",") catch return;
-        w.print("{{\"token\":\"{s}\",\"email\":\"{s}\",\"expiry\":{d}}}", .{ entry.key_ptr.*, entry.value_ptr.email, entry.value_ptr.expiry }) catch return;
-        first = false;
-    }
-    w.writeAll("]") catch return;
-    oauth_store.writeFileAtomicWithBackup(allocator, path, buf.items);
-}
-
-/// Mint a new 7-day session for `email` (32-byte hex random token), persist
-/// it to `projects/.../auth/sessions.json`, and return the cookie value the
-/// caller should send back as `eda_session`.
 /// Evict every expired entry from the session map. Called on each new login so
 /// abandoned sessions don't accumulate in memory for the life of the process
 /// (they were previously evicted only when that exact token was looked up
-/// again). Caller must hold `sessions_mutex`.
+/// again). Caller must hold the store mutex.
 fn sweepExpiredSessions(allocator: std.mem.Allocator, map: *std.StringHashMapUnmanaged(SessionData)) void {
     const now = clock.timestamp();
     var expired: std.ArrayList([]const u8) = .empty;
@@ -168,53 +246,6 @@ fn sweepExpiredSessions(allocator: std.mem.Allocator, map: *std.StringHashMapUnm
         if (now > e.value_ptr.expiry) expired.append(allocator, e.key_ptr.*) catch break;
     }
     for (expired.items) |k| _ = map.fetchRemove(k);
-}
-
-pub fn createSession(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) std.mem.Allocator.Error![]const u8 {
-    var rand_bytes: [32]u8 = undefined;
-    infra_random.bytes(&rand_bytes);
-    const hex = std.fmt.bytesToHex(rand_bytes, .lower);
-    const token = try store_alloc.dupe(u8, &hex);
-    const email_dup = try store_alloc.dupe(u8, email);
-
-    const now = clock.timestamp();
-    const expiry = now + session_ttl_secs;
-
-    sessions_mutex.lock();
-    defer sessions_mutex.unlock();
-    const map = getSessionMap(allocator, auth_dir);
-    sweepExpiredSessions(allocator, map);
-    try map.put(store_alloc, token, .{ .email = email_dup, .expiry = expiry });
-    persistSessions(allocator);
-    return token;
-}
-
-/// Look up `token` in the persisted session map and return the associated
-/// email if it has not yet expired. Expired entries are evicted as a side
-/// effect; returns `null` for unknown or expired tokens.
-pub fn validateSession(allocator: std.mem.Allocator, auth_dir: []const u8, token: []const u8) ?[]const u8 {
-    sessions_mutex.lock();
-    defer sessions_mutex.unlock();
-    const map = getSessionMap(allocator, auth_dir);
-    const entry = map.get(token) orelse return null;
-    const now = clock.timestamp();
-    if (now > entry.expiry) {
-        _ = map.fetchRemove(token);
-        persistSessions(allocator);
-        return null;
-    }
-    return entry.email;
-}
-
-/// Drop `token` from the in-memory map and persist the change to disk so a
-/// stolen cookie cannot reauthenticate. Used by `logoutApi` and during
-/// credential-revocation flows.
-pub fn deleteSession(allocator: std.mem.Allocator, auth_dir: []const u8, token: []const u8) void {
-    sessions_mutex.lock();
-    defer sessions_mutex.unlock();
-    const map = getSessionMap(allocator, auth_dir);
-    _ = map.fetchRemove(token);
-    persistSessions(allocator);
 }
 
 // ── Challenge store ──────────────────────────────────────────────────
@@ -227,16 +258,55 @@ pub fn deleteSession(allocator: std.mem.Allocator, auth_dir: []const u8, token: 
 const challenge_ttl_secs: i64 = 300;
 const challenge_cookie = "authcid";
 const ChallengeEntry = struct { challenge: [32]u8, expiry: i64 };
-var challenge_mutex: std.Thread.Mutex = .{};
-var challenges: ?std.StringHashMapUnmanaged(ChallengeEntry) = null;
 
-fn challengeMap() *std.StringHashMapUnmanaged(ChallengeEntry) {
-    if (challenges == null) challenges = std.StringHashMapUnmanaged(ChallengeEntry).empty;
-    return &challenges.?;
-}
+/// Per-server table of in-flight WebAuthn challenges, keyed by per-attempt id.
+/// Instance state carried on `ServerState` (it used to be a file-scope global);
+/// ids and challenges live in `store_alloc` (process lifetime) and are
+/// single-use.
+pub const ChallengeStore = struct {
+    mutex: std.Thread.Mutex = .{},
+    map: ?std.StringHashMapUnmanaged(ChallengeEntry) = null,
 
-/// Evict expired challenge entries (bounded batch per call). Caller holds
-/// `challenge_mutex`.
+    fn getMap(self: *ChallengeStore) *std.StringHashMapUnmanaged(ChallengeEntry) {
+        if (self.map == null) self.map = std.StringHashMapUnmanaged(ChallengeEntry).empty;
+        return &self.map.?;
+    }
+
+    /// Mint a per-attempt id, store `challenge` under it with a TTL, and return
+    /// the id (the caller emits it as the `authcid` cookie). Returns "" on
+    /// allocation failure — the complete step then finds no challenge and rejects.
+    pub fn mint(self: *ChallengeStore, challenge: [32]u8) []const u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const map = self.getMap();
+        const now = clock.timestamp();
+        sweepExpiredChallenges(map, now);
+        var rand: [16]u8 = undefined;
+        infra_random.bytes(&rand);
+        const hex = std.fmt.bytesToHex(rand, .lower);
+        const cid = store_alloc.dupe(u8, &hex) catch return "";
+        map.put(store_alloc, cid, .{ .challenge = challenge, .expiry = now + challenge_ttl_secs }) catch {
+            store_alloc.free(cid);
+            return "";
+        };
+        return cid;
+    }
+
+    /// Consume the challenge for attempt id `cid` (single-use). Null when the id
+    /// is unknown or expired.
+    pub fn consume(self: *ChallengeStore, cid: []const u8) ?[32]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const map = self.getMap();
+        const kv = map.fetchRemove(cid) orelse return null;
+        defer store_alloc.free(kv.key);
+        if (clock.timestamp() > kv.value.expiry) return null;
+        return kv.value.challenge;
+    }
+};
+
+/// Evict expired challenge entries (bounded batch per call). Caller holds the
+/// store mutex.
 fn sweepExpiredChallenges(map: *std.StringHashMapUnmanaged(ChallengeEntry), now: i64) void {
     var expired: [32][]const u8 = undefined;
     var n: usize = 0;
@@ -248,38 +318,6 @@ fn sweepExpiredChallenges(map: *std.StringHashMapUnmanaged(ChallengeEntry), now:
         }
     }
     for (expired[0..n]) |k| if (map.fetchRemove(k)) |kv| store_alloc.free(kv.key);
-}
-
-/// Mint a per-attempt id, store `challenge` under it with a TTL, and return the
-/// id (the caller emits it as the `authcid` cookie). Returns "" on allocation
-/// failure — the complete step then simply finds no challenge and rejects.
-fn storePendingChallenge(challenge: [32]u8) []const u8 {
-    challenge_mutex.lock();
-    defer challenge_mutex.unlock();
-    const map = challengeMap();
-    const now = clock.timestamp();
-    sweepExpiredChallenges(map, now);
-    var rand: [16]u8 = undefined;
-    infra_random.bytes(&rand);
-    const hex = std.fmt.bytesToHex(rand, .lower);
-    const cid = store_alloc.dupe(u8, &hex) catch return "";
-    map.put(store_alloc, cid, .{ .challenge = challenge, .expiry = now + challenge_ttl_secs }) catch {
-        store_alloc.free(cid);
-        return "";
-    };
-    return cid;
-}
-
-/// Consume the challenge for attempt id `cid` (single-use). Null when the id is
-/// unknown or expired.
-fn takePendingChallenge(cid: []const u8) ?[32]u8 {
-    challenge_mutex.lock();
-    defer challenge_mutex.unlock();
-    const map = challengeMap();
-    const kv = map.fetchRemove(cid) orelse return null;
-    defer store_alloc.free(kv.key);
-    if (clock.timestamp() > kv.value.expiry) return null;
-    return kv.value.challenge;
 }
 
 /// Parse a named cookie value out of the request's `Cookie` header.
@@ -697,7 +735,7 @@ fn viaProxy(req: *httpz.Request) bool {
 /// loopback, and the request did not come through a reverse proxy. Deriving
 /// "local" from the `Host` header — the previous behaviour — let any remote
 /// client send `Host: localhost` and obtain unauthenticated admin.
-fn isLocalhost(ctx: *Handler, req: *httpz.Request) bool {
+fn isLocalhost(ctx: *Server, req: *httpz.Request) bool {
     if (!ctx.dev_mode) return false;
     if (viaProxy(req)) return false;
     return peerIsLoopback(req);
@@ -729,7 +767,7 @@ fn getBearerToken(req: *httpz.Request) ?[]const u8 {
 /// True when the `Authorization: Bearer …` header carries a non-expired
 /// OAuth access token issued by `oauth_store`. Used to gate the MCP HTTP
 /// transport for remote Claude Code clients.
-pub fn validateBearerToken(ctx: *Handler, req: *httpz.Request) bool {
+pub fn validateBearerToken(ctx: *Server, req: *httpz.Request) bool {
     const raw = getBearerToken(req) orelse return false;
     const tok = oauth_store.validateToken(ctx.allocator, ctx.auth_dir, raw) catch return false;
     return tok != null;
@@ -762,14 +800,14 @@ fn mcpUnauthorized(req: *httpz.Request, res: *httpz.Response) HandlerError!bool 
 /// True when the `Authorization: Bearer …` header matches a plugin-issued
 /// token from `plugin_tokens`. Plugin tokens live alongside OAuth tokens
 /// but are scoped to read-only schematic/PCB consumers.
-pub fn validatePluginBearerToken(ctx: *Handler, req: *httpz.Request) bool {
+pub fn validatePluginBearerToken(ctx: *Server, req: *httpz.Request) bool {
     const raw = getBearerToken(req) orelse return false;
     return plugin_tokens.validate(ctx.allocator, ctx.auth_dir, raw);
 }
 
 /// If the request carries a valid OAuth bearer token, return the token
 /// owner's email. Used by MCP role resolution.
-pub fn getBearerEmail(ctx: *Handler, req: *httpz.Request) ?[]const u8 {
+pub fn getBearerEmail(ctx: *Server, req: *httpz.Request) ?[]const u8 {
     const raw = getBearerToken(req) orelse return null;
     const tok = oauth_store.validateToken(ctx.allocator, ctx.auth_dir, raw) catch return null;
     return if (tok) |t| t.email else null;
@@ -777,13 +815,18 @@ pub fn getBearerEmail(ctx: *Handler, req: *httpz.Request) ?[]const u8 {
 
 /// True when the request qualifies for the local-development auth bypass
 /// (`ctx.dev_mode` + loopback peer + not proxied). See `isLocalhost`.
-pub fn isLocalhostRequest(ctx: *Handler, req: *httpz.Request) bool {
+pub fn isLocalhostRequest(ctx: *Server, req: *httpz.Request) bool {
     return isLocalhost(ctx, req);
 }
 
 /// Remove all stored passkey credentials for an email, and drop any live
 /// sessions tied to that email. Called by the admin delete-user flow.
-pub fn purgeIdentity(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) void {
+pub fn purgeIdentity(
+    sessions_store: *SessionStore,
+    allocator: std.mem.Allocator,
+    auth_dir: []const u8,
+    email: []const u8,
+) void {
     const creds = loadCredentials(allocator, auth_dir) catch return;
     var kept: std.ArrayList(StoredCredential) = .empty;
     defer kept.deinit(allocator);
@@ -794,9 +837,9 @@ pub fn purgeIdentity(allocator: std.mem.Allocator, auth_dir: []const u8, email: 
         log.warn("saveCredentials failed: {s}", .{@errorName(e)});
     };
 
-    sessions_mutex.lock();
-    defer sessions_mutex.unlock();
-    if (sessions) |*map| {
+    sessions_store.mutex.lock();
+    defer sessions_store.mutex.unlock();
+    if (sessions_store.map) |*map| {
         var it = map.iterator();
         var to_remove: std.ArrayList([]const u8) = .empty;
         defer to_remove.deinit(allocator);
@@ -806,7 +849,7 @@ pub fn purgeIdentity(allocator: std.mem.Allocator, auth_dir: []const u8, email: 
             }
         }
         for (to_remove.items) |tok| _ = map.fetchRemove(tok);
-        persistSessions(allocator);
+        sessions_store.persist(allocator);
     }
 }
 
@@ -814,9 +857,9 @@ pub fn purgeIdentity(allocator: std.mem.Allocator, auth_dir: []const u8, email: 
 /// signed-in session's email, or falls back to a dev identity on localhost
 /// (matching the existing localhost auth bypass in authMiddleware). Off-
 /// localhost requests without a session return null.
-pub fn currentEmail(ctx: *Handler, req: *httpz.Request) ?[]const u8 {
+pub fn currentEmail(ctx: *Server, req: *httpz.Request) ?[]const u8 {
     if (getSessionToken(req)) |tok| {
-        if (validateSession(ctx.allocator, ctx.auth_dir, tok)) |em| return em;
+        if (ctx.state.sessions.validate(ctx.allocator, ctx.auth_dir, tok)) |em| return em;
     }
     if (isLocalhost(ctx, req)) return "dev@localhost";
     return null;
@@ -852,7 +895,7 @@ fn requiresWrite(req: *httpz.Request) bool {
 
 /// Reject a mutating request from a non-writer session with 403. Returns true
 /// when the caller should stop (response written), false to continue dispatch.
-fn denyIfInsufficientRole(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, email: []const u8) bool {
+fn denyIfInsufficientRole(ctx: *Server, req: *httpz.Request, res: *httpz.Response, email: []const u8) bool {
     if (!requiresWrite(req)) return false;
     const role = users.getRole(ctx.allocator, ctx.auth_dir, email);
     if (role.canWrite()) return false;
@@ -866,7 +909,7 @@ fn denyIfInsufficientRole(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// requests carrying a valid session cookie or bearer token; redirect
 /// others to `/auth/login`. Returns `true` to continue dispatch, `false`
 /// when the response has already been written by the middleware.
-pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!bool {
+pub fn authMiddleware(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!bool {
     // Local-dev bypass (opt-in via NETLISP_DEV; loopback + not proxied only).
     if (isLocalhost(ctx, req)) return true;
 
@@ -913,7 +956,7 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
     // Check for valid session
     if (getSessionToken(req)) |token| {
-        if (validateSession(ctx.allocator, ctx.auth_dir, token)) |email| {
+        if (ctx.state.sessions.validate(ctx.allocator, ctx.auth_dir, token)) |email| {
             // A valid session proves identity; mutating routes additionally
             // require the writer role. Read + pure-computation routes are open
             // to any authenticated role (incl. reader). Admin-only routes
@@ -951,7 +994,7 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// `PublicKeyCredentialCreationOptions` JSON for the browser. Authorises
 /// the request via active session (add-device), invite token, or first-
 /// user bootstrap when no credentials exist yet.
-pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn registerChallengePage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const existing = try loadCredentials(ctx.allocator, ctx.auth_dir);
     const q = try req.query();
 
@@ -961,7 +1004,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
     var authorized = false;
 
     if (getSessionToken(req)) |tok| {
-        if (validateSession(ctx.allocator, ctx.auth_dir, tok)) |session_email| {
+        if (ctx.state.sessions.validate(ctx.allocator, ctx.auth_dir, tok)) |session_email| {
             email = session_email;
             authorized = true;
         }
@@ -1004,7 +1047,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 
     var challenge: [32]u8 = undefined;
     infra_random.bytes(&challenge);
-    try setChallengeCookie(res, req.arena, storePendingChallenge(challenge));
+    try setChallengeCookie(res, req.arena, ctx.state.challenges.mint(challenge));
 
     const challenge_b64 = try base64urlEncode(req.arena, &challenge);
 
@@ -1054,7 +1097,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 /// POST /auth/register/complete — verify the WebAuthn attestation against
 /// the pending challenge, persist the new passkey under its email, and set
 /// a session cookie so the browser is logged in once registration succeeds.
-pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn registerCompletePage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = http_bad_request;
         res.body = err_missing_body_json;
@@ -1150,7 +1193,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
         return;
     }).string;
 
-    const stored_challenge = takePendingChallenge(getCookie(req, challenge_cookie) orelse "") orelse {
+    const stored_challenge = ctx.state.challenges.consume(getCookie(req, challenge_cookie) orelse "") orelse {
         res.status = http_bad_request;
         res.body = "{\"error\":\"no pending challenge\"}";
         res.content_type = .JSON;
@@ -1307,7 +1350,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     const session_token_opt = getSessionToken(req);
     if (session_token_opt) |stok| {
-        if (validateSession(ctx.allocator, ctx.auth_dir, stok)) |session_email| {
+        if (ctx.state.sessions.validate(ctx.allocator, ctx.auth_dir, stok)) |session_email| {
             resolved_email = session_email;
         }
     }
@@ -1385,7 +1428,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     // Create a session for the newly registered user (unless they already have one)
     if (session_token_opt == null) {
-        const token = try createSession(ctx.allocator, ctx.auth_dir, resolved_email);
+        const token = try ctx.state.sessions.create(ctx.allocator, ctx.auth_dir, resolved_email);
         const cookie = try std.fmt.allocPrint(req.arena, session_cookie_fmt, .{token});
         res.header(header_set_cookie, cookie);
     }
@@ -1399,10 +1442,10 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 /// POST /auth/login/challenge — issue a fresh WebAuthn assertion challenge
 /// and the `allowCredentials` list (optionally filtered by `?email=`) so
 /// the browser can prompt the user to tap their passkey.
-pub fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn loginChallengePage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     var challenge: [32]u8 = undefined;
     infra_random.bytes(&challenge);
-    try setChallengeCookie(res, req.arena, storePendingChallenge(challenge));
+    try setChallengeCookie(res, req.arena, ctx.state.challenges.mint(challenge));
 
     const challenge_b64 = try base64urlEncode(req.arena, &challenge);
 
@@ -1439,7 +1482,7 @@ pub fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// POST /auth/login/complete — verify the WebAuthn assertion against the
 /// pending challenge and the stored credential's public key, then mint a
 /// session cookie tied to the credential's email on success.
-pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn loginCompletePage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = http_bad_request;
         res.body = err_missing_body_json;
@@ -1567,7 +1610,7 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
         return;
     }).string;
 
-    const stored_challenge = takePendingChallenge(getCookie(req, challenge_cookie) orelse "") orelse {
+    const stored_challenge = ctx.state.challenges.consume(getCookie(req, challenge_cookie) orelse "") orelse {
         res.status = http_bad_request;
         res.body = "{\"error\":\"no pending challenge\"}";
         res.content_type = .JSON;
@@ -1668,7 +1711,7 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     // Success - create session tied to the credential's email
     const session_email = if (cred.email.len > 0) cred.email else "";
-    const token = try createSession(ctx.allocator, ctx.auth_dir, session_email);
+    const token = try ctx.state.sessions.create(ctx.allocator, ctx.auth_dir, session_email);
     const cookie = try std.fmt.allocPrint(req.arena, session_cookie_fmt, .{token});
     res.header(header_set_cookie, cookie);
 
@@ -1721,7 +1764,7 @@ pub const b64url_js =
 /// that drives the WebAuthn `navigator.credentials.get` flow against the
 /// challenge/complete endpoints. Markup lives in `templates/auth.zt`; the
 /// per-page JS is served from `/static/auth_login.js`.
-pub fn loginPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn loginPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     try auth_template.Login.render(.{}, &aw.writer);
     res.content_type = .HTML;
@@ -1732,7 +1775,7 @@ pub fn loginPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
 /// when at least one credential already exists; otherwise renders the
 /// passkey-registration UI for the initial admin account. Markup lives in
 /// `templates/auth.zt`; per-page JS is served from `/static/auth_setup.js`.
-pub fn setupPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn setupPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const existing = try loadCredentials(ctx.allocator, ctx.auth_dir);
     if (existing.len > 0) {
         res.status = 303;
@@ -1747,14 +1790,14 @@ pub fn setupPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
 
 // ── Session / account management ─────────────────────────────────────
 
-fn requireSession(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) ?[]const u8 {
+fn requireSession(ctx: *Server, req: *httpz.Request, res: *httpz.Response) ?[]const u8 {
     const tok = getSessionToken(req) orelse {
         res.status = 401;
         res.content_type = .JSON;
         res.body = "{\"error\":\"not signed in\"}";
         return null;
     };
-    const email = validateSession(ctx.allocator, ctx.auth_dir, tok) orelse {
+    const email = ctx.state.sessions.validate(ctx.allocator, ctx.auth_dir, tok) orelse {
         res.status = 401;
         res.content_type = .JSON;
         res.body = "{\"error\":\"invalid session\"}";
@@ -1766,9 +1809,9 @@ fn requireSession(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) ?[]c
 /// POST /auth/logout — invalidate the current session both server-side
 /// (drop from `sessions.json`) and client-side (overwrite the cookie with
 /// `Max-Age=0`).
-pub fn logoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn logoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     if (getSessionToken(req)) |tok| {
-        deleteSession(ctx.allocator, ctx.auth_dir, tok);
+        ctx.state.sessions.delete(ctx.allocator, ctx.auth_dir, tok);
     }
     res.header(header_set_cookie, "session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
     res.content_type = .JSON;
@@ -1778,7 +1821,7 @@ pub fn logoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
 /// GET /api/auth/credentials — return the signed-in user's registered
 /// passkeys (id, email, created_at) as JSON for the account page's
 /// device-management list.
-pub fn listCredentialsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn listCredentialsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = requireSession(ctx, req, res) orelse return;
 
     const creds = try loadCredentials(ctx.allocator, ctx.auth_dir);
@@ -1802,7 +1845,7 @@ pub fn listCredentialsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// POST /api/auth/credentials/delete — drop a single passkey by id from
 /// `credentials.json`. Refuses to delete the user's last remaining passkey
 /// to avoid locking themselves out.
-pub fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn deleteCredentialApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = requireSession(ctx, req, res) orelse return;
 
     const body = req.body() orelse {
@@ -1881,7 +1924,7 @@ pub fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
 /// POST /api/auth/invites — admin-only: mint a 7-day single-use invite token
 /// (defaulting to writer role) the recipient can redeem at
 /// `/auth/invite/<token>` to register their first passkey.
-pub fn createInviteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn createInviteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = currentEmail(ctx, req) orelse {
         res.status = 401;
         res.content_type = .JSON;
@@ -1925,7 +1968,7 @@ pub fn createInviteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// GET /auth/invite/:token — render the passkey-registration UI for an
 /// invite recipient. Shows an "expired" page when the token is missing,
 /// consumed, or past its TTL; otherwise drives the WebAuthn create flow.
-pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn invitePage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const path = req.url.path;
     const prefix = "/auth/invite/";
     if (!std.mem.startsWith(u8, path, prefix)) {
@@ -1949,4 +1992,36 @@ pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     }
     res.content_type = .HTML;
     res.body = aw.written();
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+// The session store used to be a file-scope global, so a session created in
+// any server was visible to every other server (and every test) in the
+// process — no per-test or multi-instance servers were possible. It is now
+// instance state on `ServerState`; this proves two servers stay independent.
+// spec: serve - A session minted on one ServerState instance is absent from an independent instance
+test "session stores are isolated per ServerState instance" {
+    const a = std.testing.allocator;
+
+    // Two independent servers, each with its own on-disk session file, so the
+    // isolation holds in memory AND on disk.
+    var tmp_a = std.testing.tmpDir(.{});
+    defer tmp_a.cleanup();
+    var tmp_b = std.testing.tmpDir(.{});
+    defer tmp_b.cleanup();
+    const dir_a = try tmp_a.dir.realpathAlloc(a, ".");
+    defer a.free(dir_a);
+    const dir_b = try tmp_b.dir.realpathAlloc(a, ".");
+    defer a.free(dir_b);
+
+    var state_a: serve_root.ServerState = .{};
+    var state_b: serve_root.ServerState = .{};
+
+    // A session minted on server A resolves on A...
+    const token = try state_a.sessions.create(a, dir_a, "alice@example.com");
+    try std.testing.expectEqualStrings("alice@example.com", state_a.sessions.validate(a, dir_a, token).?);
+
+    // ...but is invisible to server B — no shared global, so B's table is empty.
+    try std.testing.expect(state_b.sessions.validate(a, dir_b, token) == null);
 }

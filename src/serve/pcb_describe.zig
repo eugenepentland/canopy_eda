@@ -24,7 +24,7 @@ const modules_mod = @import("modules.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 
 /// Which side of the anchor (or of a loop's hub) something sits on, in board
 /// coordinates: x grows right, y grows DOWN, so `top` means smaller y. The
@@ -34,7 +34,7 @@ pub const Side = enum { left, right, top, bottom, center };
 /// GET /api/pcb-describe/:name — accepts the same query parameters as
 /// /api/pcb-png (layout=, regen=, sub=, placement=off, route=1, tuning knobs)
 /// so the facts match whichever board variant the caller is looking at.
-pub fn pcbDescribeApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void {
+pub fn pcbDescribeApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void {
     const arena = req.arena;
     const name = req.param("name") orelse {
         res.status = 404;

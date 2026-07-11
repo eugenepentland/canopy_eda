@@ -27,7 +27,7 @@ const req_checks = @import("../req_checks.zig");
 const edit_mod = @import("edit.zig");
 const diag_format = @import("diag_format.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
@@ -81,7 +81,7 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
 /// picks up the rebuild on its next `/api/version/:name` poll. On a build
 /// failure the JSON body carries a structured `diagnostic`
 /// (`{file,line,col,message,source_line}`) alongside the human-readable text.
-pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pushApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
         return;
@@ -116,7 +116,7 @@ pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handler
 /// `error` is the compiler-style human text (`file:line:col: message` plus the
 /// caret block); `diagnostic` is the same data structured for tooling.
 fn writeBuildErrorJson(
-    ctx: *Handler,
+    ctx: *Server,
     res: *httpz.Response,
     board_path: []const u8,
     err_name: []const u8,
@@ -139,7 +139,7 @@ fn writeBuildErrorJson(
 /// GET /api/version/:name — return `{"version":N}`. The schematic viewer
 /// polls this every ~500 ms and reloads the scene graph when N changes.
 /// Bumped by `pushApi` and the MCP mutation tools.
-pub fn versionApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn versionApi(_: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
         return;
@@ -155,7 +155,7 @@ pub fn versionApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) Handle
 /// GET /api/scene-graph/:name — return the cached schematic scene-graph JSON
 /// produced by the last build/push. Read under `live_mutex`; falls back to a
 /// minimal `{"error":"no layout"}` body when nothing has been pushed yet.
-pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn sceneGraphApi(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     serve_root.live_mutex.lock();
     const data = serve_root.live_layout_json;
     serve_root.live_mutex.unlock();
@@ -170,7 +170,7 @@ pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
 /// alternate function — next to the ref-des. Lets the user verify, for
 /// example, that the pin they wired to XSPIM_P1_IO5 really does expose that
 /// peripheral on the part.
-pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn pinoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name_raw = req.param("name") orelse {
         res.status = http_not_found;
         return;
@@ -363,7 +363,7 @@ const ExportTarget = struct { name: []const u8, block: *env_mod.DesignBlock };
 /// non-design result, sets res.status (and body) and returns null. `eval` is
 /// owned by the caller so the returned block outlives this call.
 fn evalDesignForExport(
-    ctx: *Handler,
+    ctx: *Server,
     req: *httpz.Request,
     res: *httpz.Response,
     eval: *Evaluator,
@@ -394,7 +394,7 @@ fn evalDesignForExport(
 /// GET /api/export-kicad/:name — build the design and return a zip bundling the
 /// KiCad netlist, generated footprints, and STEP models for hand-off to the PCB
 /// editor.
-pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn exportKicadApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
     const target = (try evalDesignForExport(ctx, req, res, &eval)) orelse return;
@@ -426,7 +426,7 @@ pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// GET /api/export-netlist/:name — build the design and return just the
 /// KiCad `.net` file (no footprints, no zip). Used by external tools that
 /// only care about connectivity for routing or simulation.
-pub fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn exportNetlistApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
     const target = (try evalDesignForExport(ctx, req, res, &eval)) orelse return;
@@ -458,7 +458,7 @@ pub fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 /// GET /api/export-bom-csv/:name — build the design and stream the parts
 /// list as `<name>-bom.csv`. Same column layout as the BOM table on the
 /// review page; suitable for hand-off to procurement.
-pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn exportBomCsvApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
     const target = (try evalDesignForExport(ctx, req, res, &eval)) orelse return;
@@ -496,7 +496,7 @@ pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// `<name>-bom.csv` (the parts list), and the verbatim `.sexp` source for the
 /// design plus every sub-module and component it imports — laid out under
 /// `src/` and `lib/` so the bundle mirrors a buildable project tree.
-pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn exportReviewPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
         return;
@@ -645,7 +645,7 @@ fn zipNameForSource(project_dir: []const u8, path: []const u8) []const u8 {
 /// GET /api/erc/:name — run electrical-rule checks (duplicate ref-des,
 /// floating nets, unconnected pins, voltage mismatches, missing decoupling)
 /// and return the violations as JSON for the schematic viewer's panel.
-pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn ercApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
         return;
@@ -695,7 +695,7 @@ pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerE
 /// Return all designs in the project as a JSON array. Same shape as the
 /// MCP `list_designs` tool: `[{name, title, sections, instance_count,
 /// net_count, mtime, build_ok}, ...]`.
-pub fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn designsApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
 
@@ -729,7 +729,7 @@ pub fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handle
 /// List free (unassigned) pins on an instance. Thin wrapper over the MCP
 /// tool implementation so the browser sidebar can populate the "move pin"
 /// dropdown without going through the MCP transport.
-pub fn freePinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn freePinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
 
@@ -770,7 +770,7 @@ pub fn freePinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 /// shape of the globals `COMPONENTS` and `NETS` that `canvas_page.zig`
 /// inlines at page load. The UI uses this after mutations to refresh the
 /// sidebar without reloading the page.
-pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn designStateApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
 
@@ -821,7 +821,7 @@ pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// Splices a new `(note "text" [(ref ...)])` into the named section of the
 /// design's .sexp. Returns the new live_version so the browser's 2 s poll
 /// picks up the redraw.
-pub fn addSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn addSectionNoteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
         return;
@@ -854,7 +854,7 @@ pub fn addSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
 /// POST /api/section-note/:name/remove — body `{section, index}`. Deletes the
 /// nth (0-based) `(note ...)` form nested directly in the named section.
-pub fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn removeSectionNoteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
         return;
@@ -884,7 +884,7 @@ pub fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 /// Splices a `(datasheet "file.pdf")` entry into
 /// `lib/components/<component>.sexp`. Lets the sidebar link uploaded PDFs
 /// to parts without manual .sexp editing.
-pub fn addComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn addComponentDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const component_raw = req.param("component") orelse {
         res.status = http_not_found;
         return;
@@ -910,7 +910,7 @@ pub fn addComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.
 
 /// POST /api/component-datasheet/:component/remove — body `{pdf: "file.pdf"}`.
 /// Counterpart to /add; unlinks a PDF from the library part.
-pub fn removeComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn removeComponentDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const component_raw = req.param("component") orelse {
         res.status = http_not_found;
         return;

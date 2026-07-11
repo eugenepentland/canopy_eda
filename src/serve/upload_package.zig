@@ -7,7 +7,7 @@ const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 const upload = @import("upload.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -28,7 +28,7 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
 /// + footprint (+ optional STEP) bundle, convert each piece, and persist
 /// the resulting `lib/components`, `lib/pinouts`, `lib/footprints`, and
 /// `lib/models` files in one transaction.
-pub fn uploadPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn uploadPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = http_bad_request;
         res.body = "No data";

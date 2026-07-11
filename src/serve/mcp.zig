@@ -34,19 +34,19 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     error{ NoSpaceLeft, InvalidCompressionServerMaxBits };
 
 /// Per-connection MCP context: ties a streaming Client back to the parent
-/// HTTP `Handler` and carries the authenticated user's email so role
+/// HTTP `Server` and carries the authenticated user's email so role
 /// resolution can decide which mutation tools the session may invoke.
 pub const Context = struct {
-    handler: *server_mod.Handler,
+    handler: *server_mod.Server,
     email: []const u8,
 };
 
-fn resolveRole(ctx: *server_mod.Handler, req: *httpz.Request) users.Role {
+fn resolveRole(ctx: *server_mod.Server, req: *httpz.Request) users.Role {
     // Bearer-token path: look up the token's email.
     if (auth.getBearerEmail(ctx, req)) |em| return users.getRole(ctx.allocator, ctx.auth_dir, em);
     // Session path: look up the session's email.
     if (auth.getSessionToken(req)) |tok| {
-        if (auth.validateSession(ctx.allocator, ctx.auth_dir, tok)) |em| return users.getRole(ctx.allocator, ctx.auth_dir, em);
+        if (ctx.state.sessions.validate(ctx.allocator, ctx.auth_dir, tok)) |em| return users.getRole(ctx.allocator, ctx.auth_dir, em);
     }
     // Localhost dev bypass (opt-in NETLISP_DEV + loopback + not proxied).
     if (auth.isLocalhostRequest(ctx, req)) return .admin;
@@ -330,13 +330,13 @@ pub const Client = struct {
 /// GET /mcp — perform the WebSocket upgrade for the local MCP transport,
 /// resolving the requesting user's email from their session cookie so the
 /// `Client` instance carries it for the lifetime of the connection.
-pub fn upgrade(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn upgrade(ctx: *server_mod.Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const email = blk: {
         // Bearer token first (remote MCP clients authenticate with one and
         // carry no session cookie), then the session cookie for local browsers.
         if (auth.getBearerEmail(ctx, req)) |em| break :blk em;
         if (auth.getSessionToken(req)) |tok| {
-            if (auth.validateSession(ctx.allocator, ctx.auth_dir, tok)) |em| break :blk em;
+            if (ctx.state.sessions.validate(ctx.allocator, ctx.auth_dir, tok)) |em| break :blk em;
         }
         break :blk "";
     };
@@ -353,7 +353,7 @@ pub fn upgrade(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Respon
 /// POST /mcp — streamable-HTTP transport used by Claude Code's remote MCP
 /// connector. Resolves the role from the bearer/session cookie, dispatches
 /// one JSON-RPC frame, and returns 202 for notifications (no body).
-pub fn postApi(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn postApi(ctx: *server_mod.Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = http_bad_request;
         res.body = "missing body";

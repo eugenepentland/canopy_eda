@@ -36,7 +36,6 @@ src/render_svg/context.zig: pub fn validateNetConsistency: has no /// doc commen
 src/review.zig: pub const ReviewDoc (struct_): has no /// doc comment
 src/serve.zig: pub fn dispatch: has no /// doc comment
 src/serve.zig: pub fn notFound: has no /// doc comment
-src/serve/auth.zig: pub fn createSession: has no /// doc comment
 src/serve/library.zig: pub const Kind (enum_): has no /// doc comment
 src/serve/mcp.zig: pub fn clientMessage: has no /// doc comment
 src/serve/mcp.zig: pub fn init: has no /// doc comment

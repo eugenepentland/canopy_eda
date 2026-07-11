@@ -801,6 +801,8 @@ Public functions: writeSummaryTable, writePowerBudget, writePowerSequence, write
 
 Public functions: notFound, serve
 
+- A session minted on one ServerState instance is absent from an independent instance
+
 ## serve/sync
 
 Public functions: runSyncPlan, syncKicadPcbApi

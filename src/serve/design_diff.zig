@@ -17,7 +17,7 @@ const history = @import("history.zig");
 const env_mod = @import("../eval/env.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 
 /// Error set for the HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error || error{InvalidName};
@@ -295,7 +295,7 @@ fn writeFieldChange(w: anytype, c: FieldChange) std.mem.Allocator.Error!void {
 
 /// GET /api/history/:name — list stored snapshot ids (newest first) as
 /// `{"snapshots":[{"id":…,"description":…}]}` for the History panel.
-pub fn historyApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn historyApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     const name = req.param("name") orelse {
         res.status = 404;
@@ -325,7 +325,7 @@ pub fn historyApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
 /// GET /api/diff/:name?from=<id>&to=<id|current> — evaluate both revisions
 /// request-locally (live state untouched) and return the structured diff.
 /// `to` defaults to `current` (the working file under src/).
-pub fn diffApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn diffApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     const name = req.param("name") orelse {
         res.status = 404;

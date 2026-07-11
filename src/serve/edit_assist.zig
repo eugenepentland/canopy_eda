@@ -26,7 +26,7 @@ const sexpr_parser = @import("../sexpr/parser.zig");
 const evaluator_mod = @import("../eval/evaluator.zig");
 const Evaluator = evaluator_mod.Evaluator;
 const serve_root = @import("../serve.zig");
-const Handler = serve_root.Handler;
+const Server = serve_root.Server;
 const edit = @import("edit.zig");
 const HandlerError = edit.HandlerError;
 const paths = @import("../paths.zig");
@@ -48,7 +48,7 @@ const footprint_open = "(footprint ";
 /// `"assert"` (a failed design assertion). Errors and warnings carry a
 /// 1-based span into the candidate buffer; assertions are design-level and
 /// report line 0.
-pub fn validateSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn validateSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(header_cors, "*");
 
@@ -175,7 +175,7 @@ fn writeDiag(
 /// `footprint` powers the wizard's footprint preview; `placement` flags a module
 /// with a premade `(placement …)` layout. Best-effort — a missing directory
 /// yields an empty list rather than an error.
-pub fn libIndexApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn libIndexApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(header_cors, "*");
 
@@ -190,7 +190,7 @@ pub fn libIndexApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
     res.body = out.items;
 }
 
-fn emitComponents(ctx: *Handler, w: anytype) HandlerError!void {
+fn emitComponents(ctx: *Server, w: anytype) HandlerError!void {
     const dir_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/components", .{ctx.project_dir});
     var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
@@ -237,7 +237,7 @@ fn extractFootprint(content: []const u8) []const u8 {
     return content[start..i];
 }
 
-fn emitModules(ctx: *Handler, w: anytype) HandlerError!void {
+fn emitModules(ctx: *Server, w: anytype) HandlerError!void {
     const dir_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/modules", .{ctx.project_dir});
     var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
@@ -382,7 +382,7 @@ fn findLayoutForm(source: []const u8) ?struct { start: usize, end: usize } {
 /// validates + writes + rebuilds via the normal mutation path. Powers the
 /// Layout tab's drag-to-arrange writeback — the schematic twin of PCB
 /// `spec-save`.
-pub fn saveDiagramLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+pub fn saveDiagramLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(header_cors, "*");
 

@@ -78,7 +78,7 @@
 8 src/review_md.zig
 2 src/serve.zig
 5 src/serve/api.zig
-7 src/serve/auth.zig
+6 src/serve/auth.zig
 8 src/serve/bom_html.zig
 3 src/serve/component_info.zig
 3 src/serve/component_search.zig
