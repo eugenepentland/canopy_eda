@@ -1,3 +1,7 @@
+//! Power-sequencing analysis: derives the rail power-up order from the design's
+//! rail dependencies and enable relationships, producing the `SequenceRow`s
+//! shown in the review's power-sequence panel. Read-only over the design.
+
 const std = @import("std");
 const env_mod = @import("env.zig");
 const na = @import("net_analysis.zig");

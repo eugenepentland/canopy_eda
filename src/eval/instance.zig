@@ -1,3 +1,8 @@
+//! Evaluates `(instance …)`: resolves the component/family reference, builds the
+//! `Instance` (ref-des, pins, parts, DNP, and the decouple/strap/nc sign-offs),
+//! and parses each `(pin …)` including its rating tail (typ/max current, load
+//! label). The per-part heart of design-block evaluation.
+
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("env.zig");

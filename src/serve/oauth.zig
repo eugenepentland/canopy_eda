@@ -1,3 +1,8 @@
+//! OAuth 2.0 authorization-server endpoints for MCP clients: the RFC 8414 /
+//! 9728 metadata documents, dynamic client registration, the consent page and
+//! its approval POST, and the authorization-code -> token exchange (auth code +
+//! PKCE). Client and token persistence lives in `oauth_store.zig`.
+
 const std = @import("std");
 const httpz = @import("httpz");
 

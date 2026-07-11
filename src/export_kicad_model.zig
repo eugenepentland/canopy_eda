@@ -1,3 +1,8 @@
+//! KiCad 3D-model export: loads the per-component model transform config
+//! (offset/rotation/scale) and emits the STEP-model references attached to
+//! exported footprints. Read-only over `lib/`; a transform defaults to identity
+//! when unconfigured.
+
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const log = @import("infra/log.zig");

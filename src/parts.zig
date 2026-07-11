@@ -1,3 +1,8 @@
+//! Parts database: a lazy on-disk index of `lib/parts/<family>.sexp` tables.
+//! Resolves a parameterised component request (e.g. `cap-0402` + `"100nF"` +
+//! `"x7r"`) into a concrete manufacturer part for the BOM, caching each family
+//! after its first parse. Read-only lookup keyed by family + value + attrs.
+
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const parser_mod = @import("sexpr/parser.zig");

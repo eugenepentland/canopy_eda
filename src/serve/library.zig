@@ -1,3 +1,8 @@
+//! The `/library` page and its APIs: list library parts, fetch an ECAD model
+//! from Component Search Engine, and upload or delete a library entry.
+//! Mutations write under the project's `lib/` tree (traversal-safe); the HTML
+//! rendering itself lives in the `library.zt` template.
+
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");

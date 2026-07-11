@@ -1,3 +1,7 @@
+//! Datasheet (PDF) upload, listing, and serving: validates the PDF magic
+//! bytes, sanitizes the filename (traversal-safe), and stores the file under
+//! the project datasheet dir. `StoreError` maps to the HTTP status returned.
+
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");

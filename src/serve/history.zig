@@ -1,3 +1,9 @@
+//! Design-file version history: before every mutation a timestamped copy of
+//! the `.sexp` is written under `<project>/history/<name>/<ts>/`, and this
+//! module lists, restores, and (for layouts) snapshots them. A snapshot
+//! captures the design source only — an old revision re-evaluates against
+//! today's lib/ modules.
+
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
 const clock = @import("../infra/clock.zig");

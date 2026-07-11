@@ -1,3 +1,8 @@
+//! Low-level SVG primitives shared by the schematic renderer: plain and
+//! net-labeled wire segments, component symbol shapes, GND/NC glyphs, and block
+//! icons — plus the layout constants and ref-des/net-name string helpers
+//! (`isHub`, `shortRef`, `baseNetName`, …) the other render_svg modules build on.
+
 const std = @import("std");
 const ctx_mod = @import("context.zig");
 const FlatInst = ctx_mod.FlatInst;

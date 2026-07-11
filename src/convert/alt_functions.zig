@@ -1,3 +1,8 @@
+//! Alternate-pin-function import: parses a chip's alt-function table (CSV or
+//! sexpr source) and merges it into the generated pinout, so each pad carries
+//! its GPIO/peripheral alternate names. Feeds the `convert-pinout` and
+//! symbol-conversion paths.
+
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");

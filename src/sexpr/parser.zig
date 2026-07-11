@@ -1,3 +1,8 @@
+//! S-expression parser: turns the tokenizer's stream into the AST (`ast.Node`s,
+//! each carrying a source `Span`). Recursive descent with a hard nesting-depth
+//! cap so pathological `(((…` input cannot overflow the server's stack. Node
+//! string slices borrow the source buffer, which is never freed.
+
 const std = @import("std");
 const ast = @import("ast.zig");
 const tokenizer_mod = @import("tokenizer.zig");

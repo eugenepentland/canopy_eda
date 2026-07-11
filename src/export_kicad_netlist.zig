@@ -1,3 +1,8 @@
+//! KiCad netlist writer: emits the `.net` file — components (ref, value,
+//! footprint, id-derived UUID) and their net membership — from a flattened
+//! design, pulling pad names and footprint names out of the library source. The
+//! electrical half of a KiCad export.
+
 const std = @import("std");
 const parser_mod = @import("sexpr/parser.zig");
 const env_mod = @import("eval/env.zig");

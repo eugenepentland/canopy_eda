@@ -1,3 +1,9 @@
+//! The evaluator core: the `Evaluator` state and the recursive `eval`
+//! dispatcher over special forms, builtins, and scope forms. Owns the component
+//! cache, the ref-des allocator, and the diagnostic/warning + module-call-stack
+//! machinery. Failures propagate as `EvalError` (no panics); a bad load degrades
+//! gracefully. Pipeline position: parser AST -> here -> `DesignBlock`.
+
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");

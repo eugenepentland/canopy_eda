@@ -1,3 +1,8 @@
+//! KiCad symbol conversion: parses a `.kicad_sym` and emits netlisp `(symbol …)`,
+//! pinout, or combined-package sexpr (optionally filtered to one symbol). Backs
+//! `convert-symbol`, `convert-pinout`, and `convert-package`; the pin extraction
+//! is shared via `symbol_helpers.zig`.
+
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");

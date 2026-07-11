@@ -1,3 +1,8 @@
+//! Renders the full-detail hub box with every pin labeled (the section-inset
+//! "all pins" view), first collapsing runs of identical single-passive spokes
+//! into one `N×` row and restoring the instance map afterward. Sits above
+//! `hub.zig`/`connection.zig` for the zoomed-in schematic view.
+
 const std = @import("std");
 const log = @import("../infra/log.zig");
 const env_mod = @import("../eval/env.zig");

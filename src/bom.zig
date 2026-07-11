@@ -1,3 +1,8 @@
+//! Bill-of-materials core: loads the `bom.csv` sidecar (MPN/DNP/vendor per
+//! ref-des) and flattens a `DesignBlock`'s instances — recursing sub-blocks and
+//! carrying path-qualified ref-des — into the `FlatInfo` rows the BOM rendering
+//! and identity-resolution paths consume.
+
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const paths = @import("paths.zig");

@@ -1,3 +1,8 @@
+//! Post-build design validation: warns when nets that could be one `(net …)`
+//! form are declared separately (a rail split across sections), tracking each
+//! net's declaration sources. Advisory — it emits lint warnings, not the hard
+//! errors ERC gates on. Runs after the `DesignBlock` is materialized.
+
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("env.zig");

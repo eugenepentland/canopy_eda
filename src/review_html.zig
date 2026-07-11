@@ -1,3 +1,8 @@
+//! Renders the design-review panels to HTML: the power-budget and
+//! power-sequence tables, the test-point list, and per-section coverage. These
+//! fragments are embedded inline in the schematic page — there is no standalone
+//! review-report endpoint.
+
 const std = @import("std");
 const review = @import("review.zig");
 const power_budget = @import("eval/power_budget.zig");

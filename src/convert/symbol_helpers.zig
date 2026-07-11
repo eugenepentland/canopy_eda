@@ -1,3 +1,8 @@
+//! Shared helpers for KiCad symbol conversion: collects pins from a parsed
+//! `.kicad_sym`, groups them by side, and emits the netlisp `(symbol …)` pin
+//! blocks. Factored out of `symbol.zig` so the symbol/pinout/package paths all
+//! share one pin-extraction implementation.
+
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const Node = ast.Node;

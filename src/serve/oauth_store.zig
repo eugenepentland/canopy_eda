@@ -1,3 +1,9 @@
+//! Persistent store for OAuth clients, authorization codes, and access tokens
+//! (JSON files under the auth dir, written atomically with a backup). Client
+//! secrets and tokens are stored as SHA-256 hashes only — the plaintext is
+//! returned once at creation and is never recoverable. Codes are single-use,
+//! consumed on redemption.
+
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");

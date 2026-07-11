@@ -1,3 +1,8 @@
+//! Source-file ID insertion: writes auto-minted part and sub-block `id`s back
+//! into the `.sexp` at the byte spans the evaluator recorded, so a first build
+//! persists stable identities without reformatting the rest of the file. A
+//! read-modify-write of the design source.
+
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const log = @import("infra/log.zig");

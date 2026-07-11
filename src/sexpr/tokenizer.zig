@@ -1,3 +1,9 @@
+//! S-expression tokenizer: the lexer feeding `parser.zig`. Classifies atoms,
+//! strings, and numeric literals — including SI-scaled electrical values
+//! (`220k`, `100nF`, `3.3V`) and dimension units (`mm`/`mil`). Its SI-suffix
+//! table is one of the dispatch tables the language reference is generated from.
+//! Every token carries a source `Span`.
+
 const std = @import("std");
 const ast = @import("ast.zig");
 const Span = ast.Span;

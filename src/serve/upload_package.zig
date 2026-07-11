@@ -1,3 +1,7 @@
+//! The combined-package upload handler: takes an uploaded KiCad symbol +
+//! footprint pair and writes a single named `lib/` component, delegating the
+//! extraction and name sanitization to `upload.zig`.
+
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");

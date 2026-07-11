@@ -1,3 +1,8 @@
+//! Hub-pin layout: groups an IC/connector hub's pins for the schematic box (by
+//! declared `(part …)`/group, mapping pad -> pin-function name), splits groups
+//! across columns by rendered height, and estimates each spoke's branch count
+//! so `context.zig` can size the hub box before drawing.
+
 const std = @import("std");
 const env_mod = @import("../eval/env.zig");
 const ctx_mod = @import("context.zig");

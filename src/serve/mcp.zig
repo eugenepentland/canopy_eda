@@ -1,3 +1,8 @@
+//! MCP server transport layer: the JSON-RPC frame dispatcher plus both
+//! carriers — `POST /mcp` (streamable HTTP, the Claude Code connector) and the
+//! `GET /mcp` WebSocket upgrade. Authenticates the bearer token, then routes
+//! each `tools/call` into `mcp_tools.zig`, where the tool bodies live.
+
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const httpz = @import("httpz");

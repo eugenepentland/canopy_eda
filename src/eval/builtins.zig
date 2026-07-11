@@ -1,3 +1,7 @@
+//! Builtin operators for the evaluator: arithmetic, comparison, and logic on
+//! `Value`s (the `+ - * / < = and or …` heads). Pure — no allocation, no
+//! environment — dispatched by `evaluator.zig` on a `Builtin` tag.
+
 const std = @import("std");
 const env_mod = @import("env.zig");
 const forms = @import("forms.zig");
