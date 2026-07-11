@@ -1,3 +1,8 @@
+//! The `GET /schematics/:name` handler: evaluates the named design and renders
+//! the server-side HTML schematic page (inline SVG plus the review panels
+//! embedded inline). A module name resolves standalone via its parameter
+//! defaults. Read-only; everything is built on the request arena.
+
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");

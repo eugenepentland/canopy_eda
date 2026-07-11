@@ -1,3 +1,9 @@
+//! HTTP server entry point: builds the httpz router, owns the `Handler`
+//! shared across every request, and holds the global live schematic state
+//! (scene-graph JSON behind `live_mutex`). Handlers run on httpz's per-request
+//! arena; anything cached past the response — like the live layout JSON — is
+//! duped into `page_allocator` here, never left pointing at the arena.
+
 const std = @import("std");
 const httpz = @import("httpz");
 const deflate = @import("deflate.zig");

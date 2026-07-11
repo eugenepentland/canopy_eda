@@ -1,3 +1,9 @@
+//! Library package upload/import: unpacks an uploaded ZIP (KiCad symbol +
+//! footprint + optional STEP), sanitizes the part name, and writes the
+//! resulting `lib/components` + `lib/footprints` files — never overwriting an
+//! existing library entry. `ImportError` maps to the HTTP status the uploader
+//! sees.
+
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");

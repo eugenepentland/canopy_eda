@@ -1,3 +1,7 @@
+//! 3D-model library endpoints: serve a component's STEP/model file, render the
+//! WebGL viewer page, and persist the per-model placement transform
+//! (offset/rotation/scale) that the KiCad model export later applies.
+
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");

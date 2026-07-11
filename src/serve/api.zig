@@ -1,3 +1,9 @@
+//! Core `/api/*` HTTP handlers: build/push, scene-graph JSON, ERC, KiCad
+//! export, BOM, and the fab-output downloads. Each handler drives the full
+//! eval -> render/export pipeline on the request arena (`req.arena`); a result
+//! cached into live server state is duped into `page_allocator` first.
+//! `HandlerError` is a wide superset — httpz turns any leaked error into a 5xx.
+
 const std = @import("std");
 const build_options = @import("build_options");
 const json_writer = @import("../json_writer.zig");

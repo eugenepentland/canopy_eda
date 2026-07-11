@@ -1,3 +1,7 @@
+//! Footprint-preview HTTP handlers: rasterizes a library footprint (pads,
+//! courtyard, silkscreen) to an SVG the library/preview UI embeds, plus the
+//! whole-board footprint view. Read-only; renders onto the request arena.
+
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");

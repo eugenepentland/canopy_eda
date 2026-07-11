@@ -1,3 +1,9 @@
+//! Bill-of-materials rendering off a resolved `DesignBlock`: the schematic BOM
+//! HTML table and CSV, plus the components/nets JSON the viewer reads. Also
+//! builds the library symbol-pin cache and augments instances with their
+//! declared-but-unconnected pins so the BOM and schematic show every pad.
+//! Reads lib/ for pin names; output buffers are owned by the caller's arena.
+
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
 const env_mod = @import("../eval/env.zig");

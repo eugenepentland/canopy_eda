@@ -1,3 +1,8 @@
+//! User records and role store: the `Role` enum and the JSON-file-backed user
+//! table under the auth dir (`ensureUser`, `getRole`, `setRole`, `deleteUser`,
+//! `listUsers`). A user is created on first passkey sign-in; the role gates the
+//! admin APIs in `account_page.zig`.
+
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
 const clock = @import("../infra/clock.zig");

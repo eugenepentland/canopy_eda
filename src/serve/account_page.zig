@@ -1,3 +1,9 @@
+//! The `/account` page and its APIs: mint or revoke a user's OAuth
+//! `client_id`/`client_secret` pairs (one per Claude Code MCP install) and,
+//! for admins, update or delete other users' roles. Every handler is
+//! session-gated; a secret is shown once at creation and thereafter stored as
+//! a SHA-256 hash only (see `oauth_store.zig`).
+
 const std = @import("std");
 const httpz = @import("httpz");
 
