@@ -117,18 +117,24 @@ fn assertTokensUnique(
     pending: []const Evaluator.PendingId,
     pending_child: []const Evaluator.PendingChildId,
 ) IdInsertError!void {
-    var seen = std.StringHashMap(void).init(allocator);
-    defer seen.deinit();
-    for (pending) |pid| try checkToken(&seen, source, pid.id, pid.form_offset);
-    for (pending_child) |pc| try checkToken(&seen, source, pc.id, pc.parent_form_offset);
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+    for (pending) |pid| try checkToken(allocator, &seen, source, pid.id, pid.form_offset);
+    for (pending_child) |pc| try checkToken(allocator, &seen, source, pc.id, pc.parent_form_offset);
 }
 
-fn checkToken(seen: *std.StringHashMap(void), source: []const u8, id: []const u8, offset: u32) IdInsertError!void {
+fn checkToken(
+    allocator: std.mem.Allocator,
+    seen: *std.StringHashMapUnmanaged(void),
+    source: []const u8,
+    id: []const u8,
+    offset: u32,
+) IdInsertError!void {
     if (seen.contains(id)) {
         reportIdCollision(source, offset, id, "duplicate pending id");
         return IdInsertError.IdCollision;
     }
-    try seen.put(id, {});
+    try seen.put(allocator, id, {});
     if (sourceHasToken(source, id)) {
         reportIdCollision(source, offset, id, "id already present in source");
         return IdInsertError.IdCollision;
@@ -286,6 +292,19 @@ test "applyInserts aborts on duplicate pending token" {
     const pending = [_]Evaluator.PendingId{
         .{ .form_offset = 0, .id = "a1b2c3d4" },
         .{ .form_offset = 20, .id = "a1b2c3d4" },
+    };
+    try std.testing.expectError(IdInsertError.IdCollision, applyInserts(alloc, src, &pending, &.{}));
+}
+
+// spec: id_insert - insertPendingIds aborts when a pending id already exists in the source
+test "applyInserts aborts when a pending id already exists in the source" {
+    const alloc = std.testing.allocator;
+    // The source already carries `a1b2c3d4` as a delimited atom (a prior id), so
+    // re-minting the same token onto another form must fail rather than splice a
+    // duplicate — the checkToken `sourceHasToken` collision path.
+    const src = "(instance \"R1\" comp (id a1b2c3d4))(instance \"R2\" comp)";
+    const pending = [_]Evaluator.PendingId{
+        .{ .form_offset = 34, .id = "a1b2c3d4" },
     };
     try std.testing.expectError(IdInsertError.IdCollision, applyInserts(alloc, src, &pending, &.{}));
 }

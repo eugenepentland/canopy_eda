@@ -382,6 +382,7 @@ Public functions: worldShape, pointDist, shapeGap
 - findMatchingClose finds correct closing paren
 - findMatchingClose handles strings containing parens
 - insertPendingIds aborts on a duplicate pending token
+- insertPendingIds aborts when a pending id already exists in the source
 - insertPendingIds writes a child (ids …) sidecar and stays idempotent
 
 ## convert/footprint
