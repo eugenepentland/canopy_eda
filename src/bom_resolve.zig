@@ -32,7 +32,7 @@ pub const ResolveError = std.mem.Allocator.Error ||
 /// identity, but the stored part info is now stale and must be re-resolved
 /// from the new component's definition.
 fn filterOutPartProps(allocator: std.mem.Allocator, props: []const Property) ![]const Property {
-    var out: std.ArrayListUnmanaged(Property) = .empty;
+    var out: std.ArrayList(Property) = .empty;
     for (props) |p| {
         if (std.mem.eql(u8, p.key, "manufacturer")) continue;
         if (std.mem.eql(u8, p.key, "mpn")) continue;
@@ -53,7 +53,7 @@ fn filterOutPartProps(allocator: std.mem.Allocator, props: []const Property) ![]
 /// migrates the entry.
 fn carryForwardProps(
     allocator: std.mem.Allocator,
-    props_map: *std.StringHashMap([]const Property),
+    props_map: *std.StringHashMapUnmanaged([]const Property),
     info: FlatInfo,
     old_entry: bom_mod.BomEntry,
 ) !void {
@@ -65,7 +65,7 @@ fn carryForwardProps(
     else
         try filterOutPartProps(allocator, old_entry.properties);
     if (props_to_keep.len == 0) return;
-    try props_map.put(info.ref_des, props_to_keep);
+    try props_map.put(allocator, info.ref_des, props_to_keep);
 }
 
 /// Resolve identities and BOM data for all instances in a design block.
@@ -91,14 +91,14 @@ pub fn resolveIdentities(
         allocator.free(old_entries);
     }
 
-    var flat_list: std.ArrayListUnmanaged(FlatInfo) = .empty;
+    var flat_list: std.ArrayList(FlatInfo) = .empty;
     defer flat_list.deinit(allocator);
     try bom_mod.collectFlatInstances(allocator, block, "", &flat_list, block.refStyle());
 
-    var result_map = std.StringHashMap([]const u8).init(allocator);
-    defer result_map.deinit();
-    var props_map = std.StringHashMap([]const Property).init(allocator);
-    defer props_map.deinit();
+    var result_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer result_map.deinit(allocator);
+    var props_map = std.StringHashMapUnmanaged([]const Property).empty;
+    defer props_map.deinit(allocator);
 
     // PROTOTYPE — deterministic identity (replaces the Pass 0..3.6 matcher).
     // uuid = uuidFromId(stable id). With sub-block ids now keyed off the stable
@@ -106,13 +106,13 @@ pub fn resolveIdentities(
     // is fully determined by the design: it reproduces identically every build
     // and regenerates from scratch if the .bom is lost. Props (MPN) carry
     // forward by id from the previous .bom; Pass 4 fills any missing MPN.
-    var old_by_id = std.StringHashMap(usize).init(allocator);
-    defer old_by_id.deinit();
+    var old_by_id = std.StringHashMapUnmanaged(usize).empty;
+    defer old_by_id.deinit(allocator);
     for (old_entries, 0..) |e, idx| {
-        if (e.id.len > 0) try old_by_id.put(e.id, idx);
+        if (e.id.len > 0) try old_by_id.put(allocator, e.id, idx);
     }
-    var used_uuids = std.StringHashMap(void).init(allocator);
-    defer used_uuids.deinit();
+    var used_uuids = std.StringHashMapUnmanaged(void).empty;
+    defer used_uuids.deinit(allocator);
     // Track ids we've already consumed so the tiebreak below can tell a genuine
     // (astronomically unlikely) SHA-256 collision of two *different* ids from a
     // *duplicate* stable id — the latter is a source bug (copy-paste of an
@@ -120,14 +120,14 @@ pub fn resolveIdentities(
     // becomes renumber-sensitive (re-derived from ref_des), defeating the whole
     // renumber-proof-id design. id_insert already rejects duplicates it mints;
     // this catches ones a user hand-copied into the source.
-    var seen_ids = std.StringHashMap(void).init(allocator);
-    defer seen_ids.deinit();
+    var seen_ids = std.StringHashMapUnmanaged(void).empty;
+    defer seen_ids.deinit(allocator);
     for (flat_list.items) |info| {
         const uuid = blk: {
             if (info.id.len == 0) break :blk try bom_mod.generateUuid(allocator);
             const primary = try export_kicad.uuidFromId(allocator, info.id);
             if (!used_uuids.contains(primary)) {
-                try seen_ids.put(info.id, {});
+                try seen_ids.put(allocator, info.id, {});
                 break :blk primary;
             }
             if (seen_ids.contains(info.id)) {
@@ -141,8 +141,8 @@ pub fn resolveIdentities(
             defer allocator.free(combined);
             break :blk try export_kicad.uuidFromId(allocator, combined);
         };
-        try used_uuids.put(uuid, {});
-        try result_map.put(info.ref_des, uuid);
+        try used_uuids.put(allocator, uuid, {});
+        try result_map.put(allocator, info.ref_des, uuid);
         if (info.id.len > 0) {
             if (old_by_id.get(info.id)) |idx| {
                 try carryForwardProps(allocator, &props_map, info, old_entries[idx]);
@@ -181,7 +181,7 @@ pub fn resolveIdentities(
         if (has_mpn_from_component) continue;
 
         if (parts_db.lookup(info.component, info.value, info.attrs)) |part| {
-            var new_props: std.ArrayListUnmanaged(Property) = .empty;
+            var new_props: std.ArrayList(Property) = .empty;
             if (props_map.get(info.ref_des)) |existing| {
                 for (existing) |p| try new_props.append(allocator, p);
             }
@@ -197,7 +197,7 @@ pub fn resolveIdentities(
                     .value = try allocator.dupe(u8, part.mpn),
                 });
             }
-            try props_map.put(info.ref_des, try new_props.toOwnedSlice(allocator));
+            try props_map.put(allocator, info.ref_des, try new_props.toOwnedSlice(allocator));
         }
     }
 
@@ -212,7 +212,7 @@ fn mergeProps(
     inst_props: []const Property,
     bom_props: []const Property,
 ) ![]Property {
-    var merged: std.ArrayListUnmanaged(Property) = .empty;
+    var merged: std.ArrayList(Property) = .empty;
     for (inst_props) |cp| {
         var overridden = false;
         for (bom_props) |ip| {
@@ -233,8 +233,8 @@ fn mergeProps(
 fn applyBom(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
-    uuid_map: *const std.StringHashMap([]const u8),
-    props_map: *const std.StringHashMap([]const Property),
+    uuid_map: *const std.StringHashMapUnmanaged([]const u8),
+    props_map: *const std.StringHashMapUnmanaged([]const Property),
     prefix: []const u8,
 ) !void {
     const instances: []Instance = @constCast(block.instances);
@@ -269,10 +269,10 @@ fn saveBom(
     allocator: std.mem.Allocator,
     bom_path: []const u8,
     flat_instances: []const FlatInfo,
-    uuid_map: *const std.StringHashMap([]const u8),
-    props_map: *const std.StringHashMap([]const Property),
+    uuid_map: *const std.StringHashMapUnmanaged([]const u8),
+    props_map: *const std.StringHashMapUnmanaged([]const Property),
 ) !void {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
@@ -333,7 +333,7 @@ fn writeBomEntries(
     bom_path: []const u8,
     entries: []const bom_mod.BomEntry,
 ) !void {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
@@ -405,7 +405,7 @@ pub fn setBomProperty(
         allocator.free(old_entries);
     }
 
-    var out: std.ArrayListUnmanaged(bom_mod.BomEntry) = .empty;
+    var out: std.ArrayList(bom_mod.BomEntry) = .empty;
     defer out.deinit(allocator);
 
     var matched = false;
@@ -415,7 +415,7 @@ pub fn setBomProperty(
             continue;
         }
         matched = true;
-        var props: std.ArrayListUnmanaged(Property) = .empty;
+        var props: std.ArrayList(Property) = .empty;
         var replaced = false;
         for (entry.properties) |p| {
             if (std.mem.eql(u8, p.key, key)) {

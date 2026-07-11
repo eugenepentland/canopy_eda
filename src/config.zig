@@ -7,9 +7,9 @@ const infra_fs = @import("infra/fs.zig");
 // deployment can always override) and falls back to a `.env` file in the
 // working directory, letting the operator drop credentials in one place.
 
-const DOTENV_PATH = ".env";
-const MAX_DOTENV_BYTES: usize = 64 * 1024;
-const WHITESPACE = " \t\r";
+const dotenv_path = ".env";
+const max_dotenv_bytes: usize = 64 * 1024;
+const whitespace = " \t\r";
 
 /// Component Search Engine session cookie (`connect.sid` value) for
 /// `download_footprint`. From `CSE_CONNECT_SID`.
@@ -59,7 +59,7 @@ pub fn digikeyMaxInFlight(allocator: std.mem.Allocator) u32 {
 fn lookupU64(allocator: std.mem.Allocator, key: []const u8, default: u64) u64 {
     const v = lookup(allocator, key) orelse return default;
     defer allocator.free(v);
-    return std.fmt.parseInt(u64, std.mem.trim(u8, v, WHITESPACE), 10) catch default;
+    return std.fmt.parseInt(u64, std.mem.trim(u8, v, whitespace), 10) catch default;
 }
 
 /// True when `NETLISP_DEV` is set (env or `.env`) to a non-empty value. Gates
@@ -86,17 +86,17 @@ fn lookup(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
 /// `export ` and surrounding quotes) and return a dup of VALUE, or null. The
 /// file is re-read per call — config reads are rare and this avoids a global.
 fn dotenvValue(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
-    const data = infra_fs.cwd().readFileAlloc(allocator, DOTENV_PATH, MAX_DOTENV_BYTES) catch return null;
+    const data = infra_fs.cwd().readFileAlloc(allocator, dotenv_path, max_dotenv_bytes) catch return null;
     defer allocator.free(data);
 
     var it = std.mem.splitScalar(u8, data, '\n');
     while (it.next()) |raw_line| {
-        var line = std.mem.trim(u8, raw_line, WHITESPACE);
+        var line = std.mem.trim(u8, raw_line, whitespace);
         if (line.len == 0 or line[0] == '#') continue;
-        if (std.mem.startsWith(u8, line, "export ")) line = std.mem.trim(u8, line["export ".len..], WHITESPACE);
+        if (std.mem.startsWith(u8, line, "export ")) line = std.mem.trim(u8, line["export ".len..], whitespace);
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        if (!std.mem.eql(u8, std.mem.trim(u8, line[0..eq], WHITESPACE), key)) continue;
-        const value = stripQuotes(std.mem.trim(u8, line[eq + 1 ..], WHITESPACE));
+        if (!std.mem.eql(u8, std.mem.trim(u8, line[0..eq], whitespace), key)) continue;
+        const value = stripQuotes(std.mem.trim(u8, line[eq + 1 ..], whitespace));
         if (value.len == 0) return null;
         return allocator.dupe(u8, value) catch null;
     }

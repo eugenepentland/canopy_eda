@@ -53,17 +53,17 @@ const DesignBlock = env.DesignBlock;
 pub const FlatNet = export_kicad.FlatNet;
 
 // ── Tunables ─────────────────────────────────────────────────────────────
-const K_DECOUPLE: f64 = 0.95; // power/decoupling cap hug + ground-return (highest priority)
-const K_PROX: f64 = 0.6; // single-hub signal passive hug (feedback divider, etc.)
-const K_SIG: f64 = 0.12; // generic wirelength pull
-const ITERS: usize = 600; // relaxation steps (cooling schedule length)
-const RELAX_CONVERGE_MM: f64 = 0.01; // stop relaxing once the largest per-step move is this small
-const LEGALIZE_ITERS: usize = 2000; // overlap-removal-only steps
-const MAX_DISP_MM: f64 = 0.6; // per-step displacement clamp
-const HUB_MASS: f64 = 4.0; // hubs move less → act as anchors
-const PASSIVE_MASS: f64 = 1.0;
-const SEED_GAP_MM: f64 = 1.5; // extra gap between seed grid cells
-const LOOP_W: f64 = 12.0; // weight on the loop *inductance* term (nH; see
+const k_decouple: f64 = 0.95; // power/decoupling cap hug + ground-return (highest priority)
+const k_prox: f64 = 0.6; // single-hub signal passive hug (feedback divider, etc.)
+const k_sig: f64 = 0.12; // generic wirelength pull
+const relax_iters: usize = 600; // relaxation steps (cooling schedule length)
+const relax_converge_mm: f64 = 0.01; // stop relaxing once the largest per-step move is this small
+const legalize_iters: usize = 2000; // overlap-removal-only steps
+const max_disp_mm: f64 = 0.6; // per-step displacement clamp
+const hub_mass: f64 = 4.0; // hubs move less → act as anchors
+const passive_mass: f64 = 1.0;
+const seed_gap_mm: f64 = 1.5; // extra gap between seed grid cells
+const loop_w_default: f64 = 12.0; // weight on the loop *inductance* term (nH; see
 // `loopInductanceNh`). On a solid GND plane the loop is dominated by the power-leg
 // (L1) trace — the return images directly under it (`loopGroundSpan` carries no
 // lateral term) — so minimising the connection inductance minimises both the EMI
@@ -73,30 +73,30 @@ const LOOP_W: f64 = 12.0; // weight on the loop *inductance* term (nH; see
 // weights): 12.0 won −1.5% alone and, combined with the swept align/boost,
 // −3.7% geomean across the 10-design suite (tpsm84338c −11%, pma3-14ln −6.1%,
 // tpsm84338 −3.1%; worst regression nestedarray +2.1%).
-const K_COMPACT: f64 = 0.10; // pull toward the cluster centroid (keeps HPWL tight)
-const GROUP_FORCE_PER_W: f64 = 0.05; // relaxation cohesion-force gain per unit `group_w`
+const k_compact: f64 = 0.10; // pull toward the cluster centroid (keeps HPWL tight)
+const group_force_per_w: f64 = 0.05; // relaxation cohesion-force gain per unit `group_w`
 // (g_group_force = group_w·this); default group_w=2 ⇒ 0.10, ≈ K_COMPACT.
-const ZONE_FORCE_PER_W: f64 = 0.04; // relaxation zoning-force gain per unit `group_zone_w`
+const zone_force_per_w: f64 = 0.04; // relaxation zoning-force gain per unit `group_zone_w`
 // Board-size threshold: at/below this a from-scratch seed rings the parts
 // (`seedRing`), above it grid-seeds; also gates the denser collide-shrink band.
-const MULTISTART_MAX_PARTS: usize = 32;
+const multistart_max_parts: usize = 32;
 // Upper bound for the once-per-solve finishing passes (rotation refine via
 // `optimizeRotations`, the priority-cap tuck, the routed polish) — cheap,
 // run once on the arrangement, so they cover boards well above the seed-ring band.
-const POLISH_MAX_PARTS: usize = 64;
+const polish_max_parts: usize = 64;
 // Routed-aware finishing polish (small boards only): a final local search that
 // scores each candidate (position × rotation) with the *real* maze-routed loop
 // length instead of the fixed-pad surrogate, so a cap settles at the rotation/
 // offset that shortens the actual trace — a surrogate-driven tuck optimises
 // a straight-gap proxy and can pick a different rotation/side than the router.
-const ROUTED_POLISH_SWEEPS: usize = 2;
-const ROUTED_POLISH_CELLS: i64 = 6; // ±0.6 mm window (6·GRID_MM) — local tuck/flip, not a re-place
+const routed_polish_sweeps: usize = 2;
+const routed_polish_cells: i64 = 6; // ±0.6 mm window (6·GRID_MM) — local tuck/flip, not a re-place
 // Routed polish routes once per candidate cell, so its cost grows with
 // caps × window × loops. Keep it small so a mid-size module can't make an
 // on-demand regenerate take tens of seconds. Small power modules — the case this
 // helps most — sit comfortably under it.
-const ROUTED_POLISH_MAX_PARTS: usize = 16;
-const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on a rail
+const routed_polish_max_parts: usize = 16;
+const cap_w_max_default: f64 = 3.0; // max value-priority boost for the smallest cap on a rail
 // Extra loop-tightness multiplier for a switching regulator's INPUT decoupling
 // loop (Cin→high-side switch→GND). That loop carries the high-dI/dt current and
 // dominates radiated EMI (E ∝ f²·area·I; Richtek AN045, TI SNVA638A), so its caps
@@ -104,11 +104,11 @@ const CAP_W_MAX: f64 = 3.0; // max value-priority boost for the smallest cap on 
 // inductor marks the design a switcher. 2.0 → 3.0 per the 2026-06 sweep: on the
 // fixed full-route metric, 3.0 improved tpsm84338c −13.5% with every other suite
 // design byte-identical — a strictly-dominant move.
-const INPUT_LOOP_BOOST: f64 = 3.0;
+const input_loop_boost_default: f64 = 3.0;
 // Weight on the placement-regularizer term (`tidinessPenalty`). The row/column
 // alignment reward keeps large boards compact (aligned parts route shorter —
 // load-bearing on 200+ part designs) while staying a gentle nudge on small ones.
-const ALIGN_CLAMP_MM: f64 = 1.5; // only finish near-alignments within this offset (no long pulls)
+const align_clamp_mm: f64 = 1.5; // only finish near-alignments within this offset (no long pulls)
 // `Params.w_align = W_ALIGN_AUTO` (the shipping default) resolves through
 // `effAlignW` to `W_ALIGN_TIDINESS`; an explicit query/sidecar value overrides.
 // `tidinessPenalty` is normalized by pair count (× 2/(n−1), i.e. n × the mean
@@ -120,29 +120,29 @@ const ALIGN_CLAMP_MM: f64 = 1.5; // only finish near-alignments within this offs
 // picked 1.5 instead — geomean −0.8%, rf-switch-8way −14.5%, and two fewer
 // unroutable nets across the suite, vs ≤+1% drift elsewhere. Alignment earns
 // less than assumed once real copper is the judge.
-const W_ALIGN_TIDINESS: f64 = 1.5;
-const W_ALIGN_AUTO: f64 = -1.0; // sentinel: w_align unset → resolve to W_ALIGN_TIDINESS (effAlignW)
+const w_align_tidiness: f64 = 1.5;
+const w_align_auto: f64 = -1.0; // sentinel: w_align unset → resolve to W_ALIGN_TIDINESS (effAlignW)
 // Weight on the routing-congestion penalty (`congestionPenalty`). HPWL/RSMT alone
 // does not predict routability — local congestion must be traded off against it
 // (Spindler & Johannes RUDY; UCLA mPL). The penalty is ~0 until a region's
 // estimated wire density exceeds the signal-layer budget, so it only steers parts
 // apart out of genuine hotspots. PROVISIONAL — the research notes the optimal
 // congestion weight is IC-derived and must be swept on real PCBs.
-const W_CONGEST: f64 = 2.0;
+const w_congest_default: f64 = 2.0;
 // ── Full-route cost weights (`fullRouteCost`) ─────────────────────────────────
 // `fullRouteCost` routes the whole board (the same maze router + DRC the layout
 // page runs) and scores it on what actually matters: real copper length, via
 // count, DRC violations, and unrouted nets. Costs are expressed in mm-equivalents
 // so they blend with trace length.
-const FULLROUTE_VIA_MM: f64 = 2.0; // one via ≈ this much extra trace (drill + return-path discontinuity)
-const FULLROUTE_DRC_MM: f64 = 25.0; // one clearance violation outweighs a couple of vias, not the board
+const fullroute_via_mm: f64 = 2.0; // one via ≈ this much extra trace (drill + return-path discontinuity)
+const fullroute_drc_mm: f64 = 25.0; // one clearance violation outweighs a couple of vias, not the board
 // An unroutable net costs far more than any detour that routes: it is a
 // hand-fix on the real board. 50 proved too cheap — on rf-switch-8way it
 // traded 4 extra unrouted nets for ~300 mm less copper, which no designer
 // would take. 150 ≈ three full board crossings per failed net.
-const FULLROUTE_UNROUTED_MM: f64 = 150.0;
-const GRID_COURTYARDS = true; // round courtyard half-extents to GRID_MM so edges land on-grid
-const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" test
+const fullroute_unrouted_mm: f64 = 150.0;
+const grid_courtyards_default = true; // round courtyard half-extents to GRID_MM so edges land on-grid
+const compact_eps: f64 = 1e-4; // courtyard-gap tolerance for the "touching" test
 
 // ── Phase-A constraint lowering weights (see docs/constraints_dsl.md) ─────────
 // These weight the *search-only* guidance terms a `(constraints …)` form lowers
@@ -152,15 +152,15 @@ const COMPACT_EPS: f64 = 1e-4; // courtyard-gap tolerance for the "touching" tes
 // objective — so a hand layout and a constrained solve are scored identically
 // and the constraints can't "game" the comparison. All PROVISIONAL (the doc's
 // weight-tuning is an offline sweep, not the LLM's job).
-const PROX_W: f64 = 1.5; // proximity pull: cost = PROX_W·priority·(edge gap, mm)
-const KEEPOUT_W: f64 = 4.0; // keep-out hinge: cost = KEEPOUT_W·max(0, min−gap)
+const prox_w: f64 = 1.5; // proximity pull: cost = PROX_W·priority·(edge gap, mm)
+const keepout_w: f64 = 4.0; // keep-out hinge: cost = KEEPOUT_W·max(0, min−gap)
 /// Courtyard gap (mm) a synthesized aggressor-avoidance keep-out (Phase 2b)
 /// demands between a feedback passive and a switching/clock/RF passive — a touch
 /// above the `feedback-near-aggressor` lint threshold so a satisfied solve also
 /// clears the lint with margin.
-const AGGRESSOR_KEEPOUT_MM: f64 = 2.5;
-const DEPRIORITIZE_SCALE: f64 = 0.25; // scale a deprioritized part's net wirelength weight
-const ZONE_GAP_MM: f64 = 2.0; // group zoning: cluster centroid sits this far beyond the hub edge on its connecting side
+const aggressor_keepout_mm: f64 = 2.5;
+const deprioritize_scale: f64 = 0.25; // scale a deprioritized part's net wirelength weight
+const zone_gap_mm: f64 = 2.0; // group zoning: cluster centroid sits this far beyond the hub edge on its connecting side
 /// Soft-constraint priority → numeric multiplier (low/med/high).
 fn constraintWeight(p: env.ConstraintPriority) f64 {
     return switch (p) {
@@ -174,25 +174,25 @@ fn constraintWeight(p: env.ConstraintPriority) f64 {
 /// `solve` so the UI can adjust placement without a rebuild. Only the steering
 /// weights are exposed; the structural tunables (iters, starts) stay fixed.
 pub const Params = struct {
-    loop_w: f64 = LOOP_W,
+    loop_w: f64 = loop_w_default,
     /// Alignment/compactness weight. Defaults to the `W_ALIGN_AUTO` sentinel,
     /// which resolves to `W_ALIGN_TIDINESS` via `effAlignW`. Set ≥0 to override
     /// explicitly (query/sidecar values do).
-    w_align: f64 = W_ALIGN_AUTO,
-    w_congest: f64 = W_CONGEST,
+    w_align: f64 = w_align_auto,
+    w_congest: f64 = w_congest_default,
     /// Extra loop-inductance weight multiplier on a switching regulator's INPUT
     /// decoupling loop (see `INPUT_LOOP_BOOST`). Exposed so the bench sweep can
     /// retune the provisional magnitude against routed outcomes.
-    input_loop_boost: f64 = INPUT_LOOP_BOOST,
-    cap_w_max: f64 = CAP_W_MAX,
-    grid_courtyards: bool = GRID_COURTYARDS,
+    input_loop_boost: f64 = input_loop_boost_default,
+    cap_w_max: f64 = cap_w_max_default,
+    grid_courtyards: bool = grid_courtyards_default,
     /// Extra clearance (mm) added to every part's courtyard half-extents (on top
     /// of its F.CrtYd / pad bbox). The optimizer's density floor: two parts can
     /// never sit closer than the sum of their margins. Defaults to the geometry
     /// module's shipping value; exposed so a denser regime can be swept (a hand
     /// layout packed at courtyard-touching density needs a smaller margin to be
     /// reproducible — see the tpsm84338 constraint experiment).
-    bbox_margin: f64 = geometry.BBOX_MARGIN_MM,
+    bbox_margin: f64 = geometry.bbox_margin_mm,
     /// How much (mm, total) two parts' *drawn* courtyards may overlap in the
     /// collision / legalization test. Default 0: courtyards may **touch** (their
     /// edges land on the shared `GRID_MM` grid line — grid-rounded extents +
@@ -267,7 +267,7 @@ pub const Params = struct {
 /// `params.w_align` raw), so the UI and the search always agree.
 pub fn effAlignW(params: Params) f64 {
     if (params.w_align >= 0) return params.w_align;
-    return W_ALIGN_TIDINESS;
+    return w_align_tidiness;
 }
 
 /// Which phase of the solve a progress frame came from — drives the label the
@@ -318,7 +318,7 @@ inline fn emitBest(parts: []const Part, score: f64, pass: ProgressPass) void {
 /// windows below (`RELOCATE_MAX_CELLS`, `COARSE_STRIDE`, `ROUTED_POLISH_CELLS`,
 /// `TIGHTEN_CELLS`) are sized in *cells*, so they're paired to this value to
 /// keep their physical millimetre spans constant when the grid changes.
-pub const GRID_MM: f64 = 0.1;
+pub const grid_mm: f64 = 0.1;
 
 /// Whether a part anchors the layout (ICs/connectors) or hangs off a hub
 /// pin (passives). Drives spring strength, mass, and rendering colour.
@@ -393,7 +393,7 @@ pub const Stub = struct {
 
 /// How far an escape stub reaches out of its pad (mm) — the breakout room the
 /// placer reserves so the signal can be routed off this part.
-const ESCAPE_STUB_MM: f64 = 2.0;
+const escape_stub_mm: f64 = 2.0;
 
 /// A ratsnest line's origin: a strong pin-proximity hug, a ground-return
 /// (the cap→IC ground leg that closes the decoupling loop), or a weak
@@ -628,14 +628,14 @@ pub const BoardRules = struct {
 /// inner-layer copper paints identically everywhere: index 0 = top red,
 /// 1 = bottom blue, then the inner palette cycling for 2.. — KiCad pcbnew's
 /// default layer colours (F.Cu/B.Cu/In1..In4).
-pub const SIGNAL_LAYER_COLORS = [_][]const u8{ "#C83434", "#4D7FC4" };
-pub const INNER_LAYER_COLORS = [_][]const u8{ "#C2C200", "#C200C2", "#C2C2C2", "#00C2C2" };
+pub const signal_layer_colors = [_][]const u8{ "#C83434", "#4D7FC4" };
+pub const inner_layer_colors = [_][]const u8{ "#C2C200", "#C200C2", "#C2C2C2", "#00C2C2" };
 
 /// The display colour (hex) of signal layer `sig` — outer pair, then the
 /// inner palette cycling.
 pub fn signalLayerColor(sig: u8) []const u8 {
-    if (sig < SIGNAL_LAYER_COLORS.len) return SIGNAL_LAYER_COLORS[sig];
-    return INNER_LAYER_COLORS[(sig - 2) % INNER_LAYER_COLORS.len];
+    if (sig < signal_layer_colors.len) return signal_layer_colors[sig];
+    return inner_layer_colors[(sig - 2) % inner_layer_colors.len];
 }
 
 /// Board-level default design rules as concrete millimetre values — the
@@ -994,7 +994,7 @@ pub const SeedMode = enum {
 /// The smooth-surrogate objective (the value `scorePoses` reports and the viewer
 /// shows) for the CURRENT poses in `parts`, computed in place — no `prepare()`
 /// rebuild, so it is cheap to call mid-pipeline as a candidate comparator.
-fn surrogateObjective(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet, loops: []const Loop, params: Params) f64 {
+fn surrogateObjective(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), nets: []const FlatNet, loops: []const Loop, params: Params) f64 {
     const score = scoreLayout(parts, idx_of, nets, loops);
     const lsum = surrogateLoops(parts, loops);
     return breakdownWith(parts, idx_of, nets, params, score, lsum).objective;
@@ -1048,12 +1048,12 @@ fn runPlacement(
         var fp = params;
         fp.fast = true;
         fp.w_align = 0;
-        if (fp.route_gap < ROUGH_DECLUMP_GAP_MM) fp.route_gap = ROUGH_DECLUMP_GAP_MM;
+        if (fp.route_gap < rough_declump_gap_mm) fp.route_gap = rough_declump_gap_mm;
         // The compaction pass reads the courtyard spacing from the `g_route_gap`
         // global (set once in `prepare` from the original params), not from `fp` —
         // so bump the global here, restoring it after, or the spread won't apply.
         const saved_gap = g_route_gap;
-        g_route_gap = @max(g_route_gap, ROUGH_DECLUMP_GAP_MM);
+        g_route_gap = @max(g_route_gap, rough_declump_gap_mm);
         defer g_route_gap = saved_gap;
         try runForce(arena, parts, prep, nets, built, fp);
         return;
@@ -1127,7 +1127,7 @@ const ZoneTopo = struct { ic: usize };
 /// hub), and the board is within the finisher band. Null ⇒ use the force path.
 fn analyzeTopology(parts: []const Part, lowered: Lowered) ?ZoneTopo {
     if (!lowered.active or lowered.groups.len == 0) return null;
-    if (parts.len < 2 or parts.len > POLISH_MAX_PARTS) return null;
+    if (parts.len < 2 or parts.len > polish_max_parts) return null;
     // The IC = largest-area hub.
     var ic: ?usize = null;
     var a1: f64 = -1;
@@ -1155,7 +1155,7 @@ fn analyzeTopology(parts: []const Part, lowered: Lowered) ?ZoneTopo {
 /// inductor for an output-cap bank, since a switcher's output rail terminates on
 /// the inductor, not an IC pad. Used to recover a docking edge when the IC-anchored
 /// `railDir` is zero (the bank touches no IC pad). Null when none.
-fn nearestSharedHub(members: []const usize, ic: usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) ?usize {
+fn nearestSharedHub(members: []const usize, ic: usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) ?usize {
     for (nets) |net| {
         if (isGroundName(shortName(net.name))) continue;
         var has_member = false;
@@ -1179,7 +1179,7 @@ fn nearestSharedHub(members: []const usize, ic: usize, parts: []const Part, nets
 /// the direction (IC-local; IC is at rot 0 so == world) toward the group's rail
 /// side. Ground is excluded (it is scattered all round the IC and would average
 /// the side away). Zero when the members touch only ground / no IC pad.
-fn railDir(members: []const usize, ic: usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) Pt {
+fn railDir(members: []const usize, ic: usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) Pt {
     const ic_ref = parts[ic].ref_des;
     var sx: f64 = 0;
     var sy: f64 = 0;
@@ -1208,7 +1208,7 @@ fn railDir(members: []const usize, ic: usize, parts: []const Part, nets: []const
 /// World cross-coordinate (y for a side edge, x for a top/bottom edge) of the IC's
 /// non-ground pads the members connect to — the point a block docks opposite, so
 /// its decoupling pad sits across from the supply pad. Null when there's no rail pad.
-fn railPadCross(members: []const usize, ic: usize, edge: Edge, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) ?f64 {
+fn railPadCross(members: []const usize, ic: usize, edge: Edge, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) ?f64 {
     const ic_ref = parts[ic].ref_des;
     const side = (edge == .left or edge == .right); // cross axis = y
     var s: f64 = 0;
@@ -1259,7 +1259,7 @@ pub fn faceRotation(pwr: PadRect, edge: Edge) f64 {
     };
     var best: f64 = 0;
     var best_dot: f64 = -std.math.inf(f64);
-    for (ROT_CAND) |rot| {
+    for (rot_cand) |rot| {
         const p = rotateLocal(pwr.x, pwr.y, rot);
         const dot = p.x * inward.x + p.y * inward.y;
         if (dot > best_dot) {
@@ -1323,14 +1323,14 @@ fn orderMembers(arena: std.mem.Allocator, members: []const usize, parts: []const
 /// Cross-spread (mm) beyond which a group's members are treated as *distributed*
 /// (each maps to a distinct rail pin — e.g. the two boot caps to BOOT1/BOOT2) and
 /// laid out in pin order, rather than a *shared*-rail bank centred on one pin.
-const DISTRIBUTE_MM: f64 = 0.6;
+const distribute_mm: f64 = 0.6;
 
 /// Decide a group block's member layout. If members' own rail-pin cross-positions
 /// spread past `DISTRIBUTE_MM` (distinct pins), sort them by pin so each sits above
 /// its own pad (returns `pin_order=true`); otherwise keep the criticality order for
 /// the centre-out HF placement (`pin_order=false`). Fixes boot caps landing on the
 /// wrong lateral side of the IC.
-fn orderForBlock(arena: std.mem.Allocator, ordered: []usize, ic: usize, edge: Edge, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) std.mem.Allocator.Error!bool {
+fn orderForBlock(arena: std.mem.Allocator, ordered: []usize, ic: usize, edge: Edge, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) std.mem.Allocator.Error!bool {
     if (ordered.len < 2) return false;
     const tgt = try arena.alloc(f64, ordered.len);
     var lo = std.math.inf(f64);
@@ -1341,7 +1341,7 @@ fn orderForBlock(arena: std.mem.Allocator, ordered: []usize, ic: usize, edge: Ed
         lo = @min(lo, tgt[i]);
         hi = @max(hi, tgt[i]);
     }
-    if (hi - lo <= DISTRIBUTE_MM) return false; // shared rail → centre-out
+    if (hi - lo <= distribute_mm) return false; // shared rail → centre-out
     // Distributed: insertion-sort members by their pin cross (ascending = pack order).
     var a: usize = 1;
     while (a < ordered.len) : (a += 1) {
@@ -1449,13 +1449,13 @@ fn dockEdge(parts: []Part, ic: usize, blocks: []const PackBlock, edge: Edge, gap
     const ic_cross = if (vertical) parts[ic].y else parts[ic].x;
     // Gather this edge's blocks (index + cross geometry) into fixed local arrays;
     // bounded by the part count, which the topology gate caps at POLISH_MAX_PARTS.
-    var bi: [POLISH_MAX_PARTS]usize = undefined;
-    var center: [POLISH_MAX_PARTS]f64 = undefined;
-    var half: [POLISH_MAX_PARTS]f64 = undefined;
-    var mass: [POLISH_MAX_PARTS]f64 = undefined;
+    var bi: [polish_max_parts]usize = undefined;
+    var center: [polish_max_parts]f64 = undefined;
+    var half: [polish_max_parts]f64 = undefined;
+    var mass: [polish_max_parts]f64 = undefined;
     var k: usize = 0;
     for (blocks, 0..) |b, idx| {
-        if (b.edge != edge or k >= POLISH_MAX_PARTS) continue;
+        if (b.edge != edge or k >= polish_max_parts) continue;
         bi[k] = idx;
         center[k] = if (b.target_set) b.target else ic_cross;
         half[k] = if (vertical) b.half_h else b.half_w;
@@ -1519,7 +1519,7 @@ fn dockEdge(parts: []Part, ic: usize, blocks: []const PackBlock, edge: Edge, gap
 /// edge, so it straddles SW1/SW2 instead of floating off. Locks its x to the
 /// switch-pad centroid so the finish keeps it centred. Falls back to the top edge
 /// when no switch pad is found.
-fn placeSwitchHub(parts: []Part, ic: usize, sec: usize, nets: []const FlatNet, idx_of: *std.StringHashMap(usize), blocks: []const PackBlock, gap: f64, lock_axis: []u8, lock_val: []f64) void {
+fn placeSwitchHub(parts: []Part, ic: usize, sec: usize, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize), blocks: []const PackBlock, gap: f64, lock_axis: []u8, lock_val: []f64) void {
     const ic_ref = parts[ic].ref_des;
     var sx: f64 = 0;
     var nsw: usize = 0;
@@ -1594,12 +1594,12 @@ fn packZoned(
     @memset(lock_axis, 0);
     const lock_val = try arena.alloc(f64, parts.len);
 
-    var blocks: std.ArrayListUnmanaged(PackBlock) = .empty;
-    const gap = @max(g_route_gap, FINAL_CLEAR);
+    var blocks: std.ArrayList(PackBlock) = .empty;
+    const gap = @max(g_route_gap, final_clear);
 
     // Functional-group blocks (hub members dropped — IC at origin, inductor below).
     for (g_lowered.groups) |g| {
-        var ml: std.ArrayListUnmanaged(usize) = .empty;
+        var ml: std.ArrayList(usize) = .empty;
         for (g.members) |m| {
             if (parts[m].kind == .hub or claimed[m]) continue;
             try ml.append(arena, m);
@@ -1667,7 +1667,7 @@ fn packZoned(
         placeSwitchHub(parts, ic, i, nets, &prep.idx_of, blocks.items, gap, lock_axis, lock_val);
     }
 
-    legalize(parts, FINAL_CLEAR);
+    legalize(parts, final_clear);
     // Restore the crisp row/column lines `legalize` nudged (a column's shared x, a
     // row's shared y); on-grid legalization then resolves any residual *cross-axis*
     // overlap by whole cells, leaving the aligned axis intact.
@@ -1691,7 +1691,7 @@ fn edgeFromSide(s: env.PlacementSide) Edge {
 }
 
 /// Gap (mm) below the board where parts the spec didn't list are staged.
-const STAGE_GAP_MM: f64 = 5.0;
+const stage_gap_mm: f64 = 5.0;
 
 /// Auto-fill cost guard: staged-part counts beyond this keep the band (each
 /// fill is a windowed scan). Sized for the `(floorplan …)` usage on a real
@@ -1699,27 +1699,27 @@ const STAGE_GAP_MM: f64 = 5.0;
 /// barracuda base board leaves 31 RC-filter parts loose; the original cap of
 /// 24 silently skipped every one of them). The expensive routed veto is gated
 /// separately (`AUTOFILL_VETO_MAX`), so a high cap costs only windowed scans.
-const AUTOFILL_MAX: usize = 64;
+const autofill_max: usize = 64;
 /// Re-sweep the fills until none improves: placing one part gives the parts
 /// that wire to it (and only it) their anchors, so chains fill over sweeps.
-const AUTOFILL_SWEEPS: usize = 3;
+const autofill_sweeps: usize = 3;
 /// Routed-veto gate: above this part count, skip the per-fill re-route check
 /// (matches the routedLoops gate — routing large boards per move is too slow).
-const AUTOFILL_VETO_MAX: usize = 48;
+const autofill_veto_max: usize = 48;
 /// Search window margin (mm) beyond the anchor targets' bounding box.
-const AUTOFILL_MARGIN_MM: f64 = 6.0;
+const autofill_margin_mm: f64 = 6.0;
 /// Window cap (grid cells per axis) — bounds the scan on pathological boards.
 /// 240·GRID_MM ≈ ±24 mm reach (the real bound is the board extent on normal
 /// boards); paired to GRID_MM so the millimetre cap holds across grid sizes.
-const RELOCATE_MAX_CELLS: i64 = 240;
+const relocate_max_cells: i64 = 240;
 /// Coarse stride (grid cells) for the first scan pass: sample the window every
 /// N cells, then refine at full resolution around the coarse best. 4·GRID_MM ≈
 /// 0.4 mm physical stride — paired to GRID_MM so the coarse pass keeps both its
 /// stride and its iteration count when the grid changes.
-const COARSE_STRIDE: i64 = 4;
+const coarse_stride: i64 = 4;
 /// Ground anchors pull weakly — the return is a via to the plane, not a trace
 /// to one specific pad, so any nearby GND pad serves.
-const AUTOFILL_GND_W: f64 = 0.25;
+const autofill_gnd_w: f64 = 0.25;
 
 /// Place every part the `(placement …)` spec didn't list ("pin-hug" auto-fill):
 /// instead of leaving them in the staging band below the board, move each to
@@ -1739,14 +1739,14 @@ const AUTOFILL_GND_W: f64 = 0.25;
 fn autofillUnlisted(
     arena: std.mem.Allocator,
     parts: []Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
 ) std.mem.Allocator.Error!void {
     const staged_refs = g_placement_diag.unplaced;
-    if (staged_refs.len == 0 or staged_refs.len > AUTOFILL_MAX) return;
+    if (staged_refs.len == 0 or staged_refs.len > autofill_max) return;
 
-    var idxs: std.ArrayListUnmanaged(usize) = .empty;
+    var idxs: std.ArrayList(usize) = .empty;
     for (staged_refs) |ref| {
         if (idx_of.get(ref)) |i| {
             if (!parts[i].locked) try idxs.append(arena, i);
@@ -1764,13 +1764,13 @@ fn autofillUnlisted(
     // Routed veto per SWEEP, not per fill: one maze route per sweep (≤4 total
     // with the baseline) instead of one per part — if a sweep's fills cost a
     // routed net, the whole sweep is backed out and filling stops there.
-    const veto = parts.len <= AUTOFILL_VETO_MAX;
+    const veto = parts.len <= autofill_veto_max;
     var baseline = if (veto) routedCount(arena, parts, nets) else 0;
     var sweep: usize = 0;
-    while (sweep < AUTOFILL_SWEEPS) : (sweep += 1) {
+    while (sweep < autofill_sweeps) : (sweep += 1) {
         var improved = false;
         const sweep_poses = try capturePoses(arena, parts);
-        var sweep_filled: std.ArrayListUnmanaged(usize) = .empty;
+        var sweep_filled: std.ArrayList(usize) = .empty;
         for (idxs.items) |i| {
             if (!staged[i]) continue; // already filled in an earlier sweep
             const anchors = try autofillAnchors(arena, parts, nets, staged, i);
@@ -1815,11 +1815,11 @@ fn autofillUnlisted(
         if (!improved) break;
     }
 
-    var filled: std.ArrayListUnmanaged([]const u8) = .empty;
+    var filled: std.ArrayList([]const u8) = .empty;
     // Append to (not replace) earlier fills — the board-dock path runs a
     // second pass for the connectors' partners.
     try filled.appendSlice(arena, g_placement_diag.auto_filled);
-    var remaining: std.ArrayListUnmanaged([]const u8) = .empty;
+    var remaining: std.ArrayList([]const u8) = .empty;
     var any_filled = false;
     for (idxs.items) |i| {
         if (!staged[i]) {
@@ -1877,13 +1877,13 @@ fn autofillAnchors(
     staged: []const bool,
     i: usize,
 ) std.mem.Allocator.Error![]PadAnchor {
-    var out: std.ArrayListUnmanaged(PadAnchor) = .empty;
+    var out: std.ArrayList(PadAnchor) = .empty;
     const me = parts[i];
     for (nets) |net| {
         for (net.pins) |pin| {
             if (!std.mem.eql(u8, pin.ref_des, me.ref_des)) continue;
             const pad = padByNumber(me, pin.pin) orelse continue;
-            var targets: std.ArrayListUnmanaged([2]f64) = .empty;
+            var targets: std.ArrayList([2]f64) = .empty;
             for (net.pins) |op| {
                 if (std.mem.eql(u8, op.ref_des, me.ref_des)) continue;
                 const j = indexOfRef(parts, op.ref_des) orelse continue;
@@ -1896,7 +1896,7 @@ fn autofillAnchors(
             try out.append(arena, .{
                 .lx = pad.x,
                 .ly = pad.y,
-                .w = if (isGroundName(net.name)) AUTOFILL_GND_W else 1.0,
+                .w = if (isGroundName(net.name)) autofill_gnd_w else 1.0,
                 .targets = try targets.toOwnedSlice(arena),
             });
         }
@@ -1948,17 +1948,17 @@ fn autofillOne(parts: []Part, anchors: []const PadAnchor, i: usize) bool {
     const p = &parts[i];
     const ox = p.x;
     const oy = p.y;
-    const m = AUTOFILL_MARGIN_MM + effHw(p.*) + effHh(p.*);
-    var lo_x = @max(-RELOCATE_MAX_CELLS, cellOffset(minx - m - ox));
-    var hi_x = @min(RELOCATE_MAX_CELLS, cellOffset(maxx + m - ox));
-    var lo_y = @max(-RELOCATE_MAX_CELLS, cellOffset(miny - m - oy));
-    var hi_y = @min(RELOCATE_MAX_CELLS, cellOffset(maxy + m - oy));
+    const m = autofill_margin_mm + effHw(p.*) + effHh(p.*);
+    var lo_x = @max(-relocate_max_cells, cellOffset(minx - m - ox));
+    var hi_x = @min(relocate_max_cells, cellOffset(maxx + m - ox));
+    var lo_y = @max(-relocate_max_cells, cellOffset(miny - m - oy));
+    var hi_y = @min(relocate_max_cells, cellOffset(maxy + m - oy));
     // The part-relative clamp empties the window when the part is staged far
     // from every target (a band pushed below a (board …) outline) — then
     // re-centre the window on the targets' bbox instead, in absolute mm,
     // same span cap. Near-target fills keep the original window byte-for-byte.
     if (lo_x > hi_x or lo_y > hi_y) {
-        const half_span = @as(f64, @floatFromInt(RELOCATE_MAX_CELLS)) * GRID_MM / 2.0;
+        const half_span = @as(f64, @floatFromInt(relocate_max_cells)) * grid_mm / 2.0;
         // The clamp keeps the window's centre inside the targets' bbox (± the
         // margin), but its bounds only order when the bbox+margin is at least as
         // wide as the window (2*half_span). A single target (span 0) with a small
@@ -1981,17 +1981,17 @@ fn autofillOne(parts: []Part, anchors: []const PadAnchor, i: usize) bool {
 
     // A pinned rotation is decided (spec / series pairing) — search position only.
     const pinned = [_]f64{p.rot};
-    const rot_cands: []const f64 = if (p.rot_pin != .none) &pinned else &ROT_CAND;
+    const rot_cands: []const f64 = if (p.rot_pin != .none) &pinned else &rot_cand;
 
     // Coarse pass: every COARSE_STRIDE cells over the window.
     for (rot_cands) |r| {
         var dy: i64 = lo_y;
-        while (dy <= hi_y) : (dy += COARSE_STRIDE) {
+        while (dy <= hi_y) : (dy += coarse_stride) {
             var dx: i64 = lo_x;
-            while (dx <= hi_x) : (dx += COARSE_STRIDE) {
+            while (dx <= hi_x) : (dx += coarse_stride) {
                 p.rot = r;
-                p.x = ox + @as(f64, @floatFromInt(dx)) * GRID_MM;
-                p.y = oy + @as(f64, @floatFromInt(dy)) * GRID_MM;
+                p.x = ox + @as(f64, @floatFromInt(dx)) * grid_mm;
+                p.y = oy + @as(f64, @floatFromInt(dy)) * grid_mm;
                 if (overlapsAny(parts, p)) continue;
                 const c = anchorCost(parts, anchors, i);
                 if (c < best - 1e-9) {
@@ -2009,13 +2009,13 @@ fn autofillOne(parts: []Part, anchors: []const PadAnchor, i: usize) bool {
     const cx = cellOffset(bx - ox);
     const cy = cellOffset(by - oy);
     for (rot_cands) |r| {
-        var dy: i64 = @max(lo_y, cy - COARSE_STRIDE);
-        while (dy <= @min(hi_y, cy + COARSE_STRIDE)) : (dy += 1) {
-            var dx: i64 = @max(lo_x, cx - COARSE_STRIDE);
-            while (dx <= @min(hi_x, cx + COARSE_STRIDE)) : (dx += 1) {
+        var dy: i64 = @max(lo_y, cy - coarse_stride);
+        while (dy <= @min(hi_y, cy + coarse_stride)) : (dy += 1) {
+            var dx: i64 = @max(lo_x, cx - coarse_stride);
+            while (dx <= @min(hi_x, cx + coarse_stride)) : (dx += 1) {
                 p.rot = r;
-                p.x = ox + @as(f64, @floatFromInt(dx)) * GRID_MM;
-                p.y = oy + @as(f64, @floatFromInt(dy)) * GRID_MM;
+                p.x = ox + @as(f64, @floatFromInt(dx)) * grid_mm;
+                p.y = oy + @as(f64, @floatFromInt(dy)) * grid_mm;
                 if (overlapsAny(parts, p)) continue;
                 const c = anchorCost(parts, anchors, i);
                 if (c < best - 1e-9) {
@@ -2052,7 +2052,7 @@ fn indexOfRef(parts: []const Part, ref: []const u8) ?usize {
 
 /// Round a millimetre offset to the nearest grid-cell count.
 fn cellOffset(mm: f64) i64 {
-    return numeric.checkedInt(i64, @round(mm / GRID_MM)) orelse 0;
+    return numeric.checkedInt(i64, @round(mm / grid_mm)) orelse 0;
 }
 
 /// Snapshot every part's pose — the strict/overlap retry in `solve` keeps the
@@ -2137,7 +2137,7 @@ const SolveState = struct {
 /// Round to the placement grid (member offsets are grid multiples, so a
 /// grid-rounded origin keeps every member on grid).
 fn gridRound(v: f64) f64 {
-    return @round(v / GRID_MM) * GRID_MM;
+    return @round(v / grid_mm) * grid_mm;
 }
 
 /// Normalize raw member poses into a rigid macro: apply the quarter-step
@@ -2244,18 +2244,18 @@ fn buildSubMacro(
     // (design `buck/U2` vs module `U1`) — fall back to the renumber-proof
     // origin-key match. Both fallback sides are restricted to first-level
     // children (no nested `/`), where module-local origin keys are unique.
-    var origin_idx = std.StringHashMap(usize).init(arena);
+    var origin_idx = std.StringHashMapUnmanaged(usize).empty;
     const prefix = try std.fmt.allocPrint(arena, "{s}/", .{sub.name});
     for (prep.instances, 0..) |inst, i| {
         if (!std.mem.startsWith(u8, inst.ref_des, prefix)) continue;
         if (inst.origin_key.len == 0) continue;
         if (std.mem.indexOfScalar(u8, inst.ref_des[prefix.len..], '/') != null) continue;
-        try origin_idx.put(inst.origin_key, i);
+        try origin_idx.put(arena, inst.origin_key, i);
     }
-    var members: std.ArrayListUnmanaged(usize) = .empty;
-    var xs: std.ArrayListUnmanaged(f64) = .empty;
-    var ys: std.ArrayListUnmanaged(f64) = .empty;
-    var rots: std.ArrayListUnmanaged(f64) = .empty;
+    var members: std.ArrayList(usize) = .empty;
+    var xs: std.ArrayList(f64) = .empty;
+    var ys: std.ArrayList(f64) = .empty;
+    var rots: std.ArrayList(f64) = .empty;
     for (sp.parts, 0..) |part, j| {
         const ref = try std.fmt.allocPrint(arena, "{s}/{s}", .{ sub.name, part.ref_des });
         const key = if (j < sp.instances.len and sp.instances[j].origin_key.len > 0)
@@ -2315,8 +2315,8 @@ fn starredModulePoses(
     if (pv != .array) return null;
     // Saved poses keyed by module-local origin, plus by saved ref for
     // origin-less legacy entries.
-    var by_origin = std.StringHashMap(RefPose).init(arena);
-    var by_ref = std.StringHashMap(RefPose).init(arena);
+    var by_origin = std.StringHashMapUnmanaged(RefPose).empty;
+    var by_ref = std.StringHashMapUnmanaged(RefPose).empty;
     for (pv.array.items) |it| {
         if (it != .object) continue;
         const rv = it.object.get("ref") orelse continue;
@@ -2330,15 +2330,15 @@ fn starredModulePoses(
         };
         const ov = it.object.get("origin");
         if (ov != null and ov.? == .string and ov.?.string.len > 0) {
-            try by_origin.put(ov.?.string, pose);
+            try by_origin.put(arena, ov.?.string, pose);
         } else {
-            try by_ref.put(rv.string, pose);
+            try by_ref.put(arena, rv.string, pose);
         }
     }
     // Translate into the child's current refs via the parent's first-level
     // `slug/<ref>` instances (their origin keys are the module-local keys).
     const prefix = try std.fmt.allocPrint(arena, "{s}/", .{slug});
-    var out: std.ArrayListUnmanaged(RefPose) = .empty;
+    var out: std.ArrayList(RefPose) = .empty;
     for (instances) |inst| {
         if (!std.mem.startsWith(u8, inst.ref_des, prefix)) continue;
         const child_ref = inst.ref_des[prefix.len..];
@@ -2382,7 +2382,7 @@ fn buildGlueMacros(
     prep: *Prepared,
     nets: []const FlatNet,
     macro_of: []?usize,
-    macros: *std.ArrayListUnmanaged(Macro),
+    macros: *std.ArrayList(Macro),
 ) std.mem.Allocator.Error!void {
     const hub_of = try arena.alloc(?usize, parts.len);
     @memset(hub_of, null);
@@ -2407,7 +2407,7 @@ fn buildGlueMacros(
     }
     for (parts, 0..) |p, hpi| {
         if (macro_of[hpi] != null or p.kind != .hub or p.locked) continue;
-        var members: std.ArrayListUnmanaged(usize) = .empty;
+        var members: std.ArrayList(usize) = .empty;
         for (hub_of, 0..) |h, pi| {
             if (h != null and h.? == hpi) try members.append(arena, pi);
         }
@@ -2433,22 +2433,22 @@ fn ringGlueMacro(
 ) std.mem.Allocator.Error!Macro {
     const n = members.len + 1;
     const local = try arena.alloc(Part, n);
-    var idx_of = std.StringHashMap(usize).init(arena);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
     local[0] = parts[hpi];
     local[0].x = 0;
     local[0].y = 0;
     local[0].rot = 0;
     local[0].locked = false;
-    try idx_of.put(parts[hpi].ref_des, 0);
+    try idx_of.put(arena, parts[hpi].ref_des, 0);
     for (members, 0..) |pi, k| {
         local[k + 1] = parts[pi];
         local[k + 1].locked = false;
-        try idx_of.put(parts[pi].ref_des, k + 1);
+        try idx_of.put(arena, parts[pi].ref_des, k + 1);
     }
     const hkb = keepBoxOf(local[0]);
     const roles = pin_roles.load(arena, prep.project_dir, if (hpi < prep.instances.len) prep.instances[hpi].component else "");
-    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
-    var leftover: std.ArrayListUnmanaged(usize) = .empty;
+    var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
+    var leftover: std.ArrayList(usize) = .empty;
     const ci = try buildClusters(arena, local, 0, nets, &idx_of);
     const tier_of = try arena.alloc(usize, n);
     @memset(tier_of, 0);
@@ -2474,8 +2474,8 @@ fn ringGlueMacro(
     }
     const saved_ic_gap = g_rough_ic_gap;
     const saved_part_gap = g_rough_part_gap;
-    g_rough_ic_gap = FINAL_CLEAR;
-    g_rough_part_gap = FINAL_CLEAR;
+    g_rough_ic_gap = final_clear;
+    g_rough_part_gap = final_clear;
     defer {
         g_rough_ic_gap = saved_ic_gap;
         g_rough_part_gap = saved_part_gap;
@@ -2490,7 +2490,7 @@ fn ringGlueMacro(
             x += pkb.hw;
             local[pi].x = gridRound(x);
             local[pi].y = y;
-            x += pkb.hw + PAD_ANCHOR_PART_GAP_MM;
+            x += pkb.hw + pad_anchor_part_gap_mm;
         }
     }
     try refineSidesByPull(arena, local, 0, nets, &idx_of, tier_of, cohere_side, &sides, hkb);
@@ -2594,28 +2594,28 @@ fn separateComposedPair(parts: []Part, macro_of: []const ?usize, pinned_part: []
 // ahead of the force path when `params.rough`; it returns false (caller falls back
 // to force) when the design has fewer than two clusters to arrange.
 
-const ROUGH_ITERS: usize = 240;
+const rough_iters: usize = 240;
 /// Connectivity spring gain per shared net (linear; equilibrium ≈ box contact).
-const ROUGH_K_ATT: f64 = 0.02;
+const rough_k_att: f64 = 0.02;
 /// Box-overlap repulsion gain (keeps blocks from sitting on top of each other).
-const ROUGH_K_REP: f64 = 0.5;
+const rough_k_rep: f64 = 0.5;
 /// Weak pull toward the centroid so disconnected blocks don't drift away.
-const ROUGH_K_CENTER: f64 = 0.01;
-const ROUGH_STEP: f64 = 0.5;
-const ROUGH_MAX_STEP_MM: f64 = 4.0;
+const rough_k_center: f64 = 0.01;
+const rough_step: f64 = 0.5;
+const rough_max_step_mm: f64 = 4.0;
 /// Breathing room left between blocks during the relaxation (mm).
-const ROUGH_BLOCK_GAP_MM: f64 = 2.0;
+const rough_block_gap_mm: f64 = 2.0;
 /// Cap on the residual overlap-only settling sweeps after the spring
 /// relaxation — a short cleanup for the last touching pairs, not the main
 /// separation mechanism (that's the scaled spring/repulsion loop, which
 /// keeps adjacency while it separates).
-const ROUGH_SEPARATE_ITERS: usize = 150;
+const rough_separate_iters: usize = 150;
 /// Coarse grid the block centres snap to — legible + easy to grab (5× base grid).
-const ROUGH_ORIGIN_GRID_MM: f64 = 1.0;
+const rough_origin_grid_mm: f64 = 1.0;
 /// Courtyard spacing forced on a FLAT rough seed so the compaction pass spreads the
 /// passives radially around the hub (in the direction of each part's pad) instead of
 /// collapsing them into a block off to one side. Tuned on lmk05318b-clock.
-const ROUGH_DECLUMP_GAP_MM: f64 = 3.0;
+const rough_declump_gap_mm: f64 = 3.0;
 
 /// Wrap a single free top-level part as its own one-member rigid block, so the
 /// arranger places it by connectivity and the legalizer keeps it clear.
@@ -2645,7 +2645,7 @@ fn runRough(
     var child_params = params;
     child_params.rough = false; // nested module solves place normally…
     child_params.fast = true; // …with the bare force relax — a quick seed, N modules deep
-    var macros: std.ArrayListUnmanaged(Macro) = .empty;
+    var macros: std.ArrayList(Macro) = .empty;
     for (prep.block.sub_blocks) |sub| {
         if (try buildSubMacro(arena, sub, null, prep, prep.project_dir, child_params)) |m| {
             try macros.append(arena, m);
@@ -2749,7 +2749,7 @@ fn leafRefPrefix(ref: []const u8) u8 {
 }
 
 /// True when part index `pi` has a pin on `net`.
-fn netHasPart(net: FlatNet, pi: usize, idx_of: *std.StringHashMap(usize)) bool {
+fn netHasPart(net: FlatNet, pi: usize, idx_of: *std.StringHashMapUnmanaged(usize)) bool {
     for (net.pins) |pr| {
         if ((idx_of.get(pr.ref_des) orelse continue) == pi) return true;
     }
@@ -2757,7 +2757,7 @@ fn netHasPart(net: FlatNet, pi: usize, idx_of: *std.StringHashMap(usize)) bool {
 }
 
 /// The hub's physical pad id on `net` (for pin-role lookup), or "" if absent.
-fn hubPinOnNet(net: FlatNet, hi: usize, idx_of: *std.StringHashMap(usize)) []const u8 {
+fn hubPinOnNet(net: FlatNet, hi: usize, idx_of: *std.StringHashMapUnmanaged(usize)) []const u8 {
     for (net.pins) |pr| {
         if ((idx_of.get(pr.ref_des) orelse continue) == hi) return pr.pin;
     }
@@ -2766,8 +2766,8 @@ fn hubPinOnNet(net: FlatNet, hi: usize, idx_of: *std.StringHashMap(usize)) []con
 
 /// Footprint-local centres of every hub pad on `net` — a rail lands on many, a
 /// signal on one, so the caller can both rank nets and spread parts across pads.
-fn hubPadsOnNet(arena: std.mem.Allocator, hub: Part, hi: usize, net: FlatNet, idx_of: *std.StringHashMap(usize)) std.mem.Allocator.Error![][2]f64 {
-    var out: std.ArrayListUnmanaged([2]f64) = .empty;
+fn hubPadsOnNet(arena: std.mem.Allocator, hub: Part, hi: usize, net: FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) std.mem.Allocator.Error![][2]f64 {
+    var out: std.ArrayList([2]f64) = .empty;
     for (net.pins) |pr| {
         if ((idx_of.get(pr.ref_des) orelse continue) != hi) continue;
         const pad = padLocal(hub, pr.pin);
@@ -2783,7 +2783,7 @@ fn hubPadsOnNet(arena: std.mem.Allocator, hub: Part, hi: usize, net: FlatNet, id
 /// cross-hub binding: a `(decouples "U2" 8)` cap names U2's pad 8, and the anchor
 /// U1 may carry an unrelated pad 8 on a different net — without the on-net check it
 /// would mis-resolve to U1's pad 8. Null when `tok` is empty or names no on-net hub pad.
-fn servedPadLocal(parts: []const Part, hi: usize, pi: usize, tok: []const u8, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) ?[2]f64 {
+fn servedPadLocal(parts: []const Part, hi: usize, pi: usize, tok: []const u8, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) ?[2]f64 {
     if (tok.len == 0) return null;
     for (nets) |net| {
         if (!netHasPart(net, pi, idx_of)) continue;
@@ -2809,17 +2809,17 @@ fn roughNameMatch(ref: []const u8, origin: []const u8, want: []const u8) bool {
 }
 
 /// IC edge → first ring of parts (mm) and the spacing between parts along an edge.
-const PAD_ANCHOR_IC_GAP_MM: f64 = 0.5;
-const PAD_ANCHOR_PART_GAP_MM: f64 = 0.4;
+const pad_anchor_ic_gap_mm: f64 = 0.5;
+const pad_anchor_part_gap_mm: f64 = 0.4;
 /// Target lanes per IC side: a crowded side spreads ALONG the edge into about this
 /// many lanes (sized to the part count) instead of stacking many lanes outward, so
 /// even low-priority parts stay close to the IC radially. Smaller = tighter ring.
-const ROUGH_PACK_LANES: f64 = 2;
+const rough_pack_lanes: f64 = 2;
 /// `SidePart.along` sentinel meaning "no preferred tangential spot — pack me
 /// sequentially from the lane start". `dockSidesByTier` clamps a part to
 /// `max(along, cursor+half)`, so a literal 0 would pin every such part to x≥0
 /// (a dense pile); a large-negative value lets them spread across the whole lane.
-const ALONG_PACK_SEQ: f64 = -1e9;
+const along_pack_seq: f64 = -1e9;
 
 /// Rough-output ring tightness, set per solve in `packPadAnchored` and consulted
 /// by `dockSidesByTier` (so the value need not thread through `refineSidesByPull`).
@@ -2829,8 +2829,8 @@ const ALONG_PACK_SEQ: f64 = -1e9;
 /// side assignment unchanged). The force SEED keeps the looser default so its
 /// tuned solve is unchanged. Defaults equal the loose constants, so any path that
 /// doesn't set them behaves as before.
-threadlocal var g_rough_ic_gap: f64 = PAD_ANCHOR_IC_GAP_MM;
-threadlocal var g_rough_part_gap: f64 = PAD_ANCHOR_PART_GAP_MM;
+threadlocal var g_rough_ic_gap: f64 = pad_anchor_ic_gap_mm;
+threadlocal var g_rough_part_gap: f64 = pad_anchor_part_gap_mm;
 
 /// One part docked to a side of the anchor IC in `packPadAnchored`: its index,
 /// priority `tier` (lower = tighter to the IC), desired coordinate ALONG the edge
@@ -2845,7 +2845,7 @@ const SidePart = struct { i: usize, tier: usize, along: f64, half_along: f64, de
 /// busy side spreads tangentially rather than stacking many lanes radially; each
 /// lane is flush at its inner radius and the next clears only the deepest part in
 /// THIS lane (a per-lane pitch — one big part widens its own lane, not the side).
-fn dockSidesByTier(parts: []Part, sides: *[4]std.ArrayListUnmanaged(SidePart), hkb: KeepBox) void {
+fn dockSidesByTier(parts: []Part, sides: *[4]std.ArrayList(SidePart), hkb: KeepBox) void {
     const lessTierAlong = struct {
         fn lt(_: void, a: SidePart, b: SidePart) bool {
             if (a.tier != b.tier) return a.tier < b.tier;
@@ -2867,7 +2867,7 @@ fn dockSidesByTier(parts: []Part, sides: *[4]std.ArrayListUnmanaged(SidePart), h
         // (tangential spread) instead of more lanes (radial stacking).
         var total: f64 = 0;
         for (list.items) |a| total += 2 * a.half_along + part_gap;
-        const limit = @max(span, total / (2 * ROUGH_PACK_LANES));
+        const limit = @max(span, total / (2 * rough_pack_lanes));
         var lane_inner: f64 = base + ic_gap;
         var lane_maxd: f64 = 0;
         var cursor: f64 = -limit;
@@ -2908,8 +2908,8 @@ fn dockSidesByTier(parts: []Part, sides: *[4]std.ArrayListUnmanaged(SidePart), h
 /// A net hitting ≥ this many anchor-hub pads is a power/ground rail, not a local
 /// signal link; a net joining ≥ this many parts is a bus. Either disqualifies the
 /// net from forming a cluster edge (they'd merge every part into one blob).
-const CLUSTER_MAX_RAIL_PADS: usize = 3;
-const CLUSTER_MAX_NET_PARTS: usize = 5;
+const cluster_max_rail_pads: usize = 3;
+const cluster_max_net_parts: usize = 5;
 
 /// Connected components of the NON-hub parts, joined by "local" nets (not ground,
 /// not a wide rail, not a bus) — i.e. the signal subsystems: a crystal + its
@@ -2952,7 +2952,7 @@ fn buildClusters(
     parts: []const Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) std.mem.Allocator.Error!ClusterInfo {
     const n = parts.len;
     const p = try arena.alloc(usize, n);
@@ -2972,7 +2972,7 @@ fn buildClusters(
                 if (first == null) first = idx;
             }
         }
-        if (hubpads >= CLUSTER_MAX_RAIL_PADS or members >= CLUSTER_MAX_NET_PARTS) continue;
+        if (hubpads >= cluster_max_rail_pads or members >= cluster_max_net_parts) continue;
         const f = first orelse continue;
         for (net.pins) |pr| {
             const idx = idx_of.get(pr.ref_des) orelse continue;
@@ -3022,14 +3022,14 @@ fn assignSides(
     parts: []Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     roles: pin_roles.PartRoles,
     ci: ClusterInfo,
     tier_of: []const usize,
     sig_side: []u8,
     served_pad: []const ?[2]f64,
-    sides: *[4]std.ArrayListUnmanaged(SidePart),
-    leftover: *std.ArrayListUnmanaged(usize),
+    sides: *[4]std.ArrayList(SidePart),
+    leftover: *std.ArrayList(usize),
 ) std.mem.Allocator.Error!void {
     var net_next: std.AutoHashMapUnmanaged(usize, usize) = .empty;
     for (parts, 0..) |p, pi| {
@@ -3101,7 +3101,7 @@ fn assignSides(
         var pad: [2]f64 = undefined;
         if (is_cap and served_pad[pi] != null) {
             pad = served_pad[pi].?;
-        } else if (is_cap and rail != null and rail_cnt >= CLUSTER_MAX_RAIL_PADS) {
+        } else if (is_cap and rail != null and rail_cnt >= cluster_max_rail_pads) {
             pad = (try rrPad(arena, parts, hi, nets, idx_of, &net_next, rail.?)) orelse {
                 try leftover.append(arena, pi);
                 continue;
@@ -3154,10 +3154,10 @@ fn cohereGroups(
     tier_of: []const usize,
     sig_side: []const u8,
     cohere_side: []u8,
-    sides: *[4]std.ArrayListUnmanaged(SidePart),
+    sides: *[4]std.ArrayList(SidePart),
 ) std.mem.Allocator.Error!void {
     for (groups) |g| {
-        var members: std.ArrayListUnmanaged(usize) = .empty;
+        var members: std.ArrayList(usize) = .empty;
         var votes = [_]usize{ 0, 0, 0, 0 };
         for (g.members) |want| {
             for (parts, 0..) |p, pi| {
@@ -3207,7 +3207,7 @@ fn cohereGroups(
             try sides[dom].append(arena, .{
                 .i = pi,
                 .tier = tier_of[pi],
-                .along = ALONG_PACK_SEQ, // spread across the shared lane, not piled at x≥0
+                .along = along_pack_seq, // spread across the shared lane, not piled at x≥0
                 .half_along = if (vert) pkb.hh else pkb.hw,
                 .depth = if (vert) pkb.hw else pkb.hh,
             });
@@ -3222,7 +3222,7 @@ fn rrPad(
     parts: []const Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     net_next: *std.AutoHashMapUnmanaged(usize, usize),
     net: usize,
 ) std.mem.Allocator.Error!?[2]f64 {
@@ -3239,10 +3239,10 @@ fn rrPad(
 /// rail barely tugs (a decoupling cap must not be yanked to one arbitrary VDD
 /// pad). Signal + neighbour pulls are *directional* — a part with neither stays
 /// where the initial dock put it (the rail tug alone can't pick a side).
-const ROUGH_RESIDE_PASSES: usize = 4;
-const RESIDE_W_SIG: f64 = 2.0;
-const RESIDE_W_NBR: f64 = 1.5;
-const RESIDE_W_RAIL: f64 = 0.3;
+const rough_reside_passes: usize = 4;
+const reside_w_sig: f64 = 2.0;
+const reside_w_nbr: f64 = 1.5;
+const reside_w_rail: f64 = 0.3;
 
 /// A part's refinement pull: the weighted centroid of its real connections plus
 /// `dir` — whether any of that pull is *directional* (a signal pad or a neighbour,
@@ -3260,7 +3260,7 @@ fn sidePullTarget(
     hi: usize,
     pi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) std.mem.Allocator.Error!PullTarget {
     var sx: f64 = 0;
     var sy: f64 = 0;
@@ -3279,10 +3279,10 @@ fn sidePullTarget(
             const pads = try hubPadsOnNet(arena, parts[hi], hi, net, idx_of);
             if (hubpads <= 2) {
                 for (pads) |pd| {
-                    sx += pd[0] * RESIDE_W_SIG;
-                    sy += pd[1] * RESIDE_W_SIG;
+                    sx += pd[0] * reside_w_sig;
+                    sy += pd[1] * reside_w_sig;
                 }
-                sw += RESIDE_W_SIG * @as(f64, @floatFromInt(pads.len));
+                sw += reside_w_sig * @as(f64, @floatFromInt(pads.len));
                 if (pads.len > 0) has_dir = true;
             } else if (pads.len > 0) {
                 // Wide rail: pull weakly toward the rail pads' centroid.
@@ -3293,21 +3293,21 @@ fn sidePullTarget(
                     cy += pd[1];
                 }
                 const np: f64 = @floatFromInt(pads.len);
-                sx += (cx / np) * RESIDE_W_RAIL;
-                sy += (cy / np) * RESIDE_W_RAIL;
-                sw += RESIDE_W_RAIL;
+                sx += (cx / np) * reside_w_rail;
+                sy += (cy / np) * reside_w_rail;
+                sw += reside_w_rail;
             }
         }
         // Neighbour pull — only on a local net (not a wide rail, not a bus),
         // matching the clustering rules so VDD/GND don't drag every part toward
         // every other.
-        if (hubpads >= CLUSTER_MAX_RAIL_PADS or members > CLUSTER_MAX_NET_PARTS) continue;
+        if (hubpads >= cluster_max_rail_pads or members > cluster_max_net_parts) continue;
         for (net.pins) |pr| {
             const idx = idx_of.get(pr.ref_des) orelse continue;
             if (idx == hi or idx == pi) continue;
-            sx += parts[idx].x * RESIDE_W_NBR;
-            sy += parts[idx].y * RESIDE_W_NBR;
-            sw += RESIDE_W_NBR;
+            sx += parts[idx].x * reside_w_nbr;
+            sy += parts[idx].y * reside_w_nbr;
+            sw += reside_w_nbr;
             has_dir = true;
         }
     }
@@ -3330,16 +3330,16 @@ fn refineSidesByPull(
     parts: []Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     tier_of: []const usize,
     cohere_side: []const u8,
-    sides: *[4]std.ArrayListUnmanaged(SidePart),
+    sides: *[4]std.ArrayList(SidePart),
     hkb: KeepBox,
 ) std.mem.Allocator.Error!void {
     // The ringed parts (everything currently docked to a side; leftover
     // ground-only parts stay put) and each one's current side, seeded from the
     // initial buckets so we can detect convergence.
-    var ring: std.ArrayListUnmanaged(usize) = .empty;
+    var ring: std.ArrayList(usize) = .empty;
     const cur_side = try arena.alloc(u8, parts.len);
     @memset(cur_side, 255);
     for (sides, 0..) |list, s| {
@@ -3351,7 +3351,7 @@ fn refineSidesByPull(
     if (ring.items.len == 0) return;
 
     var pass: usize = 0;
-    while (pass < ROUGH_RESIDE_PASSES) : (pass += 1) {
+    while (pass < rough_reside_passes) : (pass += 1) {
         var moved = false;
         for (sides) |*list| list.clearRetainingCapacity();
         for (ring.items) |pi| {
@@ -3367,7 +3367,7 @@ fn refineSidesByPull(
             if (cohere_side[pi] < 4) {
                 s = cohere_side[pi];
                 vert = s < 2;
-                along = ALONG_PACK_SEQ;
+                along = along_pack_seq;
             }
             if (cur_side[pi] != s) {
                 moved = true;
@@ -3410,7 +3410,7 @@ fn segsCross(a1: [2]f64, a2: [2]f64, b1: [2]f64, b2: [2]f64) bool {
 /// Euclidean minimum spanning tree (Prim's) over `pts`, appending its edges as
 /// segments to `out`. An MST is planar, so a net never crosses ITSELF — the
 /// crossing metric then measures only the inter-net tangle that placement controls.
-fn primEdges(arena: std.mem.Allocator, pts: []const [2]f64, out: *std.ArrayListUnmanaged([4]f64)) std.mem.Allocator.Error!void {
+fn primEdges(arena: std.mem.Allocator, pts: []const [2]f64, out: *std.ArrayList([4]f64)) std.mem.Allocator.Error!void {
     const n = pts.len;
     const intree = try arena.alloc(bool, n);
     @memset(intree, false);
@@ -3448,8 +3448,8 @@ fn appendCapLoop(
     hi: usize,
     pi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
-    out: *std.ArrayListUnmanaged([4]f64),
+    idx_of: *std.StringHashMapUnmanaged(usize),
+    out: *std.ArrayList([4]f64),
 ) std.mem.Allocator.Error!void {
     for (nets) |net| {
         if (!netHasPart(net, pi, idx_of)) continue;
@@ -3486,12 +3486,12 @@ fn crossingMetric(
     parts: []const Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) std.mem.Allocator.Error!usize {
-    var segs: std.ArrayListUnmanaged([4]f64) = .empty;
+    var segs: std.ArrayList([4]f64) = .empty;
     for (nets) |net| {
         if (pin_roles.isGroundFn(shortName(net.name))) continue;
-        var pts: std.ArrayListUnmanaged([2]f64) = .empty;
+        var pts: std.ArrayList([2]f64) = .empty;
         for (net.pins) |pr| {
             const idx = idx_of.get(pr.ref_des) orelse continue;
             const pad = padOnNet(parts[idx], idx, net, idx_of);
@@ -3513,8 +3513,8 @@ fn crossingMetric(
     return n;
 }
 
-const ROUGH_POLISH_PASSES: usize = 6;
-const ROUGH_POLISH_MAX_PARTS: usize = 80; // bound the O(parts²·segs²) search to module sizes
+const rough_polish_passes: usize = 6;
+const rough_polish_max_parts: usize = 80; // bound the O(parts²·segs²) search to module sizes
 
 /// Side (0 left, 1 right, 2 top, 3 bottom) of point (x,y) relative to the anchor
 /// at (ax,ay) — the same quadrant rule the side bucketing uses.
@@ -3537,14 +3537,14 @@ fn polishCrossings(
     parts: []Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     want_side: []const u8,
 ) std.mem.Allocator.Error!void {
     const ax = parts[hi].x;
     const ay = parts[hi].y;
     var best = try crossingMetric(arena, parts, hi, nets, idx_of);
     var pass: usize = 0;
-    while (best > 0 and pass < ROUGH_POLISH_PASSES) : (pass += 1) {
+    while (best > 0 and pass < rough_polish_passes) : (pass += 1) {
         var improved = false;
         for (parts, 0..) |_, i| {
             if (i == hi or parts[i].locked) continue;
@@ -3591,7 +3591,7 @@ fn importantPadLocal(
     pi: usize,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) ?[2]f64 {
     var best: ?FlatNet = null;
     var best_cnt: usize = std.math.maxInt(usize);
@@ -3629,7 +3629,7 @@ fn orientPadsToIC(
     hi: usize,
     owner_of: ?[]const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) void {
     for (parts, 0..) |*p, pi| {
         if (pi == hi or p.kind == .hub or p.pads.len != 2) continue;
@@ -3651,7 +3651,7 @@ fn orientPadsToIC(
 /// hub's non-ground nets AND the hub touches an input-rail or switch-node
 /// class net. A clock module's ferrite beads don't ride VIN/SW-class nets,
 /// so it doesn't qualify.
-fn isSwitcherBoard(parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) bool {
+fn isSwitcherBoard(parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) bool {
     const hi = pickAnchorHub(parts, nets) orelse return false;
     var has_ind = false;
     var has_hot = false;
@@ -3747,8 +3747,8 @@ fn packPadAnchored(
     // solve is unchanged. (Corpus A/B vs the starred hand layouts: this roughly
     // halved the median part→IC gap and the decoupling-loop length with the side
     // assignment unchanged — see `g_rough_ic_gap`.)
-    g_rough_ic_gap = if (cohere) FINAL_CLEAR else PAD_ANCHOR_IC_GAP_MM;
-    g_rough_part_gap = if (cohere) FINAL_CLEAR else PAD_ANCHOR_PART_GAP_MM;
+    g_rough_ic_gap = if (cohere) final_clear else pad_anchor_ic_gap_mm;
+    g_rough_part_gap = if (cohere) final_clear else pad_anchor_part_gap_mm;
 
     // Priority tier per part from the `(rough …)` groups: group index = tier
     // (index 0 placed tightest to the anchor). A part in no group gets the last
@@ -3769,8 +3769,8 @@ fn packPadAnchored(
 
     // One bucket per side (0 left, 1 right, 2 top, 3 bottom) of `SidePart`s; the
     // lane packing (tier order, per-lane pitch) lives in `dockSidesByTier`.
-    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
-    var leftover: std.ArrayListUnmanaged(usize) = .empty;
+    var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
+    var leftover: std.ArrayList(usize) = .empty;
 
     // Cluster connected signal subsystems, then bucket each part onto a side of
     // the IC. Decoupling caps spread across their rail; signal parts sit by their
@@ -3825,7 +3825,7 @@ fn packPadAnchored(
             x += pkb.hw;
             parts[pi].x = gridRound(x);
             parts[pi].y = y;
-            x += pkb.hw + PAD_ANCHOR_PART_GAP_MM;
+            x += pkb.hw + pad_anchor_part_gap_mm;
         }
     }
 
@@ -3854,7 +3854,7 @@ fn packPadAnchored(
     // Crossing-reduction polish: same-size swaps that lower the airwire-crossing
     // count, on top of the cluster-aware seed (modules only — it's bounded but
     // O(parts²·segments²) per pass). `want_side` keeps it from re-siding parts.
-    if (parts.len <= ROUGH_POLISH_MAX_PARTS) try polishCrossings(arena, parts, hi, nets, &prep.idx_of, want_side);
+    if (parts.len <= rough_polish_max_parts) try polishCrossings(arena, parts, hi, nets, &prep.idx_of, want_side);
 
     // Orient each 2-pad passive so its important pad faces the IC (power pad of a
     // bypass cap toward the IC power pin, signal pad of a resistor toward the IC).
@@ -3972,7 +3972,7 @@ fn pinTargets(
     owner: usize,
     owner_of: []const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     built: Built,
     compass: ?[]const ?u2,
 ) std.mem.Allocator.Error![]?PinTarget {
@@ -4011,7 +4011,7 @@ fn pinTargets(
                 // Flow-edge disambiguation: keep only the rail pads that sit on
                 // the port's edge — when the owner has any there. One pad, or a
                 // rail entirely elsewhere, keeps pad truth untouched.
-                var on_edge: std.ArrayListUnmanaged([2]f64) = .empty;
+                var on_edge: std.ArrayList([2]f64) = .empty;
                 for (pads) |q| {
                     if (pinTargetFromPad(hkb, q[0], q[1]).edge == e) try on_edge.append(arena, q);
                 }
@@ -4095,7 +4095,7 @@ fn pinChainAttach(
     hi: usize,
     owner_of: ?[]const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     placed: []bool,
     gap: f64,
 ) void {
@@ -4111,7 +4111,7 @@ fn pinChainAttach(
             var best_pins: usize = std.math.maxInt(usize);
             for (nets) |net| {
                 if (pin_roles.isGroundFn(shortName(net.name))) continue;
-                if (net.pins.len >= best_pins or net.pins.len > CLUSTER_MAX_NET_PARTS) continue;
+                if (net.pins.len >= best_pins or net.pins.len > cluster_max_net_parts) continue;
                 if (!netHasPart(net, pi, idx_of)) continue;
                 for (net.pins) |pr| {
                     const qi = idx_of.get(pr.ref_des) orelse continue;
@@ -4171,7 +4171,7 @@ fn pinOwners(
     parts: []const Part,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     built: Built,
 ) std.mem.Allocator.Error![]usize {
     const owner_of = try arena.alloc(usize, parts.len);
@@ -4253,7 +4253,7 @@ fn overlayAuthoredGroups(
     block: *const DesignBlock,
     instances: []const export_kicad.FlatInstance,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) std.mem.Allocator.Error!void {
     for (block.groups) |vg| {
         const m = try resolveGroupMembers(arena, instances, vg.members, null);
@@ -4303,17 +4303,17 @@ fn ringOwner(
     owner: usize,
     owner_of: []const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     built: Built,
     compass: ?[]const ?u2,
     placed: []bool,
 ) std.mem.Allocator.Error![4]f64 {
     const hkb = keepBoxOf(parts[owner]);
-    const gap = FINAL_CLEAR;
+    const gap = final_clear;
     const tgt = try pinTargets(arena, parts, owner, owner_of, nets, idx_of, built, compass);
     var ext = [4]f64{ 0, 0, 0, 0 };
 
-    var edges = [_]std.ArrayListUnmanaged(PinItem){ .empty, .empty, .empty, .empty };
+    var edges = [_]std.ArrayList(PinItem){ .empty, .empty, .empty, .empty };
     for (parts, 0..) |*p, pi| {
         const t = tgt[pi] orelse continue;
         if (pi == owner) continue;
@@ -4398,10 +4398,10 @@ fn buildPinGroups(
     owner_of: []usize,
     hi: usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     built: Built,
 ) std.mem.Allocator.Error![]PinGroup {
-    var groups: std.ArrayListUnmanaged(PinGroup) = .empty;
+    var groups: std.ArrayList(PinGroup) = .empty;
     for (parts, 0..) |_, oi| {
         if (oi == hi or owner_of[oi] != oi) continue;
         var owns = false;
@@ -4416,9 +4416,9 @@ fn buildPinGroups(
         @memset(placed, false);
         placed[oi] = true;
         _ = try ringOwner(arena, parts, oi, owner_of, nets, idx_of, built, null, placed);
-        pinChainAttach(parts, oi, owner_of, nets, idx_of, placed, FINAL_CLEAR);
+        pinChainAttach(parts, oi, owner_of, nets, idx_of, placed, final_clear);
         orientPadsToIC(parts, oi, owner_of, nets, idx_of);
-        var members: std.ArrayListUnmanaged(usize) = .empty;
+        var members: std.ArrayList(usize) = .empty;
         var bb = [4]f64{ 1e18, 1e18, -1e18, -1e18 };
         growKeepBBox(&bb, parts[oi]);
         for (parts, 0..) |q, qi| {
@@ -4436,7 +4436,7 @@ fn buildPinGroups(
 }
 
 /// True when `net` lands on the group — on its owner hub or any owned member.
-fn netTouchesGroup(net: FlatNet, owner: usize, owner_of: []const usize, idx_of: *std.StringHashMap(usize)) bool {
+fn netTouchesGroup(net: FlatNet, owner: usize, owner_of: []const usize, idx_of: *std.StringHashMapUnmanaged(usize)) bool {
     for (net.pins) |pr| {
         const qi = idx_of.get(pr.ref_des) orelse continue;
         if (qi == owner or owner_of[qi] == owner) return true;
@@ -4460,7 +4460,7 @@ fn groupAnchorTarget(
     g: PinGroup,
     owner_of: []const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     hkb: KeepBox,
     compass: ?[]const ?u2,
 ) std.mem.Allocator.Error!?PinTarget {
@@ -4535,7 +4535,7 @@ fn groupDockRot(
     g: PinGroup,
     owner_of: []const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     dock: Pt,
 ) std.mem.Allocator.Error!f64 {
     const c = Pt{ .x = (g.bbox[0] + g.bbox[2]) / 2, .y = (g.bbox[1] + g.bbox[3]) / 2 };
@@ -4594,15 +4594,15 @@ fn dockGroups(
     groups: []const PinGroup,
     owner_of: []const usize,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     compass: ?[]const ?u2,
     ring_ext: [4]f64,
     placed: []bool,
 ) std.mem.Allocator.Error!void {
     if (groups.len == 0) return;
     const hkb = keepBoxOf(parts[hi]);
-    const gap = FINAL_CLEAR;
-    var edges = [_]std.ArrayListUnmanaged(GroupDock){ .empty, .empty, .empty, .empty };
+    const gap = final_clear;
+    var edges = [_]std.ArrayList(GroupDock){ .empty, .empty, .empty, .empty };
     for (groups, 0..) |g, gi| {
         // A group with no net to the anchor still needs a home: bottom edge.
         const t = (try groupAnchorTarget(arena, parts, hi, g, owner_of, nets, idx_of, hkb, compass)) orelse
@@ -4715,9 +4715,9 @@ fn mirrorDiffTwins(
     owner_of: []const usize,
     instances: []const export_kicad.FlatInstance,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) std.mem.Allocator.Error!void {
-    var pairs: std.ArrayListUnmanaged(DiffPair) = .empty;
+    var pairs: std.ArrayList(DiffPair) = .empty;
     for (nets, 0..) |net, pi_net| {
         const mate = (try diffMateOfP(arena, net.name)) orelse continue;
         for (nets, 0..) |cand, ni_net| {
@@ -4815,7 +4815,7 @@ fn runPinAdjacent(
     const ring_ext = try ringOwner(arena, parts, hi, owner_of, nets, &prep.idx_of, built, compass, placed);
     try dockGroups(arena, parts, hi, groups, owner_of, nets, &prep.idx_of, compass, ring_ext, placed);
 
-    pinChainAttach(parts, hi, null, nets, &prep.idx_of, placed, FINAL_CLEAR);
+    pinChainAttach(parts, hi, null, nets, &prep.idx_of, placed, final_clear);
 
     // Ground-only / unconnected leftovers: one row below the board.
     var lx: f64 = -hkb.hw;
@@ -4825,7 +4825,7 @@ fn runPinAdjacent(
         lx += pkb.hw;
         p.x = gridRound(lx);
         p.y = gridRound(hkb.hh + 6);
-        lx += pkb.hw + PAD_ANCHOR_PART_GAP_MM;
+        lx += pkb.hw + pad_anchor_part_gap_mm;
     }
 
     orientPadsToIC(parts, hi, owner_of, nets, &prep.idx_of);
@@ -4872,7 +4872,7 @@ pub fn solvePinAdjacent(
 /// can penalize layouts where they do. Segments sharing an endpoint (a common
 /// pad) aren't crossings. O(S²) — module scale only.
 pub fn importantCrossings(arena: std.mem.Allocator, p: Placement) std.mem.Allocator.Error!usize {
-    var segs: std.ArrayListUnmanaged([4]f64) = .empty;
+    var segs: std.ArrayList([4]f64) = .empty;
     for (p.links) |l| {
         if (l.kind == .ground) continue;
         // Net-NAME classes (not pin functions): `.ground` and `.power` legs (a
@@ -4914,7 +4914,7 @@ fn crossingsOfSprings(
     springs: []const Spring,
     loops: []const Loop,
 ) std.mem.Allocator.Error!usize {
-    var segs: std.ArrayListUnmanaged([4]f64) = .empty;
+    var segs: std.ArrayList([4]f64) = .empty;
     for (springs) |s| {
         if (s.kind == .ground) continue;
         if (s.net.len > 0) {
@@ -5087,7 +5087,7 @@ fn arrangeMacros(
     macros: []const Macro,
     macro_of: []const ?usize,
     nets: []const FlatNet,
-    idx_of: *const std.StringHashMap(usize),
+    idx_of: *const std.StringHashMapUnmanaged(usize),
     parts: []const Part,
     pinned: []const bool,
 ) std.mem.Allocator.Error![][2]f64 {
@@ -5096,7 +5096,7 @@ fn arrangeMacros(
     // of its block pairs, so heavily-interconnected modules attract hardest.
     const w = try arena.alloc(f64, n * n);
     @memset(w, 0);
-    var touch: std.ArrayListUnmanaged(usize) = .empty;
+    var touch: std.ArrayList(usize) = .empty;
     for (nets) |net| {
         touch.clearRetainingCapacity();
         for (net.pins) |pin| {
@@ -5138,7 +5138,7 @@ fn arrangeMacros(
     // begin non-overlapping and the springs pull connected ones together.
     const centers = try arena.alloc([2]f64, n);
     const cols: usize = @max(1, numeric.toCount(@ceil(@sqrt(@as(f64, @floatFromInt(n))))));
-    const spacing = max_span + ROUGH_BLOCK_GAP_MM;
+    const spacing = max_span + rough_block_gap_mm;
     for (0..n) |i| {
         if (pinned[i]) { // a pinned block anchors at its members' current centre
             const b = membersBox(parts, macros[i].members);
@@ -5155,7 +5155,7 @@ fn arrangeMacros(
     // Iteration budget scales with block count: 240 settles a dozen modules,
     // but a 100+-block board (labstation) needs several times that for the
     // spring/repulsion pair to finish separating while keeping adjacency.
-    const iters = ROUGH_ITERS + 8 * n;
+    const iters = rough_iters + 8 * n;
     var it: usize = 0;
     while (it < iters) : (it += 1) {
         @memset(force, [2]f64{ 0, 0 });
@@ -5168,29 +5168,29 @@ fn arrangeMacros(
         gx /= nf;
         gy /= nf;
         for (0..n) |a| {
-            force[a][0] += (gx - centers[a][0]) * ROUGH_K_CENTER;
-            force[a][1] += (gy - centers[a][1]) * ROUGH_K_CENTER;
+            force[a][0] += (gx - centers[a][0]) * rough_k_center;
+            force[a][1] += (gy - centers[a][1]) * rough_k_center;
             for (a + 1..n) |b| {
                 const dx = centers[b][0] - centers[a][0];
                 const dy = centers[b][1] - centers[a][1];
                 const ww = w[a * n + b];
                 if (ww > 0) { // connectivity spring (linear → equilibrium at contact)
-                    const fx = ROUGH_K_ATT * ww * dx;
-                    const fy = ROUGH_K_ATT * ww * dy;
+                    const fx = rough_k_att * ww * dx;
+                    const fy = rough_k_att * ww * dy;
                     force[a][0] += fx;
                     force[a][1] += fy;
                     force[b][0] -= fx;
                     force[b][1] -= fy;
                 }
-                const ox = hw[a] + hw[b] + ROUGH_BLOCK_GAP_MM - @abs(dx);
-                const oy = hh[a] + hh[b] + ROUGH_BLOCK_GAP_MM - @abs(dy);
+                const ox = hw[a] + hw[b] + rough_block_gap_mm - @abs(dx);
+                const oy = hh[a] + hh[b] + rough_block_gap_mm - @abs(dy);
                 if (ox > 0 and oy > 0) { // overlapping: push along smaller-overlap axis
                     if (ox <= oy) {
-                        const push = ROUGH_K_REP * ox * (if (dx >= 0) @as(f64, 1) else -1);
+                        const push = rough_k_rep * ox * (if (dx >= 0) @as(f64, 1) else -1);
                         force[a][0] -= push;
                         force[b][0] += push;
                     } else {
-                        const push = ROUGH_K_REP * oy * (if (dy >= 0) @as(f64, 1) else -1);
+                        const push = rough_k_rep * oy * (if (dy >= 0) @as(f64, 1) else -1);
                         force[a][1] -= push;
                         force[b][1] += push;
                     }
@@ -5199,8 +5199,8 @@ fn arrangeMacros(
         }
         for (0..n) |a| {
             if (pinned[a]) continue; // pinned blocks push others but never move
-            centers[a][0] += @max(-ROUGH_MAX_STEP_MM, @min(ROUGH_MAX_STEP_MM, force[a][0] * ROUGH_STEP));
-            centers[a][1] += @max(-ROUGH_MAX_STEP_MM, @min(ROUGH_MAX_STEP_MM, force[a][1] * ROUGH_STEP));
+            centers[a][0] += @max(-rough_max_step_mm, @min(rough_max_step_mm, force[a][0] * rough_step));
+            centers[a][1] += @max(-rough_max_step_mm, @min(rough_max_step_mm, force[a][1] * rough_step));
         }
     }
 
@@ -5211,14 +5211,14 @@ fn arrangeMacros(
     // arrangement's shape is preserved) until every pair of block boxes is
     // disjoint or the pass caps out.
     var sit: usize = 0;
-    while (sit < ROUGH_SEPARATE_ITERS) : (sit += 1) {
+    while (sit < rough_separate_iters) : (sit += 1) {
         var any = false;
         for (0..n) |a| {
             for (a + 1..n) |b| {
                 const dx = centers[b][0] - centers[a][0];
                 const dy = centers[b][1] - centers[a][1];
-                const ox = hw[a] + hw[b] + ROUGH_BLOCK_GAP_MM - @abs(dx);
-                const oy = hh[a] + hh[b] + ROUGH_BLOCK_GAP_MM - @abs(dy);
+                const ox = hw[a] + hw[b] + rough_block_gap_mm - @abs(dx);
+                const oy = hh[a] + hh[b] + rough_block_gap_mm - @abs(dy);
                 if (ox <= 0 or oy <= 0) continue;
                 any = true;
                 const half: f64 = if (pinned[a] or pinned[b]) 1.0 else 0.5;
@@ -5240,8 +5240,8 @@ fn arrangeMacros(
     for (0..n) |i| {
         // Snap the block CENTRE to the coarse grid, then back out the origin so the
         // member offsets (grid multiples) keep every part on the base grid.
-        const ccx = @round(centers[i][0] / ROUGH_ORIGIN_GRID_MM) * ROUGH_ORIGIN_GRID_MM;
-        const ccy = @round(centers[i][1] / ROUGH_ORIGIN_GRID_MM) * ROUGH_ORIGIN_GRID_MM;
+        const ccx = @round(centers[i][0] / rough_origin_grid_mm) * rough_origin_grid_mm;
+        const ccy = @round(centers[i][1] / rough_origin_grid_mm) * rough_origin_grid_mm;
         origins[i] = .{ gridRound(ccx - offx[i]), gridRound(ccy - offy[i]) };
     }
     return origins;
@@ -5256,7 +5256,7 @@ fn arrangeMacros(
 
 /// Clearance between neighbouring edge-docked parts along their shared edge,
 /// and between an edge part and the corner hardware bounding its span (mm).
-const BOARD_EDGE_GAP_MM: f64 = 1.0;
+const board_edge_gap_mm: f64 = 1.0;
 
 /// The four `(corners …)` slots in authored order.
 const CornerSlot = enum { tl, tr, br, bl };
@@ -5305,7 +5305,7 @@ fn edgeInwardRot(p: Part, edge: Edge) f64 {
 /// non-ground net with (ground nets touch everything, pulling every connector
 /// to the board centre). Falls back to ground-net partners, then null. The
 /// docked connector slides along its edge toward this point.
-fn attachCentroid(parts: []const Part, idx_of: *const std.StringHashMap(usize), nets: []const FlatNet, pi: usize) ?Pt {
+fn attachCentroid(parts: []const Part, idx_of: *const std.StringHashMapUnmanaged(usize), nets: []const FlatNet, pi: usize) ?Pt {
     var sx: f64 = 0;
     var sy: f64 = 0;
     var n: f64 = 0;
@@ -5364,8 +5364,8 @@ fn resolveBoardClaims(
 ) std.mem.Allocator.Error!BoardClaims {
     const claimed = try arena.alloc(bool, nparts);
     @memset(claimed, false);
-    var unresolved: std.ArrayListUnmanaged([]const u8) = .empty;
-    var side_lists: [4]std.ArrayListUnmanaged(SideRef) = .{ .empty, .empty, .empty, .empty };
+    var unresolved: std.ArrayList([]const u8) = .empty;
+    var side_lists: [4]std.ArrayList(SideRef) = .{ .empty, .empty, .empty, .empty };
     for (spec.sides) |s| {
         const ei: usize = @intFromEnum(edgeFromSide(s.side));
         for (s.items) |it| {
@@ -5377,7 +5377,7 @@ fn resolveBoardClaims(
             } else try unresolved.append(arena, it.ref);
         }
     }
-    var corner_list: std.ArrayListUnmanaged(usize) = .empty;
+    var corner_list: std.ArrayList(usize) = .empty;
     for (spec.corners) |it| {
         if (resolvePart(instances, it.ref)) |pi| {
             if (!claimed[pi]) {
@@ -5387,7 +5387,7 @@ fn resolveBoardClaims(
         } else try unresolved.append(arena, it.ref);
     }
     if (record_unresolved and unresolved.items.len > 0) {
-        var all: std.ArrayListUnmanaged([]const u8) = .empty;
+        var all: std.ArrayList([]const u8) = .empty;
         try all.appendSlice(arena, g_placement_diag.unresolved);
         try all.appendSlice(arena, unresolved.items);
         g_placement_diag.unresolved = try all.toOwnedSlice(arena);
@@ -5409,10 +5409,10 @@ fn resolveBoardClaims(
 fn scrubClaimed(
     arena: std.mem.Allocator,
     list: []const []const u8,
-    idx_of: *const std.StringHashMap(usize),
+    idx_of: *const std.StringHashMapUnmanaged(usize),
     claimed: []const bool,
 ) std.mem.Allocator.Error![]const []const u8 {
-    var still: std.ArrayListUnmanaged([]const u8) = .empty;
+    var still: std.ArrayList([]const u8) = .empty;
     for (list) |ref| {
         const pi = idx_of.get(ref) orelse {
             try still.append(arena, ref);
@@ -5472,7 +5472,7 @@ fn packBoard(
     arena: std.mem.Allocator,
     parts: []Part,
     instances: []const export_kicad.FlatInstance,
-    idx_of: *const std.StringHashMap(usize),
+    idx_of: *const std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     spec: env.BoardSpec,
 ) std.mem.Allocator.Error!BoardRect {
@@ -5480,8 +5480,8 @@ fn packBoard(
 
     // Interior bbox: every part that is neither board-claimed nor staged in
     // the spec band (keepout extents — same boxes the collision pass checks).
-    var staged = std.StringHashMap(void).init(arena);
-    for (g_placement_diag.unplaced) |ref| try staged.put(ref, {});
+    var staged = std.StringHashMapUnmanaged(void).empty;
+    for (g_placement_diag.unplaced) |ref| try staged.put(arena, ref, {});
     var ix0 = std.math.inf(f64);
     var iy0 = std.math.inf(f64);
     var ix1 = -std.math.inf(f64);
@@ -5512,7 +5512,7 @@ fn packBoard(
             tmp.rot = if (sr.rot) |r| @mod(@round(r / 90.0) * 90.0, 360.0) else edgeInwardRot(tmp, edge);
             const kb = keepBoxOf(tmp);
             const depth = if (edge == .left or edge == .right) 2 * kb.hw else 2 * kb.hh;
-            lane[ei] = @max(lane[ei], depth + BOARD_EDGE_GAP_MM);
+            lane[ei] = @max(lane[ei], depth + board_edge_gap_mm);
         }
     }
     const rect = BoardRect{
@@ -5546,8 +5546,8 @@ fn packBoard(
             .top => .{ corner_box[0], corner_box[1] }, // TL, TR
             .bottom => .{ corner_box[3], corner_box[2] }, // BL, BR
         };
-        if (corner_at[0]) |cb| span_min = @max(span_min, (if (vertical) cb.y1 else cb.x1) + BOARD_EDGE_GAP_MM);
-        if (corner_at[1]) |cb| span_max = @min(span_max, (if (vertical) cb.y0 else cb.x0) - BOARD_EDGE_GAP_MM);
+        if (corner_at[0]) |cb| span_min = @max(span_min, (if (vertical) cb.y1 else cb.x1) + board_edge_gap_mm);
+        if (corner_at[1]) |cb| span_max = @min(span_max, (if (vertical) cb.y0 else cb.x0) - board_edge_gap_mm);
 
         const Entry = struct { pi: usize, want: f64, half: f64 };
         var entries_buf = try arena.alloc(Entry, list.len);
@@ -5590,7 +5590,7 @@ fn packBoard(
             const lo = if (i == 0)
                 span_min + e.half
             else
-                centers[i - 1] + entries[i - 1].half + e.half + BOARD_EDGE_GAP_MM;
+                centers[i - 1] + entries[i - 1].half + e.half + board_edge_gap_mm;
             centers[i] = @max(e.want, lo);
         }
         var i = entries.len;
@@ -5598,7 +5598,7 @@ fn packBoard(
         while (i > 0) {
             i -= 1;
             centers[i] = @min(centers[i], hi);
-            if (i > 0) hi = centers[i] - entries[i].half - entries[i - 1].half - BOARD_EDGE_GAP_MM;
+            if (i > 0) hi = centers[i] - entries[i].half - entries[i - 1].half - board_edge_gap_mm;
         }
         for (entries, 0..) |e, k| {
             const p = &parts[e.pi];
@@ -5617,7 +5617,7 @@ fn packBoard(
     g_placement_diag.unplaced = try scrubClaimed(arena, g_placement_diag.unplaced, idx_of, bc.claimed);
     g_placement_diag.auto_filled = try scrubClaimed(arena, g_placement_diag.auto_filled, idx_of, bc.claimed);
     staged.clearRetainingCapacity();
-    for (g_placement_diag.unplaced) |ref| try staged.put(ref, {});
+    for (g_placement_diag.unplaced) |ref| try staged.put(arena, ref, {});
 
     // The spec staging band was packed under the *interior*; a board outline
     // can reach further down. Keep the band clear of the rectangle.
@@ -5628,10 +5628,10 @@ fn packBoard(
         const kb = keepBoxOf(p);
         const top = p.y + kb.cyo - kb.hh;
         band_top = @min(band_top, top);
-        if (top < y1 + GRID_MM) band_hits = true;
+        if (top < y1 + grid_mm) band_hits = true;
     }
     if (band_hits) {
-        const dy = (y1 + STAGE_GAP_MM) - band_top;
+        const dy = (y1 + stage_gap_mm) - band_top;
         for (parts) |*p| {
             if (staged.contains(p.ref_des)) p.y += dy;
         }
@@ -5846,7 +5846,7 @@ pub fn solve(
                 try autofillUnlisted(arena, parts, &prep.idx_of, nets, built.loops);
             }
         }
-    } else if (mode == .refine and parts.len >= 2 and parts.len <= ROUTED_POLISH_MAX_PARTS and built.loops.len > 0) {
+    } else if (mode == .refine and parts.len >= 2 and parts.len <= routed_polish_max_parts and built.loops.len > 0) {
         // Seeded from an existing layout: keep its global arrangement, just run the
         // local routed tuck on it (the same monotonic, safety-netted pass the auto
         // solve finishes with), then the same priority-cap tuck. Lets a good hand
@@ -6080,8 +6080,8 @@ fn arrangeGrid(parts: []Part) void {
         const col: f64 = @floatFromInt(i % cols);
         const row: f64 = @floatFromInt(i / cols);
         p.rot = 0;
-        p.x = @round((col * cw + cw / 2) / GRID_MM) * GRID_MM;
-        p.y = @round((row * ch + ch / 2) / GRID_MM) * GRID_MM;
+        p.x = @round((col * cw + cw / 2) / grid_mm) * grid_mm;
+        p.y = @round((row * ch + ch / 2) / grid_mm) * grid_mm;
     }
 }
 
@@ -6092,7 +6092,7 @@ fn arrangeGrid(parts: []Part) void {
 /// reads, minus the placed positions.
 const Prepared = struct {
     parts: []Part,
-    idx_of: std.StringHashMap(usize),
+    idx_of: std.StringHashMapUnmanaged(usize),
     instances: []const export_kicad.FlatInstance,
     nets: []const FlatNet,
     built: Built,
@@ -6163,7 +6163,7 @@ fn netCurrents(arena: std.mem.Allocator, block: *const DesignBlock, nets: []cons
 /// The footprint-local pad of part `idx` that sits on net `net`, or a zero-size
 /// pad at the part centre when it has no pin on that net (so a proximity pull
 /// still has a sensible anchor — the part body).
-fn padOnNet(part: Part, idx: usize, net: FlatNet, idx_of: *std.StringHashMap(usize)) PadRect {
+fn padOnNet(part: Part, idx: usize, net: FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) PadRect {
     for (net.pins) |pr| {
         const i = idx_of.get(pr.ref_des) orelse continue;
         if (i != idx) continue;
@@ -6186,13 +6186,13 @@ fn resolveConstraints(
     instances: []const export_kicad.FlatInstance,
     nets: []const FlatNet,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
-    diags: ?*std.ArrayListUnmanaged([]const u8),
+    idx_of: *std.StringHashMapUnmanaged(usize),
+    diags: ?*std.ArrayList([]const u8),
 ) std.mem.Allocator.Error!Lowered {
     const c = block.constraints;
 
     const reject = struct {
-        fn add(a: std.mem.Allocator, d: ?*std.ArrayListUnmanaged([]const u8), comptime fmt: []const u8, args: anytype) void {
+        fn add(a: std.mem.Allocator, d: ?*std.ArrayList([]const u8), comptime fmt: []const u8, args: anytype) void {
             const dd = d orelse return;
             const msg = std.fmt.allocPrint(a, fmt, args) catch return;
             // A dropped diagnostic only loses an authoring hint, never correctness
@@ -6205,9 +6205,9 @@ fn resolveConstraints(
     @memset(net_weight, 1.0);
     var input_rail = try arena.alloc(bool, nets.len);
     @memset(input_rail, false);
-    var prox: std.ArrayListUnmanaged(ProxTerm) = .empty;
-    var keepouts: std.ArrayListUnmanaged(KeepTerm) = .empty;
-    var groups: std.ArrayListUnmanaged(GroupTerm) = .empty;
+    var prox: std.ArrayList(ProxTerm) = .empty;
+    var keepouts: std.ArrayList(KeepTerm) = .empty;
+    var groups: std.ArrayList(GroupTerm) = .empty;
 
     // power-rail (role input) → mark the rail so the input-loop boost fires even
     // with an integrated inductor (no discrete L to reveal the switcher).
@@ -6248,7 +6248,7 @@ fn resolveConstraints(
         for (nets, 0..) |net, ni| {
             for (net.pins) |pp| {
                 if ((idx_of.get(pp.ref_des) orelse continue) == pi) {
-                    net_weight[ni] *= DEPRIORITIZE_SCALE;
+                    net_weight[ni] *= deprioritize_scale;
                     break;
                 }
             }
@@ -6288,7 +6288,7 @@ fn resolveConstraints(
             .hub = hub_i,
             .part_pad = part_pad,
             .hub_pad = hub_pad,
-            .w = PROX_W * constraintWeight(p.priority),
+            .w = prox_w * constraintWeight(p.priority),
             .max_mm = p.max_mm,
         });
     }
@@ -6392,8 +6392,8 @@ fn synthAggressorKeepouts(
     arena: std.mem.Allocator,
     parts: []const Part,
     nets: []const FlatNet,
-    idx_of: *std.StringHashMap(usize),
-    out: *std.ArrayListUnmanaged(KeepTerm),
+    idx_of: *std.StringHashMapUnmanaged(usize),
+    out: *std.ArrayList(KeepTerm),
 ) std.mem.Allocator.Error!void {
     const flags = try arena.alloc(std.EnumSet(module_policy.NetClass), parts.len);
     defer arena.free(flags);
@@ -6409,7 +6409,7 @@ fn synthAggressorKeepouts(
         for (parts, 0..) |ap, ai| {
             if (ai == fi or ap.kind != .passive) continue;
             const aggressor = flags[ai].contains(.switch_node) or flags[ai].contains(.clock) or flags[ai].contains(.rf);
-            if (aggressor) try out.append(arena, .{ .a = fi, .b = ai, .min_mm = AGGRESSOR_KEEPOUT_MM });
+            if (aggressor) try out.append(arena, .{ .a = fi, .b = ai, .min_mm = aggressor_keepout_mm });
         }
     }
 }
@@ -6452,9 +6452,9 @@ fn resolveGroupMembers(
     arena: std.mem.Allocator,
     instances: []const export_kicad.FlatInstance,
     refs: []const []const u8,
-    diags: ?*std.ArrayListUnmanaged([]const u8),
+    diags: ?*std.ArrayList([]const u8),
 ) std.mem.Allocator.Error![]usize {
-    var members: std.ArrayListUnmanaged(usize) = .empty;
+    var members: std.ArrayList(usize) = .empty;
     for (refs) |ref| {
         if (resolvePart(instances, ref)) |pi|
             try members.append(arena, pi)
@@ -6477,7 +6477,7 @@ fn resolveGroupMembers(
 /// to a left-edge VIN pad would zone *right* purely because more GND pads happen
 /// to sit on the right. The signature rail (VIN, VOUT, SW, …) is what defines a
 /// group's side, so ground is excluded.
-fn makeGroupTerm(arena: std.mem.Allocator, members: []usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMap(usize)) GroupTerm {
+fn makeGroupTerm(arena: std.mem.Allocator, members: []usize, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize)) GroupTerm {
     _ = arena;
     var hub: i32 = -1;
     var best_area: f64 = 0;
@@ -6531,7 +6531,7 @@ pub fn validateConstraints(
     params: Params,
 ) std.mem.Allocator.Error![]const []const u8 {
     var prep = try prepare(arena, block, project_dir, params);
-    var diags: std.ArrayListUnmanaged([]const u8) = .empty;
+    var diags: std.ArrayList([]const u8) = .empty;
     _ = try resolveConstraints(arena, block, prep.instances, prep.nets, prep.parts, &prep.idx_of, &diags);
     return diags.toOwnedSlice(arena);
 }
@@ -6573,19 +6573,19 @@ fn prepare(
     // `(sub-block …)`s (hierarchical ref-des like "pwr/U1") and their merged
     // nets are included — a buck design is one sub-block, so `block.instances`
     // alone would be empty.
-    var inst_list: std.ArrayListUnmanaged(export_kicad.FlatInstance) = .empty;
+    var inst_list: std.ArrayList(export_kicad.FlatInstance) = .empty;
     try netlist_mod.collectInstances(arena, block, "", &inst_list, block.refStyle());
-    var net_list: std.ArrayListUnmanaged(FlatNet) = .empty;
+    var net_list: std.ArrayList(FlatNet) = .empty;
     try export_kicad.flattenAndMergeNets(arena, block, &net_list);
     const instances = inst_list.items;
     const nets = net_list.items;
 
     // Pin-count hint per ref: how many net endpoints it has (sizes fallback
     // boxes and is a decent proxy for footprint complexity).
-    var pin_counts = std.StringHashMap(usize).init(arena);
+    var pin_counts = std.StringHashMapUnmanaged(usize).empty;
     for (nets) |net| {
         for (net.pins) |pr| {
-            const gop = try pin_counts.getOrPut(pr.ref_des);
+            const gop = try pin_counts.getOrPut(arena, pr.ref_des);
             if (!gop.found_existing) gop.value_ptr.* = 0;
             gop.value_ptr.* += 1;
         }
@@ -6596,7 +6596,7 @@ fn prepare(
     // once. Only hubs are classified — a passive's pads are always real, and an
     // IC's GND/rail nets are the ones that also carry straps.
     var roles = try arena.alloc(pin_roles.PartRoles, instances.len);
-    var roles_cache = std.StringHashMap(pin_roles.PartRoles).init(arena);
+    var roles_cache = std.StringHashMapUnmanaged(pin_roles.PartRoles).empty;
 
     // Per-footprint geometry cache, keyed by footprint name, mirroring
     // `roles_cache`. A board with 100 cap-0402s used to file-read + parse
@@ -6605,22 +6605,22 @@ fn prepare(
     // margin is constant across a prepare, so caching by name is byte-identical.
     // Fallback geoms (missing file) depend on the per-instance pin-count hint, so
     // they are never cached — `g.fallback` gates the store.
-    var geom_cache = std.StringHashMap(geometry.Geom).init(arena);
+    var geom_cache = std.StringHashMapUnmanaged(geometry.Geom).empty;
 
     var parts = try arena.alloc(Part, instances.len);
-    var idx_of = std.StringHashMap(usize).init(arena);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
     for (instances, 0..) |inst, i| {
         const hint = pin_counts.get(inst.ref_des) orelse 2;
         const g = blk: {
             if (geom_cache.get(inst.footprint)) |cached| break :blk cached;
             const loaded = geometry.load(arena, project_dir, inst.footprint, hint, params.bbox_margin);
             // Fallback geoms depend on the per-instance pin hint — never cache them.
-            if (!loaded.fallback) try geom_cache.put(inst.footprint, loaded);
+            if (!loaded.fallback) try geom_cache.put(arena, inst.footprint, loaded);
             break :blk loaded;
         };
         const is_hub = isHub(inst.ref_des);
         if (is_hub) {
-            const gop = try roles_cache.getOrPut(inst.component);
+            const gop = try roles_cache.getOrPut(arena, inst.component);
             if (!gop.found_existing) gop.value_ptr.* = pin_roles.load(arena, project_dir, inst.component);
             roles[i] = gop.value_ptr.*;
         } else roles[i] = .{};
@@ -6641,7 +6641,7 @@ fn prepare(
             .silk_lines = g.silk_lines,
             .silk_circles = g.silk_circles,
         };
-        try idx_of.put(inst.ref_des, i);
+        try idx_of.put(arena, inst.ref_des, i);
     }
 
     // Per-part priority rank (0 = unranked everywhere now — `(placement-order …)`
@@ -6679,8 +6679,8 @@ fn prepare(
     g_lowered = lowered;
     // Relaxation cohesion- and zoning-force gains (position-space twins of the
     // scalar `group_w` / `group_zone_w` terms in `constraintCost`).
-    g_group_force = if (lowered.active) @max(0.0, params.group_w) * GROUP_FORCE_PER_W else 0;
-    g_zone_force = if (lowered.active) @max(0.0, params.group_zone_w) * ZONE_FORCE_PER_W else 0;
+    g_group_force = if (lowered.active) @max(0.0, params.group_w) * group_force_per_w else 0;
+    g_zone_force = if (lowered.active) @max(0.0, params.group_zone_w) * zone_force_per_w else 0;
     // Per-loop force relief for ≥2-member same-rail banks (twin of the scalar
     // `group_loop_relief`). Precomputed once: bank membership is position-invariant.
     g_loop_force_scale = try bankLoopScale(arena, built.loops, lowered, params.group_loop_relief);
@@ -6691,7 +6691,7 @@ fn prepare(
     // multi-start band (≤ MULTISTART_MAX_PARTS) — that's where dense decap loops
     // benefit and the strict/overlap retry's 2× cost is affordable; big boards
     // have area to spare and the retry would double an already-long solve.
-    g_collide_shrink = if (instances.len <= MULTISTART_MAX_PARTS)
+    g_collide_shrink = if (instances.len <= multistart_max_parts)
         std.math.clamp(params.courtyard_overlap / 2, 0, params.bbox_margin)
     else
         0;
@@ -6718,7 +6718,7 @@ fn prepare(
 /// surrogate (`surrogateLoops`) on the score path, so the reported objective is
 /// the same smooth metric the optimizer minimises — and the objective is rebuilt
 /// from its inductance term, so the headline matches.
-fn breakdownWith(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet, params: Params, score: Score, lsum: LoopSums) Breakdown {
+fn breakdownWith(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), nets: []const FlatNet, params: Params, score: Score, lsum: LoopSums) Breakdown {
     // `al` is the *active* compactness term (what the objective minimizes);
     // `footprint` is always the courtyard bbox area — the universal yardstick the
     // UI shows so the two modes are comparable on the same scale.
@@ -6752,7 +6752,7 @@ fn breakdownWith(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: [
 fn routedLoops(
     arena: std.mem.Allocator,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
 ) LoopSums {
@@ -6764,7 +6764,7 @@ fn routedLoops(
         const cap_c = worldPadCenter(parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
         const hub_c = worldPadCenter(parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
         const routed = lr.legLen(cap_c, hub_c, lp.pwr_net) catch null;
-        const pwr = if (routed) |r| r else surrogatePwrLeg(parts, lp) + UNROUTABLE_PENALTY_MM;
+        const pwr = if (routed) |r| r else surrogatePwrLeg(parts, lp) + unroutable_penalty_mm;
         const m = loopMetric(parts, lp, pwr);
         s.raw_mm += m.mm;
         s.weighted_mm += lp.weight * m.mm;
@@ -6785,7 +6785,7 @@ fn routedLoops(
 fn routedSubsetWeighted(
     arena: std.mem.Allocator,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     cap: usize,
@@ -6800,7 +6800,7 @@ fn routedSubsetWeighted(
             const cap_c = worldPadCenter(parts[lp.cap], lp.cap_pwr.x, lp.cap_pwr.y);
             const hub_c = worldPadCenter(parts[lp.hub], lp.hub_pwr_pin.x, lp.hub_pwr_pin.y);
             const routed = lr_opt.?.legLen(cap_c, hub_c, lp.pwr_net) catch null;
-            break :blk if (routed) |r| r else surrogatePwrLeg(parts, lp) + UNROUTABLE_PENALTY_MM;
+            break :blk if (routed) |r| r else surrogatePwrLeg(parts, lp) + unroutable_penalty_mm;
         } else surrogatePwrLeg(parts, lp);
         weighted += lp.weight * loopMetric(parts, lp, pwr).nh;
     }
@@ -6868,7 +6868,7 @@ fn anyOverlap(parts: []const Part) bool {
 /// the grid-only nudger can oscillate on a tight pack (e.g. large escape-stub
 /// keepouts), then snap + grid-legalize so the result is on-grid and clean.
 fn legalizeFinal(parts: []Part) void {
-    legalize(parts, FINAL_CLEAR);
+    legalize(parts, final_clear);
     snapToGrid(parts);
     legalizeOnGrid(parts);
 }
@@ -6876,7 +6876,7 @@ fn legalizeFinal(parts: []Part) void {
 /// Half-window (grid cells) the priority-cap tuck scans — wider than the polish
 /// window so a bypass cap can be pulled the full width of a small IC onto its
 /// pin (±`TIGHTEN_CELLS`·`GRID_MM` ≈ ±2.8 mm).
-const TIGHTEN_CELLS: i64 = 28;
+const tighten_cells: i64 = 28;
 
 /// Tuck every *declared-priority* decoupling cap onto its IC pin. For each loop
 /// whose cap was ranked in a `(placement-order …)` (priority > 0), greedily
@@ -6889,7 +6889,7 @@ const TIGHTEN_CELLS: i64 = 28;
 /// would drop a net, so tightening can never reduce routability. No-op on big
 /// boards / when nothing is ranked.
 fn tightenPriorityLoops(arena: std.mem.Allocator, parts: []Part, loops: []const Loop, nets: []const FlatNet, priority: []const u32) void {
-    if (parts.len < 2 or parts.len > POLISH_MAX_PARTS) return;
+    if (parts.len < 2 or parts.len > polish_max_parts) return;
     if (loops.len > maxParts) return;
     // Nothing ranked ⇒ skip entirely (don't even pay for the baseline route).
     var any = false;
@@ -6981,15 +6981,15 @@ fn tuckCap(parts: []Part, lp: Loop) void {
     var br = p.rot;
     // A pinned rotation is decided (spec / series pairing) — search position only.
     const pinned = [_]f64{p.rot};
-    const rot_cands: []const f64 = if (p.rot_pin != .none) &pinned else &ROT_CAND;
+    const rot_cands: []const f64 = if (p.rot_pin != .none) &pinned else &rot_cand;
     for (rot_cands) |r| {
-        var dy: i64 = -TIGHTEN_CELLS;
-        while (dy <= TIGHTEN_CELLS) : (dy += 1) {
-            var dx: i64 = -TIGHTEN_CELLS;
-            while (dx <= TIGHTEN_CELLS) : (dx += 1) {
+        var dy: i64 = -tighten_cells;
+        while (dy <= tighten_cells) : (dy += 1) {
+            var dx: i64 = -tighten_cells;
+            while (dx <= tighten_cells) : (dx += 1) {
                 p.rot = r;
-                p.x = ox + @as(f64, @floatFromInt(dx)) * GRID_MM;
-                p.y = oy + @as(f64, @floatFromInt(dy)) * GRID_MM;
+                p.x = ox + @as(f64, @floatFromInt(dx)) * grid_mm;
+                p.y = oy + @as(f64, @floatFromInt(dy)) * grid_mm;
                 if (overlapsAny(parts, p)) continue;
                 if (!touchesOther(parts, p, lp.cap)) continue; // stay docked
                 const c = loopLen(parts, lp);
@@ -7021,12 +7021,12 @@ fn touchesOther(parts: []const Part, p: *const Part, self_idx: usize) bool {
 /// the cap's ground return is a *via to the GND plane* (negligible copper), so
 /// the real routed copper the author sees is the power leg — that dominates;
 /// the small ground term only breaks ties toward a sane cap orientation.
-const TUCK_GND_W: f64 = 0.15;
+const tuck_gnd_w: f64 = 0.15;
 
 /// Tuck cost for one cap: its power leg (the real routed supply trace, cap power
 /// pad → its pinned IC power pad) plus a light ground-span tiebreaker.
 fn loopLen(parts: []const Part, lp: Loop) f64 {
-    return surrogatePwrLeg(parts, lp) + TUCK_GND_W * loopGroundSpan(parts, lp);
+    return surrogatePwrLeg(parts, lp) + tuck_gnd_w * loopGroundSpan(parts, lp);
 }
 
 /// True when two courtyards share an *edge* (not just a corner): a zero gap on
@@ -7035,8 +7035,8 @@ fn loopLen(parts: []const Part, lp: Loop) f64 {
 fn courtyardEdge(a: Part, b: Part) bool {
     const gx = @abs(a.x - b.x) - (effHw(a) + effHw(b));
     const gy = @abs(a.y - b.y) - (effHh(a) + effHh(b));
-    return (@abs(gx) <= COMPACT_EPS and gy < -COMPACT_EPS) or
-        (@abs(gy) <= COMPACT_EPS and gx < -COMPACT_EPS);
+    return (@abs(gx) <= compact_eps and gy < -compact_eps) or
+        (@abs(gy) <= compact_eps and gx < -compact_eps);
 }
 
 /// A solved pose snapshot (used to retain the best multi-start arrangement).
@@ -7048,14 +7048,14 @@ const Pose = struct { x: f64, y: f64, rot: f64 };
 /// explores side-arrangements); large boards grid-seed (overlap-free start).
 fn runStart(
     parts: []Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     built: Built,
     s: usize,
     rounds: usize,
     params: Params,
 ) void {
-    if (parts.len <= MULTISTART_MAX_PARTS) seedRing(parts, s) else seedGrid(parts);
+    if (parts.len <= multistart_max_parts) seedRing(parts, s) else seedGrid(parts);
     // Pin each series part (buck inductor across LX1/LX2, a feedback R) to the
     // rotation that faces each pad at its own hub pin — HPWL is blind to the
     // two-legged orientation, so this must be decided geometrically before the
@@ -7071,7 +7071,7 @@ fn runStart(
         optimizeRotations(parts, idx_of, nets, built.loops, params);
         relax(parts, built.springs, built.loops);
     }
-    legalize(parts, FINAL_CLEAR); // leave ≥ a grid cell so snapping can't re-overlap
+    legalize(parts, final_clear); // leave ≥ a grid cell so snapping can't re-overlap
     snapToGrid(parts);
     legalizeOnGrid(parts); // safety net: resolve any snap-induced overlap, on-grid
 }
@@ -7089,12 +7089,12 @@ fn runStart(
 fn routedPolish(
     arena: std.mem.Allocator,
     parts: []Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     params: Params,
 ) void {
-    if (parts.len < 2 or parts.len > ROUTED_POLISH_MAX_PARTS or loops.len == 0) return;
+    if (parts.len < 2 or parts.len > routed_polish_max_parts or loops.len == 0) return;
     // Only the decoupling caps (parts that own a loop) drive the routed term, so
     // those are the only parts worth the per-candidate route. Resistors/other
     // passives are left where the surrogate polish + compaction placed them.
@@ -7113,7 +7113,7 @@ fn routedPolish(
     const before_cost = routedObjectiveCost(scratch.allocator(), parts, idx_of, nets, loops, params);
 
     var sweep: usize = 0;
-    while (sweep < ROUTED_POLISH_SWEEPS) : (sweep += 1) {
+    while (sweep < routed_polish_sweeps) : (sweep += 1) {
         var improved = false;
         for (parts, 0..) |*p, i| {
             if (p.kind == .hub or !in_loop[i] or p.locked) continue;
@@ -7142,7 +7142,7 @@ fn routedPolish(
 fn routedPolishCost(
     scratch: *std.heap.ArenaAllocator,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     params: Params,
@@ -7165,7 +7165,7 @@ fn routedPolishCost(
 fn routedPolishPart(
     scratch: *std.heap.ArenaAllocator,
     parts: []Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     i: usize,
@@ -7186,15 +7186,15 @@ fn routedPolishPart(
     var improved = false;
     // A pinned rotation is decided (spec / series pairing) — search position only.
     const pinned = [_]f64{p.rot};
-    const rot_cands: []const f64 = if (p.rot_pin != .none) &pinned else &ROT_CAND;
+    const rot_cands: []const f64 = if (p.rot_pin != .none) &pinned else &rot_cand;
     for (rot_cands) |r| {
-        var dy: i64 = -ROUTED_POLISH_CELLS;
-        while (dy <= ROUTED_POLISH_CELLS) : (dy += 1) {
-            var dx: i64 = -ROUTED_POLISH_CELLS;
-            while (dx <= ROUTED_POLISH_CELLS) : (dx += 1) {
+        var dy: i64 = -routed_polish_cells;
+        while (dy <= routed_polish_cells) : (dy += 1) {
+            var dx: i64 = -routed_polish_cells;
+            while (dx <= routed_polish_cells) : (dx += 1) {
                 p.rot = r;
-                p.x = ox + @as(f64, @floatFromInt(dx)) * GRID_MM;
-                p.y = oy + @as(f64, @floatFromInt(dy)) * GRID_MM;
+                p.x = ox + @as(f64, @floatFromInt(dx)) * grid_mm;
+                p.y = oy + @as(f64, @floatFromInt(dy)) * grid_mm;
                 if (overlapsAny(parts, p)) continue;
                 const c = routedPolishCost(scratch, parts, idx_of, nets, loops, params, i, others_w);
                 if (c < best_cost - 1e-9) {
@@ -7231,8 +7231,8 @@ fn overlapsAny(parts: []const Part, p: *const Part) bool {
 fn snapToGrid(parts: []Part) void {
     for (parts) |*p| {
         if (p.locked) continue; // a pinned hand pose keeps its exact coordinates
-        p.x = @round(p.x / GRID_MM) * GRID_MM;
-        p.y = @round(p.y / GRID_MM) * GRID_MM;
+        p.x = @round(p.x / grid_mm) * grid_mm;
+        p.y = @round(p.y / grid_mm) * grid_mm;
     }
 }
 
@@ -7243,20 +7243,20 @@ fn snapToGrid(parts: []Part) void {
 /// so `stored + margin` reloads back onto the grid). The editor mirrors this
 /// rule with its own `courtCeilGrid` so its preview matches what the placer draws.
 fn ceilToGrid(v: f64) f64 {
-    return @ceil(v / GRID_MM - 1e-9) * GRID_MM;
+    return @ceil(v / grid_mm - 1e-9) * grid_mm;
 }
 
 /// Extra clearance the final legalization leaves between courtyards, so the
 /// subsequent grid snap (≤ half a cell per axis) cannot push them into
 /// overlap.
-const FINAL_CLEAR: f64 = GRID_MM;
+const final_clear: f64 = grid_mm;
 
 // ── Rotation ─────────────────────────────────────────────────────────────
 
 /// Candidate part rotations (degrees, CCW). 0/180 keep the pad axis
 /// horizontal; 90/270 make it vertical — and 0 vs 180 swaps which pad is
 /// pin-1, which is what lets a cap orient its power/ground pads to the IC.
-const ROT_CAND = [_]f64{ 0, 90, 180, 270 };
+const rot_cand = [_]f64{ 0, 90, 180, 270 };
 
 /// Rotate a footprint-local offset by `rot` (CCW, matching the page's
 /// `wpt()`). Only the four right-angle cases occur, so this is exact.
@@ -7352,18 +7352,18 @@ fn nearestHubPad(cr: Rect, hub: Part, hub_pads: []const PadRect) struct { rect: 
 /// laterally in the plane, and rises through a via at the IC's GND pad — so the
 /// loop counts this twice (one via down at the cap, one up at the IC). Per the
 /// 4-layer stackup the router assumes; tune to the real board's L1→L2 prepreg.
-const LAYER_GAP_MM: f64 = 0.2;
+const layer_gap_mm: f64 = 0.2;
 
 /// Penalty (mm) added to a loop's power leg when the maze router can't connect
 /// the cap to its pinned hub pin (a fully blocked or boxed-in placement). Keeps
 /// an unroutable loop visibly worse than any routable one in the score.
-const UNROUTABLE_PENALTY_MM: f64 = 10.0;
+const unroutable_penalty_mm: f64 = 10.0;
 
 /// Per-rank loop-weight step from a `(placement-order …)`: a cap at priority
 /// rank `r` (1 = last listed, K = first listed) gets weight ≥ `1 + r·STEP`, so a
 /// declared order dominates the value-based weighting and pulls the first-listed
 /// caps tightest. Unranked caps (rank 0) keep their value weight.
-const PRIORITY_STEP: f64 = 0.5;
+const priority_step: f64 = 0.5;
 
 /// Order two pad numbers: numerically when both parse as integers (so "2" < "10"),
 /// else lexicographically (BGA "A1"/"B2"). Picks the default pinned supply pad.
@@ -7438,9 +7438,9 @@ fn buildEscapeStubs(
     arena: std.mem.Allocator,
     nets: []const FlatNet,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
 ) std.mem.Allocator.Error![]const Stub {
-    var list: std.ArrayListUnmanaged(Stub) = .empty;
+    var list: std.ArrayList(Stub) = .empty;
     for (nets, 0..) |net, ni| {
         const sn = shortName(net.name);
         if (isGroundName(sn) or isNoConnect(sn)) continue;
@@ -7466,8 +7466,8 @@ fn buildEscapeStubs(
                 .part = i,
                 .ax = pad.x,
                 .ay = pad.y,
-                .bx = pad.x + d.x * ESCAPE_STUB_MM,
-                .by = pad.y + d.y * ESCAPE_STUB_MM,
+                .bx = pad.x + d.x * escape_stub_mm,
+                .by = pad.y + d.y * escape_stub_mm,
                 .net = @intCast(ni),
             });
         }
@@ -7523,7 +7523,7 @@ fn isNoConnect(name: []const u8) bool {
 /// searched — same rule as every other rotation search.
 fn optimizeRotations(
     parts: []Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     params: Params,
@@ -7537,7 +7537,7 @@ fn optimizeRotations(
         if (p.kind == .hub and hub_count < 2) continue;
         var best_rot = p.rot;
         var best_cost = objectiveCost(parts, idx_of, nets, loops, params);
-        for (ROT_CAND) |r| {
+        for (rot_cand) |r| {
             p.rot = r;
             const c = objectiveCost(parts, idx_of, nets, loops, params);
             if (c < best_cost - 1e-9) {
@@ -7556,7 +7556,7 @@ fn optimizeRotations(
 /// steer placement, they don't change the headline numbers.
 fn objectiveCost(
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     params: Params,
@@ -7592,7 +7592,7 @@ fn objectiveCost(
 ///     caps in a ≥2-member same-rail bank (twin of `g_loop_force_scale`)
 fn constraintCost(
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     params: Params,
@@ -7612,10 +7612,10 @@ fn constraintCost(
     }
     for (L.keepouts) |k| {
         const g = partGap(parts[k.a], parts[k.b]);
-        if (g < k.min_mm) c += KEEPOUT_W * (k.min_mm - g);
+        if (g < k.min_mm) c += keepout_w * (k.min_mm - g);
     }
     if (L.net_weight.len == nets.len) {
-        var pts: [MAX_WIRE_PTS]Pt = undefined;
+        var pts: [max_wire_pts]Pt = undefined;
         for (nets, 0..) |net, ni| {
             const extra = L.net_weight[ni] - 1.0;
             if (extra == 0) continue;
@@ -7656,7 +7656,7 @@ fn constraintCost(
         if (g.hub >= 0 and params.group_zone_w > 0) {
             const hub = parts[@intCast(g.hub)];
             const d = rotateLocal(g.dirx, g.diry, hub.rot);
-            const reach = @abs(d.x) * hub.hw + @abs(d.y) * hub.hh + ZONE_GAP_MM;
+            const reach = @abs(d.x) * hub.hw + @abs(d.y) * hub.hh + zone_gap_mm;
             const tx = hub.x + d.x * reach;
             const ty = hub.y + d.y * reach;
             c += params.group_zone_w * std.math.hypot(cx - tx, cy - ty);
@@ -7698,7 +7698,7 @@ fn partGap(a: Part, b: Part) f64 {
 fn routedObjectiveCost(
     scratch: std.mem.Allocator,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
     params: Params,
@@ -7781,9 +7781,9 @@ fn fullRouteCost(
     for (routed.tracks) |t| trace += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
     const unrouted = routed.total - routed.routed;
     const cost = trace +
-        FULLROUTE_VIA_MM * @as(f64, @floatFromInt(routed.vias.len)) +
-        FULLROUTE_DRC_MM * @as(f64, @floatFromInt(viol.len)) +
-        FULLROUTE_UNROUTED_MM * @as(f64, @floatFromInt(unrouted)) +
+        fullroute_via_mm * @as(f64, @floatFromInt(routed.vias.len)) +
+        fullroute_drc_mm * @as(f64, @floatFromInt(viol.len)) +
+        fullroute_unrouted_mm * @as(f64, @floatFromInt(unrouted)) +
         params.loop_w * loop_nh_weighted +
         effAlignW(params) * tidinessPenalty(parts);
     return .{
@@ -7832,7 +7832,7 @@ fn tidinessPenalty(parts: []const Part) f64 {
     for (parts, 0..) |a, i| {
         for (parts[i + 1 ..]) |b| {
             const off = @min(@abs(a.x - b.x), @abs(a.y - b.y));
-            total += @min(off, ALIGN_CLAMP_MM);
+            total += @min(off, align_clamp_mm);
         }
     }
     return total * 2.0 / @as(f64, @floatFromInt(parts.len - 1));
@@ -7844,22 +7844,22 @@ fn tidinessPenalty(parts: []const Part) f64 {
 // is derived from the extent and clamped: the floor keeps small modules at the
 // long-shipped resolution, the cap bounds the per-eval cost (`objectiveCost` is
 // hot — every polish candidate pays nets × covered-bins).
-const CONGEST_BIN_MM: f64 = 3.0; // target bin edge (mm)
-const CONGEST_BINS_MIN: usize = 8;
-const CONGEST_BINS_MAX: usize = 32;
-const CONGEST_PITCH_MM: f64 = 0.254; // one signal wire's footprint ≈ track_width + clearance
-const CONGEST_CLEARANCE_MM: f64 = 0.127; // the clearance half of that pitch (router default rule)
+const congest_bin_mm: f64 = 3.0; // target bin edge (mm)
+const congest_bins_min: usize = 8;
+const congest_bins_max: usize = 32;
+const congest_pitch_mm: f64 = 0.254; // one signal wire's footprint ≈ track_width + clearance
+const congest_clearance_mm: f64 = 0.127; // the clearance half of that pitch (router default rule)
 // Routable wire-density per bin, summed over the two signal layers. 2.0 (the
 // old value) is 100% copper utilization per layer — real maze/auto routability
 // collapses well before that (~60–80% per layer; beyond it detours explode),
 // so the penalty only fired in pathological pileups. 1.4 ≈ 70% × 2 layers.
-const CONGEST_CAP: f64 = 1.4;
+const congest_cap: f64 = 1.4;
 
 /// Bin count for one axis of the congestion grid: extent / target bin size,
 /// clamped to `[CONGEST_BINS_MIN, CONGEST_BINS_MAX]`.
 fn congestBins(extent: f64) usize {
-    const n: usize = numeric.toCount(@ceil(@max(extent, 1.0) / CONGEST_BIN_MM));
-    return std.math.clamp(n, CONGEST_BINS_MIN, CONGEST_BINS_MAX);
+    const n: usize = numeric.toCount(@ceil(@max(extent, 1.0) / congest_bin_mm));
+    return std.math.clamp(n, congest_bins_min, congest_bins_max);
 }
 
 /// IPC-2221-approximate trace width (mm) for `amps` of continuous current —
@@ -7881,9 +7881,9 @@ fn ipc2221WidthMm(amps: f64) f64 {
 /// — sizing its RUDY footprint by the copper that must actually exist makes
 /// congestion see power routing, not just signal count.
 fn congestPitch(net_index: usize) f64 {
-    if (net_index >= g_net_current.len) return CONGEST_PITCH_MM;
+    if (net_index >= g_net_current.len) return congest_pitch_mm;
     const w = ipc2221WidthMm(g_net_current[net_index]);
-    return @max(CONGEST_PITCH_MM, w + CONGEST_CLEARANCE_MM);
+    return @max(congest_pitch_mm, w + congest_clearance_mm);
 }
 
 /// Routing-congestion penalty (RUDY: Rectangular Uniform wire DensitY). Lays a
@@ -7897,7 +7897,7 @@ fn congestPitch(net_index: usize) f64 {
 /// UCLA mPL supply/demand). Ground nets are excluded (they drop to the plane);
 /// a net with a declared current deposits a proportionally wider corridor
 /// (`congestPitch`).
-fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet) f64 {
+fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), nets: []const FlatNet) f64 {
     if (parts.len == 0) return 0;
     var minx: f64 = std.math.inf(f64);
     var miny: f64 = std.math.inf(f64);
@@ -7916,7 +7916,7 @@ fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMap(usize), net
     if (binw <= 1e-6 or binh <= 1e-6) return 0;
     const bin_area = binw * binh;
 
-    var dens = [_]f64{0} ** (CONGEST_BINS_MAX * CONGEST_BINS_MAX);
+    var dens = [_]f64{0} ** (congest_bins_max * congest_bins_max);
     for (nets, 0..) |net, net_i| {
         if (isGroundName(shortName(net.name))) continue;
         var nminx: f64 = std.math.inf(f64);
@@ -7967,7 +7967,7 @@ fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMap(usize), net
     }
     var pen: f64 = 0;
     for (dens[0 .. nbx * nby]) |d| {
-        const over = d - CONGEST_CAP;
+        const over = d - congest_cap;
         if (over > 0) pen += over * over;
     }
     return pen;
@@ -8020,7 +8020,7 @@ fn capSpan(parts: []const Part, lp: Loop) f64 {
 /// `(kicad-pcb)` stackup, always plane-on-L2.) Kept as the display *length*; the
 /// scored quantity is the loop *inductance* (`loopInductanceNh`).
 fn loopGroundSpan(parts: []const Part, lp: Loop) f64 {
-    return capSpan(parts, lp) + 2 * LAYER_GAP_MM;
+    return capSpan(parts, lp) + 2 * layer_gap_mm;
 }
 
 // ── Loop inductance (the scored hot-loop metric) ─────────────────────────────
@@ -8039,19 +8039,19 @@ fn loopGroundSpan(parts: []const Part, lp: Loop) f64 {
 //     correction the pure-length model misses; a full rectangular-loop closed
 //     form would refine the crossover but the geometry can't pin the absolute nH
 //     anyway (the coefficient is logarithmic), so weights need empirical tuning.
-const MU0_OVER_2PI_NH_PER_MM: f64 = 0.2; // μ0/2π = 2e-7 H/m = 0.2 nH/mm
-const IND_TRACE_W_MM: f64 = 0.127; // ~track width; flat-trace equiv radius = w/4
-const VIA_TO_PLANE_DIA_MM: f64 = 0.4; // via barrel Ø for the GND drop to L2
-const N_LOOP_VIAS: f64 = 2.0; // cap-GND→plane + IC-GND→plane
+const mu0_over_2pi_nh_per_mm: f64 = 0.2; // μ0/2π = 2e-7 H/m = 0.2 nH/mm
+const ind_trace_w_mm: f64 = 0.127; // ~track width; flat-trace equiv radius = w/4
+const via_to_plane_dia_mm: f64 = 0.4; // via barrel Ø for the GND drop to L2
+const n_loop_vias: f64 = 2.0; // cap-GND→plane + IC-GND→plane
 /// Per-unit-length inductance of a signal trace over the adjacent return plane.
-const LOOP_PUL_NH_PER_MM: f64 = MU0_OVER_2PI_NH_PER_MM * @log(2.0 * LAYER_GAP_MM / (IND_TRACE_W_MM / 4.0));
+const loop_pul_nh_per_mm: f64 = mu0_over_2pi_nh_per_mm * @log(2.0 * layer_gap_mm / (ind_trace_w_mm / 4.0));
 /// Series inductance (nH) of one short via down to the L2 plane: (μ0/2π)·h·(ln(4h/d)+1).
-const VIA_IND_NH: f64 = MU0_OVER_2PI_NH_PER_MM * LAYER_GAP_MM * (@log(4.0 * LAYER_GAP_MM / VIA_TO_PLANE_DIA_MM) + 1.0);
+const via_ind_nh: f64 = mu0_over_2pi_nh_per_mm * layer_gap_mm * (@log(4.0 * layer_gap_mm / via_to_plane_dia_mm) + 1.0);
 
 /// Loop connection inductance (nH) from the conducting-path length (power leg +
 /// cap body span, mm): the trace-over-plane term + the two via transitions' floor.
 fn loopInductanceNh(conductor_len_mm: f64) f64 {
-    return N_LOOP_VIAS * VIA_IND_NH + LOOP_PUL_NH_PER_MM * conductor_len_mm;
+    return n_loop_vias * via_ind_nh + loop_pul_nh_per_mm * conductor_len_mm;
 }
 
 /// One loop's display *length* (mm) and scored *inductance* (nH) from a power-leg
@@ -8060,7 +8060,7 @@ fn loopInductanceNh(conductor_len_mm: f64) f64 {
 const LoopMetric = struct { mm: f64, nh: f64 };
 fn loopMetric(parts: []const Part, lp: Loop, pwr_len: f64) LoopMetric {
     const span = capSpan(parts, lp);
-    return .{ .mm = pwr_len + span + 2 * LAYER_GAP_MM, .nh = loopInductanceNh(pwr_len + span) };
+    return .{ .mm = pwr_len + span + 2 * layer_gap_mm, .nh = loopInductanceNh(pwr_len + span) };
 }
 
 /// Analytic loop sums (length + inductance, raw + value-weighted) from the
@@ -8096,20 +8096,20 @@ fn buildSprings(
     arena: std.mem.Allocator,
     nets: []const FlatNet,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     roles: []const pin_roles.PartRoles,
     explicit_pin: []const []const u8,
     rail_optout: []const bool,
 ) std.mem.Allocator.Error!Built {
     const gnd = try groundPads(arena, nets, parts, idx_of, roles);
-    var springs: std.ArrayListUnmanaged(Spring) = .empty;
-    var loops: std.ArrayListUnmanaged(Loop) = .empty;
-    var legs: std.ArrayListUnmanaged(SeriesCand) = .empty;
+    var springs: std.ArrayList(Spring) = .empty;
+    var loops: std.ArrayList(Loop) = .empty;
+    var legs: std.ArrayList(SeriesCand) = .empty;
 
     for (nets, 0..) |net, net_i| {
         if (isGroundName(shortName(net.name))) continue;
 
-        var eps: std.ArrayListUnmanaged(Endpoint) = .empty;
+        var eps: std.ArrayList(Endpoint) = .empty;
         var hub_idx: ?usize = null;
         var multi_hub = false;
         for (net.pins) |pr| {
@@ -8150,7 +8150,7 @@ const SeriesCand = struct { part: usize, hub: usize, part_pad: PadRect, hub_pad:
 /// hub, and the hub-side targets are distinct (two different pins — a part
 /// strapped twice to one pin has no orientation to decide).
 fn pairSeriesLegs(arena: std.mem.Allocator, cands: []const SeriesCand, parts: []const Part) std.mem.Allocator.Error![]SeriesPair {
-    var out: std.ArrayListUnmanaged(SeriesPair) = .empty;
+    var out: std.ArrayList(SeriesPair) = .empty;
     for (cands, 0..) |c, i| {
         if (parts[c.part].pads.len != 2) continue;
         // Count this part's legs and find the one other than `i` (emit each
@@ -8196,7 +8196,7 @@ fn seriesPairRot(parts: []const Part, sp: SeriesPair) ?f64 {
     if (@abs(pdx) + @abs(pdy) < 1e-9 or @abs(tdx) + @abs(tdy) < 1e-9) return null;
     var best: f64 = 0;
     var best_dot = -std.math.inf(f64);
-    for (ROT_CAND) |r| {
+    for (rot_cand) |r| {
         const p = rotateLocal(pdx, pdy, r);
         const dot = p.x * tdx + p.y * tdy;
         if (dot > best_dot) {
@@ -8299,7 +8299,7 @@ fn isInputRailName(name: []const u8) bool {
 /// neutral (1.0); a higher rank (earlier in the list) pulls the cap tighter.
 fn priorityWeight(rank: u32) f64 {
     if (rank == 0) return 1.0;
-    return 1.0 + PRIORITY_STEP * @as(f64, @floatFromInt(rank));
+    return 1.0 + priority_step * @as(f64, @floatFromInt(rank));
 }
 
 /// The pad in `pads` whose centre is nearest `to`'s centre (footprint-local) —
@@ -8335,9 +8335,9 @@ fn findHubPin(eps: []const Endpoint, hub: usize, want: []const u8) ?PadRect {
 /// hug spring to the hub's pads on this net.
 fn hugToHub(
     arena: std.mem.Allocator,
-    springs: *std.ArrayListUnmanaged(Spring),
-    loops: *std.ArrayListUnmanaged(Loop),
-    legs: *std.ArrayListUnmanaged(SeriesCand),
+    springs: *std.ArrayList(Spring),
+    loops: *std.ArrayList(Loop),
+    legs: *std.ArrayList(SeriesCand),
     eps: []const Endpoint,
     hub: usize,
     gnd: []const []const PadRect,
@@ -8363,7 +8363,7 @@ fn hugToHub(
                 .ay = e.py,
                 .bx = tgt.centroid.x,
                 .by = tgt.centroid.y,
-                .k = K_PROX,
+                .k = k_prox,
                 .kind = .proximity,
                 .net = net_name,
             });
@@ -8403,8 +8403,8 @@ fn hubTargets(
     hub: usize,
     roles: []const pin_roles.PartRoles,
 ) std.mem.Allocator.Error!?HubTarget {
-    var hub_all: std.ArrayListUnmanaged(PadRect) = .empty;
-    var hub_real: std.ArrayListUnmanaged(PadRect) = .empty;
+    var hub_all: std.ArrayList(PadRect) = .empty;
+    var hub_real: std.ArrayList(PadRect) = .empty;
     var def_rect: ?PadRect = null;
     var def_pin: []const u8 = "";
     for (eps) |e| {
@@ -8443,7 +8443,7 @@ fn hubTargets(
 /// position. Caller guarantees both the cap and the hub have a ground pad.
 fn emitCapLoop(
     arena: std.mem.Allocator,
-    loops: *std.ArrayListUnmanaged(Loop),
+    loops: *std.ArrayList(Loop),
     eps: []const Endpoint,
     e: Endpoint,
     hub: usize,
@@ -8493,8 +8493,8 @@ fn hubOwningPin(eps: []const Endpoint, want: []const u8) ?usize {
 /// before, so unbound caps and true multi-hub signal nets are unchanged.
 fn clusterMultiHub(
     arena: std.mem.Allocator,
-    springs: *std.ArrayListUnmanaged(Spring),
-    loops: *std.ArrayListUnmanaged(Loop),
+    springs: *std.ArrayList(Spring),
+    loops: *std.ArrayList(Loop),
     eps: []const Endpoint,
     gnd: []const []const PadRect,
     roles: []const pin_roles.PartRoles,
@@ -8503,7 +8503,7 @@ fn clusterMultiHub(
     net_i: i32,
     net_name: []const u8,
 ) std.mem.Allocator.Error!void {
-    var rest: std.ArrayListUnmanaged(Endpoint) = .empty;
+    var rest: std.ArrayList(Endpoint) = .empty;
     for (eps) |e| {
         const bound = !e.is_hub and gnd[e.idx].len > 0 and explicit_pin[e.idx].len > 0;
         if (bound) {
@@ -8529,7 +8529,7 @@ fn clusterMultiHub(
 /// pin-to-pin, not box-centre to box-centre.
 fn weakCluster(
     arena: std.mem.Allocator,
-    springs: *std.ArrayListUnmanaged(Spring),
+    springs: *std.ArrayList(Spring),
     eps: []const Endpoint,
     net_name: []const u8,
 ) std.mem.Allocator.Error!void {
@@ -8543,7 +8543,7 @@ fn weakCluster(
             .ay = 0,
             .bx = 0,
             .by = 0,
-            .k = K_SIG,
+            .k = k_sig,
             .kind = .signal,
             .net = net_name,
             .dax = e.px,
@@ -8572,10 +8572,10 @@ fn groundPads(
     arena: std.mem.Allocator,
     nets: []const FlatNet,
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     roles: []const pin_roles.PartRoles,
 ) std.mem.Allocator.Error![]const []const PadRect {
-    var lists = try arena.alloc(std.ArrayListUnmanaged(TaggedPad), parts.len);
+    var lists = try arena.alloc(std.ArrayList(TaggedPad), parts.len);
     for (lists) |*l| l.* = .empty;
     for (nets) |net| {
         if (!isGroundName(shortName(net.name))) continue;
@@ -8597,7 +8597,7 @@ fn groundPads(
 /// first; failing that, anything not a strap; failing that (every pad was a
 /// strap), all of them — so a part with GND pads is never left empty.
 fn selectGroundPads(arena: std.mem.Allocator, tagged: []const TaggedPad) std.mem.Allocator.Error![]const PadRect {
-    var out: std.ArrayListUnmanaged(PadRect) = .empty;
+    var out: std.ArrayList(PadRect) = .empty;
     for (tagged) |t| if (t.cls == .ground) try out.append(arena, t.rect);
     if (out.items.len > 0) return out.toOwnedSlice(arena);
     for (tagged) |t| if (t.cls != .strap) try out.append(arena, t.rect);
@@ -8609,7 +8609,7 @@ fn selectGroundPads(arena: std.mem.Allocator, tagged: []const TaggedPad) std.mem
 /// Largest net (pin count) `wireScore` builds the explicit point set for; bigger
 /// nets fall back to the cheap bounding-box HPWL (a power/ground-ish rail where
 /// the looser estimate is fine). Bounds the per-net RMST work at O(n²) ≤ 64².
-const MAX_WIRE_PTS: usize = 64;
+const max_wire_pts: usize = 64;
 
 /// Signal-net wirelength estimate (ground excluded) — the wirelength part of the
 /// inner-loop objective (`objectiveCost`), split out so it's cheap to re-evaluate.
@@ -8619,9 +8619,9 @@ const MAX_WIRE_PTS: usize = 64;
 /// — a much closer proxy for routed multi-pin wirelength (Chow & Young; FLUTE).
 /// The `Score.hpwl_mm` / `Breakdown.hpwl` fields keep their historical names but
 /// now carry this RSMT estimate.
-fn wireScore(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []const FlatNet) f64 {
+fn wireScore(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), nets: []const FlatNet) f64 {
     var total: f64 = 0;
-    var pts: [MAX_WIRE_PTS]Pt = undefined;
+    var pts: [max_wire_pts]Pt = undefined;
     for (nets) |net| {
         if (isGroundName(shortName(net.name))) continue;
         total += netWire(parts, idx_of, net, &pts);
@@ -8634,7 +8634,7 @@ fn wireScore(parts: []const Part, idx_of: *std.StringHashMap(usize), nets: []con
 /// caller owns. Factored out of `wireScore` so the constraint layer can weight
 /// an individual net's contribution (`net-length` / `deprioritize`) without
 /// re-deriving it. Caller skips ground nets.
-fn netWire(parts: []const Part, idx_of: *std.StringHashMap(usize), net: FlatNet, pts: *[MAX_WIRE_PTS]Pt) f64 {
+fn netWire(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(usize), net: FlatNet, pts: *[max_wire_pts]Pt) f64 {
     var minx: f64 = std.math.inf(f64);
     var miny: f64 = std.math.inf(f64);
     var maxx: f64 = -std.math.inf(f64);
@@ -8644,7 +8644,7 @@ fn netWire(parts: []const Part, idx_of: *std.StringHashMap(usize), net: FlatNet,
         const i = idx_of.get(pr.ref_des) orelse continue;
         const pad = padLocal(parts[i], pr.pin);
         const w = worldPt(parts[i], pad.x, pad.y);
-        if (cnt < MAX_WIRE_PTS) pts[cnt] = w;
+        if (cnt < max_wire_pts) pts[cnt] = w;
         minx = @min(minx, w.x);
         miny = @min(miny, w.y);
         maxx = @max(maxx, w.x);
@@ -8653,7 +8653,7 @@ fn netWire(parts: []const Part, idx_of: *std.StringHashMap(usize), net: FlatNet,
     }
     if (cnt < 2) return 0;
     // HPWL = RSMT for ≤3 pins (keep the fast path); RMST for the rest.
-    if (cnt <= 3 or cnt > MAX_WIRE_PTS) return (maxx - minx) + (maxy - miny);
+    if (cnt <= 3 or cnt > max_wire_pts) return (maxx - minx) + (maxy - miny);
     return rmstLen(pts[0..cnt]);
 }
 
@@ -8665,8 +8665,8 @@ fn netWire(parts: []const Part, idx_of: *std.StringHashMap(usize), net: FlatNet,
 /// is in [2, MAX_WIRE_PTS]; full FLUTE LUTs would tighten this toward exact RSMT.
 fn rmstLen(pts: []const Pt) f64 {
     const n = pts.len;
-    var in_tree = [_]bool{false} ** MAX_WIRE_PTS;
-    var best: [MAX_WIRE_PTS]f64 = undefined;
+    var in_tree = [_]bool{false} ** max_wire_pts;
+    var best: [max_wire_pts]f64 = undefined;
     in_tree[0] = true;
     for (1..n) |i| best[i] = manhattan(pts[0], pts[i]);
     var total: f64 = 0;
@@ -8701,7 +8701,7 @@ fn manhattan(a: Pt, b: Pt) f64 {
 /// override; the maze router is reserved for the finishing passes, not scoring).
 fn scoreLayout(
     parts: []const Part,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     nets: []const FlatNet,
     loops: []const Loop,
 ) Score {
@@ -8722,8 +8722,8 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
     var boxes: [maxParts]KeepBox = undefined;
     fillKeepBoxes(parts, boxes[0..n]);
     var it: usize = 0;
-    while (it < ITERS) : (it += 1) {
-        const cool = 1.0 - @as(f64, @floatFromInt(it)) / @as(f64, @floatFromInt(ITERS));
+    while (it < relax_iters) : (it += 1) {
+        const cool = 1.0 - @as(f64, @floatFromInt(it)) / @as(f64, @floatFromInt(relax_iters));
         const step = 0.1 + 0.7 * cool;
 
         var ax: [maxParts]f64 = undefined;
@@ -8752,7 +8752,7 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
         var maxdisp: f64 = 0;
         for (0..n) |i| {
             if (parts[i].locked) continue; // pinned by the caller — forces flow around it
-            const mass = if (parts[i].kind == .hub) HUB_MASS else PASSIVE_MASS;
+            const mass = if (parts[i].kind == .hub) hub_mass else passive_mass;
             const dx = clampDisp(step * ax[i] / mass);
             const dy = clampDisp(step * ay[i] / mass);
             parts[i].x += dx;
@@ -8764,7 +8764,7 @@ fn relax(parts: []Part, springs: []const Spring, loops: []const Loop) void {
         // jitter sub-grid — stop early. (Fixed 600 iters for a ~dozen parts is
         // mostly spent here, after equilibrium.) The cooling schedule still
         // keys on the full ITERS, so the early iterations are unchanged.
-        if (maxdisp < RELAX_CONVERGE_MM) break;
+        if (maxdisp < relax_converge_mm) break;
     }
 }
 
@@ -8823,7 +8823,7 @@ fn accumulateGroupCohesion(parts: []const Part, ax: []f64, ay: []f64) void {
         if (g_zone_force > 0 and g.hub >= 0) {
             const hub = parts[@intCast(g.hub)];
             const d = rotateLocal(g.dirx, g.diry, hub.rot);
-            const reach = @abs(d.x) * hub.hw + @abs(d.y) * hub.hh + ZONE_GAP_MM;
+            const reach = @abs(d.x) * hub.hw + @abs(d.y) * hub.hh + zone_gap_mm;
             zone = .{ .x = hub.x + d.x * reach, .y = hub.y + d.y * reach };
         }
         for (g.members) |m| {
@@ -8854,8 +8854,8 @@ fn accumulateLeg(
     const near = nearestHubPad(cr, parts[hub], hub_pads);
     if (near.gap < 1e-6) return; // touching → loop leg already minimal
     const np = nearestPoints(cr, near.rect);
-    const dx = scale * K_DECOUPLE * (np.b.x - np.a.x);
-    const dy = scale * K_DECOUPLE * (np.b.y - np.a.y);
+    const dx = scale * k_decouple * (np.b.x - np.a.x);
+    const dy = scale * k_decouple * (np.b.y - np.a.y);
     ax[cap] += dx;
     ay[cap] += dy;
     ax[hub] -= dx;
@@ -8870,7 +8870,7 @@ fn legalize(parts: []Part, clearance: f64) void {
     var boxes: [maxParts]KeepBox = undefined;
     fillKeepBoxes(parts, boxes[0..n]);
     var it: usize = 0;
-    while (it < LEGALIZE_ITERS) : (it += 1) {
+    while (it < legalize_iters) : (it += 1) {
         var ax: [maxParts]f64 = undefined;
         var ay: [maxParts]f64 = undefined;
         for (0..n) |i| {
@@ -8894,7 +8894,7 @@ fn legalizeOnGrid(parts: []Part) void {
     const n = parts.len;
     if (n == 0) return;
     var it: usize = 0;
-    while (it < LEGALIZE_ITERS) : (it += 1) {
+    while (it < legalize_iters) : (it += 1) {
         var any = false;
         var i: usize = 0;
         while (i < n) : (i += 1) {
@@ -8911,9 +8911,9 @@ fn legalizeOnGrid(parts: []Part) void {
                 // Move the higher-index part one cell away on the tight axis —
                 // unless it's locked, in which case the free partner steps back.
                 if (ox < oy) {
-                    if (parts[j].locked) parts[i].x += signNudge(dx, i, j) * GRID_MM else parts[j].x -= signNudge(dx, i, j) * GRID_MM;
+                    if (parts[j].locked) parts[i].x += signNudge(dx, i, j) * grid_mm else parts[j].x -= signNudge(dx, i, j) * grid_mm;
                 } else {
-                    if (parts[j].locked) parts[i].y += signNudge(dy, i, j) * GRID_MM else parts[j].y -= signNudge(dy, i, j) * GRID_MM;
+                    if (parts[j].locked) parts[i].y += signNudge(dy, i, j) * grid_mm else parts[j].y -= signNudge(dy, i, j) * grid_mm;
                 }
             }
         }
@@ -8936,8 +8936,8 @@ fn accumulateCompaction(parts: []const Part, ax: []f64, ay: []f64) void {
     cx /= @floatFromInt(n);
     cy /= @floatFromInt(n);
     for (parts, 0..) |p, i| {
-        ax[i] += K_COMPACT * (cx - p.x);
-        ay[i] += K_COMPACT * (cy - p.y);
+        ax[i] += k_compact * (cx - p.x);
+        ay[i] += k_compact * (cy - p.y);
     }
 }
 
@@ -9016,7 +9016,7 @@ fn signNudge(d: f64, i: usize, j: usize) f64 {
 }
 
 fn clampDisp(v: f64) f64 {
-    return std.math.clamp(v, -MAX_DISP_MM, MAX_DISP_MM);
+    return std.math.clamp(v, -max_disp_mm, max_disp_mm);
 }
 
 /// Seed for one multi-start attempt: hubs anchor on a compact grid at the
@@ -9028,7 +9028,7 @@ fn seedRing(parts: []Part, start: usize) void {
     if (n == 0) return;
     var maxext: f64 = 0.5;
     for (parts) |p| maxext = @max(maxext, @max(p.hw, p.hh));
-    const cell = 2 * maxext + SEED_GAP_MM;
+    const cell = 2 * maxext + seed_gap_mm;
     const radius = cell * 1.6;
 
     var hub_count: usize = 0;
@@ -9065,7 +9065,7 @@ fn seedGrid(parts: []Part) void {
     if (n == 0) return;
     var cell: f64 = 1.0;
     for (parts) |p| cell = @max(cell, 2 * @max(p.hw, p.hh));
-    cell += SEED_GAP_MM;
+    cell += seed_gap_mm;
     const cols = @max(1, numeric.toCount(@ceil(@sqrt(@as(f64, @floatFromInt(n))))));
     for (parts, 0..) |*p, i| {
         if (p.locked) continue; // pinned — the relax flows around it
@@ -9411,10 +9411,10 @@ test "optimizeRotations flips a cap to face both its pinned power and ground pin
         .hub_gnd_pin = .{ .x = 0.5, .y = -1, .w = 0.4, .h = 0.4 },
     }};
 
-    var idx = std.StringHashMap(usize).init(testing.allocator);
-    defer idx.deinit();
-    try idx.put("U1", 0);
-    try idx.put("C1", 1);
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    defer idx.deinit(testing.allocator);
+    try idx.put(testing.allocator, "U1", 0);
+    try idx.put(testing.allocator, "C1", 1);
 
     const before = scoreLayout(&parts, &idx, &.{}, &loops).loop_mm;
     optimizeRotations(&parts, &idx, &.{}, &loops, .{});
@@ -9443,9 +9443,9 @@ test "buildEscapeStubs reserves a corridor for unaccounted single-component nets
     const sig = [_]export_kicad.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "U1", .pin = "1" } };
     const nets = [_]FlatNet{ .{ .name = "RFIN", .pins = &rfin }, .{ .name = "SIG", .pins = &sig } };
 
-    var idx = std.StringHashMap(usize).init(arena);
-    try idx.put("R1", 0);
-    try idx.put("U1", 1);
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    try idx.put(arena, "R1", 0);
+    try idx.put(arena, "U1", 1);
 
     const stubs = try buildEscapeStubs(arena, &nets, &parts, &idx);
     try testing.expectEqual(@as(usize, 1), stubs.len); // RFIN only
@@ -9498,11 +9498,11 @@ test "buildSprings honours explicit decoupling bindings on a multi-hub rail" {
         .{ .name = "VDD", .pins = &vdd },
         .{ .name = "GND", .pins = &gnd_net },
     };
-    var idx = std.StringHashMap(usize).init(arena);
-    try idx.put("U1", 0);
-    try idx.put("U2", 1);
-    try idx.put("C1", 2);
-    try idx.put("C2", 3);
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    try idx.put(arena, "U1", 0);
+    try idx.put(arena, "U2", 1);
+    try idx.put(arena, "C1", 2);
+    try idx.put(arena, "C2", 3);
 
     const roles = [_]pin_roles.PartRoles{ .{}, .{}, .{}, .{} };
     const explicit = [_][]const u8{ "", "", "5", "8" };
@@ -9608,14 +9608,14 @@ test "loopInductanceNh floors at the via inductance and grows with length" {
     // floor the pure-length model misses (so L never collapses to 0 as a cap nears
     // the pin). The floor is small but strictly positive.
     const floor = loopInductanceNh(0);
-    try testing.expectApproxEqAbs(N_LOOP_VIAS * VIA_IND_NH, floor, 1e-12);
+    try testing.expectApproxEqAbs(n_loop_vias * via_ind_nh, floor, 1e-12);
     try testing.expect(floor > 0);
     // Longer conductor ⇒ strictly more inductance, linear above the floor.
     try testing.expect(loopInductanceNh(2.0) > loopInductanceNh(0.5));
-    try testing.expectApproxEqAbs(floor + LOOP_PUL_NH_PER_MM * 2.0, loopInductanceNh(2.0), 1e-9);
+    try testing.expectApproxEqAbs(floor + loop_pul_nh_per_mm * 2.0, loopInductanceNh(2.0), 1e-9);
     // Per-unit-length inductance lands in the physically sane ~0.3–0.7 nH/mm band
     // for a trace over a 0.2 mm-adjacent plane.
-    try testing.expect(LOOP_PUL_NH_PER_MM > 0.3 and LOOP_PUL_NH_PER_MM < 0.7);
+    try testing.expect(loop_pul_nh_per_mm > 0.3 and loop_pul_nh_per_mm < 0.7);
 }
 
 /// Slide `parts[cap]` by `+dy` for `steps` steps, sampling the scored
@@ -9699,9 +9699,9 @@ test "congestionPenalty fires only on dense regions" {
         .{ .ref_des = "C", .kind = .passive, .hw = 0.05, .hh = 0.05, .pads = &pad, .fallback = false, .x = 0.4, .y = 0.0 },
         .{ .ref_des = "D", .kind = .passive, .hw = 0.05, .hh = 0.05, .pads = &pad, .fallback = false, .x = 0.0, .y = 0.4 },
     };
-    var idx_of = std.StringHashMap(usize).init(testing.allocator);
-    defer idx_of.deinit();
-    for (parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    defer idx_of.deinit(testing.allocator);
+    for (parts, 0..) |p, i| try idx_of.put(testing.allocator, p.ref_des, i);
 
     // No multi-pin signal net → zero congestion.
     const lone = [_]export_kicad.FlatPin{.{ .ref_des = "A", .pin = "1" }};
@@ -9720,12 +9720,12 @@ test "congestionPenalty fires only on dense regions" {
     try testing.expect(congestionPenalty(&parts, &idx_of, &dense_nets) > 0);
 
     // binIndex clamps out-of-range fractions into [0, bins-1].
-    try testing.expectEqual(@as(usize, 0), binIndex(-1.5, CONGEST_BINS_MIN));
-    try testing.expectEqual(CONGEST_BINS_MIN - 1, binIndex(999, CONGEST_BINS_MIN));
+    try testing.expectEqual(@as(usize, 0), binIndex(-1.5, congest_bins_min));
+    try testing.expectEqual(congest_bins_min - 1, binIndex(999, congest_bins_min));
     // Bin count tracks the board extent at ~CONGEST_BIN_MM per bin, clamped.
-    try testing.expectEqual(CONGEST_BINS_MIN, congestBins(1.0)); // tiny module → floor
+    try testing.expectEqual(congest_bins_min, congestBins(1.0)); // tiny module → floor
     try testing.expectEqual(@as(usize, 20), congestBins(60.0)); // 60 mm → 3 mm bins
-    try testing.expectEqual(CONGEST_BINS_MAX, congestBins(500.0)); // huge board → cap
+    try testing.expectEqual(congest_bins_max, congestBins(500.0)); // huge board → cap
 }
 
 // spec: placement/optimizer - relieves the loop pull of caps in a same-rail bank
@@ -9919,10 +9919,10 @@ test "autofillUnlisted places a staged part beside its net" {
         .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &cap_pads, .fallback = true, .x = -5, .y = 0 },
         .{ .ref_des = "C9", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &cap_pads, .fallback = true, .y = 10 }, // staged below
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("C1", 1);
-    try idx_of.put("C9", 2);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "C1", 1);
+    try idx_of.put(arena, "C9", 2);
     const vin_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C9", .pin = "1" } };
     const nets = [_]FlatNet{.{ .name = "VIN", .pins = &vin_pins }};
     var springs = [_]Spring{};
@@ -9938,7 +9938,7 @@ test "autofillUnlisted places a staged part beside its net" {
     try testing.expectEqual(@as(usize, 1), g_placement_diag.auto_filled.len);
     try testing.expectEqualStrings("C9", g_placement_diag.auto_filled[0]);
     try testing.expectEqual(@as(usize, 0), g_placement_diag.unplaced.len);
-    try testing.expect(parts[2].y < parts[0].y + parts[0].hh + STAGE_GAP_MM);
+    try testing.expect(parts[2].y < parts[0].y + parts[0].hh + stage_gap_mm);
     try testing.expect(!anyOverlap(&parts));
 }
 
@@ -9963,10 +9963,10 @@ test "packBoard docks edges and corners on the outline" {
         .{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 1.5, .pads = &j_pads, .fallback = true },
         .{ .ref_des = "MK1", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = true },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("J1", 1);
-    try idx_of.put("MK1", 2);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "J1", 1);
+    try idx_of.put(arena, "MK1", 2);
     const instances = [_]export_kicad.FlatInstance{
         .{ .ref_des = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "J1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
@@ -10010,10 +10010,10 @@ test "packBoard de-overlaps edge parts along their edge" {
         .{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 1.5, .pads = &.{}, .fallback = true },
         .{ .ref_des = "J2", .kind = .hub, .hw = 2, .hh = 1.5, .pads = &.{}, .fallback = true },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("J1", 1);
-    try idx_of.put("J2", 2);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "J1", 1);
+    try idx_of.put(arena, "J2", 2);
     const instances = [_]export_kicad.FlatInstance{
         .{ .ref_des = "U1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
         .{ .ref_des = "J1", .component = "", .value = "", .footprint = "", .properties = &.{}, .uuid = "" },
@@ -10031,7 +10031,7 @@ test "packBoard de-overlaps edge parts along their edge" {
     _ = try packBoard(arena, &parts, &instances, &idx_of, &nets, spec);
     // Same edge (same x), separated along it by at least their extents + gap.
     try testing.expectApproxEqAbs(parts[1].x, parts[2].x, 1e-9);
-    try testing.expect(@abs(parts[1].y - parts[2].y) >= 1.5 + 1.5 + BOARD_EDGE_GAP_MM - 1e-9);
+    try testing.expect(@abs(parts[1].y - parts[2].y) >= 1.5 + 1.5 + board_edge_gap_mm - 1e-9);
     try testing.expect(!anyOverlap(&parts));
 }
 
@@ -10107,9 +10107,9 @@ test "synthAggressorKeepouts pairs a feedback passive with the switching inducto
         .{ .name = "SW", .pins = &sw },
         .{ .name = "FB", .pins = &fb },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    for (parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
-    var keepouts: std.ArrayListUnmanaged(KeepTerm) = .empty;
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
+    var keepouts: std.ArrayList(KeepTerm) = .empty;
     try synthAggressorKeepouts(arena, &parts, &nets, &idx_of, &keepouts);
     // Exactly one pair: R1 (on feedback net FB) kept clear of L1 (on the
     // switching node SW). The hub U1, on both nets, is excluded both ways.
@@ -10160,11 +10160,11 @@ test "arrangeMacros + legalize keep modules intact and disjoint" {
     // One net joins the two modules, so the arranger has connectivity to act on.
     const link = [_]export_kicad.FlatPin{ .{ .ref_des = "a/C1", .pin = "1" }, .{ .ref_des = "b/U1", .pin = "1" } };
     const nets = [_]FlatNet{.{ .name = "L", .pins = &link }};
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("a/U1", 0);
-    try idx_of.put("a/C1", 1);
-    try idx_of.put("b/U1", 2);
-    try idx_of.put("b/C1", 3);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "a/U1", 0);
+    try idx_of.put(arena, "a/C1", 1);
+    try idx_of.put(arena, "b/U1", 2);
+    try idx_of.put(arena, "b/C1", 3);
 
     const origins = try arrangeMacros(arena, &macros, &macro_of, &nets, &idx_of, &parts, &.{ false, false });
     stampMacros(&parts, &macros, origins, &.{ false, false });
@@ -10208,7 +10208,7 @@ test "dockSidesByTier fills inner lane by priority, spilling lower tiers outward
     // Both docked on the LEFT (s=0) at the same edge coordinate; C1 is tier 0
     // (highest priority), C2 tier 1. The anchor is tiny so a lane holds only one
     // part — C1 claims the inner lane and C2 spills to the outer lane.
-    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
+    var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
     try sides[0].append(arena, .{ .i = 0, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
     try sides[0].append(arena, .{ .i = 1, .tier = 1, .along = 0, .half_along = 0.5, .depth = 0.5 });
     const hkb = KeepBox{ .cxo = 0, .cyo = 0, .hw = 0.3, .hh = 0.3 };
@@ -10248,13 +10248,13 @@ test "refineSidesByPull re-sides a part toward its signal pad" {
     const nets = [_]FlatNet{
         .{ .name = "SIG", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R1", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("R1", 1);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "R1", 1);
     const tier_of = [_]usize{ 0, 0 };
     const cohere_side = [_]u8{ 255, 255 }; // neither part is group-cohered
 
-    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
+    var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
     try sides[0].append(arena, .{ .i = 1, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
     parts[1].x = -10; // its mis-seeded (left) position
     parts[1].y = 0;
@@ -10295,7 +10295,7 @@ test "cohereGroups coheres an anchored group and leaves a pure-bypass group dist
 
     // Seed each ringed part on a NON-top side so cohesion visibly moves the PWR
     // group: L1,C3→left(0); C1,C4→right(1); C2→bottom(3).
-    var sides = [_]std.ArrayListUnmanaged(SidePart){ .empty, .empty, .empty, .empty };
+    var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
     try sides[0].append(arena, .{ .i = 1, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
     try sides[1].append(arena, .{ .i = 2, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
     try sides[3].append(arena, .{ .i = 3, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
@@ -10333,10 +10333,10 @@ test "servedPadLocal resolves a bound pad on-net and rejects cross-hub bindings"
     const nets = [_]FlatNet{
         .{ .name = "DVDD", .pins = &.{ .{ .ref_des = "U1", .pin = "10" }, .{ .ref_des = "C1", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("U2", 1);
-    try idx_of.put("C1", 2);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "U2", 1);
+    try idx_of.put(arena, "C1", 2);
     // Bound to U1 pad 10 on its own net → resolves to that pad's centre (3,0).
     const got = servedPadLocal(&parts, 0, 2, "10", &nets, &idx_of);
     try testing.expect(got != null);
@@ -10377,9 +10377,9 @@ test "orientPadsToIC turns the important pad toward the anchor" {
         .{ .name = "VDD", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
         .{ .name = "GND", .pins = &.{.{ .ref_des = "C1", .pin = "2" }} },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("C1", 1);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "C1", 1);
     orientPadsToIC(&parts, 0, null, &nets, &idx_of);
     // Flipped 180 → 0 so pad "1" (power, not GND) sits at world +x, toward the IC.
     try testing.expectEqual(@as(f64, 0), parts[1].rot);
@@ -10423,8 +10423,8 @@ test "polishCrossings honours want_side, refusing a wrong-side swap" {
         .{ .name = "N1", .pins = &.{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R3", .pin = "1" } } },
         .{ .name = "N2", .pins = &.{ .{ .ref_des = "R2", .pin = "1" }, .{ .ref_des = "R4", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    inline for (.{ "U1", "R1", "R2", "R3", "R4" }, 0..) |r, i| try idx_of.put(r, i);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    inline for (.{ "U1", "R1", "R2", "R3", "R4" }, 0..) |r, i| try idx_of.put(arena, r, i);
 
     // Unconstrained polish (all 255) DOES swap R1↔R2 to kill the crossing.
     var free = init;
@@ -10456,9 +10456,9 @@ test "surrogateObjective ranks a tighter layout below a spread one" {
     const nets = [_]FlatNet{
         .{ .name = "N", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("C1", 1);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "C1", 1);
     const params = Params{ .w_align = 0 }; // kill alignment; objective ≈ wirelength
     const no_loops = [_]Loop{};
     const tight = surrogateObjective(&parts, &idx_of, &nets, &no_loops, params);
@@ -10623,10 +10623,10 @@ test "isSwitcherBoard detects the buck signature and rejects ferrite-on-rail" {
         .{ .ref_des = "L1", .kind = .passive, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
         .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("L1", 1);
-    try idx_of.put("C1", 2);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "L1", 1);
+    try idx_of.put(arena, "C1", 2);
     const buck_nets = [_]FlatNet{
         .{ .name = "VIN", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
         .{ .name = "SW", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "L1", .pin = "1" } } },
@@ -10698,14 +10698,14 @@ test "pinOwners assigns passives to the hub they serve" {
         .{ .name = "CS", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "U2", .pin = "1" }, .{ .ref_des = "R1", .pin = "1" } } },
         .{ .name = "RUN", .pins = &.{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "R2", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("U2", 1);
-    try idx_of.put("C1", 2);
-    try idx_of.put("R1", 3);
-    try idx_of.put("R2", 4);
-    try idx_of.put("C2", 5);
-    try idx_of.put("U3", 6);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "U2", 1);
+    try idx_of.put(arena, "C1", 2);
+    try idx_of.put(arena, "R1", 3);
+    try idx_of.put(arena, "R2", 4);
+    try idx_of.put(arena, "C2", 5);
+    try idx_of.put(arena, "U3", 6);
     const zero = PadRect{ .x = 0, .y = 0, .w = 0, .h = 0 };
     // C1's `(decouples "U2" 8)` loop is authoritative even though it sits on the shared rail.
     const loops = try arena.alloc(Loop, 1);
@@ -10744,10 +10744,10 @@ test "buildPinGroups + dockGroups keep a satellite's cap with its owner at the a
         .{ .name = "XIN", .pins = &.{ .{ .ref_des = "U1", .pin = "9" }, .{ .ref_des = "X1", .pin = "2" } } },
         .{ .name = "XOUT", .pins = &.{ .{ .ref_des = "X1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
-    try idx_of.put("X1", 1);
-    try idx_of.put("C1", 2);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
+    try idx_of.put(arena, "X1", 1);
+    try idx_of.put(arena, "C1", 2);
     const built = Built{ .springs = &.{}, .loops = &.{}, .series = &.{} };
     const owner_of = try pinOwners(arena, &parts, 0, &nets, &idx_of, built);
     try testing.expectEqual(@as(usize, 1), owner_of[2]); // the load cap belongs to the crystal
@@ -10795,8 +10795,8 @@ test "overlayAuthoredGroups makes an authored group one island under its core" {
         .{ .name = "EN", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "Q1", .pin = "3" } } },
         .{ .name = "GATE2", .pins = &.{ .{ .ref_des = "Q2", .pin = "3" }, .{ .ref_des = "C9", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    for (parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
     const owner_of = try arena.alloc(usize, parts.len);
     // As pinOwners would leave it: hubs own themselves, C9 claimed by Q2.
     owner_of[0] = 0;
@@ -10915,8 +10915,8 @@ test "mirrorDiffTwins places the N-side twin at the P part plus the lane vector"
         .{ .name = "ETH_TX_P", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "RA", .pin = "1" } } },
         .{ .name = "ETH_TX_N", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "RB", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    for (parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
     const owner_of = [_]usize{ 0, 0, 0 };
     try mirrorDiffTwins(arena, &parts, 0, &owner_of, &instances, &nets, &idx_of);
     // Lane vector = pad2 − pad1 = (0, 1): RB mirrors RA one pitch below, same rot.
@@ -10997,9 +10997,9 @@ test "nearestSharedHub excludes the anchor itself and finds no secondary hub" {
     const nets = [_]FlatNet{
         .{ .name = "VOUT", .pins = &.{ .{ .ref_des = "IC", .pin = "1" }, .{ .ref_des = "M", .pin = "1" } } },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("IC", 0);
-    try idx_of.put("M", 1);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "IC", 0);
+    try idx_of.put(arena, "M", 1);
     const members = [_]usize{1};
     // The net's only hub pin is the anchor IC (index 0). All three conditions
     // are ANDed, so the anchor is excluded and no secondary hub remains — an
@@ -11015,9 +11015,9 @@ test "placeSwitchHub docks above the anchor when the top/bottom edge counts tie"
         .{ .ref_des = "IC", .kind = .hub, .hw = 2, .hh = 3, .pads = &.{}, .fallback = false, .x = 0, .y = 10 },
         .{ .ref_des = "SW", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
     };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("IC", 0);
-    try idx_of.put("SW", 1);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "IC", 0);
+    try idx_of.put(arena, "SW", 1);
     var lock_axis = [_]u8{ 0, 0 };
     var lock_val = [_]f64{ 0, 0 };
     // No blocks ⇒ top == bottom == 0, so the `top <= bot` tie takes the ABOVE
@@ -11036,8 +11036,8 @@ test "hubPadsOnNet skips a zero-size pad and keeps the real one" {
         .{ .number = "2", .x = 3, .y = 4, .w = 0.5, .h = 0.5 },
     };
     const hub = Part{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false };
-    var idx_of = std.StringHashMap(usize).init(arena);
-    try idx_of.put("U1", 0);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    try idx_of.put(arena, "U1", 0);
     const net = FlatNet{
         .name = "N",
         .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "U1", .pin = "2" } },

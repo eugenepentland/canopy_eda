@@ -46,7 +46,7 @@ pub fn writeField(w: anytype, key: []const u8, value: []const u8) WriteError!voi
 }
 
 test "escape quotes and backslashes" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     const w = buf.writer(std.testing.allocator);
     try writeEscaped(w, "he said \"hi\" and \\");
@@ -54,7 +54,7 @@ test "escape quotes and backslashes" {
 }
 
 test "escape control characters" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     const w = buf.writer(std.testing.allocator);
     try writeEscaped(w, "a\x01b\nc");
@@ -62,7 +62,7 @@ test "escape control characters" {
 }
 
 test "writeField surrounds value with quotes" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     const w = buf.writer(std.testing.allocator);
     try writeField(w, "name", "U1");

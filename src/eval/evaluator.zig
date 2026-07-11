@@ -131,7 +131,7 @@ pub const Evaluator = struct {
     /// Shared library directory for component/module fallback resolution.
     /// Defaults to project_dir; set separately when using per-project folders.
     lib_dir: []const u8,
-    assertions: std.ArrayListUnmanaged(AssertionResult),
+    assertions: std.ArrayList(AssertionResult),
     /// Cache of loaded file contents (path -> parsed nodes)
     loaded_files: std.StringHashMapUnmanaged([]const Node),
     /// Cache of loaded component/symbol/footprint data
@@ -146,11 +146,11 @@ pub const Evaluator = struct {
     /// the single-char `auto_refdes` map can't represent, so they count here.
     tp_refdes: u32 = 0,
     /// Forms that need (id ...) auto-inserted: (source_offset, generated_id)
-    pending_ids: std.ArrayListUnmanaged(PendingId),
+    pending_ids: std.ArrayList(PendingId),
     /// Child-id sidecars that need `(ids ("key" token) …)` written/extended on
     /// a parent shorthand form (decouple/series). Keyed by the parent's
     /// `form_offset`; one entry per synthesized child. See `id_insert.zig`.
-    pending_child_ids: std.ArrayListUnmanaged(PendingChildId),
+    pending_child_ids: std.ArrayList(PendingChildId),
     /// Every 8-char hex id token seen anywhere in the design tree — existing
     /// source tokens (registered by `prescanIds`) plus every token
     /// `generateId` mints this session. `generateId` re-rolls against this set
@@ -179,12 +179,12 @@ pub const Evaluator = struct {
     /// would otherwise skip silently). Never aborts a build; the CLI prints
     /// them as `file:line:col: warning: …` and the server can read the list
     /// off the evaluator after a build.
-    warnings: std.ArrayListUnmanaged(EvalWarning) = .empty,
+    warnings: std.ArrayList(EvalWarning) = .empty,
     /// Module call stack, pushed by `callModule` around each body
     /// evaluation. While non-empty, `setError` appends one
     /// `  in module 'x' (called at L:C)` context line per frame
     /// (innermost first) to every diagnostic it records.
-    module_stack: std.ArrayListUnmanaged(ModuleFrame) = .empty,
+    module_stack: std.ArrayList(ModuleFrame) = .empty,
     /// Names currently being resolved on disk (`resolveImport` in progress),
     /// so a circular import — `a.sexp` imports `b`, `b.sexp` imports `a` —
     /// is detected and diagnosed instead of re-reading + re-evaluating each
@@ -378,7 +378,7 @@ pub const Evaluator = struct {
     /// the original slice when the stack is empty or allocation fails.
     fn withModuleContext(self: *Evaluator, message: []const u8) []const u8 {
         if (self.module_stack.items.len == 0) return message;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         const w = buf.writer(self.allocator);
         w.writeAll(message) catch return message;
         var i = self.module_stack.items.len;
@@ -440,7 +440,7 @@ pub const Evaluator = struct {
         // Builtins (evaluate arguments first). Looking the operator up
         // once skips the second name match `evalBuiltin` would do.
         if (Builtin.fromAtom(head_name)) |op| {
-            var eval_args: std.ArrayListUnmanaged(Value) = .empty;
+            var eval_args: std.ArrayList(Value) = .empty;
             defer eval_args.deinit(self.allocator);
             for (args) |arg| {
                 const v = try self.evalNode(arg, env);
@@ -470,7 +470,7 @@ pub const Evaluator = struct {
                     return EvalError.TypeError;
                 };
                 // Collect additional args as schematic attributes
-                var attrs: std.ArrayListUnmanaged([]const u8) = .empty;
+                var attrs: std.ArrayList([]const u8) = .empty;
                 for (args[1..]) |attr_node| {
                     const attr = attr_node.asText() orelse continue;
                     attrs.append(self.allocator, attr) catch continue;

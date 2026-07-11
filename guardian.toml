@@ -69,3 +69,9 @@ require_guard = ["src/eval/", "src/placement/", "src/kicad_pcb/", "src/import_ki
 # toml parser only reads inline arrays. See the "Fuzzing" note in CLAUDE.md.
 [fuzz_presence]
 modules = ["src/sexpr/parser.zig", "src/sexpr/printer.zig", "src/deflate.zig", "src/kicad_pcb/reader.zig", "src/zipfile.zig", "src/png.zig"]
+# src/exit.zig is netlisp's designated fatal helper (like guardian's own
+# src/reporter.zig): the one place a raw std.process.exit(nonzero) is allowed,
+# so every CLI fatal funnels through fatal()/failure() there.
+[[allow]]
+check = "fatal-exit"
+paths = ["src/exit.zig"]

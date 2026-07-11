@@ -73,8 +73,8 @@ test "leak: Graph.deinit frees all owned node, edge, and class fields" {
     };
 
     const edges = try a.alloc(types.Edge, 2);
-    edges[0] = .{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = try a.dupe(u8, "SPI") };
-    edges[1] = .{ .from = 0, .to = 2, .class = types.CLASS_RF, .label = try a.dupe(u8, "RF_OUT") };
+    edges[0] = .{ .from = 0, .to = 1, .class = types.class_control, .label = try a.dupe(u8, "SPI") };
+    edges[1] = .{ .from = 0, .to = 2, .class = types.class_rf, .label = try a.dupe(u8, "RF_OUT") };
 
     // A non-builtin class registry (a fresh allocation, NOT &builtin_classes)
     // so deinit's "free only when not the static array" branch is exercised.
@@ -248,7 +248,7 @@ test "leak: computeFreeLayout group-separation + routing path is arena-clean" {
         .{ .label = "G1", .members = &g1m },
         .{ .label = "G2", .members = &g2m },
     };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 2, .class = types.CLASS_CONTROL, .label = "x" }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 2, .class = types.class_control, .label = "x" }};
     const graph = types.Graph{
         .nodes = &nodes,
         .edges = &edges,
@@ -275,7 +275,7 @@ test "leak: computeGroupsLayout boxes-only path is arena-clean" {
         .{ .label = "G1", .members = &g1m },
         .{ .label = "G2", .members = &g2m },
     };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "net", .fanout = 2 }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.class_control, .label = "net", .fanout = 2 }};
     const graph = types.Graph{
         .nodes = &nodes,
         .edges = &edges,
@@ -301,8 +301,8 @@ test "leak: computeSystemLayout layered pipeline is arena-clean" {
         .{ .label = "SENS", .subtitle = "", .category = .peripheral, .slug = "sens", .inputs = &.{}, .outputs = &.{} },
     };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "3V3" },
-        .{ .from = 1, .to = 2, .class = types.CLASS_CONTROL, .label = "I2C" },
+        .{ .from = 0, .to = 1, .class = types.class_power, .label = "3V3" },
+        .{ .from = 1, .to = 2, .class = types.class_control, .label = "I2C" },
     };
     const graph = types.Graph{ .nodes = &nodes, .edges = &edges };
 

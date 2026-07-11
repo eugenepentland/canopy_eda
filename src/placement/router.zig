@@ -90,27 +90,27 @@ pub const RouteResult = struct {
 /// huge board from allocating an enormous grid; modules stay far under this.
 /// Total node count scales with the stackup's signal-layer count (the cap is
 /// per layer), and a bail is reported via `RouteResult.grid_overflow`.
-const MAX_NODES: usize = 200_000;
-const EMPTY: i32 = -1;
-const VIA_COST_MULT: f64 = 4.0; // a layer change costs ~4 grid steps
+const max_nodes: usize = 200_000;
+const empty_cell: i32 = -1;
+const via_cost_mult: f64 = 4.0; // a layer change costs ~4 grid steps
 /// Nets with at most this many pads get the top-layer-first attempt (feedback
 /// taps, straps, short two/three-pad signals). Fat nets skip it — see pass 2.
-const TOP_FIRST_MAX_PADS: usize = 4;
+const top_first_max_pads: usize = 4;
 /// Top-layer-first runs only on boards no larger than this. Bigger boards are
 /// dense enough that forcing short nets onto the surface costs more (slow failed
 /// searches) than it saves and disturbs the routing of other nets — see pass 2.
-const TOP_FIRST_MAX_PARTS: usize = 32;
+const top_first_max_parts: usize = 32;
 /// Return-path stitching runs only on boards no larger than this. The pass is
 /// purely additive (it can't disturb existing routing), but it runs a via search
 /// per unstitched signal via, so a huge board's already-long route is left alone.
-const STITCH_MAX_PARTS: usize = 48;
-const SQRT2: f64 = 1.4142135623730951; // diagonal step length vs. orthogonal
+const stitch_max_parts: usize = 48;
+const sqrt2: f64 = 1.4142135623730951; // diagonal step length vs. orthogonal
 /// Step-cost multiplier for maze moves onto an outer layer a declared pour
 /// covers: every signal trace there slices the pour into islands, so signals
 /// prefer the un-poured face — but the layer stays usable when the other side
 /// is walled off (the Gerber emission carves clearance around whatever lands
 /// there, so the result is legal either way).
-const POUR_COST_MULT: f64 = 1.5;
+const pour_cost_mult: f64 = 1.5;
 /// Step-cost multiplier for maze moves on an INNER signal layer (index ≥ 2,
 /// from a `(stackup …)` with more than two plane-free copper layers). Kept
 /// mild: an inner dive already pays two via costs, so this only breaks the
@@ -118,7 +118,7 @@ const POUR_COST_MULT: f64 = 1.5;
 /// all its copper on the outer faces (identical to the 2-layer result), while
 /// a congested crossing still dives inner the moment the surface detour
 /// exceeds ~25% of the path. No-op on ≤2-signal boards (no such layer exists).
-const INNER_COST_MULT: f64 = 1.25;
+const inner_cost_mult: f64 = 1.25;
 
 /// Pass 1 of `route`: ground/plane nets. Each pad of a plane-carrying net
 /// drops a via to its plane — except pads already sitting IN an outer-layer
@@ -135,12 +135,12 @@ const INNER_COST_MULT: f64 = 1.25;
 fn planeViaPass(
     ctx: *Ctx,
     placement: optimizer.Placement,
-    idx_of: *std.StringHashMap(usize),
-    tracks: *std.ArrayListUnmanaged(Track),
-    vias: *std.ArrayListUnmanaged(Via),
+    idx_of: *std.StringHashMapUnmanaged(usize),
+    tracks: *std.ArrayList(Track),
+    vias: *std.ArrayList(Via),
     routed: *usize,
     total: *usize,
-    failed: *std.ArrayListUnmanaged([]const u8),
+    failed: *std.ArrayList([]const u8),
 ) std.mem.Allocator.Error!void {
     const arena = ctx.arena;
     for (placement.nets, 0..) |net, net_i| {
@@ -189,14 +189,14 @@ fn planeViaPass(
 fn greedyPass(
     ctx: *Ctx,
     placement: optimizer.Placement,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     order: []const usize,
     net_pri: []const u32,
     top_first: bool,
-    tracks: *std.ArrayListUnmanaged(Track),
-    vias: *std.ArrayListUnmanaged(Via),
+    tracks: *std.ArrayList(Track),
+    vias: *std.ArrayList(Via),
     total: *usize,
-    routable: *std.ArrayListUnmanaged(RipNet),
+    routable: *std.ArrayList(RipNet),
 ) std.mem.Allocator.Error!void {
     const arena = ctx.arena;
     for (order) |net_i| {
@@ -217,7 +217,7 @@ fn greedyPass(
             break :blk true;
         };
         var ok = false;
-        if (top_first and one_layer and pts.len <= TOP_FIRST_MAX_PADS) {
+        if (top_first and one_layer and pts.len <= top_first_max_pads) {
             const t_mark = tracks.items.len;
             const v_mark = vias.items.len;
             ctx.allow_vias = false;
@@ -240,13 +240,13 @@ fn greedyPass(
 
 /// Route `placement` under `params`. All output is allocated in `arena`.
 pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams) std.mem.Allocator.Error!RouteResult {
-    var tracks: std.ArrayListUnmanaged(Track) = .empty;
-    var vias: std.ArrayListUnmanaged(Via) = .empty;
-    var failed: std.ArrayListUnmanaged([]const u8) = .empty;
+    var tracks: std.ArrayList(Track) = .empty;
+    var vias: std.ArrayList(Via) = .empty;
+    var failed: std.ArrayList([]const u8) = .empty;
 
     // ref-des → part index, for resolving each net pin to a pad.
-    var idx_of = std.StringHashMap(usize).init(arena);
-    for (placement.parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (placement.parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
 
     // Grid pitch sized to the WIDEST class on the board, so adjacent occupied
     // grid lines satisfy clearance even between the widest pair of nets.
@@ -258,8 +258,8 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     const oy = placement.miny - margin;
     const nx = numeric.toCount(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
     const ny = numeric.toCount(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
-    if (nx * ny == 0 or nx * ny > MAX_NODES) {
-        return .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0, .grid_overflow = nx * ny > MAX_NODES };
+    if (nx * ny == 0 or nx * ny > max_nodes) {
+        return .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0, .grid_overflow = nx * ny > max_nodes };
     }
     const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
 
@@ -313,7 +313,7 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     // Remaining ties keep net order.
     const net_pri = try arena.alloc(u32, placement.nets.len);
     for (placement.nets, 0..) |net, i| net_pri[i] = netPriority(placement, &idx_of, net, i);
-    var order: std.ArrayListUnmanaged(usize) = .empty;
+    var order: std.ArrayList(usize) = .empty;
     for (placement.nets, 0..) |net, net_i| {
         if (netHasPlane(placement, net.name)) continue;
         try order.append(arena, net_i);
@@ -325,12 +325,12 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     // with the outline test, slow) surface search, and the few that succeed shift
     // the greedy first-come routing enough to strand other nets — so we skip it
     // and route exactly as before. Mirrors the routed-scoring part gate.
-    const top_first = placement.parts.len <= TOP_FIRST_MAX_PARTS;
+    const top_first = placement.parts.len <= top_first_max_parts;
     // Greedy first-routed-wins pass. Every maze net's outcome lands in
     // `routable` (priority order) — the working set the bounded rip-up pass then
     // revisits. `routed`/`failed` are tallied from it *after* rip-up, so a net
     // re-routed by a rip counts correctly.
-    var routable: std.ArrayListUnmanaged(RipNet) = .empty;
+    var routable: std.ArrayList(RipNet) = .empty;
     try greedyPass(&ctx, placement, &idx_of, order.items, net_pri, top_first, &tracks, &vias, &total, &routable);
 
     // Bounded rip-up & reroute: give each still-failed net a chance to displace
@@ -386,7 +386,7 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     // additive: it only appends GND vias, so no existing copper moves. A via that
     // can't be stitched (no DRC-safe room) simply stays flagged. Gated to modest
     // boards so a big board's route doesn't grow a search per signal via.
-    if (placement.parts.len <= STITCH_MAX_PARTS) {
+    if (placement.parts.len <= stitch_max_parts) {
         if (firstGroundNet(placement)) |gnet| {
             setNetParams(&ctx, placement, @intCast(gnet));
             const n_before = vias.items.len;
@@ -396,13 +396,13 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
                 var stitched = false;
                 for (vias.items) |gv| {
                     if (!isGndVia(placement, gv.net)) continue;
-                    if (std.math.hypot(v.x - gv.x, v.y - gv.y) <= RETURN_PATH_RADIUS_MM) {
+                    if (std.math.hypot(v.x - gv.x, v.y - gv.y) <= return_path_radius_mm) {
                         stitched = true;
                         break;
                     }
                 }
                 if (stitched) continue;
-                const pos = findStitchVia(&ctx, vias.items, tracks.items, .{ v.x, v.y }, gnet, RETURN_PATH_RADIUS_MM) orelse continue;
+                const pos = findStitchVia(&ctx, vias.items, tracks.items, .{ v.x, v.y }, gnet, return_path_radius_mm) orelse continue;
                 try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = ctx.params.via_dia, .drill = ctx.params.via_drill, .net = gnet });
                 stampViaOcc(&ctx, pos[0], pos[1], gnet);
             }
@@ -429,9 +429,9 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
 /// the grid is too large to build (callers fall back to the raw pad centre).
 /// MUST stay in lockstep with `route`'s grid setup + pass-1 loop above.
 pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams) std.mem.Allocator.Error![]Via {
-    var vias: std.ArrayListUnmanaged(Via) = .empty;
-    var idx_of = std.StringHashMap(usize).init(arena);
-    for (placement.parts, 0..) |p, i| try idx_of.put(p.ref_des, i);
+    var vias: std.ArrayList(Via) = .empty;
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (placement.parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
 
     // Same max-class pitch as `route` (MUST stay in lockstep — see doc above).
     const gmaxp = maxRouteParams(placement, params);
@@ -441,7 +441,7 @@ pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, para
     const oy = placement.miny - margin;
     const nx = numeric.toCount(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
     const ny = numeric.toCount(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
-    if (nx * ny == 0 or nx * ny > MAX_NODES) return &.{};
+    if (nx * ny == 0 or nx * ny > max_nodes) return &.{};
     const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
 
     const n_signal: usize = placement.rules.signalLayerCount();
@@ -504,7 +504,7 @@ pub const LoopRouter = struct {
         arena: std.mem.Allocator,
         parts: []const Part,
         nets: []const FlatNet,
-        idx_of: *std.StringHashMap(usize),
+        idx_of: *std.StringHashMapUnmanaged(usize),
         params: RouteParams,
     ) std.mem.Allocator.Error!LoopRouter {
         _ = idx_of; // obstacles are built straight off `parts` now
@@ -532,7 +532,7 @@ pub const LoopRouter = struct {
         const oy = miny - margin;
         const nx: usize = numeric.toCount(@ceil((maxx - minx + 2 * margin) / g) + 1);
         const ny: usize = numeric.toCount(@ceil((maxy - miny + 2 * margin) / g) + 1);
-        if (nx * ny == 0 or nx * ny > MAX_NODES) return .{ .ctx = undefined, .ready = false };
+        if (nx * ny == 0 or nx * ny > max_nodes) return .{ .ctx = undefined, .ready = false };
         const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
 
         // The loop surrogate always measures on the two OUTER faces — it
@@ -569,10 +569,10 @@ pub const LoopRouter = struct {
     /// can't connect them (boxed in) or the router isn't ready.
     pub fn legLen(self: *LoopRouter, cap_c: [2]f64, hub_c: [2]f64, net_id: i32) std.mem.Allocator.Error!?f64 {
         if (!self.ready or net_id < 0) return null;
-        for (self.ctx.occ) |l| @memset(l, EMPTY);
-        for (self.ctx.resv) |l| @memset(l, EMPTY);
-        var tracks: std.ArrayListUnmanaged(Track) = .empty;
-        var vias: std.ArrayListUnmanaged(Via) = .empty;
+        for (self.ctx.occ) |l| @memset(l, empty_cell);
+        for (self.ctx.resv) |l| @memset(l, empty_cell);
+        var tracks: std.ArrayList(Track) = .empty;
+        var vias: std.ArrayList(Via) = .empty;
         const pts = [_]NetPt{
             .{ .x = cap_c[0], .y = cap_c[1], .layer = 0 },
             .{ .x = hub_c[0], .y = hub_c[1], .layer = 0 },
@@ -624,7 +624,7 @@ fn allocLayerGrids(arena: std.mem.Allocator, n_layers: usize, nodes: usize) std.
     const out = try arena.alloc([]i32, n_layers);
     for (out) |*l| {
         l.* = try arena.alloc(i32, nodes);
-        @memset(l.*, EMPTY);
+        @memset(l.*, empty_cell);
     }
     return out;
 }
@@ -641,14 +641,14 @@ fn distPointRect(px: f64, py: f64, r: Rect) f64 {
 /// the exact pad set `drc.zig` checks against, so the router avoids precisely
 /// what the DRC flags — connected pads *and* NC/mechanical pads alike.
 fn buildObstacles(arena: std.mem.Allocator, parts: []const Part, nets: []const FlatNet) std.mem.Allocator.Error![]PadObs {
-    var pin_net = std.StringHashMap(i32).init(arena);
+    var pin_net = std.StringHashMapUnmanaged(i32).empty;
     for (nets, 0..) |net, ni| {
         for (net.pins) |pin| {
             const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, pin.pin });
-            try pin_net.put(key, @intCast(ni));
+            try pin_net.put(arena, key, @intCast(ni));
         }
     }
-    var obs: std.ArrayListUnmanaged(PadObs) = .empty;
+    var obs: std.ArrayList(PadObs) = .empty;
     for (parts) |part| {
         for (part.pads) |pad| {
             const sh = try pad_shape.worldShape(arena, part, pad);
@@ -674,12 +674,12 @@ fn buildObstacles(arena: std.mem.Allocator, parts: []const Part, nets: []const F
 /// dominates; the intrinsic rank only orders nets the author left unranked and
 /// breaks ties between equal-ranked ones. Three bits leaves the auto rules room
 /// to grow; today they use only ranks 0–1.
-const NETCLASS_BITS = 3;
+const netclass_bits = 3;
 
 /// Highest authored `(net-class … (priority N))` tier a net can declare —
 /// parse-time clamps to this, and `netPriority` clamps again defensively so a
 /// corrupt rule can't shift garbage into the sort key's high bits.
-const MAX_NET_PRIORITY: u32 = 7;
+const max_net_priority: u32 = 7;
 
 /// A net's routing priority. Primary key (high bits): the authored
 /// `(net-class … (priority N))` tier from the design source, 0 when the net is
@@ -689,14 +689,14 @@ const MAX_NET_PRIORITY: u32 = 7;
 /// module-placement ruleset). Routing a critical net first lets it claim the
 /// short path before a bulk rail blocks it (the router has no rip-up, so
 /// first-routed wins).
-fn netPriority(placement: optimizer.Placement, idx_of: *std.StringHashMap(usize), net: FlatNet, net_i: usize) u32 {
+fn netPriority(placement: optimizer.Placement, idx_of: *std.StringHashMapUnmanaged(usize), net: FlatNet, net_i: usize) u32 {
     const authored: u32 = if (net_i < placement.rules.net.len)
-        @min(placement.rules.net[net_i].priority, MAX_NET_PRIORITY)
+        @min(placement.rules.net[net_i].priority, max_net_priority)
     else
         0;
     var rank = netClassRank(net.name);
     if (rank == 0 and isInductorBridge(placement, idx_of, net)) rank = 1;
-    return (authored << NETCLASS_BITS) | rank;
+    return (authored << netclass_bits) | rank;
 }
 
 /// Intrinsic routing-order rank for a net from its name-based `NetClass`
@@ -723,7 +723,7 @@ fn netClassRank(name: []const u8) u32 {
 /// the inductor, and nothing else (the post-inductor rail carries caps and many
 /// pins, so it never matches). Mirrors `module_policy.netClasses`' hub+inductor
 /// upgrade, which only rescues `.signal`/`.control` names and so misses these.
-fn isInductorBridge(placement: optimizer.Placement, idx_of: *std.StringHashMap(usize), net: FlatNet) bool {
+fn isInductorBridge(placement: optimizer.Placement, idx_of: *std.StringHashMapUnmanaged(usize), net: FlatNet) bool {
     if (net.pins.len < 2 or net.pins.len > 3) return false;
     var hub = false;
     var ind = false;
@@ -750,8 +750,8 @@ const NetPt = struct { x: f64, y: f64, layer: u8, thru: bool = false };
 
 /// World centres (mm) of every resolvable pad on `net`, each tagged with the
 /// signal layer its part sits on.
-fn netPoints(arena: std.mem.Allocator, placement: optimizer.Placement, idx_of: *std.StringHashMap(usize), net: FlatNet) std.mem.Allocator.Error![]NetPt {
-    var list: std.ArrayListUnmanaged(NetPt) = .empty;
+fn netPoints(arena: std.mem.Allocator, placement: optimizer.Placement, idx_of: *std.StringHashMapUnmanaged(usize), net: FlatNet) std.mem.Allocator.Error![]NetPt {
+    var list: std.ArrayList(NetPt) = .empty;
     for (net.pins) |pin| {
         const pi = idx_of.get(pin.ref_des) orelse continue;
         const part = placement.parts[pi];
@@ -949,7 +949,7 @@ fn trimStub(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, b:
 
 /// Rings (grid steps) the escape-via fan searches outward before giving up —
 /// ~3 mm at the default pitch, enough to clear a dense module's pad field.
-const ESCAPE_VIA_RINGS: usize = 12;
+const escape_via_rings: usize = 12;
 
 /// Find the *nearest* DRC-safe spot for a single-pin breakout's escape via — the
 /// in-tool version of hand-routing a pin that has nothing to land on: drop a via
@@ -979,7 +979,7 @@ fn escapeFan(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, d
     const grid = ctx.grid;
     const ang0 = std.math.atan2(dir[1], dir[0]);
     var ring: usize = 1;
-    while (ring <= ESCAPE_VIA_RINGS) : (ring += 1) {
+    while (ring <= escape_via_rings) : (ring += 1) {
         const rad = @as(f64, @floatFromInt(ring)) * grid.g;
         var k: usize = 0;
         while (k < 8) : (k += 1) {
@@ -1215,7 +1215,7 @@ fn stampDisc(ctx: *Ctx, x: f64, y: f64, net: i32, dist: f64, layer: u8, both: bo
             const n = @as(usize, @intCast(iy)) * grid.nx + @as(usize, @intCast(ix));
             for (ctx.occ, 0..) |occ_l, li| {
                 if (!both and li != layer) continue;
-                if (occ_l[n] == EMPTY) occ_l[n] = net;
+                if (occ_l[n] == empty_cell) occ_l[n] = net;
             }
         }
     }
@@ -1276,8 +1276,8 @@ fn viaAllowed(ctx: *Ctx, n: usize, net: i32) bool {
             if (std.math.hypot(wx - x, wy - y) > dist) continue;
             const m = @as(usize, @intCast(iy)) * grid.nx + @as(usize, @intCast(ix));
             for (ctx.occ, ctx.resv) |occ_l, resv_l| {
-                if (occ_l[m] != EMPTY and occ_l[m] != net) return false;
-                if (resv_l[m] != EMPTY and resv_l[m] != net) return false;
+                if (occ_l[m] != empty_cell and occ_l[m] != net) return false;
+                if (resv_l[m] != empty_cell and resv_l[m] != net) return false;
             }
         }
     }
@@ -1388,7 +1388,7 @@ const PadGrid = struct {
         const gny = (numeric.checkedInt(usize, @floor((maxy - miny) / cell)) orelse return null) + 1;
         const total = std.math.mul(usize, gnx, gny) catch return null;
         if (total > (1 << 22)) return null; // too big — full scan is cheaper
-        const lists = arena.alloc(std.ArrayListUnmanaged(u32), total) catch return null;
+        const lists = arena.alloc(std.ArrayList(u32), total) catch return null;
         for (lists) |*l| l.* = .empty;
         for (obs, 0..) |p, i| {
             const cx0 = cellFor(p.x0 - reach, minx, cell, gnx);
@@ -1439,9 +1439,9 @@ inline fn accumPad(p: PadObs, layer: usize, px: f64, py: f64, net: i32, use_poly
 
 fn blocked(ctx: *Ctx, layer: usize, n: usize, net: i32) bool {
     const o = ctx.occ[layer][n];
-    if (o != EMPTY and o != net) return true;
+    if (o != empty_cell and o != net) return true;
     const rv = ctx.resv[layer][n];
-    if (rv != EMPTY and rv != net) return true;
+    if (rv != empty_cell and rv != net) return true;
     return foreignPadAt(ctx, layer, n, net);
 }
 
@@ -1524,7 +1524,7 @@ fn qLess(_: void, a: QItem, b: QItem) std.math.Order {
 /// router draws when a fine-pitch pad's nearest grid lane happens to fall
 /// inside a neighbouring pad's clearance (whether a 0.4 mm-pitch QFN pin can
 /// escape on-grid is alignment luck; the gateway removes the lottery).
-fn routeNet(ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayListUnmanaged(Track), vias: *std.ArrayListUnmanaged(Via)) std.mem.Allocator.Error!bool {
+fn routeNet(ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via)) std.mem.Allocator.Error!bool {
     const nodes = ctx.grid.nx * ctx.grid.ny;
     // Seed the net with its first pad's access node, on that pad's own layer,
     // plus that pad's gateways as extra Dijkstra sources until real copper
@@ -1537,7 +1537,7 @@ fn routeNet(ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayListUnman
     const p0 = ctx.grid.nearest(pts[0].x, pts[0].y);
     const p0n = ctx.grid.node(p0[0], p0[1]);
     if (!blocked(ctx, pts[0].layer, p0n, net)) ctx.occ[pts[0].layer][p0n] = net;
-    var seed_gates: std.ArrayListUnmanaged(usize) = .empty;
+    var seed_gates: std.ArrayList(usize) = .empty;
     try padGateways(ctx, tracks.items, vias.items, pts[0], net, &seed_gates);
 
     var have_copper = false; // true once some leg routed (seed stub emitted)
@@ -1545,7 +1545,7 @@ fn routeNet(ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayListUnman
     for (pts[1..]) |pt| {
         const goal = ctx.grid.nearest(pt.x, pt.y);
         const goal_key = @as(usize, pt.layer) * nodes + ctx.grid.node(goal[0], goal[1]);
-        var goals: std.ArrayListUnmanaged(usize) = .empty;
+        var goals: std.ArrayList(usize) = .empty;
         try goals.append(ctx.arena, goal_key);
         try padGateways(ctx, tracks.items, vias.items, pt, net, &goals);
         const extra: []const usize = if (have_copper) &.{} else seed_gates.items;
@@ -1573,7 +1573,7 @@ fn routeNet(ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayListUnman
 
 /// Rings the pad-gateway search fans outward — ~1.5 mm at the default pitch,
 /// enough to clear a QFN pad collar plus the ground-via ring beside it.
-const GATE_RINGS: usize = 6;
+const gate_rings: usize = 6;
 
 /// Collect the off-grid gateway nodes of pad terminal `pt`: grid nodes within
 /// `GATE_RINGS` of the pad centre that are themselves routable AND reachable
@@ -1582,14 +1582,14 @@ const GATE_RINGS: usize = 6;
 /// stub always clears its row neighbours (the lateral gap is fixed by the pad
 /// pitch), so a fine-pitch pin keeps an exit even when every nearby grid node
 /// sits inside a neighbour's clearance. Keys are appended to `out` (deduped).
-fn padGateways(ctx: *Ctx, tracks: []const Track, vias: []const Via, pt: NetPt, net: i32, out: *std.ArrayListUnmanaged(usize)) std.mem.Allocator.Error!void {
+fn padGateways(ctx: *Ctx, tracks: []const Track, vias: []const Via, pt: NetPt, net: i32, out: *std.ArrayList(usize)) std.mem.Allocator.Error!void {
     const grid = ctx.grid;
     const nodes = grid.nx * grid.ny;
     const c = [2]f64{ pt.x, pt.y };
     const dir = groundFanDir(ctx, c, net);
     const ang0 = std.math.atan2(dir[1], dir[0]);
     var ring: usize = 1;
-    while (ring <= GATE_RINGS) : (ring += 1) {
+    while (ring <= gate_rings) : (ring += 1) {
         const rad = @as(f64, @floatFromInt(ring)) * grid.g;
         var k: usize = 0;
         while (k < 8) : (k += 1) {
@@ -1618,7 +1618,7 @@ fn containsKey(keys: []const usize, key: usize) bool {
 /// Emit the stub joining pad terminal `pt`'s true centre to the entry node
 /// `key` the maze actually used, and reserve its clearance halo so later nets
 /// detour it (the stub is off-grid copper the occupancy grid can't see).
-fn gateStub(ctx: *Ctx, net: i32, pt: NetPt, key: usize, tracks: *std.ArrayListUnmanaged(Track)) std.mem.Allocator.Error!void {
+fn gateStub(ctx: *Ctx, net: i32, pt: NetPt, key: usize, tracks: *std.ArrayList(Track)) std.mem.Allocator.Error!void {
     const grid = ctx.grid;
     const nodes = grid.nx * grid.ny;
     const layer: u8 = @intCast(key / nodes);
@@ -1636,10 +1636,10 @@ fn gateStub(ctx: *Ctx, net: i32, pt: NetPt, key: usize, tracks: *std.ArrayListUn
 fn clearNetOcc(ctx: *Ctx, net: i32) void {
     for (ctx.occ, ctx.resv) |occ_l, resv_l| {
         for (occ_l) |*c| {
-            if (c.* == net) c.* = EMPTY;
+            if (c.* == net) c.* = empty_cell;
         }
         for (resv_l) |*c| {
-            if (c.* == net) c.* = EMPTY;
+            if (c.* == net) c.* = empty_cell;
         }
     }
 }
@@ -1669,12 +1669,12 @@ const RipNet = struct { net_i: usize, pri: u32, ok: bool };
 /// Rip-up passes cap: at most this many full sweeps over the failed nets. Each
 /// sweep is O(failed × (probe + rip + reroute)); 3 is plenty for module boards
 /// and keeps the worst case a small multiple of the single greedy pass.
-const RIPUP_MAX_ROUNDS: usize = 3;
+const ripup_max_rounds: usize = 3;
 /// Per-cell penalty (× grid pitch) the blocker probe charges for stepping onto
 /// foreign copper. Large enough that the probe crosses copper only when there is
 /// no pad-free detour — so the nets it reports are the ones actually walling the
 /// failed net in, not incidental copper it could have gone around.
-const RIPUP_CROSS_PEN: f64 = 200.0;
+const ripup_cross_pen: f64 = 200.0;
 
 /// True when at least one net in the working set is still unrouted — the cheap
 /// guard that keeps rip-up (and its scratch arena) off fully-routed boards.
@@ -1703,7 +1703,7 @@ fn countRouted(routable: []const RipNet) usize {
 }
 
 /// Drop every track of `net` from `list`, packing the survivors down in place.
-fn removeNetTracks(list: *std.ArrayListUnmanaged(Track), net: i32) void {
+fn removeNetTracks(list: *std.ArrayList(Track), net: i32) void {
     var w: usize = 0;
     for (list.items) |item| {
         if (item.net != net) {
@@ -1715,7 +1715,7 @@ fn removeNetTracks(list: *std.ArrayListUnmanaged(Track), net: i32) void {
 }
 
 /// Drop every via of `net` from `list`, packing the survivors down in place.
-fn removeNetVias(list: *std.ArrayListUnmanaged(Via), net: i32) void {
+fn removeNetVias(list: *std.ArrayList(Via), net: i32) void {
     var w: usize = 0;
     for (list.items) |item| {
         if (item.net != net) {
@@ -1729,7 +1729,7 @@ fn removeNetVias(list: *std.ArrayListUnmanaged(Via), net: i32) void {
 /// Remove all of `net_i`'s copper from the board: clear its occupancy/reservation
 /// cells and delete its tracks + vias. Leaves every other net untouched (a net
 /// only ever stamps its own index), so the freed cells are exactly this net's.
-fn ripNet(ctx: *Ctx, tracks: *std.ArrayListUnmanaged(Track), vias: *std.ArrayListUnmanaged(Via), net_i: usize) void {
+fn ripNet(ctx: *Ctx, tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via), net_i: usize) void {
     const ni: i32 = @intCast(net_i);
     clearNetOcc(ctx, ni);
     removeNetTracks(tracks, ni);
@@ -1745,15 +1745,15 @@ fn softEnter(ctx: *Ctx, layer: usize, n: usize, net: i32) ?f64 {
     if (foreignPadAt(ctx, layer, n, net)) return null;
     var pen: f64 = 0;
     const o = ctx.occ[layer][n];
-    if (o != EMPTY and o != net) pen += RIPUP_CROSS_PEN * ctx.grid.g;
+    if (o != empty_cell and o != net) pen += ripup_cross_pen * ctx.grid.g;
     const rv = ctx.resv[layer][n];
-    if (rv != EMPTY and rv != net) pen += RIPUP_CROSS_PEN * ctx.grid.g;
+    if (rv != empty_cell and rv != net) pen += ripup_cross_pen * ctx.grid.g;
     return pen;
 }
 
 /// Relax one probe move onto `(to_layer, to_node)` at base step cost `base`,
 /// adding the soft entry penalty. A hard-pad-blocked target is skipped.
-fn softStep(ctx: *Ctx, pq: *PQ, dist: []f64, prev: []i64, net: i32, from_key: usize, to_layer: usize, to_node: ?usize, base: f64) std.mem.Allocator.Error!void {
+fn softStep(ctx: *Ctx, pq: *Pq, dist: []f64, prev: []i64, net: i32, from_key: usize, to_layer: usize, to_node: ?usize, base: f64) std.mem.Allocator.Error!void {
     const tn = to_node orelse return;
     const enter = softEnter(ctx, to_layer, tn, net) orelse return;
     const nodes = ctx.grid.nx * ctx.grid.ny;
@@ -1771,7 +1771,7 @@ fn softStep(ctx: *Ctx, pq: *PQ, dist: []f64, prev: []i64, net: i32, from_key: us
 /// only a hard-pad-blocked flank forbids the diagonal.
 fn softDiag(
     ctx: *Ctx,
-    pq: *PQ,
+    pq: *Pq,
     dist: []f64,
     prev: []i64,
     net: i32,
@@ -1786,7 +1786,7 @@ fn softDiag(
     const c1 = neighbor(grid, ix, iy, dx, 0) orelse return;
     const c2 = neighbor(grid, ix, iy, 0, dy) orelse return;
     if (softEnter(ctx, layer, c1, net) == null or softEnter(ctx, layer, c2, net) == null) return;
-    try softStep(ctx, pq, dist, prev, net, from_key, layer, neighbor(grid, ix, iy, dx, dy), grid.g * SQRT2);
+    try softStep(ctx, pq, dist, prev, net, from_key, layer, neighbor(grid, ix, iy, dx, dy), grid.g * sqrt2);
 }
 
 /// Soft Dijkstra from `src`'s access node to `goal`'s, foreign copper passable
@@ -1794,7 +1794,7 @@ fn softDiag(
 /// and records every foreign net whose copper it crossed into `crossed` — the
 /// blocker set for this pad pair. Unreachable even softly (walled by pads) ⇒ no
 /// blockers recorded. Uses `scratch` for its dist/prev/queue.
-fn softProbe(ctx: *Ctx, net: i32, src: NetPt, goal: NetPt, crossed: *std.AutoHashMap(i32, void), scratch: std.mem.Allocator) std.mem.Allocator.Error!void {
+fn softProbe(ctx: *Ctx, net: i32, src: NetPt, goal: NetPt, crossed: *std.AutoHashMapUnmanaged(i32, void), scratch: std.mem.Allocator) std.mem.Allocator.Error!void {
     const grid = ctx.grid;
     const nodes = grid.nx * grid.ny;
     const n_layers = ctx.occ.len;
@@ -1834,7 +1834,7 @@ fn softProbe(ctx: *Ctx, net: i32, src: NetPt, goal: NetPt, crossed: *std.AutoHas
         if (n_layers > 1) {
             for (0..n_layers) |to_layer| {
                 if (to_layer == layer) continue;
-                try softStep(ctx, &pq, dist, prev, net, it.key, to_layer, n, grid.g * VIA_COST_MULT);
+                try softStep(ctx, &pq, dist, prev, net, it.key, to_layer, n, grid.g * via_cost_mult);
             }
         }
     }
@@ -1845,9 +1845,9 @@ fn softProbe(ctx: *Ctx, net: i32, src: NetPt, goal: NetPt, crossed: *std.AutoHas
         const layer = k / nodes;
         const nn = k % nodes;
         const o = ctx.occ[layer][nn];
-        if (o != EMPTY and o != net) try crossed.put(o, {});
+        if (o != empty_cell and o != net) try crossed.put(scratch, o, {});
         const rv = ctx.resv[layer][nn];
-        if (rv != EMPTY and rv != net) try crossed.put(rv, {});
+        if (rv != empty_cell and rv != net) try crossed.put(scratch, rv, {});
         const p = prev[k];
         if (p < 0) break;
         k = @intCast(p);
@@ -1860,7 +1860,7 @@ fn softProbe(ctx: *Ctx, net: i32, src: NetPt, goal: NetPt, crossed: *std.AutoHas
 fn detectBlockers(
     ctx: *Ctx,
     placement: optimizer.Placement,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     net_i: usize,
     scratch: std.mem.Allocator,
 ) std.mem.Allocator.Error![]i32 {
@@ -1868,9 +1868,9 @@ fn detectBlockers(
     setNetParams(ctx, placement, net_i);
     const pts = try netPoints(scratch, placement, idx_of, placement.nets[net_i]);
     if (pts.len < 2) return &.{};
-    var crossed = std.AutoHashMap(i32, void).init(scratch);
+    var crossed = std.AutoHashMapUnmanaged(i32, void).empty;
     for (pts[1..]) |pt| try softProbe(ctx, ni, pts[0], pt, &crossed, scratch);
-    var out: std.ArrayListUnmanaged(i32) = .empty;
+    var out: std.ArrayList(i32) = .empty;
     var it = crossed.keyIterator();
     while (it.next()) |kp| try out.append(scratch, kp.*);
     return out.toOwnedSlice(scratch);
@@ -1899,7 +1899,7 @@ fn collectRippable(
     blockers: []const i32,
     fail_pri: u32,
 ) std.mem.Allocator.Error![]usize {
-    var out: std.ArrayListUnmanaged(usize) = .empty;
+    var out: std.ArrayList(usize) = .empty;
     for (routable, 0..) |rn, i| {
         if (!rn.ok) continue; // only routed copper can be ripped
         if (rn.pri > fail_pri) continue; // never rip STRICTLY higher priority
@@ -1925,10 +1925,10 @@ fn collectRippable(
 fn rerouteNet(
     ctx: *Ctx,
     placement: optimizer.Placement,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     rn: *RipNet,
-    tracks: *std.ArrayListUnmanaged(Track),
-    vias: *std.ArrayListUnmanaged(Via),
+    tracks: *std.ArrayList(Track),
+    vias: *std.ArrayList(Via),
 ) std.mem.Allocator.Error!void {
     setNetParams(ctx, placement, rn.net_i);
     const pts = try netPoints(ctx.arena, placement, idx_of, placement.nets[rn.net_i]);
@@ -1956,8 +1956,8 @@ const RipSnapshot = struct {
 fn saveSnapshot(
     scratch: std.mem.Allocator,
     ctx: *Ctx,
-    tracks: *std.ArrayListUnmanaged(Track),
-    vias: *std.ArrayListUnmanaged(Via),
+    tracks: *std.ArrayList(Track),
+    vias: *std.ArrayList(Via),
     routable: []const RipNet,
 ) std.mem.Allocator.Error!RipSnapshot {
     const occ = try scratch.alloc([]i32, ctx.occ.len);
@@ -1981,8 +1981,8 @@ fn saveSnapshot(
 /// speculative attempt's changes.
 fn restoreSnapshot(
     ctx: *Ctx,
-    tracks: *std.ArrayListUnmanaged(Track),
-    vias: *std.ArrayListUnmanaged(Via),
+    tracks: *std.ArrayList(Track),
+    vias: *std.ArrayList(Via),
     routable: []RipNet,
     snap: RipSnapshot,
 ) std.mem.Allocator.Error!void {
@@ -2001,10 +2001,10 @@ fn restoreSnapshot(
 fn ripUpReroute(
     ctx: *Ctx,
     placement: optimizer.Placement,
-    idx_of: *std.StringHashMap(usize),
+    idx_of: *std.StringHashMapUnmanaged(usize),
     routable: []RipNet,
-    tracks: *std.ArrayListUnmanaged(Track),
-    vias: *std.ArrayListUnmanaged(Via),
+    tracks: *std.ArrayList(Track),
+    vias: *std.ArrayList(Via),
 ) std.mem.Allocator.Error!usize {
     // Scratch arena for per-attempt snapshots + probe state, backed by the
     // caller's arena (not page_allocator) and reset between attempts so only one
@@ -2012,7 +2012,7 @@ fn ripUpReroute(
     var scratch_inst = std.heap.ArenaAllocator.init(ctx.arena);
     defer scratch_inst.deinit();
     var rounds: usize = 0;
-    while (rounds < RIPUP_MAX_ROUNDS) {
+    while (rounds < ripup_max_rounds) {
         rounds += 1;
         var progress = false;
         for (routable) |*rn| {
@@ -2062,13 +2062,13 @@ pub const NetRouted = struct { name: []const u8, mm: f64, vias: usize };
 /// length so the longest nets read first. `net`-index copper with no matching
 /// `placement.nets` entry (there should be none) is skipped.
 pub fn perNetRouted(arena: std.mem.Allocator, placement: optimizer.Placement, r: RouteResult) std.mem.Allocator.Error![]NetRouted {
-    var by_idx = std.AutoHashMap(i32, NetRouted).init(arena);
-    defer by_idx.deinit();
+    var by_idx = std.AutoHashMapUnmanaged(i32, NetRouted).empty;
+    defer by_idx.deinit(arena);
     for (r.tracks) |t| {
         if (t.net < 0) continue;
         const ui: usize = @intCast(t.net);
         if (ui >= placement.nets.len) continue;
-        const gop = try by_idx.getOrPut(t.net);
+        const gop = try by_idx.getOrPut(arena, t.net);
         if (!gop.found_existing) gop.value_ptr.* = .{ .name = placement.nets[ui].name, .mm = 0, .vias = 0 };
         gop.value_ptr.mm += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
     }
@@ -2076,11 +2076,11 @@ pub fn perNetRouted(arena: std.mem.Allocator, placement: optimizer.Placement, r:
         if (v.net < 0) continue;
         const ui: usize = @intCast(v.net);
         if (ui >= placement.nets.len) continue;
-        const gop = try by_idx.getOrPut(v.net);
+        const gop = try by_idx.getOrPut(arena, v.net);
         if (!gop.found_existing) gop.value_ptr.* = .{ .name = placement.nets[ui].name, .mm = 0, .vias = 0 };
         gop.value_ptr.vias += 1;
     }
-    var out: std.ArrayListUnmanaged(NetRouted) = .empty;
+    var out: std.ArrayList(NetRouted) = .empty;
     var it = by_idx.valueIterator();
     while (it.next()) |nr| try out.append(arena, nr.*);
     std.sort.pdq(NetRouted, out.items, {}, netRoutedLonger);
@@ -2106,8 +2106,8 @@ fn dijkstra(
     net: i32,
     goals: []const usize,
     extra_sources: []const usize,
-    tracks: *std.ArrayListUnmanaged(Track),
-    vias: *std.ArrayListUnmanaged(Via),
+    tracks: *std.ArrayList(Track),
+    vias: *std.ArrayList(Via),
 ) std.mem.Allocator.Error!?DijkstraHit {
     const grid = ctx.grid;
     const nodes = grid.nx * grid.ny;
@@ -2165,7 +2165,7 @@ fn dijkstra(
         if (ctx.allow_vias and n_layers > 1 and viaAllowed(ctx, n, net)) {
             for (0..n_layers) |to_layer| {
                 if (to_layer == layer) continue;
-                try relaxStep(ctx, &pq, dist, prev, net, it.key, to_layer, n, grid.g * VIA_COST_MULT);
+                try relaxStep(ctx, &pq, dist, prev, net, it.key, to_layer, n, grid.g * via_cost_mult);
             }
         }
     }
@@ -2183,11 +2183,11 @@ fn neighbor(grid: Grid, ix: usize, iy: usize, dx: i64, dy: i64) ?usize {
     return @as(usize, @intCast(y)) * grid.nx + @as(usize, @intCast(x));
 }
 
-const PQ = std.PriorityQueue(QItem, void, qLess);
+const Pq = std.PriorityQueue(QItem, void, qLess);
 
 fn relaxStep(
     ctx: *Ctx,
-    pq: *PQ,
+    pq: *Pq,
     dist: []f64,
     prev: []i64,
     net: i32,
@@ -2204,9 +2204,9 @@ fn relaxStep(
     // steps on an inner signal layer carry the mild `INNER_COST_MULT` bias
     // so equal-length paths stay on the outer faces.
     const eff = if (to_layer >= 2)
-        step * INNER_COST_MULT
+        step * inner_cost_mult
     else if (ctx.pour[to_layer])
-        step * POUR_COST_MULT
+        step * pour_cost_mult
     else
         step;
     const nd = dist[from_key] + eff;
@@ -2222,7 +2222,7 @@ fn relaxStep(
 /// clips the corner of a pad it must clear (no corner-cutting).
 fn relaxDiag(
     ctx: *Ctx,
-    pq: *PQ,
+    pq: *Pq,
     dist: []f64,
     prev: []i64,
     net: i32,
@@ -2237,7 +2237,7 @@ fn relaxDiag(
     const c1 = neighbor(grid, ix, iy, dx, 0) orelse return;
     const c2 = neighbor(grid, ix, iy, 0, dy) orelse return;
     if (blocked(ctx, layer, c1, net) or blocked(ctx, layer, c2, net)) return;
-    try relaxStep(ctx, pq, dist, prev, net, from_key, layer, neighbor(grid, ix, iy, dx, dy), grid.g * SQRT2);
+    try relaxStep(ctx, pq, dist, prev, net, from_key, layer, neighbor(grid, ix, iy, dx, dy), grid.g * sqrt2);
 }
 
 /// Walk `prev` from the goal back to a source, stamp the path as net copper,
@@ -2248,14 +2248,14 @@ fn emitPath(
     prev: []i64,
     goal_key: usize,
     net: i32,
-    tracks: *std.ArrayListUnmanaged(Track),
-    vias: *std.ArrayListUnmanaged(Via),
+    tracks: *std.ArrayList(Track),
+    vias: *std.ArrayList(Via),
 ) std.mem.Allocator.Error!usize {
     const grid = ctx.grid;
     const nodes = grid.nx * grid.ny;
     var key: i64 = @intCast(goal_key);
     // Collect the path (goal → source).
-    var path: std.ArrayListUnmanaged(usize) = .empty;
+    var path: std.ArrayList(usize) = .empty;
     while (key >= 0) : (key = prev[@intCast(key)]) {
         const k: usize = @intCast(key);
         ctx.occ[k / nodes][k % nodes] = net;
@@ -2317,7 +2317,7 @@ fn sameDir(grid: Grid, nodes: usize, a: usize, b: usize, c: usize) bool {
     return (bx - ax) == (cx - bx) and (by - ay) == (cy - by);
 }
 
-fn emitSeg(ctx: *Ctx, tracks: *std.ArrayListUnmanaged(Track), a_key: usize, b_key: usize, net: i32) std.mem.Allocator.Error!void {
+fn emitSeg(ctx: *Ctx, tracks: *std.ArrayList(Track), a_key: usize, b_key: usize, net: i32) std.mem.Allocator.Error!void {
     const grid = ctx.grid;
     const nodes = grid.nx * grid.ny;
     if (a_key == b_key) return;
@@ -2340,7 +2340,7 @@ fn emitSeg(ctx: *Ctx, tracks: *std.ArrayListUnmanaged(Track), a_key: usize, b_ke
 /// A signal via needs a GND stitching via within this radius (mm) for its return
 /// current to stay continuous across the layer change. ~2 mm is a common
 /// stitching guideline for the low-MHz–GHz range these modules operate in.
-pub const RETURN_PATH_RADIUS_MM: f64 = 2.0;
+pub const return_path_radius_mm: f64 = 2.0;
 
 /// True when via net index `net` is a ground (plane-drop / stitching) via.
 fn isGndVia(placement: optimizer.Placement, net: i32) bool {
@@ -2753,9 +2753,9 @@ test "LoopRouter.legLen lengthens a leg that must route around an obstacle" {
         .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 4, .y = 0 },
     };
     const clear_nets = [_]FlatNet{.{ .name = "SIG", .pins = &sig }};
-    var clear_idx = std.StringHashMap(usize).init(arena);
-    try clear_idx.put("R1", 0);
-    try clear_idx.put("R2", 1);
+    var clear_idx = std.StringHashMapUnmanaged(usize).empty;
+    try clear_idx.put(arena, "R1", 0);
+    try clear_idx.put(arena, "R2", 1);
     var lr_clear = try LoopRouter.init(arena, &clear_parts, &clear_nets, &clear_idx, .{});
     const len_clear = (try lr_clear.legLen(.{ 0, 0 }, .{ 4, 0 }, 0)).?;
     try testing.expect(len_clear >= 3.5 and len_clear < 6.0);
@@ -2770,10 +2770,10 @@ test "LoopRouter.legLen lengthens a leg that must route around an obstacle" {
     };
     const other = [_]export_kicad.FlatPin{.{ .ref_des = "U9", .pin = "1" }};
     const blk_nets = [_]FlatNet{ .{ .name = "SIG", .pins = &sig }, .{ .name = "OTHER", .pins = &other } };
-    var blk_idx = std.StringHashMap(usize).init(arena);
-    try blk_idx.put("R1", 0);
-    try blk_idx.put("R2", 1);
-    try blk_idx.put("U9", 2);
+    var blk_idx = std.StringHashMapUnmanaged(usize).empty;
+    try blk_idx.put(arena, "R1", 0);
+    try blk_idx.put(arena, "R2", 1);
+    try blk_idx.put(arena, "U9", 2);
     var lr_blk = try LoopRouter.init(arena, &blk_parts, &blk_nets, &blk_idx, .{});
     const len_blk = (try lr_blk.legLen(.{ 0, 0 }, .{ 4, 0 }, 0)).?;
     try testing.expect(len_blk > len_clear + 0.5);
@@ -2846,7 +2846,7 @@ test "returnPathViolations flags unstitched signal vias" {
         .{ .x = 5, .y = 0, .dia = 0.4, .net = 1 },
     };
     const far_res = RouteResult{ .tracks = &.{}, .vias = &far, .routed = 0, .total = 0 };
-    try testing.expectEqual(@as(usize, 1), returnPathViolations(placement, far_res, RETURN_PATH_RADIUS_MM));
+    try testing.expectEqual(@as(usize, 1), returnPathViolations(placement, far_res, return_path_radius_mm));
 
     // Move the GND via within the radius → the signal via is stitched (0 warnings).
     const near = [_]Via{
@@ -2854,7 +2854,7 @@ test "returnPathViolations flags unstitched signal vias" {
         .{ .x = 1, .y = 0, .dia = 0.4, .net = 1 },
     };
     const near_res = RouteResult{ .tracks = &.{}, .vias = &near, .routed = 0, .total = 0 };
-    try testing.expectEqual(@as(usize, 0), returnPathViolations(placement, near_res, RETURN_PATH_RADIUS_MM));
+    try testing.expectEqual(@as(usize, 0), returnPathViolations(placement, near_res, return_path_radius_mm));
 }
 
 // spec: placement/router - stitches each signal via's return path with a nearby GND plane via
@@ -2905,9 +2905,9 @@ test "route stitches a signal escape via with a ground via" {
     }
     try testing.expect(sig != null and gnd != null);
     // The stitch via sits within the return-path radius of the signal via…
-    try testing.expect(std.math.hypot(gnd.?.x - sig.?.x, gnd.?.y - sig.?.y) <= RETURN_PATH_RADIUS_MM);
+    try testing.expect(std.math.hypot(gnd.?.x - sig.?.x, gnd.?.y - sig.?.y) <= return_path_radius_mm);
     // …so the routed board reports no return-path discontinuity.
-    try testing.expectEqual(@as(usize, 0), returnPathViolations(placement, r, RETURN_PATH_RADIUS_MM));
+    try testing.expectEqual(@as(usize, 0), returnPathViolations(placement, r, return_path_radius_mm));
 }
 
 // spec: placement/router - escapes a single-pin breakout to an inner layer with a short stub and a via
@@ -2983,10 +2983,10 @@ test "netClassRank elevates switch-node and input-rail nets but no other class" 
 
 // spec: placement/router - lets authored (net-class (priority …)) dominate the intrinsic net-class rank
 test "netPriority ranks the hot loop first yet keeps authored class priority dominant" {
-    var idx = std.StringHashMap(usize).init(testing.allocator);
-    defer idx.deinit();
-    try idx.put("U1", 0);
-    try idx.put("C1", 1);
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    defer idx.deinit(testing.allocator);
+    try idx.put(testing.allocator, "U1", 0);
+    try idx.put(testing.allocator, "C1", 1);
 
     const sw_pins = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
     const sig_pins = [_]export_kicad.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
@@ -3033,10 +3033,10 @@ test "netPriority elevates a power-named hub-inductor bridge (VREG_LX) over a ra
         .{ .ref_des = "L_VREG", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 2, .y = 0 },
         .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 4, .y = 0 },
     };
-    var idx = std.StringHashMap(usize).init(arena);
-    try idx.put("U1", 0);
-    try idx.put("L_VREG", 1);
-    try idx.put("C1", 2);
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    try idx.put(arena, "U1", 0);
+    try idx.put(arena, "L_VREG", 1);
+    try idx.put(arena, "C1", 2);
 
     // VREG_LX: hub pin + inductor pin only — the RP2350-style switch node whose
     // NAME classifies as a power rail (VREG prefix). Must still outrank a
@@ -3483,8 +3483,8 @@ test "a routed diagonal reserves its corner cells against foreign nets only" {
         .base = .{},
         .index_reach = 0.1905,
     };
-    var tracks: std.ArrayListUnmanaged(Track) = .empty;
-    var vias: std.ArrayListUnmanaged(Via) = .empty;
+    var tracks: std.ArrayList(Track) = .empty;
+    var vias: std.ArrayList(Via) = .empty;
     // Drive the maze directly (no pad gateways): seed net 0 at (2,2), route to
     // (6,6) — the unique shortest path is the pure 45° diagonal.
     ctx.occ[0][grid.node(2, 2)] = 0;
@@ -3511,7 +3511,7 @@ fn diagCornersReserved(ctx: *Ctx, lo: usize, hi: usize, net: i32) bool {
         if (ctx.resv[0][c1] != net or ctx.resv[0][c2] != net) return false;
         if (!blocked(ctx, 0, c1, net + 1)) return false; // foreign net must be blocked
         if (blocked(ctx, 0, c1, net)) return false; // owner must stay passable
-        if (ctx.occ[0][c1] != EMPTY) return false; // reserved ≠ copper
+        if (ctx.occ[0][c1] != empty_cell) return false; // reserved ≠ copper
     }
     return true;
 }

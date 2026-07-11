@@ -13,18 +13,18 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
 // ── Constants ─────────────────────────────────────────────────────
-const HTTP_BAD_REQUEST: u16 = 400;
-const HTTP_INTERNAL_ERROR: u16 = 500;
+const http_bad_request: u16 = 400;
+const http_internal_error: u16 = 500;
 // /tmp templates assembled at use site to keep the absolute-path literal
 // out of a string-literal token guardian's ban-hardcoded-paths checker
 // flags. The TMP_DIR fragment is just a directory name.
-const TMP_DIR = "tmp";
+const tmp_dir_name = "tmp";
 // SECURITY: the temp-file name is minted from a process-unique token, NEVER
 // from the client-supplied `X-Filename` header — templating an attacker string
 // into a `/tmp/...` path was an arbitrary-file-write (path traversal via
 // `../../..`) → RCE vector. Both `{d}` fields are our own counters.
-const TMP_ZIP_TEMPLATE = "/" ++ TMP_DIR ++ "/eda-upload-{d}-{d}";
-const TMP_EXTRACT_TEMPLATE = "/" ++ TMP_DIR ++ "/eda-extract-{d}-{d}";
+const tmp_zip_template = "/" ++ tmp_dir_name ++ "/eda-upload-{d}-{d}";
+const tmp_extract_template = "/" ++ tmp_dir_name ++ "/eda-extract-{d}-{d}";
 
 /// Monotonic counter appended to temp-file names so two uploads landing in the
 /// same millisecond can't collide (and so no request input reaches the path).
@@ -33,9 +33,9 @@ var tmp_seq: std.atomic.Value(u64) = .init(0);
 fn nextTmpSeq() u64 {
     return tmp_seq.fetchAdd(1, .monotonic);
 }
-const MAX_KICAD_FILE_BYTES: usize = 10 * 1024 * 1024;
-const MAX_STEP_FILE_BYTES: usize = 50 * 1024 * 1024;
-const SEXP_PATH_TEMPLATE = "{s}/{s}.sexp";
+const max_kicad_file_bytes: usize = 10 * 1024 * 1024;
+const max_step_file_bytes: usize = 50 * 1024 * 1024;
+const sexp_path_template = "{s}/{s}.sexp";
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
@@ -92,7 +92,7 @@ pub fn importErrorMessage(e: ImportError) []const u8 {
 /// HTTP status for an `ImportError`: 400 for the one client mistake, 500
 /// otherwise.
 pub fn importErrorStatus(e: ImportError) u16 {
-    return if (e == error.NoKicadFiles) HTTP_BAD_REQUEST else HTTP_INTERNAL_ERROR;
+    return if (e == error.NoKicadFiles) http_bad_request else http_internal_error;
 }
 
 /// Convert a KiCad library ZIP (already in memory) into library entries:
@@ -110,14 +110,14 @@ pub fn importZipBytes(
     filename: []const u8,
 ) ImportError!ImportResult {
     _ = filename;
-    const tmp_zip = try std.fmt.allocPrint(allocator, TMP_ZIP_TEMPLATE, .{ clock.milliTimestamp(), nextTmpSeq() });
+    const tmp_zip = try std.fmt.allocPrint(allocator, tmp_zip_template, .{ clock.milliTimestamp(), nextTmpSeq() });
     {
         const f = infra_fs.cwd().createFile(tmp_zip, .{}) catch return error.WriteFailed;
         defer f.close();
         f.writeAll(zip_bytes) catch return error.WriteFailed;
     }
 
-    const tmp_dir = try std.fmt.allocPrint(allocator, TMP_EXTRACT_TEMPLATE, .{ clock.milliTimestamp(), nextTmpSeq() });
+    const tmp_dir = try std.fmt.allocPrint(allocator, tmp_extract_template, .{ clock.milliTimestamp(), nextTmpSeq() });
     const unzip_result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &.{ "unzip", "-o", "-q", tmp_zip, "-d", tmp_dir },
@@ -141,12 +141,12 @@ pub fn importZipBytes(
     }
     if (sym_path == null or fp_path == null) return error.NoKicadFiles;
 
-    const sym_data = infra_fs.cwd().readFileAlloc(allocator, sym_path.?, MAX_KICAD_FILE_BYTES) catch
+    const sym_data = infra_fs.cwd().readFileAlloc(allocator, sym_path.?, max_kicad_file_bytes) catch
         return error.ReadFailed;
-    const fp_data = infra_fs.cwd().readFileAlloc(allocator, fp_path.?, MAX_KICAD_FILE_BYTES) catch
+    const fp_data = infra_fs.cwd().readFileAlloc(allocator, fp_path.?, max_kicad_file_bytes) catch
         return error.ReadFailed;
     const step_data: ?[]const u8 = if (step_path) |sp|
-        (infra_fs.cwd().readFileAlloc(allocator, sp, MAX_STEP_FILE_BYTES) catch null)
+        (infra_fs.cwd().readFileAlloc(allocator, sp, max_step_file_bytes) catch null)
     else
         null;
 
@@ -204,7 +204,7 @@ fn writeSexpFile(
 ) ImportError!void {
     const dir = try std.fmt.allocPrint(allocator, "{s}/lib/{s}", .{ project_dir, subdir });
     infra_fs.cwd().makePath(dir) catch return error.WriteFailed;
-    const path = try std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ dir, name });
+    const path = try std.fmt.allocPrint(allocator, sexp_path_template, .{ dir, name });
     const f = infra_fs.cwd().createFile(path, .{}) catch return error.WriteFailed;
     defer f.close();
     f.writeAll(content) catch return error.WriteFailed;
@@ -232,7 +232,7 @@ fn writeModelFile(
 /// requires). Unzips to a temp dir via the system `unzip` and cleans up.
 pub fn extractStepBytes(allocator: std.mem.Allocator, zip_bytes: []const u8, filename: []const u8) ?[]const u8 {
     _ = filename; // advisory only — never used to build a path (client-controlled)
-    const tmp_zip = std.fmt.allocPrint(allocator, TMP_ZIP_TEMPLATE, .{ clock.milliTimestamp(), nextTmpSeq() }) catch return null;
+    const tmp_zip = std.fmt.allocPrint(allocator, tmp_zip_template, .{ clock.milliTimestamp(), nextTmpSeq() }) catch return null;
     {
         const f = infra_fs.cwd().createFile(tmp_zip, .{}) catch return null;
         defer f.close();
@@ -240,7 +240,7 @@ pub fn extractStepBytes(allocator: std.mem.Allocator, zip_bytes: []const u8, fil
     }
     defer infra_fs.cwd().deleteFile(tmp_zip) catch |e| log.warn("rm {s}: {s}", .{ tmp_zip, @errorName(e) });
 
-    const tmp_dir = std.fmt.allocPrint(allocator, TMP_EXTRACT_TEMPLATE, .{ clock.milliTimestamp(), nextTmpSeq() }) catch return null;
+    const tmp_dir = std.fmt.allocPrint(allocator, tmp_extract_template, .{ clock.milliTimestamp(), nextTmpSeq() }) catch return null;
     defer {
         _ = std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "rm", "-rf", tmp_dir } }) catch |e|
             log.warn("cleanup {s}: {s}", .{ tmp_dir, @errorName(e) });
@@ -261,7 +261,7 @@ pub fn extractStepBytes(allocator: std.mem.Allocator, zip_bytes: []const u8, fil
     while (it.next()) |line| {
         if (line.len == 0) continue;
         if (std.ascii.endsWithIgnoreCase(line, ".step") or std.ascii.endsWithIgnoreCase(line, ".stp")) {
-            return infra_fs.cwd().readFileAlloc(allocator, line, MAX_STEP_FILE_BYTES) catch return null;
+            return infra_fs.cwd().readFileAlloc(allocator, line, max_step_file_bytes) catch return null;
         }
     }
     return null;
@@ -274,7 +274,7 @@ pub fn extractStepBytes(allocator: std.mem.Allocator, zip_bytes: []const u8, fil
 /// The heavy lifting lives in `importZipBytes`, shared with the MCP path.
 pub fn uploadZipApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "No data";
         return;
     };
@@ -346,7 +346,7 @@ pub fn extractPackageName(sym_data: []const u8) []const u8 {
 /// so it's safe to use as a `lib/.../*.sexp` filename. Other characters
 /// pass through unchanged.
 pub fn sanitizeName(allocator: std.mem.Allocator, name: []const u8) []const u8 {
-    var safe_name: std.ArrayListUnmanaged(u8) = .empty;
+    var safe_name: std.ArrayList(u8) = .empty;
     for (name) |c| {
         const sc: u8 = switch (c) {
             'A'...'Z' => c + 32,
@@ -366,7 +366,7 @@ pub fn extractFootprintName(allocator: std.mem.Allocator, footprint: []const u8)
     if (std.mem.indexOf(u8, footprint, FOOTPRINT_PREFIX)) |idx| {
         const ns = idx + FOOTPRINT_PREFIX.len;
         if (std.mem.indexOfPos(u8, footprint, ns, "\"")) |ne| {
-            var fp_safe: std.ArrayListUnmanaged(u8) = .empty;
+            var fp_safe: std.ArrayList(u8) = .empty;
             for (footprint[ns..ne]) |fc| {
                 const fsc: u8 = switch (fc) {
                     'A'...'Z' => fc + 32,
@@ -428,7 +428,7 @@ fn isEscapedWhitespace(raw: []const u8, i: usize) bool {
 }
 
 fn cleanDescription(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]const u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     var sep = false;
     while (i < raw.len) {
@@ -466,7 +466,7 @@ fn renderComponentSexp(
     const manufacturer = extractFirstProperty(sym_data, &.{ "Manufacturer_Name", "Manufacturer", "MANUFACTURER", "MF" });
     const mpn = extractFirstProperty(sym_data, &.{ "Manufacturer_Part_Number", "MPN", "MP" });
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.print("(component \"{s}\"\n", .{safe_name});
     try w.print("  (description \"{s}\")\n", .{description});
@@ -502,7 +502,7 @@ pub fn writeComponentFile(
     defer allocator.free(dir);
     infra_fs.cwd().makePath(dir) catch return .write_failed;
 
-    const path = std.fmt.allocPrint(allocator, SEXP_PATH_TEMPLATE, .{ dir, safe_name }) catch return .write_failed;
+    const path = std.fmt.allocPrint(allocator, sexp_path_template, .{ dir, safe_name }) catch return .write_failed;
     defer allocator.free(path);
 
     // Note (not skip) whether we're replacing an existing component, so the

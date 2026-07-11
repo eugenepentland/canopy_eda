@@ -57,7 +57,7 @@ pub fn renderToMarkdown(
     var ctx = try render_html.setupRenderCtx(allocator, block);
     ctx.project_dir = project_dir;
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
 
     // Title + generation timestamp + build stamp
@@ -80,9 +80,9 @@ pub fn renderToMarkdown(
     // CSS subset for the inline SVGs that follow. Must come before any
     // <svg> body. Reuses the page's curated subset (no JS hooks).
     try w.writeAll("<style>\n");
-    try w.writeAll(render_html.STATIC_SVG_CSS);
+    try w.writeAll(render_html.static_svg_css);
     try w.writeAll("\n");
-    try w.writeAll(block_diagram.DIAGRAM_CSS);
+    try w.writeAll(block_diagram.diagram_css);
     try w.writeAll("\n</style>\n\n");
 
     // Verdict first: summary, the system overview, then the validation block
@@ -116,7 +116,7 @@ pub fn renderReadme(
     build_id: []const u8,
     source_names: []const []const u8,
 ) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
 
     try w.print("# Review package — {s}\n\n", .{design_name});
@@ -439,7 +439,7 @@ fn writeHubBlock(
         try escape.writeXml(w, value);
     }
     try w.writeAll("</summary>\n\n");
-    var sub_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var sub_buf: std.ArrayList(u8) = .empty;
     defer sub_buf.deinit(allocator);
     const sw = sub_buf.writer(allocator);
     const rendered = render_html.renderHubSvg(ctx, sw, allocator, pin_groups, ref_des) catch false;
@@ -462,7 +462,7 @@ fn writeHubBlock(
 /// are kept: they carry net/part names an agent can actually read.
 fn writeCompactSvg(allocator: Allocator, w: anytype, svg: []const u8) !void {
     // Pass 1 — drop dead interactive elements + the cursor:pointer style.
-    var clean: std.ArrayListUnmanaged(u8) = .empty;
+    var clean: std.ArrayList(u8) = .empty;
     defer clean.deinit(allocator);
     var i: usize = 0;
     while (i < svg.len) {
@@ -499,7 +499,7 @@ fn writeCompactSvg(allocator: Allocator, w: anytype, svg: []const u8) !void {
 }
 
 /// Append `s` to `list`, removing every occurrence of `needle`.
-fn appendWithoutSubstr(list: *std.ArrayListUnmanaged(u8), allocator: Allocator, s: []const u8, needle: []const u8) !void {
+fn appendWithoutSubstr(list: *std.ArrayList(u8), allocator: Allocator, s: []const u8, needle: []const u8) !void {
     var rest = s;
     while (std.mem.indexOf(u8, rest, needle)) |at| {
         try list.appendSlice(allocator, rest[0..at]);

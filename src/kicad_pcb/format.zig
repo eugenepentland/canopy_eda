@@ -6,11 +6,11 @@ const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 
 /// `(property "Reference" "U1" …)` — the visible ref-des.
-pub const PROP_REFERENCE = "Reference";
+pub const prop_reference = "Reference";
 /// `(property "Value" "100nF" …)` — the visible value text.
-pub const PROP_VALUE = "Value";
+pub const prop_value = "Value";
 /// `(property "canopy_uuid" "<uuid>" …)` — our cross-sync identity tag.
-pub const PROP_CANOPY_UUID = "canopy_uuid";
+pub const prop_canopy_uuid = "canopy_uuid";
 
 /// Extract a pad's number/name token (slot 1 of a `(pad …)` form) as text,
 /// regardless of how it was serialised. Modern `.sexp`-generated footprints
@@ -45,7 +45,7 @@ pub fn needsSexprEscape(s: []const u8) bool {
 /// (`"` → `\"`, `\` → `\\`); no allocation when nothing needs escaping.
 pub fn sexprEscape(arena: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8 {
     if (!needsSexprEscape(s)) return s;
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     for (s) |c| {
         if (c == '"' or c == '\\') try out.append(arena, '\\');
         try out.append(arena, c);
@@ -61,7 +61,7 @@ pub fn sexprEscape(arena: std.mem.Allocator, s: []const u8) std.mem.Allocator.Er
 /// double-escape across a load→edit→save cycle.
 pub fn sexprUnescape(arena: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8 {
     if (std.mem.indexOfScalar(u8, s, '\\') == null) return s;
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < s.len) : (i += 1) {
         if (s[i] == '\\' and i + 1 < s.len) {
@@ -102,7 +102,7 @@ test "sexprEscape escapes quotes and backslashes, passes clean text through" {
     try std.testing.expectEqual(tok.TokenTag.string, t.tag);
     // The tokenizer captures the escaped bytes between the quotes; decoding
     // `\x`→`x` must recover the raw input exactly.
-    var decoded: std.ArrayListUnmanaged(u8) = .empty;
+    var decoded: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < t.text.len) : (i += 1) {
         if (t.text[i] == '\\' and i + 1 < t.text.len) i += 1;

@@ -83,9 +83,9 @@ test "leak: extractFootprintName owned name frees parse scratch" {
 // set. Mirrors the existing "netlist generation" test's input shape.
 test "leak: writeNetlist owned buffer + internal arena freed" {
     const alloc = std.testing.allocator;
-    var fp_map = std.StringHashMap([]const u8).init(alloc);
-    defer fp_map.deinit();
-    try fp_map.put("r-0402", "R_0402_1005Metric");
+    var fp_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer fp_map.deinit(alloc);
+    try fp_map.put(alloc, "r-0402", "R_0402_1005Metric");
 
     const instances = [_]FlatInstance{
         .{ .ref_des = "R1", .component = "res-0402", .value = "220k", .footprint = "r-0402", .properties = &.{}, .uuid = "" },
@@ -97,8 +97,8 @@ test "leak: writeNetlist owned buffer + internal arena freed" {
     const nets_arr = [_]FlatNet{
         .{ .name = "VDD", .pins = &pins },
     };
-    var fp_pad_map = std.StringHashMap([]const []const u8).init(alloc);
-    defer fp_pad_map.deinit();
+    var fp_pad_map = std.StringHashMapUnmanaged([]const []const u8).empty;
+    defer fp_pad_map.deinit(alloc);
 
     const out = try export_netlist.writeNetlist(alloc, "test", &instances, &nets_arr, &fp_map, &fp_pad_map);
     defer alloc.free(out);

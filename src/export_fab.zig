@@ -30,7 +30,7 @@ pub const Frame = struct {
 
 /// Margin added around the parts' bounding box when a design declares no
 /// board outline — the fallback rectangle `outlineRect` synthesizes.
-pub const AUTO_OUTLINE_MARGIN_MM: f64 = 1.0;
+pub const auto_outline_margin_mm: f64 = 1.0;
 
 /// Whether the centroid CSV keeps Do-Not-Populate parts. `.drop` (the default)
 /// omits them — an assembler's pick-and-place machine should only see stuffed
@@ -44,10 +44,10 @@ pub const DnpMode = enum { drop, keep };
 pub fn outlineRect(placement: optimizer.Placement) optimizer.BoardRect {
     if (placement.board_rect) |r| return r;
     return .{
-        .minx = placement.minx - AUTO_OUTLINE_MARGIN_MM,
-        .miny = placement.miny - AUTO_OUTLINE_MARGIN_MM,
-        .w = (placement.maxx - placement.minx) + 2 * AUTO_OUTLINE_MARGIN_MM,
-        .h = (placement.maxy - placement.miny) + 2 * AUTO_OUTLINE_MARGIN_MM,
+        .minx = placement.minx - auto_outline_margin_mm,
+        .miny = placement.miny - auto_outline_margin_mm,
+        .w = (placement.maxx - placement.minx) + 2 * auto_outline_margin_mm,
+        .h = (placement.maxy - placement.miny) + 2 * auto_outline_margin_mm,
     };
 }
 
@@ -123,7 +123,7 @@ pub fn excellonDrill(
     frame: Frame,
 ) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
     const plated = class == .plated;
-    var holes: std.ArrayListUnmanaged(Hole) = .empty;
+    var holes: std.ArrayList(Hole) = .empty;
     for (parts) |p| {
         for (p.pads) |pad| {
             if (pad.drill <= 0) continue;
@@ -152,7 +152,7 @@ pub fn excellonDrill(
     }
 
     // Distinct diameters (0.01 mm buckets), ascending — one Excellon tool each.
-    var dias: std.ArrayListUnmanaged(f64) = .empty;
+    var dias: std.ArrayList(f64) = .empty;
     for (holes.items) |h| {
         var known = false;
         for (dias.items) |d| {
@@ -281,8 +281,8 @@ test "frameFor puts the origin at the outline's bottom-left corner" {
     // No outline: the parts' bbox + margin synthesizes one.
     p.board_rect = null;
     const auto = outlineRect(p);
-    try testing.expectApproxEqAbs(@as(f64, 2 - AUTO_OUTLINE_MARGIN_MM), auto.minx, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 10 + 2 * AUTO_OUTLINE_MARGIN_MM), auto.w, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 2 - auto_outline_margin_mm), auto.minx, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10 + 2 * auto_outline_margin_mm), auto.w, 1e-9);
 }
 
 // spec: export_fab - the Excellon writer splits plated pads + vias from non-plated holes and groups tools by diameter

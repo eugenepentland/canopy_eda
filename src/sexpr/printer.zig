@@ -7,19 +7,19 @@ const ast = @import("ast.zig");
 const Node = ast.Node;
 
 // ── Constants ─────────────────────────────────────────────────────
-const FALLBACK_INT_WIDTH: usize = 12;
-const FALLBACK_FLOAT_WIDTH: usize = 12;
-const FALLBACK_UNIT_VAL_WIDTH: usize = 14;
-const SHORT_LIST_MAX_WIDTH: usize = 72;
+const fallback_int_width: usize = 12;
+const fallback_float_width: usize = 12;
+const fallback_unit_val_width: usize = 14;
+const short_list_max_width: usize = 72;
 /// Round-trip float comparison tolerance. `printFloat` uses Zig's
 /// shortest-round-trip `{d}` decimal, so a print → parse cycle reproduces the
 /// exact f64 bits — the tolerance is 0 (exact) rather than the old 0.0001 abs,
 /// which was coarse enough to hide the `{d:.6}` truncation of small SI literals.
-const NODE_EQ_FLOAT_TOLERANCE: f64 = 0.0;
+const node_eq_float_tolerance: f64 = 0.0;
 
 /// Pretty-print a list of top-level nodes as S-expression text.
 pub fn print(allocator: std.mem.Allocator, nodes: []const Node) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     const writer = buf.writer(allocator);
 
@@ -119,17 +119,17 @@ fn estimateWidth(node: Node, depth: u32) ?usize {
         .string => |s| s.len + 2,
         .int => |i| blk: {
             var buf: [24]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk FALLBACK_INT_WIDTH;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk fallback_int_width;
             break :blk s.len;
         },
         .float => |f| blk: {
             var buf: [64]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch break :blk FALLBACK_FLOAT_WIDTH;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch break :blk fallback_float_width;
             break :blk s.len;
         },
         .unit_val => |u| blk: {
             var buf: [64]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d}", .{u}) catch break :blk FALLBACK_UNIT_VAL_WIDTH;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{u}) catch break :blk fallback_unit_val_width;
             break :blk s.len + 2; // +2 for "mm"
         },
     };
@@ -140,7 +140,7 @@ fn isShortList(children: []const Node) bool {
     for (children, 0..) |child, i| {
         if (i > 0) total_width += 1;
         total_width += estimateWidth(child, 0) orelse return false;
-        if (total_width > SHORT_LIST_MAX_WIDTH) return false;
+        if (total_width > short_list_max_width) return false;
     }
     return true;
 }
@@ -236,11 +236,11 @@ fn expectNodesEqual(a: Node, b: Node) !void {
         .float => |fv| try std.testing.expectApproxEqAbs(fv, switch (b.tag) {
             .float => |bv| bv,
             else => return error.TestExpectedEqual,
-        }, NODE_EQ_FLOAT_TOLERANCE),
+        }, node_eq_float_tolerance),
         .unit_val => |uv| try std.testing.expectApproxEqAbs(uv, switch (b.tag) {
             .unit_val => |bv| bv,
             else => return error.TestExpectedEqual,
-        }, NODE_EQ_FLOAT_TOLERANCE),
+        }, node_eq_float_tolerance),
     }
 }
 

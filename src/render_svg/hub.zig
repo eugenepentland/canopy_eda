@@ -49,8 +49,8 @@ fn buildStubs(
     pins: []const []const u8,
     pin_names: *const std.StringHashMapUnmanaged([]const u8),
 ) RenderError!StubLists {
-    const Slot = struct { stem: []const u8, pins: std.ArrayListUnmanaged([]const u8), named: bool };
-    var slots: std.ArrayListUnmanaged(Slot) = .empty;
+    const Slot = struct { stem: []const u8, pins: std.ArrayList([]const u8), named: bool };
+    var slots: std.ArrayList(Slot) = .empty;
     var stem_index: std.StringHashMapUnmanaged(usize) = .empty;
 
     for (pins) |pn| {
@@ -60,22 +60,22 @@ fn buildStubs(
                 try slots.items[idx].pins.append(self.allocator, pn);
             } else {
                 try stem_index.put(self.allocator, stem, slots.items.len);
-                var lst: std.ArrayListUnmanaged([]const u8) = .empty;
+                var lst: std.ArrayList([]const u8) = .empty;
                 try lst.append(self.allocator, pn);
                 try slots.append(self.allocator, .{ .stem = stem, .pins = lst, .named = true });
             }
         } else {
             // No pinout name: stands alone, labelled by its pin id.
-            var lst: std.ArrayListUnmanaged([]const u8) = .empty;
+            var lst: std.ArrayList([]const u8) = .empty;
             try lst.append(self.allocator, pn);
             try slots.append(self.allocator, .{ .stem = pn, .pins = lst, .named = false });
         }
     }
 
-    var labels: std.ArrayListUnmanaged([]const u8) = .empty;
-    var pin_lists: std.ArrayListUnmanaged([]const u8) = .empty;
+    var labels: std.ArrayList([]const u8) = .empty;
+    var pin_lists: std.ArrayList([]const u8) = .empty;
     for (slots.items) |slot| {
-        var pj: std.ArrayListUnmanaged(u8) = .empty;
+        var pj: std.ArrayList(u8) = .empty;
         for (slot.pins.items, 0..) |p, i| {
             if (i > 0) try pj.append(self.allocator, ',');
             try pj.appendSlice(self.allocator, p);
@@ -114,7 +114,7 @@ pub fn groupHubPins(
     if (pins.len == 0) return &[_]PinGroup{};
 
     const PinInfo = struct { pin: []const u8, net: []const u8 };
-    var pin_infos: std.ArrayListUnmanaged(PinInfo) = .empty;
+    var pin_infos: std.ArrayList(PinInfo) = .empty;
     for (pins) |pin_id| {
         var pin_net: []const u8 = "";
         for (adj_entries) |ae| {
@@ -139,14 +139,14 @@ pub fn groupHubPins(
         }
     }.lt);
 
-    var groups: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var current_pins: std.ArrayListUnmanaged([]const u8) = .empty;
+    var groups: std.ArrayList(PinGroup) = .empty;
+    var current_pins: std.ArrayList([]const u8) = .empty;
     var current_net: ?[]const u8 = null;
-    var current_conns: std.ArrayListUnmanaged(AdjEntry) = .empty;
+    var current_conns: std.ArrayList(AdjEntry) = .empty;
 
     for (pin_infos.items) |pi| {
         const pin_id = pi.pin;
-        var pin_conns: std.ArrayListUnmanaged(AdjEntry) = .empty;
+        var pin_conns: std.ArrayList(AdjEntry) = .empty;
         for (adj_entries) |ae| {
             if (std.mem.eql(u8, ae.pin, pin_id)) {
                 try pin_conns.append(self.allocator, ae);
@@ -191,8 +191,8 @@ pub fn groupHubPins(
 
 fn finishGroup(
     self: *RenderCtx,
-    pins: *std.ArrayListUnmanaged([]const u8),
-    conns: *std.ArrayListUnmanaged(AdjEntry),
+    pins: *std.ArrayList([]const u8),
+    conns: *std.ArrayList(AdjEntry),
     pin_names: *const std.StringHashMapUnmanaged([]const u8),
 ) !PinGroup {
     var display_name: []const u8 = "~";
@@ -225,7 +225,7 @@ fn finishGroup(
         }
     }
 
-    var num_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var num_buf: std.ArrayList(u8) = .empty;
     for (pins.items, 0..) |pn, i| {
         if (i > 0) try num_buf.append(self.allocator, ',');
         try num_buf.appendSlice(self.allocator, pn);
@@ -246,7 +246,7 @@ fn finishGroup(
 /// Deduplicate connections.
 fn dedupConns(self: *RenderCtx, conns: []const AdjEntry) ![]const AdjEntry {
     var seen: std.StringHashMapUnmanaged(void) = .empty;
-    var result: std.ArrayListUnmanaged(AdjEntry) = .empty;
+    var result: std.ArrayList(AdjEntry) = .empty;
     for (conns) |ae| {
         const key = switch (ae.endpoint) {
             .net => |n| try std.fmt.allocPrint(self.allocator, "net:{s}", .{n}),
@@ -286,10 +286,10 @@ pub fn splitGroupsByHeight(
     const all_heights = try groupHeights(self, all_groups, hub_ref);
     defer self.allocator.free(all_heights);
 
-    var left: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var right: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var left_h: std.ArrayListUnmanaged(f64) = .empty;
-    var right_h: std.ArrayListUnmanaged(f64) = .empty;
+    var left: std.ArrayList(PinGroup) = .empty;
+    var right: std.ArrayList(PinGroup) = .empty;
+    var left_h: std.ArrayList(f64) = .empty;
+    var right_h: std.ArrayList(f64) = .empty;
     var left_total: f64 = 0;
     var right_total: f64 = 0;
 

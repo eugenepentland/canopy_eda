@@ -7,25 +7,25 @@ const assets_css = @import("../assets_css.zig");
 const home_tmpl = @import("pages.zig");
 const LibraryRow = library_mod.LibraryRow;
 
-const STYLE_BLOCK: []const u8 = "<style>" ++
-    assets_css.NAVBAR_CSS ++
+const style_block: []const u8 = "<style>" ++
+    assets_css.navbar_css ++
     @embedFile("../assets/library.css") ++
     "</style>";
 
-const UPLOAD_BLOCK: []const u8 = @embedFile("../assets/library_upload.html");
+const upload_block: []const u8 = @embedFile("../assets/library_upload.html");
 
 pub templ Library(rows: []const LibraryRow) {
     <!DOCTYPE html>
     <html>
         <head>
             <title>Component Library</title>
-            {!STYLE_BLOCK}
+            {!style_block}
         </head>
         <body>
             @home_tmpl.Navbar("library")
             <div class="lib-content">
                 <h1>Component Library</h1>
-                {!UPLOAD_BLOCK}
+                {!upload_block}
                 <input
                     type="text" class="search-box" id="lib-search"
                     placeholder="Search components, footprints, pinouts..." autofocus />

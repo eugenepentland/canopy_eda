@@ -261,8 +261,8 @@ pub const Canvas = struct {
     /// Draw `text` with cell height `h_px` (final px). `(x,y)` is the top of the
     /// text box; `anchor` positions it horizontally. Non-table chars are blank.
     pub fn text(self: *Canvas, x: f32, y: f32, s: []const u8, h_px: f32, c: Rgb, a: f32, anchor: Anchor) void {
-        const scale = h_px / @as(f32, @floatFromInt(font.GH));
-        const advance = @as(f32, @floatFromInt(font.GW + 1)) * scale;
+        const scale = h_px / @as(f32, @floatFromInt(font.gh));
+        const advance = @as(f32, @floatFromInt(font.gw + 1)) * scale;
         const total = if (s.len == 0) 0 else @as(f32, @floatFromInt(s.len)) * advance - scale;
         var x0 = x;
         switch (anchor) {
@@ -276,7 +276,7 @@ pub const Canvas = struct {
             const base_x = x0 + @as(f32, @floatFromInt(ci)) * advance;
             for (cols, 0..) |col, gx| {
                 var gy: u32 = 0;
-                while (gy < font.GH) : (gy += 1) {
+                while (gy < font.gh) : (gy += 1) {
                     if (col & (@as(u8, 1) << @as(u3, @intCast(gy))) != 0) {
                         self.fillRect(
                             base_x + @as(f32, @floatFromInt(gx)) * scale,
@@ -313,8 +313,8 @@ pub const Canvas = struct {
     /// Width in final px a `text` call of cell height `h_px` would occupy.
     pub fn textWidth(s: []const u8, h_px: f32) f32 {
         if (s.len == 0) return 0;
-        const scale = h_px / @as(f32, @floatFromInt(font.GH));
-        const advance = @as(f32, @floatFromInt(font.GW + 1)) * scale;
+        const scale = h_px / @as(f32, @floatFromInt(font.gh));
+        const advance = @as(f32, @floatFromInt(font.gw + 1)) * scale;
         return @as(f32, @floatFromInt(s.len)) * advance - scale;
     }
 

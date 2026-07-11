@@ -24,20 +24,20 @@ const Env = env_mod.Env;
 const BlockDef = env_mod.BlockDef;
 
 // ── Constants ─────────────────────────────────────────────────────
-const FOOTPRINT_FORM = "footprint";
+const footprint_form = "footprint";
 
 /// Maximum module call nesting. A self-recursive module — an authoring typo
 /// like `(defmodule m () (m))`, or two modules calling each other — would
 /// otherwise recurse until the process stack overflows and takes down the
 /// shared server. Real module trees nest only a handful deep; this cap is
 /// generous but finite.
-const MAX_MODULE_DEPTH: usize = 64;
+const max_module_depth: usize = 64;
 
 /// Standard passive families auto-imported into every design and module
 /// before their body evaluates. The list mirrors the inventory in
 /// projects/designs/lib/components/ — keep both in sync when adding a new
 /// 04xx/06xx package family.
-const PASSIVES_PRELUDE = [_][]const u8{
+const passives_prelude = [_][]const u8{
     "cap-0201", "cap-0402", "cap-0603",     "cap-0805",
     "res-0201", "res-0402", "res-0603",     "res-0805",
     "ind-0201", "ind-0402", "ind-0603",     "ind-0805",
@@ -56,7 +56,7 @@ const PASSIVES_PRELUDE = [_][]const u8{
 pub fn loadPassivesPrelude(self: *Evaluator, env: *Env) void {
     if (self.passives_prelude_loaded) return;
     self.passives_prelude_loaded = true;
-    for (PASSIVES_PRELUDE) |name| {
+    for (passives_prelude) |name| {
         resolveImport(self, name, env) catch continue;
     }
 }
@@ -217,7 +217,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
 
     // Known structural fields (not properties)
     const skip_fields = [_][]const u8{
-        "symbol",              FOOTPRINT_FORM,
+        "symbol",              footprint_form,
         "pinout",              "component",
         "parameter",           "component-family",
         "bus",                 "note",
@@ -226,11 +226,11 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         "refdes",
     };
 
-    var props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
-    var buses: std.ArrayListUnmanaged(BusDef) = .empty;
-    var datasheets: std.ArrayListUnmanaged([]const u8) = .empty;
-    var requirements: std.ArrayListUnmanaged(env_mod.Requirement) = .empty;
-    var electrical: std.ArrayListUnmanaged(env_mod.ElectricalDecl) = .empty;
+    var props: std.ArrayList(env_mod.Property) = .empty;
+    var buses: std.ArrayList(BusDef) = .empty;
+    var datasheets: std.ArrayList([]const u8) = .empty;
+    var requirements: std.ArrayList(env_mod.Requirement) = .empty;
+    var electrical: std.ArrayList(env_mod.ElectricalDecl) = .empty;
     var requirements_ignored = false;
     // Explicit ref-des class: `(refdes "Y")` declares the single-letter prefix
     // this part's instances get, overriding the name heuristic. 0 = unset.
@@ -259,7 +259,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             props.append(self.allocator, .{ .key = "description", .value = val }) catch continue;
         } else if (std.mem.eql(u8, field, "symbol")) {
             symbol_name = cl[1].asText() orelse "";
-        } else if (std.mem.eql(u8, field, FOOTPRINT_FORM)) {
+        } else if (std.mem.eql(u8, field, footprint_form)) {
             footprint_name = cl[1].asText() orelse "";
         } else if (std.mem.eql(u8, field, "pinout")) {
             pinout_name = cl[1].asText() orelse "";
@@ -300,7 +300,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         } else if (std.mem.eql(u8, field, "bus")) {
             // (bus "name" pin1 pin2 pin3 ...)
             const bus_name = cl[1].asText() orelse continue;
-            var bus_pins: std.ArrayListUnmanaged([]const u8) = .empty;
+            var bus_pins: std.ArrayList([]const u8) = .empty;
             for (cl[2..]) |pin_node| {
                 const pin_name = pin_node.asText() orelse continue;
                 bus_pins.append(self.allocator, pin_name) catch continue;
@@ -354,7 +354,7 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
             const cl = child.asList().?;
             if (cl.len >= 2) symbol_name = cl[1].asText() orelse "";
         }
-        if (child.isForm(FOOTPRINT_FORM)) {
+        if (child.isForm(footprint_form)) {
             const cl = child.asList().?;
             if (cl.len >= 2) footprint_name = cl[1].asText() orelse "";
         }
@@ -401,9 +401,9 @@ pub fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!
         return EvalError.InvalidForm;
     };
 
-    var params: std.ArrayListUnmanaged([]const u8) = .empty;
+    var params: std.ArrayList([]const u8) = .empty;
     defer params.deinit(self.allocator);
-    var defaults: std.ArrayListUnmanaged(?Node) = .empty;
+    var defaults: std.ArrayList(?Node) = .empty;
     defer defaults.deinit(self.allocator);
     for (params_node) |p| {
         if (p.asAtom()) |pname| {
@@ -551,8 +551,8 @@ pub fn callModule(self: *Evaluator, mod: BlockDef, call_args: []const Node, call
     // `callModule` until the native stack overflows. The `module_stack` depth
     // already tracks the active call chain, so cap it here with a diagnostic
     // that still carries the frames leading in.
-    if (self.module_stack.items.len >= MAX_MODULE_DEPTH) {
-        self.setErrorFmt(call_span, "module recursion too deep (>{d}) calling '{s}' — check for a module that calls itself (directly or in a cycle)", .{ MAX_MODULE_DEPTH, mod.name });
+    if (self.module_stack.items.len >= max_module_depth) {
+        self.setErrorFmt(call_span, "module recursion too deep (>{d}) calling '{s}' — check for a module that calls itself (directly or in a cycle)", .{ max_module_depth, mod.name });
         return EvalError.InvalidForm;
     }
 
@@ -602,7 +602,7 @@ pub fn callModule(self: *Evaluator, mod: BlockDef, call_args: []const Node, call
 /// excluding parameters that declare a default:
 /// `module 'tpsm84338' missing argument(s): rled`.
 fn checkMissingParams(self: *Evaluator, mod: BlockDef, bound: []const ?Value, call_span: ast.Span) EvalError!void {
-    var missing: std.ArrayListUnmanaged(u8) = .empty;
+    var missing: std.ArrayList(u8) = .empty;
     defer missing.deinit(self.allocator);
     for (mod.params, 0..) |param, i| {
         if (bound[i] != null) continue;

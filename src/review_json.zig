@@ -9,16 +9,16 @@ const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 
 // ── Repeated string literals ──────────────────────────────────────
-const COMPONENT_KEY: []const u8 = ",\"component\":";
-const NET_KEY: []const u8 = ",\"net\":";
-const STATUS_FMT: []const u8 = ",\"status\":\"{s}\"";
-const REF_DES_OPEN: []const u8 = "{\"ref_des\":";
+const component_key: []const u8 = ",\"component\":";
+const net_key: []const u8 = ",\"net\":";
+const status_fmt: []const u8 = ",\"status\":\"{s}\"";
+const ref_des_open: []const u8 = "{\"ref_des\":";
 
 /// Serialize a ReviewDoc to JSON. Field names are snake_case. Consumers
 /// (the web UI and the `generate_review` MCP tool) rely on the schema being
 /// stable, so changes should be strictly additive.
 pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
 
     try w.writeAll("{\"design_name\":");
@@ -138,9 +138,9 @@ fn writeComponentRequirements(
     try w.writeAll("[");
     for (entries, 0..) |entry, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll(REF_DES_OPEN);
+        try w.writeAll(ref_des_open);
         try json_writer.writeString(w, entry.ref_des);
-        try w.writeAll(COMPONENT_KEY);
+        try w.writeAll(component_key);
         try json_writer.writeString(w, entry.component);
         try w.writeAll(",\"requirements\":[");
         for (entry.requirements, 0..) |r, j| {
@@ -160,7 +160,7 @@ fn writeComponentRequirements(
                 @tagName(entry.req_results[j].status)
             else
                 "na";
-            try w.print(STATUS_FMT, .{status_tag});
+            try w.print(status_fmt, .{status_tag});
             if (j < entry.req_results.len) {
                 const rr = entry.req_results[j];
                 if (rr.message.len > 0) {
@@ -227,7 +227,7 @@ fn writeSection(w: anytype, s: review.SectionReport) !void {
     try json_writer.writeString(w, s.name);
     try w.writeAll(",\"slug\":");
     try json_writer.writeString(w, s.slug);
-    try w.print(STATUS_FMT, .{@tagName(s.status)});
+    try w.print(status_fmt, .{@tagName(s.status)});
     try w.writeAll(",\"description\":");
     try json_writer.writeString(w, s.description);
     try w.print(",\"instance_count\":{d}", .{s.instance_count});
@@ -377,7 +377,7 @@ fn writeRail(w: anytype, r: power_budget.Rail) !void {
     try w.print(",\"load_typ_a\":{d:.4},\"load_max_a\":{d:.4}", .{ r.load_typ_a, r.load_max_a });
     try w.writeAll(",\"margin_pct\":");
     try writeFloatOrNull(w, r.margin_pct);
-    try w.print(STATUS_FMT, .{@tagName(r.status)});
+    try w.print(status_fmt, .{@tagName(r.status)});
     try w.writeAll(",\"consumers\":[");
     for (r.consumers, 0..) |c, i| {
         if (i > 0) try w.writeAll(",");
@@ -387,7 +387,7 @@ fn writeRail(w: anytype, r: power_budget.Rail) !void {
         try json_writer.writeString(w, c.component);
         try w.writeAll(",\"label\":");
         try json_writer.writeString(w, c.label);
-        try w.writeAll(NET_KEY);
+        try w.writeAll(net_key);
         try json_writer.writeString(w, c.net);
         try w.writeAll(",\"pins\":[");
         for (c.pins, 0..) |p, j| {
@@ -418,9 +418,9 @@ fn writeSequenceRow(w: anytype, r: power_sequencing.SequenceRow) !void {
 }
 
 fn writeTestPoint(w: anytype, tp: review.TestPointEntry) !void {
-    try w.writeAll(REF_DES_OPEN);
+    try w.writeAll(ref_des_open);
     try json_writer.writeString(w, tp.ref_des);
-    try w.writeAll(NET_KEY);
+    try w.writeAll(net_key);
     if (tp.net.len > 0) try json_writer.writeString(w, tp.net) else try w.writeAll("null");
     try w.writeAll(",\"purpose\":");
     if (tp.purpose.len > 0) try json_writer.writeString(w, tp.purpose) else try w.writeAll("null");
@@ -433,9 +433,9 @@ fn writeBomGroup(w: anytype, g: review.BomGroup) !void {
     try w.writeAll(",\"entries\":[");
     for (g.entries, 0..) |e, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll(REF_DES_OPEN);
+        try w.writeAll(ref_des_open);
         try json_writer.writeString(w, e.ref_des);
-        try w.writeAll(COMPONENT_KEY);
+        try w.writeAll(component_key);
         try json_writer.writeString(w, e.component);
         try w.writeAll(",\"value\":");
         try json_writer.writeString(w, e.value);
@@ -458,7 +458,7 @@ fn writeViolation(w: anytype, v: erc_mod.Violation) !void {
         try json_writer.writeString(w, v.ref_des);
     }
     if (v.net.len > 0) {
-        try w.writeAll(NET_KEY);
+        try w.writeAll(net_key);
         try json_writer.writeString(w, v.net);
     }
     try w.writeAll("}");

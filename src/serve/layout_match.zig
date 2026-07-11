@@ -32,7 +32,7 @@ const Side = pcb_describe.Side;
 
 /// `Side` has 5 variants (left, right, top, bottom, center); index a per-edge
 /// tally by `@intFromEnum`.
-const N_SIDES = @typeInfo(Side).@"enum".fields.len;
+const n_sides = @typeInfo(Side).@"enum".fields.len;
 
 /// Per-edge tally for one interchangeable class: how many parts the rough seed
 /// and the starred layout each placed on each IC edge, and how many edges agree.
@@ -40,8 +40,8 @@ pub const ClassDist = struct {
     class: []const u8,
     /// Total parts of this class (rough count = starred count for one design).
     n: usize = 0,
-    rough: [N_SIDES]usize = [_]usize{0} ** N_SIDES,
-    starred: [N_SIDES]usize = [_]usize{0} ** N_SIDES,
+    rough: [n_sides]usize = [_]usize{0} ** n_sides,
+    starred: [n_sides]usize = [_]usize{0} ** n_sides,
     /// Sum over edges of `min(rough, starred)` — parts the rough put where the
     /// starred layout also wanted a same-class part.
     matched: usize = 0,
@@ -67,11 +67,11 @@ pub const PInfo = struct {
 /// skipping refs in `excluded` (parts the starred reference doesn't cover —
 /// scoring those would charge the rough seed for reference staleness).
 /// Returns an empty slice if the placement has no anchor hub.
-pub fn analyze(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: ?*const std.StringHashMap(void)) std.mem.Allocator.Error![]PInfo {
+pub fn analyze(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: ?*const std.StringHashMapUnmanaged(void)) std.mem.Allocator.Error![]PInfo {
     const ai = pcb_describe.anchorIndex(p.parts, p.nets) orelse return &.{};
     const anchor = p.parts[ai];
     const a_half = pcb_describe.aabbHalf(anchor);
-    var out: std.ArrayListUnmanaged(PInfo) = .empty;
+    var out: std.ArrayList(PInfo) = .empty;
     for (p.parts, 0..) |part, i| {
         if (i == ai) continue;
         if (excluded) |ex| {
@@ -87,19 +87,19 @@ pub fn analyze(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: ?*con
 /// `min(rough, starred)` per edge, and report `area_match_pct = credited/total`.
 /// Order-independent (no per-part pairing).
 pub fn matchInfos(alloc: std.mem.Allocator, rough: []const PInfo, starred: []const PInfo) std.mem.Allocator.Error!MatchResult {
-    var map = std.StringHashMap(ClassDist).init(alloc);
-    defer map.deinit();
+    var map = std.StringHashMapUnmanaged(ClassDist).empty;
+    defer map.deinit(alloc);
     for (rough) |r| {
-        const gop = try map.getOrPut(r.class);
+        const gop = try map.getOrPut(alloc, r.class);
         if (!gop.found_existing) gop.value_ptr.* = .{ .class = r.class };
         gop.value_ptr.rough[@intFromEnum(r.side)] += 1;
     }
     for (starred) |s| {
-        const gop = try map.getOrPut(s.class);
+        const gop = try map.getOrPut(alloc, s.class);
         if (!gop.found_existing) gop.value_ptr.* = .{ .class = s.class };
         gop.value_ptr.starred[@intFromEnum(s.side)] += 1;
     }
-    var classes: std.ArrayListUnmanaged(ClassDist) = .empty;
+    var classes: std.ArrayList(ClassDist) = .empty;
     var total: usize = 0;
     var matched_total: usize = 0;
     var it = map.iterator();
@@ -107,7 +107,7 @@ pub fn matchInfos(alloc: std.mem.Allocator, rough: []const PInfo, starred: []con
         var cd = e.value_ptr.*;
         var m: usize = 0;
         var n: usize = 0;
-        for (0..N_SIDES) |k| {
+        for (0..n_sides) |k| {
             m += @min(cd.rough[k], cd.starred[k]);
             n += cd.rough[k];
         }
@@ -131,7 +131,7 @@ pub fn compare(
     alloc: std.mem.Allocator,
     rough: optimizer.Placement,
     starred: optimizer.Placement,
-    excluded: ?*const std.StringHashMap(void),
+    excluded: ?*const std.StringHashMapUnmanaged(void),
 ) std.mem.Allocator.Error!MatchResult {
     return matchInfos(alloc, try analyze(alloc, rough, excluded), try analyze(alloc, starred, excluded));
 }
@@ -190,8 +190,8 @@ pub fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: 
     // the save) sit at the origin in the verbatim render — exclude them from
     // BOTH tallies and report them, so a stale ★ reads as "stale", not as a
     // rough-seed failure.
-    var excluded = std.StringHashMap(void).init(alloc);
-    var unmatched: std.ArrayListUnmanaged([]const u8) = .empty;
+    var excluded = std.StringHashMapUnmanaged(void).empty;
+    var unmatched: std.ArrayList([]const u8) = .empty;
     const sp = star.placement;
     for (sp.parts, 0..) |part, i| {
         const origin = if (i < sp.instances.len and sp.instances[i].origin_key.len > 0)
@@ -207,7 +207,7 @@ pub fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: 
             }
         }
         if (!hit) {
-            excluded.put(part.ref_des, {}) catch return error.BuildFailed;
+            excluded.put(alloc, part.ref_des, {}) catch return error.BuildFailed;
             unmatched.append(alloc, part.ref_des) catch return error.BuildFailed;
         }
     }
@@ -242,10 +242,10 @@ pub fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: 
     // The raw objectives are emitted too so an offline λ sweep can recompute.
     const rough_obj = rough.placement.breakdown.objective;
     const star_obj = star.placement.breakdown.objective;
-    const hyb = style_score.hybridScore(rough_obj, star_obj, style.style_pct, style_score.LAMBDA_DEFAULT);
+    const hyb = style_score.hybridScore(rough_obj, star_obj, style.style_pct, style_score.lambda_default);
     w.print(
         ",\"rough_obj\":{d:.2},\"star_obj\":{d:.2},\"obj_rel\":{d:.3},\"hybrid\":{d:.3},\"lambda\":{d:.2}",
-        .{ rough_obj, star_obj, hyb.obj_rel, hyb.hybrid, style_score.LAMBDA_DEFAULT },
+        .{ rough_obj, star_obj, hyb.obj_rel, hyb.hybrid, style_score.lambda_default },
     ) catch return error.BuildFailed;
     w.print(",\"n\":{d},\"area_match_pct\":{d:.1},\"classes\":[", .{ res.n, res.area_match_pct }) catch return error.BuildFailed;
     for (res.classes, 0..) |cd, i| {
@@ -263,7 +263,7 @@ pub fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: 
 }
 
 /// Emit a `"left":n,"right":n,…` edge tally object body (no braces).
-fn writeSideTally(w: *std.Io.Writer, counts: [N_SIDES]usize) pcb_layout_page.PngError!void {
+fn writeSideTally(w: *std.Io.Writer, counts: [n_sides]usize) pcb_layout_page.PngError!void {
     inline for (@typeInfo(Side).@"enum".fields, 0..) |f, k| {
         if (k > 0) w.writeAll(",") catch return error.BuildFailed;
         w.print("\"{s}\":{d}", .{ f.name, counts[k] }) catch return error.BuildFailed;

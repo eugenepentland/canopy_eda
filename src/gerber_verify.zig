@@ -50,9 +50,9 @@ pub const ParseError = error{ MalformedCoord, MalformedAperture, MissingFormat, 
 /// our own writer (a coordinate that doesn't fit the 4.6 format, an aperture
 /// def we can't read) — those are the regressions this is meant to catch.
 pub fn parse(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
-    var apertures: std.ArrayListUnmanaged(Aperture) = .empty;
-    var flashes: std.ArrayListUnmanaged(Flash) = .empty;
-    var segments: std.ArrayListUnmanaged(Segment) = .empty;
+    var apertures: std.ArrayList(Aperture) = .empty;
+    var flashes: std.ArrayList(Flash) = .empty;
+    var segments: std.ArrayList(Segment) = .empty;
     var regions: usize = 0;
 
     var saw_format = false;
@@ -242,7 +242,7 @@ pub const Report = struct {
 
 /// Coordinate tolerance (mm): our 4.6 format rounds to 1e-6 mm, so 1e-4 is
 /// three orders of margin while still catching a real frame/scale bug.
-pub const EPS_MM: f64 = 1e-4;
+pub const eps_mm: f64 = 1e-4;
 
 /// Read `gerber_bytes` (one copper layer our writer produced) back and confirm
 /// every `flashes` and `segments` expectation appears at its frame-mapped
@@ -256,7 +256,7 @@ pub fn verifyCopperLayer(
     segments: []const ExpectSegment,
 ) ParseError!Report {
     const parsed = try parse(arena, gerber_bytes);
-    var misses: std.ArrayListUnmanaged(Miss) = .empty;
+    var misses: std.ArrayList(Miss) = .empty;
 
     for (flashes) |ef| {
         const p = frame.pt(ef.x, ef.y);
@@ -297,7 +297,7 @@ pub fn verifyCopperLayer(
 }
 
 fn approx(a: f64, b: f64) bool {
-    return @abs(a - b) <= EPS_MM;
+    return @abs(a - b) <= eps_mm;
 }
 
 /// Does parsed flash `gf` satisfy expectation `ef` at frame-mapped point `p`?

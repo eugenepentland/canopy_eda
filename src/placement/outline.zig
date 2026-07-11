@@ -85,7 +85,7 @@ pub fn segCrossesEdge(poly: []const [2]f64, x1: f64, y1: f64, x2: f64, y2: f64) 
 /// Number of polyline segments each rounded-rect corner arc is approximated
 /// with (fine enough that the sagitta error stays well under fab tolerance
 /// for any sane corner radius).
-pub const CORNER_SEGS: usize = 8;
+pub const corner_segs: usize = 8;
 
 /// Build the rounded-rectangle outline polygon for `(board (size W H)
 /// (corner-radius R))`: the rectangle `r` with each corner replaced by a
@@ -95,7 +95,7 @@ pub const CORNER_SEGS: usize = 8;
 /// are returned in one consistent winding, allocated from `alloc`.
 pub fn roundedRectPoly(alloc: std.mem.Allocator, r: optimizer.BoardRect, radius: f64) std.mem.Allocator.Error![]const [2]f64 {
     const rad = @min(@max(radius, 0), @min(r.w, r.h) / 2);
-    const pts = try alloc.alloc([2]f64, 4 * (CORNER_SEGS + 1));
+    const pts = try alloc.alloc([2]f64, 4 * (corner_segs + 1));
     // Corner arc centers + start angles, traced TL → TR → BR → BL in the
     // y-down board frame (angles in standard cos/sin form).
     const corners = [4]struct { cx: f64, cy: f64, a0: f64 }{
@@ -107,8 +107,8 @@ pub fn roundedRectPoly(alloc: std.mem.Allocator, r: optimizer.BoardRect, radius:
     var n: usize = 0;
     for (corners) |c| {
         var s: usize = 0;
-        while (s <= CORNER_SEGS) : (s += 1) {
-            const a = c.a0 + (std.math.pi / 2.0) * @as(f64, @floatFromInt(s)) / @as(f64, @floatFromInt(CORNER_SEGS));
+        while (s <= corner_segs) : (s += 1) {
+            const a = c.a0 + (std.math.pi / 2.0) * @as(f64, @floatFromInt(s)) / @as(f64, @floatFromInt(corner_segs));
             pts[n] = .{ c.cx + rad * @cos(a), c.cy + rad * @sin(a) };
             n += 1;
         }
@@ -148,22 +148,22 @@ const testing = std.testing;
 
 /// L-shaped test board: 10×10 with the top-right 4×6 notch removed
 /// (y grows down, so the notch is at large x, large y).
-const L_POLY = [_][2]f64{
+const l_poly = [_][2]f64{
     .{ 0, 0 }, .{ 10, 0 }, .{ 10, 4 }, .{ 6, 4 }, .{ 6, 10 }, .{ 0, 10 },
 };
 
 // spec: placement/outline - point-in-polygon and signed inset classify an L-shaped outline's interior, notch, and edges
 test "contains and signedInset on an L-shaped outline" {
-    try testing.expect(contains(&L_POLY, 2, 2)); // main body
-    try testing.expect(contains(&L_POLY, 8, 2)); // upper arm
-    try testing.expect(!contains(&L_POLY, 8, 8)); // the notch (inside the bbox!)
-    try testing.expect(!contains(&L_POLY, -1, 5)); // fully outside
+    try testing.expect(contains(&l_poly, 2, 2)); // main body
+    try testing.expect(contains(&l_poly, 8, 2)); // upper arm
+    try testing.expect(!contains(&l_poly, 8, 8)); // the notch (inside the bbox!)
+    try testing.expect(!contains(&l_poly, -1, 5)); // fully outside
 
-    try testing.expectApproxEqAbs(@as(f64, 2), signedInset(&L_POLY, 2, 5), 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, -2), signedInset(&L_POLY, 8, 8), 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, -1), signedInset(&L_POLY, -1, 5), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 2), signedInset(&l_poly, 2, 5), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -2), signedInset(&l_poly, 8, 8), 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, -1), signedInset(&l_poly, -1, 5), 1e-9);
 
-    const bb = bboxRect(&L_POLY);
+    const bb = bboxRect(&l_poly);
     try testing.expectApproxEqAbs(@as(f64, 0), bb.minx, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 10), bb.w, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 10), bb.h, 1e-9);
@@ -172,11 +172,11 @@ test "contains and signedInset on an L-shaped outline" {
 // spec: placement/outline - a segment crossing a concave notch edge reports the crossing point
 test "segCrossesEdge catches a track cutting the notch" {
     // Endpoints both inside the bbox; the middle crosses the x=6 notch wall.
-    const hit = segCrossesEdge(&L_POLY, 2, 8, 9, 8) orelse return error.TestExpectedCrossing;
+    const hit = segCrossesEdge(&l_poly, 2, 8, 9, 8) orelse return error.TestExpectedCrossing;
     try testing.expectApproxEqAbs(@as(f64, 6), hit[0], 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 8), hit[1], 1e-9);
     // A segment comfortably inside never reports a crossing.
-    try testing.expect(segCrossesEdge(&L_POLY, 1, 1, 4, 1) == null);
+    try testing.expect(segCrossesEdge(&l_poly, 1, 1, 4, 1) == null);
 }
 
 // spec: placement/outline - rounded-rect generation clamps the radius and keeps corner points inside the rect
@@ -187,7 +187,7 @@ test "roundedRectPoly builds the corner-radius outline" {
 
     const r = optimizer.BoardRect{ .minx = 0, .miny = 0, .w = 20, .h = 10 };
     const poly = try roundedRectPoly(arena, r, 2);
-    try testing.expectEqual(@as(usize, 4 * (CORNER_SEGS + 1)), poly.len);
+    try testing.expectEqual(@as(usize, 4 * (corner_segs + 1)), poly.len);
     // The polygon's bbox is exactly the rectangle …
     const bb = bboxRect(poly);
     try testing.expectApproxEqAbs(@as(f64, 0), bb.minx, 1e-9);

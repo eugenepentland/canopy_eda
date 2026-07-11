@@ -118,7 +118,7 @@ pub fn capture(
     project_dir: []const u8,
     name: []const u8,
 ) std.mem.Allocator.Error!FileSet {
-    var list: std.ArrayListUnmanaged(FileStamp) = .empty;
+    var list: std.ArrayList(FileStamp) = .empty;
     errdefer {
         for (list.items) |s| page.free(s.path);
         list.deinit(page);

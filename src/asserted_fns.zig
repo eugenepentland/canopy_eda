@@ -33,7 +33,7 @@ fn appendFromBlock(allocator: Allocator, map: *Map, block: *const DesignBlock) A
 fn join(allocator: Allocator, fns: []const []const u8) ?[]const u8 {
     if (fns.len == 0) return null;
     if (fns.len == 1) return fns[0];
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     for (fns, 0..) |f, i| {
         if (i > 0) w.writeAll(", ") catch return null;

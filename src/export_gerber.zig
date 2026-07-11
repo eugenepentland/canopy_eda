@@ -32,11 +32,11 @@ const numeric = @import("numeric.zig");
 // old constants (0.05 / 0.3) as defaults, and read via `placement.rules.design`.
 
 /// Silkscreen stroke width (mm) — footprint art and ref-des text alike.
-const SILK_W_MM: f64 = 0.15;
+const silk_w_mm: f64 = 0.15;
 /// Ref-des text pixel pitch (mm); glyphs are 5x7 px, so cap height ~1 mm.
-const TEXT_PX_MM: f64 = 0.15;
+const text_px_mm: f64 = 0.15;
 /// Board-profile line width (mm).
-const EDGE_W_MM: f64 = 0.1;
+const edge_w_mm: f64 = 0.1;
 
 /// Which net an inner/outer plane pour carries: a `(plane IDX "NET")` name,
 /// or the legacy implicit model's "every ground-named net".
@@ -84,7 +84,7 @@ pub const Error = std.Io.Writer.Error || std.mem.Allocator.Error;
 /// always ship. Slices are arena-allocated.
 pub fn planLayers(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]const LayerFile {
     const rules = placement.rules;
-    var out: std.ArrayListUnmanaged(LayerFile) = .empty;
+    var out: std.ArrayList(LayerFile) = .empty;
     const implicit = rules.plane_nets == null;
     const n: u8 = if (implicit) 4 else @max(2, rules.copper_layers);
 
@@ -367,18 +367,18 @@ fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneL
 /// Spoke width (mm) bridging a plane-tied through-hole pad's thermal-relief gap
 /// — `max(0.3, default track width)`, a fab-safe KiCad-ish default (not
 /// author-tunable this round).
-const THERMAL_SPOKE_MM: f64 = @max(0.3, (router.RouteParams{}).track_width);
+const thermal_spoke_mm: f64 = @max(0.3, (router.RouteParams{}).track_width);
 
 /// Emit 4-spoke thermal reliefs for every same-net THROUGH-HOLE pad the plane
 /// `net` carries: clear an isolation ring (gap = pour clearance) around each,
 /// re-flash its land, and bridge the ring with an axis-aligned copper cross.
 /// SMD same-net pads and vias are left solid (the KiCad default).
-fn thermalReliefs(g: *Gx, placement: optimizer.Placement, nets: std.StringHashMap(usize), net: PlaneNet) Error!void {
-    const gap = placement.rules.design.pour_clearance;
-    for (placement.parts) |p| {
+fn thermalReliefs(g: *Gx, pl: optimizer.Placement, nets: std.StringHashMapUnmanaged(usize), net: PlaneNet) Error!void {
+    const gap = pl.rules.design.pour_clearance;
+    for (pl.parts) |p| {
         for (p.pads) |pad| {
             if (pad.npth or !pad.thru or pad.drill <= 0) continue;
-            if (!planeCarries(net, netOfPad(nets, placement, p.ref_des, pad.number))) continue;
+            if (!planeCarries(net, netOfPad(nets, pl, p.ref_des, pad.number))) continue;
             try thermalRelief(g, p, pad, gap);
         }
     }
@@ -396,8 +396,8 @@ fn thermalRelief(g: *Gx, p: optimizer.Part, pad: geometry.Pad, gap: f64) Error!v
     try g.flash(cx, cy);
     try g.polarity(true);
     try flashPad(g, p, pad, 0);
-    const reach = rout + THERMAL_SPOKE_MM;
-    try g.use(.c, THERMAL_SPOKE_MM, 0);
+    const reach = rout + thermal_spoke_mm;
+    try g.use(.c, thermal_spoke_mm, 0);
     try g.line(cx - reach, cy, cx + reach, cy);
     try g.line(cx, cy - reach, cx, cy + reach);
 }
@@ -440,7 +440,7 @@ fn writePaste(g: *Gx, placement: optimizer.Placement, side: optimizer.Side) Erro
 fn writeSilk(g: *Gx, placement: optimizer.Placement, side: optimizer.Side, texts: []const font.BoardText) Error!void {
     for (placement.parts) |p| {
         if (p.side != side) continue;
-        try g.use(.c, SILK_W_MM, 0);
+        try g.use(.c, silk_w_mm, 0);
         for (p.silk_lines) |l| {
             const a = optimizer.worldPadCenter(p, l.x1, l.y1);
             const b = optimizer.worldPadCenter(p, l.x2, l.y2);
@@ -464,7 +464,7 @@ fn writeSilk(g: *Gx, placement: optimizer.Placement, side: optimizer.Side, texts
 /// the board is non-rectangular (viewer-drawn polygon / `(corner-radius R)`
 /// rounded rect, straight segments), else the outline rectangle.
 fn writeEdge(g: *Gx, placement: optimizer.Placement) Error!void {
-    try g.use(.c, EDGE_W_MM, 0);
+    try g.use(.c, edge_w_mm, 0);
     if (placement.board_poly) |poly| {
         if (poly.len >= 3) {
             var prev = poly[poly.len - 1];
@@ -536,7 +536,7 @@ fn isOval(pad: geometry.Pad) bool {
 /// The roundrect corner ratio to use: the pad's explicit value (capped at 0.5),
 /// else the KiCad default so a bare `roundrect` still rounds.
 fn roundrectRatio(pad: geometry.Pad) f64 {
-    return if (pad.rratio > 0) @min(pad.rratio, 0.5) else geometry.DEFAULT_RRATIO;
+    return if (pad.rratio > 0) @min(pad.rratio, 0.5) else geometry.default_rratio;
 }
 
 /// True when `rot` (deg) is a multiple of 90° — an axis-aligned pose an R/O
@@ -546,7 +546,7 @@ fn axisAligned(rot: f64) bool {
 }
 
 /// Corner-arc segments per rounded corner when a pad is polygonized.
-const PAD_ARC_SEG: usize = 6;
+const pad_arc_seg: usize = 6;
 
 /// The world-space region outline of a rect / roundrect / oval pad at `p`'s
 /// pose, grown `expand` per side (0 = copper 1:1). Rect ⇒ 4 corners; roundrect
@@ -566,7 +566,7 @@ fn padRegion(arena: std.mem.Allocator, p: optimizer.Part, pad: geometry.Pad, exp
     r = std.math.clamp(r, 0, @min(hw, hh));
 
     // Local offsets from the pad centre (before the pad's own rotation).
-    var locals: std.ArrayListUnmanaged([2]f64) = .empty;
+    var locals: std.ArrayList([2]f64) = .empty;
     if (r <= 1e-9) {
         try locals.append(arena, .{ hw, -hh });
         try locals.append(arena, .{ hw, hh });
@@ -584,8 +584,8 @@ fn padRegion(arena: std.mem.Allocator, p: optimizer.Part, pad: geometry.Pad, exp
         };
         for (arcs) |arc| {
             var i: usize = 0;
-            while (i <= PAD_ARC_SEG) : (i += 1) {
-                const t = arc[2] + HALF_PI * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(PAD_ARC_SEG));
+            while (i <= pad_arc_seg) : (i += 1) {
+                const t = arc[2] + HALF_PI * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(pad_arc_seg));
                 try locals.append(arena, .{ arc[0] + r * @cos(t), arc[1] + r * @sin(t) });
             }
         }
@@ -686,23 +686,23 @@ fn pourRect(g: *Gx, placement: optimizer.Placement) Error!void {
 
 /// (ref-des NUL pad-number) → flattened-net index, built from the netlist so
 /// plane/pour layers can classify each pad's net. Arena-owned.
-fn padNets(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!std.StringHashMap(usize) {
-    var map = std.StringHashMap(usize).init(arena);
+fn padNets(arena: std.mem.Allocator, placement: optimizer.Placement) !std.StringHashMapUnmanaged(usize) {
+    var map = std.StringHashMapUnmanaged(usize).empty;
     for (placement.nets, 0..) |net, i| {
         for (net.pins) |pin| {
             const key = try std.fmt.allocPrint(arena, "{s}\x00{s}", .{ pin.ref_des, pin.pin });
-            try map.put(key, i);
+            try map.put(arena, key, i);
         }
     }
     return map;
 }
 
 /// The net name a pad is on, or "" when unconnected.
-fn netOfPad(nets: std.StringHashMap(usize), placement: optimizer.Placement, ref: []const u8, pad: []const u8) []const u8 {
+fn netOfPad(n: std.StringHashMapUnmanaged(usize), p: optimizer.Placement, ref: []const u8, pad: []const u8) []const u8 {
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}\x00{s}", .{ ref, pad }) catch return "";
-    const i = nets.get(key) orelse return "";
-    return placement.nets[i].name;
+    const i = n.get(key) orelse return "";
+    return p.nets[i].name;
 }
 
 /// Flattened-net index → name ("" for the router's -1 / out-of-range).
@@ -759,7 +759,7 @@ fn drawRefDes(g: *Gx, p: optimizer.Part) Error!void {
     const q = quarterRot(p.rot);
     const hh = if (q) p.hw else p.hh;
     const cc = optimizer.worldPadCenter(p, p.ccx, p.ccy);
-    const ty = cc[1] - hh - (font.GH * TEXT_PX_MM) / 2 - 0.2;
+    const ty = cc[1] - hh - (font.gh * text_px_mm) / 2 - 0.2;
     // Ref-des uppercases (its font predates lowercase) at the fixed 0.15 mm
     // pitch — kept byte-identical (see TextGeom defaults).
     try drawText(g, cc[0], ty, p.ref_des, .{ .mirror = p.side == .bottom, .upper = true });
@@ -769,7 +769,7 @@ fn drawRefDes(g: *Gx, p: optimizer.Part) Error!void {
 /// mirrors about the anchor (bottom side), quarter-turn rotation, and whether
 /// the source is uppercased first (ref-des only, for byte-identical legacy).
 const TextGeom = struct {
-    pitch: f64 = TEXT_PX_MM,
+    pitch: f64 = text_px_mm,
     mirror: bool = false,
     rot: f64 = 0,
     upper: bool = false,
@@ -779,7 +779,7 @@ const TextGeom = struct {
 /// height and rotated to its quarter turn. Bottom-side mirrors like ref-des.
 fn drawBoardText(g: *Gx, t: font.BoardText) Error!void {
     // Cap height → pixel pitch (glyph is GH pixels tall). Guard non-positive.
-    const pitch = if (t.size > 0) t.size / @as(f64, @floatFromInt(font.GH)) else TEXT_PX_MM;
+    const pitch = if (t.size > 0) t.size / @as(f64, @floatFromInt(font.gh)) else text_px_mm;
     try drawText(g, t.x, t.y, t.text, .{ .pitch = pitch, .mirror = t.bottom, .rot = t.rot });
 }
 
@@ -791,7 +791,7 @@ fn drawBoardText(g: *Gx, t: font.BoardText) Error!void {
 /// `geom.rot` rotates the whole string about the anchor.
 fn drawText(g: *Gx, cx: f64, cy: f64, s: []const u8, geom: TextGeom) Error!void {
     const P = geom.pitch;
-    const adv = @as(f64, @floatFromInt(font.GW + 1)) * P;
+    const adv = @as(f64, @floatFromInt(font.gw + 1)) * P;
     const total = @as(f64, @floatFromInt(s.len)) * adv - P;
     // Rotation of the local (lx,ly) frame about the anchor (0 = the fast path
     // where ca/sa are exactly 1/0, so unrotated text is byte-identical).
@@ -825,7 +825,7 @@ fn drawText(g: *Gx, cx: f64, cy: f64, s: []const u8, geom: TextGeom) Error!void 
         }
     };
     const rotated = geom.rot != 0;
-    try g.use(.c, SILK_W_MM, 0);
+    try g.use(.c, silk_w_mm, 0);
     for (s, 0..) |ch0, k| {
         const ch = if (geom.upper) std.ascii.toUpper(ch0) else ch0;
         const gx0 = -total / 2 + @as(f64, @floatFromInt(k)) * adv;
@@ -860,7 +860,7 @@ const Ap = struct { kind: ApKind, w: i64, h: i64 };
 
 /// The file's aperture dictionary: dedups (kind, w, h) → D-code (D10+).
 const Apertures = struct {
-    list: std.ArrayListUnmanaged(Ap) = .empty,
+    list: std.ArrayList(Ap) = .empty,
 
     fn code(self: *Apertures, arena: std.mem.Allocator, kind: ApKind, w: f64, h: f64) std.mem.Allocator.Error!u32 {
         const key = Ap{ .kind = kind, .w = mmToUm(w), .h = mmToUm(h) };

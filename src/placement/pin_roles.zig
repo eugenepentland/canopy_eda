@@ -30,7 +30,7 @@ const env = @import("../eval/env.zig");
 const numeric = @import("../numeric.zig");
 
 const Node = ast.Node;
-const MAX_BYTES = 1024 * 256;
+const max_bytes = 1024 * 256;
 
 /// Placement-time role of one IC pad relative to the net it sits on.
 pub const PinClass = enum {
@@ -101,7 +101,7 @@ pub fn load(arena: std.mem.Allocator, project_dir: []const u8, component: []cons
 /// top-level form's children. Null on any read/parse failure (caller degrades).
 fn loadList(arena: std.mem.Allocator, project_dir: []const u8, dir: []const u8, name: []const u8) ?[]const Node {
     const path = std.fmt.allocPrint(arena, "{s}/lib/{s}/{s}.sexp", .{ project_dir, dir, name }) catch return null;
-    const src = infra_fs.cwd().readFileAlloc(arena, path, MAX_BYTES) catch return null;
+    const src = infra_fs.cwd().readFileAlloc(arena, path, max_bytes) catch return null;
     const nodes = parser.parse(arena, src) catch return null;
     if (nodes.len == 0) return null;
     return nodes[0].asList();

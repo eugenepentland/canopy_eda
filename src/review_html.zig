@@ -28,7 +28,7 @@ const trCodeOpen: []const u8 = "<tr><td><code>";
 /// CSS rules for review fragments. Embedded inline by `render_html.zig`'s
 /// `<style>` block alongside the schematic page's own CSS so the embedded
 /// review tables match the surrounding chrome without an extra request.
-pub const BODY_CSS = @embedFile("assets/review.css");
+pub const body_css = @embedFile("assets/review.css");
 
 /// Render the Power Budget section: one collapsible row per rail, sorted
 /// tightest-first, with source/load currents, computed margin, status

@@ -21,12 +21,12 @@ fn urlDecode(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Er
     return std.Uri.percentDecodeInPlace(buf);
 }
 
-const MAX_FOOTPRINT_BYTES: usize = 256 * 1024;
-const MAX_MODEL_BYTES: usize = 64 * 1024 * 1024;
-const MAX_BODY_BYTES: usize = 16 * 1024;
+const max_footprint_bytes: usize = 256 * 1024;
+const max_model_bytes: usize = 64 * 1024 * 1024;
+const max_body_bytes: usize = 16 * 1024;
 
 /// Route param name shared by all three handlers (`:footprint`).
-const PARAM_FOOTPRINT = "footprint";
+const param_footprint = "footprint";
 const escape = @import("../escape.zig");
 
 /// A footprint name is a library basename. Reject anything with path
@@ -45,7 +45,7 @@ fn isSafeFootprint(name: []const u8) bool {
 }
 /// JSON tail emitted when the footprint has no parsable pads/courtyard:
 /// closes the (empty) `pads` array and sets `courtyard` null.
-const EMPTY_PADS_TAIL = "],\"courtyard\":null";
+const empty_pads_tail = "],\"courtyard\":null";
 
 /// Error set for the 3D-viewer handlers: only writer/allocator failures
 /// propagate; every filesystem fallibility is handled inline as a 4xx/404.
@@ -71,12 +71,12 @@ fn resolveModelName(allocator: std.mem.Allocator, project_dir: []const u8, footp
 /// browser-side OpenCASCADE (occt-import-js) WASM can parse it. 404 when the
 /// footprint has no model. Served as binary; the viewer fetches it once.
 pub fn modelFileApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const footprint_raw = req.param(PARAM_FOOTPRINT) orelse return notFound(res);
+    const footprint_raw = req.param(param_footprint) orelse return notFound(res);
     const footprint = urlDecode(req.arena, footprint_raw) catch return notFound(res);
     if (!isSafeFootprint(footprint)) return notFound(res);
     const model_name = resolveModelName(req.arena, ctx.project_dir, footprint) orelse return notFound(res);
     const path = std.fmt.allocPrint(req.arena, "{s}/lib/models/{s}", .{ ctx.project_dir, model_name }) catch return notFound(res);
-    const bytes = infra_fs.cwd().readFileAlloc(req.arena, path, MAX_MODEL_BYTES) catch return notFound(res);
+    const bytes = infra_fs.cwd().readFileAlloc(req.arena, path, max_model_bytes) catch return notFound(res);
     res.content_type = .BINARY;
     res.header("Cache-Control", "no-store");
     res.body = bytes;
@@ -93,7 +93,7 @@ pub fn viewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     // `footprint_url` is the raw (still percent-encoded) param — kept for
     // re-emitting into the model-file URL; `footprint` is decoded for display,
     // config lookups, and pad parsing (so commas etc. resolve to the right file).
-    const footprint_url = req.param(PARAM_FOOTPRINT) orelse return notFound(res);
+    const footprint_url = req.param(param_footprint) orelse return notFound(res);
     const footprint = urlDecode(req.arena, footprint_url) catch return notFound(res);
     if (!isSafeFootprint(footprint)) return notFound(res);
 
@@ -113,7 +113,7 @@ pub fn viewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     try w.writeAll("<title>3D — ");
     try escape.writeXml(w, footprint);
     try w.writeAll("</title>");
-    try w.writeAll(PAGE_CSS);
+    try w.writeAll(page_css);
     try w.writeAll("</head><body>");
 
     // Header / toolbar.
@@ -133,7 +133,7 @@ pub fn viewerPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     try w.writeAll("<div id=\"stage\"><canvas id=\"view\"></canvas><div id=\"status\">Loading 3D model…</div></div>");
 
     // Controls panel.
-    try w.writeAll(CONTROLS_HTML);
+    try w.writeAll(controls_html);
 
     // Embedded data the viewer JS reads. Pads + courtyard come from the
     // footprint .sexp; offset/rotation from model-config.json.
@@ -195,23 +195,23 @@ fn writePadsAndCourtyard(
     footprint: []const u8,
 ) !void {
     const path = std.fmt.allocPrint(arena, "{s}/lib/footprints/{s}.sexp", .{ project_dir, footprint }) catch {
-        try w.writeAll(EMPTY_PADS_TAIL);
+        try w.writeAll(empty_pads_tail);
         return;
     };
-    const source = infra_fs.cwd().readFileAlloc(arena, path, MAX_FOOTPRINT_BYTES) catch {
-        try w.writeAll(EMPTY_PADS_TAIL);
+    const source = infra_fs.cwd().readFileAlloc(arena, path, max_footprint_bytes) catch {
+        try w.writeAll(empty_pads_tail);
         return;
     };
     const nodes = parser_mod.parse(arena, source) catch {
-        try w.writeAll(EMPTY_PADS_TAIL);
+        try w.writeAll(empty_pads_tail);
         return;
     };
     if (nodes.len == 0 or !nodes[0].isForm("footprint")) {
-        try w.writeAll(EMPTY_PADS_TAIL);
+        try w.writeAll(empty_pads_tail);
         return;
     }
     const children = nodes[0].asList() orelse {
-        try w.writeAll(EMPTY_PADS_TAIL);
+        try w.writeAll(empty_pads_tail);
         return;
     };
 
@@ -365,9 +365,9 @@ fn isPadTypeKeyword(s: []const u8) bool {
 /// reads this on the next push, so the orientation lands on the board.
 pub fn saveTransformApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    const footprint_raw = req.param(PARAM_FOOTPRINT) orelse return badRequest(res, "missing footprint");
+    const footprint_raw = req.param(param_footprint) orelse return badRequest(res, "missing footprint");
     const body = req.body() orelse return badRequest(res, "missing body");
-    if (body.len > MAX_BODY_BYTES) return badRequest(res, "body too large");
+    if (body.len > max_body_bytes) return badRequest(res, "body too large");
 
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
@@ -428,7 +428,7 @@ fn writeModelConfig(
 ) !void {
     const cfg = export_kicad.loadModelConfig(arena, project_dir);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     try w.writeAll("{\n");
 
@@ -529,8 +529,8 @@ fn badRequest(res: *httpz.Response, msg: []const u8) void {
 
 // ── Page chrome (CSS + static controls markup) ─────────────────────
 
-const PAGE_CSS = @embedFile("assets/model_viewer_3d.css");
-const CONTROLS_HTML = @embedFile("assets/model_viewer_3d_controls.html");
+const page_css = @embedFile("assets/model_viewer_3d.css");
+const controls_html = @embedFile("assets/model_viewer_3d_controls.html");
 
 // ── Tests ──────────────────────────────────────────────────────────
 

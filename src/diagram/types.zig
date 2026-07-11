@@ -21,11 +21,11 @@ const Allocator = std.mem.Allocator;
 /// registry — that is how a brand-new circuit gets its own view with no code
 /// change. A class is also a *view* unless it is a reference class (ground).
 pub const ClassId = u8;
-pub const CLASS_GROUND: ClassId = 0;
-pub const CLASS_POWER: ClassId = 1;
-pub const CLASS_CLOCK: ClassId = 2;
-pub const CLASS_CONTROL: ClassId = 3;
-pub const CLASS_RF: ClassId = 4;
+pub const class_ground: ClassId = 0;
+pub const class_power: ClassId = 1;
+pub const class_clock: ClassId = 2;
+pub const class_control: ClassId = 3;
+pub const class_rf: ClassId = 4;
 
 /// Metadata for one signal class: its source key, the tab label, the edge
 /// accent color, and whether it is a reference (drawn as a shared node, never

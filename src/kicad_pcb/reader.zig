@@ -15,9 +15,9 @@ const numeric = @import("../numeric.zig");
 
 const Node = ast.Node;
 
-const PROP_REFERENCE = fmt_const.PROP_REFERENCE;
-const PROP_VALUE = fmt_const.PROP_VALUE;
-const PROP_CANOPY_UUID = fmt_const.PROP_CANOPY_UUID;
+const prop_reference = fmt_const.prop_reference;
+const prop_value = fmt_const.prop_value;
+const prop_canopy_uuid = fmt_const.prop_canopy_uuid;
 
 pub const ReadError = error{InvalidPcbRoot} || std.mem.Allocator.Error || parser.ParseError;
 
@@ -30,8 +30,8 @@ pub fn readBoard(arena: std.mem.Allocator, source: []const u8) ReadError![]const
     if (nodes.len == 0 or !nodes[0].isForm("kicad_pcb")) return error.InvalidPcbRoot;
     const children = nodes[0].asList() orelse return error.InvalidPcbRoot;
 
-    var net_table = std.AutoHashMap(i64, []const u8).init(arena);
-    var fps: std.ArrayListUnmanaged(sync.BoardFp) = .empty;
+    var net_table = std.AutoHashMapUnmanaged(i64, []const u8).empty;
+    var fps: std.ArrayList(sync.BoardFp) = .empty;
 
     // Pass 1: build the net-ID → name map. Pads in pass 2 reference it.
     for (children[1..]) |child| {
@@ -40,7 +40,7 @@ pub fn readBoard(arena: std.mem.Allocator, source: []const u8) ReadError![]const
         if (cl.len < 3) continue;
         const id_num = cl[1].asNumber() orelse continue;
         const name = cl[2].asString() orelse continue;
-        try net_table.put(numeric.checkedInt(i64, id_num) orelse continue, name);
+        try net_table.put(arena, numeric.checkedInt(i64, id_num) orelse continue, name);
     }
 
     // Pass 2: build a BoardFp per footprint.
@@ -57,7 +57,7 @@ pub fn readBoard(arena: std.mem.Allocator, source: []const u8) ReadError![]const
 fn readFootprint(
     arena: std.mem.Allocator,
     node: Node,
-    net_table: *const std.AutoHashMap(i64, []const u8),
+    net_table: *const std.AutoHashMapUnmanaged(i64, []const u8),
 ) ReadError!?sync.BoardFp {
     const cl = node.asList() orelse return null;
     if (cl.len < 2) return null;
@@ -75,7 +75,7 @@ fn readFootprint(
         .locked = false,
     };
 
-    var pads: std.ArrayListUnmanaged(sync.PadAssign) = .empty;
+    var pads: std.ArrayList(sync.PadAssign) = .empty;
 
     for (cl[2..]) |sub| {
         if (sub.isForm("uuid")) {
@@ -135,11 +135,11 @@ fn readProperty(arena: std.mem.Allocator, node: Node, fp: *sync.BoardFp) std.mem
     if (cl.len < 3) return;
     const key = cl[1].asString() orelse return;
     const value = cl[2].asString() orelse return;
-    if (std.mem.eql(u8, key, PROP_REFERENCE)) {
+    if (std.mem.eql(u8, key, prop_reference)) {
         fp.ref = value;
-    } else if (std.mem.eql(u8, key, PROP_VALUE)) {
+    } else if (std.mem.eql(u8, key, prop_value)) {
         fp.value = value;
-    } else if (std.mem.eql(u8, key, PROP_CANOPY_UUID)) {
+    } else if (std.mem.eql(u8, key, prop_canopy_uuid)) {
         fp.uuid = value;
     } else {
         try fp.fields.put(arena, key, value);
@@ -149,8 +149,8 @@ fn readProperty(arena: std.mem.Allocator, node: Node, fp: *sync.BoardFp) std.mem
 fn readPad(
     arena: std.mem.Allocator,
     node: Node,
-    net_table: *const std.AutoHashMap(i64, []const u8),
-    pads: *std.ArrayListUnmanaged(sync.PadAssign),
+    net_table: *const std.AutoHashMapUnmanaged(i64, []const u8),
+    pads: *std.ArrayList(sync.PadAssign),
 ) std.mem.Allocator.Error!void {
     const cl = node.asList() orelse return;
     if (cl.len < 2) return;

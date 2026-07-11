@@ -26,7 +26,7 @@ pub const PortClassMap = std.StringHashMapUnmanaged(ClassId);
 /// brand-new circuit gets its own view with no code change. Caller owns the
 /// returned slice (freed by `Graph.deinit`).
 pub fn buildRegistry(allocator: Allocator, block: *const DesignBlock) Allocator.Error![]ClassDef {
-    var list: std.ArrayListUnmanaged(ClassDef) = .empty;
+    var list: std.ArrayList(ClassDef) = .empty;
     errdefer list.deinit(allocator);
     try list.appendSlice(allocator, &types.builtin_classes);
     var discovered: usize = 0;
@@ -54,8 +54,8 @@ pub fn buildPortClassMap(allocator: Allocator, block: *const DesignBlock, classe
             const cls: ?ClassId = if (p.class.len > 0)
                 types.findClass(classes, p.class)
             else switch (p.signal_type) {
-                .power => types.CLASS_POWER,
-                .clock => types.CLASS_CLOCK,
+                .power => types.class_power,
+                .clock => types.class_clock,
                 else => null,
             };
             if (cls) |c| {
@@ -72,16 +72,16 @@ pub fn buildPortClassMap(allocator: Allocator, block: *const DesignBlock, classe
 /// reaches an edge solely through an explicit port `(class …)` in the map.
 pub fn netClass(name: []const u8, port_map: *const PortClassMap) ClassId {
     if (port_map.get(name)) |c| return c;
-    if (isGround(name)) return types.CLASS_GROUND;
-    if (isPowerRail(name)) return types.CLASS_POWER;
+    if (isGround(name)) return types.class_ground;
+    if (isPowerRail(name)) return types.class_power;
     // An enable strobe is a control GPIO no matter which subsystem it gates,
     // so it must win over the clock substring match: TCXO_EN gates the TCXO
     // but is driven by the PCAL6534 expander, not a clock copy.
-    if (isEnable(name)) return types.CLASS_CONTROL;
-    if (isClock(name)) return types.CLASS_CLOCK;
-    if (isControl(name)) return types.CLASS_CONTROL;
-    if (isRf(name)) return types.CLASS_RF;
-    return types.CLASS_CONTROL; // keep otherwise-unknown digital nets visible somewhere
+    if (isEnable(name)) return types.class_control;
+    if (isClock(name)) return types.class_clock;
+    if (isControl(name)) return types.class_control;
+    if (isRf(name)) return types.class_rf;
+    return types.class_control; // keep otherwise-unknown digital nets visible somewhere
 }
 
 // Pattern tables (case-sensitive — net names are uppercase by convention).
@@ -183,30 +183,30 @@ fn emptyBlock(name: []const u8) DesignBlock {
 test "netClass classifies real Cyclops net names" {
     var pm: PortClassMap = .empty;
     defer pm.deinit(testing.allocator);
-    try testing.expectEqual(types.CLASS_POWER, netClass("V_RF_3P3", &pm));
-    try testing.expectEqual(types.CLASS_POWER, netClass("VBATT", &pm));
-    try testing.expectEqual(types.CLASS_GROUND, netClass("GND", &pm));
-    try testing.expectEqual(types.CLASS_CLOCK, netClass("REF_4159_1_AC", &pm));
-    try testing.expectEqual(types.CLASS_CONTROL, netClass("CS_ADF4159_1", &pm));
-    try testing.expectEqual(types.CLASS_CONTROL, netClass("RF_SPI_SCK", &pm));
+    try testing.expectEqual(types.class_power, netClass("V_RF_3P3", &pm));
+    try testing.expectEqual(types.class_power, netClass("VBATT", &pm));
+    try testing.expectEqual(types.class_ground, netClass("GND", &pm));
+    try testing.expectEqual(types.class_clock, netClass("REF_4159_1_AC", &pm));
+    try testing.expectEqual(types.class_control, netClass("CS_ADF4159_1", &pm));
+    try testing.expectEqual(types.class_control, netClass("RF_SPI_SCK", &pm));
     // Enable strobes are expander GPIO (control), even when named for the
     // clock/PLL they gate — TCXO_EN must not land in the clocks view.
-    try testing.expectEqual(types.CLASS_CONTROL, netClass("TCXO_EN", &pm));
-    try testing.expectEqual(types.CLASS_CONTROL, netClass("PLL_EN", &pm));
-    try testing.expectEqual(types.CLASS_CLOCK, netClass("RADAR_REF_TCXO", &pm));
-    try testing.expectEqual(types.CLASS_RF, netClass("CPOUT_1", &pm));
-    try testing.expectEqual(types.CLASS_RF, netClass("BEAM1_RFIN", &pm));
-    try testing.expectEqual(types.CLASS_RF, netClass("ADF_CH1P", &pm));
+    try testing.expectEqual(types.class_control, netClass("TCXO_EN", &pm));
+    try testing.expectEqual(types.class_control, netClass("PLL_EN", &pm));
+    try testing.expectEqual(types.class_clock, netClass("RADAR_REF_TCXO", &pm));
+    try testing.expectEqual(types.class_rf, netClass("CPOUT_1", &pm));
+    try testing.expectEqual(types.class_rf, netClass("BEAM1_RFIN", &pm));
+    try testing.expectEqual(types.class_rf, netClass("ADF_CH1P", &pm));
     // Named/isolated grounds are recognized so they stay a shared reference
     // instead of leaking into the control view as spurious edges.
-    try testing.expectEqual(types.CLASS_GROUND, netClass("GND_ISO", &pm));
+    try testing.expectEqual(types.class_ground, netClass("GND_ISO", &pm));
     // VSS/VSSA is the CMOS 0 V reference (ground), not a power rail — else it
     // fans a spurious dense power edge the ground reference class exists to hide.
-    try testing.expectEqual(types.CLASS_GROUND, netClass("VSS", &pm));
-    try testing.expectEqual(types.CLASS_GROUND, netClass("VSSA", &pm));
-    try testing.expectEqual(types.CLASS_GROUND, netClass("VSS_1", &pm));
+    try testing.expectEqual(types.class_ground, netClass("VSS", &pm));
+    try testing.expectEqual(types.class_ground, netClass("VSSA", &pm));
+    try testing.expectEqual(types.class_ground, netClass("VSS_1", &pm));
     // A real supply rail is still power.
-    try testing.expectEqual(types.CLASS_POWER, netClass("VDD", &pm));
+    try testing.expectEqual(types.class_power, netClass("VDD", &pm));
 }
 
 // spec: diagram/classify - Honors an explicit section-port signal type over the name heuristic
@@ -219,10 +219,10 @@ test "buildPortClassMap overrides the name heuristic" {
     defer pm.deinit(testing.allocator);
     // With the authoritative port, VSPECIAL is power; without it the name
     // heuristic finds no rail pattern and falls back to control.
-    try testing.expectEqual(types.CLASS_POWER, netClass("VSPECIAL", &pm));
+    try testing.expectEqual(types.class_power, netClass("VSPECIAL", &pm));
     var empty: PortClassMap = .empty;
     defer empty.deinit(testing.allocator);
-    try testing.expectEqual(types.CLASS_CONTROL, netClass("VSPECIAL", &empty));
+    try testing.expectEqual(types.class_control, netClass("VSPECIAL", &empty));
 }
 
 // spec: diagram/classify - An explicit port (class …) overrides signal-type and name heuristics
@@ -239,7 +239,7 @@ test "explicit port class wins over signal type and name" {
     block.sections = &secs;
     var pm = try buildPortClassMap(testing.allocator, &block, &types.builtin_classes);
     defer pm.deinit(testing.allocator);
-    try testing.expectEqual(types.CLASS_CONTROL, netClass("CLK_AUX", &pm));
+    try testing.expectEqual(types.class_control, netClass("CLK_AUX", &pm));
     // An unrecognized class key isn't a built-in, so the name heuristic applies.
     try testing.expectEqual(@as(?types.ClassId, null), types.findClass(&types.builtin_classes, "audio"));
 }

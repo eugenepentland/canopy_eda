@@ -36,7 +36,7 @@ const SubBlock = env_mod.SubBlock;
 /// may expand to. A real bus is dozens of lanes wide; a value of thousands is
 /// a typo or a hostile file. Without it, `(bus-net "X" 0 100000000 "sub")`
 /// allocates 100M net ties — an OOM DoS the HTTP server evaluates on push.
-const MAX_BUS_EXPANSION: usize = 4096;
+const max_bus_expansion: usize = 4096;
 
 /// True if the design-block body contains a bare `(hierarchical-ids)` form,
 /// which opts into Option-4 sub-block identity.
@@ -84,25 +84,25 @@ pub fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalErro
 /// factoring it out lets the lazy `(block …)`/`(defmodule …)` body path reuse
 /// the identical routine instead of round-tripping through a wrapper form.
 pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const Node, env: *Env) EvalError!Value {
-    var instances: std.ArrayListUnmanaged(Instance) = .empty;
-    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
-    var ports: std.ArrayListUnmanaged(Port) = .empty;
-    var notes: std.ArrayListUnmanaged(Note) = .empty;
-    var groups: std.ArrayListUnmanaged(Group) = .empty;
-    var sections: std.ArrayListUnmanaged(env_mod.Section) = .empty;
+    var instances: std.ArrayList(Instance) = .empty;
+    var all_pin_nets: std.ArrayList(PinNetDecl) = .empty;
+    var ports: std.ArrayList(Port) = .empty;
+    var notes: std.ArrayList(Note) = .empty;
+    var groups: std.ArrayList(Group) = .empty;
+    var sections: std.ArrayList(env_mod.Section) = .empty;
 
-    var net_ties: std.ArrayListUnmanaged(NetTie) = .empty;
-    var sub_blocks: std.ArrayListUnmanaged(SubBlock) = .empty;
-    var functions: std.ArrayListUnmanaged(env_mod.FunctionSpec) = .empty;
-    var verifications: std.ArrayListUnmanaged(env_mod.Verification) = .empty;
-    var test_points: std.ArrayListUnmanaged(env_mod.TestPoint) = .empty;
-    var parts: std.ArrayListUnmanaged(env_mod.PlaceholderPart) = .empty;
+    var net_ties: std.ArrayList(NetTie) = .empty;
+    var sub_blocks: std.ArrayList(SubBlock) = .empty;
+    var functions: std.ArrayList(env_mod.FunctionSpec) = .empty;
+    var verifications: std.ArrayList(env_mod.Verification) = .empty;
+    var test_points: std.ArrayList(env_mod.TestPoint) = .empty;
+    var parts: std.ArrayList(env_mod.PlaceholderPart) = .empty;
     var layout_spec: env_mod.LayoutSpec = .{};
     var board_spec: env_mod.BoardSpec = .{};
     var revision_spec: env_mod.Revision = .{};
     var rough_spec: env_mod.RoughSpec = .{};
     var stackup_spec: env_mod.StackupSpec = .{};
-    var net_class_specs: std.ArrayListUnmanaged(env_mod.NetClassSpec) = .empty;
+    var net_class_specs: std.ArrayList(env_mod.NetClassSpec) = .empty;
     var design_rules_spec: env_mod.DesignRulesSpec = .{};
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
@@ -229,7 +229,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     // Skip auto-aliases: they're block-local helpers (symbol pin-function
     // matching) and would otherwise bridge unrelated nets in the cross-block
     // flatten done by export_kicad_netlist.applyNetTies.
-    var block_ties: std.ArrayListUnmanaged(env_mod.NetTie) = .empty;
+    var block_ties: std.ArrayList(env_mod.NetTie) = .empty;
     for (net_ties.items) |nt| {
         if (nt.is_auto) continue;
         try block_ties.append(self.allocator, .{ .a = nt.a, .b = nt.b });
@@ -311,7 +311,7 @@ fn parseRevision(self: *Evaluator, form_children: []const Node) EvalError!env_mo
     };
 
     var date: []const u8 = "";
-    var changes: std.ArrayListUnmanaged(env_mod.RevisionChange) = .empty;
+    var changes: std.ArrayList(env_mod.RevisionChange) = .empty;
 
     for (form_children[2..]) |child| {
         const kids = child.asList() orelse {
@@ -360,7 +360,7 @@ fn appendAutoAliases(
     self: *Evaluator,
     inst: Instance,
     pin_nets: []const PinNetDecl,
-    net_ties: *std.ArrayListUnmanaged(NetTie),
+    net_ties: *std.ArrayList(NetTie),
 ) EvalError!void {
     const comp_data = self.component_cache.get(inst.component);
     const pin_lookup_name = if (comp_data) |cd| (if (cd.pinout_name.len > 0) cd.pinout_name else cd.symbol_name) else inst.symbol;
@@ -378,7 +378,7 @@ fn appendAutoAliases(
 }
 
 /// Evaluate a (net ...) form.
-fn evalNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_ties: *std.ArrayListUnmanaged(NetTie)) EvalError!void {
+fn evalNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_ties: *std.ArrayList(NetTie)) EvalError!void {
     if (form_children.len >= 3) {
         const src_val = try self.evalNode(form_children[1], env);
         const src = src_val.asString() orelse return;
@@ -414,14 +414,14 @@ fn literalText(node: Node) ?[]const u8 {
 ///
 /// Bounds are inclusive on both ends so the index range mirrors the
 /// underlying signal numbering.
-fn evalBusNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_ties: *std.ArrayListUnmanaged(NetTie)) EvalError!void {
+fn evalBusNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_ties: *std.ArrayList(NetTie)) EvalError!void {
     if (form_children.len < 5) return;
     const prefix = (try self.evalNode(form_children[1], env)).asString() orelse return;
     const start = numberAsUsize(try self.evalNode(form_children[2], env)) orelse return;
     const end = numberAsUsize(try self.evalNode(form_children[3], env)) orelse return;
     if (end < start) return;
-    if (end - start >= MAX_BUS_EXPANSION) {
-        self.warnFmt(form_children[0].span, "(bus-net …) index range {d}..{d} exceeds the {d}-lane cap — ignored", .{ start, end, MAX_BUS_EXPANSION });
+    if (end - start >= max_bus_expansion) {
+        self.warnFmt(form_children[0].span, "(bus-net …) index range {d}..{d} exceeds the {d}-lane cap — ignored", .{ start, end, max_bus_expansion });
         return;
     }
 
@@ -458,7 +458,7 @@ fn evalBusNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_
 /// Channels beyond the available slots are skipped.
 fn evalStridedBusNet(
     self: *Evaluator,
-    net_ties: *std.ArrayListUnmanaged(NetTie),
+    net_ties: *std.ArrayList(NetTie),
     prefix: []const u8,
     start: usize,
     end: usize,
@@ -488,7 +488,7 @@ fn evalStridedBusNet(
 
 fn appendStrideTie(
     self: *Evaluator,
-    net_ties: *std.ArrayListUnmanaged(NetTie),
+    net_ties: *std.ArrayList(NetTie),
     prefix: []const u8,
     k: usize,
     suffix: []const u8,
@@ -511,7 +511,7 @@ fn evalSubBlockBridges(
     self: *Evaluator,
     form_children: []const Node,
     sub_name: []const u8,
-    net_ties: *std.ArrayListUnmanaged(NetTie),
+    net_ties: *std.ArrayList(NetTie),
 ) EvalError!void {
     for (form_children[1..]) |child| {
         if (!child.isForm("bridge")) continue;
@@ -534,7 +534,7 @@ fn evalSubBlockBridges(
 
 fn appendBridgeTie(
     self: *Evaluator,
-    net_ties: *std.ArrayListUnmanaged(NetTie),
+    net_ties: *std.ArrayList(NetTie),
     prefix: []const u8,
     suffix: []const u8,
     sub_name: []const u8,
@@ -583,8 +583,8 @@ fn evalDecoupleForm(
     self: *Evaluator,
     form_children: []const Node,
     env: *Env,
-    instances: *std.ArrayListUnmanaged(Instance),
-    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
+    instances: *std.ArrayList(Instance),
+    all_pin_nets: *std.ArrayList(PinNetDecl),
 ) EvalError!void {
     if (form_children.len < 3) return;
     const first_val = try self.evalNode(form_children[1], env);
@@ -634,10 +634,10 @@ fn evalDecoupleForm(
 /// (`description`, `note`, `port`, `protocol`, `calc`).
 const SectionScope = struct {
     description: *[]const u8,
-    notes: *std.ArrayListUnmanaged(env_mod.SectionNote),
-    ports: *std.ArrayListUnmanaged(env_mod.SectionPort),
-    protocols: *std.ArrayListUnmanaged([]const u8),
-    calcs: *std.ArrayListUnmanaged(env_mod.CalcBlock),
+    notes: *std.ArrayList(env_mod.SectionNote),
+    ports: *std.ArrayList(env_mod.SectionPort),
+    protocols: *std.ArrayList([]const u8),
+    calcs: *std.ArrayList(env_mod.CalcBlock),
 };
 
 /// Process a form whose handling is identical between a section and a
@@ -712,27 +712,27 @@ fn evalSection(
     self: *Evaluator,
     form_children: []const Node,
     env: *Env,
-    instances: *std.ArrayListUnmanaged(Instance),
-    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
-    notes: *std.ArrayListUnmanaged(Note),
-    net_ties: *std.ArrayListUnmanaged(NetTie),
-    sections: *std.ArrayListUnmanaged(env_mod.Section),
+    instances: *std.ArrayList(Instance),
+    all_pin_nets: *std.ArrayList(PinNetDecl),
+    notes: *std.ArrayList(Note),
+    net_ties: *std.ArrayList(NetTie),
+    sections: *std.ArrayList(env_mod.Section),
 ) EvalError!void {
     if (form_children.len < 2) return;
     const sec_name_val = try self.evalNode(form_children[1], env);
     const sec_name = sec_name_val.asString() orelse return;
-    var sec_instances: std.ArrayListUnmanaged(Instance) = .empty;
-    var sec_pin_groups: std.ArrayListUnmanaged(env_mod.PinGroup) = .empty;
+    var sec_instances: std.ArrayList(Instance) = .empty;
+    var sec_pin_groups: std.ArrayList(env_mod.PinGroup) = .empty;
     var sec_description: []const u8 = "";
-    var sec_notes: std.ArrayListUnmanaged(env_mod.SectionNote) = .empty;
-    var sec_ports: std.ArrayListUnmanaged(env_mod.SectionPort) = .empty;
-    var sec_protocols: std.ArrayListUnmanaged([]const u8) = .empty;
-    var sec_calcs: std.ArrayListUnmanaged(env_mod.CalcBlock) = .empty;
-    var sec_sub_sections: std.ArrayListUnmanaged(env_mod.Section) = .empty;
+    var sec_notes: std.ArrayList(env_mod.SectionNote) = .empty;
+    var sec_ports: std.ArrayList(env_mod.SectionPort) = .empty;
+    var sec_protocols: std.ArrayList([]const u8) = .empty;
+    var sec_calcs: std.ArrayList(env_mod.CalcBlock) = .empty;
+    var sec_sub_sections: std.ArrayList(env_mod.Section) = .empty;
     var block_role: env_mod.BlockRole = .auto;
     var diagram_hidden = false;
     var sec_category: []const u8 = "";
-    var sec_hosts: std.ArrayListUnmanaged([]const u8) = .empty;
+    var sec_hosts: std.ArrayList([]const u8) = .empty;
 
     // Check for optional description as 2nd positional string arg
     var child_start: usize = 2;
@@ -885,10 +885,10 @@ fn evalPinsForm(
     sf_children: []const Node,
     sec_name: []const u8,
     env: *Env,
-    instances: *std.ArrayListUnmanaged(Instance),
-    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
-    net_ties: *std.ArrayListUnmanaged(NetTie),
-    sec_pin_groups: *std.ArrayListUnmanaged(env_mod.PinGroup),
+    instances: *std.ArrayList(Instance),
+    all_pin_nets: *std.ArrayList(PinNetDecl),
+    net_ties: *std.ArrayList(NetTie),
+    sec_pin_groups: *std.ArrayList(env_mod.PinGroup),
 ) EvalError!void {
     if (sf_children.len < 2) return;
     const pins_ref_val = try self.evalNode(sf_children[1], env);
@@ -905,7 +905,7 @@ fn evalPinsForm(
     }
 
     const pin_func_map = builders.findPinFuncMap(self, instances.items, pins_ref);
-    var pg_pins: std.ArrayListUnmanaged(env_mod.PartPin) = .empty;
+    var pg_pins: std.ArrayList(env_mod.PartPin) = .empty;
     for (sf_children[2..]) |pin_form| {
         if (pin_form.isForm("group")) continue;
         if (!builders.isKnownPinsChild(pin_form)) {
@@ -928,23 +928,23 @@ fn evalSubSection(
     self: *Evaluator,
     sf_children: []const Node,
     env: *Env,
-    instances: *std.ArrayListUnmanaged(Instance),
-    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
-    notes: *std.ArrayListUnmanaged(Note),
-    net_ties: *std.ArrayListUnmanaged(NetTie),
-    sec_instances: *std.ArrayListUnmanaged(Instance),
-    sec_sub_sections: *std.ArrayListUnmanaged(env_mod.Section),
+    instances: *std.ArrayList(Instance),
+    all_pin_nets: *std.ArrayList(PinNetDecl),
+    notes: *std.ArrayList(Note),
+    net_ties: *std.ArrayList(NetTie),
+    sec_instances: *std.ArrayList(Instance),
+    sec_sub_sections: *std.ArrayList(env_mod.Section),
 ) EvalError!void {
     if (sf_children.len < 2) return;
     const sub_name_val = try self.evalNode(sf_children[1], env);
     const sub_name = sub_name_val.asString() orelse return;
-    var sub_instances: std.ArrayListUnmanaged(Instance) = .empty;
-    var sub_pin_groups: std.ArrayListUnmanaged(env_mod.PinGroup) = .empty;
+    var sub_instances: std.ArrayList(Instance) = .empty;
+    var sub_pin_groups: std.ArrayList(env_mod.PinGroup) = .empty;
     var sub_description: []const u8 = "";
-    var sub_notes: std.ArrayListUnmanaged(env_mod.SectionNote) = .empty;
-    var sub_ports: std.ArrayListUnmanaged(env_mod.SectionPort) = .empty;
-    var sub_protocols: std.ArrayListUnmanaged([]const u8) = .empty;
-    var sub_calcs: std.ArrayListUnmanaged(env_mod.CalcBlock) = .empty;
+    var sub_notes: std.ArrayList(env_mod.SectionNote) = .empty;
+    var sub_ports: std.ArrayList(env_mod.SectionPort) = .empty;
+    var sub_protocols: std.ArrayList([]const u8) = .empty;
+    var sub_calcs: std.ArrayList(env_mod.CalcBlock) = .empty;
 
     const sub_scope = SectionScope{
         .description = &sub_description,
@@ -999,7 +999,7 @@ fn evalSubSection(
                     group_label2 = gv.asString() orelse (gc[1].asAtom() orelse "");
                 }
                 const pin_func_map2 = builders.findPinFuncMap(self, instances.items, pins_ref);
-                var pg_pins2: std.ArrayListUnmanaged(env_mod.PartPin) = .empty;
+                var pg_pins2: std.ArrayList(env_mod.PartPin) = .empty;
                 for (ssf_children[2..]) |pin_form| {
                     if (pin_form.isForm("group")) continue;
                     if (!builders.isKnownPinsChild(pin_form)) {
@@ -1103,8 +1103,8 @@ fn ufUnion(
 }
 
 /// Build nets from collected pin-net declarations and net-ties.
-fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl), net_ties: *std.ArrayListUnmanaged(NetTie)) EvalError![]Net {
-    var net_map: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(PinRef)) = .empty;
+fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayList(PinNetDecl), net_ties: *std.ArrayList(NetTie)) EvalError![]Net {
+    var net_map: std.StringHashMapUnmanaged(std.ArrayList(PinRef)) = .empty;
     for (all_pin_nets.items) |pn| {
         const gop = net_map.getOrPut(self.allocator, pn.net) catch return EvalError.OutOfMemory;
         if (!gop.found_existing) gop.value_ptr.* = .empty;
@@ -1162,7 +1162,7 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl)
 
     // Merge every non-root net's pins onto its canonical root, then drop it.
     {
-        var merge_keys: std.ArrayListUnmanaged([]const u8) = .empty;
+        var merge_keys: std.ArrayList([]const u8) = .empty;
         var it = net_map.iterator();
         while (it.next()) |entry| {
             const key = entry.key_ptr.*;
@@ -1194,7 +1194,7 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl)
     // the canonical root for each non-root prefix (so chained ties collapse the
     // stubs onto the same trunk the missing_decoupling aggregation expects).
     {
-        var rename_keys: std.ArrayListUnmanaged([]const u8) = .empty;
+        var rename_keys: std.ArrayList([]const u8) = .empty;
         var it = net_map.iterator();
         while (it.next()) |entry| {
             const key = entry.key_ptr.*;
@@ -1229,7 +1229,7 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl)
     }
     uf.deinit(self.allocator);
     // Convert to Net slice
-    var nets: std.ArrayListUnmanaged(Net) = .empty;
+    var nets: std.ArrayList(Net) = .empty;
     var net_iter = net_map.iterator();
     while (net_iter.next()) |entry| {
         nets.append(self.allocator, .{
@@ -1339,7 +1339,7 @@ fn parseVerifies(self: *Evaluator, form_children: []const Node, env: *Env) ?env_
 /// A `(group …)` with no members is dropped; `(rough)` alone ⇒ `present=false`.
 fn parseRough(self: *Evaluator, form_children: []const Node) EvalError!env_mod.RoughSpec {
     var anchor: []const u8 = "";
-    var groups: std.ArrayListUnmanaged(env_mod.RoughGroup) = .empty;
+    var groups: std.ArrayList(env_mod.RoughGroup) = .empty;
     for (form_children[1..]) |child| {
         const cl = child.asList() orelse continue;
         if (cl.len == 0) continue;
@@ -1362,11 +1362,11 @@ fn parseRough(self: *Evaluator, form_children: []const Node) EvalError!env_mod.R
 fn parseRoughGroup(
     self: *Evaluator,
     cl: []const Node,
-    out: *std.ArrayListUnmanaged(env_mod.RoughGroup),
+    out: *std.ArrayList(env_mod.RoughGroup),
 ) EvalError!void {
     if (cl.len < 2) return;
     const name = cl[1].asString() orelse cl[1].asAtom() orelse "";
-    var members: std.ArrayListUnmanaged([]const u8) = .empty;
+    var members: std.ArrayList([]const u8) = .empty;
     for (cl[2..]) |m| {
         const tok = m.asString() orelse m.asAtom() orelse continue;
         members.append(self.allocator, tok) catch return EvalError.OutOfMemory;
@@ -1408,7 +1408,7 @@ fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResul
     var width: f64 = 0;
     var height: f64 = 0;
     var channels: u8 = 1;
-    var signals: std.ArrayListUnmanaged(env_mod.PartSignal) = .empty;
+    var signals: std.ArrayList(env_mod.PartSignal) = .empty;
 
     for (form_children[2..]) |sub_node| {
         const sub = sub_node.asList() orelse continue;
@@ -1461,7 +1461,7 @@ fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResul
 
     // One PinNetDecl per signal — the signal name is the virtual pin, so the
     // part participates in net-membership without a real pinout.
-    var pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var pin_nets: std.ArrayList(PinNetDecl) = .empty;
     for (sig_slice) |sig| {
         try pin_nets.append(self.allocator, .{ .ref_des = ref_des, .pin = sig.name, .net = sig.net });
     }
@@ -1505,10 +1505,10 @@ fn parseStub(self: *Evaluator, form_children: []const Node) EvalError!?StubResul
 /// so a typo can't abort the build. Directive order is irrelevant — the solver
 /// resolves by dependency, not source order.
 fn parseLayout(self: *Evaluator, form_children: []const Node) EvalError!env_mod.LayoutSpec {
-    var placements: std.ArrayListUnmanaged(env_mod.Placement) = .empty;
-    var rows: std.ArrayListUnmanaged(env_mod.LayoutRow) = .empty;
-    var groups: std.ArrayListUnmanaged(env_mod.LayoutGroup) = .empty;
-    var edges: std.ArrayListUnmanaged(env_mod.LayoutEdge) = .empty;
+    var placements: std.ArrayList(env_mod.Placement) = .empty;
+    var rows: std.ArrayList(env_mod.LayoutRow) = .empty;
+    var groups: std.ArrayList(env_mod.LayoutGroup) = .empty;
+    var edges: std.ArrayList(env_mod.LayoutEdge) = .empty;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 2) continue;
@@ -1517,7 +1517,7 @@ fn parseLayout(self: *Evaluator, form_children: []const Node) EvalError!env_mod.
         if (std.mem.eql(u8, head, "edge")) {
             const side_atom = c[1].asAtom() orelse c[1].asString() orelse continue;
             const side: env_mod.EdgeSide = if (std.mem.eql(u8, side_atom, "right")) .right else .left;
-            var members: std.ArrayListUnmanaged([]const u8) = .empty;
+            var members: std.ArrayList([]const u8) = .empty;
             for (c[2..]) |m| {
                 const nm = m.asString() orelse m.asAtom() orelse continue;
                 try members.append(self.allocator, nm);
@@ -1530,7 +1530,7 @@ fn parseLayout(self: *Evaluator, form_children: []const Node) EvalError!env_mod.
         }
         // (row "a" "b" …) — an ordered horizontal band of block keys.
         if (std.mem.eql(u8, head, "row")) {
-            var members: std.ArrayListUnmanaged([]const u8) = .empty;
+            var members: std.ArrayList([]const u8) = .empty;
             for (c[1..]) |m| {
                 const nm = m.asString() orelse m.asAtom() orelse continue;
                 try members.append(self.allocator, nm);
@@ -1541,7 +1541,7 @@ fn parseLayout(self: *Evaluator, form_children: []const Node) EvalError!env_mod.
         // (group "Label" "a" "b" …) — a labeled visual region over its members.
         if (std.mem.eql(u8, head, "group")) {
             const label = c[1].asString() orelse c[1].asAtom() orelse "";
-            var members: std.ArrayListUnmanaged([]const u8) = .empty;
+            var members: std.ArrayList([]const u8) = .empty;
             for (c[2..]) |m| {
                 const nm = m.asString() orelse m.asAtom() orelse continue;
                 try members.append(self.allocator, nm);
@@ -1561,7 +1561,7 @@ fn parseLayout(self: *Evaluator, form_children: []const Node) EvalError!env_mod.
             continue;
         }
         // (place "x" (rel "ref") …) — collect every well-formed constraint.
-        var constraints: std.ArrayListUnmanaged(env_mod.PlaceConstraint) = .empty;
+        var constraints: std.ArrayList(env_mod.PlaceConstraint) = .empty;
         for (c[2..]) |rel_node| {
             const rel_form = rel_node.asList() orelse continue;
             if (rel_form.len < 2) continue;
@@ -1611,13 +1611,13 @@ fn placementSideFromAtom(atom: []const u8) ?env_mod.PlacementSide {
 /// — `parseBoard` reads them. Unknown side keywords / malformed items are skipped
 /// so a typo can't abort the build.
 fn parseBoardSides(self: *Evaluator, form_children: []const Node) EvalError![]const env_mod.PlacementSideSpec {
-    var sides: std.ArrayListUnmanaged(env_mod.PlacementSideSpec) = .empty;
+    var sides: std.ArrayList(env_mod.PlacementSideSpec) = .empty;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
         const head = c[0].asAtom() orelse continue;
         const side = placementSideFromAtom(head) orelse continue;
-        var items: std.ArrayListUnmanaged(env_mod.PlacementItem) = .empty;
+        var items: std.ArrayList(env_mod.PlacementItem) = .empty;
         for (c[1..]) |item_node| {
             // (rot <deg> "REF") rotation override, or a bare ref string/atom.
             if (item_node.asList()) |il| {
@@ -1649,7 +1649,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     var w: f64 = 0;
     var h: f64 = 0;
     var corner_radius: f64 = 0;
-    var corners: std.ArrayListUnmanaged(env_mod.PlacementItem) = .empty;
+    var corners: std.ArrayList(env_mod.PlacementItem) = .empty;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
@@ -1703,7 +1703,7 @@ fn parseStackup(self: *Evaluator, form_children: []const Node) EvalError!env_mod
     }
     const layers: u8 = numeric.checkedInt(u8, n_raw) orelse return .{};
     var thickness: f64 = 0;
-    var planes: std.ArrayListUnmanaged(env_mod.StackupPlane) = .empty;
+    var planes: std.ArrayList(env_mod.StackupPlane) = .empty;
     for (form_children[2..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
@@ -1798,7 +1798,7 @@ fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_m
         return null;
     };
     var spec = env_mod.NetClassSpec{ .name = name };
-    var nets: std.ArrayListUnmanaged([]const u8) = .empty;
+    var nets: std.ArrayList([]const u8) = .empty;
     for (form_children[2..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
@@ -2088,11 +2088,11 @@ test "buildNets merges chained ties into a single net" {
 
     // One pin on each of A, B, C, then chain-tie A=B and B=C. All three must
     // collapse into ONE net — the old pairwise merge re-created net B.
-    var pins: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var pins: std.ArrayList(PinNetDecl) = .empty;
     try pins.append(a, .{ .ref_des = "U1", .pin = "1", .net = "A" });
     try pins.append(a, .{ .ref_des = "U2", .pin = "1", .net = "B" });
     try pins.append(a, .{ .ref_des = "U3", .pin = "1", .net = "C" });
-    var ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    var ties: std.ArrayList(NetTie) = .empty;
     try ties.append(a, .{ .a = "A", .b = "B" });
     try ties.append(a, .{ .a = "B", .b = "C" });
 
@@ -2108,12 +2108,12 @@ test "buildNets merges reverse-order chained ties" {
     var eval = Evaluator.init(a, "");
     defer eval.deinit();
 
-    var pins: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var pins: std.ArrayList(PinNetDecl) = .empty;
     try pins.append(a, .{ .ref_des = "U1", .pin = "1", .net = "A" });
     try pins.append(a, .{ .ref_des = "U2", .pin = "1", .net = "B" });
     try pins.append(a, .{ .ref_des = "U3", .pin = "1", .net = "C" });
     // (net "A" "B") then (net "C" "B") — remove side (B) already merged away.
-    var ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    var ties: std.ArrayList(NetTie) = .empty;
     try ties.append(a, .{ .a = "A", .b = "B" });
     try ties.append(a, .{ .a = "C", .b = "B" });
 
@@ -2128,10 +2128,10 @@ test "buildNets self-tie is a no-op" {
     var eval = Evaluator.init(a, "");
     defer eval.deinit();
 
-    var pins: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var pins: std.ArrayList(PinNetDecl) = .empty;
     try pins.append(a, .{ .ref_des = "U1", .pin = "1", .net = "X" });
     try pins.append(a, .{ .ref_des = "U2", .pin = "2", .net = "X" });
-    var ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    var ties: std.ArrayList(NetTie) = .empty;
     try ties.append(a, .{ .a = "X", .b = "X" });
 
     const nets = try buildNets(&eval, &pins, &ties);
@@ -2149,10 +2149,10 @@ test "buildNets renames bypass stubs onto the canonical root" {
     // A bypass-stub net "VDD3V3.U1.24" whose trunk "VDD3V3" is tied to "3V3":
     // the stub must rename to "3V3.U1.24" so missing_decoupling aggregation
     // sees it under the canonical prefix.
-    var pins: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var pins: std.ArrayList(PinNetDecl) = .empty;
     try pins.append(a, .{ .ref_des = "C1", .pin = "1", .net = "VDD3V3.U1.24" });
     try pins.append(a, .{ .ref_des = "U1", .pin = "24", .net = "3V3" });
-    var ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    var ties: std.ArrayList(NetTie) = .empty;
     try ties.append(a, .{ .a = "3V3", .b = "VDD3V3" });
 
     const nets = try buildNets(&eval, &pins, &ties);
@@ -2544,7 +2544,7 @@ test "evalBusNetForm expands inclusive index range" {
     var env = env_mod.Env.init(a, null);
     defer env.deinit();
 
-    var net_ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    var net_ties: std.ArrayList(NetTie) = .empty;
     try evalBusNetForm(&eval, form_children, &env, &net_ties);
 
     try testing.expectEqual(@as(usize, 3), net_ties.items.len);
@@ -2570,7 +2570,7 @@ test "evalBusNetForm strided fan-out distributes channels across subs and ports"
     var env = env_mod.Env.init(a, null);
     defer env.deinit();
 
-    var net_ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    var net_ties: std.ArrayList(NetTie) = .empty;
     try evalBusNetForm(&eval, form_children, &env, &net_ties);
 
     // 10 channels x 2 suffixes = 20 ties.
@@ -2601,7 +2601,7 @@ test "evalSubBlockBridges ties PREFIX+port to sub/port and honours rename" {
     var eval = Evaluator.init(a, "");
     defer eval.deinit();
 
-    var net_ties: std.ArrayListUnmanaged(NetTie) = .empty;
+    var net_ties: std.ArrayList(NetTie) = .empty;
     try evalSubBlockBridges(&eval, form_children, "imu", &net_ties);
 
     try testing.expectEqual(@as(usize, 4), net_ties.items.len);
@@ -2626,7 +2626,7 @@ test "expandSectionBusPort expands index x suffix matrix" {
     var env = env_mod.Env.init(a, null);
     defer env.deinit();
 
-    var ports: std.ArrayListUnmanaged(env_mod.SectionPort) = .empty;
+    var ports: std.ArrayList(env_mod.SectionPort) = .empty;
     try builders.expandSectionBusPort(&eval, form_children, &env, &ports);
 
     try testing.expectEqual(@as(usize, 6), ports.items.len);
@@ -2685,12 +2685,12 @@ test "parseVerifies reads a ref-des target as a ref-des sign-off" {
 /// return the evaluator (caller inspects `warnings`). page_allocator:
 /// evaluator allocations are intentionally never freed (project convention).
 /// Cap family name shared by the warning/cascade test fixtures.
-const TEST_CAP_FAMILY = "cap-0402";
+const test_cap_family = "cap-0402";
 
 fn evalWarningFixture(alloc: std.mem.Allocator, eval: *Evaluator, source: []const u8) !void {
     eval.* = Evaluator.init(alloc, ".");
-    try eval.component_cache.put(alloc, TEST_CAP_FAMILY, .{
-        .name = TEST_CAP_FAMILY,
+    try eval.component_cache.put(alloc, test_cap_family, .{
+        .name = test_cap_family,
         .symbol_name = "",
         .footprint_name = "",
         .is_family = true,
@@ -2801,7 +2801,7 @@ test "inert form heads are warning-free" {
 /// Find the first cap-0402 instance in a block, or null.
 fn findCapInstance(block: *const DesignBlock) ?Instance {
     for (block.instances) |inst| {
-        if (std.mem.eql(u8, inst.component, TEST_CAP_FAMILY)) return inst;
+        if (std.mem.eql(u8, inst.component, test_cap_family)) return inst;
     }
     return null;
 }

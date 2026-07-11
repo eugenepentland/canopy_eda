@@ -16,16 +16,16 @@ pub const FmtError = error{
 };
 
 // ── Constants ─────────────────────────────────────────────────────
-const ONE_UNIT: f64 = 1.0;
-const ZERO_UNIT: f64 = 0.0;
-const MILLI_THRESHOLD: f64 = 0.001;
-const MICRO_THRESHOLD: f64 = 0.000001;
-const NANO_THRESHOLD: f64 = 0.000000001;
-const KILO: f64 = 1000.0;
-const MEGA: f64 = 1_000_000.0;
-const GIGA: f64 = 1_000_000_000.0;
-const TERA: f64 = 1_000_000_000_000.0;
-const WHOLE_NUMBER_LIMIT: f64 = 1e15;
+const one_unit: f64 = 1.0;
+const zero_unit: f64 = 0.0;
+const milli_threshold: f64 = 0.001;
+const micro_threshold: f64 = 0.000001;
+const nano_threshold: f64 = 0.000000001;
+const kilo: f64 = 1000.0;
+const mega: f64 = 1_000_000.0;
+const giga: f64 = 1_000_000_000.0;
+const tera: f64 = 1_000_000_000_000.0;
+const whole_number_limit: f64 = 1e15;
 
 /// What a `~X` directive consumes from the argument list.
 pub const DirectiveArg = enum { number, string, none };
@@ -52,7 +52,7 @@ pub const directives = [_]Directive{
 
 /// Format a string with ~V, ~R, ~C, ~A, ~S, ~~ specifiers.
 pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const Value) FmtError![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     const writer = buf.writer(allocator);
 
@@ -104,11 +104,11 @@ fn formatVoltage(writer: anytype, v: f64) !void {
 
 fn formatResistance(writer: anytype, v: f64) !void {
     const abs = @abs(v);
-    if (abs >= MEGA) {
-        try formatNumber(writer, v / MEGA);
+    if (abs >= mega) {
+        try formatNumber(writer, v / mega);
         try writer.writeByte('M');
-    } else if (abs >= KILO) {
-        try formatNumber(writer, v / KILO);
+    } else if (abs >= kilo) {
+        try formatNumber(writer, v / kilo);
         try writer.writeByte('k');
     } else {
         try formatNumber(writer, v);
@@ -117,43 +117,43 @@ fn formatResistance(writer: anytype, v: f64) !void {
 
 fn formatCapacitance(writer: anytype, v: f64) !void {
     const abs = @abs(v);
-    if (abs >= ONE_UNIT) {
+    if (abs >= one_unit) {
         try formatNumber(writer, v);
         try writer.writeByte('F');
-    } else if (abs >= MILLI_THRESHOLD) {
-        try formatNumber(writer, v * KILO);
+    } else if (abs >= milli_threshold) {
+        try formatNumber(writer, v * kilo);
         try writer.writeAll("mF");
-    } else if (abs >= MICRO_THRESHOLD) {
-        try formatNumber(writer, v * MEGA);
+    } else if (abs >= micro_threshold) {
+        try formatNumber(writer, v * mega);
         try writer.writeAll("uF");
-    } else if (abs >= NANO_THRESHOLD) {
-        try formatNumber(writer, v * GIGA);
+    } else if (abs >= nano_threshold) {
+        try formatNumber(writer, v * giga);
         try writer.writeAll("nF");
     } else {
-        try formatNumber(writer, v * TERA);
+        try formatNumber(writer, v * tera);
         try writer.writeAll("pF");
     }
 }
 
 fn formatAmperage(writer: anytype, v: f64) !void {
     const abs = @abs(v);
-    if (abs >= ONE_UNIT) {
+    if (abs >= one_unit) {
         try formatNumber(writer, v);
         try writer.writeAll("A");
-    } else if (abs >= MILLI_THRESHOLD) {
-        try formatNumber(writer, v * KILO);
+    } else if (abs >= milli_threshold) {
+        try formatNumber(writer, v * kilo);
         try writer.writeAll("mA");
-    } else if (abs == ZERO_UNIT) {
+    } else if (abs == zero_unit) {
         try writer.writeAll("0A");
     } else {
-        try formatNumber(writer, v * MEGA);
+        try formatNumber(writer, v * mega);
         try writer.writeAll("uA");
     }
 }
 
 fn formatNumber(writer: anytype, v: f64) !void {
     // If it's a whole number, print without decimals
-    if (v == @floor(v) and @abs(v) < WHOLE_NUMBER_LIMIT) {
+    if (v == @floor(v) and @abs(v) < whole_number_limit) {
         const i: i64 = numeric.checkedInt(i64, v) orelse 0;
         writer.print("{d}", .{i}) catch return error.OutOfMemory;
     } else {

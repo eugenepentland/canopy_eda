@@ -29,11 +29,11 @@ const RenderError = draw.RenderError;
 const escape = @import("../escape.zig");
 
 // ── Layout constants ──────────────────────────────────────────────
-const HALF_DIVISOR: f64 = 2.0;
-const NC_OFFSET: f64 = 10.0;
-const BUS_OFFSET: f64 = 10.0;
-const PIN_OFFSET: f64 = 20.0;
-const FAR_X_SENTINEL: f64 = 99999.0;
+const half_divisor: f64 = 2.0;
+const nc_offset: f64 = 10.0;
+const bus_offset_px: f64 = 10.0;
+const pin_offset: f64 = 20.0;
+const far_x_sentinel: f64 = 99999.0;
 
 /// Render every connection out of one merged hub-pin group. Classifies each
 /// connection as net-label or pin-link (spoke-chain), filters out
@@ -43,8 +43,8 @@ const FAR_X_SENTINEL: f64 = 99999.0;
 pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u8, group: PinGroup, stub_x: f64, py: f64, side: Side) RenderError!void {
     if (group.conns.len == 0) {
         const nc_x = switch (side) {
-            .left => stub_x - NC_OFFSET,
-            .right => stub_x + NC_OFFSET,
+            .left => stub_x - nc_offset,
+            .right => stub_x + nc_offset,
         };
         try drawNcSymbol(w, nc_x, py);
         return;
@@ -59,7 +59,7 @@ pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u
     const pin_net_name = self.pin_canonical_nets.get(canon_key) orelse "";
 
     const Classified = struct { conn: AdjEntry, terminal: []const u8 };
-    var classified: std.ArrayListUnmanaged(Classified) = .empty;
+    var classified: std.ArrayList(Classified) = .empty;
 
     for (group.conns) |conn| {
         switch (conn.endpoint) {
@@ -128,10 +128,10 @@ pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u
         slot_counts[i] = slots;
         total_slots += slots;
     }
-    var results: std.ArrayListUnmanaged(BranchBody) = .empty;
+    var results: std.ArrayList(BranchBody) = .empty;
 
     const multi = classified.items.len > 1;
-    const bus_offset: f64 = BUS_OFFSET;
+    const bus_offset: f64 = bus_offset_px;
     const bus_x: f64 = switch (side) {
         .left => stub_x - bus_offset,
         .right => stub_x + bus_offset,
@@ -144,8 +144,8 @@ pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u
 
     for (classified.items, 0..) |entry, i| {
         const slots = slot_counts[i];
-        const slot_center = @as(f64, @floatFromInt(consumed_slots)) + @as(f64, @floatFromInt(slots -| 1)) / HALF_DIVISOR;
-        const cy = py + slot_center * per_conn_spacing - total_height / HALF_DIVISOR;
+        const slot_center = @as(f64, @floatFromInt(consumed_slots)) + @as(f64, @floatFromInt(slots -| 1)) / half_divisor;
+        const cy = py + slot_center * per_conn_spacing - total_height / half_divisor;
         consumed_slots += slots;
         if (cy < min_cy) min_cy = cy;
         if (cy > max_cy) max_cy = cy;
@@ -179,16 +179,16 @@ pub fn renderGroupedConnections(self: *RenderCtx, w: anytype, hub_ref: []const u
     }
 
     var default_term_x: f64 = switch (side) {
-        .left => stub_x - spoke_len - PIN_OFFSET,
-        .right => stub_x + spoke_len + PIN_OFFSET,
+        .left => stub_x - spoke_len - pin_offset,
+        .right => stub_x + spoke_len + pin_offset,
     };
     for (results.items) |r| {
         switch (side) {
             .left => {
-                default_term_x = @min(default_term_x, r.end_x - PIN_OFFSET);
+                default_term_x = @min(default_term_x, r.end_x - pin_offset);
             },
             .right => {
-                default_term_x = @max(default_term_x, r.end_x + PIN_OFFSET);
+                default_term_x = @max(default_term_x, r.end_x + pin_offset);
             },
         }
     }
@@ -227,8 +227,8 @@ pub fn renderTerminalGroups(self: *RenderCtx, w: anytype, results: []const Branc
         } else {
             const nearest_x = blk: {
                 var nx: f64 = switch (side) {
-                    .left => FAR_X_SENTINEL,
-                    .right => -FAR_X_SENTINEL,
+                    .left => far_x_sentinel,
+                    .right => -far_x_sentinel,
                 };
                 for (group_slice) |r| {
                     switch (side) {
@@ -243,8 +243,8 @@ pub fn renderTerminalGroups(self: *RenderCtx, w: anytype, results: []const Branc
                 break :blk nx;
             };
             const grp_bus_x = switch (side) {
-                .left => nearest_x - PIN_OFFSET,
-                .right => nearest_x + PIN_OFFSET,
+                .left => nearest_x - pin_offset,
+                .right => nearest_x + pin_offset,
             };
 
             const first_cy = group_slice[0].cy;
@@ -301,14 +301,14 @@ pub const ChainResult = struct {
 pub fn findSpokeChain(self: *RenderCtx, ref_des: []const u8, came_from: Endpoint, visited: *std.StringHashMapUnmanaged(void)) error{OutOfMemory}!ChainResult {
     const adj_list = self.adjacency.get(ref_des) orelse return .{ .chain = &.{}, .terminal = "?", .branches = &.{} };
 
-    var from_pins: std.ArrayListUnmanaged([]const u8) = .empty;
+    var from_pins: std.ArrayList([]const u8) = .empty;
     for (adj_list.items) |ae| {
         if (endpointEql(ae.endpoint, came_from)) {
             try from_pins.append(self.allocator, ae.pin);
         }
     }
 
-    var other_conns: std.ArrayListUnmanaged(AdjEntry) = .empty;
+    var other_conns: std.ArrayList(AdjEntry) = .empty;
     for (adj_list.items) |ae| {
         var is_from_pin = false;
         for (from_pins.items) |fp| {
@@ -355,7 +355,7 @@ fn tryChainConns(
             }
             if (has_hub) return .{ .chain = &.{}, .terminal = net, .branches = &.{} };
 
-            var other_spokes: std.ArrayListUnmanaged(PinRef) = .empty;
+            var other_spokes: std.ArrayList(PinRef) = .empty;
             for (net_pins.items) |np| {
                 if (std.mem.eql(u8, np.ref_des, current_ref)) continue;
                 if (!self.spoke_set.contains(np.ref_des)) continue;
@@ -370,7 +370,7 @@ fn tryChainConns(
                 const next_inst = self.inst_map.get(next_ref) orelse return .{ .chain = &.{}, .terminal = net, .branches = &.{} };
                 try visited.put(self.allocator, next_ref, {});
                 const rest = try findSpokeChain(self, next_ref, .{ .net = net }, visited);
-                var chain: std.ArrayListUnmanaged(FlatInst) = .empty;
+                var chain: std.ArrayList(FlatInst) = .empty;
                 try chain.append(self.allocator, next_inst);
                 for (rest.chain) |c| try chain.append(self.allocator, c);
                 return .{
@@ -379,13 +379,13 @@ fn tryChainConns(
                     .branches = rest.branches,
                 };
             } else {
-                var branches: std.ArrayListUnmanaged(ctx_mod.Branch) = .empty;
+                var branches: std.ArrayList(ctx_mod.Branch) = .empty;
                 for (other_spokes.items) |sp| {
                     if (visited.contains(sp.ref_des)) continue;
                     const sib_inst = self.inst_map.get(sp.ref_des) orelse continue;
                     try visited.put(self.allocator, sp.ref_des, {});
                     const sub = try findSpokeChain(self, sp.ref_des, .{ .net = net }, visited);
-                    var chain: std.ArrayListUnmanaged(FlatInst) = .empty;
+                    var chain: std.ArrayList(FlatInst) = .empty;
                     try chain.append(self.allocator, sib_inst);
                     for (sub.chain) |c| try chain.append(self.allocator, c);
                     try branches.append(self.allocator, .{
@@ -411,7 +411,7 @@ fn tryChainConns(
                 const next_inst = self.inst_map.get(p.ref_des) orelse return .{ .chain = &.{}, .terminal = "?", .branches = &.{} };
                 try visited.put(self.allocator, p.ref_des, {});
                 const rest = try findSpokeChain(self, p.ref_des, .{ .pin = .{ .ref_des = current_ref, .pin = ae.pin } }, visited);
-                var chain: std.ArrayListUnmanaged(FlatInst) = .empty;
+                var chain: std.ArrayList(FlatInst) = .empty;
                 try chain.append(self.allocator, next_inst);
                 for (rest.chain) |c| try chain.append(self.allocator, c);
                 return .{
@@ -452,8 +452,8 @@ pub fn renderConnBody(
     switch (endpoint) {
         .net => {
             const end_x: f64 = switch (side) {
-                .left => stub_x - PIN_OFFSET,
-                .right => stub_x + PIN_OFFSET,
+                .left => stub_x - pin_offset,
+                .right => stub_x + pin_offset,
             };
             try drawNetWire(w, stub_x, stub_y, end_x, cy, net_name);
             return end_x;
@@ -475,22 +475,22 @@ pub fn renderConnBody(
                     try self.rendered_spokes.put(self.allocator, c.ref_des, {});
                 }
 
-                var all_spokes: std.ArrayListUnmanaged(FlatInst) = .empty;
+                var all_spokes: std.ArrayList(FlatInst) = .empty;
                 try all_spokes.append(self.allocator, inst);
                 for (chain_result.chain) |c| try all_spokes.append(self.allocator, c);
 
                 switch (side) {
                     .left => {
-                        try drawNetWire(w, stub_x, stub_y, stub_x - PIN_OFFSET, cy, net_name);
-                        const chain_end_x = try branch_mod.drawPassiveChainLeft(self, w, stub_x - PIN_OFFSET, cy, all_spokes.items);
+                        try drawNetWire(w, stub_x, stub_y, stub_x - pin_offset, cy, net_name);
+                        const chain_end_x = try branch_mod.drawPassiveChainLeft(self, w, stub_x - pin_offset, cy, all_spokes.items);
                         if (chain_result.branches.len > 0) {
                             try branch_mod.drawBranchTreeLeft(self, w, chain_end_x, cy, chain_result.branches, chain_result.terminal);
                         }
                         return chain_end_x;
                     },
                     .right => {
-                        try drawNetWire(w, stub_x, stub_y, stub_x + PIN_OFFSET, cy, net_name);
-                        const chain_end_x = try branch_mod.drawPassiveChainRight(self, w, stub_x + PIN_OFFSET, cy, all_spokes.items);
+                        try drawNetWire(w, stub_x, stub_y, stub_x + pin_offset, cy, net_name);
+                        const chain_end_x = try branch_mod.drawPassiveChainRight(self, w, stub_x + pin_offset, cy, all_spokes.items);
                         if (chain_result.branches.len > 0) {
                             try branch_mod.drawBranchTreeRight(self, w, chain_end_x, cy, chain_result.branches, chain_result.terminal);
                         }
@@ -499,8 +499,8 @@ pub fn renderConnBody(
                 }
             } else {
                 const end_x: f64 = switch (side) {
-                    .left => stub_x - spoke_len - PIN_OFFSET,
-                    .right => stub_x + spoke_len + PIN_OFFSET,
+                    .left => stub_x - spoke_len - pin_offset,
+                    .right => stub_x + spoke_len + pin_offset,
                 };
                 try drawNetWire(w, stub_x, stub_y, end_x, cy, net_name);
                 return end_x;

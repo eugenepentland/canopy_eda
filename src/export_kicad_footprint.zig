@@ -16,26 +16,26 @@ const numeric = @import("numeric.zig");
 pub const FootprintError = std.mem.Allocator.Error || parser_mod.ParseError || error{InvalidFormat};
 
 // ── Constants ─────────────────────────────────────────────────────
-const PAD_MIN_CHILDREN: usize = 5;
-const RECT_MIN_CHILDREN: usize = 5;
-const POLY_MIN_POINTS: usize = 3;
-const DEFAULT_ROUNDRECT_RRATIO: f64 = 0.25;
+const pad_min_children: usize = 5;
+const rect_min_children: usize = 5;
+const poly_min_points: usize = 3;
+const default_roundrect_rratio: f64 = 0.25;
 // Anchor-rect size for an emitted custom pad: kept small (and inside the
 // polygon) so the anchor∪primitives union is just the polygon outline.
-const CUSTOM_PAD_ANCHOR_MM: f64 = 0.25;
-const KICAD_FILL_NONE = "    (fill none)\n";
+const custom_pad_anchor_mm: f64 = 0.25;
+const kicad_fill_none = "    (fill none)\n";
 // Shared `.kicad_mod` line fragments for graphic primitives (layer + stroke).
-const KICAD_LAYER_FMT = "    (layer \"{s}\")\n";
-const KICAD_STROKE_FMT = "    (stroke (width {d:.2}) (type default))\n";
+const kicad_layer_fmt = "    (layer \"{s}\")\n";
+const kicad_stroke_fmt = "    (stroke (width {d:.2}) (type default))\n";
 // KiCad default stroke widths (mm) for the documentation layers.
-const SILK_STROKE_MM: f64 = 0.12;
-const FAB_STROKE_MM: f64 = 0.1;
-const STEP_EXT_LEN: usize = 5;
+const silk_stroke_mm: f64 = 0.12;
+const fab_stroke_mm: f64 = 0.1;
+const step_ext_len: usize = 5;
 // ZIP file format constants (PKZIP appnote.txt)
-const ZIP_VERSION_NEEDED: u16 = 20;
-const ZIP_VERSION_MADE_BY: u16 = 20;
-const ZIP_EOCD_SIG_5: u8 = 5;
-const ZIP_EOCD_SIG_6: u8 = 6;
+const zip_version_needed: u16 = 20;
+const zip_version_made_by: u16 = 20;
+const zip_eocd_sig_5: u8 = 5;
+const zip_eocd_sig_6: u8 = 6;
 
 // --- Source .kicad_mod passthrough ---
 
@@ -89,7 +89,7 @@ pub fn useSourceKicadMod(
         return allocator.dupe(u8, source);
     }
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
@@ -166,7 +166,7 @@ pub fn exportFootprintMod(
 
     const name = children[1].asAtom() orelse children[1].asString() orelse return error.InvalidFormat;
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
@@ -205,7 +205,7 @@ pub fn exportFootprintMod(
     // Silkscreen
     for (children[2..]) |child| {
         if (child.isForm("silkscreen")) {
-            try emitKicadGeomBlock(w, child, "F.SilkS", SILK_STROKE_MM);
+            try emitKicadGeomBlock(w, child, "F.SilkS", silk_stroke_mm);
         }
     }
 
@@ -214,7 +214,7 @@ pub fn exportFootprintMod(
     // round-trip to F.Fab rather than being dropped.
     for (children[2..]) |child| {
         if (child.isForm("fab")) {
-            try emitKicadGeomBlock(w, child, "F.Fab", FAB_STROKE_MM);
+            try emitKicadGeomBlock(w, child, "F.Fab", fab_stroke_mm);
         }
     }
 
@@ -229,7 +229,7 @@ pub fn exportFootprintMod(
 
 fn emitKicadPad(w: anytype, node: ast.Node) !void {
     const children = node.asList() orelse return;
-    if (children.len < PAD_MIN_CHILDREN) return;
+    if (children.len < pad_min_children) return;
 
     // (pad NAME TYPE SHAPE (pos X Y) (size W H))
     const pad_type_internal = children[2].asAtom() orelse return;
@@ -253,12 +253,12 @@ fn emitKicadPad(w: anytype, node: ast.Node) !void {
     // rratio defaults match KiCad's library default; override via
     // `(roundrect_rratio R)` on the .sexp pad form. 0.5 turns a square
     // pad into a circle (used by mounting-spacer footprints).
-    var rratio: f64 = DEFAULT_ROUNDRECT_RRATIO;
+    var rratio: f64 = default_roundrect_rratio;
 
     for (children[4..]) |child| {
         if (child.isForm("roundrect_rratio")) {
             const cl = child.asList().?;
-            if (cl.len >= 2) rratio = cl[1].asNumber() orelse DEFAULT_ROUNDRECT_RRATIO;
+            if (cl.len >= 2) rratio = cl[1].asNumber() orelse default_roundrect_rratio;
         }
         if (child.isForm("pos")) {
             const cl = child.asList().?;
@@ -388,7 +388,7 @@ fn emitKicadCustomPad(
     poly_node: ast.Node,
     no_paste: bool,
 ) !void {
-    const anchor = @min(@min(bw, bh) * 0.5, CUSTOM_PAD_ANCHOR_MM);
+    const anchor = @min(@min(bw, bh) * 0.5, custom_pad_anchor_mm);
     try w.print("  (pad \"{s}\" {s} custom\n", .{ pad_name, kicad_type });
     try w.print("    (at {d:.3} {d:.3})\n", .{ x, y });
     try w.print("    (size {d:.3} {d:.3})\n", .{ anchor, anchor });
@@ -419,12 +419,12 @@ fn emitKicadCourtyard(w: anytype, node: ast.Node) !void {
     // inflate the raw rect/circle by the same margin here. The rect uses the
     // page's origin-centred max-abs convention (`parseRectExt`) so the emitted
     // box is identical to what the tool renders.
-    const M = geometry.BBOX_MARGIN_MM;
+    const M = geometry.bbox_margin_mm;
     // (courtyard (rect X1 Y1 X2 Y2)) and (courtyard (circle (CX CY) R))
     for (children[1..]) |child| {
         if (child.isForm("rect")) {
             const cl = child.asList() orelse continue;
-            if (cl.len >= RECT_MIN_CHILDREN) {
+            if (cl.len >= rect_min_children) {
                 const x1 = cl[1].asNumber() orelse 0;
                 const y1 = cl[2].asNumber() orelse 0;
                 const x2 = cl[3].asNumber() orelse 0;
@@ -433,7 +433,7 @@ fn emitKicadCourtyard(w: anytype, node: ast.Node) !void {
                 const hh = @max(@abs(y1), @abs(y2)) + M;
                 try w.print("  (fp_rect (start {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ -hw, -hh, hw, hh });
                 try w.writeAll("    (stroke (width 0.05) (type default))\n");
-                try w.writeAll(KICAD_FILL_NONE);
+                try w.writeAll(kicad_fill_none);
                 try w.writeAll("    (layer \"F.CrtYd\")\n");
                 try w.writeAll("  )\n");
             }
@@ -447,7 +447,7 @@ fn emitKicadCourtyard(w: anytype, node: ast.Node) !void {
             const r = (cl[2].asNumber() orelse continue) + M;
             try w.print("  (fp_circle (center {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ cx, cy, cx + r, cy });
             try w.writeAll("    (stroke (width 0.05) (type default))\n");
-            try w.writeAll(KICAD_FILL_NONE);
+            try w.writeAll(kicad_fill_none);
             try w.writeAll("    (layer \"F.CrtYd\")\n");
             try w.writeAll("  )\n");
         }
@@ -465,22 +465,22 @@ fn emitKicadGeomBlock(w: anytype, node: ast.Node, layer: []const u8, width: f64)
         if (child.isForm("rect")) {
             const cl = child.asList() orelse continue;
             // (rect X1 Y1 X2 Y2)
-            if (cl.len >= RECT_MIN_CHILDREN) {
+            if (cl.len >= rect_min_children) {
                 const x1 = cl[1].asNumber() orelse continue;
                 const y1 = cl[2].asNumber() orelse continue;
                 const x2 = cl[3].asNumber() orelse continue;
                 const y2 = cl[4].asNumber() orelse continue;
                 try w.print("  (fp_rect (start {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ x1, y1, x2, y2 });
-                try w.print(KICAD_STROKE_FMT, .{width});
-                try w.writeAll(KICAD_FILL_NONE);
-                try w.print(KICAD_LAYER_FMT, .{layer});
+                try w.print(kicad_stroke_fmt, .{width});
+                try w.writeAll(kicad_fill_none);
+                try w.print(kicad_layer_fmt, .{layer});
                 try w.writeAll("  )\n");
             }
         }
         if (child.isForm("poly")) {
             const cl = child.asList() orelse continue;
             // (poly (X Y) (X Y) …) — a filled outline (pin-1 marker, body shape)
-            if (cl.len >= POLY_MIN_POINTS + 1) {
+            if (cl.len >= poly_min_points + 1) {
                 try w.writeAll("  (fp_poly\n    (pts");
                 for (cl[1..]) |pt| {
                     const p = pt.asList() orelse continue;
@@ -490,9 +490,9 @@ fn emitKicadGeomBlock(w: anytype, node: ast.Node, layer: []const u8, width: f64)
                     try w.print(" (xy {d:.2} {d:.2})", .{ x, y });
                 }
                 try w.writeAll(")\n");
-                try w.print(KICAD_STROKE_FMT, .{width});
+                try w.print(kicad_stroke_fmt, .{width});
                 try w.writeAll("    (fill solid)\n");
-                try w.print(KICAD_LAYER_FMT, .{layer});
+                try w.print(kicad_layer_fmt, .{layer});
                 try w.writeAll("  )\n");
             }
         }
@@ -508,8 +508,8 @@ fn emitKicadGeomBlock(w: anytype, node: ast.Node, layer: []const u8, width: f64)
                     const ex = end[0].asNumber() orelse continue;
                     const ey = end[1].asNumber() orelse continue;
                     try w.print("  (fp_line (start {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ sx, sy, ex, ey });
-                    try w.print(KICAD_STROKE_FMT, .{width});
-                    try w.print(KICAD_LAYER_FMT, .{layer});
+                    try w.print(kicad_stroke_fmt, .{width});
+                    try w.print(kicad_layer_fmt, .{layer});
                     try w.writeAll("  )\n");
                 }
             }
@@ -525,9 +525,9 @@ fn emitKicadGeomBlock(w: anytype, node: ast.Node, layer: []const u8, width: f64)
                     const r = cl[2].asNumber() orelse continue;
                     // KiCad uses center + end point
                     try w.print("  (fp_circle (center {d:.2} {d:.2}) (end {d:.2} {d:.2})\n", .{ cx, cy, cx + r, cy });
-                    try w.print(KICAD_STROKE_FMT, .{width});
-                    try w.writeAll(KICAD_FILL_NONE);
-                    try w.print(KICAD_LAYER_FMT, .{layer});
+                    try w.print(kicad_stroke_fmt, .{width});
+                    try w.writeAll(kicad_fill_none);
+                    try w.print(kicad_layer_fmt, .{layer});
                     try w.writeAll("  )\n");
                 }
             }
@@ -591,7 +591,7 @@ pub fn findModelFile(
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".step")) continue;
         // Check if model filename contains the footprint or component name
-        const basename = entry.name[0 .. entry.name.len - STEP_EXT_LEN]; // strip .step
+        const basename = entry.name[0 .. entry.name.len - step_ext_len]; // strip .step
         if (std.mem.indexOf(u8, footprint_name, basename) != null or
             std.mem.indexOf(u8, basename, footprint_name) != null or
             std.mem.indexOf(u8, component_name, basename) != null or
@@ -616,7 +616,7 @@ pub const ZipEntry = struct {
 
 /// Build a ZIP file in memory using store (no compression).
 pub fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
     // Track offsets for central directory
@@ -628,7 +628,7 @@ pub fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) std.mem
         offsets[i] = @intCast(buf.items.len);
         // Local file header
         try buf.appendSlice(allocator, &[_]u8{ 'P', 'K', 3, 4 }); // signature
-        try appendU16(&buf, allocator, ZIP_VERSION_NEEDED); // version needed
+        try appendU16(&buf, allocator, zip_version_needed); // version needed
         try appendU16(&buf, allocator, 0); // flags
         try appendU16(&buf, allocator, 0); // compression: store
         try appendU16(&buf, allocator, 0); // mod time
@@ -646,8 +646,8 @@ pub fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) std.mem
     const cd_start: u32 = @intCast(buf.items.len);
     for (entries, 0..) |entry, i| {
         try buf.appendSlice(allocator, &[_]u8{ 'P', 'K', 1, 2 }); // signature
-        try appendU16(&buf, allocator, ZIP_VERSION_MADE_BY); // version made by
-        try appendU16(&buf, allocator, ZIP_VERSION_NEEDED); // version needed
+        try appendU16(&buf, allocator, zip_version_made_by); // version made by
+        try appendU16(&buf, allocator, zip_version_needed); // version needed
         try appendU16(&buf, allocator, 0); // flags
         try appendU16(&buf, allocator, 0); // compression: store
         try appendU16(&buf, allocator, 0); // mod time
@@ -667,7 +667,7 @@ pub fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) std.mem
     const cd_size: u32 = @intCast(buf.items.len - cd_start);
 
     // End of central directory
-    try buf.appendSlice(allocator, &[_]u8{ 'P', 'K', ZIP_EOCD_SIG_5, ZIP_EOCD_SIG_6 }); // signature
+    try buf.appendSlice(allocator, &[_]u8{ 'P', 'K', zip_eocd_sig_5, zip_eocd_sig_6 }); // signature
     try appendU16(&buf, allocator, 0); // disk number
     try appendU16(&buf, allocator, 0); // disk with CD
     try appendU16(&buf, allocator, @intCast(entries.len)); // entries on disk
@@ -679,11 +679,11 @@ pub fn buildZip(allocator: std.mem.Allocator, entries: []const ZipEntry) std.mem
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendU16(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, val: u16) !void {
+fn appendU16(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, val: u16) !void {
     try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToLittle(u16, val)));
 }
 
-fn appendU32(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, val: u32) !void {
+fn appendU32(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, val: u32) !void {
     try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToLittle(u32, val)));
 }
 

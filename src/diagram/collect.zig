@@ -64,7 +64,7 @@ pub fn collectGraph(
         if (sec_idx < block.sections.len and block.sections[sec_idx].diagram_hidden) dg_attach[i] = null;
     }
 
-    var nodes: std.ArrayListUnmanaged(Node) = .empty;
+    var nodes: std.ArrayList(Node) = .empty;
     errdefer {
         for (nodes.items) |n| freeNode(allocator, n);
         nodes.deinit(allocator);
@@ -117,7 +117,7 @@ pub fn collectGraph(
 
     const flat = try buildFlatNets(scratch, block);
 
-    var edge_list: std.ArrayListUnmanaged(Edge) = .empty;
+    var edge_list: std.ArrayList(Edge) = .empty;
     errdefer {
         for (edge_list.items) |e| allocator.free(e.label);
         edge_list.deinit(allocator);
@@ -167,7 +167,7 @@ fn assignRails(
     var counts: std.AutoHashMapUnmanaged(Key, u32) = .empty;
     for (flat) |net| {
         const clean = cleanNetName(net.name);
-        if (classify.netClass(clean, port_map) != types.CLASS_POWER) continue;
+        if (classify.netClass(clean, port_map) != types.class_power) continue;
         const v = railVoltageAny(nodes, clean) orelse voltageFromName(clean) orelse continue;
         const vb: i64 = numeric.checkedInt(i64, @round(v * 100)) orelse 0;
         for (net.pins) |p| {
@@ -177,7 +177,7 @@ fn assignRails(
         }
     }
     // Bucket rail counts per node.
-    const per_node = try scratch.alloc(std.ArrayListUnmanaged(RailCount), nodes.len);
+    const per_node = try scratch.alloc(std.ArrayList(RailCount), nodes.len);
     for (per_node) |*l| l.* = .empty;
     var it = counts.iterator();
     while (it.next()) |e| {
@@ -212,14 +212,14 @@ fn buildSectionNodes(
     block: *const DesignBlock,
     sub_port_to_net: *const SubPortMap,
     sec_to_sub: []const ?usize,
-    nodes: *std.ArrayListUnmanaged(Node),
+    nodes: *std.ArrayList(Node),
     sec_node: []?u32,
     project_dir: []const u8,
 ) Allocator.Error!void {
     for (block.sections, 0..) |sec, sec_idx| {
         if (sec.diagram_hidden) continue;
-        var input_buf: std.ArrayListUnmanaged(RailEnd) = .empty;
-        var output_buf: std.ArrayListUnmanaged(RailEnd) = .empty;
+        var input_buf: std.ArrayList(RailEnd) = .empty;
+        var output_buf: std.ArrayList(RailEnd) = .empty;
         try collectSectionRails(scratch, sec, &input_buf, &output_buf);
         if (sec_to_sub[sec_idx]) |sb_idx| {
             try collectSubBlockRails(scratch, block.sub_blocks[sb_idx], sub_port_to_net, &input_buf, &output_buf);
@@ -246,14 +246,14 @@ fn buildSubBlockNodes(
     block: *const DesignBlock,
     sub_port_to_net: *const SubPortMap,
     sub_attachments: []const ?usize,
-    nodes: *std.ArrayListUnmanaged(Node),
+    nodes: *std.ArrayList(Node),
     sub_node: []?u32,
     project_dir: []const u8,
 ) Allocator.Error!void {
     for (block.sub_blocks, 0..) |sb, sb_idx| {
         if (sb_idx < sub_attachments.len and sub_attachments[sb_idx] != null) continue;
-        var input_buf: std.ArrayListUnmanaged(RailEnd) = .empty;
-        var output_buf: std.ArrayListUnmanaged(RailEnd) = .empty;
+        var input_buf: std.ArrayList(RailEnd) = .empty;
+        var output_buf: std.ArrayList(RailEnd) = .empty;
         try collectSubBlockRails(scratch, sb, sub_port_to_net, &input_buf, &output_buf);
         // Prefer the module's design-block title ("ESP32-S3 UI", "3.272V Buck
         // (TPS62933)") over the bare instance handle ("esp32", "buck_3v3") —
@@ -288,7 +288,7 @@ fn buildSubBlockNodes(
 fn buildStubNodes(
     allocator: Allocator,
     block: *const DesignBlock,
-    nodes: *std.ArrayListUnmanaged(Node),
+    nodes: *std.ArrayList(Node),
     stub_node: []?u32,
 ) Allocator.Error!void {
     for (block.parts, 0..) |p, i| {
@@ -453,7 +453,7 @@ fn mainParts(
     scratch: Allocator,
     instances: []const env_mod.Instance,
 ) Allocator.Error!MainParts {
-    var order: std.ArrayListUnmanaged([]const u8) = .empty;
+    var order: std.ArrayList([]const u8) = .empty;
     var counts: std.StringHashMapUnmanaged(usize) = .empty;
     const role: []const u8 = "";
     for (instances) |inst| {
@@ -468,7 +468,7 @@ fn mainParts(
         }
         gop.value_ptr.* += 1;
     }
-    var out: std.ArrayListUnmanaged([]const u8) = .empty;
+    var out: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (out.items) |t| allocator.free(t);
         out.deinit(allocator);
@@ -529,8 +529,8 @@ fn buildSubPortToNet(scratch: Allocator, block: *const DesignBlock) Allocator.Er
 fn collectSectionRails(
     scratch: Allocator,
     sec: Section,
-    inputs: *std.ArrayListUnmanaged(RailEnd),
-    outputs: *std.ArrayListUnmanaged(RailEnd),
+    inputs: *std.ArrayList(RailEnd),
+    outputs: *std.ArrayList(RailEnd),
 ) Allocator.Error!void {
     for (sec.ports) |p| {
         if (p.signal_type != .power) continue;
@@ -546,8 +546,8 @@ fn collectSubBlockRails(
     scratch: Allocator,
     sb: SubBlock,
     sub_port_to_net: *const SubPortMap,
-    inputs: *std.ArrayListUnmanaged(RailEnd),
-    outputs: *std.ArrayListUnmanaged(RailEnd),
+    inputs: *std.ArrayList(RailEnd),
+    outputs: *std.ArrayList(RailEnd),
 ) Allocator.Error!void {
     for (sb.block.ports) |p| {
         const v = p.nominal orelse p.rated_max orelse continue;
@@ -573,12 +573,12 @@ fn collectSubBlockRails(
 /// (arena-owned). Reuses the KiCad-export netlist machinery so the diagram
 /// sees exactly the same connectivity the board does.
 fn buildFlatNets(scratch: Allocator, block: *const DesignBlock) Allocator.Error![]export_kicad.FlatNet {
-    var nets: std.ArrayListUnmanaged(export_kicad.FlatNet) = .empty;
+    var nets: std.ArrayList(export_kicad.FlatNet) = .empty;
     // false: keep the diagram's internal flatten prefixed exactly as before —
     // it's a self-consistent rendering pipeline, independent of the board's
     // grouped-refdes ref-des strings.
     try netlist.collectNets(scratch, block, "", &nets, .hierarchical);
-    var ties: std.ArrayListUnmanaged(netlist.FlatTie) = .empty;
+    var ties: std.ArrayList(netlist.FlatTie) = .empty;
     try netlist.collectNetTies(scratch, block, "", &ties);
     try netlist.applyNetTies(scratch, &nets, ties.items);
     return nets.items;
@@ -602,17 +602,17 @@ fn deriveEdges(
     port_map: *const classify.PortClassMap,
     producer_by_net: *const std.StringHashMapUnmanaged(u32),
     nodes: []const Node,
-    edge_list: *std.ArrayListUnmanaged(Edge),
+    edge_list: *std.ArrayList(Edge),
 ) Allocator.Error!void {
-    var acc: std.ArrayListUnmanaged(AccEdge) = .empty;
+    var acc: std.ArrayList(AccEdge) = .empty;
     var key_to_idx: std.StringHashMapUnmanaged(usize) = .empty;
     var touched_set: std.AutoHashMapUnmanaged(u32, void) = .empty;
-    var touched: std.ArrayListUnmanaged(u32) = .empty;
+    var touched: std.ArrayList(u32) = .empty;
 
     for (flat) |net| {
         const clean = cleanNetName(net.name);
         const cls = classify.netClass(clean, port_map);
-        if (cls == types.CLASS_GROUND) continue;
+        if (cls == types.class_ground) continue;
 
         touched_set.clearRetainingCapacity();
         touched.clearRetainingCapacity();
@@ -624,7 +624,7 @@ fn deriveEdges(
         if (touched.items.len < 2) continue;
 
         const driver = pickDriver(cls, clean, touched.items, nodes, producer_by_net);
-        const voltage: ?f64 = if (cls == types.CLASS_POWER)
+        const voltage: ?f64 = if (cls == types.class_power)
             (producerVoltage(nodes, driver, clean) orelse railVoltageAny(nodes, clean) orelse voltageFromName(clean))
         else
             null;
@@ -710,12 +710,12 @@ fn boundaryChip(
     flat: []const export_kicad.FlatNet,
     mem: *const membership.Membership,
     port_map: *const classify.PortClassMap,
-    part_nets: *const std.StringHashMapUnmanaged(std.ArrayListUnmanaged(usize)),
+    part_nets: *const std.StringHashMapUnmanaged(std.ArrayList(usize)),
     start: usize,
 ) Allocator.Error!?u32 {
     var seen_ic: std.AutoHashMapUnmanaged(u32, void) = .empty;
     var visited: std.AutoHashMapUnmanaged(usize, void) = .empty;
-    var queue: std.ArrayListUnmanaged(usize) = .empty;
+    var queue: std.ArrayList(usize) = .empty;
     try visited.put(scratch, start, {});
     try queue.append(scratch, start);
     var chip: ?u32 = null;
@@ -742,7 +742,7 @@ fn boundaryChip(
             for (others.items) |oni| {
                 if (visited.contains(oni)) continue;
                 const cls = classify.netClass(cleanNetName(flat[oni].name), port_map);
-                if (cls == types.CLASS_POWER or cls == types.CLASS_GROUND) continue;
+                if (cls == types.class_power or cls == types.class_ground) continue;
                 try visited.put(scratch, oni, {});
                 try queue.append(scratch, oni);
             }
@@ -761,8 +761,8 @@ fn antennaPass(
     flat: []const export_kicad.FlatNet,
     mem: *const membership.Membership,
     port_map: *const classify.PortClassMap,
-    nodes: *std.ArrayListUnmanaged(Node),
-    edge_list: *std.ArrayListUnmanaged(Edge),
+    nodes: *std.ArrayList(Node),
+    edge_list: *std.ArrayList(Edge),
 ) Allocator.Error!void {
     const dir = try buildRfPortDir(scratch, block);
     var ant_id: std.StringHashMapUnmanaged(u32) = .empty;
@@ -770,7 +770,7 @@ fn antennaPass(
 
     // ref_des → the flat-net indices it appears on, for tracing a boundary net
     // through a series matching element (DC-block / tuning cap) to the IC.
-    var part_nets: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(usize)) = .empty;
+    var part_nets: std.StringHashMapUnmanaged(std.ArrayList(usize)) = .empty;
     for (flat, 0..) |net, ni| {
         for (net.pins) |p| {
             const gop = try part_nets.getOrPut(scratch, p.ref_des);
@@ -782,7 +782,7 @@ fn antennaPass(
     for (flat, 0..) |net, net_idx| {
         const clean = cleanNetName(net.name);
         if (!isBoundaryName(clean)) continue;
-        if (classify.netClass(clean, port_map) != types.CLASS_RF) continue;
+        if (classify.netClass(clean, port_map) != types.class_rf) continue;
 
         // The single IC this boundary net feeds (series matching passives are
         // transparent; a hop to a *second* IC means it's a signal, not a feed).
@@ -823,7 +823,7 @@ fn antennaPass(
         try edge_list.append(allocator, .{
             .from = from,
             .to = to,
-            .class = types.CLASS_RF,
+            .class = types.class_rf,
             .label = try allocator.dupe(u8, base),
             .voltage = null,
             .fanout = 1,
@@ -850,8 +850,8 @@ fn crystalPass(
     scratch: Allocator,
     block: *const DesignBlock,
     mem: *const membership.Membership,
-    nodes: *std.ArrayListUnmanaged(Node),
-    edge_list: *std.ArrayListUnmanaged(Edge),
+    nodes: *std.ArrayList(Node),
+    edge_list: *std.ArrayList(Edge),
 ) Allocator.Error!void {
     var host_seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
     for (block.instances) |inst| {
@@ -873,8 +873,8 @@ fn emitCrystal(
     allocator: Allocator,
     scratch: Allocator,
     host_seen: *std.AutoHashMapUnmanaged(u32, void),
-    nodes: *std.ArrayListUnmanaged(Node),
-    edge_list: *std.ArrayListUnmanaged(Edge),
+    nodes: *std.ArrayList(Node),
+    edge_list: *std.ArrayList(Edge),
     host: u32,
 ) Allocator.Error!void {
     if ((try host_seen.getOrPut(scratch, host)).found_existing) return;
@@ -890,7 +890,7 @@ fn emitCrystal(
     try edge_list.append(allocator, .{
         .from = xid,
         .to = host,
-        .class = types.CLASS_CLOCK,
+        .class = types.class_clock,
         .label = try allocator.dupe(u8, "XTAL"),
         .voltage = null,
         .fanout = 1,
@@ -899,7 +899,7 @@ fn emitCrystal(
 
 fn accumulate(
     scratch: Allocator,
-    acc: *std.ArrayListUnmanaged(AccEdge),
+    acc: *std.ArrayList(AccEdge),
     key_to_idx: *std.StringHashMapUnmanaged(usize),
     from: u32,
     to: u32,
@@ -938,7 +938,7 @@ fn pickDriver(
     nodes: []const Node,
     producer_by_net: *const std.StringHashMapUnmanaged(u32),
 ) u32 {
-    if (cls == types.CLASS_POWER) {
+    if (cls == types.class_power) {
         if (producer_by_net.get(clean)) |p| {
             for (touched) |t| if (t == p) return p;
         }
@@ -978,10 +978,10 @@ const rank_sink: u8 = 1; // PLL ref input, connector IF, plain chip
 
 fn sourceRank(node: Node, cls: ClassId) u8 {
     const n = node.label;
-    if (cls == types.CLASS_POWER) return if (node.category == .power) rank_origin else rank_sink;
-    if (cls == types.CLASS_CLOCK) return clockRank(n, node.category);
-    if (cls == types.CLASS_CONTROL) return controlRank(n, node.category);
-    if (cls == types.CLASS_RF) return rfRank(n, node.category);
+    if (cls == types.class_power) return if (node.category == .power) rank_origin else rank_sink;
+    if (cls == types.class_clock) return clockRank(n, node.category);
+    if (cls == types.class_control) return controlRank(n, node.category);
+    if (cls == types.class_rf) return rfRank(n, node.category);
     return rank_sink; // ground
 }
 
@@ -1171,7 +1171,7 @@ test "collectGraph connects two non-MCU sections via a shared net" {
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 2), g.nodes.len);
     try testing.expect(g.edges.len >= 1);
-    try testing.expectEqual(types.CLASS_RF, g.edges[0].class);
+    try testing.expectEqual(types.class_rf, g.edges[0].class);
 }
 
 // spec: diagram/collect - Labels an unattached sub-block by its module's design-block title
@@ -1215,7 +1215,7 @@ test "collectGraph surfaces a module crystal as a clock source" {
     // The mcu block node + the synthesized Crystal source, joined by a clock edge.
     try testing.expectEqual(@as(usize, 2), g.nodes.len);
     try testing.expectEqual(@as(usize, 1), g.edges.len);
-    try testing.expectEqual(types.CLASS_CLOCK, g.edges[0].class);
+    try testing.expectEqual(types.class_clock, g.edges[0].class);
 }
 
 // spec: diagram/collect - Excludes ground nets and collapses parallel or differential nets into one edge
@@ -1262,7 +1262,7 @@ test "collectGraph resolves rail voltage from a consumer when no producer declar
     var g = try collectGraph(testing.allocator, &block, &.{}, "");
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), g.edges.len);
-    try testing.expectEqual(types.CLASS_POWER, g.edges[0].class);
+    try testing.expectEqual(types.class_power, g.edges[0].class);
     try testing.expect(g.edges[0].voltage != null);
     try testing.expectApproxEqAbs(@as(f64, 3.3), g.edges[0].voltage.?, 0.01);
 }
@@ -1317,7 +1317,7 @@ test "collectGraph adds an antenna node for a one-sided RF boundary net" {
     const ant: u32 = @intCast(g.nodes.len - 1);
     try testing.expect(g.nodes[ant].is_boundary);
     try testing.expectEqual(@as(usize, 1), g.edges.len);
-    try testing.expectEqual(types.CLASS_RF, g.edges[0].class);
+    try testing.expectEqual(types.class_rf, g.edges[0].class);
     // A chip *output* port drives the net, so the antenna is the sink.
     try testing.expectEqual(ant, g.edges[0].to);
 }

@@ -15,12 +15,12 @@ const infra_fs = @import("../infra/fs.zig");
 const numeric = @import("../numeric.zig");
 const Node = ast.Node;
 
-const MAX_FOOTPRINT_BYTES: usize = 1024 * 1024;
-const PATH_FMT = "{s}/lib/footprints/{s}.sexp";
+const max_footprint_bytes: usize = 1024 * 1024;
+const path_fmt = "{s}/lib/footprints/{s}.sexp";
 /// Extra clearance baked into a part's courtyard half-extents so the
 /// optimizer leaves a little air between adjacent parts. Public so the
 /// courtyard editor can invert it (effective extent ↔ written rect).
-pub const BBOX_MARGIN_MM: f64 = 0.15;
+pub const bbox_margin_mm: f64 = 0.15;
 
 /// One pad, positioned relative to the footprint origin (mm). `shape` and
 /// `poly` are carried only for rendering (the PCB-layout page draws the real
@@ -66,7 +66,7 @@ pub const Pad = struct {
 
 /// KiCad's default roundrect corner ratio (corner radius ÷ shorter side) when
 /// a `roundrect` pad declares no explicit `(roundrect_rratio …)`.
-pub const DEFAULT_RRATIO: f64 = 0.25;
+pub const default_rratio: f64 = 0.25;
 
 /// A silkscreen line segment (footprint-local mm).
 pub const SilkLine = struct { x1: f64, y1: f64, x2: f64, y2: f64 };
@@ -99,18 +99,18 @@ pub fn load(
     pin_count_hint: usize,
     margin: f64,
 ) Geom {
-    const path = std.fmt.allocPrint(arena, PATH_FMT, .{ project_dir, fp_name }) catch
+    const path = std.fmt.allocPrint(arena, path_fmt, .{ project_dir, fp_name }) catch
         return fallbackGeom(pin_count_hint);
-    const source = infra_fs.cwd().readFileAlloc(arena, path, MAX_FOOTPRINT_BYTES) catch
+    const source = infra_fs.cwd().readFileAlloc(arena, path, max_footprint_bytes) catch
         return fallbackGeom(pin_count_hint);
     const nodes = parser.parse(arena, source) catch return fallbackGeom(pin_count_hint);
     if (nodes.len == 0 or !nodes[0].isForm("footprint")) return fallbackGeom(pin_count_hint);
     const children = nodes[0].asList() orelse return fallbackGeom(pin_count_hint);
     if (children.len < 2) return fallbackGeom(pin_count_hint);
 
-    var pads: std.ArrayListUnmanaged(Pad) = .empty;
-    var silk_lines: std.ArrayListUnmanaged(SilkLine) = .empty;
-    var silk_circles: std.ArrayListUnmanaged(SilkCircle) = .empty;
+    var pads: std.ArrayList(Pad) = .empty;
+    var silk_lines: std.ArrayList(SilkLine) = .empty;
+    var silk_circles: std.ArrayList(SilkCircle) = .empty;
     var court_hw: f64 = 0;
     var court_hh: f64 = 0;
     var have_court = false;
@@ -156,8 +156,8 @@ pub fn load(
 fn parseSilkscreen(
     arena: std.mem.Allocator,
     node: Node,
-    lines: *std.ArrayListUnmanaged(SilkLine),
-    circles: *std.ArrayListUnmanaged(SilkCircle),
+    lines: *std.ArrayList(SilkLine),
+    circles: *std.ArrayList(SilkCircle),
 ) void {
     const cl = node.asList() orelse return;
     if (cl.len < 2) return;
@@ -275,7 +275,7 @@ fn isAtomEql(n: Node, s: []const u8) bool {
 fn parsePadPoly(arena: std.mem.Allocator, node: Node) ?[]const [2]f64 {
     const cl = node.asList() orelse return null;
     if (cl.len < 4) return null; // need ≥3 points
-    var pts: std.ArrayListUnmanaged([2]f64) = .empty;
+    var pts: std.ArrayList([2]f64) = .empty;
     for (cl[1..]) |pn| {
         const pl = pn.asList() orelse continue;
         if (pl.len < 2) continue;
@@ -378,7 +378,7 @@ test "load parses a 0402 footprint's pads and courtyard" {
     const nodes = try parser.parse(arena, src);
     // Drive the same parsing paths load() uses, off an in-memory footprint.
     const children = nodes[0].asList().?;
-    var pads: std.ArrayListUnmanaged(Pad) = .empty;
+    var pads: std.ArrayList(Pad) = .empty;
     var ext: ?Ext = null;
     for (children[2..]) |sub| {
         if (sub.isForm("pad")) {
@@ -401,7 +401,7 @@ test "load falls back to a synthesized box for a missing footprint" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    const g = load(arena, "/nonexistent-project-dir", "does-not-exist", 10, BBOX_MARGIN_MM);
+    const g = load(arena, "/nonexistent-project-dir", "does-not-exist", 10, bbox_margin_mm);
     try testing.expect(g.fallback);
     try testing.expectEqual(@as(usize, 0), g.pads.len);
     try testing.expect(g.hw > 0 and g.hh > 0);
@@ -421,7 +421,7 @@ test "parsePad reads oval slots, pad rotation, and roundrect ratio" {
     ;
     const nodes = try parser.parse(arena, src);
     const children = nodes[0].asList().?;
-    var pads: std.ArrayListUnmanaged(Pad) = .empty;
+    var pads: std.ArrayList(Pad) = .empty;
     for (children[2..]) |sub| {
         if (sub.isForm("pad")) {
             if (parsePad(arena, sub)) |p| try pads.append(arena, p);
@@ -455,8 +455,8 @@ test "parseSilkscreen collects lines and circles" {
         \\  (circle (-2.90 -2.50) 0.13))
     ;
     const nodes = try parser.parse(arena, src);
-    var lines: std.ArrayListUnmanaged(SilkLine) = .empty;
-    var circles: std.ArrayListUnmanaged(SilkCircle) = .empty;
+    var lines: std.ArrayList(SilkLine) = .empty;
+    var circles: std.ArrayList(SilkCircle) = .empty;
     parseSilkscreen(arena, nodes[0], &lines, &circles);
     try testing.expectEqual(@as(usize, 1), lines.items.len);
     try testing.expectApproxEqAbs(@as(f64, -0.26), lines.items[0].x1, 1e-9);

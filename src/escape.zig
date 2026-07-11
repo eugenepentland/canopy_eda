@@ -23,7 +23,7 @@ pub fn writeXml(w: anytype, s: []const u8) !void {
 }
 
 test "writeXml escapes markup and both quote styles" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     const w = buf.writer(std.testing.allocator);
     try writeXml(w, "a<b>&\"'c");
@@ -31,7 +31,7 @@ test "writeXml escapes markup and both quote styles" {
 }
 
 test "writeXml neutralizes a script/attribute breakout" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     const w = buf.writer(std.testing.allocator);
     try writeXml(w, "\"><script>alert(1)</script>");

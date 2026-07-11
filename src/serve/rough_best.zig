@@ -61,8 +61,8 @@ fn coverageExclusions(
     alloc: std.mem.Allocator,
     star: optimizer.Placement,
     saved: pcb_layout_page.SavedLayout,
-) std.mem.Allocator.Error!std.StringHashMap(void) {
-    var ex = std.StringHashMap(void).init(alloc);
+) std.mem.Allocator.Error!std.StringHashMapUnmanaged(void) {
+    var ex = std.StringHashMapUnmanaged(void).empty;
     for (star.parts, 0..) |part, i| {
         const origin = if (i < star.instances.len and star.instances[i].origin_key.len > 0)
             star.instances[i].origin_key
@@ -75,7 +75,7 @@ fn coverageExclusions(
                 break;
             }
         }
-        if (!hit) try ex.put(part.ref_des, {});
+        if (!hit) try ex.put(alloc, part.ref_des, {});
     }
     return ex;
 }
@@ -88,11 +88,11 @@ fn scoreCandidate(
     cand: optimizer.Placement,
     star: optimizer.Placement,
     star_obj: f64,
-    excluded: *const std.StringHashMap(void),
+    excluded: *const std.StringHashMapUnmanaged(void),
 ) std.mem.Allocator.Error!Candidate {
     const st = try style_score.compareStyle(alloc, cand, star, excluded);
     const obj = cand.breakdown.objective;
-    const hyb = style_score.hybridScore(obj, star_obj, st.style_pct, style_score.LAMBDA_DEFAULT);
+    const hyb = style_score.hybridScore(obj, star_obj, st.style_pct, style_score.lambda_default);
     const crossings = try optimizer.importantCrossings(alloc, cand);
     const overlaps = optimizer.overlapCount(cand);
     const n: f64 = @floatFromInt(@max(cand.parts.len, 1));
@@ -186,7 +186,7 @@ fn computeBest(
     const star = try pcb_layout_page.solveForRequest(alloc, project_dir, name, .{ .layout = saved.?.name }, eval_s, mr_s);
     const star_obj = star.placement.breakdown.objective;
     var excluded = try coverageExclusions(alloc, star.placement, saved.?);
-    defer excluded.deinit();
+    defer excluded.deinit(alloc);
 
     // Candidate family — one evaluator/block reused for all solves.
     // `.regen` forces a FRESH rough (else `solveForRequest` returns the auto-cache
@@ -197,7 +197,7 @@ fn computeBest(
     const force_pl = optimizer.solve(alloc, block, project_dir, null, .{ .rough = false }, .place) catch return error.BuildFailed;
     const pin_pl = optimizer.solvePinAdjacent(alloc, block, project_dir, .{}) catch return error.BuildFailed;
 
-    var cands: std.ArrayListUnmanaged(Candidate) = .empty;
+    var cands: std.ArrayList(Candidate) = .empty;
     cands.append(alloc, try scoreCandidate(alloc, "rough", rough.placement, star.placement, star_obj, &excluded)) catch return error.BuildFailed;
     cands.append(alloc, try scoreCandidate(alloc, "force", force_pl, star.placement, star_obj, &excluded)) catch return error.BuildFailed;
     if (pin_pl) |pp| cands.append(alloc, try scoreCandidate(alloc, "pin", pp, star.placement, star_obj, &excluded)) catch return error.BuildFailed;
@@ -265,7 +265,7 @@ pub fn bestRoughJson(alloc: std.mem.Allocator, project_dir: []const u8, name: []
     pcb_layout_page.writeJsonStr(w, name) catch return error.BuildFailed;
     w.writeAll(",\"starred\":") catch return error.BuildFailed;
     pcb_layout_page.writeJsonStr(w, b.starred_name) catch return error.BuildFailed;
-    w.print(",\"lambda\":{d:.2},\"winner\":", .{style_score.LAMBDA_DEFAULT}) catch return error.BuildFailed;
+    w.print(",\"lambda\":{d:.2},\"winner\":", .{style_score.lambda_default}) catch return error.BuildFailed;
     pcb_layout_page.writeJsonStr(w, b.winner) catch return error.BuildFailed;
     w.print(",\"star_obj\":{d:.2},\"candidates\":[", .{b.star_obj}) catch return error.BuildFailed;
     for (b.cands, 0..) |c, i| {

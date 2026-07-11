@@ -176,14 +176,14 @@ pub const RenderCtx = struct {
     allocator: Allocator,
     /// Project directory for locating lib/pinouts/*.sexp (empty if unavailable).
     project_dir: []const u8 = "",
-    instances: std.ArrayListUnmanaged(FlatInst),
-    nets: std.ArrayListUnmanaged(FlatNet),
-    hub_order: std.ArrayListUnmanaged([]const u8),
+    instances: std.ArrayList(FlatInst),
+    nets: std.ArrayList(FlatNet),
+    hub_order: std.ArrayList([]const u8),
     inst_map: std.StringHashMapUnmanaged(FlatInst),
     spoke_set: std.StringHashMapUnmanaged(void),
     pin_net: std.StringHashMapUnmanaged([]const u8),
-    adjacency: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(AdjEntry)),
-    net_index: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(PinRef)),
+    adjacency: std.StringHashMapUnmanaged(std.ArrayList(AdjEntry)),
+    net_index: std.StringHashMapUnmanaged(std.ArrayList(PinRef)),
     significant_nets: std.StringHashMapUnmanaged(void),
     /// Base names of (non-ground) nets shared across two or more sub-blocks —
     /// i.e. global rails/buses, not local passive junctions. The spoke-chain
@@ -234,8 +234,8 @@ pub const RenderCtx = struct {
 
     /// Build a net rename map from a block's net_ties, prefixed appropriately.
     /// A tie (a="VDD", b="buck/VOUT") at prefix="" means: rename net "buck/VOUT" to "VDD".
-    fn buildNetRenameMap(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8) !std.StringHashMap([]const u8) {
-        var net_rename = std.StringHashMap([]const u8).init(self.allocator);
+    fn buildNetRenameMap(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8) !std.StringHashMapUnmanaged([]const u8) {
+        var net_rename = std.StringHashMapUnmanaged([]const u8).empty;
         for (block.net_ties) |nt| {
             const full_b = if (prefix.len > 0)
                 try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, nt.b })
@@ -245,7 +245,7 @@ pub const RenderCtx = struct {
                 try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, nt.a })
             else
                 nt.a;
-            try net_rename.put(full_b, full_a);
+            try net_rename.put(self.allocator, full_b, full_a);
         }
         return net_rename;
     }
@@ -253,7 +253,7 @@ pub const RenderCtx = struct {
     /// Resolve a net name through a chain of rename maps (parent → grandparent → ...).
     /// For qualified names like "ldo/VIN.U1.IN", also tries resolving the base
     /// part "ldo/VIN" and preserves the suffix ".U1.IN".
-    fn resolveNetName(allocator: std.mem.Allocator, net_name: []const u8, rename_maps: []const std.StringHashMap([]const u8)) []const u8 {
+    fn resolveNetName(allocator: std.mem.Allocator, net_name: []const u8, rename_maps: []const std.StringHashMapUnmanaged([]const u8)) []const u8 {
         // Try exact match first
         var resolved = net_name;
         for (rename_maps) |m| {
@@ -334,11 +334,11 @@ pub const RenderCtx = struct {
         try self.collectFlatWithRenames(block, prefix, &.{});
     }
 
-    fn collectFlatWithRenames(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8, parent_renames: []const std.StringHashMap([]const u8)) !void {
+    fn collectFlatWithRenames(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8, parent_renames: []const std.StringHashMapUnmanaged([]const u8)) !void {
         // Build rename map for this block's net_ties
         const my_rename = try self.buildNetRenameMap(block, prefix);
         // Combine with parent rename maps
-        var all_renames: std.ArrayListUnmanaged(std.StringHashMap([]const u8)) = .empty;
+        var all_renames: std.ArrayList(std.StringHashMapUnmanaged([]const u8)) = .empty;
         try all_renames.append(self.allocator, my_rename);
         for (parent_renames) |pr| {
             try all_renames.append(self.allocator, pr);
@@ -373,7 +373,7 @@ pub const RenderCtx = struct {
             try self.inst_map.put(self.allocator, rd, flat);
         }
         for (block.nets) |net| {
-            var pins: std.ArrayListUnmanaged(PinRef) = .empty;
+            var pins: std.ArrayList(PinRef) = .empty;
             for (net.pins) |pin| {
                 const rd = if (prefix.len > 0 and !isStdRefDes(pin.ref_des))
                     try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, pin.ref_des })
@@ -463,7 +463,7 @@ pub const RenderCtx = struct {
         }
 
         // Per spoke: the distinct non-ground base nets its pins touch.
-        var spoke_nets: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .empty;
+        var spoke_nets: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty;
         for (self.nets.items) |net| {
             const bn = baseNetName(net.name);
             if (isGroundNet(bn)) continue;
@@ -571,8 +571,8 @@ pub const RenderCtx = struct {
             // per-pin bypass caps, and dropping the overflow silently produced
             // a wrong schematic (missing spokes reported as floating). All of
             // this is arena-backed, freed when the render context is torn down.
-            var hub_pins: std.ArrayListUnmanaged(PinRef) = .empty;
-            var spoke_pins: std.ArrayListUnmanaged(PinRef) = .empty;
+            var hub_pins: std.ArrayList(PinRef) = .empty;
+            var spoke_pins: std.ArrayList(PinRef) = .empty;
 
             for (net.pins) |pin| {
                 if (self.spoke_set.contains(pin.ref_des)) {

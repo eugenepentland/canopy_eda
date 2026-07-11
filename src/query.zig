@@ -17,14 +17,15 @@
 //! omits it.
 
 const std = @import("std");
+const exit = @import("exit.zig");
 const infra_fs = @import("infra/fs.zig");
 const json_writer = @import("json_writer.zig");
 const docgen = @import("docgen.zig");
 const mcp_tools = @import("serve/mcp_tools.zig");
 const component_info = @import("serve/component_info.zig");
 
-const MAX_DESIGN_BYTES: usize = 4 * 1024 * 1024;
-const DESIGN_BLOCK_MARKER = "(design-block";
+const max_design_bytes: usize = 4 * 1024 * 1024;
+const design_block_marker = "(design-block";
 
 /// Error set for the public CLI handlers. Each `cmd*` catches the wide,
 /// caller-dependent errors of the shared emitters (which take `w: anytype`)
@@ -78,8 +79,7 @@ fn projectDir(args: []const []const u8) []const u8 {
 
 /// Print a usage line and exit non-zero.
 fn usage(line: []const u8) noreturn {
-    std.debug.print("Usage: netlisp {s}\n", .{line});
-    std.process.exit(1);
+    exit.fatal("Usage: netlisp {s}\n", .{line});
 }
 
 /// Write `bytes` to stdout followed by a newline.
@@ -94,28 +94,26 @@ fn emit(bytes: []const u8) !void {
 /// `netlisp instances <design>` — every placed part as JSON.
 pub fn cmdInstances(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
     const name = nthPositional(args, 0) orelse usage("instances [--project-dir <d>] <design>");
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     const ok = mcp_tools.listInstances(allocator, projectDir(args), name, w) catch |e| {
-        std.debug.print("instances: {s}: {s}\n", .{ name, @errorName(e) });
-        std.process.exit(1);
+        exit.fatal("instances: {s}: {s}\n", .{ name, @errorName(e) });
     };
     try emit(buf.items);
-    if (!ok) std.process.exit(1);
+    if (!ok) exit.failure();
 }
 
 /// `netlisp net <design> <net>` — every pin + passive on a net, as JSON.
 pub fn cmdNet(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
     const name = nthPositional(args, 0) orelse usage("net [--project-dir <d>] <design> <net>");
     const net = nthPositional(args, 1) orelse usage("net [--project-dir <d>] <design> <net>");
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     const ok = mcp_tools.getNet(allocator, projectDir(args), name, net, w) catch |e| {
-        std.debug.print("net: {s}/{s}: {s}\n", .{ name, net, @errorName(e) });
-        std.process.exit(1);
+        exit.fatal("net: {s}/{s}: {s}\n", .{ name, net, @errorName(e) });
     };
     try emit(buf.items);
-    if (!ok) std.process.exit(1);
+    if (!ok) exit.failure();
 }
 
 /// `netlisp free-pins <design> <ref> [--category gpio|power|clock|analog|other]`
@@ -125,14 +123,13 @@ pub fn cmdFreePins(allocator: std.mem.Allocator, args: []const []const u8) Query
     const name = nthPositional(args, 0) orelse usage(spec);
     const ref = nthPositional(args, 1) orelse usage(spec);
     const category = optArg(args, "--category");
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     const ok = mcp_tools.listFreePins(allocator, projectDir(args), name, ref, category, w) catch |e| {
-        std.debug.print("free-pins: {s}/{s}: {s}\n", .{ name, ref, @errorName(e) });
-        std.process.exit(1);
+        exit.fatal("free-pins: {s}/{s}: {s}\n", .{ name, ref, @errorName(e) });
     };
     try emit(buf.items);
-    if (!ok) std.process.exit(1);
+    if (!ok) exit.failure();
 }
 
 /// `netlisp schematic <design>` — the full scene-graph JSON (instances, nets,
@@ -140,8 +137,7 @@ pub fn cmdFreePins(allocator: std.mem.Allocator, args: []const []const u8) Query
 pub fn cmdSchematic(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
     const name = nthPositional(args, 0) orelse usage("schematic [--project-dir <d>] <design>");
     const json = mcp_tools.renderSceneGraph(allocator, projectDir(args), name) catch |e| {
-        std.debug.print("schematic: {s}: {s}\n", .{ name, @errorName(e) });
-        std.process.exit(1);
+        exit.fatal("schematic: {s}: {s}\n", .{ name, @errorName(e) });
     };
     defer allocator.free(json);
     try emit(json);
@@ -151,13 +147,12 @@ pub fn cmdSchematic(allocator: std.mem.Allocator, args: []const []const u8) Quer
 /// pinout, footprint, MPN, datasheets, and datasheet `(requirement …)` rules.
 pub fn cmdDescribe(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
     const name = nthPositional(args, 0) orelse usage("describe [--project-dir <d>] <component>");
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const ok = component_info.describeComponent(allocator, projectDir(args), name, &out) catch |e| {
-        std.debug.print("describe: {s}: {s}\n", .{ name, @errorName(e) });
-        std.process.exit(1);
+        exit.fatal("describe: {s}: {s}\n", .{ name, @errorName(e) });
     };
     try emit(out.items);
-    if (!ok) std.process.exit(1);
+    if (!ok) exit.failure();
 }
 
 /// `netlisp library [query]` — fuzzy-search the library across components,
@@ -165,7 +160,7 @@ pub fn cmdDescribe(allocator: std.mem.Allocator, args: []const []const u8) Query
 pub fn cmdLibrary(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
     const query = nthPositional(args, 0);
     const pdir = projectDir(args);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll("{\"components\":");
     try mcp_tools.listLibrarySubdir(allocator, pdir, "components", query, w);
@@ -201,7 +196,7 @@ pub fn cmdReference(allocator: std.mem.Allocator, args: []const []const u8) Quer
     }
     std.debug.print("reference: no section matching '{s}'. Available sections:\n", .{section.?});
     printSectionHeaders(full);
-    std.process.exit(1);
+    exit.failure();
 }
 
 /// Return the `## ` section whose title contains `query` (case-insensitive),
@@ -264,7 +259,7 @@ pub fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryE
     };
     defer dir.close();
 
-    var rows: std.ArrayListUnmanaged(DesignRow) = .empty;
+    var rows: std.ArrayList(DesignRow) = .empty;
     var walker = try dir.walk(a);
     defer walker.deinit();
     while (walker.next() catch null) |entry| {
@@ -274,8 +269,8 @@ pub fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryE
         if (std.mem.indexOfScalar(u8, stem, '.') != null) continue; // skip `.checks.sexp` etc.
 
         const full = try std.fmt.allocPrint(a, "{s}/{s}", .{ src_path, entry.path });
-        const src = infra_fs.cwd().readFileAlloc(a, full, MAX_DESIGN_BYTES) catch continue;
-        const db = std.mem.indexOf(u8, src, DESIGN_BLOCK_MARKER) orelse continue;
+        const src = infra_fs.cwd().readFileAlloc(a, full, max_design_bytes) catch continue;
+        const db = std.mem.indexOf(u8, src, design_block_marker) orelse continue;
         try rows.append(a, .{
             .name = try a.dupe(u8, stem),
             .title = try extractTitle(a, src, db),
@@ -283,7 +278,7 @@ pub fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryE
     }
     std.mem.sort(DesignRow, rows.items, {}, designRowLess);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(a);
     try w.writeAll("{\"designs\":[");
     for (rows.items, 0..) |r, i| {
@@ -301,7 +296,7 @@ pub fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryE
 /// Extract the quoted title immediately after `(design-block` at `db_idx`.
 /// Returns "" when the title is not a bare string (e.g. `(design-block (fmt …))`).
 fn extractTitle(allocator: std.mem.Allocator, src: []const u8, db_idx: usize) ![]const u8 {
-    var i = db_idx + DESIGN_BLOCK_MARKER.len;
+    var i = db_idx + design_block_marker.len;
     while (i < src.len and std.ascii.isWhitespace(src[i])) : (i += 1) {}
     if (i >= src.len or src[i] != '"') return allocator.dupe(u8, "");
     i += 1;

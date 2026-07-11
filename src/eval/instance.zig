@@ -13,7 +13,7 @@ const ids = @import("ids.zig");
 const PinNetDecl = evaluator_mod.PinNetDecl;
 
 // ── Constants ─────────────────────────────────────────────────────
-const SERIES_NAMED_REF_MIN_ARITY: usize = 5;
+const series_named_ref_min_arity: usize = 5;
 
 const Node = ast.Node;
 const Value = env_mod.Value;
@@ -165,16 +165,16 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     //   (pin 1 "NET")               -- single pin
     //   (pin 3 4 5 6 7 "NET")       -- multiple pins on same net
     //   (connect FUNC "NET" ...)     -- connect by function name from pinout
-    var pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
-    var parts: std.ArrayListUnmanaged(env_mod.Part) = .empty;
-    var inline_notes: std.ArrayListUnmanaged(Note) = .empty;
-    var inline_props: std.ArrayListUnmanaged(env_mod.Property) = .empty;
+    var pin_nets: std.ArrayList(PinNetDecl) = .empty;
+    var parts: std.ArrayList(env_mod.Part) = .empty;
+    var inline_notes: std.ArrayList(Note) = .empty;
+    var inline_props: std.ArrayList(env_mod.Property) = .empty;
     var dnp_flag = false;
     var decouple_ic: []const u8 = "";
     var decouple_pin: []const u8 = "";
     var decouple_rail = false;
-    var strap_oks: std.ArrayListUnmanaged(env_mod.StrapOk) = .empty;
-    var nc_oks: std.ArrayListUnmanaged(env_mod.NcOk) = .empty;
+    var strap_oks: std.ArrayList(env_mod.StrapOk) = .empty;
+    var nc_oks: std.ArrayList(env_mod.NcOk) = .empty;
 
     const known_forms = [_][]const u8{ "pin", "part", "note", "bus", "id", "as", "dnp", "decouples", "strap-ok", "nc-ok" };
 
@@ -301,8 +301,8 @@ fn parsePartForm(
     form: Node,
     ref_des: []const u8,
     env: *Env,
-    pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
-    parts: *std.ArrayListUnmanaged(env_mod.Part),
+    pin_nets: *std.ArrayList(PinNetDecl),
+    parts: *std.ArrayList(env_mod.Part),
     pinout: ?*const std.StringHashMapUnmanaged([]const u8),
 ) EvalError!void {
     const children = form.asList() orelse return;
@@ -316,7 +316,7 @@ fn parsePartForm(
     for (children[2..]) |child| {
         if (child.isForm("pin")) try parsePinForm(self, child, ref_des, env, pin_nets, pinout);
     }
-    var part_pins: std.ArrayListUnmanaged(env_mod.PartPin) = .empty;
+    var part_pins: std.ArrayList(env_mod.PartPin) = .empty;
     for (pin_nets.items[before..]) |pn| {
         try part_pins.append(self.allocator, .{ .pin = pn.pin, .net = pn.net, .group = name });
     }
@@ -336,7 +336,7 @@ fn parseStrapOk(
     ref_des: []const u8,
     env: *Env,
     reverse_pinout: ?*const std.StringHashMapUnmanaged([]const u8),
-    strap_oks: *std.ArrayListUnmanaged(env_mod.StrapOk),
+    strap_oks: *std.ArrayList(env_mod.StrapOk),
 ) EvalError!void {
     const sc = form.asList().?;
     if (sc.len < 3) {
@@ -359,7 +359,7 @@ fn parseNcOk(
     ref_des: []const u8,
     env: *Env,
     reverse_pinout: ?*const std.StringHashMapUnmanaged([]const u8),
-    nc_oks: *std.ArrayListUnmanaged(env_mod.NcOk),
+    nc_oks: *std.ArrayList(env_mod.NcOk),
 ) EvalError!void {
     const sc = form.asList().?;
     if (sc.len < 3) {
@@ -407,7 +407,7 @@ pub fn parsePinTail(self: *Evaluator, pin_children: []const Node, env: *Env) Eva
 /// so the asserted names are returned only when exactly one pin token is
 /// present; otherwise an empty slice (the assertion is silently dropped).
 pub fn scanAssertedFns(self: *Evaluator, tokens: []const Node, env: *Env) EvalError![]const []const u8 {
-    var asserted_buf: std.ArrayListUnmanaged([]const u8) = .empty;
+    var asserted_buf: std.ArrayList([]const u8) = .empty;
     var pin_count: usize = 0;
     for (tokens) |child| {
         if (child.isForm("as")) {
@@ -436,7 +436,7 @@ pub fn parsePinForm(
     form: Node,
     ref_des: []const u8,
     env: *Env,
-    pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
+    pin_nets: *std.ArrayList(PinNetDecl),
     pinout: ?*const std.StringHashMapUnmanaged([]const u8),
 ) EvalError!void {
     const pin_children = form.asList() orelse return;
@@ -504,7 +504,7 @@ pub fn mergeInstanceProperties(
     overrides: []const env_mod.Property,
 ) std.mem.Allocator.Error!void {
     if (overrides.len == 0) return;
-    var merged: std.ArrayListUnmanaged(env_mod.Property) = .empty;
+    var merged: std.ArrayList(env_mod.Property) = .empty;
     for (inst.properties) |cp| {
         var overridden = false;
         for (overrides) |ip| {
@@ -521,8 +521,8 @@ pub fn mergeInstanceProperties(
 
 /// Parse trailing arguments: extract net names, properties, and optional note.
 pub const TrailingArgs = struct {
-    nets: std.ArrayListUnmanaged([]const u8),
-    props: std.ArrayListUnmanaged(env_mod.Property),
+    nets: std.ArrayList([]const u8),
+    props: std.ArrayList(env_mod.Property),
     note: ?[]const u8,
 };
 
@@ -587,9 +587,9 @@ pub fn evalSeriesForm(
     self: *Evaluator,
     form_children: []const Node,
     env: *Env,
-    instances: *std.ArrayListUnmanaged(Instance),
-    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
-    note_list: *std.ArrayListUnmanaged(Note),
+    instances: *std.ArrayList(Instance),
+    all_pin_nets: *std.ArrayList(PinNetDecl),
+    note_list: *std.ArrayList(Note),
 ) EvalError!void {
     if (form_children.len < 4) return;
     const first_val = try self.evalNode(form_children[1], env);
@@ -632,7 +632,7 @@ pub fn evalSeriesForm(
         }
     } else {
         // Named ref-des: (series "REF" (comp) "NET1" "NET2")
-        if (form_children.len < SERIES_NAMED_REF_MIN_ARITY) return;
+        if (form_children.len < series_named_ref_min_arity) return;
         const s_ref = first_val.asString() orelse return;
         const s_comp_val = try self.evalNode(form_children[2], env);
         const s_comp_offset = ids.componentSourceOffset(form_children[2]);
@@ -667,8 +667,8 @@ pub fn evalFanoutForm(
     self: *Evaluator,
     form_children: []const Node,
     env: *Env,
-    instances: *std.ArrayListUnmanaged(Instance),
-    all_pin_nets: *std.ArrayListUnmanaged(PinNetDecl),
+    instances: *std.ArrayList(Instance),
+    all_pin_nets: *std.ArrayList(PinNetDecl),
 ) EvalError!void {
     if (form_children.len < 4) return;
     const common = (try self.evalNode(form_children[1], env)).asString() orelse return;
@@ -727,9 +727,9 @@ test "hierarchical series derives child ids from form id" {
 
     const nodes = try parser_mod.parse(alloc, "(series (ind-2016 \"1uH\") \"VA\" \"VB\" (id abcd1234))");
     const form_children = nodes[0].asList().?;
-    var instances: std.ArrayListUnmanaged(Instance) = .empty;
-    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
-    var notes: std.ArrayListUnmanaged(Note) = .empty;
+    var instances: std.ArrayList(Instance) = .empty;
+    var all_pin_nets: std.ArrayList(PinNetDecl) = .empty;
+    var notes: std.ArrayList(Note) = .empty;
 
     try evalSeriesForm(&eval, form_children, &env, &instances, &all_pin_nets, &notes);
 
@@ -757,8 +757,8 @@ test "evalFanoutForm stars one component from common to each target net" {
 
     const nodes = try parser_mod.parse(alloc, "(fanout \"V1P8\" (ferrite-0402 \"600R\") \"VA\" \"VB\" \"VC\" (id abcd1234))");
     const form_children = nodes[0].asList().?;
-    var instances: std.ArrayListUnmanaged(Instance) = .empty;
-    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var instances: std.ArrayList(Instance) = .empty;
+    var all_pin_nets: std.ArrayList(PinNetDecl) = .empty;
 
     try evalFanoutForm(&eval, form_children, &env, &instances, &all_pin_nets);
 
@@ -793,8 +793,8 @@ test "evalFanoutForm places one instance for the minimal 4-child form" {
     // `< 4` guard must let it through and place one branch (a `<= 4` flip drops it).
     const nodes = try parser_mod.parse(alloc, "(fanout \"V1P8\" (ferrite-0402 \"600R\") \"VA\")");
     const form_children = nodes[0].asList().?;
-    var instances: std.ArrayListUnmanaged(Instance) = .empty;
-    var all_pin_nets: std.ArrayListUnmanaged(PinNetDecl) = .empty;
+    var instances: std.ArrayList(Instance) = .empty;
+    var all_pin_nets: std.ArrayList(PinNetDecl) = .empty;
 
     try evalFanoutForm(&eval, form_children, &env, &instances, &all_pin_nets);
 

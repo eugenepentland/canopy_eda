@@ -4,11 +4,11 @@
 
 const auth_mod = @import("../auth.zig");
 
-const STYLE_BLOCK: []const u8 = "<style>" ++ auth_mod.PAGE_STYLE ++ "</style>";
-const B64URL_SCRIPT: []const u8 = "<script>" ++ auth_mod.B64URL_JS ++ "</script>";
+const style_block: []const u8 = "<style>" ++ auth_mod.page_style ++ "</style>";
+const b64url_script: []const u8 = "<script>" ++ auth_mod.b64url_js ++ "</script>";
 
-const INPUT_DARK_STYLE: []const u8 = "width:100%;box-sizing:border-box;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none";
-const INPUT_MID_STYLE: []const u8 = "width:100%;box-sizing:border-box;padding:10px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none";
+const input_dark_style: []const u8 = "width:100%;box-sizing:border-box;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none";
+const input_mid_style: []const u8 = "width:100%;box-sizing:border-box;padding:10px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:12px;outline:none";
 
 pub templ Login() {
     <!DOCTYPE html>
@@ -16,18 +16,18 @@ pub templ Login() {
         <head>
             <meta name="viewport" content="width=device-width,initial-scale=1" />
             <title>Login - Netlisp</title>
-            {!STYLE_BLOCK}
+            {!style_block}
         </head>
         <body>
             <div class="auth-card">
                 <span class="brand">Netlisp</span>
                 <h1>Sign In</h1>
                 <p>Enter your email and use your passkey to authenticate.</p>
-                <input type="email" id="email" placeholder="Email address" required style={INPUT_DARK_STYLE} />
+                <input type="email" id="email" placeholder="Email address" required style={input_dark_style} />
                 <button class="auth-btn" id="login-btn">Sign in with Passkey</button>
                 <div class="status" id="status"></div>
             </div>
-            {!B64URL_SCRIPT}
+            {!b64url_script}
             <script src="/static/auth_login.js"></script>
         </body>
     </html>
@@ -39,7 +39,7 @@ pub templ InviteExpired() {
         <head>
             <meta name="viewport" content="width=device-width,initial-scale=1" />
             <title>Invite - Netlisp</title>
-            {!STYLE_BLOCK}
+            {!style_block}
         </head>
         <body>
             <div class="auth-card">
@@ -58,18 +58,18 @@ pub templ InviteAccept(token: []const u8) {
         <head>
             <meta name="viewport" content="width=device-width,initial-scale=1" />
             <title>Accept Invite - Netlisp</title>
-            {!STYLE_BLOCK}
+            {!style_block}
         </head>
         <body data-invite-token={token}>
             <div class="auth-card">
                 <span class="brand">Netlisp</span>
                 <h1>Accept Invite</h1>
                 <p>Register a passkey to finish setting up your account.</p>
-                <input type="email" id="email" placeholder="Email address" required style={INPUT_DARK_STYLE} />
+                <input type="email" id="email" placeholder="Email address" required style={input_dark_style} />
                 <button class="auth-btn" id="register-btn">Register Passkey</button>
                 <div class="status" id="status"></div>
             </div>
-            {!B64URL_SCRIPT}
+            {!b64url_script}
             <script src="/static/auth_invite.js"></script>
         </body>
     </html>
@@ -81,19 +81,19 @@ pub templ Setup() {
         <head>
             <meta name="viewport" content="width=device-width,initial-scale=1" />
             <title>Setup - Netlisp</title>
-            {!STYLE_BLOCK}
+            {!style_block}
         </head>
         <body>
             <div class="auth-card">
                 <span class="brand">Netlisp</span>
                 <h1>Setup Passkey</h1>
                 <p>Register a passkey to secure remote access to your EDA server.</p>
-                <input type="email" id="email" placeholder="Email address" required style={INPUT_MID_STYLE} />
+                <input type="email" id="email" placeholder="Email address" required style={input_mid_style} />
                 <button class="auth-btn" id="register-btn">Register Passkey</button>
                 <div class="status" id="status"></div>
                 <a class="link" href="/auth/login">Already registered? Sign in</a>
             </div>
-            {!B64URL_SCRIPT}
+            {!b64url_script}
             <script src="/static/auth_setup.js"></script>
         </body>
     </html>

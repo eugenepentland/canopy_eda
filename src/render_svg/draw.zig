@@ -30,34 +30,34 @@ pub const per_conn_spacing: f64 = 40.0;
 pub const bus_gap: f64 = 15.0;
 
 // ── Symbol drawing constants ──────────────────────────────────────
-const HALF_DIVISOR: f64 = 2.0;
-const PASSIVE_BODY_W: f64 = 24.0;
-const PASSIVE_BODY_H: f64 = 10.0;
-const CAP_PLATE_H: f64 = 12.0;
-const CAP_PLATE_GAP: f64 = 6.0;
-const IND_ARC_W: f64 = 6.0;
-const DEFAULT_SYM_HALF_H: f64 = 8.0;
-const GND_STUB_LEN: f64 = 6.0;
-const GND_BAR1_HALF: f64 = 7.0;
-const GND_BAR2_HALF: f64 = 4.5;
-const GND_BAR2_OFF: f64 = 9.0;
-const GND_BAR3_HALF: f64 = 2.0;
-const GND_BAR3_OFF: f64 = 12.0;
-const NC_HALF_SIZE: f64 = 5.0;
-const AMP_BODY_SIZE: f64 = 28.0;
-const AMP_HALF_RATIO: f64 = 0.6;
-const ICON_LABEL_GAP: f64 = 14.0;
-const LDO_W: f64 = 36.0;
-const LDO_H: f64 = 24.0;
-const LDO_PIN_LEN: f64 = 8.0;
-const LDO_ARROW_HALF: f64 = 4.0;
-const LDO_ARROW_FOOT: f64 = 3.0;
-const TR_BODY_SIZE: f64 = 24.0;
-const TR_OFF_X: f64 = 4.0;
-const TR_GP_OFF: f64 = 4.0;
-const TR_INSET: f64 = 3.0;
-const TR_PIN_LEN: f64 = 8.0;
-const LDO_INNER_LABEL_Y: f64 = 4.0;
+const half_divisor: f64 = 2.0;
+const passive_body_w: f64 = 24.0;
+const passive_body_h: f64 = 10.0;
+const cap_plate_h: f64 = 12.0;
+const cap_plate_gap: f64 = 6.0;
+const ind_arc_w: f64 = 6.0;
+const default_sym_half_h: f64 = 8.0;
+const gnd_stub_len: f64 = 6.0;
+const gnd_bar1_half: f64 = 7.0;
+const gnd_bar2_half: f64 = 4.5;
+const gnd_bar2_off: f64 = 9.0;
+const gnd_bar3_half: f64 = 2.0;
+const gnd_bar3_off: f64 = 12.0;
+const nc_half_size: f64 = 5.0;
+const amp_body_size: f64 = 28.0;
+const amp_half_ratio: f64 = 0.6;
+const icon_label_gap: f64 = 14.0;
+const ldo_w: f64 = 36.0;
+const ldo_h: f64 = 24.0;
+const ldo_pin_len: f64 = 8.0;
+const ldo_arrow_half: f64 = 4.0;
+const ldo_arrow_foot: f64 = 3.0;
+const tr_body_size: f64 = 24.0;
+const tr_off_x: f64 = 4.0;
+const tr_gp_off: f64 = 4.0;
+const tr_inset: f64 = 3.0;
+const tr_pin_len: f64 = 8.0;
+const ldo_inner_label_y: f64 = 4.0;
 
 /// Draw a wire (Manhattan routing: horizontal, or H-V-H polyline).
 pub fn drawWire(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64) RenderError!void {
@@ -67,7 +67,7 @@ pub fn drawWire(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64) RenderError!void
             \\
         , .{ x1, y1, x2, y2 });
     } else {
-        const mid_x = (x1 + x2) / HALF_DIVISOR;
+        const mid_x = (x1 + x2) / half_divisor;
         try w.print(
             \\<polyline points="{d:.1},{d:.1} {d:.1},{d:.1} {d:.1},{d:.1} {d:.1},{d:.1}" fill="none" stroke="#4a9" stroke-width="1.5"/>
             \\
@@ -89,7 +89,7 @@ pub fn drawNetWire(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64, net: []const 
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#4a9" stroke-width="1.5"/>
         , .{ x1, y1, x2, y2 });
     } else {
-        const mid_x = (x1 + x2) / HALF_DIVISOR;
+        const mid_x = (x1 + x2) / half_divisor;
         try w.print(
             \\<polyline points="{d:.1},{d:.1} {d:.1},{d:.1} {d:.1},{d:.1} {d:.1},{d:.1}"
             \\ fill="none" stroke="transparent" stroke-width="12"
@@ -109,10 +109,10 @@ pub fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: Fla
     const is_ferrite = ref.len >= 2 and ref[0] == 'F' and ref[1] == 'B';
 
     if (is_ferrite) {
-        const body_w: f64 = PASSIVE_BODY_W;
-        const body_h: f64 = PASSIVE_BODY_H;
-        const body_x = cx - body_w / HALF_DIVISOR;
-        const body_y = cy - body_h / HALF_DIVISOR;
+        const body_w: f64 = passive_body_w;
+        const body_h: f64 = passive_body_h;
+        const body_x = cx - body_w / half_divisor;
+        const body_y = cy - body_h / half_divisor;
         try w.print(
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#8888cc" stroke-width="1.5"/>
             \\<rect x="{d:.1}" y="{d:.1}" width="{d:.1}" height="{d:.1}" fill="#3a3a5a" stroke="#8888cc" stroke-width="1.5"/>
@@ -124,10 +124,10 @@ pub fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: Fla
             body_x + body_w, cy,     bx + bw, cy,
         });
     } else if (std.mem.eql(u8, inst.symbol, "generic-res")) {
-        const body_w: f64 = PASSIVE_BODY_W;
-        const body_h: f64 = PASSIVE_BODY_H;
-        const body_x = cx - body_w / HALF_DIVISOR;
-        const body_y = cy - body_h / HALF_DIVISOR;
+        const body_w: f64 = passive_body_w;
+        const body_h: f64 = passive_body_h;
+        const body_x = cx - body_w / half_divisor;
+        const body_y = cy - body_h / half_divisor;
         try w.print(
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#8888cc" stroke-width="1.5"/>
             \\<rect x="{d:.1}" y="{d:.1}" width="{d:.1}" height="{d:.1}" fill="none" stroke="#8888cc" stroke-width="1.5"/>
@@ -139,12 +139,12 @@ pub fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: Fla
             body_x + body_w, cy,     bx + bw, cy,
         });
     } else if (std.mem.eql(u8, inst.symbol, "generic-cap")) {
-        const plate_h: f64 = CAP_PLATE_H;
-        const gap_val: f64 = CAP_PLATE_GAP;
-        const plate_l_x = cx - gap_val / HALF_DIVISOR;
-        const plate_r_x = cx + gap_val / HALF_DIVISOR;
-        const plate_top = cy - plate_h / HALF_DIVISOR;
-        const plate_bot = cy + plate_h / HALF_DIVISOR;
+        const plate_h: f64 = cap_plate_h;
+        const gap_val: f64 = cap_plate_gap;
+        const plate_l_x = cx - gap_val / half_divisor;
+        const plate_r_x = cx + gap_val / half_divisor;
+        const plate_top = cy - plate_h / half_divisor;
+        const plate_bot = cy + plate_h / half_divisor;
         try w.print(
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#8888cc" stroke-width="1.5"/>
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#8888cc" stroke-width="2"/>
@@ -158,10 +158,10 @@ pub fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: Fla
             plate_r_x, cy,        bx + bw,   cy,
         });
     } else if (std.mem.eql(u8, inst.symbol, "generic-ind")) {
-        const arc_w: f64 = IND_ARC_W;
+        const arc_w: f64 = ind_arc_w;
         const n_arcs: u32 = 3;
         const total_arc = arc_w * @as(f64, @floatFromInt(n_arcs));
-        const start_x = cx - total_arc / HALF_DIVISOR;
+        const start_x = cx - total_arc / half_divisor;
         try w.print(
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#8888cc" stroke-width="1.5"/>
             \\
@@ -172,7 +172,7 @@ pub fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: Fla
             try w.print(
                 \\<path d="M {d:.1} {d:.1} A {d:.1} {d:.1} 0 0 1 {d:.1} {d:.1}" fill="none" stroke="#8888cc" stroke-width="1.5"/>
                 \\
-            , .{ ax, cy, arc_w / HALF_DIVISOR, arc_w / HALF_DIVISOR, ax + arc_w, cy });
+            , .{ ax, cy, arc_w / half_divisor, arc_w / half_divisor, ax + arc_w, cy });
         }
         try w.print(
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#8888cc" stroke-width="1.5"/>
@@ -182,7 +182,7 @@ pub fn drawSymbolShape(w: anytype, bx: f64, bw: f64, cx: f64, cy: f64, inst: Fla
         try w.print(
             \\<rect x="{d:.1}" y="{d:.1}" width="{d:.1}" height="16" fill="#2a2a4a" stroke="#8888cc" stroke-width="1" rx="3"/>
             \\
-        , .{ bx, cy - DEFAULT_SYM_HALF_H, bw });
+        , .{ bx, cy - default_sym_half_h, bw });
     }
 }
 
@@ -195,16 +195,16 @@ pub fn drawGndSymbol(w: anytype, x: f64, y: f64) RenderError!void {
         \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#e8c547" stroke-width="1.5"/>
         \\
     , .{
-        x,                 y,                x,                 y + GND_STUB_LEN,
-        x - GND_BAR1_HALF, y + GND_STUB_LEN, x + GND_BAR1_HALF, y + GND_STUB_LEN,
-        x - GND_BAR2_HALF, y + GND_BAR2_OFF, x + GND_BAR2_HALF, y + GND_BAR2_OFF,
-        x - GND_BAR3_HALF, y + GND_BAR3_OFF, x + GND_BAR3_HALF, y + GND_BAR3_OFF,
+        x,                 y,                x,                 y + gnd_stub_len,
+        x - gnd_bar1_half, y + gnd_stub_len, x + gnd_bar1_half, y + gnd_stub_len,
+        x - gnd_bar2_half, y + gnd_bar2_off, x + gnd_bar2_half, y + gnd_bar2_off,
+        x - gnd_bar3_half, y + gnd_bar3_off, x + gnd_bar3_half, y + gnd_bar3_off,
     });
 }
 
 /// Draw the no-connect X symbol.
 pub fn drawNcSymbol(w: anytype, x: f64, y: f64) RenderError!void {
-    const size: f64 = NC_HALF_SIZE;
+    const size: f64 = nc_half_size;
     try w.print(
         \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#555" stroke-width="1.5"/>
         \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="#555" stroke-width="1.5"/>
@@ -226,22 +226,22 @@ pub fn writeDebugPin(w: anytype, x: f64, y: f64) RenderError!void {
 /// Draw a block-level icon centered at (cx, cy) with given stroke color.
 pub fn drawBlockIcon(w: anytype, icon_name: []const u8, cx: f64, cy: f64, color: []const u8) RenderError!void {
     if (std.mem.eql(u8, icon_name, "amplifier")) {
-        const size: f64 = AMP_BODY_SIZE;
-        const half_h = size * AMP_HALF_RATIO;
-        const lx = cx - size / HALF_DIVISOR;
-        const rx = cx + size / HALF_DIVISOR;
+        const size: f64 = amp_body_size;
+        const half_h = size * amp_half_ratio;
+        const lx = cx - size / half_divisor;
+        const rx = cx + size / half_divisor;
         const ty = cy - half_h;
         const by = cy + half_h;
         try w.print(
             \\<polygon points="{d:.1},{d:.1} {d:.1},{d:.1} {d:.1},{d:.1}" fill="none" stroke="{s}" stroke-width="1.5" opacity="0.5"/>
             \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="10" fill="{s}" opacity="0.5">Amplifier</text>
             \\
-        , .{ lx, ty, lx, by, rx, cy, color, cx, by + ICON_LABEL_GAP, color });
+        , .{ lx, ty, lx, by, rx, cy, color, cx, by + icon_label_gap, color });
     } else if (std.mem.eql(u8, icon_name, "ldo")) {
-        const icon_w: f64 = LDO_W;
-        const icon_h: f64 = LDO_H;
-        const lx = cx - icon_w / HALF_DIVISOR;
-        const ty = cy - icon_h / HALF_DIVISOR;
+        const icon_w: f64 = ldo_w;
+        const icon_h: f64 = ldo_h;
+        const lx = cx - icon_w / half_divisor;
+        const ty = cy - icon_h / half_divisor;
         const rx = lx + icon_w;
         try w.print(
             \\<rect x="{d:.1}" y="{d:.1}" width="{d:.1}" height="{d:.1}" fill="none" stroke="{s}" stroke-width="1.5" opacity="0.5" rx="2"/>
@@ -250,9 +250,9 @@ pub fn drawBlockIcon(w: anytype, icon_name: []const u8, cx: f64, cy: f64, color:
             \\
         , .{
             lx,                  ty,                  icon_w, icon_h, color,
-            lx - LDO_PIN_LEN,    cy,                  lx,     cy,     color,
-            lx - LDO_ARROW_HALF, cy - LDO_ARROW_FOOT, lx,     cy,     lx - LDO_ARROW_HALF,
-            cy + LDO_ARROW_FOOT, color,
+            lx - ldo_pin_len,    cy,                  lx,     cy,     color,
+            lx - ldo_arrow_half, cy - ldo_arrow_foot, lx,     cy,     lx - ldo_arrow_half,
+            cy + ldo_arrow_foot, color,
         });
         try w.print(
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="{s}" stroke-width="1.5" opacity="0.5"/>
@@ -261,18 +261,18 @@ pub fn drawBlockIcon(w: anytype, icon_name: []const u8, cx: f64, cy: f64, color:
             \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle" font-size="10" fill="{s}" opacity="0.5">Linear Regulator</text>
             \\
         , .{
-            rx,                  cy,                           rx + LDO_PIN_LEN, cy,                     color,
-            rx + LDO_ARROW_HALF, cy - LDO_ARROW_FOOT,          rx + LDO_PIN_LEN, cy,                     rx + LDO_ARROW_HALF,
-            cy + LDO_ARROW_FOOT, color,                        cx,               cy + LDO_INNER_LABEL_Y, color,
-            cx,                  ty + icon_h + ICON_LABEL_GAP, color,
+            rx,                  cy,                           rx + ldo_pin_len, cy,                     color,
+            rx + ldo_arrow_half, cy - ldo_arrow_foot,          rx + ldo_pin_len, cy,                     rx + ldo_arrow_half,
+            cy + ldo_arrow_foot, color,                        cx,               cy + ldo_inner_label_y, color,
+            cx,                  ty + icon_h + icon_label_gap, color,
         });
     } else if (std.mem.eql(u8, icon_name, "transistor")) {
-        const size: f64 = TR_BODY_SIZE;
-        const half = size / HALF_DIVISOR;
-        const ch_x = cx + TR_OFF_X;
+        const size: f64 = tr_body_size;
+        const half = size / half_divisor;
+        const ch_x = cx + tr_off_x;
         const ch_top = cy - half;
         const ch_bot = cy + half;
-        const gp_x = ch_x - TR_GP_OFF;
+        const gp_x = ch_x - tr_gp_off;
         try w.print(
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="{s}" stroke-width="2" opacity="0.5"/>
             \\<line x1="{d:.1}" y1="{d:.1}" x2="{d:.1}" y2="{d:.1}" stroke="{s}" stroke-width="1.5" opacity="0.5"/>
@@ -284,10 +284,10 @@ pub fn drawBlockIcon(w: anytype, icon_name: []const u8, cx: f64, cy: f64, color:
         , .{
             ch_x,      ch_top,                  ch_x,              ch_bot,            color,
             cx - half, cy,                      gp_x,              cy,                color,
-            gp_x,      ch_top + TR_INSET,       gp_x,              ch_bot - TR_INSET, color,
-            ch_x,      ch_top,                  ch_x + TR_PIN_LEN, ch_top,            color,
-            ch_x,      ch_bot,                  ch_x + TR_PIN_LEN, ch_bot,            color,
-            cx,        ch_bot + ICON_LABEL_GAP, color,
+            gp_x,      ch_top + tr_inset,       gp_x,              ch_bot - tr_inset, color,
+            ch_x,      ch_top,                  ch_x + tr_pin_len, ch_top,            color,
+            ch_x,      ch_bot,                  ch_x + tr_pin_len, ch_bot,            color,
+            cx,        ch_bot + icon_label_gap, color,
         });
     }
 }
@@ -430,7 +430,7 @@ pub fn pinOrder(a: []const u8, b: []const u8) bool {
 
 // spec: render_svg - Net names are XML-escaped in the emitted SVG markup
 test "drawNetWire escapes a quote/angle-bracket in the net name" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     const w = buf.writer(std.testing.allocator);
     // An import-kicad net name that tries to break out of the data-net attribute
@@ -443,7 +443,7 @@ test "drawNetWire escapes a quote/angle-bracket in the net name" {
 }
 
 test "drawWire emits a straight line for a horizontal (y1==y2) wire" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     const w = buf.writer(std.testing.allocator);
     // Equal endpoints on y ⇒ the horizontal branch: a single <line>, not the

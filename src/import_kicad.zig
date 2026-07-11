@@ -36,7 +36,7 @@ const numeric = @import("numeric.zig");
 const Node = ast.Node;
 
 /// KiCad's single-pad stub prefix — pads on these nets are unconnected.
-pub const UNCONNECTED_PREFIX = "unconnected-";
+pub const unconnected_prefix = "unconnected-";
 
 // ── Data model ────────────────────────────────────────────────────────
 
@@ -171,17 +171,17 @@ pub fn importBoard(arena: std.mem.Allocator, opts: ImportOptions) ImportError!Im
 fn parseParts(arena: std.mem.Allocator, root: Node) ImportError![]Part {
     const children = root.asList() orelse return error.InvalidBoard;
 
-    var net_table = std.AutoHashMap(i64, []const u8).init(arena);
+    var net_table = std.AutoHashMapUnmanaged(i64, []const u8).empty;
     for (children[1..]) |child| {
         if (!child.isForm("net")) continue;
         const cl = child.asList() orelse continue;
         if (cl.len < 3) continue;
         const id_num = cl[1].asNumber() orelse continue;
         const name = cl[2].asString() orelse continue;
-        try net_table.put(numeric.checkedInt(i64, id_num) orelse continue, name);
+        try net_table.put(arena, numeric.checkedInt(i64, id_num) orelse continue, name);
     }
 
-    var parts: std.ArrayListUnmanaged(Part) = .empty;
+    var parts: std.ArrayList(Part) = .empty;
     for (children[1..]) |child| {
         if (!child.isForm("footprint")) continue;
         if (try parseFootprint(arena, child, &net_table)) |part| {
@@ -194,7 +194,7 @@ fn parseParts(arena: std.mem.Allocator, root: Node) ImportError![]Part {
 fn parseFootprint(
     arena: std.mem.Allocator,
     node: Node,
-    net_table: *const std.AutoHashMap(i64, []const u8),
+    net_table: *const std.AutoHashMapUnmanaged(i64, []const u8),
 ) ImportError!?Part {
     const cl = node.asList() orelse return null;
     if (cl.len < 2) return null;
@@ -212,7 +212,7 @@ fn parseFootprint(
         .node = node,
     };
 
-    var pads: std.ArrayListUnmanaged(Pad) = .empty;
+    var pads: std.ArrayList(Pad) = .empty;
     for (cl[2..]) |sub| {
         if (sub.isForm("at")) {
             const al = sub.asList().?;
@@ -262,8 +262,8 @@ fn readPartProperty(node: Node, part: *Part) void {
 fn readPartPad(
     arena: std.mem.Allocator,
     node: Node,
-    net_table: *const std.AutoHashMap(i64, []const u8),
-    pads: *std.ArrayListUnmanaged(Pad),
+    net_table: *const std.AutoHashMapUnmanaged(i64, []const u8),
+    pads: *std.ArrayList(Pad),
 ) ImportError!void {
     const cl = node.asList() orelse return;
     if (cl.len < 2) return;
@@ -291,7 +291,7 @@ fn readPartPad(
 
 // ── Classification ────────────────────────────────────────────────────
 
-const SIZES = [_][]const u8{ "0201", "0402", "0603", "0805" };
+const sizes = [_][]const u8{ "0201", "0402", "0603", "0805" };
 
 /// Map a part onto an existing passive component family, or null when the
 /// part needs a generated library component. Kind comes from the ref-des
@@ -303,7 +303,7 @@ fn familyFor(arena: std.mem.Allocator, project_dir: []const u8, part: Part) Impo
     // Standard-passive leaf: C_/R_/L_/LED_ followed by a known size token.
     const us = std.mem.indexOfScalar(u8, leaf, '_') orelse return null;
     var size: ?[]const u8 = null;
-    for (SIZES) |s| {
+    for (sizes) |s| {
         if (std.mem.startsWith(u8, leaf[us + 1 ..], s)) size = s;
     }
     if (size == null) return null;
@@ -351,8 +351,8 @@ fn hasExactPads12(pads: []const Pad) bool {
 /// footprint leaf. Two parts sharing a name but differing in footprint get
 /// the footprint leaf appended so they don't collide in lib/.
 fn collectCustomComps(arena: std.mem.Allocator, project_dir: []const u8, parts: []Part) ImportError![]CustomComp {
-    var comps: std.ArrayListUnmanaged(CustomComp) = .empty;
-    var by_name = std.StringHashMap(usize).init(arena);
+    var comps: std.ArrayList(CustomComp) = .empty;
+    var by_name = std.StringHashMapUnmanaged(usize).empty;
 
     for (parts, 0..) |*part, idx| {
         if (part.family != null) continue;
@@ -401,7 +401,7 @@ fn collectCustomComps(arena: std.mem.Allocator, project_dir: []const u8, parts: 
             continue;
         }
         try comps.append(arena, .{ .name = name, .fp_file = fp_file, .part_idx = idx });
-        try by_name.put(name, comps.items.len - 1);
+        try by_name.put(arena, name, comps.items.len - 1);
         part.comp_name = name;
     }
     return comps.items;
@@ -437,7 +437,7 @@ fn ensureLibFiles(
     comps: []const CustomComp,
     summary: *ImportSummary,
 ) ImportError!void {
-    var fp_written = std.StringHashMap(void).init(arena);
+    var fp_written = std.StringHashMapUnmanaged(void).empty;
     for (comps) |comp| {
         const part = parts[comp.part_idx];
 
@@ -455,7 +455,7 @@ fn ensureLibFiles(
         const fp_path = try std.fmt.allocPrint(arena, "{s}/lib/footprints/{s}.sexp", .{ opts.project_dir, comp.fp_file });
         if (!fileExists(fp_path) and !fp_written.contains(comp.fp_file)) {
             try writeLibFile(opts, fp_path, try renderFootprint(arena, part), summary);
-            try fp_written.put(comp.fp_file, {});
+            try fp_written.put(arena, comp.fp_file, {});
         }
     }
 }
@@ -467,7 +467,7 @@ fn writeLibFile(opts: ImportOptions, path: []const u8, text: []const u8, summary
 }
 
 fn renderComponent(arena: std.mem.Allocator, comp: CustomComp, part: Part) ImportError![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     try w.writeAll(";; Auto-generated by `netlisp import-kicad` — edit freely, re-import never overwrites\n");
     try w.print("(component \"{s}\"\n", .{comp.name});
@@ -491,19 +491,19 @@ fn renderComponent(arena: std.mem.Allocator, comp: CustomComp, part: Part) Impor
 /// full pin map. Pads sharing a number (thermal-pad splits) dedup to one
 /// entry, preferring the first with a non-empty function name.
 fn renderPinout(arena: std.mem.Allocator, name: []const u8, pads: []const Pad) ImportError![]const u8 {
-    var seen = std.StringHashMap(usize).init(arena);
-    var uniq: std.ArrayListUnmanaged(Pad) = .empty;
+    var seen = std.StringHashMapUnmanaged(usize).empty;
+    var uniq: std.ArrayList(Pad) = .empty;
     for (pads) |p| {
         if (seen.get(p.number)) |i| {
             if (uniq.items[i].func.len == 0 and p.func.len > 0) uniq.items[i].func = p.func;
             continue;
         }
-        try seen.put(p.number, uniq.items.len);
+        try seen.put(arena, p.number, uniq.items.len);
         try uniq.append(arena, p);
     }
     std.mem.sort(Pad, uniq.items, {}, padNumberLessThan);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     try w.writeAll(";; Auto-generated pinout — DO NOT EDIT\n");
     try w.writeAll(";; Source of truth for pin ID → function name mapping\n");
@@ -531,7 +531,7 @@ fn padNumberLessThan(_: void, a: Pad, b: Pad) bool {
 /// 90°/270° pad swaps width and height.
 fn renderFootprint(arena: std.mem.Allocator, part: Part) ImportError![]const u8 {
     const leaf = stripLibPrefix(part.lib_id);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     try w.print("(footprint \"{s}\"\n", .{leaf});
     if (part.descr.len > 0) {
@@ -685,12 +685,12 @@ fn buildDesignText(
     for (order, 0..) |*o, i| o.* = i;
     std.mem.sort(usize, order, parts, partOrderLessThan);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(arena);
     try w.print(";; Imported from {s} by `netlisp import-kicad`\n", .{std.fs.path.basename(opts.board_path)});
     try w.writeAll(";; Netlist source: board pads (KiCad embeds pinfunction + net per pad).\n\n");
 
-    var import_names: std.ArrayListUnmanaged([]const u8) = .empty;
+    var import_names: std.ArrayList([]const u8) = .empty;
     for (comps) |c| {
         // Components used only inside the folded module are imported there.
         if (fold_res.active and !compUsedFlat(parts, fold_res, c.name)) continue;
@@ -780,8 +780,8 @@ fn emitInstance(arena: std.mem.Allocator, w: anytype, part: Part, nets: *NetName
 
     // Group pads by net, preserving first-seen order; dedup pad numbers
     // inside a group (thermal-pad splits repeat the same number).
-    var group_of = std.StringHashMap(usize).init(arena);
-    var groups: std.ArrayListUnmanaged(struct { net: []const u8, pins: std.ArrayListUnmanaged([]const u8) }) = .empty;
+    var group_of = std.StringHashMapUnmanaged(usize).empty;
+    var groups: std.ArrayList(struct { net: []const u8, pins: std.ArrayList([]const u8) }) = .empty;
     for (part.pads) |pad| {
         const net = try nets.resolve(pad.net) orelse {
             summary.dropped_pins += 1;
@@ -789,7 +789,7 @@ fn emitInstance(arena: std.mem.Allocator, w: anytype, part: Part, nets: *NetName
         };
         const gi = group_of.get(net) orelse blk: {
             try groups.append(arena, .{ .net = net, .pins = .empty });
-            try group_of.put(net, groups.items.len - 1);
+            try group_of.put(arena, net, groups.items.len - 1);
             break :blk groups.items.len - 1;
         };
         var dup = false;
@@ -848,21 +848,21 @@ fn strLessThan(_: void, a: []const u8, b: []const u8) bool {
 /// KiCad nets can never silently merge.
 const NetNames = struct {
     arena: std.mem.Allocator,
-    by_raw: std.StringHashMap(?[]const u8),
-    taken: std.StringHashMap([]const u8), // sanitized → raw that owns it
+    by_raw: std.StringHashMapUnmanaged(?[]const u8),
+    taken: std.StringHashMapUnmanaged([]const u8), // sanitized → raw that owns it
 
     fn init(arena: std.mem.Allocator) NetNames {
         return .{
             .arena = arena,
-            .by_raw = std.StringHashMap(?[]const u8).init(arena),
-            .taken = std.StringHashMap([]const u8).init(arena),
+            .by_raw = std.StringHashMapUnmanaged(?[]const u8).empty,
+            .taken = std.StringHashMapUnmanaged([]const u8).empty,
         };
     }
 
     /// Returns the sanitized net name, or null for unconnected pads
     /// (empty net or a KiCad `unconnected-*` stub).
     fn resolve(self: *NetNames, raw: []const u8) ImportError!?[]const u8 {
-        if (raw.len == 0 or std.mem.startsWith(u8, raw, UNCONNECTED_PREFIX)) return null;
+        if (raw.len == 0 or std.mem.startsWith(u8, raw, unconnected_prefix)) return null;
         if (self.by_raw.get(raw)) |cached| return cached;
 
         var name = try sanitizeNetName(self.arena, raw);
@@ -872,8 +872,8 @@ const NetNames = struct {
             name = try std.fmt.allocPrint(self.arena, "{s}_{d}", .{ name, suffix });
             suffix += 1;
         }
-        try self.taken.put(name, raw);
-        try self.by_raw.put(raw, name);
+        try self.taken.put(self.arena, name, raw);
+        try self.by_raw.put(self.arena, raw, name);
         return name;
     }
 
@@ -894,7 +894,7 @@ pub fn sanitizeNetName(arena: std.mem.Allocator, raw: []const u8) std.mem.Alloca
     var trimmed = raw;
     if (trimmed.len > 0 and trimmed[0] == '/') trimmed = trimmed[1..];
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     for (trimmed) |ch| {
         switch (ch) {
             'A'...'Z', 'a'...'z', '0'...'9', '_', '+', '-' => try out.append(arena, ch),
@@ -922,7 +922,7 @@ fn refPrefix(ref: []const u8) []const u8 {
 /// Lowercase library-name slug: [a-z0-9+.-] kept, runs of anything else
 /// collapse to a single '-', trimmed at both ends.
 pub fn sanitizeName(arena: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]const u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     var pending_dash = false;
     for (raw) |ch| {
         const c = std.ascii.toLower(ch);
@@ -968,7 +968,7 @@ fn writeFileMakePath(project_dir: []const u8, path: []const u8, text: []const u8
 
 const testing = std.testing;
 
-const TEST_BOARD =
+const test_board =
     \\(kicad_pcb (version 20260206) (generator "pcbnew")
     \\  (footprint "Capacitor_SMD:C_0402_1005Metric"
     \\    (at 10 20 90)
@@ -990,7 +990,7 @@ const TEST_BOARD =
 ;
 
 fn testParts(arena: std.mem.Allocator) ![]Part {
-    const nodes = try parser_mod.parse(arena, TEST_BOARD);
+    const nodes = try parser_mod.parse(arena, test_board);
     return parseParts(arena, nodes[0]);
 }
 

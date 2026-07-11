@@ -4,7 +4,7 @@
 //! grid-quantized pose checksum.
 //!
 //! The checksum is the *correctness gate* for a speed experiment: final poses
-//! snap to `optimizer.GRID_MM`, so quantizing (x,y) to grid units and hashing
+//! snap to `optimizer.grid_mm`, so quantizing (x,y) to grid units and hashing
 //! together with the rotation yields a value that is identical whenever the
 //! layout is identical — even if SIMD/fast-math reassociation perturbs the
 //! low bits of the continuous objective. A variant that prints the same
@@ -33,10 +33,10 @@ const numeric = @import("numeric.zig");
 
 /// Sentinel printed after the last result so a harness driver knows the run
 /// finished (vs. the process dying mid-list).
-const BENCH_DONE = "BENCH_DONE\n";
+const bench_done = "BENCH_DONE\n";
 
-const DEFAULT_REPS: usize = 5;
-const NS_PER_MS: f64 = 1_000_000.0;
+const default_reps: usize = 5;
+const ns_per_ms: f64 = 1_000_000.0;
 
 /// Solve/score parameters for the quality modes (`--breakdown`, `--poses`,
 /// `--seed`), overridable from the CLI (`--margin`, `--no-grid-court`) so a
@@ -57,7 +57,7 @@ const BenchResult = struct {
 /// equal at grid resolution map to the same cell regardless of sub-ULP float
 /// drift, so the checksum is robust to floating-point reassociation.
 fn quantize(v: f64) i64 {
-    return numeric.checkedInt(i64, @round(v / optimizer.GRID_MM)) orelse 0;
+    return numeric.checkedInt(i64, @round(v / optimizer.grid_mm)) orelse 0;
 }
 
 /// Order-sensitive hash over every part's (ref_des, grid x, grid y, rotation).
@@ -152,7 +152,7 @@ fn benchOne(
 }
 
 fn ms(ns: u64) f64 {
-    return @as(f64, @floatFromInt(ns)) / NS_PER_MS;
+    return @as(f64, @floatFromInt(ns)) / ns_per_ms;
 }
 
 /// A pose read from a `--poses <file>` JSON array: `[{"ref","x","y","rot"}, …]`.
@@ -303,7 +303,7 @@ pub fn main() !void {
     defer std.process.argsFree(gpa, args);
 
     var project_dir: []const u8 = ".";
-    var reps: usize = DEFAULT_REPS;
+    var reps: usize = default_reps;
     var poses_file: ?[]const u8 = null;
     var tag: []const u8 = "saved";
     var want_breakdown = false;
@@ -322,8 +322,8 @@ pub fn main() !void {
             // A silent fallback to DEFAULT_REPS on a typo would quietly change
             // the rep count and invalidate a timing protocol — flag it loudly.
             reps = std.fmt.parseInt(usize, args[i + 1], 10) catch blk: {
-                std.debug.print("bench-layout: unparseable --reps {s}, using default {d}\n", .{ args[i + 1], DEFAULT_REPS });
-                break :blk DEFAULT_REPS;
+                std.debug.print("bench-layout: unparseable --reps {s}, using default {d}\n", .{ args[i + 1], default_reps });
+                break :blk default_reps;
             };
             i += 1;
         } else if (std.mem.eql(u8, a, "--poses") and i + 1 < args.len) {
@@ -396,7 +396,7 @@ pub fn main() !void {
                     std.debug.print("SCORE_ERR {s} {s}\n", .{ name, @errorName(err) });
             }
         }
-        std.debug.print(BENCH_DONE, .{});
+        std.debug.print(bench_done, .{});
         return;
     }
     if (want_validate) {
@@ -404,7 +404,7 @@ pub fn main() !void {
             validateOne(gpa, project_dir, name) catch |err|
                 std.debug.print("VALIDATE_ERR {s} {s}\n", .{ name, @errorName(err) });
         }
-        std.debug.print(BENCH_DONE, .{});
+        std.debug.print(bench_done, .{});
         return;
     }
     if (want_breakdown) {
@@ -412,7 +412,7 @@ pub fn main() !void {
             breakdownOne(gpa, project_dir, name) catch |err|
                 std.debug.print("SCORE_ERR {s} {s}\n", .{ name, @errorName(err) });
         }
-        std.debug.print(BENCH_DONE, .{});
+        std.debug.print(bench_done, .{});
         return;
     }
 
@@ -430,5 +430,5 @@ pub fn main() !void {
             std.debug.print("BENCH_ERR {s} {s}\n", .{ name, @errorName(err) });
         }
     }
-    std.debug.print(BENCH_DONE, .{});
+    std.debug.print(bench_done, .{});
 }

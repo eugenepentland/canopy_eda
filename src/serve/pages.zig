@@ -81,7 +81,7 @@ fn designSearchText(
     s: mcp_tools.DesignSummary,
     starred: bool,
 ) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     try buf.appendSlice(allocator, if (s.is_board) "board " else "subcircuit ");
     try buf.appendSlice(allocator, s.name);
     if (s.title.len > 0) {
@@ -100,7 +100,7 @@ fn designSearchText(
 /// tag word filters to the cards showing it. Shared by design + module cards.
 fn appendTagWords(
     allocator: std.mem.Allocator,
-    buf: *std.ArrayListUnmanaged(u8),
+    buf: *std.ArrayList(u8),
     has_groups: bool,
     starred: bool,
 ) std.mem.Allocator.Error!void {
@@ -115,7 +115,7 @@ fn moduleSearchText(
     allocator: std.mem.Allocator,
     m: home_template.ModuleHomeEntry,
 ) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     try buf.appendSlice(allocator, "subcircuit ");
     try buf.appendSlice(allocator, m.name);
     if (m.params.len > 0) {
@@ -138,9 +138,9 @@ fn collectHomeModules(
     summaries: []const mcp_tools.DesignSummary,
 ) ![]home_template.ModuleHomeEntry {
     const mods = try modules_page.collectModules(allocator, project_dir);
-    var entries: std.ArrayListUnmanaged(home_template.ModuleHomeEntry) = .empty;
+    var entries: std.ArrayList(home_template.ModuleHomeEntry) = .empty;
     for (mods) |m| {
-        var used_by: std.ArrayListUnmanaged([]const u8) = .empty;
+        var used_by: std.ArrayList([]const u8) = .empty;
         for (summaries) |s| {
             for (s.modules_used) |u| {
                 if (std.mem.eql(u8, u, m.name)) {
@@ -167,5 +167,5 @@ fn collectHomeModules(
 /// inlining the CSS into every response.
 pub fn cssPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .CSS;
-    res.body = assets_css.INDEX_CSS;
+    res.body = assets_css.index_css;
 }

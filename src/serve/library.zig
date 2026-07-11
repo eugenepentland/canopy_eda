@@ -16,11 +16,11 @@ const footprint_preview = @import("footprint_preview.zig");
 const upload = @import("upload.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
-const SEXP_EXT_LEN: usize = ".sexp".len;
+const sexp_ext_len: usize = ".sexp".len;
 /// The `(footprint …)` field name / the `footprint` card kind — same token.
-const FOOTPRINT = "footprint";
-const PIN_FORM_LEN: usize = "(pin ".len;
-const MAX_LIB_FILE_BYTES: usize = 256 * 1024;
+const footprint_label = "footprint";
+const pin_form_len: usize = "(pin ".len;
+const max_lib_file_bytes: usize = 256 * 1024;
 
 /// Error set for HTTP handlers and writers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error || std.fs.Dir.Iterator.Error;
@@ -69,9 +69,9 @@ const RowWithMtime = struct {
 /// a flat slice of `LibraryRow`s sorted newest-first by mtime, ready to
 /// feed the `library.zt` template. Strings are allocator-owned.
 fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerError![]LibraryRow {
-    var buf: std.ArrayListUnmanaged(RowWithMtime) = .empty;
-    var referenced_pinouts = std.StringHashMap(void).init(allocator);
-    var referenced_footprints = std.StringHashMap(void).init(allocator);
+    var buf: std.ArrayList(RowWithMtime) = .empty;
+    var referenced_pinouts = std.StringHashMapUnmanaged(void).empty;
+    var referenced_footprints = std.StringHashMapUnmanaged(void).empty;
     const model_cfg = export_kicad.loadModelConfig(allocator, project_dir);
 
     // Components / families.
@@ -83,20 +83,20 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".sexp")) continue;
-            const base = try allocator.dupe(u8, entry.name[0 .. entry.name.len - SEXP_EXT_LEN]);
-            const content = dir.readFileAlloc(allocator, entry.name, MAX_LIB_FILE_BYTES) catch continue;
+            const base = try allocator.dupe(u8, entry.name[0 .. entry.name.len - sexp_ext_len]);
+            const content = dir.readFileAlloc(allocator, entry.name, max_lib_file_bytes) catch continue;
             const mtime = if (dir.statFile(entry.name)) |s| s.mtime else |_| 0;
 
             const description = extractField(content, "description");
-            const footprint = extractField(content, FOOTPRINT);
+            const footprint = extractField(content, footprint_label);
             const pinout = extractField(content, "pinout");
             const manufacturer = extractField(content, "manufacturer");
             const mpn = extractField(content, "mpn");
             const datasheets = try extractDatasheets(allocator, project_dir, content);
             const is_family = std.mem.indexOf(u8, content, "(component-family ") != null;
 
-            if (footprint) |fp| try referenced_footprints.put(fp, {});
-            if (pinout) |po| try referenced_pinouts.put(po, {});
+            if (footprint) |fp| try referenced_footprints.put(allocator, fp, {});
+            if (pinout) |po| try referenced_pinouts.put(allocator, po, {});
 
             const has_model = if (footprint) |fp| blk: {
                 if (model_cfg.get(fp)) |c| {
@@ -133,16 +133,16 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
         var liter = dir.iterate();
         while (try liter.next()) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".sexp")) continue;
-            const lname_local = entry.name[0 .. entry.name.len - SEXP_EXT_LEN];
+            const lname_local = entry.name[0 .. entry.name.len - sexp_ext_len];
             if (referenced_pinouts.contains(lname_local)) continue;
             const lname = try allocator.dupe(u8, lname_local);
-            const content = dir.readFileAlloc(allocator, entry.name, MAX_LIB_FILE_BYTES) catch continue;
+            const content = dir.readFileAlloc(allocator, entry.name, max_lib_file_bytes) catch continue;
             const mtime = if (dir.statFile(entry.name)) |s| s.mtime else |_| 0;
             var pin_count: usize = 0;
             var pos: usize = 0;
             while (std.mem.indexOfPos(u8, content, pos, "(pin ")) |idx| {
                 pin_count += 1;
-                pos = idx + PIN_FORM_LEN;
+                pos = idx + pin_form_len;
             }
             try buf.append(allocator, .{
                 .mtime = mtime,
@@ -165,7 +165,7 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
         var fiter = dir.iterate();
         while (try fiter.next()) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".sexp")) continue;
-            const fname_local = entry.name[0 .. entry.name.len - SEXP_EXT_LEN];
+            const fname_local = entry.name[0 .. entry.name.len - sexp_ext_len];
             if (referenced_footprints.contains(fname_local)) continue;
             const fname = try allocator.dupe(u8, fname_local);
             const mtime = if (dir.statFile(entry.name)) |s| s.mtime else |_| 0;
@@ -189,7 +189,7 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
 
     std.sort.heap(RowWithMtime, buf.items, {}, RowWithMtime.newerFirst);
 
-    var rows: std.ArrayListUnmanaged(LibraryRow) = .empty;
+    var rows: std.ArrayList(LibraryRow) = .empty;
     for (buf.items) |wm| try rows.append(allocator, wm.row);
     return rows.toOwnedSlice(allocator);
 }
@@ -204,7 +204,7 @@ fn buildSearchText(
     mpn: ?[]const u8,
     datasheets: []const LibraryRow.Datasheet,
 ) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll(base);
     if (description) |d| try w.print(" {s}", .{d});
@@ -256,9 +256,9 @@ pub fn cseFetchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     };
     const args = parsed.value;
 
-    var fp_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var fp_buf: std.ArrayList(u8) = .empty;
     _ = mcp_tools.call(aa, ctx.project_dir, "download_footprint", args, &fp_buf);
-    var ds_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var ds_buf: std.ArrayList(u8) = .empty;
     _ = mcp_tools.call(aa, ctx.project_dir, "download_datasheet", args, &ds_buf);
 
     // download_footprint creates the component and download_datasheet saves the
@@ -266,7 +266,7 @@ pub fn cseFetchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     // component's .sexp, the same link the drag-to-card flow performs.
     const linked = linkCseDatasheet(aa, ctx.project_dir, fp_buf.items, ds_buf.items);
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const w = out.writer(aa);
     try w.writeAll("{\"footprint\":");
     try w.writeAll(if (fp_buf.items.len > 0 and fp_buf.items[0] == '{') fp_buf.items else "null");
@@ -298,7 +298,7 @@ fn isSafeLibName(name: []const u8) bool {
 
 /// `{"ok":false}` JSON for a `:name`/`:kind` param that fails `isSafeLibName`
 /// (or can't be percent-decoded).
-const ERR_INVALID_NAME = "{\"ok\":false,\"error\":\"invalid name\"}";
+const err_invalid_name = "{\"ok\":false,\"error\":\"invalid name\"}";
 
 /// Percent-decode a URL path param. httpz hands params back verbatim, so
 /// `encodeURIComponent`'d reserved chars (a comma → `%2C`) arrive encoded;
@@ -331,8 +331,8 @@ pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
     // Decode so part numbers like `74ahct1g125gm,132` (sent as `%2C`) map to the
     // right file on disk, then validate the decoded name.
-    const name = urlDecode(aa, name_raw) catch return sendErr(res, 400, ERR_INVALID_NAME);
-    if (!isSafeLibName(name)) return sendErr(res, 400, ERR_INVALID_NAME);
+    const name = urlDecode(aa, name_raw) catch return sendErr(res, 400, err_invalid_name);
+    if (!isSafeLibName(name)) return sendErr(res, 400, err_invalid_name);
 
     const filename = req.header("x-filename") orelse "model.zip";
     // Accept either a raw .step/.stp file (the body IS the model) or a .zip
@@ -358,8 +358,8 @@ pub fn uploadModelApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// otherwise `name` is itself a footprint (the drop landed on a footprint card).
 fn resolveFootprintName(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const u8 {
     const path = std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name }) catch return name;
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, MAX_LIB_FILE_BYTES) catch return name;
-    return extractField(content, FOOTPRINT) orelse name;
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, max_lib_file_bytes) catch return name;
+    return extractField(content, footprint_label) orelse name;
 }
 
 /// Write raw STEP bytes to `lib/models/<fp>.step` (creating the dir), replacing
@@ -380,7 +380,7 @@ pub fn deleteLibraryEntryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
     res.content_type = .JSON;
     const kind = req.param("kind") orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing kind\"}");
     const name = req.param("name") orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"missing name\"}");
-    if (!isSafeLibName(name)) return sendErr(res, 400, ERR_INVALID_NAME);
+    if (!isSafeLibName(name)) return sendErr(res, 400, err_invalid_name);
     const subdir = subdirForKind(kind) orelse return sendErr(res, 400, "{\"ok\":false,\"error\":\"invalid kind\"}");
 
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
@@ -403,7 +403,7 @@ pub fn deleteLibraryEntryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 /// components. Unknown kinds return null (rejected as a 400).
 fn subdirForKind(kind: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, kind, "component") or std.mem.eql(u8, kind, "family")) return "components";
-    if (std.mem.eql(u8, kind, FOOTPRINT)) return "footprints";
+    if (std.mem.eql(u8, kind, footprint_label)) return "footprints";
     if (std.mem.eql(u8, kind, "pinout")) return "pinouts";
     return null;
 }
@@ -454,7 +454,7 @@ fn objStr(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
 /// Scan `content` for `(requirement "...")` forms and return a slice of the
 /// quoted text strings (slices into `content` — no allocation per string).
 fn extractRequirements(allocator: std.mem.Allocator, content: []const u8) ![]const []const u8 {
-    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var list: std.ArrayList([]const u8) = .empty;
     const needle = "(requirement ";
     var pos: usize = 0;
     while (std.mem.indexOfPos(u8, content, pos, needle)) |idx| {
@@ -477,7 +477,7 @@ fn extractDatasheets(
     project_dir: []const u8,
     content: []const u8,
 ) ![]const LibraryRow.Datasheet {
-    var list: std.ArrayListUnmanaged(LibraryRow.Datasheet) = .empty;
+    var list: std.ArrayList(LibraryRow.Datasheet) = .empty;
     const needle = "(datasheet ";
     var pos: usize = 0;
     while (std.mem.indexOfPos(u8, content, pos, needle)) |idx| {

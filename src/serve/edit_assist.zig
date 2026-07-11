@@ -31,11 +31,11 @@ const edit = @import("edit.zig");
 const HandlerError = edit.HandlerError;
 const paths = @import("../paths.zig");
 
-const HEADER_CORS = "access-control-allow-origin";
-const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
-const MAX_LIB_FILE_BYTES: usize = 1024 * 1024;
-const SEXP_EXT = ".sexp";
-const FOOTPRINT_OPEN = "(footprint ";
+const header_cors = "access-control-allow-origin";
+const max_source_bytes: usize = 10 * 1024 * 1024;
+const max_lib_file_bytes: usize = 1024 * 1024;
+const sexp_ext = ".sexp";
+const footprint_open = "(footprint ";
 
 // ── POST /api/validate/:name ──────────────────────────────────────
 
@@ -50,7 +50,7 @@ const FOOTPRINT_OPEN = "(footprint ";
 /// report line 0.
 pub fn validateSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header(HEADER_CORS, "*");
+    res.header(header_cors, "*");
 
     const name = req.param("name") orelse "design";
     const body = req.body() orelse {
@@ -82,7 +82,7 @@ pub fn validateSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     }
     const source = source_val.string;
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const w = out.writer(ctx.allocator);
 
     // Pre-flight parse so a pure syntax error reports as "syntax error" with
@@ -177,9 +177,9 @@ fn writeDiag(
 /// yields an empty list rather than an error.
 pub fn libIndexApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header(HEADER_CORS, "*");
+    res.header(header_cors, "*");
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const w = out.writer(ctx.allocator);
 
     try w.writeAll("{\"components\":[");
@@ -197,9 +197,9 @@ fn emitComponents(ctx: *Handler, w: anytype) HandlerError!void {
     var iter = dir.iterate();
     var first = true;
     while (iter.next() catch null) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, SEXP_EXT)) continue;
-        const base = entry.name[0 .. entry.name.len - SEXP_EXT.len];
-        const content = dir.readFileAlloc(ctx.allocator, entry.name, MAX_LIB_FILE_BYTES) catch continue;
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, sexp_ext)) continue;
+        const base = entry.name[0 .. entry.name.len - sexp_ext.len];
+        const content = dir.readFileAlloc(ctx.allocator, entry.name, max_lib_file_bytes) catch continue;
         const is_family = std.mem.indexOf(u8, content, "(component-family ") != null;
         const footprint = extractFootprint(content);
         if (!first) try w.writeAll(",");
@@ -217,8 +217,8 @@ fn emitComponents(ctx: *Handler, w: anytype) HandlerError!void {
 /// form `(footprint c-0402)` and the quoted form `(footprint "sot891")`.
 /// Returns "" when no footprint form is present.
 fn extractFootprint(content: []const u8) []const u8 {
-    const k = std.mem.indexOf(u8, content, FOOTPRINT_OPEN) orelse return "";
-    var i = k + FOOTPRINT_OPEN.len;
+    const k = std.mem.indexOf(u8, content, footprint_open) orelse return "";
+    var i = k + footprint_open.len;
     while (i < content.len and content[i] == ' ') : (i += 1) {}
     if (i >= content.len) return "";
     if (content[i] == '"') {
@@ -244,9 +244,9 @@ fn emitModules(ctx: *Handler, w: anytype) HandlerError!void {
     var iter = dir.iterate();
     var first = true;
     while (iter.next() catch null) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, SEXP_EXT)) continue;
-        const base = entry.name[0 .. entry.name.len - SEXP_EXT.len];
-        const content = dir.readFileAlloc(ctx.allocator, entry.name, MAX_LIB_FILE_BYTES) catch "";
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, sexp_ext)) continue;
+        const base = entry.name[0 .. entry.name.len - sexp_ext.len];
+        const content = dir.readFileAlloc(ctx.allocator, entry.name, max_lib_file_bytes) catch "";
         const params = extractModuleParams(content, base);
         // A premade layout = the defmodule body carries a (placement …) spec.
         const has_placement = std.mem.indexOf(u8, content, "(placement") != null;
@@ -384,7 +384,7 @@ fn findLayoutForm(source: []const u8) ?struct { start: usize, end: usize } {
 /// `spec-save`.
 pub fn saveDiagramLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header(HEADER_CORS, "*");
+    res.header(header_cors, "*");
 
     const name = req.param("name") orelse {
         res.status = 404;
@@ -423,13 +423,13 @@ pub fn saveDiagramLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
         res.status = 500;
         return;
     };
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, path, MAX_SOURCE_BYTES) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, path, max_source_bytes) catch {
         res.status = 404;
         res.body = "{\"ok\":false,\"error\":\"cannot read design\"}";
         return;
     };
 
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const w = out.writer(ctx.allocator);
     if (findLayoutForm(source)) |span| {
         try w.writeAll(source[0..span.start]);

@@ -8,12 +8,12 @@ const ast = @import("../sexpr/ast.zig");
 const Node = ast.Node;
 
 // ── Constants ─────────────────────────────────────────────────────
-const DEFAULT_BODY_HALF_SIZE: f64 = 5;
-const PIN_ANGLE_RIGHT: f64 = 180;
-const PIN_ANGLE_BOTTOM: f64 = 90;
-const PIN_ANGLE_TOP: f64 = 270;
-const HALF_DIVISOR: f64 = 2.0;
-const UNCONNECTED_LABEL = "unconnected";
+const default_body_half_size: f64 = 5;
+const pin_angle_right: f64 = 180;
+const pin_angle_bottom: f64 = 90;
+const pin_angle_top: f64 = 270;
+const half_divisor: f64 = 2.0;
+const unconnected_label = "unconnected";
 
 /// One pin extracted from a `.kicad_sym` symbol: pad `number`, display
 /// `name`, KiCad electrical type, and the `(at x y angle)` placement used
@@ -63,26 +63,26 @@ pub fn emitSymbol(allocator: std.mem.Allocator, w: anytype, sym_children: []cons
     }
 
     // Collect all pins from main symbol and sub-symbols
-    var pins: std.ArrayListUnmanaged(PinInfo) = .empty;
+    var pins: std.ArrayList(PinInfo) = .empty;
     defer pins.deinit(allocator);
 
     try collectPins(sym_children[2..], &pins, allocator);
 
     // Compute body bounding box from rectangles
-    var body_x1: f64 = -DEFAULT_BODY_HALF_SIZE;
-    var body_y1: f64 = -DEFAULT_BODY_HALF_SIZE;
-    var body_x2: f64 = DEFAULT_BODY_HALF_SIZE;
-    var body_y2: f64 = DEFAULT_BODY_HALF_SIZE;
+    var body_x1: f64 = -default_body_half_size;
+    var body_y1: f64 = -default_body_half_size;
+    var body_x2: f64 = default_body_half_size;
+    var body_y2: f64 = default_body_half_size;
     computeBodyBBox(sym_children[2..], &body_x1, &body_y1, &body_x2, &body_y2);
 
     // Classify pins by side and assign order
-    var left_pins: std.ArrayListUnmanaged(PinInfo) = .empty;
+    var left_pins: std.ArrayList(PinInfo) = .empty;
     defer left_pins.deinit(allocator);
-    var right_pins: std.ArrayListUnmanaged(PinInfo) = .empty;
+    var right_pins: std.ArrayList(PinInfo) = .empty;
     defer right_pins.deinit(allocator);
-    var top_pins: std.ArrayListUnmanaged(PinInfo) = .empty;
+    var top_pins: std.ArrayList(PinInfo) = .empty;
     defer top_pins.deinit(allocator);
-    var bottom_pins: std.ArrayListUnmanaged(PinInfo) = .empty;
+    var bottom_pins: std.ArrayList(PinInfo) = .empty;
     defer bottom_pins.deinit(allocator);
 
     for (pins.items) |pin| {
@@ -138,7 +138,7 @@ pub fn emitPinGroup(w: anytype, pin_list: []const PinInfo, side: []const u8) std
 /// Walk a KiCad symbol's child nodes, appending each `(pin …)` and recursing
 /// into any nested `(symbol …)` sub-units (e.g. `R_0_1`, `R_1_1`) so a
 /// multi-unit symbol contributes all of its pins to a single flat list.
-pub fn collectPins(children: []const Node, pins: *std.ArrayListUnmanaged(PinInfo), allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
+pub fn collectPins(children: []const Node, pins: *std.ArrayList(PinInfo), allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
     for (children) |child| {
         if (child.isForm("pin")) {
             if (extractPin(child)) |pin| {
@@ -233,12 +233,12 @@ pub fn computeBodyBBox(children: []const Node, x1: *f64, y1: *f64, x2: *f64, y2:
 
 fn classifyPinSide(pin: PinInfo, bx1: f64, by1: f64, bx2: f64, by2: f64) Side {
     if (pin.angle == 0) return .left;
-    if (pin.angle == PIN_ANGLE_RIGHT) return .right;
-    if (pin.angle == PIN_ANGLE_BOTTOM) return .bottom;
-    if (pin.angle == PIN_ANGLE_TOP) return .top;
+    if (pin.angle == pin_angle_right) return .right;
+    if (pin.angle == pin_angle_bottom) return .bottom;
+    if (pin.angle == pin_angle_top) return .top;
 
-    const cx = (bx1 + bx2) / HALF_DIVISOR;
-    const cy = (by1 + by2) / HALF_DIVISOR;
+    const cx = (bx1 + bx2) / half_divisor;
+    const cy = (by1 + by2) / half_divisor;
     const dx = @abs(pin.x - cx);
     const dy = @abs(pin.y - cy);
 
@@ -249,7 +249,7 @@ fn classifyPinSide(pin: PinInfo, bx1: f64, by1: f64, bx2: f64, by2: f64) Side {
     }
 }
 
-fn sortPinsByY(list: *std.ArrayListUnmanaged(PinInfo)) void {
+fn sortPinsByY(list: *std.ArrayList(PinInfo)) void {
     std.mem.sortUnstable(PinInfo, list.items, {}, struct {
         fn lessThan(_: void, a: PinInfo, b: PinInfo) bool {
             return a.y < b.y;
@@ -257,7 +257,7 @@ fn sortPinsByY(list: *std.ArrayListUnmanaged(PinInfo)) void {
     }.lessThan);
 }
 
-fn sortPinsByX(list: *std.ArrayListUnmanaged(PinInfo)) void {
+fn sortPinsByX(list: *std.ArrayList(PinInfo)) void {
     std.mem.sortUnstable(PinInfo, list.items, {}, struct {
         fn lessThan(_: void, a: PinInfo, b: PinInfo) bool {
             return a.x < b.x;
@@ -275,7 +275,7 @@ pub fn mapElectricalType(kicad: []const u8) []const u8 {
     if (std.mem.eql(u8, kicad, "passive")) return "passive";
     if (std.mem.eql(u8, kicad, "power_in")) return "power-in";
     if (std.mem.eql(u8, kicad, "power_out")) return "power-out";
-    if (std.mem.eql(u8, kicad, UNCONNECTED_LABEL)) return UNCONNECTED_LABEL;
-    if (std.mem.eql(u8, kicad, "no_connect")) return UNCONNECTED_LABEL;
+    if (std.mem.eql(u8, kicad, unconnected_label)) return unconnected_label;
+    if (std.mem.eql(u8, kicad, "no_connect")) return unconnected_label;
     return "passive";
 }

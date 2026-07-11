@@ -82,12 +82,12 @@ const Family = struct {
     template: []const u8, // digit runs → '~'
     prefix: []const u8, // letters immediately before the varying run
     /// member net → index value parsed from the varying digit run
-    nets: std.StringHashMap(u64),
+    nets: std.StringHashMapUnmanaged(u64),
 };
 
 /// Replace every maximal digit run with '~'.
 fn netTemplate(arena: std.mem.Allocator, net: []const u8) FoldError![]const u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < net.len) {
         if (std.ascii.isDigit(net[i])) {
@@ -102,7 +102,7 @@ fn netTemplate(arena: std.mem.Allocator, net: []const u8) FoldError![]const u8 {
 }
 
 fn digitRuns(arena: std.mem.Allocator, net: []const u8) FoldError![]const u64 {
-    var runs: std.ArrayListUnmanaged(u64) = .empty;
+    var runs: std.ArrayList(u64) = .empty;
     var i: usize = 0;
     while (i < net.len) {
         if (std.ascii.isDigit(net[i])) {
@@ -136,19 +136,19 @@ fn prefixBeforeRun(template: []const u8, var_run: usize) []const u8 {
 /// template with ≥2 members varying in exactly one digit-run position,
 /// excluding KiCad auto-names and unconnected stubs.
 fn detectFamilies(arena: std.mem.Allocator, nets: []const []const u8) FoldError![]Family {
-    var by_template = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(arena);
+    var by_template = std.StringHashMapUnmanaged(std.ArrayList([]const u8)).empty;
     for (nets) |net| {
         if (net.len == 0) continue;
         if (std.mem.startsWith(u8, net, "Net-")) continue;
-        if (std.mem.startsWith(u8, net, ik.UNCONNECTED_PREFIX)) continue;
+        if (std.mem.startsWith(u8, net, ik.unconnected_prefix)) continue;
         const t = try netTemplate(arena, net);
         if (std.mem.indexOfScalar(u8, t, '~') == null) continue;
-        const slot = try by_template.getOrPut(t);
+        const slot = try by_template.getOrPut(arena, t);
         if (!slot.found_existing) slot.value_ptr.* = .empty;
         try slot.value_ptr.append(arena, net);
     }
 
-    var fams: std.ArrayListUnmanaged(Family) = .empty;
+    var fams: std.ArrayList(Family) = .empty;
     var it = by_template.iterator();
     while (it.next()) |entry| {
         const members = entry.value_ptr.items;
@@ -157,12 +157,12 @@ fn detectFamilies(arena: std.mem.Allocator, nets: []const []const u8) FoldError!
         var fam = Family{
             .template = entry.key_ptr.*,
             .prefix = prefixBeforeRun(entry.key_ptr.*, var_run),
-            .nets = std.StringHashMap(u64).init(arena),
+            .nets = std.StringHashMapUnmanaged(u64).empty,
         };
         if (fam.prefix.len == 0) continue; // pure-number prefix: not channel-like
         for (members) |net| {
             const runs = try digitRuns(arena, net);
-            try fam.nets.put(net, runs[var_run]);
+            try fam.nets.put(arena, net, runs[var_run]);
         }
         try fams.append(arena, fam);
     }
@@ -190,9 +190,9 @@ fn varyingRun(arena: std.mem.Allocator, members: []const []const u8) FoldError!?
 /// cover the most nets (the "CH" of CH1_RF_IN/CH2_LO/…).
 fn pickPrefix(arena: std.mem.Allocator, fams: []const Family, override: ?[]const u8) FoldError!?[]const u8 {
     if (override) |p| return p;
-    var totals = std.StringHashMap(usize).init(arena);
+    var totals = std.StringHashMapUnmanaged(usize).empty;
     for (fams) |fam| {
-        const slot = try totals.getOrPut(fam.prefix);
+        const slot = try totals.getOrPut(arena, fam.prefix);
         if (!slot.found_existing) slot.value_ptr.* = 0;
         slot.value_ptr.* += fam.nets.count();
     }
@@ -212,17 +212,17 @@ fn pickPrefix(arena: std.mem.Allocator, fams: []const Family, override: ?[]const
 // ── Folding pipeline ──────────────────────────────────────────────────
 
 /// Claim sentinel: part not (yet) assigned to any channel.
-pub const UNCLAIMED: u64 = std.math.maxInt(u64);
+pub const unclaimed: u64 = std.math.maxInt(u64);
 /// Claim sentinel: part reached from two channels — permanently shared.
-pub const SHARED: u64 = std.math.maxInt(u64) - 1;
+pub const shared_marker: u64 = std.math.maxInt(u64) - 1;
 
 /// Working state shared between the folding pipeline and the emitter.
 pub const FoldCtx = struct {
     arena: std.mem.Allocator,
     parts: []const ik.Part,
-    net_parts: std.StringHashMap(std.ArrayListUnmanaged(usize)),
-    seed: std.StringHashMap(u64), // raw net → channel index (seed families only)
-    seed_template: std.StringHashMap([]const u8), // raw net → family template
+    net_parts: std.StringHashMapUnmanaged(std.ArrayList(usize)),
+    seed: std.StringHashMapUnmanaged(u64), // raw net → channel index (seed families only)
+    seed_template: std.StringHashMapUnmanaged([]const u8), // raw net → family template
     claim: []u64, // per part: channel index / UNCLAIMED / SHARED
     prefix: []const u8,
 };
@@ -240,19 +240,19 @@ pub fn foldChannels(
     var ctx = Ctx{
         .arena = arena,
         .parts = parts,
-        .net_parts = std.StringHashMap(std.ArrayListUnmanaged(usize)).init(arena),
-        .seed = std.StringHashMap(u64).init(arena),
-        .seed_template = std.StringHashMap([]const u8).init(arena),
+        .net_parts = std.StringHashMapUnmanaged(std.ArrayList(usize)).empty,
+        .seed = std.StringHashMapUnmanaged(u64).empty,
+        .seed_template = std.StringHashMapUnmanaged([]const u8).empty,
         .claim = try arena.alloc(u64, parts.len),
         .prefix = "",
     };
-    @memset(ctx.claim, UNCLAIMED);
+    @memset(ctx.claim, unclaimed);
 
-    var all_nets: std.ArrayListUnmanaged([]const u8) = .empty;
+    var all_nets: std.ArrayList([]const u8) = .empty;
     for (parts, 0..) |part, i| {
         for (part.pads) |pad| {
-            if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.UNCONNECTED_PREFIX)) continue;
-            const slot = try ctx.net_parts.getOrPut(pad.net);
+            if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.unconnected_prefix)) continue;
+            const slot = try ctx.net_parts.getOrPut(arena, pad.net);
             if (!slot.found_existing) {
                 slot.value_ptr.* = .empty;
                 try all_nets.append(arena, pad.net);
@@ -271,8 +271,8 @@ pub fn foldChannels(
         if (!std.mem.eql(u8, fam.prefix, prefix)) continue;
         var it = fam.nets.iterator();
         while (it.next()) |e| {
-            try ctx.seed.put(e.key_ptr.*, e.value_ptr.*);
-            try ctx.seed_template.put(e.key_ptr.*, fam.template);
+            try ctx.seed.put(arena, e.key_ptr.*, e.value_ptr.*);
+            try ctx.seed_template.put(arena, e.key_ptr.*, fam.template);
         }
     }
     if (ctx.seed.count() == 0) return .{};
@@ -285,19 +285,19 @@ pub fn foldChannels(
 /// Claim parts whose seed-family nets all carry one index.
 fn seedClaims(ctx: *Ctx) void {
     for (ctx.parts, 0..) |part, i| {
-        var idx: u64 = UNCLAIMED;
+        var idx: u64 = unclaimed;
         var conflict = false;
         for (part.pads) |pad| {
             const k = ctx.seed.get(pad.net) orelse continue;
-            if (idx == UNCLAIMED) {
+            if (idx == unclaimed) {
                 idx = k;
             } else if (idx != k) {
                 conflict = true;
             }
         }
         if (conflict) {
-            ctx.claim[i] = SHARED;
-        } else if (idx != UNCLAIMED) {
+            ctx.claim[i] = shared_marker;
+        } else if (idx != unclaimed) {
             ctx.claim[i] = idx;
         }
     }
@@ -319,24 +319,24 @@ fn propagateClaims(ctx: *Ctx) FoldError!void {
         while (it.next()) |entry| {
             if (ctx.seed.contains(entry.key_ptr.*)) continue;
             const members = entry.value_ptr.items;
-            var idx: u64 = UNCLAIMED;
+            var idx: u64 = unclaimed;
             var mixed = false;
             for (members) |i| {
                 const c = ctx.claim[i]; // frozen snapshot, not this round's proposals
-                if (c == UNCLAIMED or c == SHARED) continue;
-                if (idx == UNCLAIMED) {
+                if (c == unclaimed or c == shared_marker) continue;
+                if (idx == unclaimed) {
                     idx = c;
                 } else if (idx != c) {
                     mixed = true;
                 }
             }
-            if (mixed or idx == UNCLAIMED) continue;
+            if (mixed or idx == unclaimed) continue;
             for (members) |i| {
-                if (ctx.claim[i] != UNCLAIMED) continue;
-                if (proposal[i] == UNCLAIMED) {
+                if (ctx.claim[i] != unclaimed) continue;
+                if (proposal[i] == unclaimed) {
                     proposal[i] = idx;
-                } else if (proposal[i] != idx and proposal[i] != SHARED) {
-                    proposal[i] = SHARED; // tug-of-war between two channels
+                } else if (proposal[i] != idx and proposal[i] != shared_marker) {
+                    proposal[i] = shared_marker; // tug-of-war between two channels
                 }
             }
         }
@@ -386,13 +386,13 @@ fn writePartHead(ctx: *Ctx, w: anytype, part: ik.Part) FoldError!void {
 /// each pad lands on, which is what `internalNetKey` then measures.
 fn partBaseSignature(ctx: *Ctx, i: usize, chan: u64) FoldError![]const u8 {
     const part = ctx.parts[i];
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.arena);
     try writePartHead(ctx, w, part);
 
-    var binds: std.ArrayListUnmanaged([]const u8) = .empty;
+    var binds: std.ArrayList([]const u8) = .empty;
     for (part.pads) |pad| {
-        if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.UNCONNECTED_PREFIX)) continue;
+        if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.unconnected_prefix)) continue;
         const label = switch (classifyNet(ctx, pad.net, chan)) {
             .indexed => try std.fmt.allocPrint(ctx.arena, "{s}=T:{s}", .{ pad.number, ctx.seed_template.get(pad.net).? }),
             .internal => try std.fmt.allocPrint(ctx.arena, "{s}=I", .{pad.number}),
@@ -418,7 +418,7 @@ fn partBaseSignature(ctx: *Ctx, i: usize, chan: u64) FoldError![]const u8 {
 /// indistinguishable and a rewired channel could fold silently.
 fn internalNetKey(ctx: *Ctx, net: []const u8, chan: u64) FoldError![]const u8 {
     const members = (ctx.net_parts.getPtr(net) orelse return ctx.arena.dupe(u8, "?")).items;
-    var terms: std.ArrayListUnmanaged([]const u8) = .empty;
+    var terms: std.ArrayList([]const u8) = .empty;
     for (members) |mi| {
         const base = try partBaseSignature(ctx, mi, chan);
         // Which of this member's pads land on `net` (a part can touch one
@@ -429,7 +429,7 @@ fn internalNetKey(ctx: *Ctx, net: []const u8, chan: u64) FoldError![]const u8 {
         }
     }
     std.mem.sort([]const u8, terms.items, {}, strLess);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     for (terms.items) |t| {
         buf.appendSlice(ctx.arena, t) catch return error.OutOfMemory;
         buf.append(ctx.arena, ',') catch return error.OutOfMemory;
@@ -439,13 +439,13 @@ fn internalNetKey(ctx: *Ctx, net: []const u8, chan: u64) FoldError![]const u8 {
 
 fn partSignature(ctx: *Ctx, i: usize, chan: u64) FoldError![]const u8 {
     const part = ctx.parts[i];
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.arena);
     try writePartHead(ctx, w, part);
 
-    var binds: std.ArrayListUnmanaged([]const u8) = .empty;
+    var binds: std.ArrayList([]const u8) = .empty;
     for (part.pads) |pad| {
-        if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.UNCONNECTED_PREFIX)) continue;
+        if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.unconnected_prefix)) continue;
         const label = switch (classifyNet(ctx, pad.net, chan)) {
             .indexed => try std.fmt.allocPrint(ctx.arena, "{s}=T:{s}", .{ pad.number, ctx.seed_template.get(pad.net).? }),
             // Was `I:<netTemplate>` — same for every auto-net off one IC, so a
@@ -465,12 +465,12 @@ fn partSignature(ctx: *Ctx, i: usize, chan: u64) FoldError![]const u8 {
 }
 
 fn channelSignature(ctx: *Ctx, chan: u64) FoldError![]const u8 {
-    var sigs: std.ArrayListUnmanaged([]const u8) = .empty;
+    var sigs: std.ArrayList([]const u8) = .empty;
     for (ctx.parts, 0..) |_, i| {
         if (ctx.claim[i] == chan) try sigs.append(ctx.arena, try partSignature(ctx, i, chan));
     }
     std.mem.sort([]const u8, sigs.items, {}, strLess);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     for (sigs.items) |s| {
         try buf.appendSlice(ctx.arena, s);
         try buf.append(ctx.arena, '\n');
@@ -484,9 +484,9 @@ fn strLess(_: void, a: []const u8, b: []const u8) bool {
 
 /// Group channels by identical signature, fold the largest group (≥2).
 fn finishFold(ctx: *Ctx, design_name: []const u8) FoldError!FoldResult {
-    var indices: std.ArrayListUnmanaged(u64) = .empty;
+    var indices: std.ArrayList(u64) = .empty;
     for (ctx.claim) |c| {
-        if (c == UNCLAIMED or c == SHARED) continue;
+        if (c == unclaimed or c == shared_marker) continue;
         var known = false;
         for (indices.items) |k| {
             if (k == c) known = true;
@@ -496,10 +496,10 @@ fn finishFold(ctx: *Ctx, design_name: []const u8) FoldError!FoldResult {
     if (indices.items.len < 2) return .{};
     std.mem.sort(u64, indices.items, {}, std.sort.asc(u64));
 
-    var groups = std.StringHashMap(std.ArrayListUnmanaged(u64)).init(ctx.arena);
+    var groups = std.StringHashMapUnmanaged(std.ArrayList(u64)).empty;
     for (indices.items) |k| {
         const sig = try channelSignature(ctx, k);
-        const slot = try groups.getOrPut(sig);
+        const slot = try groups.getOrPut(ctx.arena, sig);
         if (!slot.found_existing) slot.value_ptr.* = .empty;
         try slot.value_ptr.append(ctx.arena, k);
     }
@@ -511,7 +511,7 @@ fn finishFold(ctx: *Ctx, design_name: []const u8) FoldError!FoldResult {
     const fold_set = best.?;
     if (fold_set.len < 2) return .{};
 
-    var skipped: std.ArrayListUnmanaged(u64) = .empty;
+    var skipped: std.ArrayList(u64) = .empty;
     for (indices.items) |k| {
         var in_fold = false;
         for (fold_set) |f| {
@@ -553,10 +553,10 @@ test "family detection finds CH~ and skips Net- auto names" {
 /// part wired IN/OUT to CHk nets, GND, and a private auto-net to a ferrite.
 /// Channel 3's ferrite has a different value, so it must deviate.
 fn syntheticParts(arena: std.mem.Allocator) ![]ik.Part {
-    var parts: std.ArrayListUnmanaged(ik.Part) = .empty;
+    var parts: std.ArrayList(ik.Part) = .empty;
     inline for (.{ 1, 2, 3 }) |k| {
         const ks = std.fmt.comptimePrint("{d}", .{k});
-        var sw_pads: std.ArrayListUnmanaged(ik.Pad) = .empty;
+        var sw_pads: std.ArrayList(ik.Pad) = .empty;
         try sw_pads.append(arena, .{ .number = "1", .net = "CH" ++ ks ++ "_IN", .func = "IN" });
         try sw_pads.append(arena, .{ .number = "2", .net = "CH" ++ ks ++ "_OUT", .func = "OUT" });
         try sw_pads.append(arena, .{ .number = "3", .net = "+5.0V", .func = "VDD" });
@@ -574,7 +574,7 @@ fn syntheticParts(arena: std.mem.Allocator) ![]ik.Part {
             .node = undefined,
             .comp_name = "sw-part",
         });
-        var fb_pads: std.ArrayListUnmanaged(ik.Pad) = .empty;
+        var fb_pads: std.ArrayList(ik.Pad) = .empty;
         try fb_pads.append(arena, .{ .number = "1", .net = "CTL_BUS", .func = "" });
         try fb_pads.append(arena, .{ .number = "2", .net = "Net-IC" ++ ks ++ "-CTL", .func = "" });
         try parts.append(arena, .{
@@ -653,13 +653,13 @@ fn countFolded(folded: []const bool) usize {
 /// old template-only signature could not see. `rewire_last` picks whether to
 /// introduce that deviation.
 fn ambiguousInternalParts(arena: std.mem.Allocator, comptime n: usize, rewire_last: bool) ![]ik.Part {
-    var parts: std.ArrayListUnmanaged(ik.Part) = .empty;
+    var parts: std.ArrayList(ik.Part) = .empty;
     inline for (0..n) |ci| {
         const k = ci + 1;
         const ks = std.fmt.comptimePrint("{d}", .{k});
         const na = "Net-IC" ++ ks ++ "-3"; // IC pad 4's private net
         const nb = "Net-IC" ++ ks ++ "-7"; // IC pad 5's private net
-        var ic_pads: std.ArrayListUnmanaged(ik.Pad) = .empty;
+        var ic_pads: std.ArrayList(ik.Pad) = .empty;
         try ic_pads.append(arena, .{ .number = "1", .net = "CH" ++ ks ++ "_IN", .func = "IN" });
         try ic_pads.append(arena, .{ .number = "2", .net = "CH" ++ ks ++ "_OUT", .func = "OUT" });
         try ic_pads.append(arena, .{ .number = "3", .net = "GND", .func = "GND" });
@@ -681,7 +681,7 @@ fn ambiguousInternalParts(arena: std.mem.Allocator, comptime n: usize, rewire_la
         // The resistor: honest channels wire it to `na`; the deviant last
         // channel wires it to `nb` (same value, different net).
         const r_net = if (rewire_last and ci == n - 1) nb else na;
-        var r_pads: std.ArrayListUnmanaged(ik.Pad) = .empty;
+        var r_pads: std.ArrayList(ik.Pad) = .empty;
         try r_pads.append(arena, .{ .number = "1", .net = r_net, .func = "" });
         try r_pads.append(arena, .{ .number = "2", .net = "GND", .func = "" });
         try parts.append(arena, .{

@@ -12,7 +12,7 @@ pub const Entry = struct { name: []const u8, data: []const u8 };
 
 /// Fixed DOS date for every entry (1980-01-01, the ZIP epoch) so archives
 /// are byte-reproducible for identical inputs.
-const DOS_DATE: u16 = 0x0021;
+const dos_date: u16 = 0x0021;
 
 /// Write `entries` as a complete ZIP archive: local headers + data, central
 /// directory, end record.
@@ -26,7 +26,7 @@ pub fn write(w: *std.Io.Writer, entries: []const Entry) std.Io.Writer.Error!void
         try w.writeInt(u16, 0, .little); // flags
         try w.writeInt(u16, 0, .little); // method: store
         try w.writeInt(u16, 0, .little); // mod time
-        try w.writeInt(u16, DOS_DATE, .little); // mod date
+        try w.writeInt(u16, dos_date, .little); // mod date
         try w.writeInt(u32, crc, .little);
         try w.writeInt(u32, @intCast(e.data.len), .little); // compressed
         try w.writeInt(u32, @intCast(e.data.len), .little); // uncompressed
@@ -48,7 +48,7 @@ pub fn write(w: *std.Io.Writer, entries: []const Entry) std.Io.Writer.Error!void
         try w.writeInt(u16, 0, .little); // flags
         try w.writeInt(u16, 0, .little); // method
         try w.writeInt(u16, 0, .little); // mod time
-        try w.writeInt(u16, DOS_DATE, .little); // mod date
+        try w.writeInt(u16, dos_date, .little); // mod date
         try w.writeInt(u32, crc, .little);
         try w.writeInt(u32, @intCast(e.data.len), .little);
         try w.writeInt(u32, @intCast(e.data.len), .little);

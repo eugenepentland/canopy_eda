@@ -20,15 +20,15 @@ const numeric = @import("../numeric.zig");
 /// Production host. A deployment can point at the sandbox by setting
 /// `DIGIKEY_API_BASE=https://sandbox-api.digikey.com`.
 pub const default_base = "https://api.digikey.com";
-const TOKEN_PATH = "/v1/oauth2/token";
-const KEYWORD_PATH = "/products/v4/search/keyword";
-const TOKEN_TIMEOUT_SECS = "20";
-const SEARCH_TIMEOUT_SECS = "30";
-const DOWNLOAD_TIMEOUT_SECS = "60";
+const token_path = "/v1/oauth2/token";
+const keyword_path = "/products/v4/search/keyword";
+const token_timeout_secs = "20";
+const search_timeout_secs = "30";
+const download_timeout_secs = "60";
 /// JSON responses are small; datasheet PDFs are not.
-const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
-const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " ++
+const max_response_bytes: usize = 4 * 1024 * 1024;
+const max_download_bytes: usize = 64 * 1024 * 1024;
+const browser_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " ++
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
 /// One quantity price break from a variation's `StandardPricing` ladder —
@@ -157,12 +157,12 @@ pub fn resolveMpn(
 /// query yields a single empty term (the server then matches nothing). Caller
 /// owns the slice and every joined term.
 fn keywordVariants(allocator: std.mem.Allocator, query: []const u8) std.mem.Allocator.Error![]const []const u8 {
-    var toks: std.ArrayListUnmanaged([]const u8) = .empty;
+    var toks: std.ArrayList([]const u8) = .empty;
     defer toks.deinit(allocator); // token slices point into `query`; only the list buffer is owned
     var it = std.mem.tokenizeAny(u8, query, " \t\r\n");
     while (it.next()) |t| try toks.append(allocator, t);
 
-    var out: std.ArrayListUnmanaged([]const u8) = .empty;
+    var out: std.ArrayList([]const u8) = .empty;
     if (toks.items.len == 0) {
         try out.append(allocator, try allocator.dupe(u8, query));
         return out.toOwnedSlice(allocator);
@@ -179,22 +179,22 @@ fn keywordVariants(allocator: std.mem.Allocator, query: []const u8) std.mem.Allo
 /// POST the client-credentials grant and return the bearer token, or null on a
 /// transport failure or a response without an `access_token` (bad credentials).
 fn fetchToken(allocator: std.mem.Allocator, base: []const u8, client_id: []const u8, client_secret: []const u8) ?[]const u8 {
-    const url = std.fmt.allocPrint(allocator, "{s}{s}", .{ base, TOKEN_PATH }) catch return null;
+    const url = std.fmt.allocPrint(allocator, "{s}{s}", .{ base, token_path }) catch return null;
     const id_arg = std.fmt.allocPrint(allocator, "client_id={s}", .{client_id}) catch return null;
     const secret_arg = std.fmt.allocPrint(allocator, "client_secret={s}", .{client_secret}) catch return null;
     const body = curl(allocator, &.{
         "-X",                            "POST",
         url,                             "-H",
-        FORM_CT,                         FORM_FIELD,
-        "grant_type=client_credentials", FORM_FIELD,
-        id_arg,                          FORM_FIELD,
+        form_ct,                         form_field,
+        "grant_type=client_credentials", form_field,
+        id_arg,                          form_field,
         secret_arg,
-    }, TOKEN_TIMEOUT_SECS, MAX_RESPONSE_BYTES) orelse return null;
+    }, token_timeout_secs, max_response_bytes) orelse return null;
     return parseAccessToken(allocator, body);
 }
 
-const FORM_CT = "Content-Type: application/x-www-form-urlencoded";
-const FORM_FIELD = "--data-urlencode";
+const form_ct = "Content-Type: application/x-www-form-urlencoded";
+const form_field = "--data-urlencode";
 
 /// Extract and dup the `access_token` string from an OAuth token response, or
 /// null when the JSON is unparseable or carries no token (e.g. an error body).
@@ -217,11 +217,11 @@ fn keywordSearch(
     query: []const u8,
     limit: usize,
 ) ?[]u8 {
-    const url = std.fmt.allocPrint(allocator, "{s}{s}", .{ base, KEYWORD_PATH }) catch return null;
+    const url = std.fmt.allocPrint(allocator, "{s}{s}", .{ base, keyword_path }) catch return null;
     const auth = std.fmt.allocPrint(allocator, "Authorization: Bearer {s}", .{token}) catch return null;
     const client = std.fmt.allocPrint(allocator, "X-DIGIKEY-Client-Id: {s}", .{client_id}) catch return null;
 
-    var body: std.ArrayListUnmanaged(u8) = .empty;
+    var body: std.ArrayList(u8) = .empty;
     const bw = body.writer(allocator);
     bw.writeAll("{\"Keywords\":") catch return null;
     json_writer.writeString(bw, query) catch return null;
@@ -232,14 +232,14 @@ fn keywordSearch(
         url,          "-H",
         auth,         "-H",
         client,       "-H",
-        JSON_ACCEPT,  "-H",
-        JSON_CONTENT, "--data-binary",
+        json_accept,  "-H",
+        json_content, "--data-binary",
         body.items,
-    }, SEARCH_TIMEOUT_SECS, MAX_RESPONSE_BYTES);
+    }, search_timeout_secs, max_response_bytes);
 }
 
-const JSON_ACCEPT = "Accept: application/json";
-const JSON_CONTENT = "Content-Type: application/json";
+const json_accept = "Accept: application/json";
+const json_content = "Content-Type: application/json";
 
 // ── Response mapping ──────────────────────────────────────────────
 
@@ -256,7 +256,7 @@ fn collectProducts(allocator: std.mem.Allocator, root: std.json.Value, limit: us
 /// lifecycle status, and the per-packaging price ladders all come from the same
 /// keyword-search response — DigiKey returns them inline, so no second call.
 fn mapProducts(allocator: std.mem.Allocator, items: []std.json.Value, limit: usize) std.mem.Allocator.Error![]Product {
-    var list: std.ArrayListUnmanaged(Product) = .empty;
+    var list: std.ArrayList(Product) = .empty;
     for (items) |item| {
         if (list.items.len >= limit) break;
         const mpn = strField(item, "ManufacturerProductNumber") orelse continue;
@@ -285,7 +285,7 @@ fn mapVariations(allocator: std.mem.Allocator, product: std.json.Value) std.mem.
     if (product != .object) return &.{};
     const pv = product.object.get("ProductVariations") orelse return &.{};
     if (pv != .array) return &.{};
-    var list: std.ArrayListUnmanaged(Variation) = .empty;
+    var list: std.ArrayList(Variation) = .empty;
     for (pv.array.items) |v| {
         try list.append(allocator, .{
             .digikey_part_number = try dupeOpt(allocator, nonEmpty(strField(v, "DigiKeyProductNumber"))),
@@ -304,7 +304,7 @@ fn mapPriceBreaks(allocator: std.mem.Allocator, variation: std.json.Value) std.m
     if (variation != .object) return &.{};
     const sp = variation.object.get("StandardPricing") orelse return &.{};
     if (sp != .array) return &.{};
-    var list: std.ArrayListUnmanaged(PriceBreak) = .empty;
+    var list: std.ArrayList(PriceBreak) = .empty;
     for (sp.array.items) |b| {
         try list.append(allocator, .{
             .break_quantity = u64Field(b, "BreakQuantity"),
@@ -382,7 +382,7 @@ fn dupeOpt(allocator: std.mem.Allocator, s: ?[]const u8) std.mem.Allocator.Error
 fn curl(allocator: std.mem.Allocator, extra: []const []const u8, timeout_secs: []const u8, max_bytes: usize) ?[]u8 {
     rate_limiter.digikey.acquire();
     defer rate_limiter.digikey.release();
-    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+    var argv: std.ArrayList([]const u8) = .empty;
     argv.appendSlice(allocator, &.{ "curl", "-sS", "--max-time", timeout_secs }) catch return null;
     argv.appendSlice(allocator, extra) catch return null;
 
@@ -446,15 +446,15 @@ fn pickProduct(products: []const Product, part_number: []const u8, manufacturer:
     return first_exact orelse products[0];
 }
 
-const GOTO_MARKER = "gotoUrl=";
+const goto_marker = "gotoUrl=";
 
 /// Some DigiKey `datasheet_url`s point at a manufacturer interstitial that wraps
 /// the real target in a `gotoUrl=<percent-encoded url>` query param (e.g. TI's
 /// `suppproductinfo.tsp`). Return that decoded target when present, else the URL
 /// unchanged. Following redirects on the result reaches the actual PDF.
 fn normalizeDatasheetUrl(allocator: std.mem.Allocator, url: []const u8) std.mem.Allocator.Error![]u8 {
-    const idx = std.mem.indexOf(u8, url, GOTO_MARKER) orelse return allocator.dupe(u8, url);
-    const start = idx + GOTO_MARKER.len;
+    const idx = std.mem.indexOf(u8, url, goto_marker) orelse return allocator.dupe(u8, url);
+    const start = idx + goto_marker.len;
     var end = start;
     while (end < url.len and url[end] != '&') : (end += 1) {}
     return percentDecode(allocator, url[start..end]);
@@ -462,7 +462,7 @@ fn normalizeDatasheetUrl(allocator: std.mem.Allocator, url: []const u8) std.mem.
 
 /// Percent-decode `%XX` escapes; non-escapes pass through verbatim.
 fn percentDecode(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < s.len) {
         const hi = if (s[i] == '%' and i + 2 < s.len) hexVal(s[i + 1]) else null;
@@ -491,7 +491,7 @@ fn hexVal(c: u8) ?u8 {
 fn downloadPdf(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
     // `--` stops curl option parsing so a `-`-leading vendor URL can't be
     // reparsed as a flag (arg-injection / SSRF hardening).
-    return curl(allocator, &.{ "-L", "-A", BROWSER_UA, "--", url }, DOWNLOAD_TIMEOUT_SECS, MAX_DOWNLOAD_BYTES);
+    return curl(allocator, &.{ "-L", "-A", browser_ua, "--", url }, download_timeout_secs, max_download_bytes);
 }
 
 /// PDF magic — distinguishes a real datasheet from an HTML interstitial page.

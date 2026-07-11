@@ -21,17 +21,17 @@ pub const resolveIdentities = bom_resolve.resolveIdentities;
 
 // ── Constants ─────────────────────────────────────────────────────
 // UUID v4 byte indices (RFC 4122)
-const UUID_VERSION_BYTE: usize = 6;
-const UUID_VARIANT_BYTE: usize = 8;
-const UUID_BYTE_5: usize = 5;
-const UUID_BYTE_7: usize = 7;
-const UUID_BYTE_9: usize = 9;
-const UUID_BYTE_10: usize = 10;
-const UUID_BYTE_11: usize = 11;
-const UUID_BYTE_12: usize = 12;
-const UUID_BYTE_13: usize = 13;
-const UUID_BYTE_14: usize = 14;
-const UUID_BYTE_15: usize = 15;
+const uuid_version_byte: usize = 6;
+const uuid_variant_byte: usize = 8;
+const uuid_byte_5: usize = 5;
+const uuid_byte_7: usize = 7;
+const uuid_byte_9: usize = 9;
+const uuid_byte_10: usize = 10;
+const uuid_byte_11: usize = 11;
+const uuid_byte_12: usize = 12;
+const uuid_byte_13: usize = 13;
+const uuid_byte_14: usize = 14;
+const uuid_byte_15: usize = 15;
 
 /// Error set for BOM loading and application. Covers parser-side errors,
 /// the file IO surface infra_fs.cwd() exposes, and `OutOfMemory`.
@@ -88,7 +88,7 @@ pub fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) BomError![]co
     const nodes = parser_mod.parse(allocator, source) catch return &.{};
     defer parser_mod.freeNodes(allocator, nodes);
 
-    var entries: std.ArrayListUnmanaged(BomEntry) = .empty;
+    var entries: std.ArrayList(BomEntry) = .empty;
     errdefer entries.deinit(allocator);
 
     for (nodes) |node| {
@@ -104,8 +104,8 @@ pub fn loadBom(allocator: std.mem.Allocator, bom_path: []const u8) BomError![]co
 
         // Parse sub-forms: (id "..."), (key "val"), ...
         var entry_id: []const u8 = "";
-        var props: std.ArrayListUnmanaged(Property) = .empty;
-        var entry_nets: std.ArrayListUnmanaged([]const u8) = .empty;
+        var props: std.ArrayList(Property) = .empty;
+        var entry_nets: std.ArrayList([]const u8) = .empty;
         const start_idx: usize = if (has_component) 4 else 3;
         if (children.len > start_idx) {
             for (children[start_idx..]) |prop_node| {
@@ -170,20 +170,20 @@ pub fn collectFlatInstances(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     prefix: []const u8,
-    list: *std.ArrayListUnmanaged(FlatInfo),
+    list: *std.ArrayList(FlatInfo),
     ref_style: env_mod.RefStyle,
 ) std.mem.Allocator.Error!void {
-    var net_map = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(allocator);
+    var net_map = std.StringHashMapUnmanaged(std.ArrayList([]const u8)).empty;
     defer {
         var it = net_map.iterator();
         while (it.next()) |entry| {
             entry.value_ptr.deinit(allocator);
         }
-        net_map.deinit();
+        net_map.deinit(allocator);
     }
     for (block.nets) |net| {
         for (net.pins) |pin| {
-            const gop = try net_map.getOrPut(pin.ref_des);
+            const gop = try net_map.getOrPut(allocator, pin.ref_des);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
             try gop.value_ptr.append(allocator, net.name);
         }
@@ -228,15 +228,15 @@ pub fn collectFlatInstances(
 pub fn generateUuid(allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
     var bytes: [16]u8 = undefined;
     infra_random.bytes(&bytes);
-    bytes[UUID_VERSION_BYTE] = (bytes[UUID_VERSION_BYTE] & 0x0f) | 0x40;
-    bytes[UUID_VARIANT_BYTE] = (bytes[UUID_VARIANT_BYTE] & 0x3f) | 0x80;
+    bytes[uuid_version_byte] = (bytes[uuid_version_byte] & 0x0f) | 0x40;
+    bytes[uuid_variant_byte] = (bytes[uuid_variant_byte] & 0x3f) | 0x80;
 
     return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}" ++
         "-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
         bytes[0],                 bytes[1],            bytes[2],                 bytes[3],
-        bytes[4],                 bytes[UUID_BYTE_5],  bytes[UUID_VERSION_BYTE], bytes[UUID_BYTE_7],
-        bytes[UUID_VARIANT_BYTE], bytes[UUID_BYTE_9],  bytes[UUID_BYTE_10],      bytes[UUID_BYTE_11],
-        bytes[UUID_BYTE_12],      bytes[UUID_BYTE_13], bytes[UUID_BYTE_14],      bytes[UUID_BYTE_15],
+        bytes[4],                 bytes[uuid_byte_5],  bytes[uuid_version_byte], bytes[uuid_byte_7],
+        bytes[uuid_variant_byte], bytes[uuid_byte_9],  bytes[uuid_byte_10],      bytes[uuid_byte_11],
+        bytes[uuid_byte_12],      bytes[uuid_byte_13], bytes[uuid_byte_14],      bytes[uuid_byte_15],
     });
 }
 
@@ -277,11 +277,11 @@ pub fn applyBomUuids(
     // hierarchical (`buck/C3`), so uuids must be matched against the same
     // prefixed key — matching on the child's bare ref_des applied a top-level
     // `C3`'s uuid to every same-named sub-block twin (duplicate identities).
-    var uuid_map = std.StringHashMap([]const u8).init(allocator);
-    defer uuid_map.deinit();
+    var uuid_map = std.StringHashMapUnmanaged([]const u8).empty;
+    defer uuid_map.deinit(allocator);
     for (entries) |entry| {
         if (entry.uuid.len > 0) {
-            try uuid_map.put(entry.ref_des, entry.uuid);
+            try uuid_map.put(allocator, entry.ref_des, entry.uuid);
         }
     }
 
@@ -293,7 +293,7 @@ pub fn applyBomUuids(
 /// `bom_resolve.applyBom`'s prefix threading).
 fn applyBomUuidsRec(
     block: *const DesignBlock,
-    uuid_map: *const std.StringHashMap([]const u8),
+    uuid_map: *const std.StringHashMapUnmanaged([]const u8),
     allocator: std.mem.Allocator,
     prefix: []const u8,
 ) void {

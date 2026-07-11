@@ -27,10 +27,10 @@ const Handler = serve_root.Handler;
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
-const MAX_MODULE_BYTES: usize = 1024 * 1024;
-const ERR_NOT_FOUND = "module source not found";
+const max_module_bytes: usize = 1024 * 1024;
+const err_not_found = "module source not found";
 
-const PAGE_CSS =
+const page_css =
     \\<style>
     \\body{margin:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
     \\.mod-wrap{max-width:960px;margin:0 auto;padding:8px 16px 32px;}
@@ -70,7 +70,7 @@ const PAGE_CSS =
 /// `/api/module-source` and drop the text on the clipboard. Mirrors the
 /// handler baked into `schematic_viewer.js` so the standalone module pages
 /// don't need that whole bundle.
-const COPY_SCRIPT =
+const copy_script =
     \\<script>
     \\document.addEventListener('click',function(e){
     \\ var b=e.target.closest&&e.target.closest('.copy-src-btn');
@@ -163,14 +163,14 @@ pub fn moduleSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
     const path = (resolveSourcePath(ctx.allocator, ctx.project_dir, src) catch null) orelse {
         res.status = 404;
-        res.body = ERR_NOT_FOUND;
+        res.body = err_not_found;
         return;
     };
     defer ctx.allocator.free(path);
 
-    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, MAX_MODULE_BYTES) catch {
+    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, max_module_bytes) catch {
         res.status = 404;
-        res.body = ERR_NOT_FOUND;
+        res.body = err_not_found;
         return;
     };
     res.content_type = .TEXT;
@@ -241,14 +241,14 @@ fn nodeHasCohesionGroup(node: sexpr_ast.Node) bool {
 /// atom prints as-is; a `(param default)` pair prints `name=default` so the
 /// card shows which arguments are optional. Null on allocation failure.
 fn renderParamList(allocator: std.mem.Allocator, params_node: sexpr_ast.Node) ?[]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     appendParamList(allocator, &buf, params_node) catch return null;
     return buf.items;
 }
 
 fn appendParamList(
     allocator: std.mem.Allocator,
-    buf: *std.ArrayListUnmanaged(u8),
+    buf: *std.ArrayList(u8),
     params_node: sexpr_ast.Node,
 ) std.mem.Allocator.Error!void {
     try buf.append(allocator, '(');
@@ -374,13 +374,13 @@ fn collectModulesUncached(allocator: std.mem.Allocator, project_dir: []const u8)
     var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return &[_]ModuleEntry{};
     defer dir.close();
 
-    var entries: std.ArrayListUnmanaged(ModuleEntry) = .empty;
+    var entries: std.ArrayList(ModuleEntry) = .empty;
     var iter = dir.iterate();
     while (iter.next() catch null) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
         const base = try allocator.dupe(u8, entry.name[0 .. entry.name.len - ".sexp".len]);
-        const content = dir.readFileAlloc(allocator, entry.name, MAX_MODULE_BYTES) catch {
+        const content = dir.readFileAlloc(allocator, entry.name, max_module_bytes) catch {
             try entries.append(allocator, .{ .name = base, .params = "", .doc = "" });
             continue;
         };
@@ -477,7 +477,7 @@ pub fn renderModulePage(ctx: *Handler, res: *httpz.Response, name: []const u8) H
             resolved.block,
             ctx.project_dir,
             name,
-            assets_css.NAVBAR_CSS,
+            assets_css.navbar_css,
             .pass,
             null,
             &empty_checks,
@@ -506,9 +506,9 @@ fn writeSourceOnlyPage(
     src_path: []const u8,
     render_failed: bool,
 ) HandlerError!void {
-    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, src_path, MAX_MODULE_BYTES) catch {
+    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, src_path, max_module_bytes) catch {
         res.status = 404;
-        res.body = ERR_NOT_FOUND;
+        res.body = err_not_found;
         return;
     };
 
@@ -518,9 +518,9 @@ fn writeSourceOnlyPage(
     try w.writeAll("<title>");
     try writeHtmlEscaped(w, name);
     try w.writeAll(" — module</title><style>");
-    try w.writeAll(assets_css.NAVBAR_CSS);
+    try w.writeAll(assets_css.navbar_css);
     try w.writeAll("</style>");
-    try w.writeAll(PAGE_CSS);
+    try w.writeAll(page_css);
     try w.writeAll("</head><body>");
     try pages.Navbar.render(.{"designs"}, w);
     try w.writeAll("<div class=\"mod-wrap\">");
@@ -542,7 +542,7 @@ fn writeSourceOnlyPage(
     try w.writeAll("<pre class=\"mod-src-pre\">");
     try writeHtmlEscaped(w, content);
     try w.writeAll("</pre></div>");
-    try w.writeAll(COPY_SCRIPT);
+    try w.writeAll(copy_script);
     try w.writeAll("</body></html>");
 
     res.body = aw.written();

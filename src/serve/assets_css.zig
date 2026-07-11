@@ -2,8 +2,8 @@ const std = @import("std");
 
 // ── Shared navbar ─────────────────────────────────────────────────────
 
-pub const NAVBAR_CSS = @embedFile("assets/navbar.css");
+pub const navbar_css = @embedFile("assets/navbar.css");
 
 // ── CSS for index page ────────────────────────────────────────────────
 
-pub const INDEX_CSS = @embedFile("assets/index.css");
+pub const index_css = @embedFile("assets/index.css");

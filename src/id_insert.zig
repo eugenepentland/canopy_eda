@@ -30,8 +30,8 @@ const Edit = struct {
     text: []const u8,
 };
 
-const ORDER_ID: u8 = 0;
-const ORDER_IDS: u8 = 1;
+const order_id: u8 = 0;
+const order_ids: u8 = 1;
 
 /// Insert pending `(id …)` forms and `(ids ("key" token) …)` child sidecars into
 /// a source file in a single pass. Both kinds reference byte offsets in the
@@ -74,7 +74,7 @@ pub fn applyInserts(
 ) IdInsertError![]u8 {
     try assertTokensUnique(allocator, source, pending, pending_child);
 
-    var edits: std.ArrayListUnmanaged(Edit) = .empty;
+    var edits: std.ArrayList(Edit) = .empty;
     defer {
         for (edits.items) |e| allocator.free(e.text);
         edits.deinit(allocator);
@@ -83,7 +83,7 @@ pub fn applyInserts(
     for (pending) |pid| {
         const close = findMatchingClose(source, pid.form_offset) orelse continue;
         const text = try std.fmt.allocPrint(allocator, " (id {s})", .{pid.id});
-        try edits.append(allocator, .{ .pos = close, .order = ORDER_ID, .text = text });
+        try edits.append(allocator, .{ .pos = close, .order = order_id, .text = text });
     }
     try collectChildIdEdits(allocator, source, pending_child, &edits);
 
@@ -91,7 +91,7 @@ pub fn applyInserts(
     // position, higher order first so `(id …)` (order 0) lands left of `(ids …)`.
     std.mem.sort(Edit, edits.items, {}, editBefore);
 
-    var result: std.ArrayListUnmanaged(u8) = .empty;
+    var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
     try result.appendSlice(allocator, source);
     for (edits.items) |e| {
@@ -142,17 +142,17 @@ fn collectChildIdEdits(
     allocator: std.mem.Allocator,
     source: []const u8,
     pending_child: []const Evaluator.PendingChildId,
-    edits: *std.ArrayListUnmanaged(Edit),
+    edits: *std.ArrayList(Edit),
 ) IdInsertError!void {
     if (pending_child.len == 0) return;
-    var groups = std.AutoHashMap(u32, std.ArrayListUnmanaged(Evaluator.PendingChildId)).init(allocator);
+    var groups = std.AutoHashMapUnmanaged(u32, std.ArrayList(Evaluator.PendingChildId)).empty;
     defer {
         var dit = groups.valueIterator();
         while (dit.next()) |list| list.deinit(allocator);
-        groups.deinit();
+        groups.deinit(allocator);
     }
     for (pending_child) |pc| {
-        const gop = try groups.getOrPut(pc.parent_form_offset);
+        const gop = try groups.getOrPut(allocator, pc.parent_form_offset);
         if (!gop.found_existing) gop.value_ptr.* = .empty;
         try gop.value_ptr.append(allocator, pc);
     }
@@ -165,18 +165,18 @@ fn collectChildIdEdits(
         if (findExistingIdsForm(source, parent_offset, parent_close)) |ids_close| {
             for (group) |pc| {
                 const text = try std.fmt.allocPrint(allocator, " (\"{s}\" {s})", .{ pc.key, pc.id });
-                try edits.append(allocator, .{ .pos = ids_close, .order = ORDER_IDS, .text = text });
+                try edits.append(allocator, .{ .pos = ids_close, .order = order_ids, .text = text });
             }
         } else {
             const text = try buildIdsForm(allocator, group);
-            try edits.append(allocator, .{ .pos = parent_close, .order = ORDER_IDS, .text = text });
+            try edits.append(allocator, .{ .pos = parent_close, .order = order_ids, .text = text });
         }
     }
 }
 
 /// Build a fresh ` (ids ("k1" t1) ("k2" t2) …)` string for a parent's children.
 fn buildIdsForm(allocator: std.mem.Allocator, group: []const Evaluator.PendingChildId) IdInsertError![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.appendSlice(allocator, " (ids");
     for (group) |pc| {

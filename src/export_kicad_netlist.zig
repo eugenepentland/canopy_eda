@@ -30,10 +30,10 @@ pub fn writeNetlist(
     design_name: []const u8,
     instances: []const FlatInstance,
     nets: []const FlatNet,
-    fp_name_map: *const std.StringHashMap([]const u8),
-    fp_pad_map: *const std.StringHashMap([]const []const u8),
+    fp_name_map: *const std.StringHashMapUnmanaged([]const u8),
+    fp_pad_map: *const std.StringHashMapUnmanaged([]const []const u8),
 ) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
@@ -73,11 +73,11 @@ pub fn writeNetlist(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const tmp = arena.allocator();
-    var connected_pins = std.StringHashMap(void).init(tmp);
+    var connected_pins = std.StringHashMapUnmanaged(void).empty;
     for (nets) |net| {
         for (net.pins) |pin| {
             const key = try std.fmt.allocPrint(tmp, "{s}\x00{s}", .{ pin.ref_des, pin.pin });
-            try connected_pins.put(key, {});
+            try connected_pins.put(tmp, key, {});
         }
     }
 
@@ -123,7 +123,7 @@ pub fn extractPadNames(allocator: std.mem.Allocator, source: []const u8) Netlist
     if (!root.isForm("footprint")) return error.InvalidFormat;
     const children = root.asList() orelse return error.InvalidFormat;
 
-    var pads: std.ArrayListUnmanaged([]const u8) = .empty;
+    var pads: std.ArrayList([]const u8) = .empty;
     for (children[2..]) |child| {
         if (child.isForm("pad")) {
             const cl = child.asList() orelse continue;
@@ -177,7 +177,7 @@ pub fn collectInstances(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     prefix: []const u8,
-    list: *std.ArrayListUnmanaged(FlatInstance),
+    list: *std.ArrayList(FlatInstance),
     ref_style: env_mod.RefStyle,
 ) std.mem.Allocator.Error!void {
     for (block.instances) |inst| {
@@ -225,7 +225,7 @@ pub fn collectNets(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     prefix: []const u8,
-    list: *std.ArrayListUnmanaged(FlatNet),
+    list: *std.ArrayList(FlatNet),
     ref_style: env_mod.RefStyle,
 ) std.mem.Allocator.Error!void {
     for (block.nets) |net| {
@@ -272,7 +272,7 @@ pub fn collectNetTies(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     prefix: []const u8,
-    list: *std.ArrayListUnmanaged(FlatTie),
+    list: *std.ArrayList(FlatTie),
 ) std.mem.Allocator.Error!void {
     for (block.net_ties) |t| {
         const a = try prefixed(allocator, prefix, t.a);
@@ -302,16 +302,16 @@ fn preferName(candidate: []const u8, incumbent: []const u8) bool {
 /// the right parent name).
 pub fn applyNetTies(
     allocator: std.mem.Allocator,
-    nets: *std.ArrayListUnmanaged(FlatNet),
+    nets: *std.ArrayList(FlatNet),
     ties: []const FlatTie,
 ) std.mem.Allocator.Error!void {
     if (ties.len == 0 and nets.items.len == 0) return;
 
     var name_to_idx: std.StringHashMapUnmanaged(u32) = .empty;
     defer name_to_idx.deinit(allocator);
-    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(allocator);
-    var parent: std.ArrayListUnmanaged(u32) = .empty;
+    var parent: std.ArrayList(u32) = .empty;
     defer parent.deinit(allocator);
 
     const getOrAdd = struct {
@@ -319,8 +319,8 @@ pub fn applyNetTies(
             al: std.mem.Allocator,
             n: []const u8,
             idx_map: *std.StringHashMapUnmanaged(u32),
-            all_names: *std.ArrayListUnmanaged([]const u8),
-            par: *std.ArrayListUnmanaged(u32),
+            all_names: *std.ArrayList([]const u8),
+            par: *std.ArrayList(u32),
         ) !u32 {
             const gop = try idx_map.getOrPut(al, n);
             if (gop.found_existing) return gop.value_ptr.*;
@@ -333,7 +333,7 @@ pub fn applyNetTies(
     }.f;
 
     const find = struct {
-        fn f(par: *std.ArrayListUnmanaged(u32), idx: u32) u32 {
+        fn f(par: *std.ArrayList(u32), idx: u32) u32 {
             var i = idx;
             while (par.items[i] != i) : (i = par.items[i]) {}
             var j = idx;
@@ -411,7 +411,7 @@ pub fn applyNetTies(
     }
 
     // Rebuild nets list, merging pins by canonical name.
-    var merged: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged(FlatPin)) = .empty;
+    var merged: std.StringArrayHashMapUnmanaged(std.ArrayList(FlatPin)) = .empty;
     defer {
         var it = merged.iterator();
         while (it.next()) |e| e.value_ptr.deinit(allocator);

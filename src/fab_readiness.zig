@@ -33,13 +33,13 @@ const pad_shape = @import("placement/pad_shape.zig");
 /// courtyard centre sits more than this far outside the board outline — the
 /// same "clearly off-board" band the `board_edge` DRC skips, promoted here to
 /// an explicit export-blocking error.
-pub const STAGING_BAND_MM: f64 = 10.0;
+pub const staging_band_mm: f64 = 10.0;
 
 /// Copper touching a pad's box within this slack (mm) is taken to electrically
 /// connect it — a routed track's endpoint lands on the pad centre but the
 /// stored value may be a hair off after snapping/serialization, and a via/pad
 /// that merely abuts counts as connected for airwire purposes.
-const TOUCH_SLACK_MM: f64 = 0.02;
+const touch_slack_mm: f64 = 0.02;
 
 /// One finding. `id` is a stable machine key (for the viewer to group/style),
 /// `message` the human line, and the optional net/ref/count give the modal
@@ -102,8 +102,8 @@ pub fn check(
     copper: export_gerber.Copper,
     ctx: Context,
 ) std.mem.Allocator.Error!Report {
-    var errors: std.ArrayListUnmanaged(Item) = .empty;
-    var warnings: std.ArrayListUnmanaged(Item) = .empty;
+    var errors: std.ArrayList(Item) = .empty;
+    var warnings: std.ArrayList(Item) = .empty;
     var stats: Stats = .{
         .parts = placement.parts.len,
         .nets = placement.nets.len,
@@ -131,7 +131,7 @@ pub fn check(
         for (placement.parts) |p| {
             const cc = optimizer.worldPadCenter(p, p.ccx, p.ccy);
             const inset = edgeInset(br, cc[0], cc[1]);
-            if (inset < -STAGING_BAND_MM) {
+            if (inset < -staging_band_mm) {
                 try errors.append(arena, .{
                     .id = "part-off-board",
                     .message = try std.fmt.allocPrint(arena, "{s} sits outside the board outline (staging band)" ++
@@ -178,8 +178,8 @@ pub fn check(
     // Partition by severity: error-severity violations block the gate; warnings
     // (courtyard overlap, mask slivers, silkscreen over a pad) flow through as
     // an informational finding but never 409 the download.
-    var drc_errs: std.ArrayListUnmanaged(drc.Violation) = .empty;
-    var drc_warns: std.ArrayListUnmanaged(drc.Violation) = .empty;
+    var drc_errs: std.ArrayList(drc.Violation) = .empty;
+    var drc_warns: std.ArrayList(drc.Violation) = .empty;
     for (violations) |v| {
         if (v.severity == .warn) try drc_warns.append(arena, v) else try drc_errs.append(arena, v);
     }
@@ -359,7 +359,7 @@ fn netComponents(
     net_i: i32,
 ) std.mem.Allocator.Error!NetConn {
     // ref-des → part index for this net's pins.
-    var nodes: std.ArrayListUnmanaged(PadNode) = .empty;
+    var nodes: std.ArrayList(PadNode) = .empty;
     for (net.pins) |pin| {
         const pi = partIndex(placement, pin.ref_des) orelse continue;
         const part = placement.parts[pi];
@@ -402,11 +402,11 @@ fn netComponents(
     // nodes themselves: pad↔track and pad↔via where the copper lands on the
     // pad, track↔track where a same-layer joint touches, track↔via for the
     // layer jump. Pads are what we count at the end.
-    var segs: std.ArrayListUnmanaged(router.Track) = .empty;
+    var segs: std.ArrayList(router.Track) = .empty;
     for (copper.tracks) |t| {
         if (sameNet(t.net, net_i)) try segs.append(arena, t);
     }
-    var vs: std.ArrayListUnmanaged(router.Via) = .empty;
+    var vs: std.ArrayList(router.Via) = .empty;
     for (copper.vias) |v| {
         if (sameNet(v.net, net_i)) try vs.append(arena, v);
     }
@@ -430,14 +430,14 @@ fn netComponents(
         // original behaviour — SMD pads only ever meet their own-side copper
         // in practice, and thru pads meet both).
         for (items, 0..) |p, pi| {
-            if (segShapeDist(t.x1, t.y1, t.x2, t.y2, p) <= t.width / 2 + TOUCH_SLACK_MM)
+            if (segShapeDist(t.x1, t.y1, t.x2, t.y2, p) <= t.width / 2 + touch_slack_mm)
                 unite(parent, pi, n_pads + ti);
         }
         // track ↔ track: a same-layer joint (an endpoint of one on the body
         // of the other) chains the route segments together.
         for (segs.items[ti + 1 ..], ti + 1..) |b, bi| {
             if (t.layer != b.layer) continue;
-            const touch = t.width / 2 + b.width / 2 + TOUCH_SLACK_MM;
+            const touch = t.width / 2 + b.width / 2 + touch_slack_mm;
             if (segPointDist(t.x1, t.y1, t.x2, t.y2, b.x1, b.y1) <= touch or
                 segPointDist(t.x1, t.y1, t.x2, t.y2, b.x2, b.y2) <= touch or
                 segPointDist(b.x1, b.y1, b.x2, b.y2, t.x1, t.y1) <= touch or
@@ -446,21 +446,21 @@ fn netComponents(
         }
         // track ↔ via: the cross-layer jump.
         for (vs.items, 0..) |v, vi| {
-            if (segPointDist(t.x1, t.y1, t.x2, t.y2, v.x, v.y) <= t.width / 2 + v.dia / 2 + TOUCH_SLACK_MM)
+            if (segPointDist(t.x1, t.y1, t.x2, t.y2, v.x, v.y) <= t.width / 2 + v.dia / 2 + touch_slack_mm)
                 unite(parent, n_pads + ti, n_pads + n_tracks + vi);
         }
     }
     // pad ↔ via (a via dropped on/next to a pad joins its group).
     for (vs.items, 0..) |v, vi| {
         for (items, 0..) |p, pi| {
-            if (segShapeDist(v.x, v.y, v.x, v.y, p) <= v.dia / 2 + TOUCH_SLACK_MM)
+            if (segShapeDist(v.x, v.y, v.x, v.y, p) <= v.dia / 2 + touch_slack_mm)
                 unite(parent, pi, n_pads + n_tracks + vi);
         }
     }
 
     // Count distinct roots over the PAD nodes only.
-    var group_root: std.AutoHashMap(usize, void) = .init(arena);
-    for (0..n_pads) |i| try group_root.put(find(parent, i), {});
+    var group_root: std.AutoHashMapUnmanaged(usize, void) = .empty;
+    for (0..n_pads) |i| try group_root.put(arena, find(parent, i), {});
     return .{ .locations = locations, .groups = group_root.count() };
 }
 
@@ -589,7 +589,7 @@ fn edgeInset(br: optimizer.BoardRect, x: f64, y: f64) f64 {
 fn drcSummary(arena: std.mem.Allocator, violations: []const drc.Violation) []const u8 {
     var counts = std.enums.EnumArray(drc.Kind, usize).initFill(0);
     for (violations) |v| counts.set(v.kind, counts.get(v.kind) + 1);
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     var first = true;
     inline for (@typeInfo(drc.Kind).@"enum".fields) |f| {
         const k: drc.Kind = @enumFromInt(f.value);

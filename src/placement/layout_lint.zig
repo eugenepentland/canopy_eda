@@ -52,18 +52,18 @@ pub const Severity = enum { err, warn, info };
 
 /// Microchip's hard limit: keep the pin→decap trace under ~6 mm or the leg
 /// inductance defeats the cap.
-const DECAP_MAX_LEG_MM: f64 = 6.0;
+const decap_max_leg_mm: f64 = 6.0;
 /// A feedback node within this courtyard gap of a switching/clock/RF aggressor
 /// is at coupling risk.
-const FB_AGGRESSOR_GAP_MM: f64 = 2.0;
+const fb_aggressor_gap_mm: f64 = 2.0;
 /// A hot loop only counts as "not tightest" when it's this much looser than the
 /// best non-hot loop — a margin so near-ties don't churn the lint.
-const HOT_LOOP_MARGIN: f64 = 1.3;
+const hot_loop_margin: f64 = 1.3;
 
 /// Run every gate over the solved placement. Returns a heap slice of findings
 /// (possibly empty) the caller frees with `freeFindings`.
 pub fn lint(alloc: Allocator, p: Placement, policy: mp.ModulePolicy) Allocator.Error![]Finding {
-    var out: std.ArrayListUnmanaged(Finding) = .empty;
+    var out: std.ArrayList(Finding) = .empty;
     errdefer {
         for (out.items) |f| alloc.free(f.refs);
         out.deinit(alloc);
@@ -84,12 +84,12 @@ pub fn freeFindings(alloc: Allocator, findings: []Finding) void {
 /// `decap-far`: any high-frequency decoupling loop whose power-leg exceeds the
 /// 6 mm budget. Bulk caps (rail-entry reservoirs) are exempt — the ruleset
 /// allows them ~2 cm; only the HF bypass cap must hug the pin.
-fn lintDecapDistance(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, out: *std.ArrayListUnmanaged(Finding)) Allocator.Error!void {
-    var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+fn lintDecapDistance(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, out: *std.ArrayList(Finding)) Allocator.Error!void {
+    var refs: std.ArrayList([]const u8) = .empty;
     defer refs.deinit(alloc);
     for (p.loops) |L| {
         if (L.cap < policy.part_role.len and policy.part_role[L.cap] == .bulk_cap) continue;
-        if (legMm(p, L) > DECAP_MAX_LEG_MM) try refs.append(alloc, p.parts[L.cap].ref_des);
+        if (legMm(p, L) > decap_max_leg_mm) try refs.append(alloc, p.parts[L.cap].ref_des);
     }
     if (refs.items.len == 0) return;
     const refs_owned = try alloc.dupe([]const u8, refs.items);
@@ -118,8 +118,8 @@ fn lintDecapDistance(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, ou
 /// "every decoupling cap must declare a pin" requirement is the netlist-level
 /// `decoupling_unbound` ERC check (`src/erc.zig`, error), which gates
 /// `build`/`check` and the design health chips.
-fn lintDecoupleUnbound(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, out: *std.ArrayListUnmanaged(Finding)) Allocator.Error!void {
-    var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+fn lintDecoupleUnbound(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, out: *std.ArrayList(Finding)) Allocator.Error!void {
+    var refs: std.ArrayList([]const u8) = .empty;
     defer refs.deinit(alloc);
     for (p.loops) |L| {
         if (L.explicit_pin.len > 0) continue; // already bound (decouples / near / per-pin)
@@ -145,7 +145,7 @@ fn lintDecoupleUnbound(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, 
 
 /// `hot-loop-not-tightest`: a switcher input (hot) loop looser than the best
 /// non-hot decoupling loop on the same board.
-fn lintHotLoopTightest(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, out: *std.ArrayListUnmanaged(Finding)) Allocator.Error!void {
+fn lintHotLoopTightest(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, out: *std.ArrayList(Finding)) Allocator.Error!void {
     var min_nonhot: f64 = std.math.floatMax(f64);
     var any_nonhot = false;
     for (p.loops) |L| {
@@ -157,11 +157,11 @@ fn lintHotLoopTightest(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, 
         }
     }
     if (!any_nonhot) return;
-    var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+    var refs: std.ArrayList([]const u8) = .empty;
     defer refs.deinit(alloc);
     for (p.loops) |L| {
         if (!isHotLoop(policy, L)) continue;
-        if (optimizer.loopNh(p.parts, L) > min_nonhot * HOT_LOOP_MARGIN) try refs.append(alloc, p.parts[L.cap].ref_des);
+        if (optimizer.loopNh(p.parts, L) > min_nonhot * hot_loop_margin) try refs.append(alloc, p.parts[L.cap].ref_des);
     }
     if (refs.items.len == 0) return;
     const refs_owned = try alloc.dupe([]const u8, refs.items);
@@ -179,7 +179,7 @@ fn lintHotLoopTightest(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, 
 /// clock, or RF passive. Hubs are excluded as aggressors — the IC legitimately
 /// carries both the FB and SW pins; the rule is about the FB *divider/trace*
 /// versus the SW *node copper / inductor*.
-fn lintFeedbackAggressor(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, out: *std.ArrayListUnmanaged(Finding)) Allocator.Error!void {
+fn lintFeedbackAggressor(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, out: *std.ArrayList(Finding)) Allocator.Error!void {
     const flags = try partClassFlags(alloc, p, policy);
     defer alloc.free(flags);
     for (p.parts, 0..) |fp, fi| {
@@ -195,7 +195,7 @@ fn lintFeedbackAggressor(alloc: Allocator, p: Placement, policy: mp.ModulePolicy
             }
         }
         const ai = best orelse continue;
-        if (best_gap >= FB_AGGRESSOR_GAP_MM) continue;
+        if (best_gap >= fb_aggressor_gap_mm) continue;
         const pair = try alloc.dupe([]const u8, &.{ fp.ref_des, p.parts[ai].ref_des });
         errdefer alloc.free(pair);
         try out.append(alloc, .{
@@ -226,9 +226,9 @@ fn partClassFlags(alloc: Allocator, p: Placement, policy: mp.ModulePolicy) Alloc
     const flags = try alloc.alloc(std.EnumSet(NetClass), p.parts.len);
     errdefer alloc.free(flags);
     for (flags) |*f| f.* = std.EnumSet(NetClass).initEmpty();
-    var idx = std.StringHashMap(usize).init(alloc);
-    defer idx.deinit();
-    for (p.parts, 0..) |part, i| try idx.put(part.ref_des, i);
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    defer idx.deinit(alloc);
+    for (p.parts, 0..) |part, i| try idx.put(alloc, part.ref_des, i);
     for (p.nets, 0..) |net, ni| {
         if (ni >= policy.net_class.len) break;
         for (net.pins) |pin| {

@@ -54,7 +54,7 @@ pub const PartsDb = struct {
         const parts = self.entries.get(family) orelse return null;
 
         // Filter by value
-        var value_matches: std.ArrayListUnmanaged(*const PartEntry) = .empty;
+        var value_matches: std.ArrayList(*const PartEntry) = .empty;
         defer value_matches.deinit(self.allocator);
         for (parts) |*entry| {
             if (std.mem.eql(u8, entry.value, value)) {
@@ -65,7 +65,7 @@ pub const PartsDb = struct {
 
         // If attrs provided, try to narrow by matching part attrs
         if (attrs.len > 0) {
-            var attr_matches: std.ArrayListUnmanaged(*const PartEntry) = .empty;
+            var attr_matches: std.ArrayList(*const PartEntry) = .empty;
             defer attr_matches.deinit(self.allocator);
             for (value_matches.items) |entry| {
                 if (attrsMatch(entry.attrs, attrs)) {
@@ -122,7 +122,7 @@ pub const PartsDb = struct {
         const nodes = try parser_mod.parse(self.allocator, source);
         defer parser_mod.freeNodes(self.allocator, nodes);
 
-        var parts: std.ArrayListUnmanaged(PartEntry) = .empty;
+        var parts: std.ArrayList(PartEntry) = .empty;
 
         for (nodes) |node| {
             if (!node.isForm("parts")) continue;
@@ -139,7 +139,7 @@ pub const PartsDb = struct {
                 var manufacturer: []const u8 = "";
                 var mpn: []const u8 = "";
                 var preferred = false;
-                var attrs: std.ArrayListUnmanaged(Property) = .empty;
+                var attrs: std.ArrayList(Property) = .empty;
 
                 for (part_children[2..]) |prop| {
                     if (prop.isForm("manufacturer")) {

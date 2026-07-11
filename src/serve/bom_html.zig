@@ -22,7 +22,7 @@ fn safeHref(url: []const u8) bool {
 }
 
 // ── Constants ─────────────────────────────────────────────────────
-const STEP_EXT_LEN: usize = ".step".len;
+const step_ext_len: usize = ".step".len;
 
 /// Error set for the BOM rendering helpers — a writer-or-allocator union
 /// because the `anytype` writer parameters are called with both
@@ -61,10 +61,10 @@ pub fn collectMissing(
     allocator: std.mem.Allocator,
     block: *const env_mod.DesignBlock,
     project_dir: []const u8,
-    missing_fp: *std.ArrayListUnmanaged([]const u8),
-    missing_model: *std.ArrayListUnmanaged([]const u8),
-    checked_fp: *std.StringHashMap(void),
-    checked_model: *std.StringHashMap(void),
+    missing_fp: *std.ArrayList([]const u8),
+    missing_model: *std.ArrayList([]const u8),
+    checked_fp: *std.StringHashMapUnmanaged(void),
+    checked_model: *std.StringHashMapUnmanaged(void),
 ) BomError!void {
     for (block.instances) |inst| {
         // Check footprint
@@ -101,7 +101,7 @@ pub fn collectMissing(
                     var iter = d.iterate();
                     while (iter.next() catch null) |entry| {
                         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".step")) continue;
-                        const basename = entry.name[0 .. entry.name.len - STEP_EXT_LEN];
+                        const basename = entry.name[0 .. entry.name.len - step_ext_len];
                         if ((inst.footprint.len > 0 and
                             (std.mem.indexOf(u8, inst.footprint, basename) != null or
                                 std.mem.indexOf(u8, basename, inst.footprint) != null)) or
@@ -130,7 +130,7 @@ pub fn collectMissing(
 /// the schematic page's own scripts own the click handlers.
 pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *const env_mod.DesignBlock) BomError!void {
     const Instance = env_mod.Instance;
-    var all: std.ArrayListUnmanaged(Instance) = .empty;
+    var all: std.ArrayList(Instance) = .empty;
     try bomCollectInstancesHierarchical(allocator, block, "", &all);
     if (all.items.len == 0) return;
 
@@ -142,10 +142,10 @@ pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *
         properties: []const env_mod.Property,
         dnp: bool,
         count: u32,
-        refs: std.ArrayListUnmanaged([]const u8),
+        refs: std.ArrayList([]const u8),
     };
 
-    var lines: std.ArrayListUnmanaged(BomLine) = .empty;
+    var lines: std.ArrayList(BomLine) = .empty;
     for (all.items) |inst| {
         // Test points are probe pads, not parts a fab sources. They
         // surface in the dedicated TestPoints table on the review
@@ -166,7 +166,7 @@ pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *
             }
         }
         if (!found) {
-            var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+            var refs: std.ArrayList([]const u8) = .empty;
             try refs.append(allocator, inst.ref_des);
             try lines.append(allocator, .{
                 .component = inst.component,
@@ -317,7 +317,7 @@ fn joinRefs(allocator: std.mem.Allocator, refs: []const []const u8) ![]u8 {
 /// review-package zip exporter.
 pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_mod.DesignBlock) BomError!void {
     const Instance = env_mod.Instance;
-    var all: std.ArrayListUnmanaged(Instance) = .empty;
+    var all: std.ArrayList(Instance) = .empty;
     try bomCollectInstances(allocator, block, &all);
     if (all.items.len == 0) return;
 
@@ -329,10 +329,10 @@ pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_m
         attrs: []const []const u8,
         dnp: bool,
         count: u32,
-        refs: std.ArrayListUnmanaged([]const u8),
+        refs: std.ArrayList([]const u8),
     };
 
-    var lines: std.ArrayListUnmanaged(BomLine) = .empty;
+    var lines: std.ArrayList(BomLine) = .empty;
     for (all.items) |inst| {
         // Test points are probe pads, not parts a fab sources. They
         // surface in the dedicated TestPoints table on the review
@@ -353,7 +353,7 @@ pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_m
             }
         }
         if (!found) {
-            var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+            var refs: std.ArrayList([]const u8) = .empty;
             try refs.append(allocator, inst.ref_des);
             try lines.append(allocator, .{
                 .component = inst.component,
@@ -439,7 +439,7 @@ fn writeCsvField(w: anytype, field: []const u8) !void {
     }
 }
 
-fn bomCollectInstances(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock, out: *std.ArrayListUnmanaged(env_mod.Instance)) !void {
+fn bomCollectInstances(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock, out: *std.ArrayList(env_mod.Instance)) !void {
     for (block.instances) |inst| {
         try out.append(allocator, inst);
     }
@@ -457,7 +457,7 @@ fn bomCollectInstancesHierarchical(
     allocator: std.mem.Allocator,
     block: *const env_mod.DesignBlock,
     prefix: []const u8,
-    out: *std.ArrayListUnmanaged(env_mod.Instance),
+    out: *std.ArrayList(env_mod.Instance),
 ) !void {
     for (block.instances) |inst| {
         var copy = inst;
@@ -507,7 +507,7 @@ pub fn buildSymbolPinCache(allocator: std.mem.Allocator, project_dir: []const u8
                 const item_name = top[1].asString() orelse (top[1].asAtom() orelse continue);
                 if (cache.contains(item_name)) continue; // package takes priority
 
-                var pins: std.ArrayListUnmanaged(SymbolPin) = .empty;
+                var pins: std.ArrayList(SymbolPin) = .empty;
                 for (top[2..]) |child| {
                     const cl = child.asList() orelse continue;
                     if (cl.len < 3) continue;
@@ -549,7 +549,7 @@ pub fn augmentUnconnectedPins(allocator: std.mem.Allocator, block: *env_mod.Desi
             }
         }
 
-        var nc_pins: std.ArrayListUnmanaged(env_mod.PartPin) = .empty;
+        var nc_pins: std.ArrayList(env_mod.PartPin) = .empty;
         for (sym_pins) |sp| {
             if (!used.contains(sp.num)) {
                 try nc_pins.append(allocator, .{ .pin = sp.num, .net = "" });
@@ -681,33 +681,33 @@ fn baseNetName(name: []const u8) []const u8 {
 /// nets into the parent's name (so `ldo/VIN` collapses into `VDD`).
 pub fn writeNetsJson(allocator: std.mem.Allocator, w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8) BomError!bool {
     // Build rename map from net_ties: "sb_name/port" → "parent_net"
-    var rename = std.StringHashMap([]const u8).init(allocator);
+    var rename = std.StringHashMapUnmanaged([]const u8).empty;
     for (block.net_ties) |nt| {
         // A tie like (a="VDD", b="ldo/VIN") means rename "ldo/VIN" → "VDD"
         const has_slash_a = std.mem.indexOfScalar(u8, nt.a, '/') != null;
         const has_slash_b = std.mem.indexOfScalar(u8, nt.b, '/') != null;
         if (!has_slash_a and has_slash_b) {
-            try rename.put(nt.b, nt.a);
+            try rename.put(allocator, nt.b, nt.a);
         } else if (has_slash_a and !has_slash_b) {
-            try rename.put(nt.a, nt.b);
+            try rename.put(allocator, nt.a, nt.b);
         }
     }
 
     // Collect pins grouped by resolved base net name, preserving order
     const PinRef = struct { ref_des: []const u8, pin: []const u8 };
-    var grouped = std.StringArrayHashMap(std.ArrayListUnmanaged(PinRef)).init(allocator);
+    var grouped = std.StringArrayHashMapUnmanaged(std.ArrayList(PinRef)).empty;
 
     // Helper to resolve and group a net
     const addNet = struct {
         fn add(
-            g: *std.StringArrayHashMap(std.ArrayListUnmanaged(PinRef)),
+            g: *std.StringArrayHashMapUnmanaged(std.ArrayList(PinRef)),
             alloc: std.mem.Allocator,
             name: []const u8,
             pfx: []const u8,
             pins: []const env_mod.PinRef,
         ) !void {
             const base = baseNetName(name);
-            const gop = try g.getOrPut(base);
+            const gop = try g.getOrPut(alloc, base);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
             for (pins) |pin| {
                 const rd = if (pfx.len > 0 and !isStdRefDes(pin.ref_des))
@@ -776,7 +776,7 @@ pub const BomCounts = struct { unique: u32 = 0, total: u32 = 0 };
 /// collapsed BOM card's `<summary>` count. Mirrors `writeSchematicBomHtml`'s
 /// dedup keys exactly so the headline numbers match the expanded table.
 pub fn countBom(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock) BomError!BomCounts {
-    var all: std.ArrayListUnmanaged(env_mod.Instance) = .empty;
+    var all: std.ArrayList(env_mod.Instance) = .empty;
     try bomCollectInstancesHierarchical(allocator, block, "", &all);
 
     const Key = struct {
@@ -785,7 +785,7 @@ pub fn countBom(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock)
         footprint: []const u8,
         attrs: []const []const u8,
     };
-    var keys: std.ArrayListUnmanaged(Key) = .empty;
+    var keys: std.ArrayList(Key) = .empty;
     var counts: BomCounts = .{};
     for (all.items) |inst| {
         if (env_mod.isTestPoint(inst.component)) continue;

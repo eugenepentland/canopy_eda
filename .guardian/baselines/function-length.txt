@@ -1,7 +1,7 @@
 # guardian-snapshot v2
 135 src/bench_layout.zig|main
 135 src/bom_resolve.zig|resolveIdentities
-138 src/commands.zig|cmdBuild
+127 src/commands.zig|cmdBuild
 141 src/convert/symbol.zig|generatePackage
 125 src/diagram/layout.zig|computeFreeLayout
 141 src/diagram/layout.zig|powerLayout

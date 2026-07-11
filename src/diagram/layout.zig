@@ -137,12 +137,12 @@ const Chain = struct { verts: []u32, eidx: usize, arrow_at_start: bool };
 /// The power view uses a dedicated voltage-band layout (`powerLayout`); the
 /// other views use the layered/Sugiyama pipeline below.
 pub fn computeLayout(arena: Allocator, graph: *const Graph, view: ClassId) Allocator.Error!?Layout {
-    if (view == types.CLASS_POWER) return powerLayout(arena, graph);
+    if (view == types.class_power) return powerLayout(arena, graph);
 
     // Filter edges to this view + collect participating nodes.
     var local_of = std.AutoHashMapUnmanaged(u32, u32){};
-    var gids: std.ArrayListUnmanaged(u32) = .empty;
-    var raw: std.ArrayListUnmanaged(RawEdge) = .empty;
+    var gids: std.ArrayList(u32) = .empty;
+    var raw: std.ArrayList(RawEdge) = .empty;
     for (graph.edges, 0..) |e, eidx| {
         if (e.class != view) continue;
         const fl = try internNode(arena, &local_of, &gids, e.from);
@@ -206,8 +206,8 @@ fn systemStage(n: types.Node) u8 {
 /// isn't blank. Returns null only when there is nothing to draw.
 pub fn computeSystemLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
     var local_of = std.AutoHashMapUnmanaged(u32, u32){};
-    var gids: std.ArrayListUnmanaged(u32) = .empty;
-    var raw: std.ArrayListUnmanaged(RawEdge) = .empty;
+    var gids: std.ArrayList(u32) = .empty;
+    var raw: std.ArrayList(RawEdge) = .empty;
     if (!try internStaged(arena, graph, &local_of, &gids, &raw)) return null;
     const raw_stage = try arena.alloc(u8, gids.items.len);
     for (gids.items, 0..) |gid, i| raw_stage[i] = systemStage(graph.nodes[gid]);
@@ -226,8 +226,8 @@ pub const StageSpec = struct { label: []const u8, members: []const []const u8 };
 /// trailing "Other" band. Returns null when there's nothing to draw.
 pub fn computeChainLayout(arena: Allocator, graph: *const Graph, stages: []const StageSpec) Allocator.Error!?Layout {
     var local_of = std.AutoHashMapUnmanaged(u32, u32){};
-    var gids: std.ArrayListUnmanaged(u32) = .empty;
-    var raw: std.ArrayListUnmanaged(RawEdge) = .empty;
+    var gids: std.ArrayList(u32) = .empty;
+    var raw: std.ArrayList(RawEdge) = .empty;
     if (!try internStaged(arena, graph, &local_of, &gids, &raw)) return null;
 
     // Stage each node by matching its label to a declared stage; unmatched nodes
@@ -241,7 +241,7 @@ pub fn computeChainLayout(arena: Allocator, graph: *const Graph, stages: []const
             break :blk other;
         };
     }
-    var labels: std.ArrayListUnmanaged([]const u8) = .empty;
+    var labels: std.ArrayList([]const u8) = .empty;
     for (stages) |s| try labels.append(arena, s.label);
     if (any_other) try labels.append(arena, "Other");
     return try finishStagedLayout(arena, graph, gids.items, raw.items, raw_stage, labels.items);
@@ -264,8 +264,8 @@ fn internStaged(
     arena: Allocator,
     graph: *const Graph,
     local_of: *std.AutoHashMapUnmanaged(u32, u32),
-    gids: *std.ArrayListUnmanaged(u32),
-    raw: *std.ArrayListUnmanaged(RawEdge),
+    gids: *std.ArrayList(u32),
+    raw: *std.ArrayList(RawEdge),
 ) Allocator.Error!bool {
     for (graph.edges, 0..) |e, eidx| {
         const fl = try internNode(arena, local_of, gids, e.from);
@@ -299,7 +299,7 @@ fn finishStagedLayout(
     @memset(used, false);
     for (raw_stage) |s| used[s] = true;
     const col_of_stage = try arena.alloc(u32, all_labels.len);
-    var col_label: std.ArrayListUnmanaged([]const u8) = .empty;
+    var col_label: std.ArrayList([]const u8) = .empty;
     var ncols: u32 = 0;
     for (all_labels, 0..) |label, s| {
         if (!used[s]) continue;
@@ -748,7 +748,7 @@ pub fn computeFreeLayout(arena: Allocator, graph: *const Graph) Allocator.Error!
 
     // Lay out: placed nodes at their normalised cell; un-placed (and un-keyed
     // real) blocks flow left-to-right along the fallback row beneath them.
-    var lnodes: std.ArrayListUnmanaged(LNode) = .empty;
+    var lnodes: std.ArrayList(LNode) = .empty;
     // Reserve room at the top for the tallest stacked block's offset cards +
     // its "×N" badge, which extend above the front box. The whole layout shifts
     // down by this so nothing clips the canvas top.
@@ -848,10 +848,10 @@ pub fn computeFreeLayout(arena: Allocator, graph: *const Graph) Allocator.Error!
 /// an RX feed sits left of its chip, a TX feed right, pushed outward by whole
 /// column pitches past any block it would overlap. Multiple feeds on one chip
 /// stack downward. Appends the placed antennas to `lnodes` (chips already in it).
-fn placeBoundaryNodes(arena: Allocator, graph: *const Graph, lnodes: *std.ArrayListUnmanaged(LNode)) Allocator.Error!void {
+fn placeBoundaryNodes(arena: Allocator, graph: *const Graph, lnodes: *std.ArrayList(LNode)) Allocator.Error!void {
     if (lnodes.items.len == 0) return;
     var pos: std.AutoHashMapUnmanaged(u32, LNode) = .empty;
-    var rects: std.ArrayListUnmanaged(Rect) = .empty;
+    var rects: std.ArrayList(Rect) = .empty;
     for (lnodes.items) |ln| {
         try pos.put(arena, ln.gid, ln);
         try rects.append(arena, .{ .x0 = ln.x, .y0 = ln.y, .x1 = ln.x + node_w, .y1 = ln.y + node_h });
@@ -929,7 +929,7 @@ pub fn computeGroupsLayout(arena: Allocator, graph: *const Graph) Allocator.Erro
     var box_of: std.AutoHashMapUnmanaged(usize, GroupBox) = .{};
     for (base.groups) |gb| try box_of.put(arena, gb.color_idx, gb);
 
-    var routes: std.ArrayListUnmanaged(Route) = .empty;
+    var routes: std.ArrayList(Route) = .empty;
     var seen: std.AutoHashMapUnmanaged(u64, void) = .{};
     for (graph.edges) |e| {
         if (e.from == e.to) continue;
@@ -976,7 +976,7 @@ fn lnodeOf(nodes: []const LNode, gid: u32) ?LNode {
 /// the label. Groups whose members are all missing are dropped.
 fn computeGroupBoxes(arena: Allocator, graph: *const Graph, nodes: []const LNode) Allocator.Error![]const GroupBox {
     if (graph.layout.groups.len == 0) return &.{};
-    var out: std.ArrayListUnmanaged(GroupBox) = .empty;
+    var out: std.ArrayList(GroupBox) = .empty;
     for (graph.layout.groups, 0..) |g, gi| {
         var minx: f64 = std.math.floatMax(f64);
         var miny: f64 = std.math.floatMax(f64);
@@ -1085,13 +1085,13 @@ fn memberOf(members: []const u32, gid: u32) bool {
 /// geometry `computeGroupBoxes` draws so wires dodge the visible box.
 fn collectGroupObstacles(arena: Allocator, graph: *const Graph, nodes: []const LNode) Allocator.Error![]GroupObs {
     if (graph.layout.groups.len == 0) return &.{};
-    var out: std.ArrayListUnmanaged(GroupObs) = .empty;
+    var out: std.ArrayList(GroupObs) = .empty;
     for (graph.layout.groups) |g| {
         var minx: f64 = std.math.floatMax(f64);
         var miny: f64 = std.math.floatMax(f64);
         var maxx: f64 = -std.math.floatMax(f64);
         var maxy: f64 = -std.math.floatMax(f64);
-        var members: std.ArrayListUnmanaged(u32) = .empty;
+        var members: std.ArrayList(u32) = .empty;
         for (g.members) |name| {
             const id = nodeByKey(graph, name) orelse continue;
             const ln = lnodeOf(nodes, id) orelse continue;
@@ -1136,7 +1136,7 @@ fn collectGroupObstacles(arena: Allocator, graph: *const Graph, nodes: []const L
 fn channelCoords(arena: Allocator, nodes: []const LNode, vertical: bool) Allocator.Error![]f64 {
     const span: f64 = if (vertical) free_h_gap else free_v_gap;
     const box: f64 = if (vertical) node_w else node_h;
-    var list: std.ArrayListUnmanaged(f64) = .empty;
+    var list: std.ArrayList(f64) = .empty;
     var mn: f64 = std.math.floatMax(f64);
     for (nodes) |ln| mn = @min(mn, if (vertical) ln.x else ln.y);
     try pushUnique(arena, &list, mn - span / 2);
@@ -1144,7 +1144,7 @@ fn channelCoords(arena: Allocator, nodes: []const LNode, vertical: bool) Allocat
     return list.toOwnedSlice(arena);
 }
 
-fn pushUnique(arena: Allocator, list: *std.ArrayListUnmanaged(f64), v: f64) Allocator.Error!void {
+fn pushUnique(arena: Allocator, list: *std.ArrayList(f64), v: f64) Allocator.Error!void {
     for (list.items) |e| if (@abs(e - v) < 1) return;
     try list.append(arena, v);
 }
@@ -1218,7 +1218,7 @@ const FreeLanes = struct {
 
 fn faceAppend(
     arena: Allocator,
-    faces: *std.AutoHashMapUnmanaged(i64, std.ArrayListUnmanaged(FreePort)),
+    faces: *std.AutoHashMapUnmanaged(i64, std.ArrayList(FreePort)),
     key: i64,
     fp: FreePort,
 ) Allocator.Error!void {
@@ -1238,7 +1238,7 @@ fn midKey(coord: f64) i64 {
 
 /// Drop duplicate and colinear interior points so the path has clean corners.
 fn collapsePts(arena: Allocator, raw: []const Pt) Allocator.Error![]Pt {
-    var out: std.ArrayListUnmanaged(Pt) = .empty;
+    var out: std.ArrayList(Pt) = .empty;
     for (raw) |p| {
         if (out.items.len > 0) {
             const last = out.items[out.items.len - 1];
@@ -1391,8 +1391,8 @@ fn routeFreeEdges(arena: Allocator, graph: *const Graph, nodes: []const LNode, g
         px[ln.gid] = ln.x;
         py[ln.gid] = ln.y;
     }
-    var plans: std.ArrayListUnmanaged(FreePlan) = .empty;
-    var faces: std.AutoHashMapUnmanaged(i64, std.ArrayListUnmanaged(FreePort)) = .{};
+    var plans: std.ArrayList(FreePlan) = .empty;
+    var faces: std.AutoHashMapUnmanaged(i64, std.ArrayList(FreePort)) = .{};
     for (graph.edges, 0..) |e, eidx| {
         if (e.from == e.to) continue;
         if (!present[e.from] or !present[e.to]) continue;
@@ -1422,13 +1422,13 @@ fn routeFreeEdges(arena: Allocator, graph: *const Graph, nodes: []const LNode, g
     const vxs = try channelCoords(arena, nodes, true);
     const hys = try channelCoords(arena, nodes, false);
     var lanes = FreeLanes{};
-    var routes: std.ArrayListUnmanaged(Route) = .empty;
+    var routes: std.ArrayList(Route) = .empty;
     for (plans.items) |plan| {
         const e = graph.edges[plan.eidx];
         // Foreign group boxes first, foreign blocks after — `n_soft` marks the
         // boundary so the router can retry against the blocks-only tail when
         // the group boxes leave no clear channel.
-        var obs: std.ArrayListUnmanaged(Rect) = .empty;
+        var obs: std.ArrayList(Rect) = .empty;
         for (gobs) |g| {
             if (!memberOf(g.members, e.from) and !memberOf(g.members, e.to)) try obs.append(arena, g.box);
         }
@@ -1523,7 +1523,7 @@ fn blockedVert(tops: []const f64, fy: f64, ty: f64) bool {
 
 /// True when horizontal line `y` would clip any box in columns `lo_col..hi_col`
 /// (a small margin keeps the run off box edges).
-fn bandBlocked(col_tops: []const std.ArrayListUnmanaged(f64), lo_col: u32, hi_col: u32, y: f64) bool {
+fn bandBlocked(col_tops: []const std.ArrayList(f64), lo_col: u32, hi_col: u32, y: f64) bool {
     var c = lo_col;
     while (c <= hi_col) : (c += 1) {
         for (col_tops[c].items) |t| if (y > t - band_clear and y < t + node_h + band_clear) return true;
@@ -1536,7 +1536,7 @@ const band_clear: f64 = 14; // vertical margin a cross-column run keeps off a bo
 /// A horizontal-run y clear of every box in the spanned middle columns, as close
 /// to `preferred` as possible (so a long edge crosses through a gap between
 /// block rows, not over them). Falls back to `preferred` if nothing is free.
-fn freeBandY(col_tops: []const std.ArrayListUnmanaged(f64), lo_col: u32, hi_col: u32, preferred: f64, lo: f64, hi: f64) f64 {
+fn freeBandY(col_tops: []const std.ArrayList(f64), lo_col: u32, hi_col: u32, preferred: f64, lo: f64, hi: f64) f64 {
     if (!bandBlocked(col_tops, lo_col, hi_col, preferred)) return preferred;
     var d: f64 = 10;
     while (d < hi - lo) : (d += 10) {
@@ -1551,8 +1551,8 @@ fn freeBandY(col_tops: []const std.ArrayListUnmanaged(f64), lo_col: u32, hi_col:
 /// Build the orthogonal polyline for one resolved edge: vertical for a
 /// same-column hop, a single gap jog for adjacent columns, a free-band staircase
 /// for columns apart. `content_h` bounds the free-band search.
-fn buildSidePts(arena: Allocator, col_tops: []const std.ArrayListUnmanaged(f64), se: SideEdge, sp: Pt, tp: Pt, content_h: f64) Allocator.Error![]Pt {
-    var pts: std.ArrayListUnmanaged(Pt) = .empty;
+fn buildSidePts(arena: Allocator, col_tops: []const std.ArrayList(f64), se: SideEdge, sp: Pt, tp: Pt, content_h: f64) Allocator.Error![]Pt {
+    var pts: std.ArrayList(Pt) = .empty;
     try pts.append(arena, sp);
     if (se.cs == se.ct) {
         if (se.ss == side_r) {
@@ -1601,13 +1601,13 @@ fn routeSystemEdges(arena: Allocator, graph: *const Graph, nodes: []const LNode,
         ny[ln.gid] = ln.y;
         maxcol = @max(maxcol, colOf(ln.x));
     }
-    const col_tops = try arena.alloc(std.ArrayListUnmanaged(f64), maxcol + 1);
+    const col_tops = try arena.alloc(std.ArrayList(f64), maxcol + 1);
     for (col_tops) |*c| c.* = .empty;
     for (nodes) |ln| try col_tops[colOf(ln.x)].append(arena, ln.y);
 
     // Pass 1: resolve each placed edge to its attachment faces and tally the
     // per-(box,face) fanout so the ports can spread.
-    var edges_l: std.ArrayListUnmanaged(SideEdge) = .empty;
+    var edges_l: std.ArrayList(SideEdge) = .empty;
     const side_n = try arena.alloc(u16, n * 4);
     @memset(side_n, 0);
     for (graph.edges, 0..) |e, eidx| {
@@ -1681,9 +1681,9 @@ fn layeredLayout(arena: Allocator, graph: *const Graph, gids: []const u32, raw: 
 
     // Vertices (reals + dummies) and per-edge waypoint chains, bucketed into
     // layers.
-    var verts: std.ArrayListUnmanaged(Vertex) = .empty;
+    var verts: std.ArrayList(Vertex) = .empty;
     for (gids, 0..) |gid, i| try verts.append(arena, .{ .is_dummy = false, .gid = gid, .rank = rank[i], .h = node_h });
-    var layers = try arena.alloc(std.ArrayListUnmanaged(u32), max_rank + 1);
+    var layers = try arena.alloc(std.ArrayList(u32), max_rank + 1);
     for (layers) |*l| l.* = .empty;
     for (0..m) |i| try layers[rank[i]].append(arena, @intCast(i));
 
@@ -1704,7 +1704,7 @@ fn layeredLayout(arena: Allocator, graph: *const Graph, gids: []const u32, raw: 
 fn internNode(
     arena: Allocator,
     local_of: *std.AutoHashMapUnmanaged(u32, u32),
-    gids: *std.ArrayListUnmanaged(u32),
+    gids: *std.ArrayList(u32),
     gid: u32,
 ) Allocator.Error!u32 {
     const gop = try local_of.getOrPut(arena, gid);
@@ -1721,7 +1721,7 @@ fn breakCycles(arena: Allocator, m: u32, raw: []const RawEdge) Allocator.Error![
     const reversed = try arena.alloc(bool, raw.len);
     @memset(reversed, false);
     // adjacency: node → list of (rawIdx)
-    var adj = try arena.alloc(std.ArrayListUnmanaged(u32), m);
+    var adj = try arena.alloc(std.ArrayList(u32), m);
     for (adj) |*a| a.* = .empty;
     for (raw, 0..) |e, i| try adj[e.from_l].append(arena, @intCast(i));
     const color = try arena.alloc(u8, m); // 0 white, 1 gray, 2 black
@@ -1732,7 +1732,7 @@ fn breakCycles(arena: Allocator, m: u32, raw: []const RawEdge) Allocator.Error![
     return reversed;
 }
 
-fn dfsBreak(u: u32, raw: []const RawEdge, adj: []std.ArrayListUnmanaged(u32), color: []u8, reversed: []bool) void {
+fn dfsBreak(u: u32, raw: []const RawEdge, adj: []std.ArrayList(u32), color: []u8, reversed: []bool) void {
     color[u] = 1;
     for (adj[u].items) |ri| {
         const v = raw[ri].to_l;
@@ -1749,7 +1749,7 @@ fn dfsBreak(u: u32, raw: []const RawEdge, adj: []std.ArrayListUnmanaged(u32), co
 
 fn assignRanks(arena: Allocator, m: u32, raw: []const RawEdge, reversed: []const bool) Allocator.Error![]u32 {
     // Effective edges src→dst (reversed back-edges flipped) for a DAG.
-    var out = try arena.alloc(std.ArrayListUnmanaged(u32), m);
+    var out = try arena.alloc(std.ArrayList(u32), m);
     for (out) |*o| o.* = .empty;
     const indeg = try arena.alloc(u32, m);
     @memset(indeg, 0);
@@ -1761,7 +1761,7 @@ fn assignRanks(arena: Allocator, m: u32, raw: []const RawEdge, reversed: []const
     }
     const rank = try arena.alloc(u32, m);
     @memset(rank, 0);
-    var queue: std.ArrayListUnmanaged(u32) = .empty;
+    var queue: std.ArrayList(u32) = .empty;
     for (0..m) |i| if (indeg[i] == 0) try queue.append(arena, @intCast(i));
     var head: usize = 0;
     while (head < queue.items.len) : (head += 1) {
@@ -1781,8 +1781,8 @@ fn buildChains(
     arena: Allocator,
     raw: []const RawEdge,
     rank: []const u32,
-    verts: *std.ArrayListUnmanaged(Vertex),
-    layers: []std.ArrayListUnmanaged(u32),
+    verts: *std.ArrayList(Vertex),
+    layers: []std.ArrayList(u32),
 ) Allocator.Error![]Chain {
     const chains = try arena.alloc(Chain, raw.len);
     for (raw, 0..) |e, i| {
@@ -1790,7 +1790,7 @@ fn buildChains(
         const hi: u32 = if (rank[e.from_l] <= rank[e.to_l]) e.to_l else e.from_l;
         const rl = rank[lo];
         const rh = rank[hi];
-        var verts_list: std.ArrayListUnmanaged(u32) = .empty;
+        var verts_list: std.ArrayList(u32) = .empty;
         try verts_list.append(arena, lo);
         var r = rl + 1;
         while (r < rh) : (r += 1) {
@@ -1811,8 +1811,8 @@ fn buildChains(
 
 // ── crossing reduction (median heuristic) ──────────────────────────────
 
-fn orderLayers(arena: Allocator, verts: []const Vertex, layers: []std.ArrayListUnmanaged(u32), chains: []const Chain) Allocator.Error!void {
-    var adj = try arena.alloc(std.ArrayListUnmanaged(u32), verts.len);
+fn orderLayers(arena: Allocator, verts: []const Vertex, layers: []std.ArrayList(u32), chains: []const Chain) Allocator.Error!void {
+    var adj = try arena.alloc(std.ArrayList(u32), verts.len);
     for (adj) |*a| a.* = .empty;
     for (chains) |c| {
         var i: usize = 0;
@@ -1840,14 +1840,14 @@ fn orderLayers(arena: Allocator, verts: []const Vertex, layers: []std.ArrayListU
     }
 }
 
-fn refreshOrder(layers: []std.ArrayListUnmanaged(u32), order: []f64) void {
+fn refreshOrder(layers: []std.ArrayList(u32), order: []f64) void {
     for (layers) |l| refreshLayerOrder(l.items, order);
 }
 fn refreshLayerOrder(layer: []const u32, order: []f64) void {
     for (layer, 0..) |v, i| order[v] = @floatFromInt(i);
 }
 
-fn medianKeys(verts: []const Vertex, layer: []const u32, adj: []std.ArrayListUnmanaged(u32), order: []const f64, adj_rank: u32, keys: []f64) void {
+fn medianKeys(verts: []const Vertex, layer: []const u32, adj: []std.ArrayList(u32), order: []const f64, adj_rank: u32, keys: []f64) void {
     var buf: [256]f64 = undefined;
     for (layer, 0..) |v, idx| {
         var n: usize = 0;
@@ -1899,7 +1899,7 @@ const Dims = struct { w: f64, h: f64 };
 /// the one above it, never up). So a vertex fed 1-to-1 lands exactly on its
 /// predecessor's row and a series chain (and long-edge dummies) renders as one
 /// straight horizontal run, anchored to the source column.
-fn assignCoords(arena: Allocator, verts: []Vertex, layers: []std.ArrayListUnmanaged(u32), chains: []const Chain) Allocator.Error!Dims {
+fn assignCoords(arena: Allocator, verts: []Vertex, layers: []std.ArrayList(u32), chains: []const Chain) Allocator.Error!Dims {
     var max_h: f64 = node_h;
     for (layers) |l| {
         var sum: f64 = 0;
@@ -1919,7 +1919,7 @@ fn assignCoords(arena: Allocator, verts: []Vertex, layers: []std.ArrayListUnmana
     }
 
     // Cross-layer adjacency (consecutive chain vertices touch).
-    const adj = try arena.alloc(std.ArrayListUnmanaged(u32), verts.len);
+    const adj = try arena.alloc(std.ArrayList(u32), verts.len);
     for (adj) |*a| a.* = .empty;
     for (chains) |c| {
         var i: usize = 0;
@@ -2039,7 +2039,7 @@ fn routeChains(arena: Allocator, graph: *const Graph, verts: []const Vertex, ran
 
     const routes = try arena.alloc(Route, chains.len);
     for (chains, 0..) |c, ci| {
-        var pts: std.ArrayListUnmanaged(Pt) = .empty;
+        var pts: std.ArrayList(Pt) = .empty;
         const w0 = verts[c.verts[0]];
         try pts.append(arena, .{ .x = colX(w0.rank) + node_w, .y = cy(w0) });
         var i: usize = 0;
@@ -2117,7 +2117,7 @@ fn railsHas(rails: []const f64, v: f64) bool {
 /// True when `node` has an incoming power edge carrying voltage `v`.
 fn hasInEdgeVolt(graph: *const Graph, node: u32, v: f64) bool {
     for (graph.edges) |e| {
-        if (e.class != types.CLASS_POWER or e.to != node) continue;
+        if (e.class != types.class_power or e.to != node) continue;
         if (e.voltage) |ev| {
             if (@abs(ev - v) < volt_eps) return true;
         }
@@ -2127,7 +2127,7 @@ fn hasInEdgeVolt(graph: *const Graph, node: u32, v: f64) bool {
 
 const ProducerInfo = struct { depth: []u8, parent: []i64, has_chain: bool, battery_v: f64 };
 
-fn dfsBack(u: u32, elist: []const InfraEdge, adj: []const std.ArrayListUnmanaged(u32), color: []u8, back: []bool) void {
+fn dfsBack(u: u32, elist: []const InfraEdge, adj: []const std.ArrayList(u32), color: []u8, back: []bool) void {
     color[u] = 1;
     for (adj[u].items) |ei| {
         const v = elist[ei].to;
@@ -2146,13 +2146,13 @@ fn dfsBack(u: u32, elist: []const InfraEdge, adj: []const std.ArrayListUnmanaged
 /// Cycle-broken so a rail looping back to the source doesn't demote it.
 fn producerDepths(arena: Allocator, graph: *const Graph, is_producer: []const bool) Allocator.Error!ProducerInfo {
     const n = is_producer.len;
-    var elist: std.ArrayListUnmanaged(InfraEdge) = .empty;
+    var elist: std.ArrayList(InfraEdge) = .empty;
     for (graph.edges) |e| {
-        if (e.class != types.CLASS_POWER or e.from == e.to) continue;
+        if (e.class != types.class_power or e.from == e.to) continue;
         if (!is_producer[e.from] or !is_producer[e.to]) continue;
         try elist.append(arena, .{ .from = e.from, .to = e.to });
     }
-    const adj = try arena.alloc(std.ArrayListUnmanaged(u32), n);
+    const adj = try arena.alloc(std.ArrayList(u32), n);
     for (adj) |*a| a.* = .empty;
     for (elist.items, 0..) |ed, i| try adj[ed.from].append(arena, @intCast(i));
     const back = try arena.alloc(bool, elist.items.len);
@@ -2162,7 +2162,7 @@ fn producerDepths(arena: Allocator, graph: *const Graph, is_producer: []const bo
     for (0..n) |s| if (is_producer[s] and color[s] == 0) dfsBack(@intCast(s), elist.items, adj, color, back);
 
     // Longest-path depth over the forward (non-back) producer edges.
-    const out = try arena.alloc(std.ArrayListUnmanaged(u32), n);
+    const out = try arena.alloc(std.ArrayList(u32), n);
     for (out) |*o| o.* = .empty;
     const indeg = try arena.alloc(u32, n);
     @memset(indeg, 0);
@@ -2175,7 +2175,7 @@ fn producerDepths(arena: Allocator, graph: *const Graph, is_producer: []const bo
     @memset(depth, 0);
     const parent = try arena.alloc(i64, n);
     @memset(parent, -1);
-    var queue: std.ArrayListUnmanaged(u32) = .empty;
+    var queue: std.ArrayList(u32) = .empty;
     for (0..n) |i| if (is_producer[i] and indeg[i] == 0) try queue.append(arena, @intCast(i));
     var head: usize = 0;
     while (head < queue.items.len) : (head += 1) {
@@ -2195,7 +2195,7 @@ fn producerDepths(arena: Allocator, graph: *const Graph, is_producer: []const bo
     }
     var battery_v: f64 = std.math.nan(f64);
     for (graph.edges) |e| {
-        if (e.class != types.CLASS_POWER) continue;
+        if (e.class != types.class_power) continue;
         if (!is_producer[e.from] or !is_producer[e.to]) continue;
         if (depth[e.from] == 0 and depth[e.to] == 1) {
             if (e.voltage) |ev| battery_v = ev;
@@ -2213,7 +2213,7 @@ const role_hidden: u8 = 3; // pass-through filter (folded; rail feeds from paren
 /// Voltage of the incoming producer→`p` power edge (the rail feeding `p`).
 fn producerInVolt(graph: *const Graph, is_producer: []const bool, p: u32) f64 {
     for (graph.edges) |e| {
-        if (e.class != types.CLASS_POWER or e.to != p or !is_producer[e.from]) continue;
+        if (e.class != types.class_power or e.to != p or !is_producer[e.from]) continue;
         if (e.voltage) |ev| return ev;
     }
     return std.math.nan(f64);
@@ -2258,7 +2258,7 @@ fn shownAncestor(info: ProducerInfo, roles: []const u8, p: u32) u32 {
 /// edge). NaN when it drives nothing.
 fn producerOutVolt(graph: *const Graph, g: u32) f64 {
     for (graph.edges) |e| {
-        if (e.class != types.CLASS_POWER or e.from != g) continue;
+        if (e.class != types.class_power or e.from != g) continue;
         if (e.voltage) |ev| return ev;
     }
     return std.math.nan(f64);
@@ -2282,7 +2282,7 @@ fn railFeeder(graph: *const Graph, is_producer: []const bool, info: ProducerInfo
     var best: ?u32 = null;
     var best_depth: i32 = -1;
     for (graph.edges) |e| {
-        if (e.class != types.CLASS_POWER or !is_producer[e.from]) continue;
+        if (e.class != types.class_power or !is_producer[e.from]) continue;
         const ev = e.voltage orelse continue;
         if (@abs(ev - v) >= volt_eps) continue;
         if (@as(i32, info.depth[e.from]) > best_depth) {
@@ -2294,7 +2294,7 @@ fn railFeeder(graph: *const Graph, is_producer: []const bool, info: ProducerInfo
     return null;
 }
 
-fn addVolt(arena: Allocator, list: *std.ArrayListUnmanaged(f64), v: f64, battery_v: f64) Allocator.Error!void {
+fn addVolt(arena: Allocator, list: *std.ArrayList(f64), v: f64, battery_v: f64) Allocator.Error!void {
     if (!std.math.isNan(battery_v) and @abs(v - battery_v) < volt_eps) return;
     if (railsHas(list.items, v)) return;
     try list.append(arena, v);
@@ -2302,17 +2302,17 @@ fn addVolt(arena: Allocator, list: *std.ArrayListUnmanaged(f64), v: f64, battery
 
 /// Every load-rail voltage a consumer touches (rail set + incoming power-edge
 /// voltages), minus the battery rail.
-fn collectConsumerVolts(arena: Allocator, graph: *const Graph, node: u32, battery_v: f64, list: *std.ArrayListUnmanaged(f64)) Allocator.Error!void {
+fn collectConsumerVolts(arena: Allocator, graph: *const Graph, node: u32, battery_v: f64, list: *std.ArrayList(f64)) Allocator.Error!void {
     for (graph.nodes[node].rails) |r| try addVolt(arena, list, r, battery_v);
     for (graph.edges) |e| {
-        if (e.class != types.CLASS_POWER or e.to != node) continue;
+        if (e.class != types.class_power or e.to != node) continue;
         if (e.voltage) |ev| try addVolt(arena, list, ev, battery_v);
     }
 }
 
 fn pwElbow(arena: Allocator, x0: f64, y0: f64, x1: f64, y1: f64) Allocator.Error![]Pt {
     const midx = (x0 + x1) / 2;
-    var pts: std.ArrayListUnmanaged(Pt) = .empty;
+    var pts: std.ArrayList(Pt) = .empty;
     try pts.append(arena, .{ .x = x0, .y = y0 });
     try pts.append(arena, .{ .x = midx, .y = y0 });
     try pts.append(arena, .{ .x = midx, .y = y1 });
@@ -2324,7 +2324,7 @@ fn pwRoute(from: u32, to: u32, v: f64, pts: []Pt) Route {
     return .{
         .from_gid = from,
         .to_gid = to,
-        .class = types.CLASS_POWER,
+        .class = types.class_power,
         .label = "",
         .voltage = if (std.math.isNan(v)) null else v,
         .fanout = 1,
@@ -2339,7 +2339,7 @@ fn powerLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
     @memset(is_producer, false);
     var any = false;
     for (graph.edges) |e| {
-        if (e.class != types.CLASS_POWER) continue;
+        if (e.class != types.class_power) continue;
         any = true;
         is_producer[e.from] = true;
     }
@@ -2350,7 +2350,7 @@ fn powerLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
 
     // Distinct load-rail voltages, highest first so each bucket sits beside its
     // (descending) regulator.
-    var rails: std.ArrayListUnmanaged(f64) = .empty;
+    var rails: std.ArrayList(f64) = .empty;
     for (0..n) |i| {
         if (is_producer[i]) continue;
         try collectConsumerVolts(arena, graph, @intCast(i), info.battery_v, &rails);
@@ -2358,9 +2358,9 @@ fn powerLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
     std.mem.sort(f64, rails.items, {}, cmpDescF64);
 
     // Gather producers by role; regulators + derived LDOs sorted highest-rail-first.
-    var sources: std.ArrayListUnmanaged(u32) = .empty;
-    var regs: std.ArrayListUnmanaged(u32) = .empty;
-    var deriveds: std.ArrayListUnmanaged(u32) = .empty;
+    var sources: std.ArrayList(u32) = .empty;
+    var regs: std.ArrayList(u32) = .empty;
+    var deriveds: std.ArrayList(u32) = .empty;
     for (0..n) |i| {
         if (!is_producer[i]) continue;
         switch (roles[i]) {
@@ -2390,8 +2390,8 @@ fn powerLayout(arena: Allocator, graph: *const Graph) Allocator.Error!?Layout {
     if (bucket_total > 0) bucket_total -= pw_bucket_gap;
     const inner_h = @max(@max(@max(src_total, reg_total), der_total), bucket_total);
 
-    var boxes: std.ArrayListUnmanaged(PowerBox) = .empty;
-    var routes: std.ArrayListUnmanaged(Route) = .empty;
+    var boxes: std.ArrayList(PowerBox) = .empty;
+    var routes: std.ArrayList(Route) = .empty;
     const prx = try arena.alloc(f64, n); // shown producer right-edge x
     const pcy = try arena.alloc(f64, n); // shown producer centre y
     @memset(prx, 0);
@@ -2498,9 +2498,9 @@ const Bucket = struct { v: f64, members: []const u32, h: f64 };
 /// box height needed for their pill grid. Rails with no consumer are dropped.
 fn buildBuckets(arena: Allocator, graph: *const Graph, is_producer: []const bool, rail_volts: []const f64) Allocator.Error![]Bucket {
     const n = graph.nodes.len;
-    var out: std.ArrayListUnmanaged(Bucket) = .empty;
+    var out: std.ArrayList(Bucket) = .empty;
     for (rail_volts) |v| {
-        var members: std.ArrayListUnmanaged(u32) = .empty;
+        var members: std.ArrayList(u32) = .empty;
         for (0..n) |i| {
             if (is_producer[i]) continue;
             if (isInstrumentation(graph.nodes[i].label)) continue;
@@ -2537,7 +2537,7 @@ test "computeLayout returns null when the view has no edges" {
     const graph = Graph{ .nodes = &nodes, .edges = &.{} };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = try computeLayout(arena.allocator(), &graph, types.CLASS_RF);
+    const lay = try computeLayout(arena.allocator(), &graph, types.class_rf);
     try testing.expect(lay == null);
 }
 
@@ -2545,14 +2545,14 @@ test "computeLayout returns null when the view has no edges" {
 test "computeLayout breaks a cycle and ranks across columns" {
     var nodes = [_]types.Node{ mkNode("A"), mkNode("B"), mkNode("C") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_RF, .label = "x" },
-        .{ .from = 1, .to = 2, .class = types.CLASS_RF, .label = "y" },
-        .{ .from = 2, .to = 0, .class = types.CLASS_RF, .label = "z" }, // back-edge → cycle
+        .{ .from = 0, .to = 1, .class = types.class_rf, .label = "x" },
+        .{ .from = 1, .to = 2, .class = types.class_rf, .label = "y" },
+        .{ .from = 2, .to = 0, .class = types.class_rf, .label = "z" }, // back-edge → cycle
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_RF)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.class_rf)) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 3), lay.nodes.len);
     // Three ranks ⇒ at least three columns wide.
     try testing.expect(lay.width > node_w * 2);
@@ -2562,14 +2562,14 @@ test "computeLayout breaks a cycle and ranks across columns" {
 test "computeLayout gives a shared-source fanout one common bend x" {
     var nodes = [_]types.Node{ mkNode("SRC"), mkNode("A"), mkNode("B"), mkNode("C") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_CLOCK, .label = "r1" },
-        .{ .from = 0, .to = 2, .class = types.CLASS_CLOCK, .label = "r2" },
-        .{ .from = 0, .to = 3, .class = types.CLASS_CLOCK, .label = "r3" },
+        .{ .from = 0, .to = 1, .class = types.class_clock, .label = "r1" },
+        .{ .from = 0, .to = 2, .class = types.class_clock, .label = "r2" },
+        .{ .from = 0, .to = 3, .class = types.class_clock, .label = "r3" },
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_CLOCK)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.class_clock)) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 3), lay.routes.len);
     // The first vertical channel segment is pts[1]→pts[2]; its x is the bend.
     // All three edges leave the same source, so they must share one trunk x.
@@ -2584,13 +2584,13 @@ test "computeLayout gives a shared-source fanout one common bend x" {
 test "computeLayout puts the power source left of the regulators it feeds" {
     var nodes = [_]types.Node{ mkNode("MEZZ"), mkNode("REG"), mkNode("LOAD") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "VBATT", .voltage = 3.7 },
-        .{ .from = 1, .to = 2, .class = types.CLASS_POWER, .label = "v5", .voltage = 5.0 },
+        .{ .from = 0, .to = 1, .class = types.class_power, .label = "VBATT", .voltage = 3.7 },
+        .{ .from = 1, .to = 2, .class = types.class_power, .label = "v5", .voltage = 5.0 },
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_POWER)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.class_power)) orelse return error.TestUnexpectedResult;
     var sx: f64 = -1;
     var rx: f64 = -1;
     var bx: f64 = -1;
@@ -2608,14 +2608,14 @@ test "computeLayout puts the power source left of the regulators it feeds" {
 test "computeLayout groups power consumers into per-rail buckets" {
     var nodes = [_]types.Node{ mkNode("REG18"), mkNode("REG33"), mkNode("A"), mkNode("B"), mkNode("C") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 2, .class = types.CLASS_POWER, .label = "v18", .voltage = 1.8 },
-        .{ .from = 1, .to = 3, .class = types.CLASS_POWER, .label = "v33", .voltage = 3.3 },
-        .{ .from = 1, .to = 4, .class = types.CLASS_POWER, .label = "v33b", .voltage = 3.3 },
+        .{ .from = 0, .to = 2, .class = types.class_power, .label = "v18", .voltage = 1.8 },
+        .{ .from = 1, .to = 3, .class = types.class_power, .label = "v33", .voltage = 3.3 },
+        .{ .from = 1, .to = 4, .class = types.class_power, .label = "v33b", .voltage = 3.3 },
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_POWER)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.class_power)) orelse return error.TestUnexpectedResult;
     var n18: usize = 0;
     var n33: usize = 0;
     var buckets: usize = 0;
@@ -2636,11 +2636,11 @@ test "computeLayout lists a dual-rail consumer in both rail buckets" {
     dual.rails = &[_]f64{ 1.8, 3.3 };
     dual.power_rail = 3.3;
     var nodes = [_]types.Node{ mkNode("REG"), dual };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "v", .voltage = 3.3 }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.class_power, .label = "v", .voltage = 3.3 }};
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_POWER)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.class_power)) orelse return error.TestUnexpectedResult;
     var in18 = false;
     var in33 = false;
     for (lay.power_boxes) |pb| {
@@ -2655,14 +2655,14 @@ test "computeLayout lists a dual-rail consumer in both rail buckets" {
 test "computeLayout shows a voltage-changing cascade LDO" {
     var nodes = [_]types.Node{ mkNode("MEZZ"), mkNode("BUCK33"), mkNode("LDO18"), mkNode("LOAD") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "VBATT", .voltage = 3.7 },
-        .{ .from = 1, .to = 2, .class = types.CLASS_POWER, .label = "V3P3", .voltage = 3.3 }, // buck → LDO (3.3 V in)
-        .{ .from = 2, .to = 3, .class = types.CLASS_POWER, .label = "V1P8", .voltage = 1.8 }, // LDO → load (1.8 V out)
+        .{ .from = 0, .to = 1, .class = types.class_power, .label = "VBATT", .voltage = 3.7 },
+        .{ .from = 1, .to = 2, .class = types.class_power, .label = "V3P3", .voltage = 3.3 }, // buck → LDO (3.3 V in)
+        .{ .from = 2, .to = 3, .class = types.class_power, .label = "V1P8", .voltage = 1.8 }, // LDO → load (1.8 V out)
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_POWER)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.class_power)) orelse return error.TestUnexpectedResult;
     // The LDO changes voltage (3.3 → 1.8) so it is shown — two regulator cards
     // (BUCK33 + LDO18) at different columns, plus the 1.8 V bucket.
     var regs: usize = 0;
@@ -2684,14 +2684,14 @@ test "computeLayout shows a voltage-changing cascade LDO" {
 test "computeLayout folds a same-voltage filter stage" {
     var nodes = [_]types.Node{ mkNode("MEZZ"), mkNode("BUCK5"), mkNode("FILTER"), mkNode("LOAD") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "VBATT", .voltage = 3.7 },
-        .{ .from = 1, .to = 2, .class = types.CLASS_POWER, .label = "V5RAW", .voltage = 5.0 }, // buck → filter (5 V)
-        .{ .from = 2, .to = 3, .class = types.CLASS_POWER, .label = "V5", .voltage = 5.0 }, // filter → load (still 5 V)
+        .{ .from = 0, .to = 1, .class = types.class_power, .label = "VBATT", .voltage = 3.7 },
+        .{ .from = 1, .to = 2, .class = types.class_power, .label = "V5RAW", .voltage = 5.0 }, // buck → filter (5 V)
+        .{ .from = 2, .to = 3, .class = types.class_power, .label = "V5", .voltage = 5.0 }, // filter → load (still 5 V)
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const lay = (try computeLayout(arena.allocator(), &graph, types.CLASS_POWER)) orelse return error.TestUnexpectedResult;
+    const lay = (try computeLayout(arena.allocator(), &graph, types.class_power)) orelse return error.TestUnexpectedResult;
     // The filter passes 5 V through unchanged, so it is folded: only BUCK5 shows.
     var regs: usize = 0;
     var has5bucket = false;
@@ -2843,7 +2843,7 @@ test "computeFreeLayout routes around a block under an incoherent group box" {
     };
     const gmem = [_][]const u8{ "d", "e" };
     const groups = [_]env_mod.LayoutGroup{.{ .label = "G", .members = &gmem }};
-    var edges = [_]types.Edge{.{ .from = 0, .to = 2, .class = types.CLASS_CONTROL, .label = "x" }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 2, .class = types.class_control, .label = "x" }};
     const graph = Graph{ .nodes = &nodes, .edges = &edges, .layout = .{ .placements = &placements, .groups = &groups } };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2949,7 +2949,7 @@ test "computeFreeLayout routes an edge around a foreign group" {
     };
     const gmem = [_][]const u8{"b"};
     const groups = [_]env_mod.LayoutGroup{.{ .label = "G", .members = &gmem }};
-    var edges = [_]types.Edge{.{ .from = 0, .to = 2, .class = types.CLASS_CONTROL, .label = "x" }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 2, .class = types.class_control, .label = "x" }};
     const graph = Graph{ .nodes = &nodes, .edges = &edges, .layout = .{ .placements = &placements, .groups = &groups } };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2994,8 +2994,8 @@ test "computeFreeLayout lanes parallel wires apart" {
     const gmem = [_][]const u8{"b"};
     const groups = [_]env_mod.LayoutGroup{.{ .label = "G", .members = &gmem }};
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 2, .class = types.CLASS_CONTROL, .label = "x" },
-        .{ .from = 0, .to = 2, .class = types.CLASS_RF, .label = "y" },
+        .{ .from = 0, .to = 2, .class = types.class_control, .label = "x" },
+        .{ .from = 0, .to = 2, .class = types.class_rf, .label = "y" },
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges, .layout = .{ .placements = &placements, .groups = &groups } };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -3024,9 +3024,9 @@ test "computeFreeLayout fans same-face wires without stacking" {
         .{ .name = "d", .constraints = &d_right_b },
     };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 3, .class = types.CLASS_CONTROL, .label = "x" },
-        .{ .from = 1, .to = 3, .class = types.CLASS_CONTROL, .label = "y" },
-        .{ .from = 2, .to = 3, .class = types.CLASS_CONTROL, .label = "z" },
+        .{ .from = 0, .to = 3, .class = types.class_control, .label = "x" },
+        .{ .from = 1, .to = 3, .class = types.class_control, .label = "y" },
+        .{ .from = 2, .to = 3, .class = types.class_control, .label = "z" },
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges, .layout = .{ .placements = &placements } };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -3056,8 +3056,8 @@ test "computeGroupsLayout boxes-only with one connector per crossing pair" {
     const g2mem = [_][]const u8{ "b", "c" };
     const groups = [_]env_mod.LayoutGroup{ .{ .label = "G1", .members = &g1mem }, .{ .label = "G2", .members = &g2mem } };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "x" }, // a→b crosses G1↔G2
-        .{ .from = 1, .to = 2, .class = types.CLASS_RF, .label = "y" }, // b→c within G2
+        .{ .from = 0, .to = 1, .class = types.class_control, .label = "x" }, // a→b crosses G1↔G2
+        .{ .from = 1, .to = 2, .class = types.class_rf, .label = "y" }, // b→c within G2
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges, .layout = .{ .placements = &placements, .groups = &groups } };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -3150,8 +3150,8 @@ fn nodeXY(nodes: []const LNode) [8]Pt {
 test "computeSystemLayout includes edges of all classes at once" {
     var nodes = [_]types.Node{ mkNode("A"), mkNode("B"), mkNode("C") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "v", .voltage = 3.3 },
-        .{ .from = 1, .to = 2, .class = types.CLASS_CLOCK, .label = "clk" },
+        .{ .from = 0, .to = 1, .class = types.class_power, .label = "v", .voltage = 3.3 },
+        .{ .from = 1, .to = 2, .class = types.class_clock, .label = "clk" },
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -3161,8 +3161,8 @@ test "computeSystemLayout includes edges of all classes at once" {
     var has_power = false;
     var has_clock = false;
     for (lay.routes) |r| {
-        if (r.class == types.CLASS_POWER) has_power = true;
-        if (r.class == types.CLASS_CLOCK) has_clock = true;
+        if (r.class == types.class_power) has_power = true;
+        if (r.class == types.class_clock) has_clock = true;
     }
     try testing.expect(has_power and has_clock);
 }
@@ -3175,8 +3175,8 @@ test "computeSystemLayout stages blocks power→core→peripheral left to right"
         .{ .label = "Sensor", .subtitle = "", .category = .sensor, .slug = "", .inputs = &.{}, .outputs = &.{} },
     };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "3V3", .voltage = 3.3 },
-        .{ .from = 1, .to = 2, .class = types.CLASS_CONTROL, .label = "I2C" },
+        .{ .from = 0, .to = 1, .class = types.class_power, .label = "3V3", .voltage = 3.3 },
+        .{ .from = 1, .to = 2, .class = types.class_control, .label = "I2C" },
     };
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -3202,7 +3202,7 @@ test "computeSystemLayout routes a same-column edge on a vertical face" {
     // Two peripherals share a stage (column); the edge between them must attach
     // top/bottom and arrive vertically, not loop out into the column gap.
     var nodes = [_]types.Node{ mkNode("A"), mkNode("B") };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "x" }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.class_control, .label = "x" }};
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -3223,7 +3223,7 @@ test "computeSystemLayout routes a cross-column edge on a horizontal face" {
         .{ .label = "Buck", .subtitle = "", .category = .power, .slug = "", .inputs = &.{}, .outputs = &.{} },
         .{ .label = "MCU", .subtitle = "", .category = .mcu, .slug = "", .inputs = &.{}, .outputs = &.{} },
     };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "x" }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.class_control, .label = "x" }};
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -3251,7 +3251,7 @@ test "computeSystemLayout shows isolated blocks when there are no edges" {
 // spec: diagram/layout - Omits an unconnected block from the System view when edges exist
 test "computeSystemLayout omits an unconnected block when edges exist" {
     var nodes = [_]types.Node{ mkBlock("A", "a"), mkBlock("B", "b"), mkBlock("Lonely", "lonely") };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "x" }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.class_control, .label = "x" }};
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -3266,7 +3266,7 @@ test "computeSystemLayout keeps a force-shown isolated block" {
     var lonely = mkBlock("Declared", "declared");
     lonely.force_show = true; // a declared function box, unwired
     var nodes = [_]types.Node{ mkBlock("A", "a"), mkBlock("B", "b"), lonely };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "x" }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.class_control, .label = "x" }};
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -3324,7 +3324,7 @@ test "routeSystemEdges keeps the target-port index non-negative for a right-colu
     // the `+` to `-` gives 0·4 - 1, an unsigned underflow / OOB — the call must
     // instead route the one edge cleanly.
     var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b") };
-    var edges = [_]types.Edge{.{ .from = 1, .to = 0, .class = types.CLASS_CONTROL, .label = "x" }};
+    var edges = [_]types.Edge{.{ .from = 1, .to = 0, .class = types.class_control, .label = "x" }};
     const graph = Graph{ .nodes = &nodes, .edges = &edges };
     var lnodes = [_]LNode{
         .{ .gid = 0, .x = pad + (node_w + h_gap), .y = 0 },

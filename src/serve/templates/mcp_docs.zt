@@ -8,12 +8,12 @@ const home_tmpl = @import("pages.zig");
 const ToolDoc = mcp_docs.ToolDoc;
 const ParamDoc = mcp_docs.ParamDoc;
 
-const STYLE_BLOCK: []const u8 = "<style>" ++
-    assets_css.NAVBAR_CSS ++
+const style_block: []const u8 = "<style>" ++
+    assets_css.navbar_css ++
     @embedFile("../assets/mcp_docs.css") ++
     "</style>";
 
-const SCRIPT_BLOCK: []const u8 = "<script>" ++
+const script_block: []const u8 = "<script>" ++
     @embedFile("../assets/mcp_docs.js") ++
     "</script>";
 
@@ -22,7 +22,7 @@ pub templ Mcp(tools: []const ToolDoc) {
     <html>
         <head>
             <title>MCP Tools</title>
-            {!STYLE_BLOCK}
+            {!style_block}
         </head>
         <body>
             @home_tmpl.Navbar("mcp")
@@ -38,7 +38,7 @@ pub templ Mcp(tools: []const ToolDoc) {
                     @ToolCard(tool)
                 }
             </div>
-            {!SCRIPT_BLOCK}
+            {!script_block}
         </body>
     </html>
 }

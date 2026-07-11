@@ -3,7 +3,7 @@
 // form otherwise. The hidden-input bundle echoes every authorize-request
 // parameter so POST /oauth/authorize/approve receives the same query back.
 
-const STYLE_BLOCK: []const u8 = "<style>" ++
+const style_block: []const u8 = "<style>" ++
     \\body{font-family:system-ui,sans-serif;
     \\background:#0d1117;color:#c9d1d9;
     \\max-width:560px;margin:80px auto;padding:24px;line-height:1.5}
@@ -34,7 +34,7 @@ pub templ Authorize(
             } else {
                 <title>Authorize {client_name} — Netlisp</title>
             }
-            {!STYLE_BLOCK}
+            {!style_block}
         </head>
         <body>
             <div class="card">

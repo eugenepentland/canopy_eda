@@ -13,13 +13,13 @@ const store = @import("oauth_store.zig");
 const oauth_template = @import("templates/oauth.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
-const HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin";
-const KEY_CLIENT_ID = "client_id";
-const KEY_REDIRECT_URI = "redirect_uri";
-const ERR_INVALID_GRANT = "invalid_grant";
-const ERR_INVALID_REQUEST = "invalid_request";
-const ERR_MISSING_CLIENT_ID = "missing client_id";
-const ERR_MISSING_REDIRECT_URI = "missing redirect_uri";
+const header_cors_allow_origin = "access-control-allow-origin";
+const key_client_id = "client_id";
+const key_redirect_uri = "redirect_uri";
+const err_invalid_grant = "invalid_grant";
+const err_invalid_request = "invalid_request";
+const err_missing_client_id = "missing client_id";
+const err_missing_redirect_uri = "missing redirect_uri";
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
@@ -47,7 +47,7 @@ pub fn metadataProtectedResource(ctx: *Handler, req: *httpz.Request, res: *httpz
     const base = try requestUrl(ctx, req);
     defer ctx.allocator.free(base);
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
     res.body = try std.fmt.allocPrint(
         req.arena,
         \\{{"resource":"{s}","authorization_servers":["{s}"],"scopes_supported":["mcp"],"bearer_methods_supported":["header"]}}
@@ -63,7 +63,7 @@ pub fn metadataAuthServer(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     const base = try requestUrl(ctx, req);
     defer ctx.allocator.free(base);
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
     res.body = try std.fmt.allocPrint(
         req.arena,
         "{{\"issuer\":\"{s}\"," ++
@@ -100,19 +100,19 @@ pub fn registerEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
         // RFC 7591 lists more optional fields; we accept and ignore them.
     };
     const parsed = std.json.parseFromSlice(Body, req.arena, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
-        return registerError(req, res, ERR_INVALID_REQUEST, "request body must be JSON with client_name and redirect_uris");
+        return registerError(req, res, err_invalid_request, "request body must be JSON with client_name and redirect_uris");
     };
     defer parsed.deinit();
 
-    const uris = parsed.value.redirect_uris orelse return registerError(req, res, ERR_INVALID_REQUEST, "redirect_uris required");
-    if (uris.len != 1) return registerError(req, res, ERR_INVALID_REQUEST, "exactly one redirect_uri is required");
+    const uris = parsed.value.redirect_uris orelse return registerError(req, res, err_invalid_request, "redirect_uris required");
+    if (uris.len != 1) return registerError(req, res, err_invalid_request, "exactly one redirect_uri is required");
     const redirect_uri = uris[0];
     if (parseLoopbackUri(redirect_uri) == null) {
         return registerError(req, res, "invalid_redirect_uri", "redirect_uri must be a loopback URI (http://127.0.0.1 or http://localhost)");
     }
 
     const client_name = parsed.value.client_name orelse "Dynamic Client";
-    if (client_name.len > 200) return registerError(req, res, ERR_INVALID_REQUEST, "client_name too long");
+    if (client_name.len > 200) return registerError(req, res, err_invalid_request, "client_name too long");
 
     // Empty email = unclaimed; first /oauth/authorize approval will set it.
     const minted = store.createClient(ctx.allocator, ctx.auth_dir, client_name, "", redirect_uri) catch {
@@ -125,7 +125,7 @@ pub fn registerEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     res.status = 201;
     res.content_type = .JSON;
     res.header("cache-control", "no-store");
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
     // RFC 7591 §3.2.1 response shape. `token_endpoint_auth_method` matches
     // what the metadata advertises so the client knows to POST creds in the
     // form body rather than HTTP Basic.
@@ -146,7 +146,7 @@ pub fn registerEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 fn registerError(req: *httpz.Request, res: *httpz.Response, code: []const u8, desc: []const u8) void {
     res.status = 400;
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
     res.body = std.fmt.allocPrint(
         req.arena,
         \\{{"error":"{s}","error_description":"{s}"}}
@@ -163,8 +163,8 @@ fn registerError(req: *httpz.Request, res: *httpz.Response, code: []const u8, de
 /// with a link to /auth/login.
 pub fn authorizePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const q = try req.query();
-    const client_id = q.get(KEY_CLIENT_ID) orelse return badRequest(res, ERR_MISSING_CLIENT_ID);
-    const redirect_uri = q.get(KEY_REDIRECT_URI) orelse return badRequest(res, ERR_MISSING_REDIRECT_URI);
+    const client_id = q.get(key_client_id) orelse return badRequest(res, err_missing_client_id);
+    const redirect_uri = q.get(key_redirect_uri) orelse return badRequest(res, err_missing_redirect_uri);
     const response_type = q.get("response_type") orelse "";
     const state = q.get("state") orelse "";
     const code_challenge = q.get("code_challenge") orelse "";
@@ -212,8 +212,8 @@ pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const email = auth.currentEmail(ctx, req) orelse return unauthorized(res);
 
     const form = try req.formData();
-    const client_id = form.get(KEY_CLIENT_ID) orelse return badRequest(res, ERR_MISSING_CLIENT_ID);
-    const redirect_uri = form.get(KEY_REDIRECT_URI) orelse return badRequest(res, ERR_MISSING_REDIRECT_URI);
+    const client_id = form.get(key_client_id) orelse return badRequest(res, err_missing_client_id);
+    const redirect_uri = form.get(key_redirect_uri) orelse return badRequest(res, err_missing_redirect_uri);
     const state = form.get("state") orelse "";
     const code_challenge = form.get("code_challenge") orelse return badRequest(res, "missing code_challenge");
     const scope = form.get("scope") orelse "mcp";
@@ -244,7 +244,7 @@ pub fn authorizeApprove(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 /// Percent-encode `s` for use as a URL query-parameter value (RFC 3986
 /// unreserved set kept literal; everything else `%XX`). Allocates from `a`.
 fn percentEncode(a: std.mem.Allocator, s: []const u8) ![]const u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     for (s) |c| {
         const unreserved = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
             (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or c == '~';
@@ -263,32 +263,32 @@ fn percentEncode(a: std.mem.Allocator, s: []const u8) ![]const u8 {
 pub fn tokenEndpoint(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const form = try req.formData();
 
-    const grant_type = form.get("grant_type") orelse return tokenError(req, res, ERR_INVALID_REQUEST, "missing grant_type");
+    const grant_type = form.get("grant_type") orelse return tokenError(req, res, err_invalid_request, "missing grant_type");
     if (!std.mem.eql(u8, grant_type, "authorization_code")) {
         return tokenError(req, res, "unsupported_grant_type", "only authorization_code is supported");
     }
-    const code = form.get("code") orelse return tokenError(req, res, ERR_INVALID_REQUEST, "missing code");
-    const redirect_uri = form.get(KEY_REDIRECT_URI) orelse return tokenError(req, res, ERR_INVALID_REQUEST, ERR_MISSING_REDIRECT_URI);
-    const client_id = form.get(KEY_CLIENT_ID) orelse return tokenError(req, res, ERR_INVALID_REQUEST, ERR_MISSING_CLIENT_ID);
-    const client_secret = form.get("client_secret") orelse return tokenError(req, res, ERR_INVALID_REQUEST, "missing client_secret");
-    const code_verifier = form.get("code_verifier") orelse return tokenError(req, res, ERR_INVALID_REQUEST, "missing code_verifier");
+    const code = form.get("code") orelse return tokenError(req, res, err_invalid_request, "missing code");
+    const redirect_uri = form.get(key_redirect_uri) orelse return tokenError(req, res, err_invalid_request, err_missing_redirect_uri);
+    const client_id = form.get(key_client_id) orelse return tokenError(req, res, err_invalid_request, err_missing_client_id);
+    const client_secret = form.get("client_secret") orelse return tokenError(req, res, err_invalid_request, "missing client_secret");
+    const code_verifier = form.get("code_verifier") orelse return tokenError(req, res, err_invalid_request, "missing code_verifier");
 
     const verified_client = try store.verifyClientSecret(ctx.allocator, ctx.auth_dir, client_id, client_secret);
     if (verified_client == null) return tokenError(req, res, "invalid_client", "bad client_id or client_secret");
 
     const auth_code = store.consumeCode(ctx.allocator, ctx.auth_dir, code) orelse
-        return tokenError(req, res, ERR_INVALID_GRANT, "code expired or already used");
-    if (!std.mem.eql(u8, auth_code.client_id, client_id)) return tokenError(req, res, ERR_INVALID_GRANT, "code was issued to a different client");
-    if (!redirectUriMatches(auth_code.redirect_uri, redirect_uri)) return tokenError(req, res, ERR_INVALID_GRANT, "redirect_uri mismatch");
+        return tokenError(req, res, err_invalid_grant, "code expired or already used");
+    if (!std.mem.eql(u8, auth_code.client_id, client_id)) return tokenError(req, res, err_invalid_grant, "code was issued to a different client");
+    if (!redirectUriMatches(auth_code.redirect_uri, redirect_uri)) return tokenError(req, res, err_invalid_grant, "redirect_uri mismatch");
 
     const pkce_ok = try store.verifyPkce(ctx.allocator, code_verifier, auth_code.code_challenge);
-    if (!pkce_ok) return tokenError(req, res, ERR_INVALID_GRANT, "PKCE verification failed");
+    if (!pkce_ok) return tokenError(req, res, err_invalid_grant, "PKCE verification failed");
 
     const access_token = try store.issueToken(ctx.allocator, ctx.auth_dir, client_id, auth_code.email, auth_code.scope);
 
     res.content_type = .JSON;
     res.header("cache-control", "no-store");
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
     res.body = try std.fmt.allocPrint(
         req.arena,
         \\{{"access_token":"{s}","token_type":"Bearer","expires_in":2592000,"scope":"{s}"}}
@@ -314,11 +314,11 @@ const LoopbackUri = struct { host: []const u8, path: []const u8 };
 /// Returns host/path for `http://127.0.0.1[:port][/path]` or
 /// `http://localhost[:port][/path]`. Anything else (https, other hosts,
 /// missing scheme) returns null so the strict-equality fallback applies.
-const HTTP_PREFIX = "http" ++ "://";
+const http_prefix = "http" ++ "://";
 
 fn parseLoopbackUri(uri: []const u8) ?LoopbackUri {
-    if (!std.mem.startsWith(u8, uri, HTTP_PREFIX)) return null;
-    const rest = uri[HTTP_PREFIX.len..];
+    if (!std.mem.startsWith(u8, uri, http_prefix)) return null;
+    const rest = uri[http_prefix.len..];
     // Split off the path at the first '/'.
     const path_start = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
     var hostport = rest[0..path_start];

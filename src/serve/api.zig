@@ -30,27 +30,27 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
 // ── Constants ─────────────────────────────────────────────────────
-const HTTP_NOT_FOUND: u16 = 404;
-const HTTP_BAD_REQUEST: u16 = 400;
-const HTTP_INTERNAL_ERROR: u16 = 500;
+const http_not_found: u16 = 404;
+const http_bad_request: u16 = 400;
+const http_internal_error: u16 = 500;
 
-const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
-const STREAM_BUF_BYTES: usize = 8192;
+const max_source_bytes: usize = 10 * 1024 * 1024;
+const stream_buf_bytes: usize = 8192;
 
 // Headers
-const HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin";
-const HEADER_CONTENT_TYPE = "Content-Type";
-const HEADER_CONTENT_DISPOSITION = "Content-Disposition";
-const CONTENT_TYPE_ZIP = "application/zip";
+const header_cors_allow_origin = "access-control-allow-origin";
+const header_content_type = "Content-Type";
+const header_content_disposition = "Content-Disposition";
+const content_type_zip = "application/zip";
 
 // JSON fragments / response templates
-const ERR_BUILD = "Build error";
-const ERR_NO_BODY_JSON = "{\"error\":\"no body\"}";
-const OK_JSON_TRUE = "{\"ok\":true}";
-const OK_VERSION_TEMPLATE = "{{\"ok\":true,\"version\":{d}}}";
-const ERR_OK_FALSE_TEMPLATE = "{{\"ok\":false,\"error\":\"{s}\"}}";
-const NAME_FIELD_PREFIX = "{\"name\":";
-const EMPTY_DATASHEETS_REQS = ",\"datasheets\":[],\"requirements\":[]";
+const err_build = "Build error";
+const err_no_body_json = "{\"error\":\"no body\"}";
+const ok_json_true = "{\"ok\":true}";
+const ok_version_template = "{{\"ok\":true,\"version\":{d}}}";
+const err_ok_false_template = "{{\"ok\":false,\"error\":\"{s}\"}}";
+const name_field_prefix = "{\"name\":";
+const empty_datasheets_reqs = ",\"datasheets\":[],\"requirements\":[]";
 
 /// Error set for HTTP handlers in this module. Wide because handlers
 /// orchestrate many subsystems (eval, render, parser, file IO, BOM resolve)
@@ -83,7 +83,7 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
 /// (`{file,line,col,message,source_line}`) alongside the human-readable text.
 pub fn pushApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         return;
     };
 
@@ -124,14 +124,14 @@ fn writeBuildErrorJson(
 ) HandlerError!void {
     const d = try diag_format.load(ctx.allocator, board_path, err_name, last_error);
     const text = try diag_format.formatText(ctx.allocator, d);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try w.writeAll("{\"ok\":false,\"error\":");
     try json_writer.writeString(w, text);
     try w.writeAll(",\"diagnostic\":");
     try diag_format.writeJson(w, d);
     try w.writeAll("}");
-    res.status = HTTP_INTERNAL_ERROR;
+    res.status = http_internal_error;
     res.content_type = .JSON;
     res.body = buf.items;
 }
@@ -141,13 +141,13 @@ fn writeBuildErrorJson(
 /// Bumped by `pushApi` and the MCP mutation tools.
 pub fn versionApi(_: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         return;
     };
     const v = serve_root.getLiveVersion(name);
 
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
     const w = res.writer();
     try w.print("{{\"version\":{d}}}", .{v});
 }
@@ -161,7 +161,7 @@ pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
     serve_root.live_mutex.unlock();
 
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
     res.body = data orelse "{\"error\":\"no layout\"}";
 }
 
@@ -172,14 +172,14 @@ pub fn sceneGraphApi(_: *Handler, _: *httpz.Request, res: *httpz.Response) Handl
 /// peripheral on the part.
 pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name_raw = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         return;
     };
     // Decode before validating so `%2e%2e` can't slip past the traversal check,
     // and so library files with reserved chars (e.g. `…#pbf`) actually resolve.
     const name = try urlDecodeAlloc(ctx.allocator, name_raw);
     if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null or std.mem.indexOf(u8, name, "..") != null) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"invalid component name\"}";
         res.content_type = .JSON;
         return;
@@ -189,20 +189,20 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     defer ctx.allocator.free(path);
 
     const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 256) catch {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         res.content_type = .JSON;
         res.body = "{\"error\":\"pinout not found\"}";
         return;
     };
 
     const nodes = parser_mod.parse(ctx.allocator, content) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.content_type = .JSON;
         res.body = "{\"error\":\"parse error\"}";
         return;
     };
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
 
     try w.writeAll("{\"component\":");
@@ -244,7 +244,7 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
 
                                 if (!first_alt) try w.writeAll(",");
                                 first_alt = false;
-                                try w.writeAll(NAME_FIELD_PREFIX);
+                                try w.writeAll(name_field_prefix);
                                 try json_writer.writeString(w, alt_name);
                                 try w.writeAll(",\"type\":");
                                 try json_writer.writeString(w, etype);
@@ -261,7 +261,7 @@ pub fn pinoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     try w.writeAll("]}");
 
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
     res.body = buf.items;
 }
 
@@ -279,19 +279,19 @@ fn writeComponentLibInfo(
     const path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name });
     defer allocator.free(path);
     const content = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 512) catch {
-        try w.writeAll(EMPTY_DATASHEETS_REQS);
+        try w.writeAll(empty_datasheets_reqs);
         return;
     };
     const nodes = parser_mod.parse(allocator, content) catch {
-        try w.writeAll(EMPTY_DATASHEETS_REQS);
+        try w.writeAll(empty_datasheets_reqs);
         return;
     };
     if (nodes.len == 0) {
-        try w.writeAll(EMPTY_DATASHEETS_REQS);
+        try w.writeAll(empty_datasheets_reqs);
         return;
     }
     const top = nodes[0].asList() orelse {
-        try w.writeAll(EMPTY_DATASHEETS_REQS);
+        try w.writeAll(empty_datasheets_reqs);
         return;
     };
 
@@ -306,7 +306,7 @@ fn writeComponentLibInfo(
         if (!first_ds) try w.writeAll(",");
         first_ds = false;
         const size = datasheetSize(allocator, project_dir, ds);
-        try w.writeAll(NAME_FIELD_PREFIX);
+        try w.writeAll(name_field_prefix);
         try json_writer.writeString(w, ds);
         try w.print(",\"size\":{d}}}", .{size});
     }
@@ -369,7 +369,7 @@ fn evalDesignForExport(
     eval: *Evaluator,
 ) HandlerError!?ExportTarget {
     const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         return null;
     };
 
@@ -377,15 +377,15 @@ fn evalDesignForExport(
     defer ctx.allocator.free(board_path);
 
     const result = eval.evalFile(board_path) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = ERR_BUILD;
+        res.status = http_internal_error;
+        res.body = err_build;
         return null;
     };
 
     return switch (result) {
         .design_block => |b| .{ .name = name, .block = b },
         else => {
-            res.status = HTTP_INTERNAL_ERROR;
+            res.status = http_internal_error;
             return null;
         },
     };
@@ -402,24 +402,24 @@ pub fn exportKicadApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     const block = target.block;
 
     const bom_path = paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom") catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         return;
     };
     try bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
     const zip_data = export_kicad.exportKicadZip(ctx.allocator, block, ctx.project_dir, name) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "Export error";
         return;
     };
 
     const disposition = std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-kicad.zip\"", .{name}) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         return;
     };
 
-    res.header(HEADER_CONTENT_TYPE, CONTENT_TYPE_ZIP);
-    res.header(HEADER_CONTENT_DISPOSITION, disposition);
+    res.header(header_content_type, content_type_zip);
+    res.header(header_content_disposition, disposition);
     res.body = zip_data;
 }
 
@@ -434,24 +434,24 @@ pub fn exportNetlistApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const block = target.block;
 
     const bom_path = paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom") catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         return;
     };
     try bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
     const netlist = export_kicad.exportNetlistOnly(ctx.allocator, block, ctx.project_dir, name) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "Export error";
         return;
     };
 
     const disposition = std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}.net\"", .{name}) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         return;
     };
 
-    res.header(HEADER_CONTENT_TYPE, "text/plain");
-    res.header(HEADER_CONTENT_DISPOSITION, disposition);
+    res.header(header_content_type, "text/plain");
+    res.header(header_content_disposition, disposition);
     res.body = netlist;
 }
 
@@ -475,18 +475,18 @@ pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
         log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(e) });
     };
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try bom_html.writeBomCsv(ctx.allocator, w, block);
 
     const disposition = std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-bom.csv\"", .{name}) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         return;
     };
 
-    res.header(HEADER_CONTENT_TYPE, "text/csv");
-    res.header(HEADER_CONTENT_DISPOSITION, disposition);
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_content_type, "text/csv");
+    res.header(header_content_disposition, disposition);
+    res.header(header_cors_allow_origin, "*");
     res.body = buf.items;
 }
 
@@ -498,7 +498,7 @@ pub fn exportBomCsvApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 /// `src/` and `lib/` so the bundle mirrors a buildable project tree.
 pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         return;
     };
 
@@ -510,8 +510,8 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     defer eval.deinit();
 
     const nb = mcp_tools.evalNamedBlock(ctx.allocator, ctx.project_dir, name, &eval) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = ERR_BUILD;
+        res.status = http_internal_error;
+        res.body = err_build;
         return;
     };
     const block = nb.block;
@@ -537,8 +537,8 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     req_checks.applyVerifications(&check_results, block, block.instances);
 
     const doc = review_mod.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = ERR_BUILD;
+        res.status = http_internal_error;
+        res.body = err_build;
         return;
     };
 
@@ -548,19 +548,19 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     const board_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch null;
     defer if (board_path) |bp| ctx.allocator.free(bp);
     const source: []const u8 = if (board_path) |bp|
-        infra_fs.cwd().readFileAlloc(ctx.allocator, bp, MAX_SOURCE_BYTES) catch &[_]u8{}
+        infra_fs.cwd().readFileAlloc(ctx.allocator, bp, max_source_bytes) catch &[_]u8{}
     else
         &[_]u8{};
 
     const md = review_md_mod.renderToMarkdown(ctx.allocator, block, ctx.project_dir, name, doc, build_options.git_hash) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "Markdown render error";
         return;
     };
 
-    var csv_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var csv_buf: std.ArrayList(u8) = .empty;
     bom_html.writeBomCsv(ctx.allocator, csv_buf.writer(ctx.allocator), block) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "BOM CSV error";
         return;
     };
@@ -568,7 +568,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     // Collect every source `.sexp` the evaluator read, each under its path
     // relative to the project dir so the bundle reads as a buildable project
     // tree (src/<design>.sexp, lib/modules/*.sexp, lib/components/*.sexp).
-    var sources: std.ArrayListUnmanaged(fp_mod.ZipEntry) = .empty;
+    var sources: std.ArrayList(fp_mod.ZipEntry) = .empty;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
 
     // The design's own top-level source, added explicitly rather than via
@@ -588,7 +588,7 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
         if (!std.mem.endsWith(u8, path, ".sexp")) continue;
         const zip_name = zipNameForSource(ctx.project_dir, path);
         if (seen.contains(zip_name)) continue;
-        const data = infra_fs.cwd().readFileAlloc(ctx.allocator, path, MAX_SOURCE_BYTES) catch continue;
+        const data = infra_fs.cwd().readFileAlloc(ctx.allocator, path, max_source_bytes) catch continue;
         try seen.put(ctx.allocator, zip_name, {});
         try sources.append(ctx.allocator, .{ .name = zip_name, .data = data });
     }
@@ -603,14 +603,14 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
     const md_name = try std.fmt.allocPrint(ctx.allocator, "{s}-review.md", .{name});
     const csv_name = try std.fmt.allocPrint(ctx.allocator, "{s}-bom.csv", .{name});
 
-    var entries: std.ArrayListUnmanaged(fp_mod.ZipEntry) = .empty;
+    var entries: std.ArrayList(fp_mod.ZipEntry) = .empty;
     if (readme.len > 0) try entries.append(ctx.allocator, .{ .name = "README.md", .data = readme });
     try entries.append(ctx.allocator, .{ .name = md_name, .data = md });
     try entries.append(ctx.allocator, .{ .name = csv_name, .data = csv_buf.items });
     try entries.appendSlice(ctx.allocator, sources.items);
 
     const zip = fp_mod.buildZip(ctx.allocator, entries.items) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "Zip error";
         return;
     };
@@ -622,9 +622,9 @@ pub fn exportReviewPackageApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Re
         "attachment; filename=\"{s}-review-{s}.zip\"",
         .{ name, build_options.git_hash },
     );
-    res.header(HEADER_CONTENT_TYPE, CONTENT_TYPE_ZIP);
-    res.header(HEADER_CONTENT_DISPOSITION, disposition);
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_content_type, content_type_zip);
+    res.header(header_content_disposition, disposition);
+    res.header(header_cors_allow_origin, "*");
     res.body = zip;
 }
 
@@ -647,7 +647,7 @@ fn zipNameForSource(project_dir: []const u8, path: []const u8) []const u8 {
 /// and return the violations as JSON for the schematic viewer's panel.
 pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         return;
     };
 
@@ -658,15 +658,15 @@ pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerE
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch {
-        res.status = HTTP_INTERNAL_ERROR;
-        res.body = ERR_BUILD;
+        res.status = http_internal_error;
+        res.body = err_build;
         return;
     };
 
     const block = switch (result) {
         .design_block => |b| b,
         else => {
-            res.status = HTTP_INTERNAL_ERROR;
+            res.status = http_internal_error;
             res.body = "Not a design block";
             return;
         },
@@ -677,18 +677,18 @@ pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerE
     try bom.resolveIdentities(ctx.allocator, @constCast(block), bom_path, ctx.project_dir);
 
     const violations = erc_mod.runErc(ctx.allocator, block, ctx.project_dir) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "ERC error";
         return;
     };
 
     const json = erc_mod.writeViolationsJson(ctx.allocator, violations) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         return;
     };
 
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
     res.body = json;
 }
 
@@ -697,16 +697,16 @@ pub fn ercApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerE
 /// net_count, mtime, build_ok}, ...]`.
 pub fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
 
     const summaries = mcp_tools.listDesignSummaries(ctx.allocator, ctx.project_dir) catch &[_]mcp_tools.DesignSummary{};
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
     try w.writeAll("[");
     for (summaries, 0..) |s, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll(NAME_FIELD_PREFIX);
+        try w.writeAll(name_field_prefix);
         try json_writer.writeString(w, s.name);
         try w.writeAll(",\"title\":");
         try json_writer.writeString(w, s.title);
@@ -731,34 +731,34 @@ pub fn designsApi(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handle
 /// dropdown without going through the MCP transport.
 pub fn freePinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
 
     const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         res.body = "{\"error\":\"missing name\"}";
         return;
     };
     const qs = req.query() catch {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"invalid query\"}";
         return;
     };
     const ref_des = qs.get("ref") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing ref\"}";
         return;
     };
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     const w = buf.writer(ctx.allocator);
     const ok = mcp_tools.listFreePins(ctx.allocator, ctx.project_dir, name, ref_des, null, w) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "{\"error\":\"internal\"}";
         return;
     };
     if (!ok) {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         // buf.items holds plain text like "error: instance not found".
         res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\"}}", .{buf.items});
         return;
@@ -772,10 +772,10 @@ pub fn freePinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 /// sidebar without reloading the page.
 pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
 
     const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         res.body = "{\"error\":\"missing name\"}";
         return;
     };
@@ -786,14 +786,14 @@ pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
     const result = eval.evalFile(board_path) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "{\"error\":\"rebuild_failed\"}";
         return;
     };
     const block = switch (result) {
         .design_block => |b| b,
         else => {
-            res.status = HTTP_INTERNAL_ERROR;
+            res.status = http_internal_error;
             res.body = "{\"error\":\"not_a_design\"}";
             return;
         },
@@ -805,7 +805,7 @@ pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
     var sym_cache = try bom_html.buildSymbolPinCache(ctx.allocator, ctx.project_dir);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     const w = buf.writer(ctx.allocator);
     try w.writeAll("{\"components\":{");
@@ -823,19 +823,19 @@ pub fn designStateApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 /// picks up the redraw.
 pub fn addSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         return;
     };
     const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         return;
     };
     const section = jsonField(body, "section") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         return;
     };
     const text = jsonField(body, "text") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         return;
     };
     const pdf = jsonField(body, "pdf") orelse "";
@@ -843,41 +843,41 @@ pub fn addSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     const page: u32 = @intCast(page_u);
 
     const result = edit_mod.addSectionNoteCore(ctx.allocator, ctx.project_dir, name, section, text, pdf, page) catch |err| {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.content_type = .JSON;
-        res.body = try std.fmt.allocPrint(ctx.allocator, ERR_OK_FALSE_TEMPLATE, .{@errorName(err)});
+        res.body = try std.fmt.allocPrint(ctx.allocator, err_ok_false_template, .{@errorName(err)});
         return;
     };
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{result.version});
+    res.body = try std.fmt.allocPrint(ctx.allocator, ok_version_template, .{result.version});
 }
 
 /// POST /api/section-note/:name/remove — body `{section, index}`. Deletes the
 /// nth (0-based) `(note ...)` form nested directly in the named section.
 pub fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         return;
     };
     const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         return;
     };
     const section = jsonField(body, "section") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         return;
     };
     const idx_u = jsonUintField(body, "index") orelse 0;
     const idx: usize = @intCast(idx_u);
 
     const result = edit_mod.removeSectionNoteCore(ctx.allocator, ctx.project_dir, name, section, idx) catch |err| {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.content_type = .JSON;
-        res.body = try std.fmt.allocPrint(ctx.allocator, ERR_OK_FALSE_TEMPLATE, .{@errorName(err)});
+        res.body = try std.fmt.allocPrint(ctx.allocator, err_ok_false_template, .{@errorName(err)});
         return;
     };
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{result.version});
+    res.body = try std.fmt.allocPrint(ctx.allocator, ok_version_template, .{result.version});
 }
 
 /// POST /api/component-datasheet/:component/add — body `{pdf: "file.pdf"}`.
@@ -886,52 +886,52 @@ pub fn removeSectionNoteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 /// to parts without manual .sexp editing.
 pub fn addComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const component_raw = req.param("component") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         return;
     };
     const component = try urlDecodeAlloc(ctx.allocator, component_raw);
     const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         return;
     };
     const pdf = jsonField(body, "pdf") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         return;
     };
     const result = edit_mod.addComponentDatasheetCore(ctx.allocator, ctx.project_dir, component, pdf) catch |err| {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.content_type = .JSON;
-        res.body = try std.fmt.allocPrint(ctx.allocator, ERR_OK_FALSE_TEMPLATE, .{@errorName(err)});
+        res.body = try std.fmt.allocPrint(ctx.allocator, err_ok_false_template, .{@errorName(err)});
         return;
     };
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{result.version});
+    res.body = try std.fmt.allocPrint(ctx.allocator, ok_version_template, .{result.version});
 }
 
 /// POST /api/component-datasheet/:component/remove — body `{pdf: "file.pdf"}`.
 /// Counterpart to /add; unlinks a PDF from the library part.
 pub fn removeComponentDatasheetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const component_raw = req.param("component") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         return;
     };
     const component = try urlDecodeAlloc(ctx.allocator, component_raw);
     const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         return;
     };
     const pdf = jsonField(body, "pdf") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         return;
     };
     const result = edit_mod.removeComponentDatasheetCore(ctx.allocator, ctx.project_dir, component, pdf) catch |err| {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.content_type = .JSON;
-        res.body = try std.fmt.allocPrint(ctx.allocator, ERR_OK_FALSE_TEMPLATE, .{@errorName(err)});
+        res.body = try std.fmt.allocPrint(ctx.allocator, err_ok_false_template, .{@errorName(err)});
         return;
     };
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, OK_VERSION_TEMPLATE, .{result.version});
+    res.body = try std.fmt.allocPrint(ctx.allocator, ok_version_template, .{result.version});
 }
 
 /// Extract a positive integer value for `"key":N` out of a flat JSON body.

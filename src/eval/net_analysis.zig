@@ -103,7 +103,7 @@ pub fn findMissingDecouplingNets(
 
     // Emit each undecoupled base rail once, walking `block.nets` for a stable
     // order rather than the (unordered) hash map.
-    var missing: std.ArrayListUnmanaged([]const u8) = .empty;
+    var missing: std.ArrayList([]const u8) = .empty;
     var emitted: std.StringHashMapUnmanaged(void) = .empty;
     defer emitted.deinit(allocator);
     for (block.nets) |net| {

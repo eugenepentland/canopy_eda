@@ -48,21 +48,21 @@ const Allocator = std.mem.Allocator;
 pub const RenderError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 // ── Layout constants ──────────────────────────────────────────────
-const HALF_DIVISOR: f64 = 2.0;
-const HUB_VPAD: f64 = 40.0;
-const PIN_OFFSET: f64 = 20.0;
-const TITLE_LINE_GAP: f64 = 12.0;
-const DESC_LINE_GAP: f64 = 6.0;
-const NOTE_BLOCK_PAD: f64 = 16.0;
-const SECTION_PAD_X: f64 = 8.0;
-const SECTION_BORDER_W: f64 = 16.0;
-const CELL_BLOCK_GAP: f64 = 40.0;
-const MIN_VB_WIDTH: f64 = 850.0;
-const MIN_VB_HEIGHT: f64 = 400.0;
-const VB_MARGIN: f64 = 40.0;
-const FAR_X_SENTINEL: f64 = 99999.0;
-const BUS_OFFSET: f64 = 10.0;
-const BRANCH_BUS_GAP: f64 = 10.0;
+const half_divisor: f64 = 2.0;
+const hub_vpad: f64 = 40.0;
+const pin_offset: f64 = 20.0;
+const title_line_gap: f64 = 12.0;
+const desc_line_gap: f64 = 6.0;
+const note_block_pad: f64 = 16.0;
+const section_pad_x: f64 = 8.0;
+const section_border_w: f64 = 16.0;
+const cell_block_gap: f64 = 40.0;
+const min_vb_width: f64 = 850.0;
+const min_vb_height: f64 = 400.0;
+const vb_margin: f64 = 40.0;
+const far_x_sentinel: f64 = 99999.0;
+const bus_offset_px: f64 = 10.0;
+const branch_bus_gap: f64 = 10.0;
 
 // ── JSON Scene Graph Types ───────────────────────────────────────────
 
@@ -124,8 +124,8 @@ const JsonHub = struct {
     /// Section-grid card index this hub renders in — shared with every passive
     /// the card emits, so the editor pairs a module's caps with its own IC.
     slot: ?usize = null,
-    left_pins: std.ArrayListUnmanaged(JsonPin),
-    right_pins: std.ArrayListUnmanaged(JsonPin),
+    left_pins: std.ArrayList(JsonPin),
+    right_pins: std.ArrayList(JsonPin),
 };
 
 /// Cached pinout data: symbol_name -> (pin_id -> []alt_names).
@@ -153,7 +153,7 @@ fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const
         if (!std.mem.eql(u8, ch, "pin")) continue;
         const pin_id = cl[1].asAtom() orelse cl[1].asString() orelse continue;
 
-        var alts: std.ArrayListUnmanaged([]const u8) = .empty;
+        var alts: std.ArrayList([]const u8) = .empty;
         for (cl[3..]) |alt_node| {
             const al = alt_node.asList() orelse continue;
             if (al.len < 2) continue;
@@ -199,7 +199,7 @@ fn loadPinoutNames(allocator: Allocator, path: []const u8) ?std.StringHashMapUnm
 
 const JsonWire = struct {
     net: []const u8,
-    points: std.ArrayListUnmanaged([2]f64),
+    points: std.ArrayList([2]f64),
     is_bus: bool,
 };
 
@@ -308,7 +308,7 @@ fn firstIcInSubBlock(sb: env_mod.SubBlock) []const u8 {
 /// Resolve each `eval/rails` PowerRail to its producing IC ref for the scene.
 fn buildPowerRails(allocator: Allocator, block: *const DesignBlock) Allocator.Error![]const ScenePowerRail {
     const power_rails = try rails_mod.build(allocator, block);
-    var out: std.ArrayListUnmanaged(ScenePowerRail) = .empty;
+    var out: std.ArrayList(ScenePowerRail) = .empty;
     for (power_rails) |r| {
         var hub: []const u8 = "";
         for (block.sub_blocks) |sb| {
@@ -348,12 +348,12 @@ const SceneGraph = struct {
     vb_w: f64 = 0,
     vb_h: f64 = 0,
     design_name: []const u8 = "",
-    sections: std.ArrayListUnmanaged(JsonSection),
-    hubs: std.ArrayListUnmanaged(JsonHub),
-    wires: std.ArrayListUnmanaged(JsonWire),
-    passives: std.ArrayListUnmanaged(JsonPassive),
-    labels: std.ArrayListUnmanaged(JsonLabel),
-    staged: std.ArrayListUnmanaged(JsonStaged),
+    sections: std.ArrayList(JsonSection),
+    hubs: std.ArrayList(JsonHub),
+    wires: std.ArrayList(JsonWire),
+    passives: std.ArrayList(JsonPassive),
+    labels: std.ArrayList(JsonLabel),
+    staged: std.ArrayList(JsonStaged),
     /// Names of the design's authored `(section …)` / sub-block structure, so the
     /// editor's sheet navigator pages by authored section — and collapses to a
     /// single whole-design sheet when there are none — instead of auto per-IC.
@@ -386,12 +386,12 @@ const SceneGraph = struct {
     }
 
     fn addWire(self: *SceneGraph, net: []const u8, x1: f64, y1: f64, x2: f64, y2: f64, is_bus: bool) !void {
-        var pts: std.ArrayListUnmanaged([2]f64) = .empty;
+        var pts: std.ArrayList([2]f64) = .empty;
         if (y1 == y2) {
             try pts.append(self.allocator, .{ x1, y1 });
             try pts.append(self.allocator, .{ x2, y2 });
         } else {
-            const mid_x = (x1 + x2) / HALF_DIVISOR;
+            const mid_x = (x1 + x2) / half_divisor;
             try pts.append(self.allocator, .{ x1, y1 });
             try pts.append(self.allocator, .{ mid_x, y1 });
             try pts.append(self.allocator, .{ mid_x, y2 });
@@ -464,7 +464,7 @@ fn mergeAwareGroupHeights(ctx: *RenderCtx, allocator: Allocator, groups: []const
         var total_slots: u32 = 0;
 
         // Classify connections for this group (same logic as collectGroupConnections)
-        var classified: std.ArrayListUnmanaged(Classified) = .empty;
+        var classified: std.ArrayList(Classified) = .empty;
         for (group.conns) |conn| {
             switch (conn.endpoint) {
                 .net => |net| {
@@ -573,7 +573,7 @@ const MergeAwareSplit = ctx_mod.MergeAwareSplit;
 /// identical groups ⇒ identical split — a cache hit is only ever returned for
 /// byte-identical inputs. Owned by `allocator` (arena; lives for the render).
 fn splitCacheKey(allocator: Allocator, all_groups: []const PinGroup, hub_ref: []const u8) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     try buf.appendSlice(allocator, hub_ref);
     for (all_groups) |g| {
         try buf.append(allocator, '|');
@@ -597,10 +597,10 @@ fn splitGroupsByMergeAwareHeight(
     const all_heights = try mergeAwareGroupHeights(ctx, allocator, all_groups, hub_ref);
     defer allocator.free(all_heights);
 
-    var left: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var right: std.ArrayListUnmanaged(PinGroup) = .empty;
-    var left_h: std.ArrayListUnmanaged(f64) = .empty;
-    var right_h: std.ArrayListUnmanaged(f64) = .empty;
+    var left: std.ArrayList(PinGroup) = .empty;
+    var right: std.ArrayList(PinGroup) = .empty;
+    var left_h: std.ArrayList(f64) = .empty;
+    var right_h: std.ArrayList(f64) = .empty;
     var left_total: f64 = 0;
     var right_total: f64 = 0;
 
@@ -630,7 +630,7 @@ fn splitGroupsByMergeAwareHeight(
 fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, part: ?env_mod.Part) !f64 {
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
 
-    var all_pins_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var all_pins_list: std.ArrayList([]const u8) = .empty;
     defer all_pins_list.deinit(allocator);
 
     if (part) |p| {
@@ -672,7 +672,7 @@ fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, par
     var right_total: f64 = 0;
     for (right_heights) |h| right_total += h;
 
-    return @max(left_total, right_total) + HUB_VPAD;
+    return @max(left_total, right_total) + hub_vpad;
 }
 
 // ── Public entry point ───────────────────────────────────────────────
@@ -686,7 +686,7 @@ fn mergeAwareHubHeight(ctx: *RenderCtx, allocator: Allocator, hub: FlatInst, par
 /// editor pages by; when the list is empty the design has no explicit sections
 /// and the editor shows a single whole-design sheet.
 fn collectAuthoredSections(allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize) ![]const []const u8 {
-    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var list: std.ArrayList([]const u8) = .empty;
     for (block.sections) |sec| {
         try list.append(allocator, sec.name);
         for (sec.sub_sections) |sub| try list.append(allocator, sub.name);
@@ -705,7 +705,7 @@ fn collectAuthoredSections(allocator: Allocator, block: *const DesignBlock, sub_
 /// order as `collectAuthoredSections`), each classified with the system-
 /// overview category heuristics so the editor can order bands canonically.
 fn buildSheetMeta(allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize) ![]const SheetMeta {
-    var list: std.ArrayListUnmanaged(SheetMeta) = .empty;
+    var list: std.ArrayList(SheetMeta) = .empty;
     for (block.sections) |sec| {
         try list.append(allocator, .{ .name = sec.name, .cat = @tagName(rb_types.classifySection(sec)), .sub = sec.description });
         for (sec.sub_sections) |sub| {
@@ -735,12 +735,12 @@ const SectionInfo = struct {
     description: []const u8,
     notes: []const env_mod.SectionNote,
     sheet: []const u8,
-    cell_indices: std.ArrayListUnmanaged(usize),
+    cell_indices: std.ArrayList(usize),
 };
 
 const SectionGridState = struct {
-    grid: std.ArrayListUnmanaged(SectionInfo),
-    ref_to_section: std.StringHashMap(usize),
+    grid: std.ArrayList(SectionInfo),
+    ref_to_section: std.StringHashMapUnmanaged(usize),
 };
 
 /// Build the section grid (one slot per authored section, sub-section, and
@@ -748,7 +748,7 @@ const SectionGridState = struct {
 /// keeps its own card but files under the adopting section's sheet, so the
 /// editor's bands match the authored structure.
 fn buildSectionGrid(allocator: Allocator, block: *const DesignBlock, sub_attachments: []const ?usize) !SectionGridState {
-    var st = SectionGridState{ .grid = .empty, .ref_to_section = std.StringHashMap(usize).init(allocator) };
+    var st = SectionGridState{ .grid = .empty, .ref_to_section = std.StringHashMapUnmanaged(usize).empty };
     for (block.sections) |sec| {
         const sec_idx = st.grid.items.len;
         try st.grid.append(allocator, .{
@@ -758,7 +758,7 @@ fn buildSectionGrid(allocator: Allocator, block: *const DesignBlock, sub_attachm
             .sheet = sec.name,
             .cell_indices = .empty,
         });
-        for (sec.instances) |inst| try st.ref_to_section.put(inst.ref_des, sec_idx);
+        for (sec.instances) |inst| try st.ref_to_section.put(allocator, inst.ref_des, sec_idx);
         for (sec.sub_sections) |sub| {
             const sub_idx = st.grid.items.len;
             try st.grid.append(allocator, .{
@@ -768,7 +768,7 @@ fn buildSectionGrid(allocator: Allocator, block: *const DesignBlock, sub_attachm
                 .sheet = sub.name,
                 .cell_indices = .empty,
             });
-            for (sub.instances) |inst| try st.ref_to_section.put(inst.ref_des, sub_idx);
+            for (sub.instances) |inst| try st.ref_to_section.put(allocator, inst.ref_des, sub_idx);
         }
     }
     for (block.sub_blocks, 0..) |sb, sb_idx| {
@@ -781,7 +781,7 @@ fn buildSectionGrid(allocator: Allocator, block: *const DesignBlock, sub_attachm
             .sheet = sheet,
             .cell_indices = .empty,
         });
-        for (sb.block.instances) |inst| try st.ref_to_section.put(inst.ref_des, sec_idx);
+        for (sb.block.instances) |inst| try st.ref_to_section.put(allocator, inst.ref_des, sec_idx);
     }
     return st;
 }
@@ -792,10 +792,10 @@ fn buildSectionGrid(allocator: Allocator, block: *const DesignBlock, sub_attachm
 fn collectGridCells(
     allocator: Allocator,
     ctx: *RenderCtx,
-    section_grid: *std.ArrayListUnmanaged(SectionInfo),
-    ref_to_section: *const std.StringHashMap(usize),
-) !std.ArrayListUnmanaged(GridCell) {
-    var cells: std.ArrayListUnmanaged(GridCell) = .empty;
+    section_grid: *std.ArrayList(SectionInfo),
+    ref_to_section: *const std.StringHashMapUnmanaged(usize),
+) !std.ArrayList(GridCell) {
+    var cells: std.ArrayList(GridCell) = .empty;
     for (ctx.hub_order.items) |hub_ref| {
         const hub_inst = ctx.inst_map.get(hub_ref) orelse continue;
         if (hub_inst.parts.len > 0) {
@@ -885,8 +885,8 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     var section_header_heights = try allocator.alloc(f64, section_grid.items.len);
     defer allocator.free(section_header_heights);
     for (section_grid.items, 0..) |sg, si| {
-        var h: f64 = title_font_size + TITLE_LINE_GAP;
-        if (sg.description.len > 0) h += desc_font_size + DESC_LINE_GAP;
+        var h: f64 = title_font_size + title_line_gap;
+        if (sg.description.len > 0) h += desc_font_size + desc_line_gap;
         section_header_heights[si] = h;
     }
 
@@ -895,7 +895,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     defer allocator.free(section_footer_heights);
     for (section_grid.items, 0..) |sg, si| {
         if (sg.notes.len > 0) {
-            section_footer_heights[si] = @as(f64, @floatFromInt(sg.notes.len)) * note_line_height + NOTE_BLOCK_PAD;
+            section_footer_heights[si] = @as(f64, @floatFromInt(sg.notes.len)) * note_line_height + note_block_pad;
         } else {
             section_footer_heights[si] = 0;
         }
@@ -918,7 +918,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
         const grid_row = si / n_cols;
         var sec_height: f64 = 0;
         for (sg.cell_indices.items) |ci| {
-            sec_height += cell_heights[ci] + CELL_BLOCK_GAP;
+            sec_height += cell_heights[ci] + cell_block_gap;
         }
         const total = sec_height + section_pad * 2 + section_header_heights[si] + section_footer_heights[si];
         if (total > row_heights[grid_row]) row_heights[grid_row] = total;
@@ -952,9 +952,9 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
             .name = sg.name,
             .description = sg.description,
             .notes = sg.notes,
-            .x = x_offset + SECTION_PAD_X,
+            .x = x_offset + section_pad_x,
             .y = cell_y,
-            .w = cell_width - SECTION_BORDER_W,
+            .w = cell_width - section_border_w,
             .h = section_h,
         });
 
@@ -977,7 +977,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
             try collectHubConnections(&ctx, &scene, allocator, cell.hub_inst, cell.part, x_offset, content_y);
             for (scene.passives.items[passives_before..]) |*jp| jp.slot = cell.section_idx;
 
-            content_y += h + CELL_BLOCK_GAP;
+            content_y += h + cell_block_gap;
         }
     }
 
@@ -987,7 +987,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     // editor reads these (authoritative) instead of inferring a pin's net from
     // drawn wires, so a pin on a fresh single-pin net (no wire yet) still shows
     // its name. Keyed by full ref_des (nets reference instances by full ref).
-    var pinnet_map: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(PinNet)) = .empty;
+    var pinnet_map: std.StringHashMapUnmanaged(std.ArrayList(PinNet)) = .empty;
     for (ctx.nets.items) |net| {
         const bn = baseNetName(net.name);
         for (net.pins) |pin| {
@@ -1018,8 +1018,8 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     }
 
     // Set viewBox
-    scene.vb_w = @max(total_width, MIN_VB_WIDTH);
-    scene.vb_h = @max(y + VB_MARGIN, MIN_VB_HEIGHT);
+    scene.vb_w = @max(total_width, min_vb_width);
+    scene.vb_h = @max(y + vb_margin, min_vb_height);
 
     // Serialize to JSON
     return serializeScene(allocator, &scene);
@@ -1054,7 +1054,7 @@ fn collectHubData(
     // Get pin groups (reuse hub.zig logic)
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
 
-    var all_pins_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var all_pins_list: std.ArrayList([]const u8) = .empty;
     defer all_pins_list.deinit(allocator);
 
     if (part) |p| {
@@ -1115,7 +1115,7 @@ fn collectHubData(
     for (left_heights) |h| left_total += h;
     var right_total: f64 = 0;
     for (right_heights) |h| right_total += h;
-    const hub_height = @max(left_total, right_total) + HUB_VPAD;
+    const hub_height = @max(left_total, right_total) + hub_vpad;
 
     const label = try std.fmt.allocPrint(allocator, "{s} {s}", .{ shortRef(hub.ref_des), displayValue(hub) });
 
@@ -1139,10 +1139,10 @@ fn collectHubData(
     };
 
     // Collect left pin positions
-    var py_left = y_start + HUB_VPAD;
+    var py_left = y_start + hub_vpad;
     for (left_groups, 0..) |group, gi| {
         const height = left_heights[gi];
-        const pin_cy = py_left + height / HALF_DIVISOR;
+        const pin_cy = py_left + height / half_divisor;
         const enrich = pinEnrichment(allocator, group, hub.ref_des, hub.symbol, alt_map, asserted_fns);
         const gnet = hubPinGroupNet(ctx, allocator, hub.ref_des, group);
         try json_hub.left_pins.append(allocator, .{
@@ -1160,10 +1160,10 @@ fn collectHubData(
     }
 
     // Collect right pin positions
-    var py_right = y_start + HUB_VPAD;
+    var py_right = y_start + hub_vpad;
     for (right_groups, 0..) |group, gi| {
         const height = right_heights[gi];
-        const pin_cy = py_right + height / HALF_DIVISOR;
+        const pin_cy = py_right + height / half_divisor;
         const enrich = pinEnrichment(allocator, group, hub.ref_des, hub.symbol, alt_map, asserted_fns);
         const gnet = hubPinGroupNet(ctx, allocator, hub.ref_des, group);
         try json_hub.right_pins.append(allocator, .{
@@ -1244,7 +1244,7 @@ fn collectHubConnections(
 ) !void {
     const adj_entries = if (ctx.adjacency.get(hub.ref_des)) |list| list.items else &[_]AdjEntry{};
 
-    var all_pins_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var all_pins_list: std.ArrayList([]const u8) = .empty;
     defer all_pins_list.deinit(allocator);
 
     if (part) |p| {
@@ -1290,20 +1290,20 @@ fn collectHubConnections(
     const right_heights = split.right_heights;
 
     // Collect left connections
-    var py_left = y_start + HUB_VPAD;
+    var py_left = y_start + hub_vpad;
     for (left_groups, 0..) |group, gi| {
         const height = left_heights[gi];
-        const pin_cy = py_left + height / HALF_DIVISOR;
+        const pin_cy = py_left + height / half_divisor;
         const stub_x = x_offset + hub_x - pin_stub;
         try collectGroupConnections(ctx, scene, allocator, hub.ref_des, group, stub_x, pin_cy, .left);
         py_left += height;
     }
 
     // Collect right connections
-    var py_right = y_start + HUB_VPAD;
+    var py_right = y_start + hub_vpad;
     for (right_groups, 0..) |group, gi| {
         const height = right_heights[gi];
-        const pin_cy = py_right + height / HALF_DIVISOR;
+        const pin_cy = py_right + height / half_divisor;
         const stub_x = x_offset + hub_x + hub_width + pin_stub;
         try collectGroupConnections(ctx, scene, allocator, hub.ref_des, group, stub_x, pin_cy, .right);
         py_right += height;
@@ -1330,7 +1330,7 @@ fn collectGroupConnections(
     const canon_key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ hub_ref, first_pin_id });
     const pin_net_name = ctx.pin_canonical_nets.get(canon_key) orelse "";
 
-    var classified: std.ArrayListUnmanaged(Classified) = .empty;
+    var classified: std.ArrayList(Classified) = .empty;
 
     for (group.conns) |conn| {
         switch (conn.endpoint) {
@@ -1404,7 +1404,7 @@ fn collectGroupConnections(
     }
 
     const multi = merged.items.len > 1;
-    const bus_offset: f64 = BUS_OFFSET;
+    const bus_offset: f64 = bus_offset_px;
     const bus_x: f64 = switch (side) {
         .left => stub_x - bus_offset,
         .right => stub_x + bus_offset,
@@ -1415,12 +1415,12 @@ fn collectGroupConnections(
     var max_cy: f64 = py;
     const total_h2 = @as(f64, @floatFromInt(@max(total_slots, 1) -| 1)) * per_conn_spacing;
 
-    var results: std.ArrayListUnmanaged(BranchResult) = .empty;
+    var results: std.ArrayList(BranchResult) = .empty;
 
     for (merged.items, 0..) |entry, i| {
         const slots = slot_counts[i];
-        const slot_center = @as(f64, @floatFromInt(consumed_slots)) + @as(f64, @floatFromInt(slots -| 1)) / HALF_DIVISOR;
-        const cy = py + slot_center * per_conn_spacing - total_h2 / HALF_DIVISOR;
+        const slot_center = @as(f64, @floatFromInt(consumed_slots)) + @as(f64, @floatFromInt(slots -| 1)) / half_divisor;
+        const cy = py + slot_center * per_conn_spacing - total_h2 / half_divisor;
         consumed_slots += slots;
         if (cy < min_cy) min_cy = cy;
         if (cy > max_cy) max_cy = cy;
@@ -1475,13 +1475,13 @@ fn collectGroupConnections(
 
     // Terminal labels
     var default_term_x: f64 = switch (side) {
-        .left => stub_x - spoke_len - PIN_OFFSET,
-        .right => stub_x + spoke_len + PIN_OFFSET,
+        .left => stub_x - spoke_len - pin_offset,
+        .right => stub_x + spoke_len + pin_offset,
     };
     for (results.items) |r| {
         switch (side) {
-            .left => default_term_x = @min(default_term_x, r.end_x - PIN_OFFSET),
-            .right => default_term_x = @max(default_term_x, r.end_x + PIN_OFFSET),
+            .left => default_term_x = @min(default_term_x, r.end_x - pin_offset),
+            .right => default_term_x = @max(default_term_x, r.end_x + pin_offset),
         }
     }
     const term_x = default_term_x;
@@ -1496,8 +1496,8 @@ const MergedEntry = struct {
 
 /// Find groups of identical single-passive spoke connections to the same terminal
 /// and collapse them into one entry with a count (e.g. "5x 100nF" to GND).
-fn mergeIdenticalSpokes(ctx: *RenderCtx, allocator: Allocator, classified: []const Classified, hub_ref: []const u8) !std.ArrayListUnmanaged(MergedEntry) {
-    var result: std.ArrayListUnmanaged(MergedEntry) = .empty;
+fn mergeIdenticalSpokes(ctx: *RenderCtx, allocator: Allocator, classified: []const Classified, hub_ref: []const u8) !std.ArrayList(MergedEntry) {
+    var result: std.ArrayList(MergedEntry) = .empty;
 
     // Build a key for each spoke connection: "terminal|value|symbol"
     // Non-spoke connections get unique keys so they never merge.
@@ -1586,8 +1586,8 @@ fn collectMergedPassive(
     switch (endpoint) {
         .net => {
             const end_x: f64 = switch (side) {
-                .left => stub_x - PIN_OFFSET,
-                .right => stub_x + PIN_OFFSET,
+                .left => stub_x - pin_offset,
+                .right => stub_x + pin_offset,
             };
             try scene.addWire(net_name, stub_x, stub_y, end_x, cy, false);
             return end_x;
@@ -1598,14 +1598,14 @@ fn collectMergedPassive(
 
             switch (side) {
                 .left => {
-                    try scene.addWire(net_name, stub_x, stub_y, stub_x - PIN_OFFSET, cy, false);
-                    try scene.addPassiveWithCount(inst, stub_x - PIN_OFFSET - passive_bw, cy, count, true);
-                    return stub_x - PIN_OFFSET - passive_bw;
+                    try scene.addWire(net_name, stub_x, stub_y, stub_x - pin_offset, cy, false);
+                    try scene.addPassiveWithCount(inst, stub_x - pin_offset - passive_bw, cy, count, true);
+                    return stub_x - pin_offset - passive_bw;
                 },
                 .right => {
-                    try scene.addWire(net_name, stub_x, stub_y, stub_x + PIN_OFFSET, cy, false);
-                    try scene.addPassiveWithCount(inst, stub_x + PIN_OFFSET, cy, count, false);
-                    return stub_x + PIN_OFFSET + passive_bw;
+                    try scene.addWire(net_name, stub_x, stub_y, stub_x + pin_offset, cy, false);
+                    try scene.addPassiveWithCount(inst, stub_x + pin_offset, cy, count, false);
+                    return stub_x + pin_offset + passive_bw;
                 },
             }
         },
@@ -1628,8 +1628,8 @@ fn collectConnBody(
     switch (endpoint) {
         .net => {
             const end_x: f64 = switch (side) {
-                .left => stub_x - PIN_OFFSET,
-                .right => stub_x + PIN_OFFSET,
+                .left => stub_x - pin_offset,
+                .right => stub_x + pin_offset,
             };
             try scene.addWire(net_name, stub_x, stub_y, end_x, cy, false);
             return end_x;
@@ -1651,22 +1651,22 @@ fn collectConnBody(
                     try ctx.rendered_spokes.put(allocator, c.ref_des, {});
                 }
 
-                var all_spokes: std.ArrayListUnmanaged(FlatInst) = .empty;
+                var all_spokes: std.ArrayList(FlatInst) = .empty;
                 try all_spokes.append(allocator, inst);
                 for (chain_result.chain) |c| try all_spokes.append(allocator, c);
 
                 switch (side) {
                     .left => {
-                        try scene.addWire(net_name, stub_x, stub_y, stub_x - PIN_OFFSET, cy, false);
-                        const chain_end_x = try collectPassiveChainLeft(scene, allocator, stub_x - PIN_OFFSET, cy, all_spokes.items);
+                        try scene.addWire(net_name, stub_x, stub_y, stub_x - pin_offset, cy, false);
+                        const chain_end_x = try collectPassiveChainLeft(scene, allocator, stub_x - pin_offset, cy, all_spokes.items);
                         if (chain_result.branches.len > 0) {
                             try collectBranchTreeLeft(ctx, scene, allocator, chain_end_x, cy, chain_result.branches, chain_result.terminal);
                         }
                         return chain_end_x;
                     },
                     .right => {
-                        try scene.addWire(net_name, stub_x, stub_y, stub_x + PIN_OFFSET, cy, false);
-                        const chain_end_x = try collectPassiveChainRight(scene, allocator, stub_x + PIN_OFFSET, cy, all_spokes.items);
+                        try scene.addWire(net_name, stub_x, stub_y, stub_x + pin_offset, cy, false);
+                        const chain_end_x = try collectPassiveChainRight(scene, allocator, stub_x + pin_offset, cy, all_spokes.items);
                         if (chain_result.branches.len > 0) {
                             try collectBranchTreeRight(ctx, scene, allocator, chain_end_x, cy, chain_result.branches, chain_result.terminal);
                         }
@@ -1675,8 +1675,8 @@ fn collectConnBody(
                 }
             } else {
                 const end_x: f64 = switch (side) {
-                    .left => stub_x - spoke_len - PIN_OFFSET,
-                    .right => stub_x + spoke_len + PIN_OFFSET,
+                    .left => stub_x - spoke_len - pin_offset,
+                    .right => stub_x + spoke_len + pin_offset,
                 };
                 try scene.addWire(net_name, stub_x, stub_y, end_x, cy, false);
                 return end_x;
@@ -1690,8 +1690,8 @@ fn collectPassiveChainLeft(scene: *SceneGraph, _: Allocator, start_x: f64, cy: f
     var x = start_x;
     for (spokes, 0..) |inst, i| {
         if (i > 0) {
-            try scene.addWire("", x, cy, x - PIN_OFFSET, cy, false);
-            x -= PIN_OFFSET;
+            try scene.addWire("", x, cy, x - pin_offset, cy, false);
+            x -= pin_offset;
         }
         try scene.addPassive(inst, x - passive_bw, cy, true); // left chain: hub on the right
         x -= passive_bw;
@@ -1705,8 +1705,8 @@ fn collectPassiveChainRight(scene: *SceneGraph, allocator: Allocator, start_x: f
     var x = start_x;
     for (spokes, 0..) |inst, i| {
         if (i > 0) {
-            try scene.addWire("", x, cy, x + PIN_OFFSET, cy, false);
-            x += PIN_OFFSET;
+            try scene.addWire("", x, cy, x + pin_offset, cy, false);
+            x += pin_offset;
         }
         try scene.addPassive(inst, x, cy, false); // right chain: hub on the left
         x += passive_bw;
@@ -1725,7 +1725,7 @@ fn collectBranchTreeLeft(
 ) !void {
     const n = branches.len;
     const total_height = @as(f64, @floatFromInt(n -| 1)) * branch_spacing;
-    const start_y = center_y - total_height / HALF_DIVISOR;
+    const start_y = center_y - total_height / half_divisor;
 
     const bx = junction_x - bus_gap;
     try scene.addWire(junction_net, junction_x, center_y, bx, center_y, false);
@@ -1734,19 +1734,19 @@ fn collectBranchTreeLeft(
     }
 
     const BranchBody = struct { end_x: f64, cy: f64, terminal: []const u8 };
-    var bodies: std.ArrayListUnmanaged(BranchBody) = .empty;
+    var bodies: std.ArrayList(BranchBody) = .empty;
 
     for (branches, 0..) |branch, idx| {
         const by = start_y + @as(f64, @floatFromInt(idx)) * branch_spacing;
-        try scene.addWire(junction_net, bx, by, bx - BRANCH_BUS_GAP, by, false);
-        const chain_end_x = try collectPassiveChainLeft(scene, allocator, bx - BRANCH_BUS_GAP, by, branch.chain);
+        try scene.addWire(junction_net, bx, by, bx - branch_bus_gap, by, false);
+        const chain_end_x = try collectPassiveChainLeft(scene, allocator, bx - branch_bus_gap, by, branch.chain);
         try bodies.append(allocator, .{ .end_x = chain_end_x, .cy = by, .terminal = branch.terminal });
     }
 
     // Terminals
     var term_x: f64 = 0;
     for (bodies.items) |b| {
-        const tx = b.end_x - PIN_OFFSET;
+        const tx = b.end_x - pin_offset;
         if (term_x == 0 or tx < term_x) term_x = tx;
     }
     for (bodies.items) |b| {
@@ -1769,7 +1769,7 @@ fn collectBranchTreeRight(
 ) !void {
     const n = branches.len;
     const total_height = @as(f64, @floatFromInt(n -| 1)) * branch_spacing;
-    const start_y = center_y - total_height / HALF_DIVISOR;
+    const start_y = center_y - total_height / half_divisor;
 
     const bx = junction_x + bus_gap;
     try scene.addWire(junction_net, junction_x, center_y, bx, center_y, false);
@@ -1778,18 +1778,18 @@ fn collectBranchTreeRight(
     }
 
     const BranchBody = struct { end_x: f64, cy: f64, terminal: []const u8 };
-    var bodies: std.ArrayListUnmanaged(BranchBody) = .empty;
+    var bodies: std.ArrayList(BranchBody) = .empty;
 
     for (branches, 0..) |branch, idx| {
         const by = start_y + @as(f64, @floatFromInt(idx)) * branch_spacing;
-        try scene.addWire(junction_net, bx, by, bx + BRANCH_BUS_GAP, by, false);
-        const chain_end_x = try collectPassiveChainRight(scene, allocator, bx + BRANCH_BUS_GAP, by, branch.chain);
+        try scene.addWire(junction_net, bx, by, bx + branch_bus_gap, by, false);
+        const chain_end_x = try collectPassiveChainRight(scene, allocator, bx + branch_bus_gap, by, branch.chain);
         try bodies.append(allocator, .{ .end_x = chain_end_x, .cy = by, .terminal = branch.terminal });
     }
 
     var term_x: f64 = 0;
     for (bodies.items) |b| {
-        const tx = b.end_x + PIN_OFFSET;
+        const tx = b.end_x + pin_offset;
         if (term_x == 0 or tx > term_x) term_x = tx;
     }
     for (bodies.items) |b| {
@@ -1830,8 +1830,8 @@ fn collectTerminals(ctx: *RenderCtx, scene: *SceneGraph, _: Allocator, results: 
         } else {
             const nearest_x = blk: {
                 var nx: f64 = switch (side) {
-                    .left => FAR_X_SENTINEL,
-                    .right => -FAR_X_SENTINEL,
+                    .left => far_x_sentinel,
+                    .right => -far_x_sentinel,
                 };
                 for (group_slice) |r| {
                     switch (side) {
@@ -1842,8 +1842,8 @@ fn collectTerminals(ctx: *RenderCtx, scene: *SceneGraph, _: Allocator, results: 
                 break :blk nx;
             };
             const grp_bus_x = switch (side) {
-                .left => nearest_x - PIN_OFFSET,
-                .right => nearest_x + PIN_OFFSET,
+                .left => nearest_x - pin_offset,
+                .right => nearest_x + pin_offset,
             };
 
             const first_cy = group_slice[0].cy;
@@ -1901,7 +1901,7 @@ fn writeRailsJson(w: anytype, power_rails: []const ScenePowerRail) !void {
 }
 
 fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
 
     try w.writeAll("{");
@@ -2352,9 +2352,9 @@ test "collectPassiveChainLeft steps the chain leftward by pin offset and body wi
     // First spoke steps back one body width; the second adds a pin-offset hop
     // then another body. `x -= PIN_OFFSET`→`+=` walks the second spoke the wrong
     // way, moving the chain end by +2·PIN_OFFSET.
-    try std.testing.expectEqual(start_x - 2 * passive_bw - PIN_OFFSET, end_x);
+    try std.testing.expectEqual(start_x - 2 * passive_bw - pin_offset, end_x);
     try std.testing.expectEqual(@as(usize, 2), scene.passives.items.len);
-    try std.testing.expectEqual(start_x - 2 * passive_bw - PIN_OFFSET, scene.passives.items[1].x);
+    try std.testing.expectEqual(start_x - 2 * passive_bw - pin_offset, scene.passives.items[1].x);
 }
 
 /// Parse the numeric `viewBox` height out of a rendered scene-graph JSON.
@@ -2409,5 +2409,5 @@ test "renderSceneGraph sizes the viewBox to its section's stacked cell height" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const json = try renderSceneGraph(arena.allocator(), &block, "");
-    try std.testing.expect(viewBoxHeight(json) > MIN_VB_HEIGHT);
+    try std.testing.expect(viewBoxHeight(json) > min_vb_height);
 }

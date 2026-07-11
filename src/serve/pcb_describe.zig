@@ -114,9 +114,9 @@ const RoutedSummary = struct {
 pub const DescribeError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 /// `"origin"` JSON key — the stable module-local name, emitted beside every ref.
-const ORIGIN_KEY = ",\"origin\":";
+const origin_key_head = ",\"origin\":";
 /// Opening of a `{"ref": …}` object — emitted for parts, hub-pad maps, and roles.
-const REF_KEY = "{\"ref\":";
+const ref_key = "{\"ref\":";
 
 /// Emit the full facts document. Split from `describeDesign` so tests can run
 /// it on a hand-built `Placement` without a project on disk.
@@ -130,28 +130,28 @@ pub fn writeDescribeJson(
     title: []const u8,
 ) DescribeError!void {
     // ref|pad → net name, the same resolution the PNG renderer uses.
-    var pad_net = std.StringHashMap([]const u8).init(alloc);
-    defer pad_net.deinit();
+    var pad_net = std.StringHashMapUnmanaged([]const u8).empty;
+    defer pad_net.deinit(alloc);
     for (p.nets) |net| {
         for (net.pins) |pin| {
             const key = try std.fmt.allocPrint(alloc, "{s}|{s}", .{ pin.ref_des, pin.pin });
-            try pad_net.put(key, net.name);
+            try pad_net.put(alloc, key, net.name);
         }
     }
-    var unplaced = std.StringHashMap(void).init(alloc);
-    defer unplaced.deinit();
-    var auto_filled = std.StringHashMap(void).init(alloc);
-    defer auto_filled.deinit();
+    var unplaced = std.StringHashMapUnmanaged(void).empty;
+    defer unplaced.deinit(alloc);
+    var auto_filled = std.StringHashMapUnmanaged(void).empty;
+    defer auto_filled.deinit(alloc);
     if (spec) |sp| {
-        for (sp.unplaced) |ref| try unplaced.put(ref, {});
-        for (sp.auto_filled) |ref| try auto_filled.put(ref, {});
+        for (sp.unplaced) |ref| try unplaced.put(alloc, ref, {});
+        for (sp.auto_filled) |ref| try auto_filled.put(alloc, ref, {});
     }
     // net → the single hub package edge its pads sit on (null = several edges,
     // i.e. no preference). Drives the per-part `want_side` regret signal.
-    var net_edge = std.StringHashMap(?Side).init(alloc);
-    defer net_edge.deinit();
-    try buildNetEdgeMap(p, &pad_net, &net_edge);
-    var wrong_side: std.ArrayListUnmanaged([]const u8) = .empty;
+    var net_edge = std.StringHashMapUnmanaged(?Side).empty;
+    defer net_edge.deinit(alloc);
+    try buildNetEdgeMap(alloc, p, &pad_net, &net_edge);
+    var wrong_side: std.ArrayList([]const u8) = .empty;
     defer wrong_side.deinit(alloc);
 
     const anchor = anchorIndex(p.parts, p.nets);
@@ -165,7 +165,7 @@ pub fn writeDescribeJson(
     if (anchor) |ai| {
         try w.writeAll(",\"anchor\":{\"ref\":");
         try pcb_layout_page.writeJsonStr(w, p.parts[ai].ref_des);
-        try w.writeAll(ORIGIN_KEY);
+        try w.writeAll(origin_key_head);
         try pcb_layout_page.writeJsonStr(w, originOf(p, ai));
         try w.writeAll("}");
     }
@@ -223,9 +223,9 @@ pub fn writeDescribeJson(
     try w.writeAll(",\"parts\":[");
     for (p.parts, 0..) |part, pi| {
         if (pi > 0) try w.writeAll(",");
-        try w.writeAll(REF_KEY);
+        try w.writeAll(ref_key);
         try pcb_layout_page.writeJsonStr(w, part.ref_des);
-        try w.writeAll(ORIGIN_KEY);
+        try w.writeAll(origin_key_head);
         try pcb_layout_page.writeJsonStr(w, originOf(p, pi));
         try w.print(",\"kind\":\"{s}\",\"x\":{d:.2},\"y\":{d:.2},\"rot\":{d:.0},\"w_mm\":{d:.2},\"h_mm\":{d:.2}", .{
             if (part.kind == .hub) "hub" else "passive",
@@ -277,7 +277,7 @@ pub fn writeDescribeJson(
         const hw_ = world(hub, L.hub_pwr_pin.x, L.hub_pwr_pin.y);
         try w.writeAll("{\"cap\":");
         try pcb_layout_page.writeJsonStr(w, cap.ref_des);
-        try w.writeAll(ORIGIN_KEY);
+        try w.writeAll(origin_key_head);
         try pcb_layout_page.writeJsonStr(w, originOf(p, L.cap));
         try w.writeAll(",\"hub\":");
         try pcb_layout_page.writeJsonStr(w, hub.ref_des);
@@ -330,9 +330,10 @@ fn writeRoutedJson(w: *std.Io.Writer, r: RoutedSummary) std.Io.Writer.Error!void
 /// Map each net to the single hub package edge its pads sit on; nets whose hub
 /// pads straddle edges (or sit at the centre — an exposed pad) map to null.
 fn buildNetEdgeMap(
+    alloc: std.mem.Allocator,
     p: optimizer.Placement,
-    pad_net: *std.StringHashMap([]const u8),
-    out: *std.StringHashMap(?Side),
+    pad_net: *std.StringHashMapUnmanaged([]const u8),
+    out: *std.StringHashMapUnmanaged(?Side),
 ) std.mem.Allocator.Error!void {
     for (p.parts) |part| {
         if (part.kind != .hub) continue;
@@ -340,7 +341,7 @@ fn buildNetEdgeMap(
             const net = netOf(pad_net, part.ref_des, pad.number) orelse continue;
             const e = padEdge(part, pad.x, pad.y);
             if (e == .center) continue;
-            const gop = try out.getOrPut(net);
+            const gop = try out.getOrPut(alloc, net);
             if (!gop.found_existing) {
                 gop.value_ptr.* = e;
                 continue;
@@ -355,8 +356,8 @@ fn buildNetEdgeMap(
 /// The side `part` "wants" to be on: the single hub edge of its first
 /// non-ground net, when the hub pads agree on one. Null = no preference.
 fn wantSideOf(
-    net_edge: *std.StringHashMap(?Side),
-    pad_net: *std.StringHashMap([]const u8),
+    net_edge: *std.StringHashMapUnmanaged(?Side),
+    pad_net: *std.StringHashMapUnmanaged([]const u8),
     part: optimizer.Part,
 ) ?Side {
     for (part.pads) |pad| {
@@ -386,7 +387,7 @@ fn groundish(name: []const u8) bool {
 
 /// Loops flagged "long": worse than twice the median inductance (and over an
 /// absolute floor so tiny boards don't lint their best loop).
-const LONG_LOOP_FLOOR_NH: f64 = 3.0;
+const long_loop_floor_nh: f64 = 3.0;
 
 /// One lint entry: `{"rule","severity","refs":[…],"msg"}`.
 fn lintItem(
@@ -427,7 +428,7 @@ fn writeModulePolicy(
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"hub\":");
         try pcb_layout_page.writeJsonStr(w, p.parts[m.hub].ref_des);
-        try w.writeAll(ORIGIN_KEY);
+        try w.writeAll(origin_key_head);
         try pcb_layout_page.writeJsonStr(w, originOf(p, m.hub));
         try w.print(",\"class\":\"{s}\",\"has_inductor\":{}}}", .{ @tagName(m.class), m.has_inductor });
     }
@@ -449,9 +450,9 @@ fn writeModulePolicy(
         if (r == .other or r == .anchor_ic) continue;
         if (!first) try w.writeAll(",");
         first = false;
-        try w.writeAll(REF_KEY);
+        try w.writeAll(ref_key);
         try pcb_layout_page.writeJsonStr(w, part.ref_des);
-        try w.writeAll(ORIGIN_KEY);
+        try w.writeAll(origin_key_head);
         try pcb_layout_page.writeJsonStr(w, originOf(p, i));
         try w.print(",\"role\":\"{s}\"}}", .{@tagName(r)});
     }
@@ -498,10 +499,10 @@ fn writeLint(
     // Parts poking past the authored `(board …)` outline. Staged (unplaced)
     // parts sit below the board by design and are already reported above.
     if (p.board_rect) |br| {
-        var in_band = std.StringHashMap(void).init(alloc);
-        defer in_band.deinit();
-        if (spec) |sp| for (sp.unplaced) |ref| try in_band.put(ref, {});
-        var outside: std.ArrayListUnmanaged([]const u8) = .empty;
+        var in_band = std.StringHashMapUnmanaged(void).empty;
+        defer in_band.deinit(alloc);
+        if (spec) |sp| for (sp.unplaced) |ref| try in_band.put(alloc, ref, {});
+        var outside: std.ArrayList([]const u8) = .empty;
         defer outside.deinit(alloc);
         const tol = 0.05;
         for (p.parts) |part| {
@@ -525,10 +526,10 @@ fn writeLint(
         defer alloc.free(sorted);
         std.mem.sort(f64, sorted, {}, std.sort.asc(f64));
         const median = sorted[sorted.len / 2];
-        var refs: std.ArrayListUnmanaged([]const u8) = .empty;
+        var refs: std.ArrayList([]const u8) = .empty;
         defer refs.deinit(alloc);
         for (p.loops, 0..) |L, i| {
-            if (nhs[i] > 2 * median and nhs[i] > LONG_LOOP_FLOOR_NH) {
+            if (nhs[i] > 2 * median and nhs[i] > long_loop_floor_nh) {
                 try refs.append(alloc, p.parts[L.cap].ref_des);
             }
         }
@@ -549,8 +550,8 @@ fn writeLint(
 }
 
 /// The unique nets on `part`'s pads, in pad order — `"nets":["VIN","GND"]`.
-fn writePartNets(w: *std.Io.Writer, alloc: std.mem.Allocator, pad_net: *std.StringHashMap([]const u8), part: optimizer.Part) !void {
-    var seen: std.ArrayListUnmanaged([]const u8) = .empty;
+fn writePartNets(w: *std.Io.Writer, alloc: std.mem.Allocator, pad_net: *std.StringHashMapUnmanaged([]const u8), part: optimizer.Part) !void {
+    var seen: std.ArrayList([]const u8) = .empty;
     defer seen.deinit(alloc);
     try w.writeAll(",\"nets\":[");
     for (part.pads) |pad| {
@@ -573,25 +574,25 @@ fn writePartNets(w: *std.Io.Writer, alloc: std.mem.Allocator, pad_net: *std.Stri
 /// Each hub's net → package-edge map: which edge(s) of the IC a net's pads sit
 /// on, and how many. This is what lets an agent reason "the VIN pads are on the
 /// left edge, so the input bank belongs left" without reading the footprint.
-fn writeHubPads(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, pad_net: *std.StringHashMap([]const u8)) !void {
+fn writeHubPads(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, pad_net: *std.StringHashMapUnmanaged([]const u8)) !void {
     try w.writeAll(",\"hub_pads\":[");
     var first_hub = true;
     for (p.parts, 0..) |part, pi| {
         if (part.kind != .hub) continue;
         if (!first_hub) try w.writeAll(",");
         first_hub = false;
-        try w.writeAll(REF_KEY);
+        try w.writeAll(ref_key);
         try pcb_layout_page.writeJsonStr(w, part.ref_des);
-        try w.writeAll(ORIGIN_KEY);
+        try w.writeAll(origin_key_head);
         try pcb_layout_page.writeJsonStr(w, originOf(p, pi));
         try w.writeAll(",\"nets\":[");
 
         // Aggregate per net (ordered by first appearance): edge set + pad count.
-        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        var names: std.ArrayList([]const u8) = .empty;
         defer names.deinit(alloc);
-        var edges: std.ArrayListUnmanaged([5]bool) = .empty;
+        var edges: std.ArrayList([5]bool) = .empty;
         defer edges.deinit(alloc);
-        var counts: std.ArrayListUnmanaged(usize) = .empty;
+        var counts: std.ArrayList(usize) = .empty;
         defer counts.deinit(alloc);
         for (part.pads) |pad| {
             const net = netOf(pad_net, part.ref_des, pad.number) orelse continue;
@@ -717,7 +718,7 @@ pub fn originOf(p: optimizer.Placement, pi: usize) []const u8 {
     return p.parts[pi].ref_des;
 }
 
-fn netOf(pad_net: *std.StringHashMap([]const u8), ref: []const u8, pad: []const u8) ?[]const u8 {
+fn netOf(pad_net: *std.StringHashMapUnmanaged([]const u8), ref: []const u8, pad: []const u8) ?[]const u8 {
     var buf: [128]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}|{s}", .{ ref, pad }) catch return null;
     return pad_net.get(key);
@@ -725,7 +726,7 @@ fn netOf(pad_net: *std.StringHashMap([]const u8), ref: []const u8, pad: []const 
 
 /// Net on the pad of `part` nearest the footprint-local point (lx,ly) — loops
 /// carry pad rectangles, not pad numbers, so recover the net by proximity.
-fn netAtLocal(pad_net: *std.StringHashMap([]const u8), part: optimizer.Part, lx: f64, ly: f64) ?[]const u8 {
+fn netAtLocal(pad_net: *std.StringHashMapUnmanaged([]const u8), part: optimizer.Part, lx: f64, ly: f64) ?[]const u8 {
     var best: ?[]const u8 = null;
     var best_d: f64 = std.math.floatMax(f64);
     for (part.pads) |pad| {
@@ -846,12 +847,12 @@ test "buildNetEdgeMap maps a net to its non-centre hub pad edge" {
         .maxy = 0,
         .generated = true,
     };
-    var pad_net = std.StringHashMap([]const u8).init(alloc);
-    defer pad_net.deinit();
-    try pad_net.put("U1|1", "VIN");
-    var out = std.StringHashMap(?Side).init(alloc);
-    defer out.deinit();
-    try buildNetEdgeMap(p, &pad_net, &out);
+    var pad_net = std.StringHashMapUnmanaged([]const u8).empty;
+    defer pad_net.deinit(alloc);
+    try pad_net.put(alloc, "U1|1", "VIN");
+    var out = std.StringHashMapUnmanaged(?Side).empty;
+    defer out.deinit(alloc);
+    try buildNetEdgeMap(alloc, p, &pad_net, &out);
     const e = out.get("VIN") orelse return error.TestNetMissing;
     try std.testing.expectEqual(Side.left, e.?);
 }

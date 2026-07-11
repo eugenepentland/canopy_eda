@@ -12,68 +12,68 @@ const infra_random = @import("../infra/random.zig");
 const auth_template = @import("templates/auth.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
-const HTTP_NOT_FOUND: u16 = 404;
-const HTTP_BAD_REQUEST: u16 = 400;
-const HTTP_INTERNAL_ERROR: u16 = 500;
+const http_not_found: u16 = 404;
+const http_bad_request: u16 = 400;
+const http_internal_error: u16 = 500;
 
 // Time (use std.time constants to avoid bare-60 magic-number violations)
-const SECONDS_PER_DAY: i64 = std.time.s_per_day;
-const SESSION_TTL_DAYS: i64 = 7;
-const SESSION_TTL_SECS: i64 = SESSION_TTL_DAYS * SECONDS_PER_DAY;
+const seconds_per_day: i64 = std.time.s_per_day;
+const session_ttl_days: i64 = 7;
+const session_ttl_secs: i64 = session_ttl_days * seconds_per_day;
 
 // Token sizes
-const SESSION_RAND_BYTES: usize = 32;
-const INVITE_RAND_BYTES: usize = 24;
+const session_rand_bytes: usize = 32;
+const invite_rand_bytes: usize = 24;
 
 // File-size limits
-const MAX_SESSION_FILE_BYTES: usize = 256 * 1024;
-const MAX_INVITES_FILE_BYTES: usize = 256 * 1024;
+const max_session_file_bytes: usize = 256 * 1024;
+const max_invites_file_bytes: usize = 256 * 1024;
 
 // WebAuthn authenticatorData layout (RFC 8809 §6)
-const AUTH_DATA_RPID_HASH_LEN: usize = 32;
-const AUTH_DATA_FLAGS_LEN: usize = 1;
-const AUTH_DATA_SIGN_COUNT_LEN: usize = 4;
-const AUTH_DATA_HEADER_LEN: usize = AUTH_DATA_RPID_HASH_LEN + AUTH_DATA_FLAGS_LEN + AUTH_DATA_SIGN_COUNT_LEN; // 37
-const AUTH_DATA_AAGUID_LEN: usize = 16;
-const AUTH_DATA_CRED_LEN_OFFSET: usize = AUTH_DATA_HEADER_LEN + AUTH_DATA_AAGUID_LEN; // 53
-const AUTH_DATA_CRED_DATA_OFFSET: usize = AUTH_DATA_CRED_LEN_OFFSET + 2; // 55
+const auth_data_rpid_hash_len: usize = 32;
+const auth_data_flags_len: usize = 1;
+const auth_data_sign_count_len: usize = 4;
+const auth_data_header_len: usize = auth_data_rpid_hash_len + auth_data_flags_len + auth_data_sign_count_len; // 37
+const auth_data_aaguid_len: usize = 16;
+const auth_data_cred_len_offset: usize = auth_data_header_len + auth_data_aaguid_len; // 53
+const auth_data_cred_data_offset: usize = auth_data_cred_len_offset + 2; // 55
 
 // EC P-256 SEC1 uncompressed point: 1 tag byte + 32 X + 32 Y
-const SEC1_UNCOMPRESSED_LEN: usize = 65;
-const SEC1_TAG_AND_X_LEN: usize = 33;
+const sec1_uncompressed_len: usize = 65;
+const sec1_tag_and_x_len: usize = 33;
 
 // CBOR encoding constants (RFC 8949)
-const CBOR_TAG_BITS: u3 = 5;
-const CBOR_ADDITIONAL_MASK: u8 = 0x1f;
-const CBOR_MAJOR_MAP: u8 = 5;
-const CBOR_ADDITIONAL_U8: u8 = 24;
-const CBOR_ADDITIONAL_U16: u8 = 25;
-const CBOR_ADDITIONAL_U32: u8 = 26;
-const CBOR_ADDITIONAL_U64: u8 = 27;
-const CBOR_HEADER_LEN_U8: usize = 2;
-const CBOR_HEADER_LEN_U16: usize = 3;
-const CBOR_HEADER_LEN_U32: usize = 5;
-const CBOR_HEADER_LEN_U64: usize = 9;
+const cbor_tag_bits: u3 = 5;
+const cbor_additional_mask: u8 = 0x1f;
+const cbor_major_map: u8 = 5;
+const cbor_additional_u8: u8 = 24;
+const cbor_additional_u16: u8 = 25;
+const cbor_additional_u32: u8 = 26;
+const cbor_additional_u64: u8 = 27;
+const cbor_header_len_u8: usize = 2;
+const cbor_header_len_u16: usize = 3;
+const cbor_header_len_u32: usize = 5;
+const cbor_header_len_u64: usize = 9;
 
 // URL scheme prefixes (extracted to satisfy ban-hardcoded-paths)
-const URL_SCHEME_HTTPS = "https";
-const URL_SCHEME_HTTP = "http";
-const URL_SCHEME_TEMPLATE = "{s}://{s}";
+const url_scheme_https = "https";
+const url_scheme_http = "http";
+const url_scheme_template = "{s}://{s}";
 
 // Repeated string literals (HTML/JSON templates and headers)
-const HEADER_LOCATION = "location";
-const HEADER_SET_COOKIE = "set-cookie";
-const PATH_AUTH_LOGIN = "/auth/login";
-const HOST_LOCALHOST = "localhost";
+const header_location = "location";
+const header_set_cookie = "set-cookie";
+const path_auth_login = "/auth/login";
+const host_localhost = "localhost";
 
-const SESSION_COOKIE_FMT = "session={s}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800";
+const session_cookie_fmt = "session={s}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800";
 
-const ERR_INVALID_EMAIL_JSON = "{\"error\":\"invalid email\"}";
-const ERR_INVALID_JSON_JSON = "{\"error\":\"invalid json\"}";
-const ERR_MISSING_BODY_JSON = "{\"error\":\"missing body\"}";
-const ERR_MISSING_ID_JSON = "{\"error\":\"missing id\"}";
-const ERR_INVALID_CLIENT_DATA = "{\"error\":\"invalid clientDataJSON\"}";
-const OK_JSON_TRUE = "{\"ok\":true}";
+const err_invalid_email_json = "{\"error\":\"invalid email\"}";
+const err_invalid_json_json = "{\"error\":\"invalid json\"}";
+const err_missing_body_json = "{\"error\":\"missing body\"}";
+const err_missing_id_json = "{\"error\":\"missing id\"}";
+const err_invalid_client_data = "{\"error\":\"invalid clientDataJSON\"}";
+const ok_json_true = "{\"ok\":true}";
 
 /// Error set for HTTP handlers in this module. Wide enough to cover
 /// allocator, writer, file IO, makePath, and JSON / form parsing errors
@@ -91,7 +91,7 @@ const SessionData = struct {
 };
 
 var sessions_mutex: std.Thread.Mutex = .{};
-var sessions: ?std.StringHashMap(SessionData) = null;
+var sessions: ?std.StringHashMapUnmanaged(SessionData) = null;
 var sessions_auth_dir: ?[]const u8 = null;
 
 // The session map outlives every request — handlers call in with a
@@ -99,9 +99,9 @@ var sessions_auth_dir: ?[]const u8 = null;
 // must come from the process allocator instead.
 const store_alloc = std.heap.page_allocator;
 
-fn getSessionMap(allocator: std.mem.Allocator, auth_dir: []const u8) *std.StringHashMap(SessionData) {
+fn getSessionMap(allocator: std.mem.Allocator, auth_dir: []const u8) *std.StringHashMapUnmanaged(SessionData) {
     if (sessions == null) {
-        sessions = std.StringHashMap(SessionData).init(store_alloc);
+        sessions = std.StringHashMapUnmanaged(SessionData).empty;
         sessions_auth_dir = auth_dir;
         // Load persisted sessions
         loadSessions(allocator, auth_dir);
@@ -127,7 +127,7 @@ fn loadSessions(allocator: std.mem.Allocator, auth_dir: []const u8) void {
         if (now < entry.expiry) {
             const token_dup = store_alloc.dupe(u8, entry.token) catch continue;
             const email_dup = store_alloc.dupe(u8, entry.email) catch continue;
-            sessions.?.put(token_dup, .{ .email = email_dup, .expiry = entry.expiry }) catch continue;
+            sessions.?.put(store_alloc, token_dup, .{ .email = email_dup, .expiry = entry.expiry }) catch continue;
         }
     }
 }
@@ -137,7 +137,7 @@ fn persistSessions(allocator: std.mem.Allocator) void {
     const path = sessionsPath(allocator, auth_dir) catch return;
     defer allocator.free(path);
     infra_fs.cwd().makePath(auth_dir) catch return;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     w.writeAll("[") catch return;
     var map = &sessions.?;
@@ -159,9 +159,9 @@ fn persistSessions(allocator: std.mem.Allocator) void {
 /// abandoned sessions don't accumulate in memory for the life of the process
 /// (they were previously evicted only when that exact token was looked up
 /// again). Caller must hold `sessions_mutex`.
-fn sweepExpiredSessions(allocator: std.mem.Allocator, map: *std.StringHashMap(SessionData)) void {
+fn sweepExpiredSessions(allocator: std.mem.Allocator, map: *std.StringHashMapUnmanaged(SessionData)) void {
     const now = clock.timestamp();
-    var expired: std.ArrayListUnmanaged([]const u8) = .empty;
+    var expired: std.ArrayList([]const u8) = .empty;
     defer expired.deinit(allocator);
     var it = map.iterator();
     while (it.next()) |e| {
@@ -178,13 +178,13 @@ pub fn createSession(allocator: std.mem.Allocator, auth_dir: []const u8, email: 
     const email_dup = try store_alloc.dupe(u8, email);
 
     const now = clock.timestamp();
-    const expiry = now + SESSION_TTL_SECS;
+    const expiry = now + session_ttl_secs;
 
     sessions_mutex.lock();
     defer sessions_mutex.unlock();
     const map = getSessionMap(allocator, auth_dir);
     sweepExpiredSessions(allocator, map);
-    try map.put(token, .{ .email = email_dup, .expiry = expiry });
+    try map.put(store_alloc, token, .{ .email = email_dup, .expiry = expiry });
     persistSessions(allocator);
     return token;
 }
@@ -224,20 +224,20 @@ pub fn deleteSession(allocator: std.mem.Allocator, auth_dir: []const u8, token: 
 // concurrent register/login ceremonies clobbered each other, so one would fail
 // "challenge mismatch" under any concurrency. Each entry is single-use with a
 // short TTL.
-const CHALLENGE_TTL_SECS: i64 = 300;
-const CHALLENGE_COOKIE = "authcid";
+const challenge_ttl_secs: i64 = 300;
+const challenge_cookie = "authcid";
 const ChallengeEntry = struct { challenge: [32]u8, expiry: i64 };
 var challenge_mutex: std.Thread.Mutex = .{};
-var challenges: ?std.StringHashMap(ChallengeEntry) = null;
+var challenges: ?std.StringHashMapUnmanaged(ChallengeEntry) = null;
 
-fn challengeMap() *std.StringHashMap(ChallengeEntry) {
-    if (challenges == null) challenges = std.StringHashMap(ChallengeEntry).init(store_alloc);
+fn challengeMap() *std.StringHashMapUnmanaged(ChallengeEntry) {
+    if (challenges == null) challenges = std.StringHashMapUnmanaged(ChallengeEntry).empty;
     return &challenges.?;
 }
 
 /// Evict expired challenge entries (bounded batch per call). Caller holds
 /// `challenge_mutex`.
-fn sweepExpiredChallenges(map: *std.StringHashMap(ChallengeEntry), now: i64) void {
+fn sweepExpiredChallenges(map: *std.StringHashMapUnmanaged(ChallengeEntry), now: i64) void {
     var expired: [32][]const u8 = undefined;
     var n: usize = 0;
     var it = map.iterator();
@@ -263,7 +263,7 @@ fn storePendingChallenge(challenge: [32]u8) []const u8 {
     infra_random.bytes(&rand);
     const hex = std.fmt.bytesToHex(rand, .lower);
     const cid = store_alloc.dupe(u8, &hex) catch return "";
-    map.put(cid, .{ .challenge = challenge, .expiry = now + CHALLENGE_TTL_SECS }) catch {
+    map.put(store_alloc, cid, .{ .challenge = challenge, .expiry = now + challenge_ttl_secs }) catch {
         store_alloc.free(cid);
         return "";
     };
@@ -300,8 +300,8 @@ fn getCookie(req: *httpz.Request, name: []const u8) ?[]const u8 {
 fn setChallengeCookie(res: *httpz.Response, arena: std.mem.Allocator, cid: []const u8) !void {
     const cookie = try std.fmt.allocPrint(
         arena,
-        CHALLENGE_COOKIE ++ "={s}; Max-Age={d}; Path=/; HttpOnly; SameSite=Strict",
-        .{ cid, CHALLENGE_TTL_SECS },
+        challenge_cookie ++ "={s}; Max-Age={d}; Path=/; HttpOnly; SameSite=Strict",
+        .{ cid, challenge_ttl_secs },
     );
     res.header("Set-Cookie", cookie);
 }
@@ -346,7 +346,7 @@ fn saveCredentials(allocator: std.mem.Allocator, auth_dir: []const u8, creds: []
     try infra_fs.cwd().makePath(auth_dir);
 
     // Build JSON string
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const bw = buf.writer(allocator);
     try bw.writeAll("[");
     for (creds, 0..) |c, i| {
@@ -373,7 +373,7 @@ const Invite = struct {
     role: []const u8 = "writer",
 };
 
-const INVITE_TTL_SECONDS: i64 = SESSION_TTL_SECS;
+const invite_ttl_seconds: i64 = session_ttl_secs;
 
 fn invitesPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/invites.json", .{auth_dir});
@@ -397,7 +397,7 @@ fn saveInvites(allocator: std.mem.Allocator, auth_dir: []const u8, invites: []co
 
     try infra_fs.cwd().makePath(auth_dir);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const bw = buf.writer(allocator);
     try bw.writeAll("[");
     for (invites, 0..) |inv, i| {
@@ -423,14 +423,14 @@ pub fn createInvite(allocator: std.mem.Allocator, auth_dir: []const u8, created_
 
     const now = clock.timestamp();
     const existing = try loadInvites(allocator, auth_dir);
-    var invites: std.ArrayListUnmanaged(Invite) = .empty;
+    var invites: std.ArrayList(Invite) = .empty;
     for (existing) |inv| {
         if (now < inv.expiry) try invites.append(allocator, inv);
     }
     try invites.append(allocator, .{
         .token = token,
         .created_by = try allocator.dupe(u8, created_by),
-        .expiry = now + INVITE_TTL_SECONDS,
+        .expiry = now + invite_ttl_seconds,
         .role = try allocator.dupe(u8, role),
     });
     try saveInvites(allocator, auth_dir, invites.items);
@@ -449,7 +449,7 @@ fn findInvite(allocator: std.mem.Allocator, auth_dir: []const u8, token: []const
 fn consumeInvite(allocator: std.mem.Allocator, auth_dir: []const u8, token: []const u8) !bool {
     const invites = try loadInvites(allocator, auth_dir);
     const now = clock.timestamp();
-    var remaining: std.ArrayListUnmanaged(Invite) = .empty;
+    var remaining: std.ArrayList(Invite) = .empty;
     var found = false;
     for (invites) |inv| {
         if (std.mem.eql(u8, inv.token, token) and now < inv.expiry) {
@@ -488,30 +488,30 @@ const CborError = error{
 fn decodeCborArg(allocator: std.mem.Allocator, data: []const u8) CborError!struct { CborValue, usize } {
     if (data.len == 0) return CborError.InvalidCbor;
 
-    const major = data[0] >> CBOR_TAG_BITS;
-    const additional = data[0] & CBOR_ADDITIONAL_MASK;
+    const major = data[0] >> cbor_tag_bits;
+    const additional = data[0] & cbor_additional_mask;
     var offset: usize = 1;
 
     // Decode argument value
     var arg: u64 = 0;
-    if (additional < CBOR_ADDITIONAL_U8) {
+    if (additional < cbor_additional_u8) {
         arg = additional;
-    } else if (additional == CBOR_ADDITIONAL_U8) {
-        if (data.len < CBOR_HEADER_LEN_U8) return CborError.InvalidCbor;
+    } else if (additional == cbor_additional_u8) {
+        if (data.len < cbor_header_len_u8) return CborError.InvalidCbor;
         arg = data[1];
-        offset = CBOR_HEADER_LEN_U8;
-    } else if (additional == CBOR_ADDITIONAL_U16) {
-        if (data.len < CBOR_HEADER_LEN_U16) return CborError.InvalidCbor;
+        offset = cbor_header_len_u8;
+    } else if (additional == cbor_additional_u16) {
+        if (data.len < cbor_header_len_u16) return CborError.InvalidCbor;
         arg = std.mem.readInt(u16, data[1..3], .big);
-        offset = CBOR_HEADER_LEN_U16;
-    } else if (additional == CBOR_ADDITIONAL_U32) {
-        if (data.len < CBOR_HEADER_LEN_U32) return CborError.InvalidCbor;
-        arg = std.mem.readInt(u32, data[1..CBOR_HEADER_LEN_U32], .big);
-        offset = CBOR_HEADER_LEN_U32;
-    } else if (additional == CBOR_ADDITIONAL_U64) {
-        if (data.len < CBOR_HEADER_LEN_U64) return CborError.InvalidCbor;
-        arg = std.mem.readInt(u64, data[1..CBOR_HEADER_LEN_U64], .big);
-        offset = CBOR_HEADER_LEN_U64;
+        offset = cbor_header_len_u16;
+    } else if (additional == cbor_additional_u32) {
+        if (data.len < cbor_header_len_u32) return CborError.InvalidCbor;
+        arg = std.mem.readInt(u32, data[1..cbor_header_len_u32], .big);
+        offset = cbor_header_len_u32;
+    } else if (additional == cbor_additional_u64) {
+        if (data.len < cbor_header_len_u64) return CborError.InvalidCbor;
+        arg = std.mem.readInt(u64, data[1..cbor_header_len_u64], .big);
+        offset = cbor_header_len_u64;
     } else {
         return CborError.InvalidCbor;
     }
@@ -546,7 +546,7 @@ fn decodeCborArg(allocator: std.mem.Allocator, data: []const u8) CborError!struc
             }
             return .{ .{ .array = items }, pos };
         },
-        CBOR_MAJOR_MAP => { // map
+        cbor_major_map => { // map
             const count: usize = @intCast(arg);
             var entries = try allocator.alloc(CborMapEntry, count);
             var pos = offset;
@@ -741,15 +741,15 @@ pub fn validateBearerToken(ctx: *Handler, req: *httpz.Request) bool {
 /// the server as connected with an empty tool list. Always returns
 /// `false` so the middleware caller knows the response is fully written.
 fn mcpUnauthorized(req: *httpz.Request, res: *httpz.Response) HandlerError!bool {
-    const host = req.header("host") orelse HOST_LOCALHOST;
+    const host = req.header("host") orelse host_localhost;
     const is_https = if (req.header("x-forwarded-proto")) |p|
-        std.mem.eql(u8, p, URL_SCHEME_HTTPS)
+        std.mem.eql(u8, p, url_scheme_https)
     else
         false;
-    const scheme = if (is_https) URL_SCHEME_HTTPS else URL_SCHEME_HTTP;
+    const scheme = if (is_https) url_scheme_https else url_scheme_http;
     const challenge = try std.fmt.allocPrint(
         req.arena,
-        "Bearer resource_metadata=\"" ++ URL_SCHEME_TEMPLATE ++ "/.well-known/oauth-protected-resource\"",
+        "Bearer resource_metadata=\"" ++ url_scheme_template ++ "/.well-known/oauth-protected-resource\"",
         .{ scheme, host },
     );
     res.status = 401;
@@ -785,7 +785,7 @@ pub fn isLocalhostRequest(ctx: *Handler, req: *httpz.Request) bool {
 /// sessions tied to that email. Called by the admin delete-user flow.
 pub fn purgeIdentity(allocator: std.mem.Allocator, auth_dir: []const u8, email: []const u8) void {
     const creds = loadCredentials(allocator, auth_dir) catch return;
-    var kept: std.ArrayListUnmanaged(StoredCredential) = .empty;
+    var kept: std.ArrayList(StoredCredential) = .empty;
     defer kept.deinit(allocator);
     for (creds) |c| {
         if (!std.mem.eql(u8, c.email, email)) kept.append(allocator, c) catch continue;
@@ -798,7 +798,7 @@ pub fn purgeIdentity(allocator: std.mem.Allocator, auth_dir: []const u8, email: 
     defer sessions_mutex.unlock();
     if (sessions) |*map| {
         var it = map.iterator();
-        var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
+        var to_remove: std.ArrayList([]const u8) = .empty;
         defer to_remove.deinit(allocator);
         while (it.next()) |entry| {
             if (std.mem.eql(u8, entry.value_ptr.email, email)) {
@@ -937,10 +937,10 @@ pub fn authMiddleware(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     // Redirect to login or setup
     if (has_creds) {
         res.status = 303;
-        res.header(HEADER_LOCATION, PATH_AUTH_LOGIN);
+        res.header(header_location, path_auth_login);
     } else {
         res.status = 303;
-        res.header(HEADER_LOCATION, "/auth/setup");
+        res.header(header_location, "/auth/setup");
     }
     return false;
 }
@@ -972,9 +972,9 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
             if (try findInvite(ctx.allocator, ctx.auth_dir, inv_token)) |_| {
                 const body_email = q.get("email") orelse "";
                 if (body_email.len == 0 or std.mem.indexOfScalar(u8, body_email, '@') == null) {
-                    res.status = HTTP_BAD_REQUEST;
+                    res.status = http_bad_request;
                     res.content_type = .JSON;
-                    res.body = ERR_INVALID_EMAIL_JSON;
+                    res.body = err_invalid_email_json;
                     return;
                 }
                 email = body_email;
@@ -987,9 +987,9 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
         // Bootstrap: first user
         email = q.get("email") orelse "";
         if (email.len == 0 or std.mem.indexOfScalar(u8, email, '@') == null) {
-            res.status = HTTP_BAD_REQUEST;
+            res.status = http_bad_request;
             res.content_type = .JSON;
-            res.body = ERR_INVALID_EMAIL_JSON;
+            res.body = err_invalid_email_json;
             return;
         }
         authorized = true;
@@ -1008,7 +1008,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 
     const challenge_b64 = try base64urlEncode(req.arena, &challenge);
 
-    const host = req.header("host") orelse HOST_LOCALHOST;
+    const host = req.header("host") orelse host_localhost;
     var rp_id = host;
     if (std.mem.indexOfScalar(u8, host, ':')) |idx| {
         rp_id = host[0..idx];
@@ -1022,7 +1022,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 
     // Build excludeCredentials list: passkeys already registered for this email
     // so the browser won't offer to re-use them.
-    var exclude_buf: std.ArrayListUnmanaged(u8) = .empty;
+    var exclude_buf: std.ArrayList(u8) = .empty;
     const xw = exclude_buf.writer(req.arena);
     try xw.writeAll("[");
     var first_excl = true;
@@ -1035,7 +1035,7 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
     }
     try xw.writeAll("]");
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(req.arena);
     try w.print(
         "{{\"challenge\":\"{s}\",\"rp\":{{\"name\":\"Netlisp\",\"id\":\"{s}\"}}," ++
@@ -1056,15 +1056,15 @@ pub fn registerChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Res
 /// a session cookie so the browser is logged in once registration succeeds.
 pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = ERR_MISSING_BODY_JSON;
+        res.status = http_bad_request;
+        res.body = err_missing_body_json;
         res.content_type = .JSON;
         return;
     };
 
     const parsed = std.json.parseFromSlice(std.json.Value, req.arena, body, .{}) catch {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = ERR_INVALID_JSON_JSON;
+        res.status = http_bad_request;
+        res.body = err_invalid_json_json;
         res.content_type = .JSON;
         return;
     };
@@ -1072,28 +1072,28 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     // Extract fields from the JSON
     const cred_id_b64 = (root.object.get("id") orelse {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = ERR_MISSING_ID_JSON;
+        res.status = http_bad_request;
+        res.body = err_missing_id_json;
         res.content_type = .JSON;
         return;
     }).string;
 
     const response_obj = (root.object.get("response") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing response\"}";
         res.content_type = .JSON;
         return;
     }).object;
 
     const attestation_b64 = (response_obj.get("attestationObject") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing attestationObject\"}";
         res.content_type = .JSON;
         return;
     }).string;
 
     const client_data_b64 = (response_obj.get("clientDataJSON") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing clientDataJSON\"}";
         res.content_type = .JSON;
         return;
@@ -1101,7 +1101,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     // Decode attestationObject
     const attestation_raw = base64urlDecode(req.arena, attestation_b64) catch {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"invalid attestation base64\"}";
         res.content_type = .JSON;
         return;
@@ -1109,34 +1109,34 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     // Decode clientDataJSON and verify challenge
     const client_data_raw = base64urlDecode(req.arena, client_data_b64) catch {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"invalid clientData base64\"}";
         res.content_type = .JSON;
         return;
     };
 
     const client_data_parsed = std.json.parseFromSlice(std.json.Value, req.arena, client_data_raw, .{}) catch {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = ERR_INVALID_CLIENT_DATA;
+        res.status = http_bad_request;
+        res.body = err_invalid_client_data;
         res.content_type = .JSON;
         return;
     };
 
     if (client_data_parsed.value != .object) {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = ERR_INVALID_CLIENT_DATA;
+        res.status = http_bad_request;
+        res.body = err_invalid_client_data;
         res.content_type = .JSON;
         return;
     }
     // Verify type
     const cd_type = (client_data_parsed.value.object.get("type") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing type in clientData\"}";
         res.content_type = .JSON;
         return;
     }).string;
     if (!std.mem.eql(u8, cd_type, "webauthn.create")) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"wrong ceremony type\"}";
         res.content_type = .JSON;
         return;
@@ -1144,14 +1144,14 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     // Verify challenge
     const cd_challenge = (client_data_parsed.value.object.get("challenge") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing challenge in clientData\"}";
         res.content_type = .JSON;
         return;
     }).string;
 
-    const stored_challenge = takePendingChallenge(getCookie(req, CHALLENGE_COOKIE) orelse "") orelse {
-        res.status = HTTP_BAD_REQUEST;
+    const stored_challenge = takePendingChallenge(getCookie(req, challenge_cookie) orelse "") orelse {
+        res.status = http_bad_request;
         res.body = "{\"error\":\"no pending challenge\"}";
         res.content_type = .JSON;
         return;
@@ -1159,7 +1159,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     const expected_challenge_b64 = try base64urlEncode(req.arena, &stored_challenge);
     if (!std.mem.eql(u8, cd_challenge, expected_challenge_b64)) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"challenge mismatch\"}";
         res.content_type = .JSON;
         return;
@@ -1167,7 +1167,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     // Parse CBOR attestationObject
     const cbor_val = decodeCbor(req.arena, attestation_raw) catch {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"invalid CBOR\"}";
         res.content_type = .JSON;
         return;
@@ -1176,7 +1176,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     const att_map = switch (cbor_val) {
         .map => |m| m,
         else => {
-            res.status = HTTP_BAD_REQUEST;
+            res.status = http_bad_request;
             res.body = "{\"error\":\"attestation not a map\"}";
             res.content_type = .JSON;
             return;
@@ -1185,7 +1185,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     // Get authData
     const auth_data_val = cborMapGetText(att_map, "authData") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing authData\"}";
         res.content_type = .JSON;
         return;
@@ -1193,7 +1193,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     const auth_data = switch (auth_data_val) {
         .bytes => |b| b,
         else => {
-            res.status = HTTP_BAD_REQUEST;
+            res.status = http_bad_request;
             res.body = "{\"error\":\"authData not bytes\"}";
             res.content_type = .JSON;
             return;
@@ -1202,33 +1202,33 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     // Parse authenticatorData:
     // 32 bytes rpIdHash + 1 byte flags + 4 bytes signCount + attestedCredentialData
-    if (auth_data.len < AUTH_DATA_HEADER_LEN) {
-        res.status = HTTP_BAD_REQUEST;
+    if (auth_data.len < auth_data_header_len) {
+        res.status = http_bad_request;
         res.body = "{\"error\":\"authData too short\"}";
         res.content_type = .JSON;
         return;
     }
 
-    const flags = auth_data[AUTH_DATA_RPID_HASH_LEN];
+    const flags = auth_data[auth_data_rpid_hash_len];
     if (flags & 0x40 == 0) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"no attested credential data\"}";
         res.content_type = .JSON;
         return;
     }
 
     // Skip: 32 rpIdHash + 1 flags + 4 signCount + 16 AAGUID = 53
-    if (auth_data.len < AUTH_DATA_CRED_DATA_OFFSET) {
-        res.status = HTTP_BAD_REQUEST;
+    if (auth_data.len < auth_data_cred_data_offset) {
+        res.status = http_bad_request;
         res.body = "{\"error\":\"authData too short for credential\"}";
         res.content_type = .JSON;
         return;
     }
 
-    const cred_id_len = std.mem.readInt(u16, auth_data[AUTH_DATA_CRED_LEN_OFFSET..AUTH_DATA_CRED_DATA_OFFSET], .big);
-    const cred_data_start: usize = AUTH_DATA_CRED_DATA_OFFSET + cred_id_len;
+    const cred_id_len = std.mem.readInt(u16, auth_data[auth_data_cred_len_offset..auth_data_cred_data_offset], .big);
+    const cred_data_start: usize = auth_data_cred_data_offset + cred_id_len;
     if (auth_data.len < cred_data_start) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"authData too short for cred id\"}";
         res.content_type = .JSON;
         return;
@@ -1237,7 +1237,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     // Parse COSE public key (remainder of authData after credential ID)
     const cose_key_bytes = auth_data[cred_data_start..];
     const cose_key_cbor = decodeCbor(req.arena, cose_key_bytes) catch {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"invalid COSE key CBOR\"}";
         res.content_type = .JSON;
         return;
@@ -1246,7 +1246,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     const key_map = switch (cose_key_cbor) {
         .map => |m| m,
         else => {
-            res.status = HTTP_BAD_REQUEST;
+            res.status = http_bad_request;
             res.body = "{\"error\":\"COSE key not a map\"}";
             res.content_type = .JSON;
             return;
@@ -1255,7 +1255,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     // Extract x coordinate (key -2)
     const x_val = cborMapGet(key_map, -2) orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing x in COSE key\"}";
         res.content_type = .JSON;
         return;
@@ -1263,7 +1263,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     const x_bytes = switch (x_val) {
         .bytes => |b| b,
         else => {
-            res.status = HTTP_BAD_REQUEST;
+            res.status = http_bad_request;
             res.body = "{\"error\":\"x not bytes\"}";
             res.content_type = .JSON;
             return;
@@ -1272,7 +1272,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
 
     // Extract y coordinate (key -3)
     const y_val = cborMapGet(key_map, -3) orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing y in COSE key\"}";
         res.content_type = .JSON;
         return;
@@ -1280,7 +1280,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     const y_bytes = switch (y_val) {
         .bytes => |b| b,
         else => {
-            res.status = HTTP_BAD_REQUEST;
+            res.status = http_bad_request;
             res.body = "{\"error\":\"y not bytes\"}";
             res.content_type = .JSON;
             return;
@@ -1288,7 +1288,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     };
 
     if (x_bytes.len != 32 or y_bytes.len != 32) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"invalid key coordinate length\"}";
         res.content_type = .JSON;
         return;
@@ -1315,8 +1315,8 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     if (resolved_email.len == 0 and invite_token.len > 0) {
         if (try findInvite(ctx.allocator, ctx.auth_dir, invite_token)) |inv| {
             if (body_email.len == 0 or std.mem.indexOfScalar(u8, body_email, '@') == null) {
-                res.status = HTTP_BAD_REQUEST;
-                res.body = ERR_INVALID_EMAIL_JSON;
+                res.status = http_bad_request;
+                res.body = err_invalid_email_json;
                 res.content_type = .JSON;
                 return;
             }
@@ -1329,8 +1329,8 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     if (resolved_email.len == 0 and existing.len == 0) {
         // Bootstrap
         if (body_email.len == 0 or std.mem.indexOfScalar(u8, body_email, '@') == null) {
-            res.status = HTTP_BAD_REQUEST;
-            res.body = ERR_INVALID_EMAIL_JSON;
+            res.status = http_bad_request;
+            res.body = err_invalid_email_json;
             res.content_type = .JSON;
             return;
         }
@@ -1350,7 +1350,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     const id_dup = try ctx.allocator.dupe(u8, cred_id_b64);
     const email_dup = try ctx.allocator.dupe(u8, resolved_email);
 
-    var creds: std.ArrayListUnmanaged(StoredCredential) = .empty;
+    var creds: std.ArrayList(StoredCredential) = .empty;
     for (existing) |c| {
         try creds.append(ctx.allocator, c);
     }
@@ -1364,7 +1364,7 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     });
 
     saveCredentials(ctx.allocator, ctx.auth_dir, creds.items) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "{\"error\":\"failed to save credentials\"}";
         res.content_type = .JSON;
         return;
@@ -1386,12 +1386,12 @@ pub fn registerCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     // Create a session for the newly registered user (unless they already have one)
     if (session_token_opt == null) {
         const token = try createSession(ctx.allocator, ctx.auth_dir, resolved_email);
-        const cookie = try std.fmt.allocPrint(req.arena, SESSION_COOKIE_FMT, .{token});
-        res.header(HEADER_SET_COOKIE, cookie);
+        const cookie = try std.fmt.allocPrint(req.arena, session_cookie_fmt, .{token});
+        res.header(header_set_cookie, cookie);
     }
 
     res.content_type = .JSON;
-    res.body = OK_JSON_TRUE;
+    res.body = ok_json_true;
 }
 
 // ── Authentication endpoints ─────────────────────────────────────────
@@ -1411,7 +1411,7 @@ pub fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 
     const creds = try loadCredentials(ctx.allocator, ctx.auth_dir);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(req.arena);
     try w.print("{{\"challenge\":\"{s}\",\"allowCredentials\":[", .{challenge_b64});
     var first = true;
@@ -1424,7 +1424,7 @@ pub fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
         first = false;
     }
 
-    const host = req.header("host") orelse HOST_LOCALHOST;
+    const host = req.header("host") orelse host_localhost;
     var rp_id = host;
     if (std.mem.indexOfScalar(u8, host, ':')) |idx| {
         rp_id = host[0..idx];
@@ -1441,50 +1441,50 @@ pub fn loginChallengePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 /// session cookie tied to the credential's email on success.
 pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = ERR_MISSING_BODY_JSON;
+        res.status = http_bad_request;
+        res.body = err_missing_body_json;
         res.content_type = .JSON;
         return;
     };
 
     const parsed = std.json.parseFromSlice(std.json.Value, req.arena, body, .{}) catch {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = ERR_INVALID_JSON_JSON;
+        res.status = http_bad_request;
+        res.body = err_invalid_json_json;
         res.content_type = .JSON;
         return;
     };
     const root = parsed.value;
 
     const cred_id = (root.object.get("id") orelse {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = ERR_MISSING_ID_JSON;
+        res.status = http_bad_request;
+        res.body = err_missing_id_json;
         res.content_type = .JSON;
         return;
     }).string;
 
     const response_obj = (root.object.get("response") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing response\"}";
         res.content_type = .JSON;
         return;
     }).object;
 
     const auth_data_b64 = (response_obj.get("authenticatorData") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing authenticatorData\"}";
         res.content_type = .JSON;
         return;
     }).string;
 
     const client_data_b64 = (response_obj.get("clientDataJSON") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing clientDataJSON\"}";
         res.content_type = .JSON;
         return;
     }).string;
 
     const sig_b64 = (response_obj.get("signature") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing signature\"}";
         res.content_type = .JSON;
         return;
@@ -1492,21 +1492,21 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     // Decode all base64url fields
     const auth_data = base64urlDecode(req.arena, auth_data_b64) catch {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"invalid authenticatorData base64\"}";
         res.content_type = .JSON;
         return;
     };
 
     const client_data_raw = base64urlDecode(req.arena, client_data_b64) catch {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"invalid clientDataJSON base64\"}";
         res.content_type = .JSON;
         return;
     };
 
     const sig_raw = base64urlDecode(req.arena, sig_b64) catch {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"invalid signature base64\"}";
         res.content_type = .JSON;
         return;
@@ -1514,27 +1514,27 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     // Parse and verify clientDataJSON
     const client_data_parsed = std.json.parseFromSlice(std.json.Value, req.arena, client_data_raw, .{}) catch {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = ERR_INVALID_CLIENT_DATA;
+        res.status = http_bad_request;
+        res.body = err_invalid_client_data;
         res.content_type = .JSON;
         return;
     };
 
     if (client_data_parsed.value != .object) {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = ERR_INVALID_CLIENT_DATA;
+        res.status = http_bad_request;
+        res.body = err_invalid_client_data;
         res.content_type = .JSON;
         return;
     }
     // Verify type
     const cd_type = (client_data_parsed.value.object.get("type") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing type\"}";
         res.content_type = .JSON;
         return;
     }).string;
     if (!std.mem.eql(u8, cd_type, "webauthn.get")) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"wrong ceremony type\"}";
         res.content_type = .JSON;
         return;
@@ -1542,18 +1542,18 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     // Verify origin
     const cd_origin = (client_data_parsed.value.object.get("origin") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing origin\"}";
         res.content_type = .JSON;
         return;
     }).string;
 
-    const host = req.header("host") orelse HOST_LOCALHOST;
+    const host = req.header("host") orelse host_localhost;
     // Construct expected origins (http and https)
-    const expected_https = try std.fmt.allocPrint(req.arena, URL_SCHEME_TEMPLATE, .{ URL_SCHEME_HTTPS, host });
-    const expected_http = try std.fmt.allocPrint(req.arena, URL_SCHEME_TEMPLATE, .{ URL_SCHEME_HTTP, host });
+    const expected_https = try std.fmt.allocPrint(req.arena, url_scheme_template, .{ url_scheme_https, host });
+    const expected_http = try std.fmt.allocPrint(req.arena, url_scheme_template, .{ url_scheme_http, host });
     if (!std.mem.eql(u8, cd_origin, expected_https) and !std.mem.eql(u8, cd_origin, expected_http)) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"origin mismatch\"}";
         res.content_type = .JSON;
         return;
@@ -1561,14 +1561,14 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     // Verify challenge
     const cd_challenge = (client_data_parsed.value.object.get("challenge") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"missing challenge\"}";
         res.content_type = .JSON;
         return;
     }).string;
 
-    const stored_challenge = takePendingChallenge(getCookie(req, CHALLENGE_COOKIE) orelse "") orelse {
-        res.status = HTTP_BAD_REQUEST;
+    const stored_challenge = takePendingChallenge(getCookie(req, challenge_cookie) orelse "") orelse {
+        res.status = http_bad_request;
         res.body = "{\"error\":\"no pending challenge\"}";
         res.content_type = .JSON;
         return;
@@ -1576,7 +1576,7 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     const expected_challenge_b64 = try base64urlEncode(req.arena, &stored_challenge);
     if (!std.mem.eql(u8, cd_challenge, expected_challenge_b64)) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"challenge mismatch\"}";
         res.content_type = .JSON;
         return;
@@ -1593,7 +1593,7 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     }
 
     const cred = matching_cred orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"unknown credential\"}";
         res.content_type = .JSON;
         return;
@@ -1601,34 +1601,34 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     // Reconstruct the public key
     const x_bytes = base64urlDecode(req.arena, cred.public_key_x) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "{\"error\":\"invalid stored key x\"}";
         res.content_type = .JSON;
         return;
     };
     const y_bytes = base64urlDecode(req.arena, cred.public_key_y) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "{\"error\":\"invalid stored key y\"}";
         res.content_type = .JSON;
         return;
     };
 
     if (x_bytes.len != 32 or y_bytes.len != 32) {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "{\"error\":\"invalid stored key length\"}";
         res.content_type = .JSON;
         return;
     }
 
     // Build SEC1 uncompressed point: 0x04 || x || y
-    var sec1: [SEC1_UNCOMPRESSED_LEN]u8 = undefined;
+    var sec1: [sec1_uncompressed_len]u8 = undefined;
     sec1[0] = 0x04;
-    @memcpy(sec1[1..SEC1_TAG_AND_X_LEN], x_bytes);
-    @memcpy(sec1[SEC1_TAG_AND_X_LEN..SEC1_UNCOMPRESSED_LEN], y_bytes);
+    @memcpy(sec1[1..sec1_tag_and_x_len], x_bytes);
+    @memcpy(sec1[sec1_tag_and_x_len..sec1_uncompressed_len], y_bytes);
 
     const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
     const pubkey = EcdsaP256.PublicKey.fromSec1(&sec1) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "{\"error\":\"invalid public key\"}";
         res.content_type = .JSON;
         return;
@@ -1645,12 +1645,12 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     // Parse DER signature to raw r||s
     const sig_rs = parseDerSignature(req.arena, sig_raw) catch {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"invalid signature format\"}";
         res.content_type = .JSON;
         return;
     } orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"could not parse DER signature\"}";
         res.content_type = .JSON;
         return;
@@ -1660,7 +1660,7 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     // Verify the signature
     signature.verify(verify_msg, pubkey) catch {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "{\"error\":\"signature verification failed\"}";
         res.content_type = .JSON;
         return;
@@ -1669,16 +1669,16 @@ pub fn loginCompletePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     // Success - create session tied to the credential's email
     const session_email = if (cred.email.len > 0) cred.email else "";
     const token = try createSession(ctx.allocator, ctx.auth_dir, session_email);
-    const cookie = try std.fmt.allocPrint(req.arena, SESSION_COOKIE_FMT, .{token});
-    res.header(HEADER_SET_COOKIE, cookie);
+    const cookie = try std.fmt.allocPrint(req.arena, session_cookie_fmt, .{token});
+    res.header(header_set_cookie, cookie);
 
     res.content_type = .JSON;
-    res.body = OK_JSON_TRUE;
+    res.body = ok_json_true;
 }
 
 // ── HTML Pages ───────────────────────────────────────────────────────
 
-pub const PAGE_STYLE =
+pub const page_style =
     \\* { margin: 0; padding: 0; box-sizing: border-box; }
     \\body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     \\  background: #0d1117; color: #c9d1d9; display: flex; justify-content: center;
@@ -1700,7 +1700,7 @@ pub const PAGE_STYLE =
     \\.link:hover { text-decoration: underline; }
 ;
 
-pub const B64URL_JS =
+pub const b64url_js =
     \\function b64urlToBytes(b64) {
     \\  let s = b64.replace(/-/g, '+').replace(/_/g, '/');
     \\  while (s.length % 4) s += '=';
@@ -1736,7 +1736,7 @@ pub fn setupPage(ctx: *Handler, _: *httpz.Request, res: *httpz.Response) Handler
     const existing = try loadCredentials(ctx.allocator, ctx.auth_dir);
     if (existing.len > 0) {
         res.status = 303;
-        res.header(HEADER_LOCATION, PATH_AUTH_LOGIN);
+        res.header(header_location, path_auth_login);
         return;
     }
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
@@ -1770,9 +1770,9 @@ pub fn logoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     if (getSessionToken(req)) |tok| {
         deleteSession(ctx.allocator, ctx.auth_dir, tok);
     }
-    res.header(HEADER_SET_COOKIE, "session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+    res.header(header_set_cookie, "session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
     res.content_type = .JSON;
-    res.body = OK_JSON_TRUE;
+    res.body = ok_json_true;
 }
 
 /// GET /api/auth/credentials — return the signed-in user's registered
@@ -1783,7 +1783,7 @@ pub fn listCredentialsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 
     const creds = try loadCredentials(ctx.allocator, ctx.auth_dir);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(req.arena);
     try w.print("{{\"email\":\"{s}\",\"credentials\":[", .{email});
     var first = true;
@@ -1806,31 +1806,31 @@ pub fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
     const email = requireSession(ctx, req, res) orelse return;
 
     const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.content_type = .JSON;
-        res.body = ERR_MISSING_BODY_JSON;
+        res.body = err_missing_body_json;
         return;
     };
     const parsed = std.json.parseFromSlice(std.json.Value, req.arena, body, .{}) catch {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.content_type = .JSON;
-        res.body = ERR_INVALID_JSON_JSON;
+        res.body = err_invalid_json_json;
         return;
     };
     if (parsed.value != .object) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.content_type = .JSON;
-        res.body = ERR_INVALID_JSON_JSON;
+        res.body = err_invalid_json_json;
         return;
     }
     const id_val = parsed.value.object.get("id") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.content_type = .JSON;
-        res.body = ERR_MISSING_ID_JSON;
+        res.body = err_missing_id_json;
         return;
     };
     if (id_val != .string) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.content_type = .JSON;
         res.body = "{\"error\":\"id must be string\"}";
         return;
@@ -1844,13 +1844,13 @@ pub fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
         if (std.mem.eql(u8, c.email, email)) user_count += 1;
     }
     if (user_count <= 1) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.content_type = .JSON;
         res.body = "{\"error\":\"cannot delete your only passkey\"}";
         return;
     }
 
-    var kept: std.ArrayListUnmanaged(StoredCredential) = .empty;
+    var kept: std.ArrayList(StoredCredential) = .empty;
     var removed = false;
     for (existing) |c| {
         if (std.mem.eql(u8, c.id, target_id) and std.mem.eql(u8, c.email, email)) {
@@ -1861,21 +1861,21 @@ pub fn deleteCredentialApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
     }
 
     if (!removed) {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         res.content_type = .JSON;
         res.body = "{\"error\":\"credential not found\"}";
         return;
     }
 
     saveCredentials(ctx.allocator, ctx.auth_dir, kept.items) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.content_type = .JSON;
         res.body = "{\"error\":\"failed to save\"}";
         return;
     };
 
     res.content_type = .JSON;
-    res.body = OK_JSON_TRUE;
+    res.body = ok_json_true;
 }
 
 /// POST /api/auth/invites — admin-only: mint a 7-day single-use invite token
@@ -1914,7 +1914,7 @@ pub fn createInviteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
 
     const token = try createInvite(ctx.allocator, ctx.auth_dir, email, role_str);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(req.arena);
     try w.print("{{\"ok\":true,\"token\":\"{s}\",\"path\":\"/auth/invite/{s}\",\"role\":\"{s}\"}}", .{ token, token, role_str });
 
@@ -1929,13 +1929,13 @@ pub fn invitePage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     const path = req.url.path;
     const prefix = "/auth/invite/";
     if (!std.mem.startsWith(u8, path, prefix)) {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         res.body = "not found";
         return;
     }
     const token = path[prefix.len..];
     if (token.len == 0) {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         res.body = "not found";
         return;
     }

@@ -15,10 +15,10 @@ const Instance = env_mod.Instance;
 const Check = env_mod.Check;
 
 // ── Constants ─────────────────────────────────────────────────────
-const CURRENT_TOLERANCE_F: f64 = 1e-9;
-const VALUE_TOLERANCE_PF: f64 = 1e-12;
-const DC_EQUIV_RESISTOR_OHMS: f64 = 10.0;
-const PIN_NOT_FOUND_MSG = "pin '{s}' not found in pinout";
+const current_tolerance_f: f64 = 1e-9;
+const value_tolerance_pf: f64 = 1e-12;
+const dc_equiv_resistor_ohms: f64 = 10.0;
+const pin_not_found_msg = "pin '{s}' not found in pinout";
 
 /// Outcome of evaluating one component requirement: `pass` / `fail` for
 /// automated checks, `na` when no check primitive ran, and `verified` once
@@ -192,9 +192,9 @@ fn evalConnected(
     pin_b: []const u8,
 ) Result {
     const net_a = netForPinFn(eval, block, inst, pin_a) orelse
-        return fail(allocator, PIN_NOT_FOUND_MSG, .{pin_a});
+        return fail(allocator, pin_not_found_msg, .{pin_a});
     const net_b = netForPinFn(eval, block, inst, pin_b) orelse
-        return fail(allocator, PIN_NOT_FOUND_MSG, .{pin_b});
+        return fail(allocator, pin_not_found_msg, .{pin_b});
     // Use netsAlias so per-pin stubs (NET.REFDES.PIN) collapse to the base net.
     if (netsAlias(net_a, net_b)) return passMsg(allocator, "'{s}' and '{s}' both on {s}", .{ pin_a, pin_b, netBase(net_a) });
     return fail(allocator, "'{s}' on {s}, '{s}' on {s} — must be the same net", .{ pin_a, net_a, pin_b, net_b });
@@ -210,9 +210,9 @@ fn evalDecoupling(
     min_uf: f64,
 ) Result {
     const net_a = netForPinFn(eval, block, inst, pin_a) orelse
-        return fail(allocator, PIN_NOT_FOUND_MSG, .{pin_a});
+        return fail(allocator, pin_not_found_msg, .{pin_a});
     const net_b = netForPinFn(eval, block, inst, pin_b) orelse
-        return fail(allocator, PIN_NOT_FOUND_MSG, .{pin_b});
+        return fail(allocator, pin_not_found_msg, .{pin_b});
     if (std.mem.eql(u8, net_a, net_b)) {
         return fail(allocator, "pins '{s}' and '{s}' are on the same net ({s}) — nothing to decouple", .{ pin_a, pin_b, net_a });
     }
@@ -223,7 +223,7 @@ fn evalDecoupling(
     if (best_uf == 0) {
         return fail(allocator, "no capacitor between {s} and {s}; need ≥{d:.3} µF", .{ net_a, net_b, min_uf });
     }
-    if (best_uf + CURRENT_TOLERANCE_F < min_uf) {
+    if (best_uf + current_tolerance_f < min_uf) {
         return fail(allocator, "largest cap {s} = {d:.3} µF on {s}↔{s}; need ≥{d:.3} µF", .{ best_ref, best_uf, net_a, net_b, min_uf });
     }
     return passMsg(allocator, "{s} ({d:.3} µF) bridges {s}↔{s}", .{ best_ref, best_uf, net_a, net_b });
@@ -240,7 +240,7 @@ fn evalPullupRange(
     max_ohms: f64,
 ) Result {
     const pin_net = netForPinFn(eval, block, inst, pin) orelse
-        return fail(allocator, PIN_NOT_FOUND_MSG, .{pin});
+        return fail(allocator, pin_not_found_msg, .{pin});
 
     var matched_ref: []const u8 = "";
     var matched_ohms: f64 = 0;
@@ -385,7 +385,7 @@ fn findVoltageForNet(
             'F', 'L' => true,
             'R' => blk: {
                 const ohms = parseOhms(c.value) orelse break :blk false;
-                break :blk ohms <= DC_EQUIV_RESISTOR_OHMS;
+                break :blk ohms <= dc_equiv_resistor_ohms;
             },
             else => false,
         };
@@ -418,13 +418,13 @@ fn evalVoltageRange(
         return fail(allocator, "no `(port …)` declared on net {s} — can't verify voltage", .{net});
 
     if (vi.nominal) |v| {
-        if (v + CURRENT_TOLERANCE_F < min_v or v > max_v + CURRENT_TOLERANCE_F) {
+        if (v + current_tolerance_f < min_v or v > max_v + current_tolerance_f) {
             return fail(allocator, "{s} nominal = {d:.3} V, outside [{d:.3}, {d:.3}] V", .{ vi.label, v, min_v, max_v });
         }
         return passMsg(allocator, "{s} = {d:.3} V ∈ [{d:.3}, {d:.3}] V", .{ vi.label, v, min_v, max_v });
     }
     if (vi.rated_min) |lo| if (vi.rated_max) |hi| {
-        if (lo + CURRENT_TOLERANCE_F < min_v or hi > max_v + CURRENT_TOLERANCE_F) {
+        if (lo + current_tolerance_f < min_v or hi > max_v + current_tolerance_f) {
             return fail(allocator, "{s} rated [{d:.3}, {d:.3}] V, outside [{d:.3}, {d:.3}] V", .{ vi.label, lo, hi, min_v, max_v });
         }
         return passMsg(allocator, "{s} rated [{d:.3}, {d:.3}] V ⊆ [{d:.3}, {d:.3}] V", .{ vi.label, lo, hi, min_v, max_v });
@@ -441,7 +441,7 @@ fn evalTiedToNet(
     target_net: []const u8,
 ) Result {
     const net = netForPinFn(eval, block, inst, pin) orelse
-        return fail(allocator, PIN_NOT_FOUND_MSG, .{pin});
+        return fail(allocator, pin_not_found_msg, .{pin});
     if (netsAlias(net, target_net)) {
         return passMsg(allocator, "pin '{s}' on {s} (matches {s})", .{ pin, net, target_net });
     }
@@ -551,10 +551,10 @@ fn evalPinsOnSameNet(
 ) Result {
     if (pins.len < 2) return passMsg(allocator, "trivially satisfied (only {d} pin)", .{pins.len});
     const first = netForPinFn(eval, block, inst, pins[0]) orelse
-        return fail(allocator, PIN_NOT_FOUND_MSG, .{pins[0]});
+        return fail(allocator, pin_not_found_msg, .{pins[0]});
     for (pins[1..]) |pin_name| {
         const n = netForPinFn(eval, block, inst, pin_name) orelse
-            return fail(allocator, PIN_NOT_FOUND_MSG, .{pin_name});
+            return fail(allocator, pin_not_found_msg, .{pin_name});
         if (!netsAlias(first, n)) {
             return fail(allocator, "pin '{s}' on {s}, '{s}' on {s} — must be the same net", .{ pins[0], first, pin_name, n });
         }
@@ -587,7 +587,7 @@ fn evalDecouplingPerPin(
         var best_uf: f64 = 0;
         var best_ref: []const u8 = "";
         collectCapsBetween(block, pin_net, ret_net, &best_uf, &best_ref);
-        if (best_uf + CURRENT_TOLERANCE_F >= min_uf) {
+        if (best_uf + current_tolerance_f >= min_uf) {
             matched += 1;
         } else if (first_unmatched.len == 0) {
             first_unmatched = pin_name;
@@ -620,7 +620,7 @@ fn evalSeriesElement(
     max: f64,
 ) Result {
     const pin_net = netForPinFn(eval, block, inst, pin) orelse
-        return fail(allocator, PIN_NOT_FOUND_MSG, .{pin});
+        return fail(allocator, pin_not_found_msg, .{pin});
 
     const prefix: u8 = switch (kind) {
         .R => 'R',
@@ -643,7 +643,7 @@ fn evalSeriesElement(
         if (!instancePinOnNet(block, c, target_net)) continue;
         any_bridge = true;
         const v = parseValueFor(kind, c.value) orelse continue;
-        if (v + VALUE_TOLERANCE_PF >= min and v <= max + VALUE_TOLERANCE_PF) {
+        if (v + value_tolerance_pf >= min and v <= max + value_tolerance_pf) {
             matched_ref = c.ref_des;
             matched_v = v;
             matched_value = c.value;

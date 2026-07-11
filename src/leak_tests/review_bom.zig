@@ -182,7 +182,7 @@ test "leak: bom_html.writeBomCsv over a sub-block hierarchy" {
     };
     const top = block("top", &top_insts, &subs);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     try bom_html.writeBomCsv(alloc, buf.writer(alloc), &top);
     // Two 100nF caps dedup to one BOM line (count 2); test point excluded.
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "cap-0402") != null);
@@ -213,7 +213,7 @@ test "leak: bom_html.writeNetsJson with net_ties and a sub-block" {
     top.nets = &top_nets;
     top.net_ties = &ties;
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     const written = try bom_html.writeNetsJson(alloc, buf.writer(alloc), &top, "");
     try std.testing.expect(written);
 }
@@ -238,7 +238,7 @@ test "leak: bom_html.writeSchematicBomHtml over a sub-block hierarchy" {
     };
     const top = block("top", &top_insts, &subs);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     try bom_html.writeSchematicBomHtml(alloc, buf.writer(alloc), &top);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "sch-bom-table") != null);
 }

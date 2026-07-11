@@ -15,14 +15,14 @@ const std = @import("std");
 pub const Error = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 // RFC 1951 length/distance code tables (index 0 = symbol 257 / distance 0).
-const LEN_BASE = [_]u16{ 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258 };
-const LEN_EXTRA = [_]u3{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0 };
-const DIST_BASE = [_]u16{ 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769 } ++
+const len_base = [_]u16{ 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258 };
+const len_extra = [_]u3{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0 };
+const dist_base = [_]u16{ 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769 } ++
     [_]u16{ 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
-const DIST_EXTRA = [_]u4{ 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
-const MAX_MATCH: usize = 258;
-const MAX_DIST: usize = 32768;
-const MAX_CHAIN: u32 = 128; // hash-chain probes per position (speed/ratio trade)
+const dist_extra = [_]u4{ 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
+const max_match: usize = 258;
+const max_dist: usize = 32768;
+const max_chain: u32 = 128; // hash-chain probes per position (speed/ratio trade)
 
 /// LSB-first bit accumulator over a byte writer (DEFLATE bit order).
 const BitWriter = struct {
@@ -87,15 +87,15 @@ fn emitLitLen(bw: *BitWriter, sym: u32) std.Io.Writer.Error!void {
 
 /// Emit an LZ77 (length, distance) back-reference in the fixed-Huffman alphabet.
 fn emitMatch(bw: *BitWriter, length: usize, distance: usize) std.Io.Writer.Error!void {
-    var li: usize = LEN_BASE.len - 1;
-    while (@as(usize, LEN_BASE[li]) > length) li -= 1;
+    var li: usize = len_base.len - 1;
+    while (@as(usize, len_base[li]) > length) li -= 1;
     try emitLitLen(bw, @intCast(257 + li));
-    try bw.writeBits(@intCast(length - LEN_BASE[li]), LEN_EXTRA[li]);
+    try bw.writeBits(@intCast(length - len_base[li]), len_extra[li]);
 
-    var di: usize = DIST_BASE.len - 1;
-    while (@as(usize, DIST_BASE[di]) > distance) di -= 1;
+    var di: usize = dist_base.len - 1;
+    while (@as(usize, dist_base[di]) > distance) di -= 1;
     try bw.writeBits(bitRev(@intCast(di), 5), 5); // distance code: 5-bit fixed
-    try bw.writeBits(@intCast(distance - DIST_BASE[di]), DIST_EXTRA[di]);
+    try bw.writeBits(@intCast(distance - dist_base[di]), dist_extra[di]);
 }
 
 fn hash3(d: []const u8, i: usize) u32 {
@@ -127,12 +127,12 @@ fn deflateFixed(alloc: std.mem.Allocator, bw: *BitWriter, data: []const u8) Erro
         var best_len: usize = 0;
         var best_dist: usize = 0;
         if (i + 3 <= data.len) {
-            const maxl = @min(MAX_MATCH, data.len - i);
+            const maxl = @min(max_match, data.len - i);
             var cand = head[hash3(data, i)];
             var chain: u32 = 0;
-            while (cand >= 0 and chain < MAX_CHAIN) : (chain += 1) {
+            while (cand >= 0 and chain < max_chain) : (chain += 1) {
                 const cpos: usize = @intCast(cand);
-                if (i - cpos > MAX_DIST) break;
+                if (i - cpos > max_dist) break;
                 var l: usize = 0;
                 while (l < maxl and data[cpos + l] == data[i + l]) l += 1;
                 if (l > best_len) {
