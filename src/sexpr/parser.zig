@@ -8,7 +8,7 @@ const TokenTag = tokenizer_mod.TokenTag;
 const Token = tokenizer_mod.Token;
 
 // ── Constants ─────────────────────────────────────────────────────
-const MIL_TO_MM: f64 = 0.0254;
+const mil_to_mm: f64 = 0.0254;
 
 /// Maximum S-expression nesting depth. `parseList` → `parseNode` → `parseList`
 /// recurses once per open paren; without a bound, a few hundred KB of `(((…`
@@ -16,7 +16,7 @@ const MIL_TO_MM: f64 = 0.0254;
 /// is far beyond any legitimate design (real files nest well under 100 deep)
 /// yet stops the runaway before the native stack does. Bounding the parser
 /// bounds the evaluator for free — eval recursion follows AST depth.
-const MAX_PARSE_DEPTH: u32 = 10_000;
+const max_parse_depth: u32 = 10_000;
 
 pub const ParseError = error{
     UnexpectedEof,
@@ -79,7 +79,7 @@ fn parseNumberNode(tok: *Tokenizer, token: Token) ParseError!Node {
             const source = tok.source;
             var mm_value = val;
             if (after_pos + 2 < source.len and source[after_pos] == 'm' and source[after_pos + 1] == 'i' and source[after_pos + 2] == 'l') {
-                mm_value = val * MIL_TO_MM; // mil to mm
+                mm_value = val * mil_to_mm; // mil to mm
             }
             return Node.unitVal(token.span, mm_value);
         },
@@ -108,7 +108,7 @@ fn parseSiValue(text: []const u8) ?f64 {
 }
 
 fn parseList(allocator: std.mem.Allocator, tok: *Tokenizer, open_span: Span, depth: u32) ParseError!Node {
-    if (depth >= MAX_PARSE_DEPTH) return ParseError.TooDeep;
+    if (depth >= max_parse_depth) return ParseError.TooDeep;
     var children: std.ArrayList(Node) = .empty;
     errdefer children.deinit(allocator);
 
@@ -233,7 +233,7 @@ test "parse rejects excessively deep nesting" {
     const alloc = std.testing.allocator;
     // MAX_PARSE_DEPTH + a margin of open parens: deep enough to trip the guard
     // but nowhere near a native stack overflow, so the test itself is safe.
-    const depth = MAX_PARSE_DEPTH + 16;
+    const depth = max_parse_depth + 16;
     const src = try alloc.alloc(u8, depth);
     defer alloc.free(src);
     @memset(src, '(');

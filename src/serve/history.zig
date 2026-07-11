@@ -5,9 +5,9 @@ const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
-const SEXP_FILE_TEMPLATE = "{s}/{s}.sexp";
-const LAYOUTS_FILE_TEMPLATE = "{s}/{s}.layouts.json";
-const NOTE_MAX_BYTES: usize = 4096;
+const sexp_file_template = "{s}/{s}.sexp";
+const layouts_file_template = "{s}/{s}.layouts.json";
+const note_max_bytes: usize = 4096;
 
 // Source-snapshot storage: projects/designs/history/<name>/<timestamp>/{name}.sexp
 // Timestamp format: YYYY-MM-DDTHH-MM-SS (filesystem-safe, sorts lexicographically).
@@ -17,8 +17,8 @@ const NOTE_MAX_BYTES: usize = 4096;
 // — so a Save/Update to the `.layouts.json` sidecar keeps a rolling backup
 // without polluting the source-snapshot list (`listSnapshots` skips the
 // `layouts/` subdir). Retention: newest `MAX_LAYOUT_SNAPSHOTS` per design.
-const LAYOUT_SUBDIR = "layouts";
-const MAX_LAYOUT_SNAPSHOTS: usize = 20;
+const layout_subdir = "layouts";
+const max_layout_snapshots: usize = 20;
 
 pub const HistoryError = error{
     InvalidName,
@@ -78,7 +78,7 @@ pub fn snapshot(
     defer allocator.free(dir);
     try infra_fs.cwd().makePath(dir);
 
-    const dst_sexp = try std.fmt.allocPrint(allocator, SEXP_FILE_TEMPLATE, .{ dir, name });
+    const dst_sexp = try std.fmt.allocPrint(allocator, sexp_file_template, .{ dir, name });
     defer allocator.free(dst_sexp);
     try infra_fs.cwd().copyFile(sexp_src, infra_fs.cwd(), dst_sexp, .{});
 
@@ -125,11 +125,11 @@ pub fn listSnapshots(
         if (entry.kind != .directory) continue;
         // The reserved `layouts/` subdir holds `.layouts.json` snapshots, not
         // source ones — never surface it as a source snapshot id.
-        if (std.mem.eql(u8, entry.name, LAYOUT_SUBDIR)) continue;
+        if (std.mem.eql(u8, entry.name, layout_subdir)) continue;
         const id = try allocator.dupe(u8, entry.name);
         const note_path = try std.fmt.allocPrint(allocator, "{s}/{s}/.note", .{ dir_path, id });
         defer allocator.free(note_path);
-        const description: ?[]const u8 = infra_fs.cwd().readFileAlloc(allocator, note_path, NOTE_MAX_BYTES) catch null;
+        const description: ?[]const u8 = infra_fs.cwd().readFileAlloc(allocator, note_path, note_max_bytes) catch null;
         try entries.append(allocator, .{ .id = id, .description = description });
     }
     std.mem.sort(SnapshotInfo, entries.items, {}, struct {
@@ -158,7 +158,7 @@ pub fn restore(
     defer allocator.free(dir);
     infra_fs.cwd().access(dir, .{}) catch return error.SnapshotNotFound;
 
-    const src_sexp = try std.fmt.allocPrint(allocator, SEXP_FILE_TEMPLATE, .{ dir, name });
+    const src_sexp = try std.fmt.allocPrint(allocator, sexp_file_template, .{ dir, name });
     defer allocator.free(src_sexp);
     const dst_sexp = try paths.designSourcePath(allocator, project_dir, name);
     defer allocator.free(dst_sexp);
@@ -173,7 +173,7 @@ pub fn restore(
 /// `<project>/history/<name>/layouts` — the layout-snapshot root for `name`
 /// (caller owns). One chokepoint so the path shape lives in a single place.
 fn layoutHistoryDir(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) std.mem.Allocator.Error![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/history/{s}/" ++ LAYOUT_SUBDIR, .{ project_dir, name });
+    return std.fmt.allocPrint(allocator, "{s}/history/{s}/" ++ layout_subdir, .{ project_dir, name });
 }
 
 /// Copy the `.layouts.json` sidecar at `sidecar_path` into
@@ -201,7 +201,7 @@ pub fn snapshotLayouts(
     defer allocator.free(dir);
     try infra_fs.cwd().makePath(dir);
 
-    const dst = try std.fmt.allocPrint(allocator, LAYOUTS_FILE_TEMPLATE, .{ dir, name });
+    const dst = try std.fmt.allocPrint(allocator, layouts_file_template, .{ dir, name });
     defer allocator.free(dst);
     try infra_fs.cwd().copyFile(sidecar_path, infra_fs.cwd(), dst, .{});
 
@@ -274,11 +274,11 @@ fn pruneLayoutSnapshots(
         for (snaps) |s| allocator.free(s.id);
         allocator.free(snaps);
     }
-    if (snaps.len <= MAX_LAYOUT_SNAPSHOTS) return;
+    if (snaps.len <= max_layout_snapshots) return;
 
     const base = try layoutHistoryDir(allocator, project_dir, name);
     defer allocator.free(base);
-    for (snaps[MAX_LAYOUT_SNAPSHOTS..]) |s| {
+    for (snaps[max_layout_snapshots..]) |s| {
         const p = std.fmt.allocPrint(allocator, "{s}/{s}", .{ base, s.id }) catch continue;
         defer allocator.free(p);
         infra_fs.cwd().deleteTree(p) catch |e| log.warn("prune layout snapshot {s}: {s}", .{ p, @errorName(e) });
@@ -353,7 +353,7 @@ test "layout snapshots prune to the newest cap" {
 
     // Pre-seed MAX+2 distinct fake snapshots dated 2026-01-01 (older than the
     // real timestamp the snapshot below mints, so it becomes the newest).
-    try seedFakeLayoutSnapshots(alloc, project, "foo", MAX_LAYOUT_SNAPSHOTS + 2);
+    try seedFakeLayoutSnapshots(alloc, project, "foo", max_layout_snapshots + 2);
 
     // One real snapshot pushes the total past the cap and triggers the prune.
     const id = (try snapshotLayouts(alloc, project, "foo", sidecar)) orelse return error.TestExpectedId;
@@ -364,7 +364,7 @@ test "layout snapshots prune to the newest cap" {
         for (snaps) |s| alloc.free(s.id);
         alloc.free(snaps);
     }
-    try std.testing.expectEqual(MAX_LAYOUT_SNAPSHOTS, snaps.len);
+    try std.testing.expectEqual(max_layout_snapshots, snaps.len);
     // Newest-first: the real snapshot leads; the oldest fakes were pruned.
     try std.testing.expectEqualStrings(id, snaps[0].id);
     try std.testing.expectError(error.SnapshotNotFound, layoutSnapshotPath(alloc, project, "foo", "2026-01-01T00-00-01"));
@@ -379,7 +379,7 @@ test "source snapshot list ignores the layouts subdir" {
     defer alloc.free(project);
 
     // A layout snapshot dir plus a real source snapshot dir side by side.
-    const lay = try std.fmt.allocPrint(alloc, "{s}/history/foo/{s}/2026-01-01T00-00-01", .{ project, LAYOUT_SUBDIR });
+    const lay = try std.fmt.allocPrint(alloc, "{s}/history/foo/{s}/2026-01-01T00-00-01", .{ project, layout_subdir });
     defer alloc.free(lay);
     try infra_fs.cwd().makePath(lay);
     const src = try std.fmt.allocPrint(alloc, "{s}/history/foo/2026-01-01T00-00-02", .{project});

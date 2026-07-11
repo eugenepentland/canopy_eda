@@ -3,7 +3,7 @@ const env_mod = @import("env.zig");
 const na = @import("net_analysis.zig");
 const DesignBlock = env_mod.DesignBlock;
 
-const SUB_PATH_BUF_LEN: usize = 256;
+const sub_path_buf_len: usize = 256;
 
 /// Resolution status for one rail's `(enable …)` declaration. `ok` means
 /// the enable net traces back to a known upstream rail; `unresolved` flags
@@ -86,7 +86,7 @@ pub fn analyze(
     var power_rail_set: std.StringHashMapUnmanaged(void) = .empty;
     defer power_rail_set.deinit(allocator);
 
-    var path_buf: [SUB_PATH_BUF_LEN]u8 = undefined;
+    var path_buf: [sub_path_buf_len]u8 = undefined;
     for (block.sub_blocks) |sb| {
         for (sb.block.ports) |port| {
             if (!std.mem.eql(u8, port.direction, "out")) continue;
@@ -167,7 +167,7 @@ fn resolveEnable(
     sb_name: []const u8,
     enable_name: []const u8,
 ) Resolution {
-    var path_buf: [SUB_PATH_BUF_LEN]u8 = undefined;
+    var path_buf: [sub_path_buf_len]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ sb_name, enable_name }) catch return .{};
     var target: []const u8 = "";
     for (block.net_ties) |nt| {

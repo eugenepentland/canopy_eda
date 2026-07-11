@@ -19,40 +19,40 @@ const diag_format = @import("diag_format.zig");
 const datasheet_attach = @import("datasheet_attach.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
-const HTTP_NOT_FOUND: u16 = 404;
-const HTTP_BAD_REQUEST: u16 = 400;
-const HTTP_INTERNAL_ERROR: u16 = 500;
-const MAX_SOURCE_BYTES: usize = 10 * 1024 * 1024;
+const http_not_found: u16 = 404;
+const http_bad_request: u16 = 400;
+const http_internal_error: u16 = 500;
+const max_source_bytes: usize = 10 * 1024 * 1024;
 
 // JSON key prefixes (length-encoded so we don't need bare integer offsets)
-const JSON_REF_KEY = "\"ref\":\"";
-const JSON_VALUE_KEY = "\"value\":\"";
-const JSON_COMPONENT_KEY = "\"component\":\"";
-const JSON_OLD_COMPONENT_KEY = "\"oldComponent\":\"";
-const JSON_SRC_OFF_KEY = "\"srcOff\":";
-const JSON_PINS_KEY = "\"pins\"";
+const json_ref_key = "\"ref\":\"";
+const json_value_key = "\"value\":\"";
+const json_component_key = "\"component\":\"";
+const json_old_component_key = "\"oldComponent\":\"";
+const json_src_off_key = "\"srcOff\":";
+const json_pins_key = "\"pins\"";
 
 // Repeated string templates / fragments
-const COMPONENT_PATH_TEMPLATE = "{s}/lib/components/{s}.sexp";
-const INSTANCE_OPEN_TEMPLATE = "(instance \"{s}\"";
-const SECTION_OPEN_TEMPLATE = "(section \"{s}\"";
-const IMPORT_OPEN = "(import ";
+const component_path_template = "{s}/lib/components/{s}.sexp";
+const instance_open_template = "(instance \"{s}\"";
+const section_open_template = "(section \"{s}\"";
+const import_open = "(import ";
 
-const HEADER_CORS_ALLOW_ORIGIN = "access-control-allow-origin";
-const ERR_CANNOT_READ_FILE = "cannot read file";
-const ERR_CANNOT_WRITE_FILE = "cannot write file";
-const ERR_REBUILD_FAILED = "rebuild failed";
-const ERR_INSTANCE_NOT_FOUND = "instance not found";
-const ERR_MALFORMED_INSTANCE = "malformed instance form";
-const ERR_GENERATED_PART = "this part is generated (decouple/series) or defined in a module — edit its source form directly";
-const ERR_NO_EDITABLE_VALUE = "this part has a fixed component with no editable value";
-const ERR_MISSING_REF = "missing ref";
+const header_cors_allow_origin = "access-control-allow-origin";
+const err_cannot_read_file = "cannot read file";
+const err_cannot_write_file = "cannot write file";
+const err_rebuild_failed = "rebuild failed";
+const err_instance_not_found = "instance not found";
+const err_malformed_instance = "malformed instance form";
+const err_generated_part = "this part is generated (decouple/series) or defined in a module — edit its source form directly";
+const err_no_editable_value = "this part has a fixed component with no editable value";
+const err_missing_ref = "missing ref";
 
-const ERR_JSON_NO_BODY = "{\"error\":\"no body\"}";
-const ERR_JSON_MISSING_NAME = "{\"error\":\"missing name\"}";
-const OK_JSON_TRUE = "{\"ok\":true}";
+const err_json_no_body = "{\"error\":\"no body\"}";
+const err_json_missing_name = "{\"error\":\"missing name\"}";
+const ok_json_true = "{\"ok\":true}";
 /// `std.fmt` template for a `{"error":"<msg>"}` JSON body (msg substituted).
-const ERR_JSON_FMT = "{{\"error\":\"{s}\"}}";
+const err_json_fmt = "{{\"error\":\"{s}\"}}";
 
 /// Error set for HTTP handlers in this module. Wide enough to cover
 /// every subsystem error that may bubble through `try`: allocator, writer,
@@ -95,7 +95,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 
     // Parse JSON: {"ref": "C3", "value": "0.5pF", "srcOff": 1234}
     const ref_des = parseJsonString(body, "\"ref\"") orelse {
-        sendJsonError(ctx, res, 400, ERR_MISSING_REF);
+        sendJsonError(ctx, res, 400, err_missing_ref);
         return;
     };
     const new_value = parseJsonString(body, "\"value\"") orelse {
@@ -106,24 +106,24 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 
     // Read the .sexp file
     const file_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
-        sendJsonError(ctx, res, 500, ERR_CANNOT_READ_FILE);
+        sendJsonError(ctx, res, 500, err_cannot_read_file);
         return;
     };
     defer ctx.allocator.free(file_path);
 
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
-        sendJsonError(ctx, res, 500, ERR_CANNOT_READ_FILE);
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, max_source_bytes) catch {
+        sendJsonError(ctx, res, 500, err_cannot_read_file);
         return;
     };
     defer ctx.allocator.free(source);
 
     // Locate the enclosing instance form (offset-first → label-robust).
     const inst_open = findInstanceOpen(source, ref_des, src_off) orelse {
-        sendJsonError(ctx, res, 404, if (src_off > 0) ERR_GENERATED_PART else ERR_INSTANCE_NOT_FOUND);
+        sendJsonError(ctx, res, 404, if (src_off > 0) err_generated_part else err_instance_not_found);
         return;
     };
     const inst_end = findFormEnd(source, inst_open) orelse {
-        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
+        sendJsonError(ctx, res, 400, err_malformed_instance);
         return;
     };
 
@@ -142,24 +142,24 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     } else if (findBareComponentRange(source, inst_open, inst_end)) |br| {
         const atom = source[br[0]..br[1]];
         if (!componentIsFamily(ctx.allocator, ctx.project_dir, atom)) {
-            sendJsonError(ctx, res, 400, ERR_NO_EDITABLE_VALUE);
+            sendJsonError(ctx, res, 400, err_no_editable_value);
             return;
         }
         try nw.writeAll(source[0..br[0]]);
         try nw.print("({s} \"{s}\")", .{ atom, new_value });
         try nw.writeAll(source[br[1]..]);
     } else {
-        sendJsonError(ctx, res, 400, ERR_NO_EDITABLE_VALUE);
+        sendJsonError(ctx, res, 400, err_no_editable_value);
         return;
     }
 
     infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = new_source.items }) catch {
-        sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
+        sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
 
     rebuildAndPush(ctx, name, res) catch {
-        sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
+        sendJsonError(ctx, res, 500, err_rebuild_failed);
         return;
     };
 }
@@ -170,7 +170,7 @@ pub fn editValueApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 /// the quotes), or null when the part carries a bare/fixed component (nothing to
 /// edit) or the form is malformed.
 fn findInstanceValueRange(source: []const u8, inst_open: usize, inst_end: usize) ?[2]usize {
-    var pos = inst_open + INSTANCE_HEAD.len;
+    var pos = inst_open + instance_head.len;
     while (pos < inst_end and isPinWs(source[pos])) : (pos += 1) {}
     if (pos >= inst_end or source[pos] != '"') return null;
     pos = (std.mem.indexOfScalarPos(u8, source, pos + 1, '"') orelse inst_end) + 1; // past label
@@ -191,7 +191,7 @@ fn findInstanceValueRange(source: []const u8, inst_open: usize, inst_end: usize)
 /// findInstanceValueRange) or the form is malformed. Pairs with
 /// findInstanceValueRange to cover both spellings of the component slot.
 fn findBareComponentRange(source: []const u8, inst_open: usize, inst_end: usize) ?[2]usize {
-    var pos = inst_open + INSTANCE_HEAD.len;
+    var pos = inst_open + instance_head.len;
     while (pos < inst_end and isPinWs(source[pos])) : (pos += 1) {}
     if (pos >= inst_end or source[pos] != '"') return null;
     pos = (std.mem.indexOfScalarPos(u8, source, pos + 1, '"') orelse inst_end) + 1; // past label
@@ -211,7 +211,7 @@ fn componentIsFamily(allocator: std.mem.Allocator, project_dir: []const u8, name
     if (!safeLibName(name)) return false;
     const path = libComponentPath(allocator, project_dir, name) catch return false;
     defer allocator.free(path);
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, MAX_SOURCE_BYTES) catch return false;
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, max_source_bytes) catch return false;
     defer allocator.free(content);
     return std.mem.indexOf(u8, content, "(component-family ") != null;
 }
@@ -234,7 +234,7 @@ fn isFootprintTokenBoundary(c: u8) bool {
 fn findComponentTokenInInstance(source: []const u8, ref: []const u8, component: []const u8) ?usize {
     if (ref.len == 0 or component.len == 0) return null;
     var buf: [256]u8 = undefined;
-    const needle = std.fmt.bufPrint(&buf, INSTANCE_OPEN_TEMPLATE, .{ref}) catch return null;
+    const needle = std.fmt.bufPrint(&buf, instance_open_template, .{ref}) catch return null;
     const inst_start = std.mem.indexOf(u8, source, needle) orelse return null;
     const inst_end = findFormEnd(source, inst_start) orelse source.len;
     var from = inst_start + needle.len;
@@ -265,36 +265,36 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
 
     // Parse JSON: {"ref": "C3", "component": "cap-0603", "oldComponent": "cap-0805", "srcOff": 1234}
-    const comp_start_marker = std.mem.indexOf(u8, body, JSON_COMPONENT_KEY) orelse {
+    const comp_start_marker = std.mem.indexOf(u8, body, json_component_key) orelse {
         res.status = 400;
         res.body = "missing component";
         return;
     };
-    const comp_start = comp_start_marker + JSON_COMPONENT_KEY.len;
+    const comp_start = comp_start_marker + json_component_key.len;
     const comp_end = std.mem.indexOfPos(u8, body, comp_start, "\"") orelse {
         res.status = 400;
         return;
     };
     const new_component = body[comp_start..comp_end];
 
-    const old_comp_marker = std.mem.indexOf(u8, body, JSON_OLD_COMPONENT_KEY) orelse {
+    const old_comp_marker = std.mem.indexOf(u8, body, json_old_component_key) orelse {
         res.status = 400;
         res.body = "missing oldComponent";
         return;
     };
-    const old_comp_start = old_comp_marker + JSON_OLD_COMPONENT_KEY.len;
+    const old_comp_start = old_comp_marker + json_old_component_key.len;
     const old_comp_end = std.mem.indexOfPos(u8, body, old_comp_start, "\"") orelse {
         res.status = 400;
         return;
     };
     const old_component = body[old_comp_start..old_comp_end];
 
-    const src_off_marker = std.mem.indexOf(u8, body, JSON_SRC_OFF_KEY) orelse {
+    const src_off_marker = std.mem.indexOf(u8, body, json_src_off_key) orelse {
         res.status = 400;
         res.body = "missing srcOff";
         return;
     };
-    const src_off_num_start = src_off_marker + JSON_SRC_OFF_KEY.len;
+    const src_off_num_start = src_off_marker + json_src_off_key.len;
     var src_off_num_end = src_off_num_start;
     while (src_off_num_end < body.len and body[src_off_num_end] >= '0' and body[src_off_num_end] <= '9') : (src_off_num_end += 1) {}
     const source_offset = std.fmt.parseInt(usize, body[src_off_num_start..src_off_num_end], 10) catch {
@@ -308,7 +308,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const ref_des = parseJsonString(body, "\"ref\"") orelse "";
 
     // Verify the new component family exists
-    const comp_path = std.fmt.allocPrint(ctx.allocator, COMPONENT_PATH_TEMPLATE, .{ ctx.project_dir, new_component }) catch {
+    const comp_path = std.fmt.allocPrint(ctx.allocator, component_path_template, .{ ctx.project_dir, new_component }) catch {
         res.status = 500;
         return;
     };
@@ -326,9 +326,9 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
     defer ctx.allocator.free(file_path);
 
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, max_source_bytes) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_READ_FILE;
+        res.body = err_cannot_read_file;
         return;
     };
     defer ctx.allocator.free(source);
@@ -355,7 +355,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
     // Ensure new component is in the import statement
     var final_source = new_source.items;
-    if (std.mem.indexOf(u8, final_source, IMPORT_OPEN)) |import_start| {
+    if (std.mem.indexOf(u8, final_source, import_open)) |import_start| {
         var depth: u32 = 0;
         var import_end: usize = import_start;
         for (final_source[import_start..], 0..) |ch, i| {
@@ -396,7 +396,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
 
     const file = infra_fs.cwd().createFile(file_path, .{}) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_WRITE_FILE;
+        res.body = err_cannot_write_file;
         return;
     };
     defer file.close();
@@ -418,7 +418,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     defer eval.deinit();
     const result = eval.evalFile(board_path) catch {
         res.status = 500;
-        res.body = ERR_REBUILD_FAILED;
+        res.body = err_rebuild_failed;
         return;
     };
     const block = switch (result) {
@@ -449,7 +449,7 @@ pub fn editFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     _ = try bom_html.writeComponentsJson(cw, block, "", &svg_sym_cache, ctx.allocator, ctx.project_dir);
     try cw.writeAll("}}");
 
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
     res.content_type = .JSON;
     res.body = comp_json.items;
 }
@@ -507,9 +507,9 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(file_path);
 
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, max_source_bytes) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_READ_FILE;
+        res.body = err_cannot_read_file;
         return;
     };
     defer ctx.allocator.free(source);
@@ -517,9 +517,9 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     // Parse pin assignments from body: "pins":{"1":"VDD","2":"GND"}
     var pin_str: std.ArrayList(u8) = .empty;
     const pw = pin_str.writer(ctx.allocator);
-    if (std.mem.indexOf(u8, body, JSON_PINS_KEY)) |pins_start| {
+    if (std.mem.indexOf(u8, body, json_pins_key)) |pins_start| {
         // Find the opening brace
-        var pos = pins_start + JSON_PINS_KEY.len;
+        var pos = pins_start + json_pins_key.len;
         while (pos < body.len and body[pos] != '{') : (pos += 1) {}
         if (pos < body.len) {
             pos += 1; // skip {
@@ -575,7 +575,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
         var aug: std.ArrayList(u8) = .empty;
         const aw = aug.writer(ctx.allocator);
         try aw.writeAll(source[0..anchor]);
-        try aw.print("{s}{s})\n", .{ IMPORT_OPEN, component });
+        try aw.print("{s}{s})\n", .{ import_open, component });
         try aw.writeAll(source[anchor..]);
         break :blk aug.items;
     } else source;
@@ -586,7 +586,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
 
     if (!is_module and section.len > 0) {
         // Find (section "Name" ...) and insert before its closing paren
-        const sec_needle = try std.fmt.allocPrint(ctx.allocator, SECTION_OPEN_TEMPLATE, .{section});
+        const sec_needle = try std.fmt.allocPrint(ctx.allocator, section_open_template, .{section});
         defer ctx.allocator.free(sec_needle);
 
         if (std.mem.indexOf(u8, eff_source, sec_needle)) |sec_start| {
@@ -626,7 +626,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     // Write file
     const file = infra_fs.cwd().createFile(file_path, .{}) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_WRITE_FILE;
+        res.body = err_cannot_write_file;
         return;
     };
     defer file.close();
@@ -638,7 +638,7 @@ pub fn addInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     // Rebuild + push live update
     rebuildAndPush(ctx, name, res) catch {
         res.status = 500;
-        res.body = ERR_REBUILD_FAILED;
+        res.body = err_rebuild_failed;
         return;
     };
 }
@@ -698,7 +698,7 @@ pub fn newDesignApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     defer ctx.allocator.free(content);
     infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = content }) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_WRITE_FILE;
+        res.body = err_cannot_write_file;
         return;
     };
 
@@ -735,7 +735,7 @@ fn designBlockInsertPos(source: []const u8) ?usize {
 fn finishMutation(ctx: *Handler, name: []const u8, new_source: []const u8, desc: []const u8, res: *httpz.Response) HandlerError!void {
     const result = writeAndRebuild(ctx.allocator, ctx.project_dir, name, new_source, desc) catch {
         res.status = 500;
-        res.body = ERR_REBUILD_FAILED;
+        res.body = err_rebuild_failed;
         return;
     };
     res.content_type = .JSON;
@@ -767,12 +767,12 @@ pub fn addSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const subtitle = parseJsonString(body, "\"subtitle\"") orelse "";
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_READ_FILE;
+        res.body = err_cannot_read_file;
         return;
     };
     defer ctx.allocator.free(source);
 
-    const needle = try std.fmt.allocPrint(ctx.allocator, SECTION_OPEN_TEMPLATE, .{section});
+    const needle = try std.fmt.allocPrint(ctx.allocator, section_open_template, .{section});
     defer ctx.allocator.free(needle);
     if (std.mem.indexOf(u8, source, needle) != null) {
         res.status = 409;
@@ -828,12 +828,12 @@ pub fn renameSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     }
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_READ_FILE;
+        res.body = err_cannot_read_file;
         return;
     };
     defer ctx.allocator.free(source);
 
-    const needle = try std.fmt.allocPrint(ctx.allocator, SECTION_OPEN_TEMPLATE, .{from});
+    const needle = try std.fmt.allocPrint(ctx.allocator, section_open_template, .{from});
     defer ctx.allocator.free(needle);
     const at = std.mem.indexOf(u8, source, needle) orelse {
         res.status = 404;
@@ -875,12 +875,12 @@ pub fn removeSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_READ_FILE;
+        res.body = err_cannot_read_file;
         return;
     };
     defer ctx.allocator.free(source);
 
-    const needle = try std.fmt.allocPrint(ctx.allocator, SECTION_OPEN_TEMPLATE, .{section});
+    const needle = try std.fmt.allocPrint(ctx.allocator, section_open_template, .{section});
     defer ctx.allocator.free(needle);
     const sec_start = std.mem.indexOf(u8, source, needle) orelse {
         res.status = 404;
@@ -889,7 +889,7 @@ pub fn removeSectionApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
     const sec_end = findFormEnd(source, sec_start) orelse {
         res.status = 500;
-        res.body = ERR_MALFORMED_INSTANCE;
+        res.body = err_malformed_instance;
         return;
     };
     // Only metadata (subtitle / row / col / role / protocol) may remain — refuse if
@@ -943,7 +943,7 @@ pub fn addPortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     }
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_READ_FILE;
+        res.body = err_cannot_read_file;
         return;
     };
     defer ctx.allocator.free(source);
@@ -991,7 +991,7 @@ pub fn removePortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     };
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_READ_FILE;
+        res.body = err_cannot_read_file;
         return;
     };
     defer ctx.allocator.free(source);
@@ -1005,7 +1005,7 @@ pub fn removePortApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     };
     const p_end = findFormEnd(source, p_start) orelse {
         res.status = 500;
-        res.body = ERR_MALFORMED_INSTANCE;
+        res.body = err_malformed_instance;
         return;
     };
     var cut_start = p_start;
@@ -1034,7 +1034,7 @@ pub fn renameRefdesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     };
     const ref = parseJsonString(body, "\"ref\"") orelse {
         res.status = 400;
-        res.body = ERR_MISSING_REF;
+        res.body = err_missing_ref;
         return;
     };
     const to = parseJsonString(body, "\"to\"") orelse {
@@ -1050,7 +1050,7 @@ pub fn renameRefdesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     const src_off = parseSrcOff(body);
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_READ_FILE;
+        res.body = err_cannot_read_file;
         return;
     };
     defer ctx.allocator.free(source);
@@ -1065,17 +1065,17 @@ pub fn renameRefdesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     }
     const open = findInstanceOpen(source, ref, src_off) orelse {
         res.status = 404;
-        res.body = ERR_INSTANCE_NOT_FOUND;
+        res.body = err_instance_not_found;
         return;
     };
     const lq = std.mem.indexOfScalarPos(u8, source, open, '"') orelse {
         res.status = 500;
-        res.body = ERR_MALFORMED_INSTANCE;
+        res.body = err_malformed_instance;
         return;
     };
     const rq = std.mem.indexOfScalarPos(u8, source, lq + 1, '"') orelse {
         res.status = 500;
-        res.body = ERR_MALFORMED_INSTANCE;
+        res.body = err_malformed_instance;
         return;
     };
     var buf: std.ArrayList(u8) = .empty;
@@ -1105,7 +1105,7 @@ pub fn setDnpApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     };
     const ref = parseJsonString(body, "\"ref\"") orelse {
         res.status = 400;
-        res.body = ERR_MISSING_REF;
+        res.body = err_missing_ref;
         return;
     };
     const want_dnp = std.mem.indexOf(u8, body, "\"dnp\":true") != null or
@@ -1113,19 +1113,19 @@ pub fn setDnpApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     const src_off = parseSrcOff(body);
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_READ_FILE;
+        res.body = err_cannot_read_file;
         return;
     };
     defer ctx.allocator.free(source);
 
     const open = findInstanceOpen(source, ref, src_off) orelse {
         res.status = 404;
-        res.body = ERR_INSTANCE_NOT_FOUND;
+        res.body = err_instance_not_found;
         return;
     };
     const end = findFormEnd(source, open) orelse {
         res.status = 500;
-        res.body = ERR_MALFORMED_INSTANCE;
+        res.body = err_malformed_instance;
         return;
     };
     const dnp_rel = std.mem.indexOf(u8, source[open..end], "(dnp)");
@@ -1174,7 +1174,7 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     const ref_des = parseJsonString(body, "\"ref\"") orelse {
         res.status = 400;
-        res.body = ERR_MISSING_REF;
+        res.body = err_missing_ref;
         return;
     };
 
@@ -1182,9 +1182,9 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(file_path);
 
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, max_source_bytes) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_READ_FILE;
+        res.body = err_cannot_read_file;
         return;
     };
     defer ctx.allocator.free(source);
@@ -1196,12 +1196,12 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     const src_off = parseSrcOff(body);
     const inst_pos = findInstanceOpen(source, ref_des, src_off) orelse {
         res.status = 404;
-        res.body = if (src_off > 0) ERR_GENERATED_PART else ERR_INSTANCE_NOT_FOUND;
+        res.body = if (src_off > 0) err_generated_part else err_instance_not_found;
         return;
     };
     var inst_end = findFormEnd(source, inst_pos) orelse {
         res.status = 400;
-        res.body = ERR_MALFORMED_INSTANCE;
+        res.body = err_malformed_instance;
         return;
     };
 
@@ -1219,7 +1219,7 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
 
     const file = infra_fs.cwd().createFile(file_path, .{}) catch {
         res.status = 500;
-        res.body = ERR_CANNOT_WRITE_FILE;
+        res.body = err_cannot_write_file;
         return;
     };
     defer file.close();
@@ -1231,13 +1231,13 @@ pub fn removeInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     std.debug.print("Removed instance {s} from {s}\n", .{ ref_des, name });
     rebuildAndPush(ctx, name, res) catch {
         res.status = 500;
-        res.body = ERR_REBUILD_FAILED;
+        res.body = err_rebuild_failed;
         return;
     };
 }
 
-const INSTANCE_HEAD = "(instance";
-const PIN_HEAD = "(pin ";
+const instance_head = "(instance";
+const pin_head = "(pin ";
 
 /// Send a JSON `{"error":"…"}` body. `msg` is a trusted static string (no
 /// embedded quotes/backslashes) — the frontend's `postEdit` parses the body as
@@ -1246,16 +1246,16 @@ const PIN_HEAD = "(pin ";
 fn sendJsonError(ctx: *Handler, res: *httpz.Response, status: u16, msg: []const u8) void {
     res.status = status;
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
-    res.body = std.fmt.allocPrint(ctx.allocator, ERR_JSON_FMT, .{msg}) catch
+    res.header(header_cors_allow_origin, "*");
+    res.body = std.fmt.allocPrint(ctx.allocator, err_json_fmt, .{msg}) catch
         "{\"error\":\"edit failed\"}";
 }
 
 /// Parse the optional numeric `"srcOff":N` field (the component-token offset the
 /// scene graph publishes as `components[].src`). Returns 0 when absent.
 fn parseSrcOff(body: []const u8) usize {
-    const m = std.mem.indexOf(u8, body, JSON_SRC_OFF_KEY) orelse return 0;
-    var s = m + JSON_SRC_OFF_KEY.len;
+    const m = std.mem.indexOf(u8, body, json_src_off_key) orelse return 0;
+    var s = m + json_src_off_key.len;
     while (s < body.len and body[s] == ' ') : (s += 1) {}
     var e = s;
     while (e < body.len and body[e] >= '0' and body[e] <= '9') : (e += 1) {}
@@ -1271,10 +1271,10 @@ fn parseSrcOff(body: []const u8) usize {
 /// needle when no usable offset is given.
 fn findInstanceOpen(source: []const u8, ref_des: []const u8, src_off: usize) ?usize {
     if (src_off > 0 and src_off <= source.len) {
-        if (std.mem.lastIndexOf(u8, source[0..src_off], INSTANCE_HEAD)) |p| {
+        if (std.mem.lastIndexOf(u8, source[0..src_off], instance_head)) |p| {
             // Confirm it opens `(instance "` (not a comment mention) and that
             // src_off really sits inside this instance form.
-            var q = p + INSTANCE_HEAD.len;
+            var q = p + instance_head.len;
             while (q < source.len and (source[q] == ' ' or source[q] == '\t')) : (q += 1) {}
             if (q < source.len and source[q] == '"') {
                 if (findFormEnd(source, p)) |end| {
@@ -1284,7 +1284,7 @@ fn findInstanceOpen(source: []const u8, ref_des: []const u8, src_off: usize) ?us
         }
     }
     var buf: [256]u8 = undefined;
-    const needle = std.fmt.bufPrint(&buf, INSTANCE_OPEN_TEMPLATE, .{ref_des}) catch return null;
+    const needle = std.fmt.bufPrint(&buf, instance_open_template, .{ref_des}) catch return null;
     return std.mem.indexOf(u8, source, needle);
 }
 
@@ -1320,7 +1320,7 @@ fn parsePinForm(
     tokens: *std.ArrayList([]const u8),
 ) !?PinForm {
     const form_end = findFormEnd(source, form_start) orelse return null;
-    var i = form_start + PIN_HEAD.len - 1; // step back over the trailing space
+    var i = form_start + pin_head.len - 1; // step back over the trailing space
     var has_subform = false;
     while (i < form_end) {
         while (i < form_end and isPinWs(source[i])) : (i += 1) {}
@@ -1363,7 +1363,7 @@ fn parsePinForm(
 /// `(instance "stm32" …)`. The label drives lookup of the instance's
 /// section-level `(pins "<label>" …)` pin maps.
 fn instanceLabel(source: []const u8, inst_open: usize) ?[]const u8 {
-    var i = inst_open + INSTANCE_HEAD.len;
+    var i = inst_open + instance_head.len;
     while (i < source.len and isPinWs(source[i])) : (i += 1) {}
     if (i >= source.len or source[i] != '"') return null;
     const s = i + 1;
@@ -1383,7 +1383,7 @@ fn findPinFormInRegion(
     out_tokens: *std.ArrayList([]const u8),
 ) !?PinForm {
     var search = start;
-    while (std.mem.indexOfPos(u8, source[0..end], search, PIN_HEAD)) |pf| {
+    while (std.mem.indexOfPos(u8, source[0..end], search, pin_head)) |pf| {
         var tokens: std.ArrayList([]const u8) = .empty;
         defer tokens.deinit(allocator);
         if ((parsePinForm(allocator, source, pf, &tokens) catch null)) |parsed| {
@@ -1395,7 +1395,7 @@ fn findPinFormInRegion(
             }
             search = parsed.form_end;
         } else {
-            search = pf + PIN_HEAD.len;
+            search = pf + pin_head.len;
         }
     }
     return null;
@@ -1439,7 +1439,7 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     };
 
     const ref_des = parseJsonString(body, "\"ref\"") orelse {
-        sendJsonError(ctx, res, 400, ERR_MISSING_REF);
+        sendJsonError(ctx, res, 400, err_missing_ref);
         return;
     };
     const pin = parseJsonString(body, "\"pin\"") orelse {
@@ -1455,8 +1455,8 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(file_path);
 
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
-        sendJsonError(ctx, res, 500, ERR_CANNOT_READ_FILE);
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, max_source_bytes) catch {
+        sendJsonError(ctx, res, 500, err_cannot_read_file);
         return;
     };
     defer ctx.allocator.free(source);
@@ -1464,11 +1464,11 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     // Locate the enclosing instance form (by component-token offset, robust to
     // label-declared instances; ref-des needle as fallback).
     const inst_open = findInstanceOpen(source, ref_des, src_off) orelse {
-        sendJsonError(ctx, res, 404, if (src_off > 0) ERR_GENERATED_PART else ERR_INSTANCE_NOT_FOUND);
+        sendJsonError(ctx, res, 404, if (src_off > 0) err_generated_part else err_instance_not_found);
         return;
     };
     const inst_end = findFormEnd(source, inst_open) orelse {
-        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
+        sendJsonError(ctx, res, 400, err_malformed_instance);
         return;
     };
 
@@ -1488,11 +1488,11 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         try iw.print("\n    (pin {s} \"{s}\")", .{ pin, new_net });
         try iw.writeAll(source[close..]);
         infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = ins.items }) catch {
-            sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
+            sendJsonError(ctx, res, 500, err_cannot_write_file);
             return;
         };
         rebuildAndPush(ctx, name, res) catch {
-            sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
+            sendJsonError(ctx, res, 500, err_rebuild_failed);
             return;
         };
         return;
@@ -1515,7 +1515,7 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
         }
         const old_net = source[p.net_start..p.net_end];
         try nw.writeAll(source[0..p.form_start]);
-        try nw.writeAll(PIN_HEAD);
+        try nw.writeAll(pin_head);
         var first = true;
         for (match_tokens.items) |tk| {
             if (std.mem.eql(u8, tk, pin)) continue;
@@ -1528,12 +1528,12 @@ pub fn rewirePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     }
 
     infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = new_source.items }) catch {
-        sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
+        sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
 
     rebuildAndPush(ctx, name, res) catch {
-        sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
+        sendJsonError(ctx, res, 500, err_rebuild_failed);
         return;
     };
 }
@@ -1555,7 +1555,7 @@ pub fn bindDecoupleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     };
 
     const ref_des = parseJsonString(body, "\"ref\"") orelse {
-        sendJsonError(ctx, res, 400, ERR_MISSING_REF);
+        sendJsonError(ctx, res, 400, err_missing_ref);
         return;
     };
     const ic = parseJsonString(body, "\"ic\"") orelse {
@@ -1571,18 +1571,18 @@ pub fn bindDecoupleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(file_path);
 
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
-        sendJsonError(ctx, res, 500, ERR_CANNOT_READ_FILE);
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, max_source_bytes) catch {
+        sendJsonError(ctx, res, 500, err_cannot_read_file);
         return;
     };
     defer ctx.allocator.free(source);
 
     const inst_open = findInstanceOpen(source, ref_des, src_off) orelse {
-        sendJsonError(ctx, res, 404, if (src_off > 0) ERR_GENERATED_PART else ERR_INSTANCE_NOT_FOUND);
+        sendJsonError(ctx, res, 404, if (src_off > 0) err_generated_part else err_instance_not_found);
         return;
     };
     const inst_end = findFormEnd(source, inst_open) orelse {
-        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
+        sendJsonError(ctx, res, 400, err_malformed_instance);
         return;
     };
 
@@ -1623,11 +1623,11 @@ pub fn bindDecoupleApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response)
     }
 
     infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = out.items }) catch {
-        sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
+        sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
     rebuildAndPush(ctx, name, res) catch {
-        sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
+        sendJsonError(ctx, res, 500, err_rebuild_failed);
         return;
     };
 }
@@ -1649,39 +1649,39 @@ pub fn duplicateInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
         return;
     };
     const ref_des = parseJsonString(body, "\"ref\"") orelse {
-        sendJsonError(ctx, res, 400, ERR_MISSING_REF);
+        sendJsonError(ctx, res, 400, err_missing_ref);
         return;
     };
     const src_off = parseSrcOff(body);
 
     const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(file_path);
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
-        sendJsonError(ctx, res, 500, ERR_CANNOT_READ_FILE);
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, max_source_bytes) catch {
+        sendJsonError(ctx, res, 500, err_cannot_read_file);
         return;
     };
     defer ctx.allocator.free(source);
 
     const inst_open = findInstanceOpen(source, ref_des, src_off) orelse {
-        sendJsonError(ctx, res, 404, if (src_off > 0) ERR_GENERATED_PART else ERR_INSTANCE_NOT_FOUND);
+        sendJsonError(ctx, res, 404, if (src_off > 0) err_generated_part else err_instance_not_found);
         return;
     };
     const inst_end = findFormEnd(source, inst_open) orelse {
-        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
+        sendJsonError(ctx, res, 400, err_malformed_instance);
         return;
     };
 
     // Ref string bounds: the first quoted token after "(instance".
     const q1 = std.mem.indexOfScalarPos(u8, source, inst_open, '"') orelse {
-        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
+        sendJsonError(ctx, res, 400, err_malformed_instance);
         return;
     };
     const q2 = std.mem.indexOfScalarPos(u8, source, q1 + 1, '"') orelse {
-        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
+        sendJsonError(ctx, res, 400, err_malformed_instance);
         return;
     };
     if (q2 >= inst_end) {
-        sendJsonError(ctx, res, 400, ERR_MALFORMED_INSTANCE);
+        sendJsonError(ctx, res, 400, err_malformed_instance);
         return;
     }
 
@@ -1720,11 +1720,11 @@ pub fn duplicateInstanceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     try ow.writeAll(source[inst_end..]);
 
     infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = out.items }) catch {
-        sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
+        sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
     rebuildAndPush(ctx, name, res) catch {
-        sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
+        sendJsonError(ctx, res, 500, err_rebuild_failed);
         return;
     };
 }
@@ -1765,8 +1765,8 @@ pub fn renameNetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 
     const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(file_path);
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, MAX_SOURCE_BYTES) catch {
-        sendJsonError(ctx, res, 500, ERR_CANNOT_READ_FILE);
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, file_path, max_source_bytes) catch {
+        sendJsonError(ctx, res, 500, err_cannot_read_file);
         return;
     };
     defer ctx.allocator.free(source);
@@ -1780,17 +1780,17 @@ pub fn renameNetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     const repl = try std.fmt.allocPrint(ctx.allocator, "\"{s}\"", .{to});
     defer ctx.allocator.free(repl);
     const out = std.mem.replaceOwned(u8, ctx.allocator, source, needle, repl) catch {
-        sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
+        sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
     defer ctx.allocator.free(out);
 
     infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = out }) catch {
-        sendJsonError(ctx, res, 500, ERR_CANNOT_WRITE_FILE);
+        sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
     rebuildAndPush(ctx, name, res) catch {
-        sendJsonError(ctx, res, 500, ERR_REBUILD_FAILED);
+        sendJsonError(ctx, res, 500, err_rebuild_failed);
         return;
     };
 }
@@ -1800,16 +1800,16 @@ pub fn renameNetApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 /// HTTP 409 with a structured error if the destination pin is already used.
 pub fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
 
     const name = req.param("name") orelse {
         res.status = 404;
-        res.body = ERR_JSON_MISSING_NAME;
+        res.body = err_json_missing_name;
         return;
     };
     const body = req.body() orelse {
         res.status = 400;
-        res.body = ERR_JSON_NO_BODY;
+        res.body = err_json_no_body;
         return;
     };
 
@@ -1863,7 +1863,7 @@ pub fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
             },
             else => {
                 res.status = 500;
-                res.body = try std.fmt.allocPrint(ctx.allocator, ERR_JSON_FMT, .{@errorName(err)});
+                res.body = try std.fmt.allocPrint(ctx.allocator, err_json_fmt, .{@errorName(err)});
                 return;
             },
         }
@@ -1876,16 +1876,16 @@ pub fn movePinApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
 /// Body: `{"ref":"U1","pin_a":"V11","pin_b":"V12"}`.
 pub fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
 
     const name = req.param("name") orelse {
         res.status = 404;
-        res.body = ERR_JSON_MISSING_NAME;
+        res.body = err_json_missing_name;
         return;
     };
     const body = req.body() orelse {
         res.status = 400;
-        res.body = ERR_JSON_NO_BODY;
+        res.body = err_json_no_body;
         return;
     };
 
@@ -1931,7 +1931,7 @@ pub fn swapPinsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
             },
             else => {
                 res.status = 500;
-                res.body = try std.fmt.allocPrint(ctx.allocator, ERR_JSON_FMT, .{@errorName(err)});
+                res.body = try std.fmt.allocPrint(ctx.allocator, err_json_fmt, .{@errorName(err)});
                 return;
             },
         }
@@ -1961,9 +1961,9 @@ fn rebuildAndPush(ctx: *Handler, name: []const u8, res: *httpz.Response) Handler
     serve_root.setLiveLayoutJson(layout_json);
     _ = serve_root.bumpLiveVersion(name);
 
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
     res.content_type = .JSON;
-    res.body = OK_JSON_TRUE;
+    res.body = ok_json_true;
 }
 
 fn parseJsonString(body: []const u8, key: []const u8) ?[]const u8 {
@@ -1979,8 +1979,8 @@ fn parseJsonString(body: []const u8, key: []const u8) ?[]const u8 {
 /// `(import foo)` does not match a request to import `foobar`.
 fn hasImport(source: []const u8, name: []const u8) bool {
     var from: usize = 0;
-    while (std.mem.indexOfPos(u8, source, from, IMPORT_OPEN)) |p| {
-        from = p + IMPORT_OPEN.len;
+    while (std.mem.indexOfPos(u8, source, from, import_open)) |p| {
+        from = p + import_open.len;
         var q = from;
         while (q < source.len and source[q] == ' ') : (q += 1) {}
         if (std.mem.startsWith(u8, source[q..], name)) {
@@ -2182,7 +2182,7 @@ pub fn rebuildDesign(
 fn readDesignSource(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) EditError![]u8 {
     const path = try designFilePath(allocator, project_dir, name);
     defer allocator.free(path);
-    return infra_fs.cwd().readFileAlloc(allocator, path, MAX_SOURCE_BYTES) catch return error.CannotReadDesign;
+    return infra_fs.cwd().readFileAlloc(allocator, path, max_source_bytes) catch return error.CannotReadDesign;
 }
 
 /// Snapshot → write → re-evaluate → bump the live version. The canonical
@@ -2313,24 +2313,24 @@ pub fn editMpnCore(
 /// version. Returns `{"ok":true,"version":N}`.
 pub fn editMpnApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         return;
     };
     const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = ERR_JSON_NO_BODY;
+        res.status = http_bad_request;
+        res.body = err_json_no_body;
         return;
     };
 
     // ref is required.
-    const ref_start = std.mem.indexOf(u8, body, JSON_REF_KEY) orelse {
-        res.status = HTTP_BAD_REQUEST;
-        res.body = ERR_MISSING_REF;
+    const ref_start = std.mem.indexOf(u8, body, json_ref_key) orelse {
+        res.status = http_bad_request;
+        res.body = err_missing_ref;
         return;
     };
-    const ref_val_start = ref_start + JSON_REF_KEY.len;
+    const ref_val_start = ref_start + json_ref_key.len;
     const ref_end = std.mem.indexOfPos(u8, body, ref_val_start, "\"") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         return;
     };
     const ref_des = body[ref_val_start..ref_end];
@@ -2340,19 +2340,19 @@ pub fn editMpnApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     const manufacturer = parseOptionalStringField(body, "\"manufacturer\":\"");
 
     if (mpn.len == 0 and manufacturer.len == 0) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "no fields to update";
         return;
     }
 
     const version = editMpnCore(ctx.allocator, ctx.project_dir, name, ref_des, mpn, manufacturer) catch |e| {
         log.warn("editMpn {s} {s}: {s}", .{ name, ref_des, @errorName(e) });
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "{\"ok\":false}";
         return;
     };
 
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{version});
 }
@@ -2458,7 +2458,7 @@ pub fn addSectionNoteCore(
     const source = try readDesignSource(allocator, project_dir, name);
     defer allocator.free(source);
 
-    const needle = try std.fmt.allocPrint(allocator, SECTION_OPEN_TEMPLATE, .{section_name});
+    const needle = try std.fmt.allocPrint(allocator, section_open_template, .{section_name});
     defer allocator.free(needle);
     const sec_start = std.mem.indexOf(u8, source, needle) orelse return error.SectionNotFound;
     if (std.mem.indexOfPos(u8, source, sec_start + needle.len, needle) != null) return error.AmbiguousMatch;
@@ -2514,7 +2514,7 @@ pub fn removeSectionNoteCore(
     const source = try readDesignSource(allocator, project_dir, name);
     defer allocator.free(source);
 
-    const needle = try std.fmt.allocPrint(allocator, SECTION_OPEN_TEMPLATE, .{section_name});
+    const needle = try std.fmt.allocPrint(allocator, section_open_template, .{section_name});
     defer allocator.free(needle);
     const sec_start = std.mem.indexOf(u8, source, needle) orelse return error.SectionNotFound;
     if (std.mem.indexOfPos(u8, source, sec_start + needle.len, needle) != null) return error.AmbiguousMatch;
@@ -2657,7 +2657,7 @@ pub fn removeComponentDatasheetCore(
 }
 
 fn libComponentPath(allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, COMPONENT_PATH_TEMPLATE, .{ project_dir, component_name });
+    return std.fmt.allocPrint(allocator, component_path_template, .{ project_dir, component_name });
 }
 
 fn writeLibComponent(path: []const u8, new_source: []const u8) EditError!void {
@@ -2899,11 +2899,11 @@ pub fn swapPinsCore(
 /// GET /api/source/:name — returns `{"source":"<raw .sexp text>"}`.
 pub fn getSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
 
     const name = req.param("name") orelse {
         res.status = 404;
-        res.body = ERR_JSON_MISSING_NAME;
+        res.body = err_json_missing_name;
         return;
     };
 
@@ -2928,16 +2928,16 @@ pub fn getSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
 /// `{"ok":false,"error":"..."}` with HTTP 400 on invalid source.
 pub fn saveSourceApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
-    res.header(HEADER_CORS_ALLOW_ORIGIN, "*");
+    res.header(header_cors_allow_origin, "*");
 
     const name = req.param("name") orelse {
         res.status = 404;
-        res.body = ERR_JSON_MISSING_NAME;
+        res.body = err_json_missing_name;
         return;
     };
     const body = req.body() orelse {
         res.status = 400;
-        res.body = ERR_JSON_NO_BODY;
+        res.body = err_json_no_body;
         return;
     };
 

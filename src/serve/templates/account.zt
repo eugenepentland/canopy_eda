@@ -8,10 +8,10 @@ const home_tmpl = @import("pages.zig");
 // interpolated, so the inline auth blocks ship as single raw chunks emitted
 // via `{!...}` outside the tags. The page-specific CSS/JS are linked
 // externally and served by `static_assets.staticAsset` at /static/.
-const AUTH_STYLE_BLOCK: []const u8 = "<style>" ++ auth_mod.PAGE_STYLE ++ assets_css.NAVBAR_CSS ++ "</style>";
-const AUTH_SCRIPT_BLOCK: []const u8 = "<script>" ++ auth_mod.B64URL_JS ++ "</script>";
+const auth_style_block: []const u8 = "<style>" ++ auth_mod.page_style ++ assets_css.navbar_css ++ "</style>";
+const auth_script_block: []const u8 = "<script>" ++ auth_mod.b64url_js ++ "</script>";
 
-const ROLE_OPTIONS = [_][]const u8{ "admin", "writer", "reader" };
+const role_options = [_][]const u8{ "admin", "writer", "reader" };
 
 pub templ Account(
     email: []const u8,
@@ -25,7 +25,7 @@ pub templ Account(
         <head>
             <meta name="viewport" content="width=device-width,initial-scale=1" />
             <title>Account — Netlisp</title>
-            {!AUTH_STYLE_BLOCK}
+            {!auth_style_block}
             <link rel="stylesheet" href="/static/account_page.css" />
         </head>
         <body>
@@ -49,7 +49,7 @@ pub templ Account(
 
                 @OAuthClientsCard(clients)
             </div>
-            {!AUTH_SCRIPT_BLOCK}
+            {!auth_script_block}
             <script src="/static/account_page.js"></script>
         </body>
     </html>
@@ -105,7 +105,7 @@ pub templ UserRow(u: users_mod.User, current_email: []const u8) {
                 <span class="muted">(you)</span>
             } else {
                 <select onchange="updateRole(this,'{u.email}')">
-                    for (ROLE_OPTIONS) |r| {
+                    for (role_options) |r| {
                         <option value={r} selected={if (std.mem.eql(u8, r, u.role.toString())) "" else null}>{r}</option>
                     }
                 </select>

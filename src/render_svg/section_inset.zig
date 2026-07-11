@@ -19,17 +19,17 @@ const RenderError = draw.RenderError;
 const escape = @import("../escape.zig");
 
 // ── Layout constants ──────────────────────────────────────────────
-const HALF_DIVISOR: f64 = 2.0;
-const HUB_VPAD: f64 = 40.0;
-const SVG_TOP_MARGIN: f64 = 20.0;
-const SVG_RIGHT_PAD: f64 = 320.0;
-const SVG_BOTTOM_PAD: f64 = 20.0;
-const HUB_TITLE_Y: f64 = 18.0;
-const PIN_LABEL_PAD_X: f64 = 8.0;
-const PIN_LABEL_PAD_Y: f64 = 4.0;
-const PIN_NUMBER_INSET_LEFT: f64 = 38.0;
-const PIN_NUMBER_INSET_RIGHT: f64 = 36.0;
-const PIN_NUMBER_BASELINE: f64 = 1.0;
+const half_divisor: f64 = 2.0;
+const hub_vpad: f64 = 40.0;
+const svg_top_margin: f64 = 20.0;
+const svg_right_pad: f64 = 320.0;
+const svg_bottom_pad: f64 = 20.0;
+const hub_title_y: f64 = 18.0;
+const pin_label_pad_x: f64 = 8.0;
+const pin_label_pad_y: f64 = 4.0;
+const pin_number_inset_left: f64 = 38.0;
+const pin_number_inset_right: f64 = 36.0;
+const pin_number_baseline: f64 = 1.0;
 
 /// A spoke instance whose `inst_map` entry was temporarily rewritten to add a
 /// count prefix (e.g. value `"100nF"` → `"3× 100nF"`). Restored by
@@ -161,12 +161,12 @@ pub fn renderHubAllPins(
     for (left_heights) |h| left_total += h;
     var right_total: f64 = 0;
     for (right_heights) |h| right_total += h;
-    const hub_height = @max(@max(left_total, right_total), HUB_VPAD) + HUB_VPAD;
+    const hub_height = @max(@max(left_total, right_total), hub_vpad) + hub_vpad;
 
     // Pad viewBox to include spoke trees on either side.
-    const y_start: f64 = SVG_TOP_MARGIN;
-    const svg_w: f64 = hub_x + hub_width + SVG_RIGHT_PAD;
-    const svg_h: f64 = hub_height + y_start + SVG_BOTTOM_PAD;
+    const y_start: f64 = svg_top_margin;
+    const svg_w: f64 = hub_x + hub_width + svg_right_pad;
+    const svg_h: f64 = hub_height + y_start + svg_bottom_pad;
 
     try w.print(
         \\<svg class="hub-inset" viewBox="0 0 {d:.0} {d:.0}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" data-ref="
@@ -187,27 +187,27 @@ pub fn renderHubAllPins(
         y_start,
         hub_width,
         hub_height,
-        hub_x + hub_width / HALF_DIVISOR,
-        y_start + HUB_TITLE_Y,
+        hub_x + hub_width / half_divisor,
+        y_start + hub_title_y,
     });
     try escape.writeXml(w, shortRef(hub.ref_des));
     try w.writeAll(" ");
     try escape.writeXml(w, displayValue(hub));
     try w.writeAll("</text></g>\n");
 
-    var py_left: f64 = y_start + HUB_VPAD;
+    var py_left: f64 = y_start + hub_vpad;
     for (left_groups, 0..) |group, gi| {
         const h = left_heights[gi];
-        const cy = py_left + h / HALF_DIVISOR;
+        const cy = py_left + h / half_divisor;
         try renderPinStub(w, .left, hub_x, cy, group, hub.ref_des);
         try connection.renderGroupedConnections(ctx, w, hub.ref_des, group, hub_x - pin_stub, cy, .left);
         py_left += h;
     }
 
-    var py_right: f64 = y_start + HUB_VPAD;
+    var py_right: f64 = y_start + hub_vpad;
     for (right_groups, 0..) |group, gi| {
         const h = right_heights[gi];
-        const cy = py_right + h / HALF_DIVISOR;
+        const cy = py_right + h / half_divisor;
         try renderPinStub(w, .right, hub_x + hub_width, cy, group, hub.ref_des);
         try connection.renderGroupedConnections(ctx, w, hub.ref_des, group, hub_x + hub_width + pin_stub, cy, .right);
         py_right += h;
@@ -241,7 +241,7 @@ fn renderPinStub(w: anytype, side: ctx_mod.Side, px: f64, py: f64, group: PinGro
     // Spread the stubs across the band, one `per_conn_spacing` apart, centred
     // on `py`. The group height (set by groupHeights) is sized to hold them.
     const gap: f64 = per_conn_spacing;
-    const first_y = py - @as(f64, @floatFromInt(displayed - 1)) / HALF_DIVISOR * gap;
+    const first_y = py - @as(f64, @floatFromInt(displayed - 1)) / half_divisor * gap;
 
     for (labels, 0..) |label, i| {
         const pins = pin_lists[i];
@@ -293,13 +293,13 @@ fn renderOneStub(
                 \\<text x="{d:.1}" y="{d:.1}" font-size="12" fill="#aaa">
             , .{
                 stub_x, y,                    px,
-                y,      px + PIN_LABEL_PAD_X, y + PIN_LABEL_PAD_Y,
+                y,      px + pin_label_pad_x, y + pin_label_pad_y,
             });
             try escape.writeXml(w, label);
             try w.print(
                 \\</text>
                 \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="10" fill="#666">
-            , .{ stub_x + PIN_NUMBER_INSET_LEFT, y - PIN_NUMBER_BASELINE });
+            , .{ stub_x + pin_number_inset_left, y - pin_number_baseline });
             try escape.writeXml(w, num_text);
             try w.writeAll("</text>\n");
         },
@@ -309,13 +309,13 @@ fn renderOneStub(
                 \\<text x="{d:.1}" y="{d:.1}" text-anchor="end" font-size="12" fill="#aaa">
             , .{
                 px, y,                    stub_x,
-                y,  px - PIN_LABEL_PAD_X, y + PIN_LABEL_PAD_Y,
+                y,  px - pin_label_pad_x, y + pin_label_pad_y,
             });
             try escape.writeXml(w, label);
             try w.print(
                 \\</text>
                 \\<text x="{d:.1}" y="{d:.1}" font-size="10" fill="#666">
-            , .{ stub_x - PIN_NUMBER_INSET_RIGHT, y - PIN_NUMBER_BASELINE });
+            , .{ stub_x - pin_number_inset_right, y - pin_number_baseline });
             try escape.writeXml(w, num_text);
             try w.writeAll("</text>\n");
         },

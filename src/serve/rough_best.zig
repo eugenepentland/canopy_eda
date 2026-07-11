@@ -92,7 +92,7 @@ fn scoreCandidate(
 ) std.mem.Allocator.Error!Candidate {
     const st = try style_score.compareStyle(alloc, cand, star, excluded);
     const obj = cand.breakdown.objective;
-    const hyb = style_score.hybridScore(obj, star_obj, st.style_pct, style_score.LAMBDA_DEFAULT);
+    const hyb = style_score.hybridScore(obj, star_obj, st.style_pct, style_score.lambda_default);
     const crossings = try optimizer.importantCrossings(alloc, cand);
     const overlaps = optimizer.overlapCount(cand);
     const n: f64 = @floatFromInt(@max(cand.parts.len, 1));
@@ -265,7 +265,7 @@ pub fn bestRoughJson(alloc: std.mem.Allocator, project_dir: []const u8, name: []
     pcb_layout_page.writeJsonStr(w, name) catch return error.BuildFailed;
     w.writeAll(",\"starred\":") catch return error.BuildFailed;
     pcb_layout_page.writeJsonStr(w, b.starred_name) catch return error.BuildFailed;
-    w.print(",\"lambda\":{d:.2},\"winner\":", .{style_score.LAMBDA_DEFAULT}) catch return error.BuildFailed;
+    w.print(",\"lambda\":{d:.2},\"winner\":", .{style_score.lambda_default}) catch return error.BuildFailed;
     pcb_layout_page.writeJsonStr(w, b.winner) catch return error.BuildFailed;
     w.print(",\"star_obj\":{d:.2},\"candidates\":[", .{b.star_obj}) catch return error.BuildFailed;
     for (b.cands, 0..) |c, i| {

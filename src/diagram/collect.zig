@@ -167,7 +167,7 @@ fn assignRails(
     var counts: std.AutoHashMapUnmanaged(Key, u32) = .empty;
     for (flat) |net| {
         const clean = cleanNetName(net.name);
-        if (classify.netClass(clean, port_map) != types.CLASS_POWER) continue;
+        if (classify.netClass(clean, port_map) != types.class_power) continue;
         const v = railVoltageAny(nodes, clean) orelse voltageFromName(clean) orelse continue;
         const vb: i64 = @intFromFloat(@round(v * 100));
         for (net.pins) |p| {
@@ -612,7 +612,7 @@ fn deriveEdges(
     for (flat) |net| {
         const clean = cleanNetName(net.name);
         const cls = classify.netClass(clean, port_map);
-        if (cls == types.CLASS_GROUND) continue;
+        if (cls == types.class_ground) continue;
 
         touched_set.clearRetainingCapacity();
         touched.clearRetainingCapacity();
@@ -624,7 +624,7 @@ fn deriveEdges(
         if (touched.items.len < 2) continue;
 
         const driver = pickDriver(cls, clean, touched.items, nodes, producer_by_net);
-        const voltage: ?f64 = if (cls == types.CLASS_POWER)
+        const voltage: ?f64 = if (cls == types.class_power)
             (producerVoltage(nodes, driver, clean) orelse railVoltageAny(nodes, clean) orelse voltageFromName(clean))
         else
             null;
@@ -742,7 +742,7 @@ fn boundaryChip(
             for (others.items) |oni| {
                 if (visited.contains(oni)) continue;
                 const cls = classify.netClass(cleanNetName(flat[oni].name), port_map);
-                if (cls == types.CLASS_POWER or cls == types.CLASS_GROUND) continue;
+                if (cls == types.class_power or cls == types.class_ground) continue;
                 try visited.put(scratch, oni, {});
                 try queue.append(scratch, oni);
             }
@@ -782,7 +782,7 @@ fn antennaPass(
     for (flat, 0..) |net, net_idx| {
         const clean = cleanNetName(net.name);
         if (!isBoundaryName(clean)) continue;
-        if (classify.netClass(clean, port_map) != types.CLASS_RF) continue;
+        if (classify.netClass(clean, port_map) != types.class_rf) continue;
 
         // The single IC this boundary net feeds (series matching passives are
         // transparent; a hop to a *second* IC means it's a signal, not a feed).
@@ -823,7 +823,7 @@ fn antennaPass(
         try edge_list.append(allocator, .{
             .from = from,
             .to = to,
-            .class = types.CLASS_RF,
+            .class = types.class_rf,
             .label = try allocator.dupe(u8, base),
             .voltage = null,
             .fanout = 1,
@@ -890,7 +890,7 @@ fn emitCrystal(
     try edge_list.append(allocator, .{
         .from = xid,
         .to = host,
-        .class = types.CLASS_CLOCK,
+        .class = types.class_clock,
         .label = try allocator.dupe(u8, "XTAL"),
         .voltage = null,
         .fanout = 1,
@@ -938,7 +938,7 @@ fn pickDriver(
     nodes: []const Node,
     producer_by_net: *const std.StringHashMapUnmanaged(u32),
 ) u32 {
-    if (cls == types.CLASS_POWER) {
+    if (cls == types.class_power) {
         if (producer_by_net.get(clean)) |p| {
             for (touched) |t| if (t == p) return p;
         }
@@ -978,10 +978,10 @@ const rank_sink: u8 = 1; // PLL ref input, connector IF, plain chip
 
 fn sourceRank(node: Node, cls: ClassId) u8 {
     const n = node.label;
-    if (cls == types.CLASS_POWER) return if (node.category == .power) rank_origin else rank_sink;
-    if (cls == types.CLASS_CLOCK) return clockRank(n, node.category);
-    if (cls == types.CLASS_CONTROL) return controlRank(n, node.category);
-    if (cls == types.CLASS_RF) return rfRank(n, node.category);
+    if (cls == types.class_power) return if (node.category == .power) rank_origin else rank_sink;
+    if (cls == types.class_clock) return clockRank(n, node.category);
+    if (cls == types.class_control) return controlRank(n, node.category);
+    if (cls == types.class_rf) return rfRank(n, node.category);
     return rank_sink; // ground
 }
 
@@ -1171,7 +1171,7 @@ test "collectGraph connects two non-MCU sections via a shared net" {
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 2), g.nodes.len);
     try testing.expect(g.edges.len >= 1);
-    try testing.expectEqual(types.CLASS_RF, g.edges[0].class);
+    try testing.expectEqual(types.class_rf, g.edges[0].class);
 }
 
 // spec: diagram/collect - Labels an unattached sub-block by its module's design-block title
@@ -1215,7 +1215,7 @@ test "collectGraph surfaces a module crystal as a clock source" {
     // The mcu block node + the synthesized Crystal source, joined by a clock edge.
     try testing.expectEqual(@as(usize, 2), g.nodes.len);
     try testing.expectEqual(@as(usize, 1), g.edges.len);
-    try testing.expectEqual(types.CLASS_CLOCK, g.edges[0].class);
+    try testing.expectEqual(types.class_clock, g.edges[0].class);
 }
 
 // spec: diagram/collect - Excludes ground nets and collapses parallel or differential nets into one edge
@@ -1262,7 +1262,7 @@ test "collectGraph resolves rail voltage from a consumer when no producer declar
     var g = try collectGraph(testing.allocator, &block, &.{}, "");
     defer g.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), g.edges.len);
-    try testing.expectEqual(types.CLASS_POWER, g.edges[0].class);
+    try testing.expectEqual(types.class_power, g.edges[0].class);
     try testing.expect(g.edges[0].voltage != null);
     try testing.expectApproxEqAbs(@as(f64, 3.3), g.edges[0].voltage.?, 0.01);
 }
@@ -1317,7 +1317,7 @@ test "collectGraph adds an antenna node for a one-sided RF boundary net" {
     const ant: u32 = @intCast(g.nodes.len - 1);
     try testing.expect(g.nodes[ant].is_boundary);
     try testing.expectEqual(@as(usize, 1), g.edges.len);
-    try testing.expectEqual(types.CLASS_RF, g.edges[0].class);
+    try testing.expectEqual(types.class_rf, g.edges[0].class);
     // A chip *output* port drives the net, so the antenna is the sink.
     try testing.expectEqual(ant, g.edges[0].to);
 }

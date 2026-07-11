@@ -140,7 +140,7 @@ fn detectFamilies(arena: std.mem.Allocator, nets: []const []const u8) FoldError!
     for (nets) |net| {
         if (net.len == 0) continue;
         if (std.mem.startsWith(u8, net, "Net-")) continue;
-        if (std.mem.startsWith(u8, net, ik.UNCONNECTED_PREFIX)) continue;
+        if (std.mem.startsWith(u8, net, ik.unconnected_prefix)) continue;
         const t = try netTemplate(arena, net);
         if (std.mem.indexOfScalar(u8, t, '~') == null) continue;
         const slot = try by_template.getOrPut(arena, t);
@@ -212,9 +212,9 @@ fn pickPrefix(arena: std.mem.Allocator, fams: []const Family, override: ?[]const
 // ── Folding pipeline ──────────────────────────────────────────────────
 
 /// Claim sentinel: part not (yet) assigned to any channel.
-pub const UNCLAIMED: u64 = std.math.maxInt(u64);
+pub const unclaimed: u64 = std.math.maxInt(u64);
 /// Claim sentinel: part reached from two channels — permanently shared.
-pub const SHARED: u64 = std.math.maxInt(u64) - 1;
+pub const shared_marker: u64 = std.math.maxInt(u64) - 1;
 
 /// Working state shared between the folding pipeline and the emitter.
 pub const FoldCtx = struct {
@@ -246,12 +246,12 @@ pub fn foldChannels(
         .claim = try arena.alloc(u64, parts.len),
         .prefix = "",
     };
-    @memset(ctx.claim, UNCLAIMED);
+    @memset(ctx.claim, unclaimed);
 
     var all_nets: std.ArrayList([]const u8) = .empty;
     for (parts, 0..) |part, i| {
         for (part.pads) |pad| {
-            if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.UNCONNECTED_PREFIX)) continue;
+            if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.unconnected_prefix)) continue;
             const slot = try ctx.net_parts.getOrPut(arena, pad.net);
             if (!slot.found_existing) {
                 slot.value_ptr.* = .empty;
@@ -285,19 +285,19 @@ pub fn foldChannels(
 /// Claim parts whose seed-family nets all carry one index.
 fn seedClaims(ctx: *Ctx) void {
     for (ctx.parts, 0..) |part, i| {
-        var idx: u64 = UNCLAIMED;
+        var idx: u64 = unclaimed;
         var conflict = false;
         for (part.pads) |pad| {
             const k = ctx.seed.get(pad.net) orelse continue;
-            if (idx == UNCLAIMED) {
+            if (idx == unclaimed) {
                 idx = k;
             } else if (idx != k) {
                 conflict = true;
             }
         }
         if (conflict) {
-            ctx.claim[i] = SHARED;
-        } else if (idx != UNCLAIMED) {
+            ctx.claim[i] = shared_marker;
+        } else if (idx != unclaimed) {
             ctx.claim[i] = idx;
         }
     }
@@ -319,24 +319,24 @@ fn propagateClaims(ctx: *Ctx) FoldError!void {
         while (it.next()) |entry| {
             if (ctx.seed.contains(entry.key_ptr.*)) continue;
             const members = entry.value_ptr.items;
-            var idx: u64 = UNCLAIMED;
+            var idx: u64 = unclaimed;
             var mixed = false;
             for (members) |i| {
                 const c = ctx.claim[i]; // frozen snapshot, not this round's proposals
-                if (c == UNCLAIMED or c == SHARED) continue;
-                if (idx == UNCLAIMED) {
+                if (c == unclaimed or c == shared_marker) continue;
+                if (idx == unclaimed) {
                     idx = c;
                 } else if (idx != c) {
                     mixed = true;
                 }
             }
-            if (mixed or idx == UNCLAIMED) continue;
+            if (mixed or idx == unclaimed) continue;
             for (members) |i| {
-                if (ctx.claim[i] != UNCLAIMED) continue;
-                if (proposal[i] == UNCLAIMED) {
+                if (ctx.claim[i] != unclaimed) continue;
+                if (proposal[i] == unclaimed) {
                     proposal[i] = idx;
-                } else if (proposal[i] != idx and proposal[i] != SHARED) {
-                    proposal[i] = SHARED; // tug-of-war between two channels
+                } else if (proposal[i] != idx and proposal[i] != shared_marker) {
+                    proposal[i] = shared_marker; // tug-of-war between two channels
                 }
             }
         }
@@ -392,7 +392,7 @@ fn partBaseSignature(ctx: *Ctx, i: usize, chan: u64) FoldError![]const u8 {
 
     var binds: std.ArrayList([]const u8) = .empty;
     for (part.pads) |pad| {
-        if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.UNCONNECTED_PREFIX)) continue;
+        if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.unconnected_prefix)) continue;
         const label = switch (classifyNet(ctx, pad.net, chan)) {
             .indexed => try std.fmt.allocPrint(ctx.arena, "{s}=T:{s}", .{ pad.number, ctx.seed_template.get(pad.net).? }),
             .internal => try std.fmt.allocPrint(ctx.arena, "{s}=I", .{pad.number}),
@@ -445,7 +445,7 @@ fn partSignature(ctx: *Ctx, i: usize, chan: u64) FoldError![]const u8 {
 
     var binds: std.ArrayList([]const u8) = .empty;
     for (part.pads) |pad| {
-        if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.UNCONNECTED_PREFIX)) continue;
+        if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.unconnected_prefix)) continue;
         const label = switch (classifyNet(ctx, pad.net, chan)) {
             .indexed => try std.fmt.allocPrint(ctx.arena, "{s}=T:{s}", .{ pad.number, ctx.seed_template.get(pad.net).? }),
             // Was `I:<netTemplate>` — same for every auto-net off one IC, so a
@@ -486,7 +486,7 @@ fn strLess(_: void, a: []const u8, b: []const u8) bool {
 fn finishFold(ctx: *Ctx, design_name: []const u8) FoldError!FoldResult {
     var indices: std.ArrayList(u64) = .empty;
     for (ctx.claim) |c| {
-        if (c == UNCLAIMED or c == SHARED) continue;
+        if (c == unclaimed or c == shared_marker) continue;
         var known = false;
         for (indices.items) |k| {
             if (k == c) known = true;

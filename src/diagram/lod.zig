@@ -607,10 +607,10 @@ fn testNode(label: []const u8) types.Node {
 test "aggregateEdges collapses same-pair same-class edges and sums fanout" {
     var nodes = [_]types.Node{ testNode("a"), testNode("b"), testNode("c"), testNode("d") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 2, .class = types.CLASS_CONTROL, .label = "SPI_SCK" },
-        .{ .from = 1, .to = 3, .class = types.CLASS_CONTROL, .label = "SPI_MISO", .fanout = 3 },
-        .{ .from = 0, .to = 3, .class = types.CLASS_POWER, .label = "VDD" },
-        .{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "INTRA" },
+        .{ .from = 0, .to = 2, .class = types.class_control, .label = "SPI_SCK" },
+        .{ .from = 1, .to = 3, .class = types.class_control, .label = "SPI_MISO", .fanout = 3 },
+        .{ .from = 0, .to = 3, .class = types.class_power, .label = "VDD" },
+        .{ .from = 0, .to = 1, .class = types.class_control, .label = "INTRA" },
     };
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     // Nodes a+b form entity 0, c+d entity 1.
@@ -620,17 +620,17 @@ test "aggregateEdges collapses same-pair same-class edges and sums fanout" {
     const aggs = try aggregateEdges(arena_state.allocator(), &graph, &ent_of);
     try testing.expectEqual(@as(usize, 2), aggs.len);
     try testing.expectEqual(@as(usize, 4), aggs[0].nets); // 1 + 3 control nets
-    try testing.expectEqual(types.CLASS_CONTROL, aggs[0].class);
+    try testing.expectEqual(types.class_control, aggs[0].class);
     try testing.expectEqual(@as(usize, 1), aggs[1].nets);
-    try testing.expectEqual(types.CLASS_POWER, aggs[1].class);
+    try testing.expectEqual(types.class_power, aggs[1].class);
 }
 
 // spec: diagram/lod - Renders a glance chip per group and per ungrouped block with member captions
 test "writeGlanceLayer emits group chips plus solo chips for ungrouped blocks" {
     var nodes = [_]types.Node{ testNode("MCU"), testNode("Flash"), testNode("Sensor") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "BUS", .fanout = 2 },
-        .{ .from = 0, .to = 2, .class = types.CLASS_CONTROL, .label = "I2C" },
+        .{ .from = 0, .to = 1, .class = types.class_control, .label = "BUS", .fanout = 2 },
+        .{ .from = 0, .to = 2, .class = types.class_control, .label = "I2C" },
     };
     const members = [_][]const u8{ "MCU", "Flash" };
     const groups = [_]env_mod.LayoutGroup{.{ .label = "Compute", .members = &members }};
@@ -719,7 +719,7 @@ test "entityOf keeps duplicate-labelled solo blocks on separate chips" {
         .{ .label = "ADC channel", .subtitle = "", .category = .peripheral, .slug = "", .key = "adc2", .inputs = &.{}, .outputs = &.{} },
     };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "DAISY" },
+        .{ .from = 0, .to = 1, .class = types.class_control, .label = "DAISY" },
     };
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var lnodes = [_]layout.LNode{

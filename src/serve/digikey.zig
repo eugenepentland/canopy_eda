@@ -19,15 +19,15 @@ const rate_limiter = @import("rate_limiter.zig");
 /// Production host. A deployment can point at the sandbox by setting
 /// `DIGIKEY_API_BASE=https://sandbox-api.digikey.com`.
 pub const default_base = "https://api.digikey.com";
-const TOKEN_PATH = "/v1/oauth2/token";
-const KEYWORD_PATH = "/products/v4/search/keyword";
-const TOKEN_TIMEOUT_SECS = "20";
-const SEARCH_TIMEOUT_SECS = "30";
-const DOWNLOAD_TIMEOUT_SECS = "60";
+const token_path = "/v1/oauth2/token";
+const keyword_path = "/products/v4/search/keyword";
+const token_timeout_secs = "20";
+const search_timeout_secs = "30";
+const download_timeout_secs = "60";
 /// JSON responses are small; datasheet PDFs are not.
-const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
-const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " ++
+const max_response_bytes: usize = 4 * 1024 * 1024;
+const max_download_bytes: usize = 64 * 1024 * 1024;
+const browser_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " ++
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
 /// One quantity price break from a variation's `StandardPricing` ladder —
@@ -178,22 +178,22 @@ fn keywordVariants(allocator: std.mem.Allocator, query: []const u8) std.mem.Allo
 /// POST the client-credentials grant and return the bearer token, or null on a
 /// transport failure or a response without an `access_token` (bad credentials).
 fn fetchToken(allocator: std.mem.Allocator, base: []const u8, client_id: []const u8, client_secret: []const u8) ?[]const u8 {
-    const url = std.fmt.allocPrint(allocator, "{s}{s}", .{ base, TOKEN_PATH }) catch return null;
+    const url = std.fmt.allocPrint(allocator, "{s}{s}", .{ base, token_path }) catch return null;
     const id_arg = std.fmt.allocPrint(allocator, "client_id={s}", .{client_id}) catch return null;
     const secret_arg = std.fmt.allocPrint(allocator, "client_secret={s}", .{client_secret}) catch return null;
     const body = curl(allocator, &.{
         "-X",                            "POST",
         url,                             "-H",
-        FORM_CT,                         FORM_FIELD,
-        "grant_type=client_credentials", FORM_FIELD,
-        id_arg,                          FORM_FIELD,
+        form_ct,                         form_field,
+        "grant_type=client_credentials", form_field,
+        id_arg,                          form_field,
         secret_arg,
-    }, TOKEN_TIMEOUT_SECS, MAX_RESPONSE_BYTES) orelse return null;
+    }, token_timeout_secs, max_response_bytes) orelse return null;
     return parseAccessToken(allocator, body);
 }
 
-const FORM_CT = "Content-Type: application/x-www-form-urlencoded";
-const FORM_FIELD = "--data-urlencode";
+const form_ct = "Content-Type: application/x-www-form-urlencoded";
+const form_field = "--data-urlencode";
 
 /// Extract and dup the `access_token` string from an OAuth token response, or
 /// null when the JSON is unparseable or carries no token (e.g. an error body).
@@ -216,7 +216,7 @@ fn keywordSearch(
     query: []const u8,
     limit: usize,
 ) ?[]u8 {
-    const url = std.fmt.allocPrint(allocator, "{s}{s}", .{ base, KEYWORD_PATH }) catch return null;
+    const url = std.fmt.allocPrint(allocator, "{s}{s}", .{ base, keyword_path }) catch return null;
     const auth = std.fmt.allocPrint(allocator, "Authorization: Bearer {s}", .{token}) catch return null;
     const client = std.fmt.allocPrint(allocator, "X-DIGIKEY-Client-Id: {s}", .{client_id}) catch return null;
 
@@ -231,14 +231,14 @@ fn keywordSearch(
         url,          "-H",
         auth,         "-H",
         client,       "-H",
-        JSON_ACCEPT,  "-H",
-        JSON_CONTENT, "--data-binary",
+        json_accept,  "-H",
+        json_content, "--data-binary",
         body.items,
-    }, SEARCH_TIMEOUT_SECS, MAX_RESPONSE_BYTES);
+    }, search_timeout_secs, max_response_bytes);
 }
 
-const JSON_ACCEPT = "Accept: application/json";
-const JSON_CONTENT = "Content-Type: application/json";
+const json_accept = "Accept: application/json";
+const json_content = "Content-Type: application/json";
 
 // ── Response mapping ──────────────────────────────────────────────
 
@@ -445,15 +445,15 @@ fn pickProduct(products: []const Product, part_number: []const u8, manufacturer:
     return first_exact orelse products[0];
 }
 
-const GOTO_MARKER = "gotoUrl=";
+const goto_marker = "gotoUrl=";
 
 /// Some DigiKey `datasheet_url`s point at a manufacturer interstitial that wraps
 /// the real target in a `gotoUrl=<percent-encoded url>` query param (e.g. TI's
 /// `suppproductinfo.tsp`). Return that decoded target when present, else the URL
 /// unchanged. Following redirects on the result reaches the actual PDF.
 fn normalizeDatasheetUrl(allocator: std.mem.Allocator, url: []const u8) std.mem.Allocator.Error![]u8 {
-    const idx = std.mem.indexOf(u8, url, GOTO_MARKER) orelse return allocator.dupe(u8, url);
-    const start = idx + GOTO_MARKER.len;
+    const idx = std.mem.indexOf(u8, url, goto_marker) orelse return allocator.dupe(u8, url);
+    const start = idx + goto_marker.len;
     var end = start;
     while (end < url.len and url[end] != '&') : (end += 1) {}
     return percentDecode(allocator, url[start..end]);
@@ -490,7 +490,7 @@ fn hexVal(c: u8) ?u8 {
 fn downloadPdf(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
     // `--` stops curl option parsing so a `-`-leading vendor URL can't be
     // reparsed as a flag (arg-injection / SSRF hardening).
-    return curl(allocator, &.{ "-L", "-A", BROWSER_UA, "--", url }, DOWNLOAD_TIMEOUT_SECS, MAX_DOWNLOAD_BYTES);
+    return curl(allocator, &.{ "-L", "-A", browser_ua, "--", url }, download_timeout_secs, max_download_bytes);
 }
 
 /// PDF magic — distinguishes a real datasheet from an HTML interstitial page.

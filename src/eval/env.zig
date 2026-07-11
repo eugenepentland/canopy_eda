@@ -3,10 +3,10 @@ const ast = @import("../sexpr/ast.zig");
 const numeric = @import("../numeric.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
-const PULLUP_RANGE_MIN_CHILDREN: usize = 5;
-const DECOUPLING_PER_PIN_MIN_CHILDREN: usize = 5;
-const SERIES_ELEMENT_MIN_CHILDREN: usize = 6;
-const SERIES_ELEMENT_MAX_INDEX: usize = 5;
+const pullup_range_min_children: usize = 5;
+const decoupling_per_pin_min_children: usize = 5;
+const series_element_min_children: usize = 6;
+const series_element_max_index: usize = 5;
 
 /// A value in the evaluator.
 pub const Value = union(enum) {
@@ -408,7 +408,7 @@ pub fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check {
         return .{ .decoupling = .{ .pin_a = a, .pin_b = b, .min_uf = min_uf } };
     }
     if (std.mem.eql(u8, kind, "pullup-range")) {
-        if (body_children.len < PULLUP_RANGE_MIN_CHILDREN) return null;
+        if (body_children.len < pullup_range_min_children) return null;
         const p = pinArg(body_children[1]) orelse return null;
         const net_name = netArg(body_children[2]) orelse return null;
         const lo = namedNumberArg(body_children[3], "min-ohms") orelse return null;
@@ -454,7 +454,7 @@ pub fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check {
         return .{ .pins_on_same_net = .{ .pins = list.toOwnedSlice(allocator) catch return null } };
     }
     if (std.mem.eql(u8, kind, "decoupling-per-pin")) {
-        if (body_children.len < DECOUPLING_PER_PIN_MIN_CHILDREN) return null;
+        if (body_children.len < decoupling_per_pin_min_children) return null;
         // (decoupling-per-pin (return-pin "X") (pins "A" "B"...) (min-uf F) (count N))
         const rp_form = body_children[1].asList() orelse return null;
         if (rp_form.len < 2) return null;
@@ -487,7 +487,7 @@ pub fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check {
         } };
     }
     if (std.mem.eql(u8, kind, "series-element")) {
-        if (body_children.len < SERIES_ELEMENT_MIN_CHILDREN) return null;
+        if (body_children.len < series_element_min_children) return null;
         // (series-element (kind R|L|C) (pin "P") (target-net "N") (min X) (max Y))
         const kind_form = body_children[1].asList() orelse return null;
         if (kind_form.len < 2) return null;
@@ -505,7 +505,7 @@ pub fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check {
         if (!std.mem.eql(u8, tn_head, "target-net")) return null;
         const target_net = tn_form[1].asText() orelse return null;
         const lo = namedNumberArg(body_children[4], "min") orelse return null;
-        const hi = namedNumberArg(body_children[SERIES_ELEMENT_MAX_INDEX], "max") orelse return null;
+        const hi = namedNumberArg(body_children[series_element_max_index], "max") orelse return null;
         return .{ .series_element = .{
             .kind = sk,
             .pin = p,

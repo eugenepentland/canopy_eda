@@ -84,7 +84,7 @@ pub const ModulePolicy = struct {
 
 /// A bulk cap is anything ≥ 4.7 µF — the rail-entry reservoir, not the
 /// high-frequency bypass cap that hugs the pin.
-const BULK_FARADS: f64 = 4.7e-6;
+const bulk_farads: f64 = 4.7e-6;
 
 /// Analyse a solved placement. Allocates the three result slices on `alloc`
 /// (caller frees via `ModulePolicy.deinit`); scratch maps are freed internally.
@@ -178,7 +178,7 @@ fn capRole(part: Part, fl: std.EnumSet(NetClass)) PartRole {
     if (fl.contains(.rf)) return .matching_element;
     if (fl.contains(.feedback)) return .feedback_divider;
     if (fl.contains(.power)) {
-        return if (capValueFarads(part.value) >= BULK_FARADS) .bulk_cap else .decoupling_cap;
+        return if (capValueFarads(part.value) >= bulk_farads) .bulk_cap else .decoupling_cap;
     }
     return .other;
 }
@@ -385,7 +385,7 @@ test "capValueFarads parses SI prefixes including UTF-8 micro" {
     try testing.expectApproxEqAbs(@as(f64, 4.7e-6), capValueFarads("4.7µF"), 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 10e-6), capValueFarads("10µF"), 1e-12);
     // A bulk µF cap must clear the BULK_FARADS threshold via the µ path.
-    try testing.expect(capValueFarads("10µF") >= BULK_FARADS);
+    try testing.expect(capValueFarads("10µF") >= bulk_farads);
     // Unrecognised → 0.
     try testing.expectEqual(@as(f64, 0), capValueFarads("abc"));
     try testing.expectEqual(@as(f64, 0), capValueFarads("100"));

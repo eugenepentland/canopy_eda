@@ -25,8 +25,8 @@ const Edit = struct {
     text: []const u8,
 };
 
-const ORDER_ID: u8 = 0;
-const ORDER_IDS: u8 = 1;
+const order_id: u8 = 0;
+const order_ids: u8 = 1;
 
 /// Insert pending `(id …)` forms and `(ids ("key" token) …)` child sidecars into
 /// a source file in a single pass. Both kinds reference byte offsets in the
@@ -78,7 +78,7 @@ pub fn applyInserts(
     for (pending) |pid| {
         const close = findMatchingClose(source, pid.form_offset) orelse continue;
         const text = try std.fmt.allocPrint(allocator, " (id {s})", .{pid.id});
-        try edits.append(allocator, .{ .pos = close, .order = ORDER_ID, .text = text });
+        try edits.append(allocator, .{ .pos = close, .order = order_id, .text = text });
     }
     try collectChildIdEdits(allocator, source, pending_child, &edits);
 
@@ -160,11 +160,11 @@ fn collectChildIdEdits(
         if (findExistingIdsForm(source, parent_offset, parent_close)) |ids_close| {
             for (group) |pc| {
                 const text = try std.fmt.allocPrint(allocator, " (\"{s}\" {s})", .{ pc.key, pc.id });
-                try edits.append(allocator, .{ .pos = ids_close, .order = ORDER_IDS, .text = text });
+                try edits.append(allocator, .{ .pos = ids_close, .order = order_ids, .text = text });
             }
         } else {
             const text = try buildIdsForm(allocator, group);
-            try edits.append(allocator, .{ .pos = parent_close, .order = ORDER_IDS, .text = text });
+            try edits.append(allocator, .{ .pos = parent_close, .order = order_ids, .text = text });
         }
     }
 }

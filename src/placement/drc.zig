@@ -23,7 +23,7 @@ const export_kicad = @import("../export_kicad.zig");
 /// Silkscreen ref-des pixel pitch (mm) — mirrors `export_gerber.zig`'s
 /// `TEXT_PX_MM`, so the ref-des bounding box the `silk_over_pad` check measures
 /// matches the strokes the Gerber writer actually draws.
-const SILK_TEXT_PX_MM: f64 = 0.15;
+const silk_text_px_mm: f64 = 0.15;
 
 const FlatNet = export_kicad.FlatNet;
 
@@ -121,7 +121,7 @@ const PadBox = struct {
 /// alike (a round hole is the zero-length capsule).
 const Hole = struct { x: f64, y: f64, drill: f64, shx: f64 = 0, shy: f64 = 0 };
 
-const EPS: f64 = 1e-6;
+const eps: f64 = 1e-6;
 
 /// Resolves the effective copper-to-copper clearance between two features,
 /// honouring per-net `(net-class (clearance …))` overrides. The clearance
@@ -156,7 +156,7 @@ const ClearanceResolver = struct {
 /// castellated edge pad) exempt from the component-lead `pad_annular` check.
 /// Real component through-hole leads pad out well above this (≥ ~0.8 mm), so it
 /// cleanly separates "a via someone drew as a pad" from "a connector/header pin".
-const VIA_PAD_MAX_MM: f64 = 0.65;
+const via_pad_max_mm: f64 = 0.65;
 
 /// Run the check. All output is allocated in `arena`. `clearance` is the
 /// board-default copper-to-copper rule (mm); two features of different nets must
@@ -190,7 +190,7 @@ pub fn check(
             if (sameNet(v.net, p.net)) continue;
             const eff = clr.between(v.net, p.net);
             const gap = pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, v.x, v.y, vr + eff) - vr;
-            if (gap < eff - EPS) {
+            if (gap < eff - eps) {
                 try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = eff, .kind = .via_pad });
             }
         }
@@ -201,7 +201,7 @@ pub fn check(
             if (sameNet(a.net, b.net)) continue;
             const eff = clr.between(a.net, b.net);
             const gap = std.math.hypot(a.x - b.x, a.y - b.y) - a.dia / 2 - b.dia / 2;
-            if (gap < eff - EPS) {
+            if (gap < eff - eps) {
                 try out.append(arena, .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2, .gap = gap, .clearance = eff, .kind = .via_via });
             }
         }
@@ -213,7 +213,7 @@ pub fn check(
             if (sameNet(v.net, t.net)) continue;
             const eff = clr.between(v.net, t.net);
             const gap = segPointDist(t.x1, t.y1, t.x2, t.y2, v.x, v.y) - vr - t.width / 2;
-            if (gap < eff - EPS) {
+            if (gap < eff - eps) {
                 try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = eff, .kind = .via_track });
             }
         }
@@ -228,7 +228,7 @@ pub fn check(
             if (a.layer != b.layer or sameNet(a.net, b.net)) continue;
             const eff = clr.between(a.net, b.net);
             const gap = segSegDist(a.x1, a.y1, a.x2, a.y2, b.x1, b.y1, b.x2, b.y2) - a.width / 2 - b.width / 2;
-            if (gap < eff - EPS) {
+            if (gap < eff - eps) {
                 const mx = (a.x1 + a.x2 + b.x1 + b.x2) / 4;
                 const my = (a.y1 + a.y2 + b.y1 + b.y2) / 4;
                 try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = eff, .kind = .track_track });
@@ -249,7 +249,7 @@ pub fn check(
             if (@min(t.x1, t.x2) > p.x1 + need or @max(t.x1, t.x2) < p.x0 - need or
                 @min(t.y1, t.y2) > p.y1 + need or @max(t.y1, t.y2) < p.y0 - need) continue;
             const gap = segShapeDist(t, p, need) - t.width / 2;
-            if (gap < eff - EPS) {
+            if (gap < eff - eps) {
                 const mx = std.math.clamp((p.x0 + p.x1) / 2, @min(t.x1, t.x2), @max(t.x1, t.x2));
                 const my = std.math.clamp((p.y0 + p.y1) / 2, @min(t.y1, t.y2), @max(t.y1, t.y2));
                 try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = eff, .kind = .track_pad });
@@ -280,7 +280,7 @@ pub fn check(
                 .{ .x0 = b.x0, .y0 = b.y0, .x1 = b.x1, .y1 = b.y1, .poly = b.poly },
                 eff,
             );
-            if (gap < eff - EPS) {
+            if (gap < eff - eps) {
                 const mx = (std.math.clamp((a.x0 + a.x1) / 2, b.x0, b.x1) + std.math.clamp((b.x0 + b.x1) / 2, a.x0, a.x1)) / 2;
                 const my = (std.math.clamp((a.y0 + a.y1) / 2, b.y0, b.y1) + std.math.clamp((b.y0 + b.y1) / 2, a.y0, a.y1)) / 2;
                 try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = eff, .kind = .pad_pad });
@@ -307,7 +307,7 @@ fn checkDrillRules(
     for (vias) |v| {
         if (v.drill <= 0) continue;
         const ring = (v.dia - v.drill) / 2;
-        if (ring < rules.min_annular - EPS) {
+        if (ring < rules.min_annular - eps) {
             try out.append(arena, .{ .x = v.x, .y = v.y, .gap = ring, .clearance = rules.min_annular, .kind = .annular });
         }
     }
@@ -324,20 +324,20 @@ fn checkDrillRules(
         if (p.drill <= 0 or p.drill_oval) continue;
         if (!p.thru or p.npth) continue; // SMD / non-plated → no plated ring
         const min_dim = @min(p.x1 - p.x0, p.y1 - p.y0);
-        if (min_dim <= VIA_PAD_MAX_MM) continue; // via-scale stitch/thermal/castellated
+        if (min_dim <= via_pad_max_mm) continue; // via-scale stitch/thermal/castellated
         const ring = (min_dim - p.drill) / 2;
-        if (ring < rules.min_annular - EPS) {
+        if (ring < rules.min_annular - eps) {
             try out.append(arena, .{ .x = p.hx, .y = p.hy, .gap = ring, .clearance = rules.min_annular, .kind = .pad_annular });
         }
     }
     // min drill: no drilled hole smaller than the minimum drill (vias + pads).
     for (vias) |v| {
-        if (v.drill > 0 and v.drill < rules.min_drill - EPS) {
+        if (v.drill > 0 and v.drill < rules.min_drill - eps) {
             try out.append(arena, .{ .x = v.x, .y = v.y, .gap = v.drill, .clearance = rules.min_drill, .kind = .min_drill });
         }
     }
     for (pads) |p| {
-        if (p.drill > 0 and p.drill < rules.min_drill - EPS) {
+        if (p.drill > 0 and p.drill < rules.min_drill - eps) {
             try out.append(arena, .{ .x = p.hx, .y = p.hy, .gap = p.drill, .clearance = rules.min_drill, .kind = .min_drill });
         }
     }
@@ -351,10 +351,10 @@ fn checkDrillRules(
             // Centre coincidence still skips a via on its own barrel; the wall
             // gap is the capsule (segment ± radius) distance, so an oval slot is
             // measured end-to-end, not as a point at its centre.
-            if (std.math.hypot(a.x - b.x, a.y - b.y) < EPS) continue;
+            if (std.math.hypot(a.x - b.x, a.y - b.y) < eps) continue;
             const wall = segSegDist(a.x - a.shx, a.y - a.shy, a.x + a.shx, a.y + a.shy, b.x - b.shx, b.y - b.shy, b.x + b.shx, b.y + b.shy);
             const gap = wall - a.drill / 2 - b.drill / 2;
-            if (gap < rules.hole_to_hole - EPS) {
+            if (gap < rules.hole_to_hole - eps) {
                 try out.append(arena, .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2, .gap = gap, .clearance = rules.hole_to_hole, .kind = .hole_hole });
             }
         }
@@ -381,9 +381,9 @@ fn checkBoardEdge(
     for (vias) |v| {
         const vr = v.dia / 2;
         const inset = boardInset(br, poly, v.x, v.y);
-        if (inset < -(vr + STAGING_EXEMPT_MM)) continue; // staging band
+        if (inset < -(vr + staging_exempt_mm)) continue; // staging band
         const gap = inset - vr;
-        if (gap < edge - EPS) {
+        if (gap < edge - eps) {
             try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = edge, .kind = .board_edge });
         }
     }
@@ -405,7 +405,7 @@ fn checkBoardEdge(
             }
         }
         if (poly) |pl| {
-            if (worst > -(hw + STAGING_EXEMPT_MM)) {
+            if (worst > -(hw + staging_exempt_mm)) {
                 if (outline.segCrossesEdge(pl, t.x1, t.y1, t.x2, t.y2)) |hit| {
                     worst = 0;
                     wx = hit[0];
@@ -413,9 +413,9 @@ fn checkBoardEdge(
                 }
             }
         }
-        if (worst < -(hw + STAGING_EXEMPT_MM)) continue; // staging band
+        if (worst < -(hw + staging_exempt_mm)) continue; // staging band
         const gap = worst - hw;
-        if (gap < edge - EPS) {
+        if (gap < edge - eps) {
             try out.append(arena, .{ .x = wx, .y = wy, .gap = gap, .clearance = edge, .kind = .board_edge });
         }
     }
@@ -438,7 +438,7 @@ fn checkCourtyards(
             const cb = optimizer.worldCourtyard(b);
             if (cb.w <= 0 or cb.h <= 0) continue;
             const ov = rectOverlap(ca, cb);
-            if (ov.depth > EPS) {
+            if (ov.depth > eps) {
                 // Assembly concern, not a copper defect → warn, and record the
                 // interpenetration depth in `gap` (clearance stays 0 — there is
                 // no clearance rule; the presentation layer reads this as an
@@ -475,11 +475,11 @@ fn checkMaskSlivers(
             const wgy = @max(a.y0 - b.y1, b.y0 - a.y1) - m2;
             // If either axis alone already clears the rule, the web (≥ that
             // axis' gap) can't be a sliver — cheap reject + correctness.
-            if (wgx >= min_web - EPS or wgy >= min_web - EPS) continue;
+            if (wgx >= min_web - eps or wgy >= min_web - eps) continue;
             // Web width: a diagonal corner gap when separated on both axes,
             // else the one positive axis (overlap on the other).
             const web = if (wgx > 0 and wgy > 0) std.math.hypot(wgx, wgy) else @max(wgx, wgy);
-            if (web > EPS and web < min_web - EPS) {
+            if (web > eps and web < min_web - eps) {
                 const mx = ((a.x0 + a.x1) + (b.x0 + b.x1)) / 4;
                 const my = ((a.y0 + a.y1) + (b.y0 + b.y1)) / 4;
                 try out.append(arena, .{ .x = mx, .y = my, .gap = web, .clearance = min_web, .kind = .mask_sliver, .severity = .warn });
@@ -550,13 +550,13 @@ fn checkTrackWidth(
 ) std.mem.Allocator.Error!void {
     const nrules = placement.rules.net;
     for (tracks) |t| {
-        if (t.width <= EPS) continue; // no recorded width — not a real defect
+        if (t.width <= eps) continue; // no recorded width — not a real defect
         var want = min_width;
         if (t.net >= 0) {
             const ni: usize = @intCast(t.net);
             if (ni < nrules.len and nrules[ni].width > 0) want = nrules[ni].width;
         }
-        if (t.width < want - EPS) {
+        if (t.width < want - eps) {
             try out.append(arena, .{ .x = (t.x1 + t.x2) / 2, .y = (t.y1 + t.y2) / 2, .gap = t.width, .clearance = want, .kind = .track_width });
         }
     }
@@ -576,9 +576,9 @@ fn padOpening(p: PadBox, s_layer: u8, margin: f64) ?[4]f64 {
 /// has no ref-des. Quarter-turned parts use the rotated courtyard half-height.
 fn refDesBox(p: optimizer.Part) ?[4]f64 {
     if (p.ref_des.len == 0) return null;
-    const px = SILK_TEXT_PX_MM;
-    const gh: f64 = @floatFromInt(font.GH);
-    const adv = @as(f64, @floatFromInt(font.GW + 1)) * px;
+    const px = silk_text_px_mm;
+    const gh: f64 = @floatFromInt(font.gh);
+    const adv = @as(f64, @floatFromInt(font.gw + 1)) * px;
     const total_w = @as(f64, @floatFromInt(p.ref_des.len)) * adv - px;
     const height = gh * px;
     const q = quarterRot(p.rot);
@@ -625,7 +625,7 @@ fn segRectHit(ax: f64, ay: f64, bx: f64, by: f64, box: [4]f64) ?[2]f64 {
     const tm = (t0 + t1) / 2;
     const mx = ax + tm * dx;
     const my = ay + tm * dy;
-    if (mx > box[0] + EPS and mx < box[2] - EPS and my > box[1] + EPS and my < box[3] - EPS) return .{ mx, my };
+    if (mx > box[0] + eps and mx < box[2] - eps and my > box[1] + eps and my < box[3] - eps) return .{ mx, my };
     return null;
 }
 
@@ -636,10 +636,10 @@ fn segRectHit(ax: f64, ay: f64, bx: f64, by: f64, box: [4]f64) ?[2]f64 {
 fn circleRectHit(cx: f64, cy: f64, r: f64, box: [4]f64) bool {
     const nx = std.math.clamp(cx, box[0], box[2]);
     const ny = std.math.clamp(cy, box[1], box[3]);
-    if (std.math.hypot(cx - nx, cy - ny) >= r - EPS) return false;
+    if (std.math.hypot(cx - nx, cy - ny) >= r - eps) return false;
     const fx = if (cx - box[0] > box[2] - cx) box[0] else box[2];
     const fy = if (cy - box[1] > box[3] - cy) box[1] else box[3];
-    return std.math.hypot(cx - fx, cy - fy) > r + EPS;
+    return std.math.hypot(cx - fx, cy - fy) > r + eps;
 }
 
 /// Overlap of two AABBs → the centre of the shared region, or null when they
@@ -649,7 +649,7 @@ fn boxOverlap(a: [4]f64, b: [4]f64) ?[2]f64 {
     const oy0 = @max(a[1], b[1]);
     const ox1 = @min(a[2], b[2]);
     const oy1 = @min(a[3], b[3]);
-    if (ox1 <= ox0 + EPS or oy1 <= oy0 + EPS) return null;
+    if (ox1 <= ox0 + eps or oy1 <= oy0 + eps) return null;
     return .{ (ox0 + ox1) / 2, (oy0 + oy1) / 2 };
 }
 
@@ -744,7 +744,7 @@ fn rectOverlap(a: optimizer.BoardRect, b: optimizer.BoardRect) struct { depth: f
 /// writes it off as staged (parked in the off-board staging band) rather
 /// than flagging it — copper just past the edge IS an error (it would be
 /// routed off the board), copper centimetres away is a workflow state.
-pub const STAGING_EXEMPT_MM: f64 = 10.0;
+pub const staging_exempt_mm: f64 = 10.0;
 
 /// Signed distance from (x,y) to the nearest board-outline edge — positive
 /// inside the rectangle, negative outside.
@@ -770,7 +770,7 @@ fn segPointDist(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) f64 {
     const dx = bx - ax;
     const dy = by - ay;
     const len2 = dx * dx + dy * dy;
-    if (len2 < EPS) return std.math.hypot(px - ax, py - ay);
+    if (len2 < eps) return std.math.hypot(px - ax, py - ay);
     const t = std.math.clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1);
     return std.math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }

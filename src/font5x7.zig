@@ -10,25 +10,25 @@
 const std = @import("std");
 
 /// Glyph cell dimensions in font pixels.
-pub const GW: u32 = 5;
-pub const GH: u32 = 7;
+pub const gw: u32 = 5;
+pub const gh: u32 = 7;
 
 /// Pack a 7-row visual grid into 5 column bytes (bit r = row r, top..bottom).
-fn pack(rows: [GH][]const u8) [GW]u8 {
-    var out = [_]u8{0} ** GW;
+fn pack(rows: [gh][]const u8) [gw]u8 {
+    var out = [_]u8{0} ** gw;
     for (rows, 0..) |row, r| {
         var c: usize = 0;
-        while (c < GW) : (c += 1) {
+        while (c < gw) : (c += 1) {
             if (c < row.len and row[c] == '#') out[c] |= (@as(u8, 1) << @as(u3, @intCast(r)));
         }
     }
     return out;
 }
 
-const GlyphDef = struct { c: u8, r: [GH][]const u8 };
+const GlyphDef = struct { c: u8, r: [gh][]const u8 };
 
 /// Visual glyph definitions. Each is a 7×5 grid.
-const GLYPHS = [_]GlyphDef{
+const glyph_rows = [_]GlyphDef{
     .{ .c = '0', .r = .{ " ### ", "#   #", "#  ##", "# # #", "##  #", "#   #", " ### " } },
     .{ .c = '1', .r = .{ "  #  ", " ##  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### " } },
     .{ .c = '2', .r = .{ " ### ", "#   #", "    #", "   # ", "  #  ", " #   ", "#####" } },
@@ -112,16 +112,16 @@ const GLYPHS = [_]GlyphDef{
 
 /// Char → 5 column bytes, built once at comptime. Index 0 (and any undefined
 /// char) is blank.
-const TABLE: [128][GW]u8 = blk: {
+const glyph_table: [128][gw]u8 = blk: {
     @setEvalBranchQuota(100_000);
-    var t = [_][GW]u8{[_]u8{0} ** GW} ** 128;
-    for (GLYPHS) |g| t[g.c] = pack(g.r);
+    var t = [_][gw]u8{[_]u8{0} ** gw} ** 128;
+    for (glyph_rows) |g| t[g.c] = pack(g.r);
     break :blk t;
 };
 
 /// Column bitmap for `c` (blank for chars outside the table).
-pub fn cols(c: u8) [GW]u8 {
-    return if (c < 128) TABLE[c] else TABLE[0];
+pub fn cols(c: u8) [gw]u8 {
+    return if (c < 128) glyph_table[c] else glyph_table[0];
 }
 
 /// A board-level silkscreen text label placed by the viewer's Text tool and
@@ -144,7 +144,7 @@ pub const BoardText = struct {
 
 /// Default cap height (mm) for a new silkscreen text — matches the ~1 mm
 /// ref-des height (GH * 0.15 mm pixel pitch), the KiCad stock legend size.
-pub const DEFAULT_SIZE_MM: f64 = @as(f64, @floatFromInt(GH)) * 0.15;
+pub const default_size_mm: f64 = @as(f64, @floatFromInt(gh)) * 0.15;
 
 /// One lit horizontal run in a glyph row: pixel columns [c0, c1] (inclusive)
 /// are lit on row `r`. `c0 == c1` is a single lit pixel (a dot).
@@ -157,16 +157,16 @@ pub const Run = struct { r: u5, c0: u5, c1: u5 };
 pub fn glyphRuns(ch: u8, comptime E: type, ctx: anytype, emit: fn (@TypeOf(ctx), Run) E!void) E!void {
     const g = cols(ch);
     var r: u5 = 0;
-    while (r < GH) : (r += 1) {
+    while (r < gh) : (r += 1) {
         const bit = @as(u8, 1) << @as(u3, @intCast(r));
         var c: u5 = 0;
-        while (c < GW) {
+        while (c < gw) {
             if (g[c] & bit == 0) {
                 c += 1;
                 continue;
             }
             var e = c;
-            while (e + 1 < GW and g[e + 1] & bit != 0) e += 1;
+            while (e + 1 < gw and g[e + 1] & bit != 0) e += 1;
             try emit(ctx, .{ .r = r, .c0 = c, .c1 = e });
             c = e + 1;
         }
@@ -184,9 +184,9 @@ test "font packs a known glyph and leaves unknowns blank" {
     try std.testing.expect(cols('T')[2] & (1 << 6) != 0);
     // Lowercase now has its own glyphs (not blank); space and truly undefined
     // chars still render blank.
-    try std.testing.expect(!std.meta.eql([_]u8{0} ** GW, cols('a')));
-    try std.testing.expectEqual([_]u8{0} ** GW, cols(' '));
-    try std.testing.expectEqual([_]u8{0} ** GW, cols('\t'));
+    try std.testing.expect(!std.meta.eql([_]u8{0} ** gw, cols('a')));
+    try std.testing.expectEqual([_]u8{0} ** gw, cols(' '));
+    try std.testing.expectEqual([_]u8{0} ** gw, cols('\t'));
 }
 
 test "glyphRuns enumerates a glyph's lit horizontal runs" {

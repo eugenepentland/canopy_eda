@@ -33,32 +33,32 @@ const docgen = @import("../docgen.zig");
 const page_cache = @import("page_cache.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
-const NAME_FIELD_PREFIX = "{\"name\":";
-const REF_DES_FIELD_PREFIX = "{\"ref_des\":";
-const FUNCTION_FIELD = ",\"function\":";
-const KEY_COMPONENTS = "components";
-const KEY_FOOTPRINTS = "footprints";
-const ERR_NOT_DESIGN = "error: not a design";
-const ERR_BUILD_FAILED = "error: build failed";
-const ERR_LINE_TEMPLATE = "error: {s}";
-const VERSION_SNAPSHOT_TEMPLATE = "{{\"ok\":true,\"version\":{d},\"snapshot\":";
-const JSON_NET_KEY = ",\"net\":";
-const JSON_COMPONENT_KEY = ",\"component\":";
-const JSON_VALUE_KEY = ",\"value\":";
-const JSON_MANUFACTURER_KEY = ",\"manufacturer\":";
-const JSON_DESCRIPTION_KEY = ",\"description\":";
-const JSON_ERR_OPEN = "{\"ok\":false,\"error\":";
+const name_field_prefix = "{\"name\":";
+const ref_des_field_prefix = "{\"ref_des\":";
+const function_field = ",\"function\":";
+const key_components = "components";
+const key_footprints = "footprints";
+const err_not_design = "error: not a design";
+const err_build_failed = "error: build failed";
+const err_line_template = "error: {s}";
+const version_snapshot_template = "{{\"ok\":true,\"version\":{d},\"snapshot\":";
+const json_net_key = ",\"net\":";
+const json_component_key = ",\"component\":";
+const json_value_key = ",\"value\":";
+const json_manufacturer_key = ",\"manufacturer\":";
+const json_description_key = ",\"description\":";
+const json_err_open = "{\"ok\":false,\"error\":";
 // Shared opening of the part-search envelopes (search_components / resolve_mpn /
 // check_stock): `{"ok":true,"query":<q>` then `,"count":N,"results":[`.
-const JSON_OK_QUERY_OPEN = "{\"ok\":true,\"query\":";
-const JSON_COUNT_RESULTS_OPEN = ",\"count\":{d},\"results\":[";
-const KEY_PART_NUMBER = "part_number";
+const json_ok_query_open = "{\"ok\":true,\"query\":";
+const json_count_results_open = ",\"count\":{d},\"results\":[";
+const key_part_number = "part_number";
 // search_components `limit` arg: default and hard cap.
-const SEARCH_LIMIT_DEFAULT: usize = 10;
-const SEARCH_LIMIT_MAX: u64 = 50;
+const search_limit_default: usize = 10;
+const search_limit_max: u64 = 50;
 // check_stock default is smaller — each result carries full per-packaging price
 // ladders, so a handful of exact-ish matches is the useful payload (cap shared).
-const STOCK_LIMIT_DEFAULT: usize = 5;
+const stock_limit_default: usize = 5;
 
 const EvalError = @import("../eval/evaluator.zig").EvalError;
 const RenderError = render_json.RenderError;
@@ -197,7 +197,7 @@ pub fn call(
     if (std.mem.eql(u8, tool_name, "get_pcb_layout_image")) {
         const ok = toolGetPcbImage(allocator, project_dir, args_val, out) catch |err| {
             const w = out.writer(allocator);
-            w.print(ERR_LINE_TEMPLATE, .{@errorName(err)}) catch |e| {
+            w.print(err_line_template, .{@errorName(err)}) catch |e| {
                 log.warn("failed to write error msg: {s}", .{@errorName(e)});
             };
             return .{ .ok = false };
@@ -207,7 +207,7 @@ pub fn call(
     const ok = callInner(allocator, project_dir, tool_name, args_val, out) catch |err| {
         const msg = @errorName(err);
         const w = out.writer(allocator);
-        w.print(ERR_LINE_TEMPLATE, .{msg}) catch |e| {
+        w.print(err_line_template, .{msg}) catch |e| {
             log.warn("failed to write error msg: {s}", .{@errorName(e)});
         };
         return .{ .ok = false };
@@ -496,7 +496,7 @@ fn toolListDesigns(allocator: std.mem.Allocator, project_dir: []const u8, w: any
     try w.writeAll("[");
     for (summaries, 0..) |s, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll(NAME_FIELD_PREFIX);
+        try w.writeAll(name_field_prefix);
         try json_writer.writeString(w, s.name);
         try w.writeAll(",\"title\":");
         try json_writer.writeString(w, s.title);
@@ -523,10 +523,10 @@ fn toolListLibrary(allocator: std.mem.Allocator, project_dir: []const u8, args_v
     };
     try w.writeAll("{");
     const kinds = [_]struct { field: []const u8, sub: []const u8 }{
-        .{ .field = KEY_COMPONENTS, .sub = KEY_COMPONENTS },
+        .{ .field = key_components, .sub = key_components },
         .{ .field = "modules", .sub = "modules" },
         .{ .field = "pinouts", .sub = "pinouts" },
-        .{ .field = KEY_FOOTPRINTS, .sub = KEY_FOOTPRINTS },
+        .{ .field = key_footprints, .sub = key_footprints },
     };
     for (kinds, 0..) |k, i| {
         if (i > 0) try w.writeAll(",");
@@ -546,7 +546,7 @@ fn toolListHistory(allocator: std.mem.Allocator, project_dir: []const u8, args_v
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"id\":");
         try json_writer.writeString(w, s.id);
-        try w.writeAll(JSON_DESCRIPTION_KEY);
+        try w.writeAll(json_description_key);
         if (s.description) |d| try json_writer.writeString(w, d) else try w.writeAll("null");
         try w.writeAll("}");
     }
@@ -697,7 +697,7 @@ fn writeErcViolationJson(w: anytype, v: erc_mod.Violation) !void {
         try json_writer.writeString(w, v.ref_des);
     }
     if (v.net.len > 0) {
-        try w.writeAll(JSON_NET_KEY);
+        try w.writeAll(json_net_key);
         try json_writer.writeString(w, v.net);
     }
     try w.writeAll("}");
@@ -723,9 +723,9 @@ fn writeModuleSummary(
     try w.writeAll(",\"ports\":[");
     for (block.ports, 0..) |p, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll(NAME_FIELD_PREFIX);
+        try w.writeAll(name_field_prefix);
         try json_writer.writeString(w, p.name);
-        try w.writeAll(JSON_NET_KEY);
+        try w.writeAll(json_net_key);
         try json_writer.writeString(w, p.net);
         try w.writeAll(",\"dir\":");
         try json_writer.writeString(w, p.direction);
@@ -734,18 +734,18 @@ fn writeModuleSummary(
     try w.writeAll("],\"instances\":[");
     for (block.instances, 0..) |inst, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll(REF_DES_FIELD_PREFIX);
+        try w.writeAll(ref_des_field_prefix);
         try json_writer.writeString(w, inst.ref_des);
-        try w.writeAll(JSON_COMPONENT_KEY);
+        try w.writeAll(json_component_key);
         try json_writer.writeString(w, inst.component);
-        try w.writeAll(JSON_VALUE_KEY);
+        try w.writeAll(json_value_key);
         try json_writer.writeString(w, inst.value);
         try w.writeAll("}");
     }
     try w.writeAll("],\"nets\":[");
     for (block.nets, 0..) |net, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll(NAME_FIELD_PREFIX);
+        try w.writeAll(name_field_prefix);
         try json_writer.writeString(w, net.name);
         try w.print(",\"pin_count\":{d}}}", .{net.pins.len});
     }
@@ -886,7 +886,7 @@ fn toolRestoreVersion(allocator: std.mem.Allocator, project_dir: []const u8, arg
     const id = requireString(args_val, "id") orelse return missingArg(out, allocator, "id");
     const result = edit.restoreDesignCore(allocator, project_dir, name, id) catch |err| return editErrorMsg(out, allocator, err);
     const w = out.writer(allocator);
-    try w.print(VERSION_SNAPSHOT_TEMPLATE, .{result.version});
+    try w.print(version_snapshot_template, .{result.version});
     if (result.snapshot) |s| try json_writer.writeString(w, s) else try w.writeAll("null");
     try w.writeAll("}");
     return true;
@@ -976,7 +976,7 @@ fn toolBuild(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?s
 /// library names on success, or `{ok:false,error}` if search, download
 /// (expired cookie), or import fails.
 fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const part_number = requireString(args_val, KEY_PART_NUMBER) orelse return missingArg(out, allocator, KEY_PART_NUMBER);
+    const part_number = requireString(args_val, key_part_number) orelse return missingArg(out, allocator, key_part_number);
     const manufacturer = optionalString(args_val, "manufacturer");
     const w = out.writer(allocator);
 
@@ -1003,7 +1003,7 @@ fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, 
 
     try w.writeAll("{\"ok\":true,\"part_name\":");
     try json_writer.writeString(w, dl.part_name);
-    try w.writeAll(JSON_MANUFACTURER_KEY);
+    try w.writeAll(json_manufacturer_key);
     try json_writer.writeString(w, dl.manufacturer);
     try w.writeAll(",\"samac_id\":");
     try json_writer.writeString(w, dl.samac_id);
@@ -1031,7 +1031,7 @@ fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, 
 /// server-side, never over MCP. The success envelope's `source` says which
 /// provider supplied it; when both fail, `{ok:false,error,cse_error,digikey_error}`.
 fn toolDownloadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const part_number = requireString(args_val, KEY_PART_NUMBER) orelse return missingArg(out, allocator, KEY_PART_NUMBER);
+    const part_number = requireString(args_val, key_part_number) orelse return missingArg(out, allocator, key_part_number);
     const manufacturer = optionalString(args_val, "manufacturer");
     const w = out.writer(allocator);
 
@@ -1049,7 +1049,7 @@ fn toolDownloadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, 
         .unavailable => |m| dk_msg = m,
     }
 
-    try w.writeAll(JSON_ERR_OPEN);
+    try w.writeAll(json_err_open);
     try json_writer.writeString(w, "no datasheet found via Component Search Engine or DigiKey");
     try w.writeAll(",\"cse_error\":");
     try json_writer.writeString(w, cse_msg);
@@ -1126,7 +1126,7 @@ fn finishDatasheet(
     try json_writer.writeString(w, stored.name);
     try w.print(",\"size\":{d},\"part\":", .{stored.size});
     try json_writer.writeString(w, part);
-    try w.writeAll(JSON_MANUFACTURER_KEY);
+    try w.writeAll(json_manufacturer_key);
     try json_writer.writeString(w, manufacturer);
     try w.writeAll(",\"datasheet_url\":");
     try json_writer.writeString(w, url);
@@ -1143,7 +1143,7 @@ fn finishDatasheet(
 /// or `{ok:false,error}` on a network/auth failure.
 fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const query = requireString(args_val, "query") orelse return missingArg(out, allocator, "query");
-    const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, SEARCH_LIMIT_MAX)) else SEARCH_LIMIT_DEFAULT;
+    const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, search_limit_max)) else search_limit_default;
     const w = out.writer(allocator);
 
     const sid = config.cseConnectSid(allocator) orelse {
@@ -1152,20 +1152,20 @@ fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value,
     };
 
     const hits = component_search.searchComponents(allocator, query, sid, limit) catch |err| {
-        try w.writeAll(JSON_ERR_OPEN);
+        try w.writeAll(json_err_open);
         try json_writer.writeString(w, component_search.searchErrorMessage(err));
         try w.writeAll("}");
         return false;
     };
 
-    try w.writeAll(JSON_OK_QUERY_OPEN);
+    try w.writeAll(json_ok_query_open);
     try json_writer.writeString(w, query);
-    try w.print(JSON_COUNT_RESULTS_OPEN, .{hits.len});
+    try w.print(json_count_results_open, .{hits.len});
     for (hits, 0..) |h, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"part_number\":");
         try json_writer.writeString(w, h.part_name);
-        try w.writeAll(JSON_MANUFACTURER_KEY);
+        try w.writeAll(json_manufacturer_key);
         try json_writer.writeString(w, h.manufacturer);
         try w.print(",\"has_model\":{s},\"has_datasheet\":{s}}}", .{
             if (h.samac_id != null) "true" else "false",
@@ -1186,27 +1186,27 @@ fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value,
 /// datasheet_url,product_url,digikey_part_number}]}` or `{ok:false,error}`.
 fn toolResolveMpn(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const query = requireString(args_val, "query") orelse return missingArg(out, allocator, "query");
-    const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, SEARCH_LIMIT_MAX)) else SEARCH_LIMIT_DEFAULT;
+    const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, search_limit_max)) else search_limit_default;
     const w = out.writer(allocator);
 
     const creds = (try digikeyCreds(allocator, w)) orelse return false;
     const products = digikey.resolveMpn(allocator, creds.base, creds.client_id, creds.client_secret, query, limit) catch |err| {
-        try w.writeAll(JSON_ERR_OPEN);
+        try w.writeAll(json_err_open);
         try json_writer.writeString(w, digikey.searchErrorMessage(err));
         try w.writeAll("}");
         return false;
     };
 
-    try w.writeAll(JSON_OK_QUERY_OPEN);
+    try w.writeAll(json_ok_query_open);
     try json_writer.writeString(w, query);
-    try w.print(JSON_COUNT_RESULTS_OPEN, .{products.len});
+    try w.print(json_count_results_open, .{products.len});
     for (products, 0..) |p, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"mpn\":");
         try json_writer.writeString(w, p.mpn);
-        try w.writeAll(JSON_MANUFACTURER_KEY);
+        try w.writeAll(json_manufacturer_key);
         try json_writer.writeString(w, p.manufacturer);
-        try w.writeAll(JSON_DESCRIPTION_KEY);
+        try w.writeAll(json_description_key);
         try json_writer.writeString(w, p.description);
         try w.writeAll(",\"datasheet_url\":");
         try writeOptString(w, p.datasheet_url);
@@ -1236,27 +1236,27 @@ fn toolResolveMpn(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: 
 /// total_price}]}]}]}` or `{ok:false,error}`.
 fn toolCheckStock(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const query = requireString(args_val, "query") orelse return missingArg(out, allocator, "query");
-    const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, SEARCH_LIMIT_MAX)) else STOCK_LIMIT_DEFAULT;
+    const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, search_limit_max)) else stock_limit_default;
     const w = out.writer(allocator);
 
     const creds = (try digikeyCreds(allocator, w)) orelse return false;
     const products = digikey.resolveMpn(allocator, creds.base, creds.client_id, creds.client_secret, query, limit) catch |err| {
-        try w.writeAll(JSON_ERR_OPEN);
+        try w.writeAll(json_err_open);
         try json_writer.writeString(w, digikey.searchErrorMessage(err));
         try w.writeAll("}");
         return false;
     };
 
-    try w.writeAll(JSON_OK_QUERY_OPEN);
+    try w.writeAll(json_ok_query_open);
     try json_writer.writeString(w, query);
-    try w.print(JSON_COUNT_RESULTS_OPEN, .{products.len});
+    try w.print(json_count_results_open, .{products.len});
     for (products, 0..) |p, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"mpn\":");
         try json_writer.writeString(w, p.mpn);
-        try w.writeAll(JSON_MANUFACTURER_KEY);
+        try w.writeAll(json_manufacturer_key);
         try json_writer.writeString(w, p.manufacturer);
-        try w.writeAll(JSON_DESCRIPTION_KEY);
+        try w.writeAll(json_description_key);
         try json_writer.writeString(w, p.description);
         try w.writeAll(",\"product_status\":");
         try writeOptString(w, p.product_status);
@@ -1606,9 +1606,9 @@ pub fn listLibrarySubdir(
 
 /// Emit one `{"name":..,"description":..}` library entry.
 fn writeLibEntry(w: anytype, name: []const u8, description: ?[]const u8) !void {
-    try w.writeAll(NAME_FIELD_PREFIX);
+    try w.writeAll(name_field_prefix);
     try json_writer.writeString(w, name);
-    try w.writeAll(JSON_DESCRIPTION_KEY);
+    try w.writeAll(json_description_key);
     if (description) |d| try json_writer.writeString(w, d) else try w.writeAll("\"\"");
     try w.writeAll("}");
 }
@@ -1637,11 +1637,11 @@ fn runChecks(
     defer eval.deinit();
     const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
         error.NotADesign => {
-            try w.writeAll(ERR_NOT_DESIGN);
+            try w.writeAll(err_not_design);
             return false;
         },
         else => {
-            try w.writeAll(ERR_BUILD_FAILED);
+            try w.writeAll(err_build_failed);
             return false;
         },
     };
@@ -1825,11 +1825,11 @@ pub fn listInstances(
     defer eval.deinit();
     const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
         error.NotADesign => {
-            try w.writeAll(ERR_NOT_DESIGN);
+            try w.writeAll(err_not_design);
             return false;
         },
         else => {
-            try w.writeAll(ERR_BUILD_FAILED);
+            try w.writeAll(err_build_failed);
             return false;
         },
     };
@@ -1838,15 +1838,15 @@ pub fn listInstances(
     try w.writeAll("{\"instances\":[");
     for (block.instances, 0..) |inst, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll(REF_DES_FIELD_PREFIX);
+        try w.writeAll(ref_des_field_prefix);
         try json_writer.writeString(w, inst.ref_des);
         try w.writeAll(",\"label\":");
         try json_writer.writeString(w, inst.label);
-        try w.writeAll(JSON_COMPONENT_KEY);
+        try w.writeAll(json_component_key);
         try json_writer.writeString(w, inst.component);
         try w.writeAll(",\"symbol\":");
         try json_writer.writeString(w, inst.symbol);
-        try w.writeAll(JSON_VALUE_KEY);
+        try w.writeAll(json_value_key);
         try json_writer.writeString(w, inst.value);
 
         // Pin count: prefer explicit parts if present (multi-part symbol);
@@ -1878,11 +1878,11 @@ pub fn listFreePins(
     defer eval.deinit();
     const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
         error.NotADesign => {
-            try w.writeAll(ERR_NOT_DESIGN);
+            try w.writeAll(err_not_design);
             return false;
         },
         else => {
-            try w.writeAll(ERR_BUILD_FAILED);
+            try w.writeAll(err_build_failed);
             return false;
         },
     };
@@ -1940,7 +1940,7 @@ pub fn listFreePins(
         first = false;
         try w.writeAll("{\"pin\":");
         try json_writer.writeString(w, pin_id);
-        try w.writeAll(FUNCTION_FIELD);
+        try w.writeAll(function_field);
         try json_writer.writeString(w, fname);
         try w.print(",\"category\":\"{s}\"}}", .{categoryName(cat)});
     }
@@ -1957,9 +1957,9 @@ pub fn listFreePins(
         first2 = false;
         try w.writeAll("{\"pin\":");
         try json_writer.writeString(w, pin_id);
-        try w.writeAll(FUNCTION_FIELD);
+        try w.writeAll(function_field);
         try json_writer.writeString(w, fname);
-        try w.writeAll(JSON_NET_KEY);
+        try w.writeAll(json_net_key);
         try json_writer.writeString(w, net_name);
         try w.print(",\"category\":\"{s}\"}}", .{categoryName(cat)});
     }
@@ -1980,11 +1980,11 @@ pub fn getNet(
     defer eval.deinit();
     const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
         error.NotADesign => {
-            try w.writeAll(ERR_NOT_DESIGN);
+            try w.writeAll(err_not_design);
             return false;
         },
         else => {
-            try w.writeAll(ERR_BUILD_FAILED);
+            try w.writeAll(err_build_failed);
             return false;
         },
     };
@@ -2003,7 +2003,7 @@ pub fn getNet(
     }
     const net = target.?;
 
-    try w.writeAll(NAME_FIELD_PREFIX);
+    try w.writeAll(name_field_prefix);
     try json_writer.writeString(w, net.name);
     try w.writeAll(",\"pins\":[");
 
@@ -2031,11 +2031,11 @@ pub fn getNet(
             }
             break;
         }
-        try w.writeAll(REF_DES_FIELD_PREFIX);
+        try w.writeAll(ref_des_field_prefix);
         try json_writer.writeString(w, p.ref_des);
         try w.writeAll(",\"pin\":");
         try json_writer.writeString(w, p.pin);
-        try w.writeAll(FUNCTION_FIELD);
+        try w.writeAll(function_field);
         try json_writer.writeString(w, fname);
         try w.writeAll("}");
     }
@@ -2048,11 +2048,11 @@ pub fn getNet(
             if (!std.mem.eql(u8, inst.ref_des, e.key_ptr.*)) continue;
             if (!first) try w.writeAll(",");
             first = false;
-            try w.writeAll(REF_DES_FIELD_PREFIX);
+            try w.writeAll(ref_des_field_prefix);
             try json_writer.writeString(w, inst.ref_des);
-            try w.writeAll(JSON_COMPONENT_KEY);
+            try w.writeAll(json_component_key);
             try json_writer.writeString(w, inst.component);
-            try w.writeAll(JSON_VALUE_KEY);
+            try w.writeAll(json_value_key);
             try json_writer.writeString(w, inst.value);
             try w.writeAll("}");
             break;
@@ -2070,7 +2070,7 @@ fn missingArg(out: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []cons
 
 fn editErrorMsg(out: *std.ArrayList(u8), allocator: std.mem.Allocator, err: edit.EditError) !bool {
     const w = out.writer(allocator);
-    try w.print(ERR_LINE_TEMPLATE, .{@errorName(err)});
+    try w.print(err_line_template, .{@errorName(err)});
     return false;
 }
 

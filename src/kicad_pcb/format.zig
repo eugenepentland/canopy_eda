@@ -6,11 +6,11 @@ const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 
 /// `(property "Reference" "U1" …)` — the visible ref-des.
-pub const PROP_REFERENCE = "Reference";
+pub const prop_reference = "Reference";
 /// `(property "Value" "100nF" …)` — the visible value text.
-pub const PROP_VALUE = "Value";
+pub const prop_value = "Value";
 /// `(property "canopy_uuid" "<uuid>" …)` — our cross-sync identity tag.
-pub const PROP_CANOPY_UUID = "canopy_uuid";
+pub const prop_canopy_uuid = "canopy_uuid";
 
 /// Extract a pad's number/name token (slot 1 of a `(pad …)` form) as text,
 /// regardless of how it was serialised. Modern `.sexp`-generated footprints

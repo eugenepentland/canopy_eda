@@ -8,7 +8,7 @@ const std = @import("std");
 const deflate = @import("deflate.zig");
 
 /// 8-byte PNG file signature.
-const SIGNATURE = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+const png_signature = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
 
 /// Errors `encodeRgb` (and downstream rasterizer encode paths) can produce.
 /// `EmptyImage` guards a degenerate 0×N / N×0 canvas — the IHDR spec forbids a
@@ -63,7 +63,7 @@ pub fn encodeRgb(alloc: std.mem.Allocator, width: u32, height: u32, rgb: []const
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
     const w = &out.writer;
-    try w.writeAll(&SIGNATURE);
+    try w.writeAll(&png_signature);
 
     var ihdr: [13]u8 = undefined;
     std.mem.writeInt(u32, ihdr[0..4], width, .big);
@@ -112,7 +112,7 @@ test "encodeRgb produces a decodable 2x2 PNG" {
     defer alloc.free(png);
 
     try std.testing.expect(png.len > 8);
-    try std.testing.expectEqualSlices(u8, &SIGNATURE, png[0..8]);
+    try std.testing.expectEqualSlices(u8, &png_signature, png[0..8]);
     // IHDR length (13) then "IHDR".
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 13 }, png[8..12]);
     try std.testing.expectEqualSlices(u8, "IHDR", png[12..16]);
@@ -147,7 +147,7 @@ test "encodeRgb round-trips and compresses a larger patterned image" {
     }
     const png = try encodeRgb(alloc, w, h, buf);
     defer alloc.free(png);
-    try std.testing.expectEqualSlices(u8, &SIGNATURE, png[0..8]);
+    try std.testing.expectEqualSlices(u8, &png_signature, png[0..8]);
     try expectRoundTrip(alloc, png, w, h, buf);
     // The matcher should crush this well under half the raw size.
     try std.testing.expect(png.len < @as(usize, w) * h * 3 / 2);

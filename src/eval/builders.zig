@@ -24,12 +24,12 @@ const Group = env_mod.Group;
 const SubBlock = env_mod.SubBlock;
 
 // ── Constants ─────────────────────────────────────────────────────
-const ASSERT_RANGE_ARITY: usize = 5;
+const assert_range_arity: usize = 5;
 /// Sanity cap on the index count a single `(bus-port …)` form may expand to —
 /// mirrors `design_block.MAX_BUS_EXPANSION`. Guards against a design-file typo
 /// (or hostile input) turning a huge index range into a runaway allocation the
 /// HTTP server evaluates on every push/page-load.
-const MAX_BUS_PORT_EXPANSION: i64 = 4096;
+const max_bus_port_expansion: i64 = 4096;
 
 /// The head atom of a list form, for warning messages — `"?"` when the
 /// node isn't a list or its head isn't an atom.
@@ -237,8 +237,8 @@ fn parseBusPortHeader(self: *Evaluator, bp_children: []const Node, env: *Env) Ev
     // Reject NaN/±inf/out-of-range before narrowing (UB in ReleaseSmall).
     const start_i = numeric.checkedInt(i64, start_f) orelse return null;
     const end_i = numeric.checkedInt(i64, end_f) orelse return null;
-    if (end_i - start_i >= MAX_BUS_PORT_EXPANSION) {
-        self.warnFmt(bp_children[0].span, "(bus-port …) index range {d}..{d} exceeds the {d}-lane cap — ignored", .{ start_i, end_i, MAX_BUS_PORT_EXPANSION });
+    if (end_i - start_i >= max_bus_port_expansion) {
+        self.warnFmt(bp_children[0].span, "(bus-port …) index range {d}..{d} exceeds the {d}-lane cap — ignored", .{ start_i, end_i, max_bus_port_expansion });
         return null;
     }
 
@@ -306,7 +306,7 @@ pub fn parseSectionCalc(self: *Evaluator, sf_children: []const Node, env: *env_m
                 if (var_val.asNumber()) |n| try calc_results.append(self.allocator, .{ .name = var_name, .value = n });
             }
         } else if (std.mem.eql(u8, cf_name, "assert-range")) {
-            if (cf_children.len >= ASSERT_RANGE_ARITY) {
+            if (cf_children.len >= assert_range_arity) {
                 const val = try self.evalNode(cf_children[1], &calc_env);
                 const lo = try self.evalNode(cf_children[2], &calc_env);
                 const hi = try self.evalNode(cf_children[3], &calc_env);

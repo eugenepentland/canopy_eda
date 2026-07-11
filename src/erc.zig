@@ -20,15 +20,15 @@ const Net = env_mod.Net;
 pub const Severity = checks.Severity;
 
 // ── Constants ─────────────────────────────────────────────────────
-const VOLTAGE_MISMATCH_TOLERANCE_V: f64 = 0.01;
-const PERCENT_MULTIPLIER: f64 = 100.0;
+const voltage_mismatch_tolerance_v: f64 = 0.01;
+const percent_multiplier: f64 = 100.0;
 /// Below this many diagram blocks the grouping rule doesn't apply — a tiny
 /// power/module design (a buck + its passives) reads fine without `(group …)`
 /// regions, so only real boards get flagged. Mirrors the "≥5 blocks" scope.
-const GROUP_COVERAGE_MIN_BLOCKS: u32 = 5;
+const group_coverage_min_blocks: u32 = 5;
 /// How many ungrouped block names to spell out in the violation before
 /// summarising the rest as "+N more".
-const GROUP_COVERAGE_NAME_LIMIT: usize = 6;
+const group_coverage_name_limit: usize = 6;
 
 /// Tag identifying which electrical-rule check produced a `Violation`. The
 /// review UI groups findings by this kind so users can scan all
@@ -233,10 +233,10 @@ fn checkComponentGrouping(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const cov = lod.groupCoverage(arena, &graph) catch return;
-    if (cov.total < GROUP_COVERAGE_MIN_BLOCKS or cov.ungrouped.len == 0) return;
+    if (cov.total < group_coverage_min_blocks or cov.ungrouped.len == 0) return;
 
     // Spell out the first few offenders, then summarise the tail.
-    const shown = @min(cov.ungrouped.len, GROUP_COVERAGE_NAME_LIMIT);
+    const shown = @min(cov.ungrouped.len, group_coverage_name_limit);
     var names: std.ArrayList(u8) = .empty;
     for (cov.ungrouped[0..shown], 0..) |label, i| {
         if (i > 0) names.appendSlice(arena, ", ") catch return;
@@ -987,7 +987,7 @@ fn checkMissingDecoupling(
 /// they're exempt from the per-pin binding requirement. Mirrors
 /// `module_policy.BULK_FARADS` (kept local to avoid an eval→placement pub-API
 /// dependency; both are stable physical constants).
-const DECOUPLE_BULK_FARADS: f64 = 4.7e-6;
+const decouple_bulk_farads: f64 = 4.7e-6;
 
 /// Require every HF decoupling cap on a *multi-supply-pad* rail to declare which
 /// IC pin it serves — the netlist-level twin of the `decouple-unbound` layout
@@ -1044,7 +1044,7 @@ fn checkBlockDecouplingBinding(
         if (cap.decouple_pin.len > 0 or cap.decouple_rail) continue;
         if (decouplePinFromOrigin(cap.origin_key) != null) continue;
         // Bulk reservoirs serve the whole rail by nature → exempt.
-        if (capFarads(cap.value) >= DECOUPLE_BULK_FARADS) continue;
+        if (capFarads(cap.value) >= decouple_bulk_farads) continue;
 
         // Resolve the cap's legs: exactly one ground net + one non-ground
         // "power-leg" net. Anything else (no ground leg, two distinct power
@@ -1658,7 +1658,7 @@ test "no-connect check tiers floating pads and honours (nc-ok …)" {
 
 // ── decoupling-binding requirement tests ─────────────────────────────
 
-const TEST_CAP = "cap-0402";
+const test_cap = "cap-0402";
 
 fn dcInst(ref: []const u8, comp: []const u8, value: []const u8) Instance {
     return .{ .ref_des = ref, .component = comp, .value = value, .footprint = "", .symbol = "" };
@@ -1679,13 +1679,13 @@ fn countKind(violations: []const Violation, kind: ViolationKind) usize {
 fn makeDecoupleTestBlock(alloc: std.mem.Allocator) !DesignBlock {
     const insts = try alloc.alloc(Instance, 6);
     insts[0] = dcInst("U1", "somechip", "");
-    insts[1] = dcInst("C1", TEST_CAP, "100nF"); // unbound → FLAG
-    insts[2] = dcInst("C2", TEST_CAP, "100nF"); // bound via (decouples "U1" 1)
+    insts[1] = dcInst("C1", test_cap, "100nF"); // unbound → FLAG
+    insts[2] = dcInst("C2", test_cap, "100nF"); // bound via (decouples "U1" 1)
     insts[2].decouple_pin = "1";
-    insts[3] = dcInst("C3", TEST_CAP, "10uF"); // bulk reservoir → exempt
-    insts[4] = dcInst("C4", TEST_CAP, "100nF"); // (decouples rail) → exempt
+    insts[3] = dcInst("C3", test_cap, "10uF"); // bulk reservoir → exempt
+    insts[4] = dcInst("C4", test_cap, "100nF"); // (decouples rail) → exempt
     insts[4].decouple_rail = true;
-    insts[5] = dcInst("C5", TEST_CAP, "100nF"); // per-pin shorthand pad in origin_key → exempt
+    insts[5] = dcInst("C5", test_cap, "100nF"); // per-pin shorthand pad in origin_key → exempt
     insts[5].origin_key = "100nF@2#0";
 
     const caps = [_][]const u8{ "C1", "C2", "C3", "C4", "C5" };
@@ -1755,8 +1755,8 @@ test "decoupling-binding excludes config straps from the supply-pad count" {
 
     const insts = try alloc.alloc(Instance, 3);
     insts[0] = dcInst("U1", "reg1", "");
-    insts[1] = dcInst("C1", TEST_CAP, "100nF"); // on VIN: pad 2 is a strap ⇒ 1 supply pad ⇒ exempt
-    insts[2] = dcInst("C2", TEST_CAP, "100nF"); // on VCC: pads 4,5 real ⇒ 2 supply pads ⇒ FLAG
+    insts[1] = dcInst("C1", test_cap, "100nF"); // on VIN: pad 2 is a strap ⇒ 1 supply pad ⇒ exempt
+    insts[2] = dcInst("C2", test_cap, "100nF"); // on VCC: pads 4,5 real ⇒ 2 supply pads ⇒ FLAG
 
     var vin: std.ArrayList(env_mod.PinRef) = .empty;
     try vin.append(alloc, .{ .ref_des = "U1", .pin = "1" }); // IN
@@ -1824,7 +1824,7 @@ fn checkVoltageMismatches(
             if (e.voltage < min_e.voltage) min_e = e;
             if (e.voltage > max_e.voltage) max_e = e;
         }
-        if (max_e.voltage - min_e.voltage > VOLTAGE_MISMATCH_TOLERANCE_V) {
+        if (max_e.voltage - min_e.voltage > voltage_mismatch_tolerance_v) {
             const msg = std.fmt.allocPrint(
                 allocator,
                 "Voltage mismatch on \"{s}\": {s} declares {d:.1}V vs {s} declares {d:.1}V",
@@ -2130,7 +2130,7 @@ fn checkPowerBudget(
                 // and `@intFromFloat(inf)` is UB in ReleaseSmall. Emit the row
                 // without a percent rather than crash the whole ERC pass.
                 const pct: ?u32 = if (styp > 0)
-                    numeric.checkedInt(u32, PERCENT_MULTIPLIER * rail.load_typ_a / styp)
+                    numeric.checkedInt(u32, percent_multiplier * rail.load_typ_a / styp)
                 else
                     null;
                 const msg = if (pct) |p| std.fmt.allocPrint(
@@ -3848,7 +3848,7 @@ test "capFarads parses the micro sign and exempts a bulk cap" {
     // 0.00001 F = 10 µF — well above the 4.7 µF bulk-reservoir threshold.
     try std.testing.expectApproxEqAbs(@as(f64, 1e-5), capFarads("10µF"), 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 4.7e-6), capFarads("4.7µF"), 1e-12);
-    try std.testing.expect(capFarads("10µF") >= DECOUPLE_BULK_FARADS);
+    try std.testing.expect(capFarads("10µF") >= decouple_bulk_farads);
     // ASCII forms still parse (no regression).
     try std.testing.expectApproxEqAbs(@as(f64, 1e-5), capFarads("10uF"), 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 1e-7), capFarads("100nF"), 1e-15);
@@ -3862,7 +3862,7 @@ test "decoupling-binding exempts a micro-sign bulk reservoir" {
 
     const insts = try alloc.alloc(Instance, 2);
     insts[0] = dcInst("U1", "somechip", "");
-    insts[1] = dcInst("C1", TEST_CAP, "10µF"); // bulk reservoir via the micro sign → exempt
+    insts[1] = dcInst("C1", test_cap, "10µF"); // bulk reservoir via the micro sign → exempt
 
     var vdd: std.ArrayList(env_mod.PinRef) = .empty;
     var gnd: std.ArrayList(env_mod.PinRef) = .empty;

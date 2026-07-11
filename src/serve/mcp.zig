@@ -11,16 +11,16 @@ const mcp_tools = @import("mcp_tools.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 // JSON-RPC 2.0 standard error codes (RFC).
-const JSONRPC_INVALID_REQUEST: i32 = -32600;
-const JSONRPC_METHOD_NOT_FOUND: i32 = -32601;
-const JSONRPC_INVALID_PARAMS: i32 = -32602;
-const JSONRPC_SERVER_ERROR: i32 = -32000;
+const jsonrpc_invalid_request: i32 = -32600;
+const jsonrpc_method_not_found: i32 = -32601;
+const jsonrpc_invalid_params: i32 = -32602;
+const jsonrpc_server_error: i32 = -32000;
 
-const JSONRPC_ENVELOPE_PREFIX: []const u8 = "{\"jsonrpc\":\"2.0\",\"id\":";
+const jsonrpc_envelope_prefix: []const u8 = "{\"jsonrpc\":\"2.0\",\"id\":";
 
-const HTTP_BAD_REQUEST: u16 = 400;
-const HTTP_ACCEPTED: u16 = 202;
-const HTTP_INTERNAL_ERROR: u16 = 500;
+const http_bad_request: u16 = 400;
+const http_accepted: u16 = 202;
+const http_internal_error: u16 = 500;
 
 /// Error set for HTTP/WebSocket handlers in this module and the JSON-RPC
 /// dispatcher. Wide enough to cover JSON parsing, allocation, websocket
@@ -65,7 +65,7 @@ pub fn dispatchFrame(
     };
     const root = parsed.value;
     if (root != .object) {
-        return try errorEnvelope(allocator, null, JSONRPC_INVALID_REQUEST, "invalid request");
+        return try errorEnvelope(allocator, null, jsonrpc_invalid_request, "invalid request");
     }
     const obj = root.object;
 
@@ -101,7 +101,7 @@ pub fn dispatchFrame(
         // Unknown notification — no response per JSON-RPC spec.
         return null;
     }
-    return try errorEnvelope(allocator, id_val, JSONRPC_METHOD_NOT_FOUND, "method not found");
+    return try errorEnvelope(allocator, id_val, jsonrpc_method_not_found, "method not found");
 }
 
 fn handleToolCall(
@@ -111,11 +111,11 @@ fn handleToolCall(
     params: ?std.json.Value,
     role: users.Role,
 ) ![]const u8 {
-    const p = params orelse return errorEnvelope(allocator, id_val, JSONRPC_INVALID_PARAMS, "missing params");
-    if (p != .object) return errorEnvelope(allocator, id_val, JSONRPC_INVALID_PARAMS, "params must be an object");
+    const p = params orelse return errorEnvelope(allocator, id_val, jsonrpc_invalid_params, "missing params");
+    if (p != .object) return errorEnvelope(allocator, id_val, jsonrpc_invalid_params, "params must be an object");
 
     const tool_name = if (p.object.get("name")) |n| (if (n == .string) n.string else "") else "";
-    if (tool_name.len == 0) return errorEnvelope(allocator, id_val, JSONRPC_INVALID_PARAMS, "missing tool name");
+    if (tool_name.len == 0) return errorEnvelope(allocator, id_val, jsonrpc_invalid_params, "missing tool name");
 
     if (mcp_tools.isMutationTool(tool_name) and !role.canWrite()) {
         var msg: std.ArrayList(u8) = .empty;
@@ -193,8 +193,8 @@ fn handleResourcesRead(
     id_val: ?std.json.Value,
     params: ?std.json.Value,
 ) ![]const u8 {
-    const p = params orelse return errorEnvelope(allocator, id_val, JSONRPC_INVALID_PARAMS, "missing params");
-    if (p != .object) return errorEnvelope(allocator, id_val, JSONRPC_INVALID_PARAMS, "params must be an object");
+    const p = params orelse return errorEnvelope(allocator, id_val, jsonrpc_invalid_params, "missing params");
+    if (p != .object) return errorEnvelope(allocator, id_val, jsonrpc_invalid_params, "params must be an object");
 
     const uri = if (p.object.get("uri")) |u| (if (u == .string) u.string else "") else "";
 
@@ -212,11 +212,11 @@ fn handleResourcesRead(
 
     const prefix = "eda://schematic/";
     if (!std.mem.startsWith(u8, uri, prefix)) {
-        return errorEnvelope(allocator, id_val, JSONRPC_INVALID_PARAMS, "unknown resource uri");
+        return errorEnvelope(allocator, id_val, jsonrpc_invalid_params, "unknown resource uri");
     }
     const design = uri[prefix.len..];
     const graph = mcp_tools.renderSceneGraph(allocator, project_dir, design) catch |err| {
-        return errorEnvelope(allocator, id_val, JSONRPC_SERVER_ERROR, @errorName(err));
+        return errorEnvelope(allocator, id_val, jsonrpc_server_error, @errorName(err));
     };
 
     var buf: std.ArrayList(u8) = .empty;
@@ -234,7 +234,7 @@ fn handleResourcesRead(
 fn resultEnvelope(allocator: std.mem.Allocator, id_val: ?std.json.Value, result_json: []const u8) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
-    try w.writeAll(JSONRPC_ENVELOPE_PREFIX);
+    try w.writeAll(jsonrpc_envelope_prefix);
     try writeIdTo(w, id_val);
     try w.writeAll(",\"result\":");
     try w.writeAll(result_json);
@@ -245,7 +245,7 @@ fn resultEnvelope(allocator: std.mem.Allocator, id_val: ?std.json.Value, result_
 fn errorEnvelope(allocator: std.mem.Allocator, id_val: ?std.json.Value, code: i32, msg: []const u8) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
-    try w.writeAll(JSONRPC_ENVELOPE_PREFIX);
+    try w.writeAll(jsonrpc_envelope_prefix);
     try writeIdTo(w, id_val);
     try w.print(",\"error\":{{\"code\":{d},\"message\":", .{code});
     try json_writer.writeString(w, msg);
@@ -338,7 +338,7 @@ pub fn upgrade(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Respon
 
     const upgrade_ctx = Context{ .handler = ctx, .email = email };
     if (try httpz.upgradeWebsocket(Client, req, res, &upgrade_ctx) == false) {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "expected websocket upgrade";
     }
 }
@@ -350,7 +350,7 @@ pub fn upgrade(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Respon
 /// one JSON-RPC frame, and returns 202 for notifications (no body).
 pub fn postApi(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "missing body";
         return;
     };
@@ -362,7 +362,7 @@ pub fn postApi(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Respon
     const role = resolveRole(ctx, req);
     const reply_opt = dispatchFrame(aa, ctx.project_dir, body, role) catch |err| {
         log.warn("mcp dispatch error: {s}", .{@errorName(err)});
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "internal error";
         return;
     };
@@ -374,6 +374,6 @@ pub fn postApi(ctx: *server_mod.Handler, req: *httpz.Request, res: *httpz.Respon
         res.body = try req.arena.dupe(u8, reply);
     } else {
         // Notification: MCP spec says return 202 Accepted with no body.
-        res.status = HTTP_ACCEPTED;
+        res.status = http_accepted;
     }
 }

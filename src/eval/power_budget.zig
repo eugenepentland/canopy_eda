@@ -10,15 +10,15 @@ const Section = env_mod.Section;
 pub const RailStatus = enum { ok, tight, over, no_source, no_consumers };
 
 // ── Constants ─────────────────────────────────────────────────────
-const ZERO_VOLTAGE: f64 = 0.0;
-const CURRENT_CONVERGENCE_A: f64 = 1e-9;
-const PERCENT_FULL: f64 = 100.0;
-const PERCENT_FRACTION_BASE: f64 = 1.0;
+const zero_voltage: f64 = 0.0;
+const current_convergence_a: f64 = 1e-9;
+const percent_full: f64 = 100.0;
+const percent_fraction_base: f64 = 1.0;
 /// Derating fraction — typical-load threshold at which a rail flips to
 /// `.tight` (a rail is "tight" once typical load exceeds 80% of its rating).
-const DEFAULT_DERATING: f64 = 0.8;
-const RATING_MIDPOINT: f64 = 0.5;
-const SENTINEL_CURRENT: f64 = 1.0;
+const default_derating: f64 = 0.8;
+const rating_midpoint: f64 = 0.5;
+const sentinel_current: f64 = 1.0;
 
 /// Breakdown of one (ref_des, net) group's contribution to a rail. Pins on
 /// the same ref_des but different downstream nets (e.g. both VDDA18USB and
@@ -247,14 +247,14 @@ pub fn analyze(
                         .first_name = findDisplayForSubPath(block, in_path) orelse in_rail_root,
                     };
                     const vin = in_port.nominal orelse resolveRailVoltage(allocator, block, in_display.first_name) orelse continue;
-                    if (vin <= ZERO_VOLTAGE) continue;
+                    if (vin <= zero_voltage) continue;
 
                     // For linear regulators, η = Vout/Vin (drops out of the ratio below so
                     // Iin ≈ Iout as expected for a pass-through LDO). For switchers, use
                     // the user-declared scalar. `efficiency_linear` takes precedence when
                     // both are declared — it's an explicit "compute this" instruction.
                     const eta = if (out_port.efficiency_linear) vout / vin else out_port.efficiency.?;
-                    if (eta <= ZERO_VOLTAGE) continue;
+                    if (eta <= zero_voltage) continue;
 
                     const ratio = vout / (vin * eta);
                     const iin_typ = out_load.sum_typ * ratio;
@@ -263,7 +263,7 @@ pub fn analyze(
                     const prev = sb_contrib.get(contrib_key) orelse SubContribution{ .iin_typ = 0, .iin_max = 0 };
                     const delta_typ = iin_typ - prev.iin_typ;
                     const delta_max = iin_max - prev.iin_max;
-                    if (@abs(delta_typ) < CURRENT_CONVERGENCE_A and @abs(delta_max) < CURRENT_CONVERGENCE_A) break;
+                    if (@abs(delta_typ) < current_convergence_a and @abs(delta_max) < current_convergence_a) break;
                     changed = true;
 
                     // Upsert the consumer group. Pin list + any_* flags only
@@ -305,7 +305,7 @@ pub fn analyze(
     var rails: std.ArrayList(Rail) = .empty;
     var emitted_roots: std.StringHashMapUnmanaged(void) = .empty;
 
-    const derating = DEFAULT_DERATING;
+    const derating = default_derating;
     var src_iter = sources.iterator();
     while (src_iter.next()) |entry| {
         const root = entry.key_ptr.*;
@@ -375,8 +375,8 @@ fn buildConsumers(
 /// Highest typ draw first (annotated groups above unannotated); ties broken
 /// by ref_des for stable output.
 fn lessThanConsumer(_: void, a: RailConsumer, b: RailConsumer) bool {
-    const a_typ = a.i_typ orelse -SENTINEL_CURRENT;
-    const b_typ = b.i_typ orelse -SENTINEL_CURRENT;
+    const a_typ = a.i_typ orelse -sentinel_current;
+    const b_typ = b.i_typ orelse -sentinel_current;
     if (a_typ != b_typ) return a_typ > b_typ;
     return std.mem.order(u8, a.ref_des, b.ref_des) == .lt;
 }
@@ -407,13 +407,13 @@ fn buildRail(
     if (status == .ok) {
         if (source_typ) |styp| {
             if (any_typ) {
-                margin = PERCENT_FULL * (PERCENT_FRACTION_BASE - load_typ / styp);
+                margin = percent_full * (percent_fraction_base - load_typ / styp);
                 if (load_typ > derating * styp) status = .tight;
             }
         }
     } else if (status == .over) {
         if (source_typ) |styp| if (any_typ) {
-            margin = PERCENT_FULL * (PERCENT_FRACTION_BASE - load_typ / styp);
+            margin = percent_full * (percent_fraction_base - load_typ / styp);
         };
     }
 
@@ -496,7 +496,7 @@ fn resolveRailVoltage(allocator: std.mem.Allocator, block: *const DesignBlock, r
         if (!std.mem.eql(u8, port_net, rail_name)) continue;
         if (p.nominal) |v| return v;
         if (p.rated_min != null and p.rated_max != null) {
-            return (p.rated_min.? + p.rated_max.?) * RATING_MIDPOINT;
+            return (p.rated_min.? + p.rated_max.?) * rating_midpoint;
         }
     }
     return null;

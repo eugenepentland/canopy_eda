@@ -18,14 +18,14 @@ const sexpr_parser = @import("../sexpr/parser.zig");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("../eval/env.zig");
 
-const MAX_COMPONENT_BYTES: usize = 1 * 1024 * 1024;
+const max_component_bytes: usize = 1 * 1024 * 1024;
 
-const ERR_COMPONENT_NOT_FOUND = "component not found";
-const ERR_COMPONENT_PARSE = "component parse failed";
-const ERR_INVALID_NAME = "invalid component name";
-const FORM_COMPONENT = "component";
-const FORM_COMPONENT_FAMILY = "component-family";
-const FORM_REQUIREMENT = "requirement";
+const err_component_not_found = "component not found";
+const err_component_parse = "component parse failed";
+const err_invalid_name = "invalid component name";
+const form_component = "component";
+const form_component_family = "component-family";
+const form_requirement = "requirement";
 
 /// Error set for `describeComponent`. Combines allocator/JSON-writer errors
 /// (we synthesize JSON ourselves) with file I/O — a real I/O failure bubbles
@@ -46,30 +46,30 @@ pub fn describeComponent(
     out: *std.ArrayList(u8),
 ) DescribeError!bool {
     if (!validComponentName(name)) {
-        return writeJsonError(allocator, out, ERR_INVALID_NAME);
+        return writeJsonError(allocator, out, err_invalid_name);
     }
 
     const comp_path = try componentPath(allocator, project_dir, name);
     defer allocator.free(comp_path);
-    const comp_src = infra_fs.cwd().readFileAlloc(allocator, comp_path, MAX_COMPONENT_BYTES) catch |e| switch (e) {
-        error.FileNotFound => return writeJsonError(allocator, out, ERR_COMPONENT_NOT_FOUND),
+    const comp_src = infra_fs.cwd().readFileAlloc(allocator, comp_path, max_component_bytes) catch |e| switch (e) {
+        error.FileNotFound => return writeJsonError(allocator, out, err_component_not_found),
         else => return e,
     };
     defer allocator.free(comp_src);
 
     const comp_nodes = sexpr_parser.parse(allocator, comp_src) catch {
-        return writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+        return writeJsonError(allocator, out, err_component_parse);
     };
     defer sexpr_parser.freeNodes(allocator, comp_nodes);
 
-    if (comp_nodes.len == 0) return writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+    if (comp_nodes.len == 0) return writeJsonError(allocator, out, err_component_parse);
     const root = comp_nodes[0];
-    const root_children = root.asList() orelse return writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
-    if (root_children.len < 2) return writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+    const root_children = root.asList() orelse return writeJsonError(allocator, out, err_component_parse);
+    if (root_children.len < 2) return writeJsonError(allocator, out, err_component_parse);
 
-    const head = root_children[0].asAtom() orelse return writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
-    const is_family = std.mem.eql(u8, head, FORM_COMPONENT_FAMILY);
-    if (!is_family and !std.mem.eql(u8, head, FORM_COMPONENT)) {
+    const head = root_children[0].asAtom() orelse return writeJsonError(allocator, out, err_component_parse);
+    const is_family = std.mem.eql(u8, head, form_component_family);
+    if (!is_family and !std.mem.eql(u8, head, form_component)) {
         return writeJsonError(allocator, out, "not a component or component-family");
     }
 
@@ -128,7 +128,7 @@ fn loadPinoutWithSource(
 ) !LoadedPinout {
     const path = try std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, ref });
     defer allocator.free(path);
-    const src = try infra_fs.cwd().readFileAlloc(allocator, path, MAX_COMPONENT_BYTES);
+    const src = try infra_fs.cwd().readFileAlloc(allocator, path, max_component_bytes);
     defer allocator.free(src);
 
     const source = try findSourceComment(allocator, src);
@@ -313,7 +313,7 @@ fn writeComponentJson(
     try w.writeAll(",\"requested_name\":");
     try json_writer.writeString(w, requested_name);
     try w.writeAll(",\"kind\":\"");
-    try w.writeAll(if (info.is_family) FORM_COMPONENT_FAMILY else FORM_COMPONENT);
+    try w.writeAll(if (info.is_family) form_component_family else form_component);
     try w.writeAll("\",\"is_family\":");
     try w.writeAll(if (info.is_family) "true" else "false");
     try w.writeAll(",\"description\":");
@@ -366,7 +366,7 @@ fn writeComponentJson(
     try w.writeAll(",\"requirements\":[");
     var req_first = true;
     for (root_body) |child| {
-        if (!child.isForm(FORM_REQUIREMENT)) continue;
+        if (!child.isForm(form_requirement)) continue;
         const cl = child.asList() orelse continue;
         if (cl.len < 2) continue;
         if (!req_first) try w.writeAll(",");
@@ -472,22 +472,22 @@ fn componentPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []
 /// structural problem, writes a JSON error into `out` and returns null.
 fn componentRootBody(nodes: []const ast.Node, allocator: std.mem.Allocator, out: *std.ArrayList(u8)) !?[]const ast.Node {
     if (nodes.len == 0) {
-        _ = try writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+        _ = try writeJsonError(allocator, out, err_component_parse);
         return null;
     }
     const rc = nodes[0].asList() orelse {
-        _ = try writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+        _ = try writeJsonError(allocator, out, err_component_parse);
         return null;
     };
     if (rc.len < 2) {
-        _ = try writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+        _ = try writeJsonError(allocator, out, err_component_parse);
         return null;
     }
     const head = rc[0].asAtom() orelse {
-        _ = try writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+        _ = try writeJsonError(allocator, out, err_component_parse);
         return null;
     };
-    if (!std.mem.eql(u8, head, FORM_COMPONENT) and !std.mem.eql(u8, head, FORM_COMPONENT_FAMILY)) {
+    if (!std.mem.eql(u8, head, form_component) and !std.mem.eql(u8, head, form_component_family)) {
         _ = try writeJsonError(allocator, out, "not a component or component-family");
         return null;
     }
@@ -637,15 +637,15 @@ pub fn listRequirements(
     name: []const u8,
     out: *std.ArrayList(u8),
 ) ReqError!bool {
-    if (!validComponentName(name)) return writeJsonError(allocator, out, ERR_INVALID_NAME);
+    if (!validComponentName(name)) return writeJsonError(allocator, out, err_invalid_name);
     const path = try componentPath(allocator, project_dir, name);
     defer allocator.free(path);
-    const src = infra_fs.cwd().readFileAlloc(allocator, path, MAX_COMPONENT_BYTES) catch |e| switch (e) {
-        error.FileNotFound => return writeJsonError(allocator, out, ERR_COMPONENT_NOT_FOUND),
+    const src = infra_fs.cwd().readFileAlloc(allocator, path, max_component_bytes) catch |e| switch (e) {
+        error.FileNotFound => return writeJsonError(allocator, out, err_component_not_found),
         else => return e,
     };
     defer allocator.free(src);
-    const nodes = sexpr_parser.parse(allocator, src) catch return writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+    const nodes = sexpr_parser.parse(allocator, src) catch return writeJsonError(allocator, out, err_component_parse);
     defer sexpr_parser.freeNodes(allocator, nodes);
     const body = (try componentRootBody(nodes, allocator, out)) orelse return false;
 
@@ -655,7 +655,7 @@ pub fn listRequirements(
     try w.writeAll(",\"requirements\":[");
     var first = true;
     for (body) |child| {
-        if (!child.isForm(FORM_REQUIREMENT)) continue;
+        if (!child.isForm(form_requirement)) continue;
         const cl = child.asList() orelse continue;
         if (cl.len < 2) continue;
         if (!first) try w.writeAll(",");
@@ -680,7 +680,7 @@ pub fn addRequirement(
     check_src: ?[]const u8,
     out: *std.ArrayList(u8),
 ) ReqError!bool {
-    if (!validComponentName(name)) return writeJsonError(allocator, out, ERR_INVALID_NAME);
+    if (!validComponentName(name)) return writeJsonError(allocator, out, err_invalid_name);
     if (text.len == 0) return writeJsonError(allocator, out, "text must be a non-empty string");
     if (check_src) |cs| {
         if (cs.len > 0 and !checkClauseValid(allocator, cs))
@@ -689,12 +689,12 @@ pub fn addRequirement(
 
     const path = try componentPath(allocator, project_dir, name);
     defer allocator.free(path);
-    const src = infra_fs.cwd().readFileAlloc(allocator, path, MAX_COMPONENT_BYTES) catch |e| switch (e) {
-        error.FileNotFound => return writeJsonError(allocator, out, ERR_COMPONENT_NOT_FOUND),
+    const src = infra_fs.cwd().readFileAlloc(allocator, path, max_component_bytes) catch |e| switch (e) {
+        error.FileNotFound => return writeJsonError(allocator, out, err_component_not_found),
         else => return e,
     };
     defer allocator.free(src);
-    const nodes = sexpr_parser.parse(allocator, src) catch return writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+    const nodes = sexpr_parser.parse(allocator, src) catch return writeJsonError(allocator, out, err_component_parse);
     defer sexpr_parser.freeNodes(allocator, nodes);
     const body = (try componentRootBody(nodes, allocator, out)) orelse return false;
 
@@ -709,7 +709,7 @@ pub fn addRequirement(
     defer allocator.free(id_hex);
 
     for (body) |child| {
-        if (!child.isForm(FORM_REQUIREMENT)) continue;
+        if (!child.isForm(form_requirement)) continue;
         const cl = child.asList() orelse continue;
         if (cl.len < 2) continue;
         if (!requirementIdMatches(cl, id_hex)) continue;
@@ -771,19 +771,19 @@ pub fn removeRequirement(
     target_text: ?[]const u8,
     out: *std.ArrayList(u8),
 ) ReqError!bool {
-    if (!validComponentName(name)) return writeJsonError(allocator, out, ERR_INVALID_NAME);
+    if (!validComponentName(name)) return writeJsonError(allocator, out, err_invalid_name);
     const has_id = target_id != null and target_id.?.len > 0;
     const has_text = target_text != null and target_text.?.len > 0;
     if (!has_id and !has_text) return writeJsonError(allocator, out, "must supply id or text");
 
     const path = try componentPath(allocator, project_dir, name);
     defer allocator.free(path);
-    const src = infra_fs.cwd().readFileAlloc(allocator, path, MAX_COMPONENT_BYTES) catch |e| switch (e) {
-        error.FileNotFound => return writeJsonError(allocator, out, ERR_COMPONENT_NOT_FOUND),
+    const src = infra_fs.cwd().readFileAlloc(allocator, path, max_component_bytes) catch |e| switch (e) {
+        error.FileNotFound => return writeJsonError(allocator, out, err_component_not_found),
         else => return e,
     };
     defer allocator.free(src);
-    const nodes = sexpr_parser.parse(allocator, src) catch return writeJsonError(allocator, out, ERR_COMPONENT_PARSE);
+    const nodes = sexpr_parser.parse(allocator, src) catch return writeJsonError(allocator, out, err_component_parse);
     defer sexpr_parser.freeNodes(allocator, nodes);
     const body = (try componentRootBody(nodes, allocator, out)) orelse return false;
 
@@ -792,7 +792,7 @@ pub fn removeRequirement(
     var id_buf: [8]u8 = undefined;
     var removed_id: []const u8 = "";
     for (body) |child| {
-        if (!child.isForm(FORM_REQUIREMENT)) continue;
+        if (!child.isForm(form_requirement)) continue;
         const cl = child.asList() orelse continue;
         if (cl.len < 2) continue;
         const is_match = (has_id and requirementIdMatches(cl, target_id.?)) or

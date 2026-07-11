@@ -11,7 +11,7 @@ pub const BuiltinError = error{
 };
 
 // ── Constants ─────────────────────────────────────────────────────
-const ZERO_DIVISOR: f64 = 0.0;
+const zero_divisor: f64 = 0.0;
 
 /// Evaluate a builtin given its enum tag (preferred path — the evaluator
 /// has already resolved the head atom via `Builtin.fromAtom`).
@@ -31,7 +31,7 @@ pub fn evalBuiltinOp(op: Builtin, args: []const Value) BuiltinError!Value {
         .and_ => logicAnd(args),
         .or_ => logicOr(args),
         .not_ => logicNot(args),
-        .e96 => eSeries(args, &E96),
+        .e96 => eSeries(args, &e96_series),
     };
 }
 
@@ -46,7 +46,7 @@ fn arithmetic(args: []const Value, op: ArithOp) BuiltinError!Value {
         .sub => a - b,
         .mul => a * b,
         .div => blk: {
-            if (b == ZERO_DIVISOR) return BuiltinError.DivisionByZero;
+            if (b == zero_divisor) return BuiltinError.DivisionByZero;
             break :blk a / b;
         },
         .mod => blk: {
@@ -54,7 +54,7 @@ fn arithmetic(args: []const Value, op: ArithOp) BuiltinError!Value {
             // containing `(% x -3)` (or `(% x 0)`) would otherwise be undefined
             // behavior in the safety-off ReleaseSmall production build. Reject
             // any non-positive divisor as a division-by-zero-class error.
-            if (b <= ZERO_DIVISOR) return BuiltinError.DivisionByZero;
+            if (b <= zero_divisor) return BuiltinError.DivisionByZero;
             break :blk @mod(a, b);
         },
     };
@@ -113,7 +113,7 @@ fn logicNot(args: []const Value) BuiltinError!Value {
 // parameterised by `(vout X)` emits a buildable BOM part instead of an
 // off-grid value like 400k. Decade is found by scaling into [1,10); the
 // 10.0 top edge (= 1.0 of the next decade) is considered so 9.9 → 10.
-const E96 = [_]f64{
+const e96_series = [_]f64{
     1.00, 1.02, 1.05, 1.07, 1.10, 1.13, 1.15, 1.18, 1.21, 1.24, 1.27, 1.30,
     1.33, 1.37, 1.40, 1.43, 1.47, 1.50, 1.54, 1.58, 1.62, 1.65, 1.69, 1.74,
     1.78, 1.82, 1.87, 1.91, 1.96, 2.00, 2.05, 2.10, 2.15, 2.21, 2.26, 2.32,

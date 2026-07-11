@@ -56,8 +56,8 @@ const pcb_3d_viewer_js = @embedFile("assets/pcb_3d_viewer.js");
 // `serve/assets/` already, but the CSS is the concatenation of
 // `assets/schematic_inline.css` and the diagram engine's `DIAGRAM_CSS`).
 const render_html = @import("../render_html.zig");
-const schematic_viewer_js = render_html.SCHEMATIC_VIEWER_JS;
-const schematic_css = render_html.SCHEMATIC_CSS;
+const schematic_viewer_js = render_html.schematic_viewer_js_asset;
+const schematic_css = render_html.schematic_css;
 
 /// Error set for the static-asset handler: only writer-side errors propagate
 /// to httpz; the lookup itself is fallible only via a 404.
@@ -73,7 +73,7 @@ const Asset = struct {
 /// `<script src="/static/...">` / `<link href="/static/...">`. Adding a new
 /// asset is a one-line entry here plus the `@embedFile` import above —
 /// `staticAsset` does the lookup.
-const REGISTRY = [_]Asset{
+const registry = [_]Asset{
     .{ .name = "account_page.js", .body = account_page_js, .content_type = .JS },
     .{ .name = "account_page.css", .body = account_page_css, .content_type = .CSS },
     .{ .name = "pdf_viewer.js", .body = pdf_viewer_js, .content_type = .JS },
@@ -103,12 +103,12 @@ const REGISTRY = [_]Asset{
 /// Lazily-computed per-asset content hashes (the ETag values). 0 = not yet
 /// computed; the benign race (two request threads hashing the same immutable
 /// embedded bytes) stores the identical value, so no lock is needed.
-var etag_cache = [_]u64{0} ** REGISTRY.len;
+var etag_cache = [_]u64{0} ** registry.len;
 
 fn assetEtag(idx: usize) u64 {
     const v = @atomicLoad(u64, &etag_cache[idx], .monotonic);
     if (v != 0) return v;
-    const h = std.hash.Wyhash.hash(0, REGISTRY[idx].body);
+    const h = std.hash.Wyhash.hash(0, registry[idx].body);
     const nz: u64 = if (h == 0) 1 else h; // 0 is the "uncomputed" sentinel
     @atomicStore(u64, &etag_cache[idx], nz, .monotonic);
     return nz;
@@ -123,7 +123,7 @@ pub fn staticAsset(_: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
         res.body = "asset not found";
         return;
     };
-    for (REGISTRY, 0..) |a, i| {
+    for (registry, 0..) |a, i| {
         if (std.mem.eql(u8, a.name, name)) {
             // Content-hash ETag + always-revalidate: after a deploy the
             // browser's conditional GET misses the old tag and refetches, so

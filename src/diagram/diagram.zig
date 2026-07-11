@@ -96,7 +96,7 @@ fn hasTopLevelHub(block: *const DesignBlock) bool {
 /// CSS fragment for the diagram, embedded into the schematic page stylesheet
 /// and the markdown export's `<style>` block (the System view reuses the
 /// signal-view node/edge/legend CSS).
-pub const DIAGRAM_CSS = render.CSS;
+pub const diagram_css = render.css;
 
 test {
     std.testing.refAllDecls(@This());

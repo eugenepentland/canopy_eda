@@ -34,7 +34,7 @@ pub const ModuleCardVM = struct {
 // zt treats `<style>` as a raw-text element — expressions inside are NOT
 // interpolated, so the entire `<style>…</style>` block ships as a single raw
 // chunk emitted via `{!HOME_STYLE_BLOCK}` in the head.
-const HOME_STYLE_BLOCK: []const u8 = "<style>" ++ @embedFile("../assets/navbar.css") ++
+const home_style_block: []const u8 = "<style>" ++ @embedFile("../assets/navbar.css") ++
     \\body{margin:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
     \\.designs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;padding:16px}
     \\.design-card{background:#161b22;border:1px solid #21262d;
@@ -97,7 +97,7 @@ const HOME_STYLE_BLOCK: []const u8 = "<style>" ++ @embedFile("../assets/navbar.c
 // AND-match each term against the card's `data-search` attribute (name +
 // title/params + sections/doc + the type-tag word). Raw-text block emitted
 // via `{!HOME_SEARCH_SCRIPT}` so zt doesn't try to interpolate the JS.
-const HOME_SEARCH_SCRIPT: []const u8 =
+const home_search_script: []const u8 =
     \\<script>
     \\(function(){
     \\ var input=document.getElementById('home-search');
@@ -138,7 +138,7 @@ const HOME_SEARCH_SCRIPT: []const u8 =
 
 // "+ New design" → prompt for a name/title, POST /api/new-design, then open the
 // editor on the fresh stub. Raw block so zt doesn't interpolate the JS.
-const HOME_NEW_SCRIPT: []const u8 =
+const home_new_script: []const u8 =
     \\<script>
     \\(function(){
     \\ var b=document.getElementById('home-new');
@@ -158,24 +158,24 @@ const HOME_NEW_SCRIPT: []const u8 =
     \\</script>
 ;
 
-const SECONDS_PER_MINUTE: i64 = 60;
-const SECONDS_PER_HOUR: i64 = 3600;
-const SECONDS_PER_DAY: i64 = 86400;
-const DAYS_PER_MONTH_APPROX: i64 = 30;
+const seconds_per_minute: i64 = 60;
+const seconds_per_hour: i64 = 3600;
+const seconds_per_day: i64 = 86400;
+const days_per_month_approx: i64 = 30;
 
-const MAX_CHIPS: usize = 6;
+const max_chips: usize = 6;
 
 // Route prefix for the schematic viewer. Interpolated into every "open the
 // schematic" href so the generated template emits one shared const reference
 // instead of repeating the literal path (keeps it off the repeated-string
 // guardian check). `/schematics/<name>` renders both designs and modules.
-const SCHEMATIC_PREFIX: []const u8 = "/schematics/";
+const schematic_prefix: []const u8 = "/schematics/";
 
 /// One type-filter button on the home grid. `id` matches each card's
 /// `data-kind` (or "all"); the client script in HOME_SEARCH_SCRIPT toggles
 /// the active button and AND-combines the chosen kind with the text search.
 const HomeFilter = struct { id: []const u8, label: []const u8 };
-const HOME_FILTERS = [_]HomeFilter{
+const home_filters = [_]HomeFilter{
     .{ .id = "all", .label = "All" },
     .{ .id = "board", .label = "Boards" },
     .{ .id = "subcircuit", .label = "Subcircuits" },
@@ -190,23 +190,23 @@ const RelTime = struct {
 
     pub fn formatHtml(self: RelTime, w: *std.Io.Writer) std.Io.Writer.Error!void {
         const a = self.age_sec;
-        if (a < SECONDS_PER_MINUTE) {
+        if (a < seconds_per_minute) {
             try w.writeAll("just now");
             return;
         }
-        if (a < SECONDS_PER_HOUR) {
-            try w.print("{d}m ago", .{@divTrunc(a, SECONDS_PER_MINUTE)});
+        if (a < seconds_per_hour) {
+            try w.print("{d}m ago", .{@divTrunc(a, seconds_per_minute)});
             return;
         }
-        if (a < SECONDS_PER_DAY) {
-            try w.print("{d}h ago", .{@divTrunc(a, SECONDS_PER_HOUR)});
+        if (a < seconds_per_day) {
+            try w.print("{d}h ago", .{@divTrunc(a, seconds_per_hour)});
             return;
         }
-        if (a < DAYS_PER_MONTH_APPROX * SECONDS_PER_DAY) {
-            try w.print("{d}d ago", .{@divTrunc(a, SECONDS_PER_DAY)});
+        if (a < days_per_month_approx * seconds_per_day) {
+            try w.print("{d}d ago", .{@divTrunc(a, seconds_per_day)});
             return;
         }
-        try w.print("{d}mo ago", .{@divTrunc(a, DAYS_PER_MONTH_APPROX * SECONDS_PER_DAY)});
+        try w.print("{d}mo ago", .{@divTrunc(a, days_per_month_approx * seconds_per_day)});
     }
 };
 
@@ -223,7 +223,7 @@ fn hasOwnTitle(s: DesignSummary) bool {
 }
 
 fn chipsShown(n: usize) usize {
-    return if (n < MAX_CHIPS) n else MAX_CHIPS;
+    return if (n < max_chips) n else max_chips;
 }
 
 /// True when a built design has nothing to flag — no ERC errors/warnings, no
@@ -303,13 +303,13 @@ pub templ DesignCard(s: DesignSummary, search: []const u8, has_starred: bool, no
                 for (s.sections[0..chipsShown(s.sections.len)]) |sec| {
                     <span class="section-chip">{sec}</span>
                 }
-                if (s.sections.len > MAX_CHIPS) {
-                    <span class="section-chip-more">+{s.sections.len - MAX_CHIPS} more</span>
+                if (s.sections.len > max_chips) {
+                    <span class="section-chip-more">+{s.sections.len - max_chips} more</span>
                 }
             </div>
         }
         <div class="design-card-links">
-            <a class="design-card-link" href="{SCHEMATIC_PREFIX}{s.name}">Schematic</a>
+            <a class="design-card-link" href="{schematic_prefix}{s.name}">Schematic</a>
             <a class="design-card-link" href="/editor/{s.name}">Editor</a>
         </div>
     </div>
@@ -336,14 +336,14 @@ pub templ ModuleCard(m: ModuleHomeEntry, search: []const u8) {
             if (m.used_by.len > 0) {
                 <span class="section-chip-more">used by</span>
                 for (m.used_by) |d| {
-                    <a class="section-chip" href="{SCHEMATIC_PREFIX}{d}">{d}</a>
+                    <a class="section-chip" href="{schematic_prefix}{d}">{d}</a>
                 }
             } else {
                 <span class="section-chip-more">not used by any design yet</span>
             }
         </div>
         <div class="design-card-links">
-            <a class="design-card-link" href="{SCHEMATIC_PREFIX}{m.name}">Schematic</a>
+            <a class="design-card-link" href="{schematic_prefix}{m.name}">Schematic</a>
             <a class="design-card-link" href="/pcb-layout/{m.name}">PCB layout</a>
             <a class="design-card-link" href="/editor/{m.name}">Editor</a>
         </div>
@@ -356,7 +356,7 @@ pub templ Home(design_cards: []const DesignCardVM, module_cards: []const ModuleC
         <head>
             <meta name="viewport" content="width=device-width,initial-scale=1" />
             <title>Netlisp — Designs &amp; Modules</title>
-            {!HOME_STYLE_BLOCK}
+            {!home_style_block}
         </head>
         <body>
             @Navbar("designs")
@@ -370,7 +370,7 @@ pub templ Home(design_cards: []const DesignCardVM, module_cards: []const ModuleC
                     <button type="button" id="home-new" class="home-new">+ New design</button>
                 </div>
                 <div class="home-filters" id="home-filters">
-                    for (HOME_FILTERS) |f| {
+                    for (home_filters) |f| {
                         <button type="button" class={filterClass(f.id)} data-filter="{f.id}">{f.label}</button>
                     }
                 </div>
@@ -388,8 +388,8 @@ pub templ Home(design_cards: []const DesignCardVM, module_cards: []const ModuleC
                 </div>
                 <div class="empty-hint" id="home-empty" style="display:none">No designs or modules match your search.</div>
             </div>
-            {!HOME_SEARCH_SCRIPT}
-            {!HOME_NEW_SCRIPT}
+            {!home_search_script}
+            {!home_new_script}
         </body>
     </html>
 }

@@ -6,12 +6,12 @@ const PowerRail = env_mod.PowerRail;
 const Port = env_mod.Port;
 
 // ── Constants ─────────────────────────────────────────────────────
-const RATING_MIDPOINT: f64 = 0.5;
-const GND_NAME: []const u8 = "GND";
-const SUB_PATH_BUF_LEN: usize = 256;
+const rating_midpoint: f64 = 0.5;
+const gnd_name: []const u8 = "GND";
+const sub_path_buf_len: usize = 256;
 /// Sentinel for "no existing capacity declared" — picked so any real
 /// declared capacity (>= 0) wins the multi-source tie-break.
-const SENTINEL_CAP: f64 = 1.0;
+const sentinel_cap: f64 = 1.0;
 
 /// Walk `block.sub_blocks` output ports and emit one `PowerRail` per declared
 /// source. Ferrite-bead-bridged nets collapse into a single rail by
@@ -45,7 +45,7 @@ pub fn build(
     // order.
     var by_root: std.StringHashMapUnmanaged(PowerRail) = .empty;
     defer by_root.deinit(allocator);
-    var path_buf: [SUB_PATH_BUF_LEN]u8 = undefined;
+    var path_buf: [sub_path_buf_len]u8 = undefined;
     for (block.sub_blocks) |sb| {
         for (sb.block.ports) |port| {
             if (!std.mem.eql(u8, port.direction, "out")) continue;
@@ -53,9 +53,9 @@ pub fn build(
             const path_temp = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ sb.name, port.name }) catch continue;
             const top_net = findTopNet(block, path_temp) orelse continue;
             const base = na.baseNetName(top_net);
-            if (std.mem.eql(u8, base, GND_NAME)) continue;
+            if (std.mem.eql(u8, base, gnd_name)) continue;
             const root = na.findRoot(&net_parent, base);
-            if (std.mem.eql(u8, root, GND_NAME)) continue;
+            if (std.mem.eql(u8, root, gnd_name)) continue;
 
             // A rail source is an output port that either declares power specs
             // OR is tied to a net that reads like a supply rail. The name path
@@ -70,7 +70,7 @@ pub fn build(
             const existing_cap = if (by_root.get(root)) |existing|
                 (existing.capacity_max orelse existing.capacity_typ orelse 0)
             else
-                -SENTINEL_CAP;
+                -sentinel_cap;
             const incoming_cap = port.current_max orelse port.current_typ orelse 0;
             if (incoming_cap <= existing_cap) continue;
 
@@ -174,7 +174,7 @@ fn resolveRailVoltage(block: *const DesignBlock, rail_name: []const u8) ?f64 {
         if (!std.mem.eql(u8, port_net, rail_name)) continue;
         if (p.nominal) |v| return v;
         if (p.rated_min != null and p.rated_max != null) {
-            return (p.rated_min.? + p.rated_max.?) * RATING_MIDPOINT;
+            return (p.rated_min.? + p.rated_max.?) * rating_midpoint;
         }
     }
     return null;

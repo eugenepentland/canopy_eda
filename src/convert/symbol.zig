@@ -8,7 +8,7 @@ const PinInfo = helpers.PinInfo;
 const PadInfo = helpers.PadInfo;
 
 // ── Constants ─────────────────────────────────────────────────────
-const KICAD_SYMBOL_LIB_FORM = "kicad_symbol_lib";
+const kicad_symbol_lib_form = "kicad_symbol_lib";
 
 /// Convert a KiCad .kicad_sym file to .sexp symbol format.
 /// If filter is non-null, only convert the symbol matching that name.
@@ -22,7 +22,7 @@ pub fn convertSymbol(allocator: std.mem.Allocator, source: []const u8, filter: ?
     var symbols_to_process: std.ArrayList(Node) = .empty;
     defer symbols_to_process.deinit(allocator);
 
-    if (root.isForm(KICAD_SYMBOL_LIB_FORM)) {
+    if (root.isForm(kicad_symbol_lib_form)) {
         const children = root.asList().?;
         for (children[1..]) |child| {
             if (child.isForm("symbol")) {
@@ -65,7 +65,7 @@ pub fn generatePinout(allocator: std.mem.Allocator, source: []const u8, filter: 
     var symbols_to_process: std.ArrayList(Node) = .empty;
     defer symbols_to_process.deinit(allocator);
 
-    if (root.isForm(KICAD_SYMBOL_LIB_FORM)) {
+    if (root.isForm(kicad_symbol_lib_form)) {
         const children = root.asList().?;
         for (children[1..]) |child| {
             if (child.isForm("symbol")) {
@@ -124,7 +124,7 @@ pub fn generatePackage(
         const root = sym_nodes[0];
         var symbols: std.ArrayList(Node) = .empty;
         defer symbols.deinit(allocator);
-        if (root.isForm(KICAD_SYMBOL_LIB_FORM)) {
+        if (root.isForm(kicad_symbol_lib_form)) {
             for ((root.asList().?)[1..]) |child| {
                 if (child.isForm("symbol")) try symbols.append(allocator, child);
             }

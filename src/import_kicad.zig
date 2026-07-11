@@ -36,7 +36,7 @@ const import_fold = @import("import_fold.zig");
 const Node = ast.Node;
 
 /// KiCad's single-pad stub prefix — pads on these nets are unconnected.
-pub const UNCONNECTED_PREFIX = "unconnected-";
+pub const unconnected_prefix = "unconnected-";
 
 // ── Data model ────────────────────────────────────────────────────────
 
@@ -291,7 +291,7 @@ fn readPartPad(
 
 // ── Classification ────────────────────────────────────────────────────
 
-const SIZES = [_][]const u8{ "0201", "0402", "0603", "0805" };
+const sizes = [_][]const u8{ "0201", "0402", "0603", "0805" };
 
 /// Map a part onto an existing passive component family, or null when the
 /// part needs a generated library component. Kind comes from the ref-des
@@ -303,7 +303,7 @@ fn familyFor(arena: std.mem.Allocator, project_dir: []const u8, part: Part) Impo
     // Standard-passive leaf: C_/R_/L_/LED_ followed by a known size token.
     const us = std.mem.indexOfScalar(u8, leaf, '_') orelse return null;
     var size: ?[]const u8 = null;
-    for (SIZES) |s| {
+    for (sizes) |s| {
         if (std.mem.startsWith(u8, leaf[us + 1 ..], s)) size = s;
     }
     if (size == null) return null;
@@ -862,7 +862,7 @@ const NetNames = struct {
     /// Returns the sanitized net name, or null for unconnected pads
     /// (empty net or a KiCad `unconnected-*` stub).
     fn resolve(self: *NetNames, raw: []const u8) ImportError!?[]const u8 {
-        if (raw.len == 0 or std.mem.startsWith(u8, raw, UNCONNECTED_PREFIX)) return null;
+        if (raw.len == 0 or std.mem.startsWith(u8, raw, unconnected_prefix)) return null;
         if (self.by_raw.get(raw)) |cached| return cached;
 
         var name = try sanitizeNetName(self.arena, raw);
@@ -968,7 +968,7 @@ fn writeFileMakePath(project_dir: []const u8, path: []const u8, text: []const u8
 
 const testing = std.testing;
 
-const TEST_BOARD =
+const test_board =
     \\(kicad_pcb (version 20260206) (generator "pcbnew")
     \\  (footprint "Capacitor_SMD:C_0402_1005Metric"
     \\    (at 10 20 90)
@@ -990,7 +990,7 @@ const TEST_BOARD =
 ;
 
 fn testParts(arena: std.mem.Allocator) ![]Part {
-    const nodes = try parser_mod.parse(arena, TEST_BOARD);
+    const nodes = try parser_mod.parse(arena, test_board);
     return parseParts(arena, nodes[0]);
 }
 

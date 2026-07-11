@@ -6,16 +6,16 @@ const Node = ast.Node;
 const Span = ast.Span;
 
 // ── Constants ─────────────────────────────────────────────────────
-const SHAPE_ROUNDRECT = "roundrect";
-const SILK_HEADER = "  (silkscreen\n";
-const FAB_HEADER = "  (fab\n";
-const LAYER_SILK = "F.SilkS";
-const LAYER_FAB = "F.Fab";
-const FULL_TURN_DEG: f64 = 360.0;
-const ROT_45_DEG: f64 = 45.0;
-const ROT_135_DEG: f64 = 135.0;
-const ROT_225_DEG: f64 = 225.0;
-const ROT_315_DEG: f64 = 315.0;
+const shape_roundrect = "roundrect";
+const silk_header = "  (silkscreen\n";
+const fab_header = "  (fab\n";
+const layer_silk = "F.SilkS";
+const layer_fab = "F.Fab";
+const full_turn_deg: f64 = 360.0;
+const rot_45_deg: f64 = 45.0;
+const rot_135_deg: f64 = 135.0;
+const rot_225_deg: f64 = 225.0;
+const rot_315_deg: f64 = 315.0;
 
 /// Convert a KiCad .kicad_mod file to .sexp footprint format.
 pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) ConvertError![]const u8 {
@@ -70,8 +70,8 @@ pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) Conver
     // Extract silkscreen and fabrication-layer geometry (lines, circles,
     // rects, polys). F.Fab carries the package body outline + pin-1 marker —
     // the richest preview geometry — which earlier conversions dropped.
-    try emitLayerGeom(w, children[2..], LAYER_SILK, SILK_HEADER);
-    try emitLayerGeom(w, children[2..], LAYER_FAB, FAB_HEADER);
+    try emitLayerGeom(w, children[2..], layer_silk, silk_header);
+    try emitLayerGeom(w, children[2..], layer_fab, fab_header);
 
     try w.writeAll(")\n");
     return buf.toOwnedSlice(allocator);
@@ -166,8 +166,8 @@ fn emitPad(w: anytype, node: Node) !void {
     }
 
     // Apply pad rotation: 90° or 270° swaps width and height
-    const rot_mod = @mod(rotation, FULL_TURN_DEG);
-    const is_rotated = (rot_mod > ROT_45_DEG and rot_mod < ROT_135_DEG) or (rot_mod > ROT_225_DEG and rot_mod < ROT_315_DEG);
+    const rot_mod = @mod(rotation, full_turn_deg);
+    const is_rotated = (rot_mod > rot_45_deg and rot_mod < rot_135_deg) or (rot_mod > rot_225_deg and rot_mod < rot_315_deg);
     const out_sx = if (is_rotated) sy else sx;
     const out_sy = if (is_rotated) sx else sy;
 
@@ -188,7 +188,7 @@ fn emitPad(w: anytype, node: Node) !void {
     // Preserve rratio so the proto sync emits the right cornerRoundingRatio —
     // 0.5 on a square pad is what makes a steel-spacer SMD ring render as a
     // visual circle even though the underlying shape is roundrect.
-    if (has_rratio and std.mem.eql(u8, out_shape, SHAPE_ROUNDRECT)) {
+    if (has_rratio and std.mem.eql(u8, out_shape, shape_roundrect)) {
         try w.print(" (roundrect_rratio {d:.3})", .{rratio});
     }
     try w.writeAll(")\n");
@@ -473,7 +473,7 @@ pub fn mapPadType(kicad: []const u8) []const u8 {
 /// renderer understands; unrecognised shapes fall back to `rect` so import
 /// of an unfamiliar footprint still produces a usable approximation.
 pub fn mapPadShape(kicad: []const u8) []const u8 {
-    if (std.mem.eql(u8, kicad, SHAPE_ROUNDRECT)) return SHAPE_ROUNDRECT;
+    if (std.mem.eql(u8, kicad, shape_roundrect)) return shape_roundrect;
     if (std.mem.eql(u8, kicad, "circle")) return "circle";
     if (std.mem.eql(u8, kicad, "oval")) return "oval";
     if (std.mem.eql(u8, kicad, "rect")) return "rect";

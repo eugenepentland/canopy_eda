@@ -10,16 +10,16 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 
 // ── Constants ─────────────────────────────────────────────────────
-const HTTP_NOT_FOUND: u16 = 404;
-const HTTP_INTERNAL_ERROR: u16 = 500;
-const MAX_FOOTPRINT_BYTES: usize = 256 * 1024;
-const SEXP_EXT_LEN: usize = ".sexp".len;
-const FAR_AWAY: f64 = 999;
-const SVG_BBOX_PAD: f64 = 0.5;
+const http_not_found: u16 = 404;
+const http_internal_error: u16 = 500;
+const max_footprint_bytes: usize = 256 * 1024;
+const sexp_ext_len: usize = ".sexp".len;
+const far_away: f64 = 999;
+const svg_bbox_pad: f64 = 0.5;
 // A `(rect x0 y0 x1 y1)` form is the head atom plus four coordinates.
-const RECT_FORM_ITEMS: usize = 5;
+const rect_form_items: usize = 5;
 // JSON `[a,b,c,d]` of four 3-decimal coords — rects + line segments.
-const JSON_F4 = "[{d:.3},{d:.3},{d:.3},{d:.3}]";
+const json_f4 = "[{d:.3},{d:.3},{d:.3},{d:.3}]";
 
 // The layer palette + pad-label sizing now live in the shared client renderer
 // (`assets/footprint_svg.js`); this module only describes the geometry as JSON.
@@ -65,32 +65,32 @@ const Shapes = struct {
 /// the PCB-layout page — so a pad-shape change lands in exactly one place.
 pub fn footprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         return;
     };
 
     const fp_path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints/{s}.sexp", .{ ctx.project_dir, name }) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         return;
     };
     defer ctx.allocator.free(fp_path);
-    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, MAX_FOOTPRINT_BYTES) catch {
-        res.status = HTTP_NOT_FOUND;
+    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, max_footprint_bytes) catch {
+        res.status = http_not_found;
         res.body = "Footprint not found";
         return;
     };
 
     const nodes = parser_mod.parse(ctx.allocator, content) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "Parse error";
         return;
     };
     if (nodes.len == 0) {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         return;
     }
     const top = nodes[0].asList() orelse {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         return;
     };
 
@@ -98,7 +98,7 @@ pub fn footprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Ha
     try collectShapes(ctx.allocator, top[1..], &shapes);
 
     if (shapes.isEmpty()) {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         res.body = "Empty footprint";
         return;
     }
@@ -231,7 +231,7 @@ fn readCircle(node: Node, layer: Layer) ?Circ {
 
 fn readRect(node: Node, layer: Layer) ?RectS {
     const sl = node.asList() orelse return null;
-    if (sl.len < RECT_FORM_ITEMS) return null;
+    if (sl.len < rect_form_items) return null;
     return .{
         .x0 = sl[1].asNumber() orelse 0,
         .y0 = sl[2].asNumber() orelse 0,
@@ -264,7 +264,7 @@ fn readPoly(allocator: std.mem.Allocator, node: Node, layer: Layer) HandlerError
 const BBox = struct { min_x: f64, min_y: f64, max_x: f64, max_y: f64 };
 
 fn computeBBox(shapes: Shapes) BBox {
-    var b: BBox = .{ .min_x = FAR_AWAY, .min_y = FAR_AWAY, .max_x = -FAR_AWAY, .max_y = -FAR_AWAY };
+    var b: BBox = .{ .min_x = far_away, .min_y = far_away, .max_x = -far_away, .max_y = -far_away };
     for (shapes.pads.items) |p| {
         grow(&b, p.x - p.w / 2, p.y - p.h / 2);
         grow(&b, p.x + p.w / 2, p.y + p.h / 2);
@@ -306,10 +306,10 @@ fn grow(b: *BBox, x: f64, y: f64) void {
 /// top — see `/static/footprint_svg.js`.
 fn emitFootprintJson(w: anytype, shapes: Shapes) HandlerError!void {
     var b = computeBBox(shapes);
-    b.min_x -= SVG_BBOX_PAD;
-    b.min_y -= SVG_BBOX_PAD;
-    b.max_x += SVG_BBOX_PAD;
-    b.max_y += SVG_BBOX_PAD;
+    b.min_x -= svg_bbox_pad;
+    b.min_y -= svg_bbox_pad;
+    b.max_x += svg_bbox_pad;
+    b.max_y += svg_bbox_pad;
 
     try w.print("{{\"bbox\":{{\"x\":{d:.3},\"y\":{d:.3},\"w\":{d:.3},\"h\":{d:.3}}}", .{
         b.min_x, b.min_y, b.max_x - b.min_x, b.max_y - b.min_y,
@@ -342,7 +342,7 @@ fn emitFootprintJson(w: anytype, shapes: Shapes) HandlerError!void {
     try w.writeAll(",\"courtyard\":{\"rects\":[");
     for (shapes.court_rects.items, 0..) |r, i| {
         if (i != 0) try w.writeAll(",");
-        try w.print(JSON_F4, .{ r.x0, r.y0, r.x1, r.y1 });
+        try w.print(json_f4, .{ r.x0, r.y0, r.x1, r.y1 });
     }
     try w.writeAll("],\"circles\":[");
     for (shapes.court_circs.items, 0..) |c, i| {
@@ -361,7 +361,7 @@ fn emitLayerJson(w: anytype, shapes: Shapes, layer: Layer) HandlerError!void {
         if (s.layer != layer) continue;
         if (!first) try w.writeAll(",");
         first = false;
-        try w.print(JSON_F4, .{ s.x1, s.y1, s.x2, s.y2 });
+        try w.print(json_f4, .{ s.x1, s.y1, s.x2, s.y2 });
     }
     try w.writeAll("],\"circles\":[");
     first = true;
@@ -377,7 +377,7 @@ fn emitLayerJson(w: anytype, shapes: Shapes, layer: Layer) HandlerError!void {
         if (r.layer != layer) continue;
         if (!first) try w.writeAll(",");
         first = false;
-        try w.print(JSON_F4, .{ r.x0, r.y0, r.x1, r.y1 });
+        try w.print(json_f4, .{ r.x0, r.y0, r.x1, r.y1 });
     }
     try w.writeAll("],\"polys\":[");
     first = true;
@@ -424,61 +424,61 @@ fn writeJsonStr(w: anytype, s: []const u8) HandlerError!void {
 const eval_mod = @import("../eval/evaluator.zig");
 const paths = @import("../paths.zig");
 
-const HTTP_BAD_REQUEST: u16 = 400;
-const MAX_PCB_BYTES: usize = 64 * 1024 * 1024;
+const http_bad_request: u16 = 400;
+const max_pcb_bytes: usize = 64 * 1024 * 1024;
 
 /// GET /api/board-footprint/:name?uuid=<kicad-uuid> — one footprint from the
 /// design's declared `.kicad_pcb`, as preview JSON ({bbox, pads, silk, fab,
 /// courtyard}). 404 when the design has no board file or the uuid isn't on it.
 pub fn boardFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         return;
     };
     const q = req.query() catch {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         return;
     };
     const want_uuid = q.get("uuid") orelse {
-        res.status = HTTP_BAD_REQUEST;
+        res.status = http_bad_request;
         res.body = "missing ?uuid=";
         return;
     };
 
     const design_path = paths.designSourcePath(req.arena, ctx.project_dir, name) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         return;
     };
     var eval = eval_mod.Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
     const result = eval.evalFile(design_path) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         res.body = "Build error";
         return;
     };
     const block = switch (result) {
         .design_block => |b| b,
         else => {
-            res.status = HTTP_NOT_FOUND;
+            res.status = http_not_found;
             return;
         },
     };
     const pcb_path = block.kicad_pcb_path orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         res.body = "design has no (kicad-pcb …) form";
         return;
     };
-    const src = infra_fs.cwd().readFileAlloc(req.arena, pcb_path, MAX_PCB_BYTES) catch {
-        res.status = HTTP_NOT_FOUND;
+    const src = infra_fs.cwd().readFileAlloc(req.arena, pcb_path, max_pcb_bytes) catch {
+        res.status = http_not_found;
         res.body = "board file unreadable";
         return;
     };
     const nodes = parser_mod.parse(req.arena, src) catch {
-        res.status = HTTP_INTERNAL_ERROR;
+        res.status = http_internal_error;
         return;
     };
     const found = findBoardFootprint(nodes, want_uuid) orelse {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         res.body = "footprint not on board";
         return;
     };
@@ -486,7 +486,7 @@ pub fn boardFootprintApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     var shapes: Shapes = .{};
     try collectShapesFromBoardFp(req.arena, found.children, &shapes);
     if (shapes.isEmpty()) {
-        res.status = HTTP_NOT_FOUND;
+        res.status = http_not_found;
         res.body = "Empty footprint";
         return;
     }

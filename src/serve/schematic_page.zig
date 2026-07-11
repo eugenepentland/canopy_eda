@@ -208,7 +208,7 @@ pub fn schematicPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         block,
         ctx.project_dir,
         name,
-        assets_css.NAVBAR_CSS,
+        assets_css.navbar_css,
         status,
         review_doc,
         &check_results,

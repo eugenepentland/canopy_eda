@@ -26,19 +26,19 @@ const pcb_describe = @import("pcb_describe.zig");
 const Side = pcb_describe.Side;
 
 /// `Side` variant count (left, right, top, bottom, center).
-pub const N_SIDES = @typeInfo(Side).@"enum".fields.len;
+pub const n_sides = @typeInfo(Side).@"enum".fields.len;
 
 /// Upper edges of the radial gap-to-anchor bands (mm); a part past the last edge
 /// falls in the final "far" bucket. Chosen to separate the tightness regimes a
 /// hand-finisher cares about: sub-mm hugging, close, mid, loose, far.
-pub const GAP_BANDS = [_]f64{ 0.5, 1.0, 2.0, 4.0, 8.0 };
-pub const N_BANDS = GAP_BANDS.len + 1;
+pub const gap_bands = [_]f64{ 0.5, 1.0, 2.0, 4.0, 8.0 };
+pub const n_bands = gap_bands.len + 1;
 
 /// Sub-term weights for the overall style score. Kept here (not scattered) so a
 /// calibration sweep can retune them in one place. Renormalized from the plan's
 /// full-term weights to the two terms shipped in this increment.
-pub const W_EDGE: f64 = 0.6;
-pub const W_GAP: f64 = 0.4;
+pub const w_edge: f64 = 0.6;
+pub const w_gap: f64 = 0.4;
 
 /// One analyzed part for the style metric: its anchor edge, its gap-band, and its
 /// interchangeable-class key. Split out so the matcher is unit-testable on
@@ -101,10 +101,10 @@ fn aabbGap(a: optimizer.Part, b: optimizer.Part) f64 {
 
 /// Bucket a gap (mm) into `0..N_BANDS-1` by `GAP_BANDS`.
 pub fn gapBand(gap_mm: f64) usize {
-    for (GAP_BANDS, 0..) |edge, i| {
+    for (gap_bands, 0..) |edge, i| {
         if (gap_mm < edge) return i;
     }
-    return N_BANDS - 1;
+    return n_bands - 1;
 }
 
 /// Rotate a `Side` by `k` clockwise quarter-turns (top→right→bottom→left).
@@ -146,10 +146,10 @@ pub fn analyzeStyle(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: 
 /// rough and starred totals are equal — we credit `min(count)` per edge and per
 /// gap-band (order-independent histogram overlap).
 const SClass = struct {
-    edge_r: [N_SIDES]usize = [_]usize{0} ** N_SIDES,
-    edge_s: [N_SIDES]usize = [_]usize{0} ** N_SIDES,
-    gap_r: [N_BANDS]usize = [_]usize{0} ** N_BANDS,
-    gap_s: [N_BANDS]usize = [_]usize{0} ** N_BANDS,
+    edge_r: [n_sides]usize = [_]usize{0} ** n_sides,
+    edge_s: [n_sides]usize = [_]usize{0} ** n_sides,
+    gap_r: [n_bands]usize = [_]usize{0} ** n_bands,
+    gap_s: [n_bands]usize = [_]usize{0} ** n_bands,
     n: usize = 0,
 };
 
@@ -178,7 +178,7 @@ pub fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []con
     for (0..4) |k| {
         // Re-tally the rough edges under rotation k.
         var it = map.iterator();
-        while (it.next()) |e| e.value_ptr.edge_r = [_]usize{0} ** N_SIDES;
+        while (it.next()) |e| e.value_ptr.edge_r = [_]usize{0} ** n_sides;
         for (rough) |r| {
             const gop = try map.getOrPut(alloc, r.class);
             if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -190,7 +190,7 @@ pub fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []con
         var it2 = map.iterator();
         while (it2.next()) |e| {
             const cd = e.value_ptr;
-            for (0..N_SIDES) |j| edge_credit += @min(cd.edge_r[j], cd.edge_s[j]);
+            for (0..n_sides) |j| edge_credit += @min(cd.edge_r[j], cd.edge_s[j]);
             for (cd.edge_r) |c| tot += c;
         }
         if (k == 0) total = tot;
@@ -203,7 +203,7 @@ pub fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []con
     // Gap credit (once): tally rough gap-bands then credit min per band per class.
     {
         var it = map.iterator();
-        while (it.next()) |e| e.value_ptr.gap_r = [_]usize{0} ** N_BANDS;
+        while (it.next()) |e| e.value_ptr.gap_r = [_]usize{0} ** n_bands;
         for (rough) |r| {
             const gop = try map.getOrPut(alloc, r.class);
             if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -212,7 +212,7 @@ pub fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []con
         var it2 = map.iterator();
         while (it2.next()) |e| {
             const cd = e.value_ptr;
-            for (0..N_BANDS) |j| gap_credit += @min(cd.gap_r[j], cd.gap_s[j]);
+            for (0..n_bands) |j| gap_credit += @min(cd.gap_r[j], cd.gap_s[j]);
         }
     }
 
@@ -223,7 +223,7 @@ pub fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []con
         .n = total,
         .edge_pct = edge_pct,
         .gap_pct = gap_pct,
-        .style_pct = W_EDGE * edge_pct + W_GAP * gap_pct,
+        .style_pct = w_edge * edge_pct + w_gap * gap_pct,
         .rot_k = best_k,
     };
 }
@@ -236,7 +236,7 @@ pub fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []con
 /// style term real selection weight for generation. The lone holdout,
 /// `adp7118-ldo` (rough obj_rel 0.56 but 80% style → needs λ≈3.9), is a
 /// reward-misfit to investigate, not a reason to crank λ. See `hybridScore`.
-pub const LAMBDA_DEFAULT: f64 = 1.5;
+pub const lambda_default: f64 = 1.5;
 
 /// The hybrid verdict for one candidate: physics relative to the reference, the
 /// dense style match, and their scale-free product. **Lower `hybrid` = better**,
@@ -325,7 +325,7 @@ test "styleScore D4 rewards a rotated-but-identical arrangement" {
 test "gapBand buckets by GAP_BANDS edges" {
     try std.testing.expectEqual(@as(usize, 0), gapBand(0.2));
     try std.testing.expectEqual(@as(usize, 1), gapBand(0.7));
-    try std.testing.expectEqual(@as(usize, N_BANDS - 1), gapBand(20.0));
+    try std.testing.expectEqual(@as(usize, n_bands - 1), gapBand(20.0));
 }
 
 // spec: Web Server - hybrid score ranks the reference layout at exactly 1.0 and penalizes stylistic deviation

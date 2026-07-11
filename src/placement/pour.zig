@@ -49,10 +49,10 @@ const Contour = []const [2]f64;
 /// Upper bound on grid cells before `compute` coarsens the pitch (and flags
 /// `coarsened`). A 100×100 mm board at the 0.15 mm default pitch is ~445 k
 /// cells; the cap leaves generous headroom while bounding a pathological board.
-const MAX_CELLS: usize = 3_000_000;
+const max_cells: usize = 3_000_000;
 
-const BLOCKED: i32 = -2;
-const UNLABELED: i32 = -1;
+const blocked_marker: i32 = -2;
+const unlabeled: i32 = -1;
 
 /// The computed fill for one layer: the label grid (for point/pad membership)
 /// plus the kept components' outer contours (for emission).
@@ -171,7 +171,7 @@ pub fn compute(
     var coarsened = false;
     var nx = gridCount(r.w, pitch);
     var ny = gridCount(r.h, pitch);
-    while (nx * ny > MAX_CELLS) {
+    while (nx * ny > max_cells) {
         pitch *= 1.5;
         nx = gridCount(r.w, pitch);
         ny = gridCount(r.h, pitch);
@@ -259,7 +259,7 @@ fn initInset(g: Grid, placement: optimizer.Placement, r: optimizer.BoardRect, in
             else
                 c[0] >= r.minx + inset and c[0] <= r.minx + r.w - inset and
                     c[1] >= r.miny + inset and c[1] <= r.miny + r.h - inset;
-            g.labels[j * g.nx + i] = if (ok) UNLABELED else BLOCKED;
+            g.labels[j * g.nx + i] = if (ok) unlabeled else blocked_marker;
         }
     }
 }
@@ -359,13 +359,13 @@ fn seedAt(g: Grid, x: f64, y: f64, kept: []bool) void {
 }
 
 fn labelAtWorld(g: Grid, x: f64, y: f64) i32 {
-    if (g.pitch <= 0) return BLOCKED;
+    if (g.pitch <= 0) return blocked_marker;
     const fi = @floor((x - g.minx) / g.pitch);
     const fj = @floor((y - g.miny) / g.pitch);
-    if (fi < 0 or fj < 0) return BLOCKED;
+    if (fi < 0 or fj < 0) return blocked_marker;
     const i: usize = @intFromFloat(fi);
     const j: usize = @intFromFloat(fj);
-    if (i >= g.nx or j >= g.ny) return BLOCKED;
+    if (i >= g.nx or j >= g.ny) return blocked_marker;
     return g.labels[j * g.nx + i];
 }
 
@@ -381,7 +381,7 @@ fn stampDisc(g: Grid, cx: f64, cy: f64, rad: f64) void {
             const c = g.cellCenter(i, j);
             const dx = c[0] - cx;
             const dy = c[1] - cy;
-            if (dx * dx + dy * dy <= r2) g.labels[j * g.nx + i] = BLOCKED;
+            if (dx * dx + dy * dy <= r2) g.labels[j * g.nx + i] = blocked_marker;
         }
     }
 }
@@ -395,7 +395,7 @@ fn stampSeg(g: Grid, x1: f64, y1: f64, x2: f64, y2: f64, rad: f64) void {
         var i = lo[0];
         while (i <= hi[0] and i < g.nx) : (i += 1) {
             const c = g.cellCenter(i, j);
-            if (segPointDist(x1, y1, x2, y2, c[0], c[1]) <= rad) g.labels[j * g.nx + i] = BLOCKED;
+            if (segPointDist(x1, y1, x2, y2, c[0], c[1]) <= rad) g.labels[j * g.nx + i] = blocked_marker;
         }
     }
 }
@@ -412,7 +412,7 @@ fn stampPad(g: Grid, p: optimizer.Part, pad: geometry.Pad, reach: f64) void {
         while (i <= hi[0] and i < g.nx) : (i += 1) {
             const c = g.cellCenter(i, j);
             if (pad_shape.pointDist(sh.x0, sh.y0, sh.x1, sh.y1, sh.poly, c[0], c[1], reach) <= reach)
-                g.labels[j * g.nx + i] = BLOCKED;
+                g.labels[j * g.nx + i] = blocked_marker;
         }
     }
 }
@@ -444,7 +444,7 @@ fn labelComponents(arena: std.mem.Allocator, g: Grid) std.mem.Allocator.Error!us
     var next: i32 = 0;
     var start: usize = 0;
     while (start < g.labels.len) : (start += 1) {
-        if (g.labels[start] != UNLABELED) continue;
+        if (g.labels[start] != unlabeled) continue;
         g.labels[start] = next;
         stack.clearRetainingCapacity();
         try stack.append(arena, @intCast(start));
@@ -462,7 +462,7 @@ fn labelComponents(arena: std.mem.Allocator, g: Grid) std.mem.Allocator.Error!us
 }
 
 fn floodPush(arena: std.mem.Allocator, g: Grid, stack: *std.ArrayList(u32), idx: usize, comp: i32) std.mem.Allocator.Error!void {
-    if (g.labels[idx] != UNLABELED) return;
+    if (g.labels[idx] != unlabeled) return;
     g.labels[idx] = comp;
     try stack.append(arena, @intCast(idx));
 }

@@ -43,63 +43,63 @@ const Handler = serve_root.Handler;
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 // SVG framing.
-const SCALE_MIN: f64 = 6.0; // px per mm
-const SCALE_MAX: f64 = 48.0;
-const TARGET_PX: f64 = 1000.0; // desired content width/height
-const MARGIN_MM: f64 = 2.0;
+const scale_min: f64 = 6.0; // px per mm
+const scale_max: f64 = 48.0;
+const target_px: f64 = 1000.0; // desired content width/height
+const margin_mm: f64 = 2.0;
 
 /// Legacy standalone optimizer-cache sidecar. The cache now lives in the
 /// `"cache"` key of `.layouts.json` (one sidecar per design); this file is
 /// still read as a fallback for boards last solved by an older build, and
 /// is deleted the next time the cache is written.
-const AUTO_EXT = ".autolayout.json";
+const auto_ext = ".autolayout.json";
 
 /// JSON key prefix shared by every `{"ref": …}` record we emit.
-const REF_OPEN = "{\"ref\":";
+const ref_open = "{\"ref\":";
 /// JSON object opener shared by the placement-export / saved-layout records.
-const NAME_OPEN = "{\"name\":";
+const name_open = "{\"name\":";
 /// JSON key + open bracket shared by the layout/cache/export part arrays.
-const PARTS_OPEN = "\"parts\":[";
+const parts_open = "\"parts\":[";
 /// JSON `,"origin":` key shared by the part records that carry the renumber-
 /// stable origin key (saved-layout disk + page JSON, live PCB.parts).
-const ORIGIN_OPEN = ",\"origin\":";
+const origin_open = ",\"origin\":";
 /// JSON `,"texts":` key shared by the sidecar, the page blob, and the
 /// per-layout Load records (board-level silkscreen text array).
-const TEXTS_OPEN = ",\"texts\":";
+const texts_open = ",\"texts\":";
 /// JSON `,"outline":` key shared by the sidecar writer, the page blob, and the
 /// MCP `set_board_outline` response.
-const OUTLINE_OPEN = ",\"outline\":";
+const outline_open = ",\"outline\":";
 /// Error bodies shared across the layout handlers.
-const NO_BLOCK_MSG = "No design or module by that name";
+const no_block_msg = "No design or module by that name";
 /// Response header name the fab-output endpoints set their MIME type on.
-const CT_HDR = "content-type";
+const ct_hdr = "content-type";
 /// Returned when `?sub=<slug>` names a sub-block that doesn't exist in the design.
-const NO_SUB_MSG = "No sub-block by that name";
-const BAD_JSON_MSG = "bad json";
-const PLACEMENT_ERR_MSG = "Placement error";
+const no_sub_msg = "No sub-block by that name";
+const bad_json_msg = "bad json";
+const placement_err_msg = "Placement error";
 /// JSON body/query key for the copper-to-copper clearance rule (mm).
-const CLEARANCE_KEY = "clearance";
+const clearance_key = "clearance";
 
 /// Success body returned by the mutating layout/courtyard endpoints.
-const OK_JSON_TRUE = "{\"ok\":true}";
+const ok_json_true = "{\"ok\":true}";
 
 /// The ` checked` HTML attribute fragment, emitted to pre-check a checkbox.
-const CHECKED = " checked";
+const checked_glyph = " checked";
 
 /// The one layout sidecar per design: every *named* saved layout (manual
 /// snapshots the user named plus an auto-recorded history of optimizer
 /// runs) under `"layouts"`, the KiCad-sync `"default"` marker, and the
 /// single-slot optimizer cache under `"cache"`.
-const LAYOUTS_EXT = ".layouts.json";
+const layouts_ext = ".layouts.json";
 
 /// Layout `kind` tags. `manual` = a snapshot the user saved by name; `auto` =
 /// one recorded automatically each time the optimizer regenerated.
-const KIND_MANUAL = "manual";
-const KIND_AUTO = "auto";
+const kind_manual = "manual";
+const kind_auto = "auto";
 
 /// Cap on auto-recorded entries kept per design. On each record the oldest
 /// auto entries past this are pruned; manual snapshots are never auto-pruned.
-const MAX_AUTO_LAYOUTS: usize = 12;
+const max_auto_layouts: usize = 12;
 
 /// One placed part within a saved layout: ref-des + centre (mm) + rotation,
 /// plus the renumber-stable `origin` (the part's module-local `origin_key`).
@@ -193,13 +193,13 @@ const SavedRoutes = struct { tracks: []const SavedTrack, vias: []const SavedVia 
 
 /// Shared JSON fragments for copper serialization — the sidecar, the page
 /// blob, and the Stamp subroutes all write the identical track/via shape.
-const TRACK_JSON_FMT = "{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d},\"net\":";
+const track_json_fmt = "{{\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"l\":{d},\"w\":{d},\"net\":";
 /// One outline-polygon vertex as a JSON `[x,y]` pair (sidecar + page blob).
-const PT_PAIR_FMT = "[{d},{d}]";
-const VIA_JSON_FMT = "{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":";
-const VIAS_ARR_OPEN = "],\"vias\":[";
+const pt_pair_fmt = "[{d},{d}]";
+const via_json_fmt = "{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":";
+const vias_arr_open = "],\"vias\":[";
 /// "ref\x00pad" / "prefix\x00origin" composite hash keys.
-const PIN_KEY_FMT = "{s}\x00{s}";
+const pin_key_fmt = "{s}\x00{s}";
 
 /// A user-DRAWN board outline (world mm) captured with a saved layout — the
 /// interactive counterpart of the authored `(board (size W H))` form (the
@@ -382,7 +382,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     };
     const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
-        res.body = NO_BLOCK_MSG;
+        res.body = no_block_msg;
         return;
     };
     // A `?sub=<slug>` request scopes the layout to a single sub-block — the
@@ -393,7 +393,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const sub_block: ?env_mod.SubBlock = if (sub) |s|
         (descendToSub(ctx.allocator, block, s) orelse {
             res.status = 404;
-            res.body = NO_SUB_MSG;
+            res.body = no_sub_msg;
             return;
         })
     else
@@ -432,7 +432,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     const grid_only = choice.grid_only;
     var placement = placeForChoice(ctx.allocator, eff_block, ctx.project_dir, choice, refine_name, tune.params) catch {
         res.status = 500;
-        res.body = PLACEMENT_ERR_MSG;
+        res.body = placement_err_msg;
         return;
     };
     // Persist the layout + its weights whenever the optimizer ran (miss /
@@ -480,7 +480,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
         .ro_params = ro.params,
         .routed = routed,
         .n_drc = rv.violations.len,
-        .n_rp = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0,
+        .n_rp = if (routed) |r| router.returnPathViolations(placement, r, router.return_path_radius_mm) else 0,
         .layouts = layouts,
         .auto = auto_score,
         .single = single,
@@ -505,8 +505,8 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     try writeStage(w, view, embed);
     // WebGL 3D-view stage — hidden until the "3D View" tab is opened, then the
     // body gets `.mode-3d` (CSS swaps the SVG out for this). Built lazily.
-    if (!embed) try w.writeAll(PCB_3D_STAGE_HTML);
-    if (!embed) try w.writeAll(COURTYARD_MODAL ++ FAB_MODAL);
+    if (!embed) try w.writeAll(pcb_3d_stage_html);
+    if (!embed) try w.writeAll(courtyard_modal ++ fab_modal);
     try w.writeAll("</main>");
     try writeRightDock(w, embed, edit_embed, single, layouts, auto_score, placement);
     try w.writeAll("</div>");
@@ -549,7 +549,7 @@ pub fn pcbLayoutPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
     try w.writeAll("<script src=\"/static/pcb_board.js\"></script>");
     // 3D-view tab wiring — lazy-loads the WebGL stack on first open. Omitted in
     // the read-only embedded preview (no toggle there).
-    if (!embed) try w.writeAll(PCB_3D_TOGGLE_JS);
+    if (!embed) try w.writeAll(pcb_3d_toggle_js);
     try w.writeAll("</body></html>");
 
     res.content_type = .HTML;
@@ -738,7 +738,7 @@ fn designPinNetMap(alloc: std.mem.Allocator, p: optimizer.Placement) ?std.String
     var m = std.StringHashMapUnmanaged([]const u8).empty;
     for (p.nets) |net| {
         for (net.pins) |pin| {
-            const key = std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ pin.ref_des, pin.pin }) catch return null;
+            const key = std.fmt.allocPrint(alloc, pin_key_fmt, .{ pin.ref_des, pin.pin }) catch return null;
             m.put(alloc, key, net.name) catch return null;
         }
     }
@@ -763,21 +763,21 @@ fn writeSubRoutesJson(
     for (pin_nets) |ps| {
         if (net_map.contains(ps.net)) continue;
         const dref = ok_ref.get(ps.origin_key) orelse continue;
-        const key = std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ dref, ps.pad }) catch continue;
+        const key = std.fmt.allocPrint(alloc, pin_key_fmt, .{ dref, ps.pad }) catch continue;
         const dn = dpin_net.get(key) orelse continue;
         net_map.put(alloc, ps.net, dn) catch break;
     }
     try w.writeAll("{\"tracks\":[");
     for (sr.tracks, 0..) |t, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print(TRACK_JSON_FMT, .{ t.x1, t.y1, t.x2, t.y2, t.l, t.w });
+        try w.print(track_json_fmt, .{ t.x1, t.y1, t.x2, t.y2, t.l, t.w });
         try writeJsonStr(w, mappedNet(alloc, &net_map, slug, t.net));
         try w.writeAll("}");
     }
-    try w.writeAll(VIAS_ARR_OPEN);
+    try w.writeAll(vias_arr_open);
     for (sr.vias, 0..) |vi, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print(VIA_JSON_FMT, .{ vi.x, vi.y, vi.d, vi.drill });
+        try w.print(via_json_fmt, .{ vi.x, vi.y, vi.d, vi.drill });
         try writeJsonStr(w, mappedNet(alloc, &net_map, slug, vi.net));
         try w.writeAll("}");
     }
@@ -830,7 +830,7 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
     const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
-        res.body = NO_BLOCK_MSG;
+        res.body = no_block_msg;
         return;
     };
 
@@ -856,7 +856,7 @@ pub fn pcbLayoutJsonApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     else
         optimizer.solve(ctx.allocator, block, ctx.project_dir, cached, tune.params, if (refine_name != null) .refine else .place)) catch {
         res.status = 500;
-        res.body = PLACEMENT_ERR_MSG;
+        res.body = placement_err_msg;
         return;
     };
     if (placement.generated) writeAutoCache(ctx.allocator, ctx.project_dir, name, placement, tune.params);
@@ -923,13 +923,13 @@ pub fn writePerNetJson(w: *std.Io.Writer, per_net: []const router.NetRouted) std
     try w.writeAll("]");
 }
 
-const PNG_DEFAULT_WIDTH: u32 = 1200;
+const png_default_width: u32 = 1200;
 
 /// Inputs for `renderDesignPng` — the union of what the HTTP query and the MCP
 /// `get_pcb_layout_image` tool can specify. Empty `highlight_*` → plain board;
 /// any value → focus mode (spotlight + dim).
 pub const PngRequest = struct {
-    width: u32 = PNG_DEFAULT_WIDTH,
+    width: u32 = png_default_width,
     highlight_nets: []const []const u8 = &.{},
     highlight_refs: []const []const u8 = &.{},
     route: bool = false,
@@ -1162,9 +1162,9 @@ pub fn renderDesignPng(
 /// the facts always describe the placement the image shows).
 pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngRequest {
     const width: u32 = blk: {
-        const q = req.query() catch break :blk PNG_DEFAULT_WIDTH;
-        const wv = q.get("width") orelse break :blk PNG_DEFAULT_WIDTH;
-        break :blk std.fmt.parseInt(u32, wv, 10) catch PNG_DEFAULT_WIDTH;
+        const q = req.query() catch break :blk png_default_width;
+        const wv = q.get("width") orelse break :blk png_default_width;
+        break :blk std.fmt.parseInt(u32, wv, 10) catch png_default_width;
     };
     return .{
         .width = width,
@@ -1239,9 +1239,9 @@ pub fn pcbPngApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     const png_bytes = renderDesignPng(arena, ctx.project_dir, name, opts) catch |e| {
         res.status = if (e == error.BlockNotFound or e == error.SubNotFound) 404 else 500;
         res.body = switch (e) {
-            error.BlockNotFound => NO_BLOCK_MSG,
-            error.SubNotFound => NO_SUB_MSG,
-            else => PLACEMENT_ERR_MSG,
+            error.BlockNotFound => no_block_msg,
+            error.SubNotFound => no_sub_msg,
+            else => placement_err_msg,
         };
         return;
     };
@@ -1321,7 +1321,7 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
     const b = p.breakdown;
     var bmax: f64 = 0;
     for (blame) |v| bmax = @max(bmax, v);
-    try w.writeAll(NAME_OPEN);
+    try w.writeAll(name_open);
     try writeJsonStr(w, name);
     try w.print(",\"generated\":{s},", .{if (p.generated) "true" else "false"});
     try w.print("\"params\":{{\"loop_w\":{d},\"w_align\":{d},\"w_congest\":{d},\"cap_w_max\":{d},\"grid\":{s}}},", .{
@@ -1332,13 +1332,13 @@ fn writePlacementJson(w: *std.Io.Writer, p: optimizer.Placement, params: optimiz
     try w.writeAll("\"breakdown\":");
     try writeBreakdownJson(w, b, params);
     try w.print(",\"bbox\":{{\"minx\":{d},\"miny\":{d},\"maxx\":{d},\"maxy\":{d}}},", .{ p.minx, p.miny, p.maxx, p.maxy });
-    try w.writeAll(PARTS_OPEN);
+    try w.writeAll(parts_open);
     for (p.parts, 0..) |pt, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"ref\":");
         try writeJsonStr(w, pt.ref_des);
         if (i < p.instances.len) {
-            try w.writeAll(ORIGIN_OPEN);
+            try w.writeAll(origin_open);
             try writeJsonStr(w, p.instances[i].origin_key);
         }
         const bl = if (i < blame.len and bmax > 0) blame[i] / bmax else 0;
@@ -1462,7 +1462,7 @@ fn regenOnBest(ctx_ptr: *anyopaque, parts: []const optimizer.Part, score: f64, p
     w.print("{{\"pass\":\"{s}\",\"score\":{d:.2},\"parts\":[", .{ pass.label(), score }) catch return;
     for (parts, 0..) |p, i| {
         if (i > 0) w.writeAll(",") catch return;
-        w.writeAll(REF_OPEN) catch return;
+        w.writeAll(ref_open) catch return;
         writeJsonStr(w, p.ref_des) catch return;
         w.print(",\"x\":{d:.3},\"y\":{d:.3},\"rot\":{d:.0}}}", .{ p.x, p.y, p.rot }) catch return;
     }
@@ -1603,7 +1603,7 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     };
     const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
-        res.body = BAD_JSON_MSG;
+        res.body = bad_json_msg;
         return;
     };
     if (root != .object) {
@@ -1647,13 +1647,13 @@ pub fn pcbScoreApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     };
     const block: *env_mod.DesignBlock = resolveBlock(arena, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
-        res.body = NO_BLOCK_MSG;
+        res.body = no_block_msg;
         return;
     };
     const eff_block = if (subSlug(req)) |s|
         (descendToSub(arena, block, s) orelse {
             res.status = 404;
-            res.body = NO_SUB_MSG;
+            res.body = no_sub_msg;
             return;
         }).block
     else
@@ -1720,7 +1720,7 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     };
     const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
-        res.body = BAD_JSON_MSG;
+        res.body = bad_json_msg;
         return;
     };
     if (root != .object) {
@@ -1755,7 +1755,7 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     var rp = router.RouteParams{};
     const tw = jsonNum(root.object.get("track_width"));
     if (tw > 0) rp.track_width = tw;
-    const cl = jsonNum(root.object.get(CLEARANCE_KEY));
+    const cl = jsonNum(root.object.get(clearance_key));
     if (cl > 0) rp.clearance = cl;
     const vd = jsonNum(root.object.get("via_drill"));
     if (vd > 0) rp.via_drill = vd;
@@ -1771,13 +1771,13 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     };
     const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
-        res.body = NO_BLOCK_MSG;
+        res.body = no_block_msg;
         return;
     };
     const eff_block = if (subSlug(req)) |s|
         (descendToSub(ctx.allocator, block, s) orelse {
             res.status = 404;
-            res.body = NO_SUB_MSG;
+            res.body = no_sub_msg;
             return;
         }).block
     else
@@ -1788,7 +1788,7 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     // layout instead of the cached auto one.
     const placement = optimizer.placeFromPoses(ctx.allocator, eff_block, ctx.project_dir, poses.items, optimizer.Params{}) catch {
         res.status = 500;
-        res.body = PLACEMENT_ERR_MSG;
+        res.body = placement_err_msg;
         return;
     };
     const routed = router.route(ctx.allocator, placement, rp) catch {
@@ -1798,7 +1798,7 @@ pub fn pcbRouteApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     };
     const violations: []const drc.Violation = drc.check(ctx.allocator, placement, routed, rp.clearance) catch &.{};
 
-    const rp_warn = router.returnPathViolations(placement, routed, router.RETURN_PATH_RADIUS_MM);
+    const rp_warn = router.returnPathViolations(placement, routed, router.return_path_radius_mm);
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
@@ -1829,7 +1829,7 @@ pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     };
     const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
-        res.body = BAD_JSON_MSG;
+        res.body = bad_json_msg;
         return;
     };
     if (root != .object) {
@@ -1864,7 +1864,7 @@ pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     // base, applied after the placement is built below (matches ?route=1 and the
     // client's PCB.clr). Per-net `(net-class …)` overrides are applied inside
     // `drc.check` from `placement.rules.net`.
-    const body_clearance = jsonNum(root.object.get(CLEARANCE_KEY));
+    const body_clearance = jsonNum(root.object.get(clearance_key));
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
@@ -1875,13 +1875,13 @@ pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
     };
     const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
-        res.body = NO_BLOCK_MSG;
+        res.body = no_block_msg;
         return;
     };
     const eff_block = if (subSlug(req)) |s|
         (descendToSub(ctx.allocator, block, s) orelse {
             res.status = 404;
-            res.body = NO_SUB_MSG;
+            res.body = no_sub_msg;
             return;
         }).block
     else
@@ -1889,7 +1889,7 @@ pub fn pcbDrcApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Handl
 
     var placement = optimizer.placeFromPoses(ctx.allocator, eff_block, ctx.project_dir, poses.items, optimizer.Params{}) catch {
         res.status = 500;
-        res.body = PLACEMENT_ERR_MSG;
+        res.body = placement_err_msg;
         return;
     };
     // A submitted outline becomes the board edge so the board-edge DRC check
@@ -1938,7 +1938,7 @@ fn blessedPlacement(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, na
     var module_res: ?modules_mod.ResolvedBlock = null;
     const block: *env_mod.DesignBlock = resolveBlock(req.arena, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 404;
-        res.body = NO_BLOCK_MSG;
+        res.body = no_block_msg;
         return null;
     };
     const poses = chooseSyncPoses(req.arena, ctx.project_dir, name) orelse {
@@ -1948,7 +1948,7 @@ fn blessedPlacement(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, na
     };
     return optimizer.placeFromPoses(req.arena, block, ctx.project_dir, poses, optimizer.Params{}) catch {
         res.status = 500;
-        res.body = PLACEMENT_ERR_MSG;
+        res.body = placement_err_msg;
         return null;
     };
 }
@@ -1981,7 +1981,7 @@ fn blessedLayout(layouts: []const SavedLayout) ?*const SavedLayout {
         if (L.default and L.parts.len > 0) return L;
     }
     for (layouts) |*L| {
-        if (std.mem.eql(u8, L.kind, KIND_MANUAL) and L.parts.len > 0) return L;
+        if (std.mem.eql(u8, L.kind, kind_manual) and L.parts.len > 0) return L;
     }
     for (layouts) |*L| {
         if (L.parts.len > 0) return L;
@@ -2027,7 +2027,7 @@ pub fn pcbCentroidApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) 
     const fv = blessedFabView(ctx, req, res, name) orelse return;
     var aw: std.Io.Writer.Allocating = .init(req.arena);
     try export_fab.centroidCsv(&aw.writer, fv.placement.parts, fv.placement.instances, fv.frame, dnpMode(req));
-    res.header(CT_HDR, "text/csv; charset=utf-8");
+    res.header(ct_hdr, "text/csv; charset=utf-8");
     res.body = aw.written();
 }
 
@@ -2043,7 +2043,7 @@ pub fn pcbDrillApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
     const class: export_fab.DrillClass = if (queryFlag(req, "npth")) .non_plated else .plated;
     var aw: std.Io.Writer.Allocating = .init(req.arena);
     try export_fab.excellonDrill(&aw.writer, req.arena, fv.placement.parts, fv.vias, class, fv.frame);
-    res.header(CT_HDR, "text/plain; charset=utf-8");
+    res.header(ct_hdr, "text/plain; charset=utf-8");
     res.body = aw.written();
 }
 
@@ -2149,7 +2149,7 @@ pub fn pcbGerbersApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) H
 
     var zw: std.Io.Writer.Allocating = .init(req.arena);
     try zipfile.write(&zw.writer, entries.items);
-    res.header(CT_HDR, "application/zip");
+    res.header(ct_hdr, "application/zip");
     res.header("content-disposition", try std.fmt.allocPrint(req.arena, "attachment; filename=\"{s}-gerbers.zip\"", .{name}));
     res.body = zw.written();
 }
@@ -2214,7 +2214,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
     // it, so a bad Save/Update is recoverable from history. Best-effort. Sub
     // circuits keep multi-snapshot in-file history already, so they're skipped.
     if (sub == null) {
-        if (layoutsSidecar(req.arena, ctx.project_dir, name, null, LAYOUTS_EXT)) |scp| {
+        if (layoutsSidecar(req.arena, ctx.project_dir, name, null, layouts_ext)) |scp| {
             _ = history.snapshotLayouts(req.arena, ctx.project_dir, name, scp) catch null;
         }
     }
@@ -2253,7 +2253,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
 
     var entry = SavedLayout{
         .name = nm,
-        .kind = KIND_MANUAL,
+        .kind = kind_manual,
         .ts = clock.timestamp(),
         .score = score,
         .parts = parts,
@@ -2290,7 +2290,7 @@ pub fn saveNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respon
             try out.append(req.arena, entry);
             replaced = true;
         } else if (open and sameLayoutScore(L.score, entry.score)) {
-            if (std.mem.eql(u8, L.kind, KIND_AUTO)) {
+            if (std.mem.eql(u8, L.kind, kind_auto)) {
                 // Same arrangement as an auto run → promote it to this named
                 // keeper in place rather than leaving a duplicate behind.
                 entry.default = L.default;
@@ -2375,7 +2375,7 @@ pub fn restoreLayoutHistoryApi(ctx: *Handler, req: *httpz.Request, res: *httpz.R
     // Snapshot the current sidecar so the restore itself is undoable, then write
     // the restored layouts with a bumped rev, preserving the current cache slot.
     const disk_rev = readLayoutRev(req.arena, ctx.project_dir, name, null);
-    if (layoutsSidecar(req.arena, ctx.project_dir, name, null, LAYOUTS_EXT)) |scp| {
+    if (layoutsSidecar(req.arena, ctx.project_dir, name, null, layouts_ext)) |scp| {
         _ = history.snapshotLayouts(req.arena, ctx.project_dir, name, scp) catch null;
     }
     writeLayoutsFile(req.arena, ctx.project_dir, name, restored, readCacheSlot(req.arena, ctx.project_dir, name), disk_rev + 1);
@@ -2407,7 +2407,7 @@ pub fn deleteNamedLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Resp
     }
     writeLayoutsSub(req.arena, ctx.project_dir, name, sub, out.items);
     res.content_type = .JSON;
-    res.body = OK_JSON_TRUE;
+    res.body = ok_json_true;
 }
 
 /// POST /api/pcb-layouts/:name/default — mark which saved layout the KiCad sync
@@ -2440,7 +2440,7 @@ pub fn setDefaultLayoutApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
     }
     writeLayoutsSub(req.arena, ctx.project_dir, name, sub, out.items);
     res.content_type = .JSON;
-    res.body = OK_JSON_TRUE;
+    res.body = ok_json_true;
 }
 
 /// POST /api/pcb-rescore/:name — recompute every saved layout's objective with
@@ -2483,7 +2483,7 @@ pub fn rescoreLayoutsApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respons
     };
     const block: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
-        res.body = NO_BLOCK_MSG;
+        res.body = no_block_msg;
         return;
     };
 
@@ -2539,7 +2539,7 @@ pub fn pcbScoreBatchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     };
     const block_root: *env_mod.DesignBlock = resolveBlock(ctx.allocator, ctx.project_dir, name, &eval, &module_res) orelse {
         res.status = 500;
-        res.body = NO_BLOCK_MSG;
+        res.body = no_block_msg;
         return;
     };
     // Score against the scoped sub-block when `?sub=` is present, so the panel
@@ -2547,7 +2547,7 @@ pub fn pcbScoreBatchApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response
     const block: *env_mod.DesignBlock = if (sub) |s| blk: {
         const sb = descendToSub(ctx.allocator, block_root, s) orelse {
             res.status = 404;
-            res.body = NO_SUB_MSG;
+            res.body = no_sub_msg;
             return;
         };
         break :blk sb.block;
@@ -2585,7 +2585,7 @@ fn parseJsonObject(req: *httpz.Request, res: *httpz.Response) ?std.json.Value {
     };
     const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
-        res.body = BAD_JSON_MSG;
+        res.body = bad_json_msg;
         return null;
     };
     if (root != .object) {
@@ -2611,7 +2611,7 @@ fn writeFileAll(path: []const u8, data: []const u8) !void {
     try atomic.finish();
 }
 
-const MAX_FP_BYTES: usize = 1024 * 1024;
+const max_fp_bytes: usize = 1024 * 1024;
 
 /// Round a courtyard half-extent up to the placement grid, the same rule the
 /// optimizer draws with (`optimizer.ceilToGrid`) and the modal preview mirrors
@@ -2619,13 +2619,13 @@ const MAX_FP_BYTES: usize = 1024 * 1024;
 /// grid from being bumped a whole step by float error — which matters because
 /// offset mode constructs a value designed to land exactly on a grid line.
 fn courtCeilGrid(v: f64) f64 {
-    const g = optimizer.GRID_MM;
+    const g = optimizer.grid_mm;
     return std.math.ceil(v / g - 1e-9) * g;
 }
 
 /// `courtCeilGrid`'s outward twin for a low edge (rounds down / away).
 fn courtFloorGrid(v: f64) f64 {
-    const g = optimizer.GRID_MM;
+    const g = optimizer.grid_mm;
     return std.math.floor(v / g + 1e-9) * g;
 }
 
@@ -2649,7 +2649,7 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
     };
     const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
-        res.body = BAD_JSON_MSG;
+        res.body = bad_json_msg;
         return;
     };
     if (root != .object) {
@@ -2670,7 +2670,7 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
         return;
     };
     defer ctx.allocator.free(path);
-    const src = infra_fs.cwd().readFileAlloc(ctx.allocator, path, MAX_FP_BYTES) catch {
+    const src = infra_fs.cwd().readFileAlloc(ctx.allocator, path, max_fp_bytes) catch {
         res.status = 404;
         res.body = "footprint not found";
         return;
@@ -2688,7 +2688,7 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
         const mv = root.object.get("mode") orelse break :blk "size";
         break :blk if (mv == .string) mv.string else "size";
     };
-    const margin = geometry.BBOX_MARGIN_MM;
+    const margin = geometry.bbox_margin_mm;
     var rx0: f64 = undefined;
     var ry0: f64 = undefined;
     var rx1: f64 = undefined;
@@ -2754,7 +2754,7 @@ pub fn savePcbCourtyardApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Respo
         return;
     };
     res.content_type = .JSON;
-    res.body = OK_JSON_TRUE;
+    res.body = ok_json_true;
 }
 
 /// A footprint name must be a bare file stem — no path separators or `..`, so a
@@ -2868,7 +2868,7 @@ fn rekeyPosesByOrigin(
     for (flat.items) |fi| {
         live.put(alloc, fi.ref_des, {}) catch return null;
         if (fi.origin_key.len == 0) continue;
-        const key = std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ refPrefix(fi.ref_des), fi.origin_key }) catch return null;
+        const key = std.fmt.allocPrint(alloc, pin_key_fmt, .{ refPrefix(fi.ref_des), fi.origin_key }) catch return null;
         ref_of.put(alloc, key, fi.ref_des) catch return null;
     }
     const out = alloc.alloc(optimizer.RefPose, parts.len) catch return null;
@@ -2876,7 +2876,7 @@ fn rekeyPosesByOrigin(
         const ref = if (live.contains(pp.ref))
             pp.ref
         else if (pp.origin.len > 0) blk: {
-            const key = std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ refPrefix(pp.ref), pp.origin }) catch return null;
+            const key = std.fmt.allocPrint(alloc, pin_key_fmt, .{ refPrefix(pp.ref), pp.origin }) catch return null;
             break :blk ref_of.get(key) orelse pp.ref;
         } else pp.ref;
         out[i] = .{ .ref = ref, .x = pp.x, .y = pp.y, .rot = pp.rot, .side = pp.side, .locked = pp.locked };
@@ -2946,7 +2946,7 @@ pub fn readLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []co
 /// As `readLayouts`, but for a `?sub=` scoped sub circuit reads its per-sub
 /// sidecar (`layoutsSidecar`). `sub == null` is identical to `readLayouts`.
 fn readLayoutsSub(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) []const SavedLayout {
-    if (layoutsSidecar(alloc, project_dir, name, sub, LAYOUTS_EXT)) |path| {
+    if (layoutsSidecar(alloc, project_dir, name, sub, layouts_ext)) |path| {
         defer alloc.free(path);
         if (infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20)) |data| {
             if (parseLayouts(alloc, data)) |list| return list;
@@ -2990,8 +2990,8 @@ fn parseLayouts(alloc: std.mem.Allocator, data: []const u8) ?[]const SavedLayout
         const nm = it.object.get("name") orelse continue;
         if (nm != .string) continue;
         const kind: []const u8 = blk: {
-            const k = it.object.get("kind") orelse break :blk KIND_AUTO;
-            break :blk if (k == .string and std.mem.eql(u8, k.string, KIND_MANUAL)) KIND_MANUAL else KIND_AUTO;
+            const k = it.object.get("kind") orelse break :blk kind_auto;
+            break :blk if (k == .string and std.mem.eql(u8, k.string, kind_manual)) kind_manual else kind_auto;
         };
         var score: ?LayoutScore = null;
         if (it.object.get("hpwl")) |_| score = .{
@@ -3137,7 +3137,7 @@ fn writeSavedOutlineJson(w: *std.Io.Writer, o: SavedOutline) std.Io.Writer.Error
         try w.writeAll(",\"pts\":[");
         for (pts, 0..) |p, i| {
             if (i > 0) try w.writeAll(",");
-            try w.print(PT_PAIR_FMT, .{ p[0], p[1] });
+            try w.print(pt_pair_fmt, .{ p[0], p[1] });
         }
         try w.writeAll("]");
     }
@@ -3180,7 +3180,7 @@ fn parseSavedTexts(alloc: std.mem.Allocator, v: ?std.json.Value) []const font5x7
             .y = jsonNum(it.object.get("y")),
             .rot = @mod(@round(jsonNum(it.object.get("rot")) / 90) * 90, 360),
             .bottom = std.mem.eql(u8, side, "bottom"),
-            .size = if (size > 0) size else font5x7.DEFAULT_SIZE_MM,
+            .size = if (size > 0) size else font5x7.default_size_mm,
             .text = tv.string,
         }) catch return list.items;
     }
@@ -3213,7 +3213,7 @@ fn writeSavedRoutesJson(w: *std.Io.Writer, sr: SavedRoutes) std.Io.Writer.Error!
     try w.writeAll("{\"tracks\":[");
     for (sr.tracks, 0..) |t, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print(TRACK_JSON_FMT, .{ t.x1, t.y1, t.x2, t.y2, t.l, t.w });
+        try w.print(track_json_fmt, .{ t.x1, t.y1, t.x2, t.y2, t.l, t.w });
         try writeJsonStr(w, t.net);
         if (t.g.len > 0) {
             try w.writeAll(",\"g\":");
@@ -3221,10 +3221,10 @@ fn writeSavedRoutesJson(w: *std.Io.Writer, sr: SavedRoutes) std.Io.Writer.Error!
         }
         try w.writeAll("}");
     }
-    try w.writeAll(VIAS_ARR_OPEN);
+    try w.writeAll(vias_arr_open);
     for (sr.vias, 0..) |vi, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print(VIA_JSON_FMT, .{ vi.x, vi.y, vi.d, vi.drill });
+        try w.print(via_json_fmt, .{ vi.x, vi.y, vi.d, vi.drill });
         try writeJsonStr(w, vi.net);
         if (vi.g.len > 0) {
             try w.writeAll(",\"g\":");
@@ -3399,7 +3399,7 @@ fn parseCacheParams(po: std.json.Value, p: *optimizer.Params) void {
 /// `.layouts.json` first, falling back to the legacy standalone
 /// `.autolayout.json` for boards last solved by an older build.
 fn readCacheSlot(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?CacheSlot {
-    if (paths.designSiblingPath(alloc, project_dir, name, LAYOUTS_EXT)) |path| {
+    if (paths.designSiblingPath(alloc, project_dir, name, layouts_ext)) |path| {
         defer alloc.free(path);
         if (infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20)) |data| {
             if (std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{})) |root| {
@@ -3411,7 +3411,7 @@ fn readCacheSlot(alloc: std.mem.Allocator, project_dir: []const u8, name: []cons
             } else |_| {}
         } else |_| {}
     } else |_| {}
-    const path = paths.designSiblingPath(alloc, project_dir, name, AUTO_EXT) catch return null;
+    const path = paths.designSiblingPath(alloc, project_dir, name, auto_ext) catch return null;
     defer alloc.free(path);
     const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch return null;
     const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return null;
@@ -3423,7 +3423,7 @@ fn readCacheSlot(alloc: std.mem.Allocator, project_dir: []const u8, name: []cons
 /// rev the page loaded and the save guard 409s on a mismatch; render-path
 /// writes preserve this value so merely viewing/regenerating never bumps it.
 fn readLayoutRev(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) i64 {
-    const path = layoutsSidecar(alloc, project_dir, name, sub, LAYOUTS_EXT) orelse return 0;
+    const path = layoutsSidecar(alloc, project_dir, name, sub, layouts_ext) orelse return 0;
     defer alloc.free(path);
     const data = infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch return 0;
     const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return 0;
@@ -3458,7 +3458,7 @@ fn writeLayoutsSub(alloc: std.mem.Allocator, project_dir: []const u8, name: []co
 /// `sub == null` goes through the design store (cache preserved).
 fn writeLayoutsSubRev(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, layouts: []const SavedLayout, rev: i64) void {
     if (sub == null) return writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name), rev);
-    const path = layoutsSidecar(alloc, project_dir, name, sub, LAYOUTS_EXT) orelse return;
+    const path = layoutsSidecar(alloc, project_dir, name, sub, layouts_ext) orelse return;
     defer alloc.free(path);
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
@@ -3475,7 +3475,7 @@ fn writeLayoutsFile(
     cache: ?CacheSlot,
     rev: i64,
 ) void {
-    const path = paths.designSiblingPath(alloc, project_dir, name, LAYOUTS_EXT) catch return;
+    const path = paths.designSiblingPath(alloc, project_dir, name, layouts_ext) catch return;
     defer alloc.free(path);
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
@@ -3514,7 +3514,7 @@ fn writeLayoutsFileJsonRev(w: *std.Io.Writer, layouts: []const SavedLayout, cach
     try w.writeAll("\"layouts\":[");
     for (layouts, 0..) |L, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll(NAME_OPEN);
+        try w.writeAll(name_open);
         try writeJsonStr(w, L.name);
         try w.writeAll(",\"kind\":");
         try writeJsonStr(w, L.kind);
@@ -3525,23 +3525,23 @@ fn writeLayoutsFileJsonRev(w: *std.Io.Writer, layouts: []const SavedLayout, cach
             try writeSavedRoutesJson(w, sr);
         }
         if (L.outline) |o| {
-            try w.writeAll(OUTLINE_OPEN);
+            try w.writeAll(outline_open);
             try writeSavedOutlineJson(w, o);
         }
         if (L.texts.len > 0) {
-            try w.writeAll(TEXTS_OPEN);
+            try w.writeAll(texts_open);
             try writeSavedTextsJson(w, L.texts);
         }
         if (L.score) |s| try w.print(",\"hpwl\":{d},\"loop\":{d},\"caps\":{d},\"objective\":{d}", .{ s.hpwl, s.loop, s.caps, s.objective });
         try w.writeAll(",\"parts\":[");
         for (L.parts, 0..) |pt, j| {
             if (j > 0) try w.writeAll(",");
-            try w.writeAll(REF_OPEN);
+            try w.writeAll(ref_open);
             try writeJsonStr(w, pt.ref);
             try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pt.x, pt.y, pt.rot });
             try writePoseSideLocked(w, pt.side, pt.locked);
             if (pt.origin.len > 0) {
-                try w.writeAll(ORIGIN_OPEN);
+                try w.writeAll(origin_open);
                 try writeJsonStr(w, pt.origin);
             }
             try w.writeAll("}");
@@ -3587,7 +3587,7 @@ fn dedupLayouts(alloc: std.mem.Allocator, layouts: []const SavedLayout) []const 
             if (!sameLayoutScore(K.score, L.score)) continue;
             const keep_default = K.default or L.default;
             // Prefer to keep a manual (named) entry over an auto stamp.
-            if (std.mem.eql(u8, L.kind, KIND_MANUAL) and !std.mem.eql(u8, K.kind, KIND_MANUAL)) K.* = L;
+            if (std.mem.eql(u8, L.kind, kind_manual) and !std.mem.eql(u8, K.kind, kind_manual)) K.* = L;
             K.default = keep_default;
             merged = true;
             break;
@@ -3637,7 +3637,7 @@ fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []c
     const now = clock.timestamp();
     const entry = SavedLayout{
         .name = fmtAutoName(alloc, now) catch return,
-        .kind = KIND_AUTO,
+        .kind = kind_auto,
         .ts = now,
         .score = score,
         .parts = parts,
@@ -3650,8 +3650,8 @@ fn recordAutoLayout(alloc: std.mem.Allocator, project_dir: []const u8, name: []c
     out.append(alloc, entry) catch return;
     var autos: usize = 1;
     for (existing) |L| {
-        if (std.mem.eql(u8, L.kind, KIND_AUTO)) {
-            if (autos >= MAX_AUTO_LAYOUTS and !L.default) continue;
+        if (std.mem.eql(u8, L.kind, kind_auto)) {
+            if (autos >= max_auto_layouts and !L.default) continue;
             autos += 1;
         }
         out.append(alloc, L) catch break;
@@ -3749,7 +3749,7 @@ fn chooseSyncPoses(alloc: std.mem.Allocator, project_dir: []const u8, name: []co
             if (L.default and L.parts.len > 0) break :blk L.parts;
         }
         for (layouts) |L| {
-            if (std.mem.eql(u8, L.kind, KIND_MANUAL) and L.parts.len > 0) break :blk L.parts;
+            if (std.mem.eql(u8, L.kind, kind_manual) and L.parts.len > 0) break :blk L.parts;
         }
         for (layouts) |L| {
             if (L.parts.len > 0) break :blk L.parts;
@@ -3819,8 +3819,8 @@ fn chooseModuleSnapshot(
             best_score = score;
             continue;
         };
-        const manual = std.mem.eql(u8, L.kind, KIND_MANUAL);
-        const cur_manual = std.mem.eql(u8, cur.kind, KIND_MANUAL);
+        const manual = std.mem.eql(u8, L.kind, kind_manual);
+        const cur_manual = std.mem.eql(u8, cur.kind, kind_manual);
         const wins = if (score == best_score) manual and !cur_manual else score > best_score;
         if (wins) {
             best = L;
@@ -4117,7 +4117,7 @@ fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
     const layouts = readLayouts(alloc, project_dir, name);
     // Refreshing the auto cache is a render-path write — preserve the rev.
     writeLayoutsFile(alloc, project_dir, name, layouts, .{ .params = params, .parts = parts }, readLayoutRev(alloc, project_dir, name, null));
-    if (paths.designSiblingPath(alloc, project_dir, name, AUTO_EXT)) |legacy| {
+    if (paths.designSiblingPath(alloc, project_dir, name, auto_ext)) |legacy| {
         defer alloc.free(legacy);
         infra_fs.cwd().deleteFile(legacy) catch |e| switch (e) {
             // Usually already gone — only first post-upgrade solve has one.
@@ -4135,10 +4135,10 @@ fn writeCacheSlotJson(w: *std.Io.Writer, c: CacheSlot) std.Io.Writer.Error!void 
         c.params.loop_w,                                   c.params.w_align, c.params.w_congest, c.params.cap_w_max,
         if (c.params.grid_courtyards) "true" else "false",
     });
-    try w.writeAll(PARTS_OPEN);
+    try w.writeAll(parts_open);
     for (c.parts orelse &[_]PartPose{}, 0..) |pt, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll(REF_OPEN);
+        try w.writeAll(ref_open);
         try writeJsonStr(w, pt.ref);
         try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pt.x, pt.y, pt.rot });
         try writePoseSideLocked(w, pt.side, pt.locked);
@@ -4255,7 +4255,7 @@ fn parseRoute(req: *httpz.Request, base: router.RouteParams) RouteOpts {
     var p = base;
     const q = req.query() catch return .{ .params = p, .run = false };
     if (q.get("track_width")) |v| p.track_width = parseF(v, p.track_width);
-    if (q.get(CLEARANCE_KEY)) |v| p.clearance = parseF(v, p.clearance);
+    if (q.get(clearance_key)) |v| p.clearance = parseF(v, p.clearance);
     if (q.get("via_drill")) |v| p.via_drill = parseF(v, p.via_drill);
     if (q.get("via_dia")) |v| p.via_dia = parseF(v, p.via_dia);
     return .{ .params = p, .run = q.get("route") != null };
@@ -4271,9 +4271,9 @@ const View = struct {
     height: f64,
 
     fn init(p: optimizer.Placement) View {
-        const cw = @max(p.maxx - p.minx, 1.0) + 2 * MARGIN_MM;
-        const ch = @max(p.maxy - p.miny, 1.0) + 2 * MARGIN_MM;
-        const s = std.math.clamp(TARGET_PX / @max(cw, ch), SCALE_MIN, SCALE_MAX);
+        const cw = @max(p.maxx - p.minx, 1.0) + 2 * margin_mm;
+        const ch = @max(p.maxy - p.miny, 1.0) + 2 * margin_mm;
+        const s = std.math.clamp(target_px / @max(cw, ch), scale_min, scale_max);
         return .{ .scale = s, .minx = p.minx, .miny = p.miny, .width = cw * s, .height = ch * s };
     }
 };
@@ -4316,7 +4316,7 @@ fn writeEditControls(
         try w.writeAll("<div class=\"pcb-panels\">");
         try writeTuning(w, shown);
         try writeScoreView(w, shown, name);
-        const rp_warn = if (routed) |r| router.returnPathViolations(placement, r, router.RETURN_PATH_RADIUS_MM) else 0;
+        const rp_warn = if (routed) |r| router.returnPathViolations(placement, r, router.return_path_radius_mm) else 0;
         try writeRoutePanel(w, ro_params, routed, n_drc, rp_warn, route_open, true);
         try w.writeAll("</div>");
     }
@@ -4328,9 +4328,9 @@ fn writeEditControls(
 // Action-bar group wrappers — small inline-flex clusters separated by thin rules
 // so the buttons read as grouped (place / save / edit) rather than one long row.
 // Extracted as consts (each used 3× in writeScorebar).
-const BAR_SEP = "<span class=\"bar-sep\"></span>";
-const BAR_GRP = "<span class=\"bar-grp\">";
-const BAR_GRP_END = "</span>" ++ BAR_SEP;
+const bar_sep = "<span class=\"bar-sep\"></span>";
+const bar_grp = "<span class=\"bar-grp\">";
+const bar_grp_end = "</span>" ++ bar_sep;
 
 fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, src: LayoutSource, single: bool, tools_in_bar: bool) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-bar\">");
@@ -4342,10 +4342,10 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
         "title=\"weighted objective the optimizer minimizes (term breakdown in the Score chip)\">objective ");
     try w.print("{d:.1}</span>", .{p.breakdown.objective});
     try w.writeAll("<span class=\"delta\" id=\"sc-obj-d\"></span>");
-    try w.writeAll(BAR_SEP);
+    try w.writeAll(bar_sep);
     // Auto-place group: Regenerate re-runs the optimizer live; Rough drops the
     // legible module-clustered seed. Both nav to a fresh solve.
-    try w.writeAll(BAR_GRP);
+    try w.writeAll(bar_grp);
     try w.writeAll("<a class=\"btn\" id=\"pcb-regen\" href=\"/pcb-layout/");
     try writeAttr(w, name);
     try w.writeAll("?regen=1\" title=\"Re-run the optimizer and watch it converge live\">Regenerate</a>");
@@ -4354,10 +4354,10 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     try w.writeAll("?remaining=1\" title=\"Keep every part the \u{2605} (or last auto) layout already places, " ++
         "and rough-place only the new/uncovered parts around them — the incremental rough for a " ++
         "hand-finished board that grew\">Rough remaining</a>");
-    try w.writeAll(BAR_GRP_END);
+    try w.writeAll(bar_grp_end);
     // Save group: Save as… mints a new snapshot; Update overwrites the loaded one
     // in place (disabled until a saved layout is the active edit target).
-    try w.writeAll(BAR_GRP);
+    try w.writeAll(bar_grp);
     if (single) {
         // Designs keep ONE layout: Save overwrites it in place (auto-starred
         // server-side), so there's no name prompt, no Update, no active chip.
@@ -4369,10 +4369,10 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
             "title=\"Save changes back into the loaded layout (overwrite in place)\">Update</button>");
         try w.writeAll("<span class=\"lay-active\" id=\"pcb-active\" style=\"display:none\"></span>");
     }
-    try w.writeAll(BAR_GRP_END);
+    try w.writeAll(bar_grp_end);
     // Edit group: undo / redo the last manual move-or-rotate (Ctrl+Z / Ctrl+Shift+Z),
     // and reset back to the auto layout. Undo/redo start disabled (empty history).
-    try w.writeAll(BAR_GRP);
+    try w.writeAll(bar_grp);
     try w.writeAll("<button class=\"btn\" id=\"pcb-undo\" disabled title=\"Undo last move / rotate (Ctrl+Z)\">↶ Undo</button>");
     try w.writeAll("<button class=\"btn\" id=\"pcb-redo\" disabled title=\"Redo (Ctrl+Shift+Z)\">↷ Redo</button>");
     try w.writeAll("<button class=\"btn\" id=\"pcb-reset\" title=\"Discard manual edits, restore the auto layout\">Reset</button>");
@@ -4380,21 +4380,21 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     // vertical tool strip); the full page docks them left of the canvas
     // (TOOLSTRIP_HTML — same ids, so the wiring is shared).
     if (tools_in_bar) {
-        try w.writeAll("<button class=\"btn\" id=\"pcb-outline\" title=\"" ++ TIP_OUTLINE ++ "\">\u{25AD} Outline</button>");
-        try w.writeAll("<button class=\"btn\" id=\"pcb-outline-poly\" title=\"" ++ TIP_POLY ++ "\">\u{2B21} Poly</button>");
-        try w.writeAll("<button class=\"btn\" id=\"pcb-draw\" title=\"" ++ TIP_DRAW ++ "\">\u{270E} Draw</button>");
-        try w.writeAll("<button class=\"btn\" id=\"pcb-text\" title=\"" ++ TIP_TEXT ++ "\">T Text</button>");
+        try w.writeAll("<button class=\"btn\" id=\"pcb-outline\" title=\"" ++ tip_outline ++ "\">\u{25AD} Outline</button>");
+        try w.writeAll("<button class=\"btn\" id=\"pcb-outline-poly\" title=\"" ++ tip_poly ++ "\">\u{2B21} Poly</button>");
+        try w.writeAll("<button class=\"btn\" id=\"pcb-draw\" title=\"" ++ tip_draw ++ "\">\u{270E} Draw</button>");
+        try w.writeAll("<button class=\"btn\" id=\"pcb-text\" title=\"" ++ tip_text ++ "\">T Text</button>");
     }
-    try w.writeAll(BAR_GRP_END);
+    try w.writeAll(bar_grp_end);
     // Fab handoff: the complete manufacturing package at the saved (★) layout.
     // A button (not a plain link) so it can run the pre-fab readiness gate
     // first — clean downloads straight through, errors/warnings open a modal.
-    try w.writeAll(BAR_GRP);
+    try w.writeAll(bar_grp);
     try w.writeAll("<button class=\"btn\" id=\"pcb-fab\" title=\"Download the fab package (ZIP): Gerber copper / mask / paste / silk / " ++
         "board profile + Excellon drills + centroid CSV + .gbrjob, at the saved (\u{2605}) layout with its saved routed " ++
         "copper. Runs a pre-fab readiness check first (unrouted nets, DRC, off-board parts). Save a layout first.\">" ++
         "\u{2913} Gerbers</button>");
-    try w.writeAll(BAR_GRP_END);
+    try w.writeAll(bar_grp_end);
     // Zoom stays in the bar for embeds only — the full page's tool strip
     // carries −/+/Fit (same ids). The old drag/rotate hint line moved into
     // the status bar's "?" help button.
@@ -4407,41 +4407,41 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     if (tools_in_bar) {
         try w.print("<span class=\"muted\" title=\"drag part to move · hover + R to rotate · Ctrl+Z undo · " ++
             "two-finger drag / middle-drag to pan · scroll wheel or pinch to zoom · snaps to {d} mm grid · press ? for all shortcuts\">" ++
-            "drag · R rotate · Ctrl+Z undo · ? help</span>", .{optimizer.GRID_MM});
+            "drag · R rotate · Ctrl+Z undo · ? help</span>", .{optimizer.grid_mm});
     }
     try w.writeAll("</div>");
 }
 
 // ── Drawing-tool tooltips (shared by the action bar and the tool strip) ─────
-const TIP_OUTLINE = "Board outline rectangle: click, then drag a rectangle " ++
+const tip_outline = "Board outline rectangle: click, then drag a rectangle " ++
     "on the board (a plain click clears it). Grid-snapped; saved with the layout (Save/Update); becomes the board edge " ++
     "the renderers draw and the board-edge DRC checks.";
-const TIP_POLY = "Polygon board outline (L/T shapes, cutout-free " ++
+const tip_poly = "Polygon board outline (L/T shapes, cutout-free " ++
     "notches): click to place vertices (grid-snapped), click the first vertex or press Enter to close, Backspace removes " ++
     "the last vertex, Esc cancels. After closing, drag a vertex handle to edit. Saved with the layout (Save/Update); " ++
     "becomes the exact board edge the renderers draw, the board-edge DRC measures, and the Gerber Edge.Cuts traces.";
-const TIP_DRAW = "Route tracks (X): click a pad to start a trace, click to " ++
+const tip_draw = "Route tracks (X): click a pad to start a trace, click to " ++
     "fix corners (45\u{b0}/grid snapped, Shift = free angle), V drops a via and flips layer, click a same-net pad or " ++
     "double-click to finish, Backspace steps back, Esc ends. Right-click deletes the track/via under the cursor. " ++
     "Copper is saved with the layout (Save/Update).";
-const TIP_TEXT = "Silkscreen text (T): click on the board to place a label " ++
+const tip_text = "Silkscreen text (T): click on the board to place a label " ++
     "(grid-snapped, on the active side). Click an existing label to edit its content / size / rotation / side, drag to " ++
     "move it, R rotates 90\u{b0}, Del or right-click deletes. Saved with the layout (Save/Update); emitted on the silk " ++
     "Gerber.";
-const TIP_RULER = "Ruler / measure (M): drag to measure dx / dy / distance in the current units; Esc exits.";
+const tip_ruler = "Ruler / measure (M): drag to measure dx / dy / distance in the current units; Esc exits.";
 
 /// KiCad-style vertical drawing toolbar, docked on the canvas' left edge
 /// (full page only). Every button keeps the id the board script already
 /// wires: select is the new explicit "disarm all modes" tool; the rest are
 /// the same tools that used to sit in the action bar.
-const TOOLSTRIP_HTML =
+const toolstrip_html =
     "<div class=\"pcb-toolstrip\" id=\"pcb-toolstrip\">" ++
     "<button class=\"ts-btn on\" id=\"tool-select\" title=\"Select / move (Esc) — drag parts, marquee-select on empty board\">\u{2196}</button>" ++
-    "<button class=\"ts-btn\" id=\"pcb-draw\" title=\"" ++ TIP_DRAW ++ "\">\u{270E}</button>" ++
-    "<button class=\"ts-btn\" id=\"pcb-outline\" title=\"" ++ TIP_OUTLINE ++ "\">\u{25AD}</button>" ++
-    "<button class=\"ts-btn\" id=\"pcb-outline-poly\" title=\"" ++ TIP_POLY ++ "\">\u{2B21}</button>" ++
-    "<button class=\"ts-btn\" id=\"pcb-text\" title=\"" ++ TIP_TEXT ++ "\">T</button>" ++
-    "<button class=\"ts-btn\" id=\"pcb-ruler-btn\" title=\"" ++ TIP_RULER ++ "\">\u{1F4CF}</button>" ++
+    "<button class=\"ts-btn\" id=\"pcb-draw\" title=\"" ++ tip_draw ++ "\">\u{270E}</button>" ++
+    "<button class=\"ts-btn\" id=\"pcb-outline\" title=\"" ++ tip_outline ++ "\">\u{25AD}</button>" ++
+    "<button class=\"ts-btn\" id=\"pcb-outline-poly\" title=\"" ++ tip_poly ++ "\">\u{2B21}</button>" ++
+    "<button class=\"ts-btn\" id=\"pcb-text\" title=\"" ++ tip_text ++ "\">T</button>" ++
+    "<button class=\"ts-btn\" id=\"pcb-ruler-btn\" title=\"" ++ tip_ruler ++ "\">\u{1F4CF}</button>" ++
     "<span class=\"ts-sep\"></span>" ++
     "<button class=\"ts-btn\" id=\"z-in\" title=\"Zoom in\">+</button>" ++
     "<button class=\"ts-btn\" id=\"z-out\" title=\"Zoom out\">\u{2212}</button>" ++
@@ -4452,7 +4452,7 @@ const TOOLSTRIP_HTML =
 /// position, drag/measure deltas, zoom, snap grid, units, active layer,
 /// hovered part/net, and the shortcut help. The grid select + units button
 /// keep their classic ids so the existing view-state wiring binds them.
-const STATUSBAR_HTML =
+const statusbar_html =
     "<div class=\"pcb-status\" id=\"pcb-status\">" ++
     "<span class=\"st-seg st-xy\" id=\"st-xy\"></span>" ++
     "<span class=\"st-seg st-dxdy\" id=\"st-dxdy\"></span>" ++
@@ -4475,7 +4475,7 @@ const STATUSBAR_HTML =
 /// Align / distribute cluster (full page only). Hidden until ≥2 parts are
 /// marquee-selected; BOARD_JS's `refreshAlignBar` reveals it and updates the
 /// count, and the data-attributed buttons drive alignSel / distributeSel.
-const ALIGNBAR_HTML =
+const alignbar_html =
     "<div class=\"align-bar\" id=\"align-bar\" hidden>" ++
     "<div class=\"align-h\"><span id=\"align-n\">0 parts selected</span></div>" ++
     "<div class=\"align-grid\">" ++
@@ -4543,7 +4543,7 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
         try w.writeAll(if (L.default) "<div class=\"lay-row def\" data-lay-row=\"" else "<div class=\"lay-row\" data-lay-row=\"");
         try writeAttr(w, L.name);
         try w.writeAll("\"><div class=\"lay-top\"><span class=\"lay-kind ");
-        try w.writeAll(if (std.mem.eql(u8, L.kind, KIND_MANUAL)) "k-man\">manual" else "k-auto\">auto");
+        try w.writeAll(if (std.mem.eql(u8, L.kind, kind_manual)) "k-man\">manual" else "k-auto\">auto");
         try w.writeAll("</span><span class=\"lay-name\">");
         try writeEscaped(w, L.name);
         try w.writeAll("</span>");
@@ -4580,7 +4580,7 @@ fn writeLayoutsPanel(w: *std.Io.Writer, layouts: []const SavedLayout, auto: Layo
         try writeAttr(w, L.name);
         try w.writeAll("\">✕</button></span></div></div>");
     }
-    try w.writeAll(DIV2_END);
+    try w.writeAll(div2_end);
 }
 
 /// Delta of a saved layout's cost versus the on-screen auto baseline, on the
@@ -4610,7 +4610,7 @@ fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Wr
 /// click. All behaviour is wired in BOARD_JS by the `data-panel` / id hooks.
 /// Opening tag shared by the board-view toggle chips (Ratsnest / Net colours /
 /// Heatmap / Legend) — extracted so the repeated literal stays in one place.
-const VIEW_CHIP_OPEN = "<label class=\"view-chip\" ";
+const view_chip_open = "<label class=\"view-chip\" ";
 
 fn writeTabsRow(w: *std.Io.Writer, route_open: bool, with_view_controls: bool) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-tabs\">");
@@ -4628,19 +4628,19 @@ fn writeTabsRow(w: *std.Io.Writer, route_open: bool, with_view_controls: bool) s
     // the tool strip — writeSidebar calls this with `with_view_controls=false`.
     if (with_view_controls) {
         try w.writeAll("<span class=\"tabs-sep\"></span>");
-        try w.writeAll(VIEW_CHIP_OPEN ++
+        try w.writeAll(view_chip_open ++
             "title=\"Show the ratsnest airwires + decoupling-loop overlays (pin-to-pin) — " ++
             "uncheck to hide them and read the bare placement\">" ++
             "<input type=\"checkbox\" id=\"v-rats\" checked> Ratsnest</label>");
-        try w.writeAll(VIEW_CHIP_OPEN ++
+        try w.writeAll(view_chip_open ++
             "title=\"Give every net its own pad/airwire colour — no-connect white, GND " ++
             "brown, power warm, each signal net a distinct colour — so connectivity " ++
             "reads off the board without the schematic\">" ++
             "<input type=\"checkbox\" id=\"v-netcol\"> Net colours</label>");
-        try w.writeAll(VIEW_CHIP_OPEN ++
+        try w.writeAll(view_chip_open ++
             "title=\"Tint each part green→red by its share of the objective (cost/blame heatmap)\">" ++
             "<input type=\"checkbox\" id=\"v-heat\"> Heatmap</label>");
-        try w.writeAll(VIEW_CHIP_OPEN ++ "title=\"Show the trace / via colour key\">" ++
+        try w.writeAll(view_chip_open ++ "title=\"Show the trace / via colour key\">" ++
             "<input type=\"checkbox\" id=\"v-legend\"> Legend</label>");
         try w.writeAll("<span class=\"tabs-sep\"></span>");
         // Layers / grid / units / ruler controls (audit 1.5). Populated + wired
@@ -4656,7 +4656,7 @@ fn writeTabsRow(w: *std.Io.Writer, route_open: bool, with_view_controls: bool) s
         try w.writeAll("<button class=\"tab-chip\" id=\"pcb-units-btn\" " ++
             "title=\"Toggle coordinate / dimension display between mm and mil (display only)\">mm</button>");
         try w.writeAll("<button class=\"tab-chip\" id=\"pcb-ruler-btn\" " ++
-            "title=\"" ++ TIP_RULER ++ "\">\u{1F4CF} Ruler</button>");
+            "title=\"" ++ tip_ruler ++ "\">\u{1F4CF} Ruler</button>");
         try w.writeAll("<div class=\"pcb-layers-pop\" id=\"pcb-layers-pop\" hidden></div>");
     }
     try w.writeAll("</div>");
@@ -4667,8 +4667,8 @@ fn writeTabsRow(w: *std.Io.Writer, route_open: bool, with_view_controls: bool) s
 // one brown, power-family → a vivid warm colour (red/orange/yellow band), and
 // every other (signal) net → its own distinct colour spread around the wheel.
 // The goal is "tell the nets apart at a glance", not "label each net's role".
-const NET_BROWN = "#8a5a2b"; // every ground variant (GND/AGND/PGND/…)
-const NET_WHITE = "#ffffff"; // no-connect nets + pads on no net at all
+const net_brown = "#8a5a2b"; // every ground variant (GND/AGND/PGND/…)
+const net_white = "#ffffff"; // no-connect nets + pads on no net at all
 
 /// `h` in degrees [0,360), `s`/`l` in [0,1] → `"#rrggbb"` written into `buf`.
 fn hslHex(buf: *[7]u8, h: f64, s: f64, l: f64) []const u8 {
@@ -4738,9 +4738,9 @@ fn looksLikeVoltageRail(name: []const u8) bool {
 /// (137.508°) keeps consecutive nets far apart in hue so they read as distinct.
 /// `pi`/`si` are bumped so each net in its bucket gets a fresh slot.
 fn netColorHex(name: []const u8, buf: *[7]u8, pi: *usize, si: *usize) []const u8 {
-    if (isNoConnectName(name)) return NET_WHITE;
+    if (isNoConnectName(name)) return net_white;
     const cls = module_policy.classifyNetName(name);
-    if (cls == .ground) return NET_BROWN;
+    if (cls == .ground) return net_brown;
     const is_power = cls == .power or cls == .input_rail or cls == .switch_node or looksLikeVoltageRail(name);
     if (is_power) {
         const h = @mod(@as(f64, @floatFromInt(pi.*)) * 137.508, 50.0);
@@ -4809,8 +4809,8 @@ fn writeNetColors(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Plac
 fn writeNetLegend(w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"net-legend\" id=\"net-legend\" hidden>" ++
         "<span class=\"net-h\">Net colours</span>" ++
-        "<span class=\"net-sw\"><i style=\"background:" ++ NET_WHITE ++ "\"></i>No-connect</span>" ++
-        "<span class=\"net-sw\"><i style=\"background:" ++ NET_BROWN ++ "\"></i>GND</span>" ++
+        "<span class=\"net-sw\"><i style=\"background:" ++ net_white ++ "\"></i>No-connect</span>" ++
+        "<span class=\"net-sw\"><i style=\"background:" ++ net_brown ++ "\"></i>GND</span>" ++
         "<span class=\"net-sw\"><i style=\"background:linear-gradient(90deg,#e5484d,#ff924d,#f2cd2e)\"></i>Power</span>" ++
         "<span class=\"net-sw\"><i style=\"background:linear-gradient(90deg," ++
         "#3fb950,#2dd4bf,#58a6ff,#bc6bff,#f778ba)\"></i>Signal — one colour per net</span>" ++
@@ -4836,7 +4836,7 @@ fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!
     try w.print("<label>Loop <input id=\"t-loop\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.loop_w});
     try w.print("<label>Congest <input id=\"t-cong\" type=\"number\" step=\"0.5\" min=\"0\" value=\"{d}\"></label>", .{params.w_congest});
     try w.writeAll("<label class=\"tune-chk\"><input id=\"t-grid\" type=\"checkbox\"");
-    if (params.grid_courtyards) try w.writeAll(CHECKED);
+    if (params.grid_courtyards) try w.writeAll(checked_glyph);
     try w.writeAll("> Grid edges</label>");
     try w.writeAll("<button class=\"btn\" id=\"t-apply\">Apply &amp; regenerate</button>");
     try w.writeAll("<span class=\"muted\">re-runs the optimizer with these weights</span></div>");
@@ -4850,9 +4850,9 @@ fn writeDocHead(w: *std.Io.Writer, title: []const u8, embed: bool, edit_embed: b
     try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     try w.print("<title>{s} — PCB Layout</title>", .{title});
     try w.writeAll("<style>");
-    try w.writeAll(assets_css.NAVBAR_CSS);
-    try w.writeAll(PAGE_CSS);
-    if (embed) try w.writeAll(EMBED_CSS);
+    try w.writeAll(assets_css.navbar_css);
+    try w.writeAll(page_css);
+    if (embed) try w.writeAll(embed_css);
     try w.writeAll("</style></head><body");
     // `.embed` trims chrome; `.embed-edit` re-enables drag (the read-only preview
     // forces a default cursor) for the editable embed used by the sub-circuit toggle.
@@ -5007,8 +5007,8 @@ fn writeEmbedRoute(
     try w.print("<input type=\"hidden\" id=\"r-cl\" value=\"{d}\">", .{params.clearance});
     try w.print("<input type=\"hidden\" id=\"r-vd\" value=\"{d}\">", .{params.via_drill});
     try w.print("<input type=\"hidden\" id=\"r-va\" value=\"{d}\">", .{params.via_dia});
-    try w.print("<label class=\"tune-chk\"><input id=\"r-clr-show\" type=\"checkbox\"{s}> show clearance</label>", .{if (show_clr) CHECKED else ""});
-    try w.print("<label class=\"tune-chk\"><input id=\"r-drc-show\" type=\"checkbox\"{s}> show DRC</label>", .{if (show_drc) CHECKED else ""});
+    try w.print("<label class=\"tune-chk\"><input id=\"r-clr-show\" type=\"checkbox\"{s}> show clearance</label>", .{if (show_clr) checked_glyph else ""});
+    try w.print("<label class=\"tune-chk\"><input id=\"r-drc-show\" type=\"checkbox\"{s}> show DRC</label>", .{if (show_drc) checked_glyph else ""});
     if (routed) |r| {
         const cls = if (r.routed == r.total) "ok" else "warn";
         try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">routed {d}/{d} nets · {d} vias", .{ cls, r.routed, r.total, r.vias.len });
@@ -5083,7 +5083,7 @@ const SidebarOpts = struct {
 fn writeSidebar(w: *std.Io.Writer, p: optimizer.Placement, sch_base: []const u8, o: SidebarOpts) HandlerError!void {
     try w.writeAll("<aside class=\"pcb-side\">");
     try w.writeAll("<div class=\"side-h\">Properties</div>");
-    try w.writeAll(ALIGNBAR_HTML);
+    try w.writeAll(alignbar_html);
     try w.writeAll("<div id=\"prop-body\" class=\"prop-body\" data-schbase=\"");
     try writeAttr(w, sch_base);
     try w.print(
@@ -5099,7 +5099,7 @@ fn writeSidebar(w: *std.Io.Writer, p: optimizer.Placement, sch_base: []const u8,
     try writeTuning(w, o.shown);
     try writeScoreView(w, o.shown, o.name);
     try writeRoutePanel(w, o.ro_params, o.routed, o.n_drc, o.n_rp, route_open, false);
-    try w.writeAll(DIV2_END);
+    try w.writeAll(div2_end);
     if (!o.single) try writeLayoutsPanel(w, o.layouts, o.auto, p);
     try w.writeAll("</aside>");
 }
@@ -5126,14 +5126,14 @@ fn writeHeadNav(w: *std.Io.Writer, is_module: bool, name: []const u8, title: []c
 /// status bar underneath. Embeds keep the bare stage (no strip/status).
 fn writeStage(w: *std.Io.Writer, view: View, embed: bool) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-stage\">");
-    if (!embed) try w.writeAll(TOOLSTRIP_HTML);
+    if (!embed) try w.writeAll(toolstrip_html);
     try w.writeAll("<div class=\"pcb-canvas-host\">");
     try w.print(
         "<svg id=\"pcb-svg\" class=\"pcb-svg\" viewBox=\"0 0 {d:.0} {d:.0}\" width=\"{d:.0}\" height=\"{d:.0}\" xmlns=\"http://www.w3.org/2000/svg\"></svg>",
         .{ view.width, view.height, view.width, view.height },
     );
-    if (!embed) try w.writeAll(STATUSBAR_HTML);
-    try w.writeAll(DIV2_END);
+    if (!embed) try w.writeAll(statusbar_html);
+    try w.writeAll(div2_end);
 }
 
 /// Right dock. Full page: the KiCad-style Appearance panel (Layers / Objects
@@ -5235,18 +5235,18 @@ const PcbDataOpts = struct {
 /// loop overlay drops its GND via here so the previewed via is the DRC-safe one
 /// routing will use — never a second via beside it. A via belonging to this pad
 /// sits within the fan-out radius; anything past `VIA_MATCH_MM` is a neighbour's.
-const VIA_MATCH_MM: f64 = 3.0;
+const via_match_mm: f64 = 3.0;
 /// Only run the pass-1 GND-via preview on boards small enough that the page
 /// already pays for routed scoring (mirrors the optimizer's ROUTED_SCORE_MAX_PARTS);
 /// bigger boards skip it and the overlay falls back to the pad centre.
-const ROUTED_VIA_PREVIEW_MAX_PARTS: usize = 48;
+const routed_via_preview_max_parts: usize = 48;
 /// The DRC-safe GND-via nearest `(cx,cy)` within `VIA_MATCH_MM`, or null when the
 /// router placed no via there. Null is meaningful: a fat EP/thermal GND pad often
 /// can't take a fanned via at all, so the overlay must *not* invent one at the raw
 /// pad centre (it would sit on a neighbouring pad — e.g. the FB tap abutting the
 /// thermal pad — and never match what routing actually drops).
 fn dropViaPos(vias: []const router.Via, cx: f64, cy: f64) ?LocalPt {
-    var best_d2: f64 = VIA_MATCH_MM * VIA_MATCH_MM;
+    var best_d2: f64 = via_match_mm * via_match_mm;
     var found: ?LocalPt = null;
     for (vias) |vi| {
         const d2 = (vi.x - cx) * (vi.x - cx) + (vi.y - cy) * (vi.y - cy);
@@ -5298,7 +5298,7 @@ fn writePadsJson(
             try w.writeAll(",\"poly\":[");
             for (pad.poly, 0..) |pp, k| {
                 if (k > 0) try w.writeAll(",");
-                try w.print(PT_PAIR_FMT, .{ pp[0], pp[1] });
+                try w.print(pt_pair_fmt, .{ pp[0], pp[1] });
             }
             try w.writeAll("]");
         }
@@ -5365,14 +5365,14 @@ fn writePcbData(
     const blame = partBlameRaw(alloc, p, params);
 
     // Parts.
-    try w.writeAll(PARTS_OPEN);
+    try w.writeAll(parts_open);
     for (p.parts, 0..) |pt, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll(REF_OPEN);
+        try w.writeAll(ref_open);
         try writeJsonStr(w, pt.ref_des);
         // Renumber-stable module-local key, so a saved-layout Load can match on
         // it instead of the volatile ref-des (see PartPose.origin / bindLayLoad).
-        try w.writeAll(ORIGIN_OPEN);
+        try w.writeAll(origin_open);
         try writeJsonStr(w, if (i < p.instances.len) p.instances[i].origin_key else "");
         try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"kind\":\"{s}\",\"fb\":{s}", .{
             pt.x,                                 pt.y,  pt.rot,
@@ -5427,7 +5427,7 @@ fn writePcbData(
     // the raw pad centre inside `dropViaPos`.
     const drop_vias: []const router.Via = if (routed) |r|
         r.vias
-    else if (p.parts.len <= ROUTED_VIA_PREVIEW_MAX_PARTS)
+    else if (p.parts.len <= routed_via_preview_max_parts)
         (router.groundVias(alloc, p, .{}) catch &.{})
     else
         &.{};
@@ -5548,7 +5548,7 @@ fn writeRoutedArrays(
     try w.writeAll("\"tracks\":[");
     if (routed) |r| for (r.tracks, 0..) |t, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print(TRACK_JSON_FMT, .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.width });
+        try w.print(track_json_fmt, .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.width });
         try writeJsonStr(w, netNameOf(nets, t.net));
         // Stamp group tag — restoreRoutes maps SavedRoutes 1:1, so the source
         // entry at the same index carries this segment's tag (fresh ?route=1
@@ -5559,10 +5559,10 @@ fn writeRoutedArrays(
         };
         try w.writeAll("}");
     };
-    try w.writeAll(VIAS_ARR_OPEN);
+    try w.writeAll(vias_arr_open);
     if (routed) |r| for (r.vias, 0..) |vi, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print(VIA_JSON_FMT, .{ vi.x, vi.y, vi.dia, vi.drill });
+        try w.print(via_json_fmt, .{ vi.x, vi.y, vi.dia, vi.drill });
         try writeJsonStr(w, netNameOf(nets, vi.net));
         if (saved) |sr| if (i < sr.vias.len and sr.vias[i].g.len > 0) {
             try w.writeAll(",\"g\":");
@@ -5606,8 +5606,8 @@ fn writeBlobHead(
     opts: PcbDataOpts,
 ) HandlerError!void {
     try w.print("{{\"scale\":{d},\"minx\":{d},\"miny\":{d},", .{ v.scale, v.minx, v.miny });
-    try w.print("\"margin\":{d},\"grid\":{d},\"w\":{d},\"h\":{d},", .{ MARGIN_MM, optimizer.GRID_MM, v.width, v.height });
-    try w.print("\"clr\":{d},\"cmargin\":{d},", .{ clearance, geometry.BBOX_MARGIN_MM });
+    try w.print("\"margin\":{d},\"grid\":{d},\"w\":{d},\"h\":{d},", .{ margin_mm, optimizer.grid_mm, v.width, v.height });
+    try w.print("\"clr\":{d},\"cmargin\":{d},", .{ clearance, geometry.bbox_margin_mm });
     // Outline rectangle (world mm) — the authored `(board (size W H) …)` or
     // the shown layout's drawn outline; null when neither exists. A
     // non-rectangular board also carries its exact polygon (`board_poly`,
@@ -5621,7 +5621,7 @@ fn writeBlobHead(
         try w.writeAll("\"board_poly\":[");
         for (poly, 0..) |pp, i| {
             if (i > 0) try w.writeAll(",");
-            try w.print(PT_PAIR_FMT, .{ pp[0], pp[1] });
+            try w.print(pt_pair_fmt, .{ pp[0], pp[1] });
         }
         try w.writeAll("],");
     } else {
@@ -5647,7 +5647,7 @@ fn writeBlobHead(
             try w.writeAll(",\"poly\":[");
             for (poly, 0..) |pt, i| {
                 if (i > 0) try w.writeByte(',');
-                try w.print(PT_PAIR_FMT, .{ pt[0], pt[1] });
+                try w.print(pt_pair_fmt, .{ pt[0], pt[1] });
             }
             try w.writeAll("]}");
         }
@@ -5717,7 +5717,7 @@ fn writeBlobHead(
     }
     try w.writeAll("}");
     // Board-level silkscreen texts the shown layout carries (Text tool state).
-    try w.writeAll(TEXTS_OPEN);
+    try w.writeAll(texts_open);
     try writeSavedTextsJson(w, opts.texts);
     try w.writeAll(",");
 }
@@ -5762,7 +5762,7 @@ fn drcSevStr(sev: drc.Severity) []const u8 {
 // ── Small helpers ────────────────────────────────────────────────────────
 
 /// Two closing divs — shared by the stage, layouts-panel and sidebar writers.
-const DIV2_END = "</div></div>";
+const div2_end = "</div></div>";
 
 /// Emit `"layouts":[ … ],` — the saved-layout history for the client. Each
 /// entry carries its name, kind, optional score, and `parts` as a ref → {x,y,
@@ -5772,7 +5772,7 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
     try w.writeAll("\"layouts\":[");
     for (layouts, 0..) |L, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll(NAME_OPEN);
+        try w.writeAll(name_open);
         try writeJsonStr(w, L.name);
         try w.writeAll(",\"kind\":");
         try writeJsonStr(w, L.kind);
@@ -5787,11 +5787,11 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
             try writeSavedRoutesJson(w, sr);
         }
         if (L.outline) |o| {
-            try w.writeAll(OUTLINE_OPEN);
+            try w.writeAll(outline_open);
             try writeSavedOutlineJson(w, o);
         }
         if (L.texts.len > 0) {
-            try w.writeAll(TEXTS_OPEN);
+            try w.writeAll(texts_open);
             try writeSavedTextsJson(w, L.texts);
         }
         try w.writeAll(",\"parts\":{");
@@ -5801,7 +5801,7 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout) std.Io.Writ
             try w.print(":{{\"x\":{d},\"y\":{d},\"rot\":{d}", .{ pt.x, pt.y, pt.rot });
             try writePoseSideLocked(w, pt.side, pt.locked);
             if (pt.origin.len > 0) {
-                try w.writeAll(ORIGIN_OPEN);
+                try w.writeAll(origin_open);
                 try writeJsonStr(w, pt.origin);
             }
             try w.writeAll("}");
@@ -5936,7 +5936,7 @@ pub fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
 
 /// Hidden-by-default overlay; populated + shown by BOARD_JS when a sidebar
 /// footprint button is clicked. Edits the courtyard half-extents on the grid.
-const COURTYARD_MODAL =
+const courtyard_modal =
     \\<div id="court-modal" class="court-modal" hidden><div class="court-dialog">
     \\<div class="court-h"><span id="court-title">Courtyard</span><button id="court-x" class="court-x" title="Close">×</button></div>
     \\<svg id="court-svg" class="court-svg" viewBox="0 0 260 220" xmlns="http://www.w3.org/2000/svg"></svg>
@@ -5964,7 +5964,7 @@ const COURTYARD_MODAL =
 /// finds the fab-readiness report non-clean. Lists errors + warnings; the
 /// primary action is "Download anyway" (force) on errors, "Continue" on
 /// warnings-only. Reuses the court-modal styling.
-const FAB_MODAL =
+const fab_modal =
     \\<div id="fab-modal" class="court-modal" hidden><div class="court-dialog fab-dialog">
     \\<div class="court-h"><span id="fab-title">Fab readiness</span><button id="fab-x" class="court-x" title="Close">×</button></div>
     \\<div id="fab-body" class="fab-body"></div>
@@ -5975,7 +5975,7 @@ const FAB_MODAL =
 
 // ── Styles + client renderer ─────────────────────────────────────────────
 
-const PAGE_CSS =
+const page_css =
     \\/* Neutral graphite CAD chrome (de-GitHubbed): page + panel palette lives
     \\   here once — panels #232428, inset #1a1b1e, borders #2c2d31/#3a3b40,
     \\   text #d6d7db/#9b9ca3, KiCad-ish accent blue #5a8fd6. */
@@ -6415,7 +6415,7 @@ const PAGE_CSS =
 /// Extra rules layered on top of PAGE_CSS only when `?embed=1` — the body gets
 /// the `embed` class. Strips outer padding, lets the board fill the frame
 /// width, and drops the grab cursor (no dragging in the read-only preview).
-const EMBED_CSS =
+const embed_css =
     \\body.embed .pcb-layout{padding:8px 10px;max-width:none;height:auto;min-height:0}
     \\body.embed .pcb-bar{margin:4px 0}
     \\body.embed .pcb-route{margin:2px 0 6px}
@@ -6431,7 +6431,7 @@ const EMBED_CSS =
 /// The (hidden) WebGL stage for the 3D-view tab: a canvas, a status overlay,
 /// and a floating toolbar (camera presets + layer toggles). CSS `.mode-3d`
 /// reveals it and hides the 2D board; `pcb_3d_viewer.js` builds the scene.
-const PCB_3D_STAGE_HTML =
+const pcb_3d_stage_html =
     \\<div class="pcb-3d-stage" id="pcb-3d-stage">
     \\<canvas id="pcb-3d-canvas"></canvas>
     \\<div id="pcb-3d-status">Loading 3D view…</div>
@@ -6453,7 +6453,7 @@ const PCB_3D_STAGE_HTML =
 /// stack (Three.js + OrbitControls + occt-import-js) and our viewer before
 /// calling `PCB3D.init()` — so the heavy assets load only when 3D is opened.
 /// The PCB Layout tab flips back to 2D in place (no reload) when 3D is active.
-const PCB_3D_TOGGLE_JS =
+const pcb_3d_toggle_js =
     \\<script>(function(){
     \\var tab3d=document.getElementById("pcb-tab-3d"),tab2d=document.getElementById("pcb-tab-2d");
     \\if(!tab3d||!tab2d)return;
@@ -6504,11 +6504,11 @@ const PCB_3D_TOGGLE_JS =
 
 /// Shared error/response fragments for the layout tools (extracted so the
 /// repeated-literal check stays quiet and the wording stays consistent).
-const MCP_ERR_MISSING_NAME = "missing argument \"name\"";
-const MCP_ERR_NO_DESIGN = "no design or module by that name";
+const mcp_err_missing_name = "missing argument \"name\"";
+const mcp_err_no_design = "no design or module by that name";
 /// `{"ok":true,"live_version":N,"layout":` — the opening the tools that report
 /// only a layout name share (set_board_outline / route_pcb / clear_routes).
-const MCP_OK_LAYOUT_FMT = "{{\"ok\":true,\"live_version\":{d},\"layout\":";
+const mcp_ok_layout_fmt = "{{\"ok\":true,\"live_version\":{d},\"layout\":";
 
 /// A single requested pose from `set_part_poses` (`x_mm`/`y_mm` in mm; `rot`/
 /// `side`/`locked` optional — absent keeps the part's current value).
@@ -6654,7 +6654,7 @@ fn mcpPersistWorking(
     star: bool,
 ) void {
     var entry = entry_in;
-    entry.kind = KIND_MANUAL;
+    entry.kind = kind_manual;
     if (entry.ts == 0) entry.ts = clock.timestamp();
     if (single) {
         entry.name = "layout";
@@ -6691,7 +6691,7 @@ fn mcpPersistWorking(
 /// stale rev 409s on its next save instead of silently clobbering). MCP tools
 /// are design-level only, so there is no `sub` variant.
 fn mcpProtectedWrite(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) void {
-    if (layoutsSidecar(alloc, project_dir, name, null, LAYOUTS_EXT)) |scp| {
+    if (layoutsSidecar(alloc, project_dir, name, null, layouts_ext)) |scp| {
         _ = history.snapshotLayouts(alloc, project_dir, name, scp) catch null;
     }
     writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name), readLayoutRev(alloc, project_dir, name, null) + 1);
@@ -6867,7 +6867,7 @@ pub fn mcpSetPartPoses(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) HandlerError!bool {
-    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
+    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, mcp_err_missing_name);
     const reqs = mcpParsePoses(alloc, args_val) orelse return mcpFail(out, alloc, "missing or malformed \"poses\" array");
     if (reqs.len == 0) return mcpFail(out, alloc, "\"poses\" is empty");
     const layout_arg = mcpArgStr(args_val, "layout");
@@ -6891,7 +6891,7 @@ pub fn mcpSetPartPoses(
     for (base, 0..) |p, i| {
         try idx_of.put(alloc, p.ref, i);
         if (p.origin.len > 0) {
-            const key = try std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ refPrefix(p.ref), p.origin });
+            const key = try std.fmt.allocPrint(alloc, pin_key_fmt, .{ refPrefix(p.ref), p.origin });
             try origin_of.put(alloc, key, i);
         }
     }
@@ -6901,7 +6901,7 @@ pub fn mcpSetPartPoses(
     for (reqs) |rq| {
         if (!rq.has_xy) return mcpFailFmt(out, alloc, "pose for \"{s}\" is missing x_mm/y_mm", .{rq.ref});
         const i: usize = idx_of.get(rq.ref) orelse blk: {
-            const key = try std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ refPrefix(rq.ref), mcpOriginOf(rq.ref) });
+            const key = try std.fmt.allocPrint(alloc, pin_key_fmt, .{ refPrefix(rq.ref), mcpOriginOf(rq.ref) });
             break :blk origin_of.get(key) orelse
                 return mcpFailFmt(out, alloc, "unknown ref \"{s}\" — not a component or origin key in this design", .{rq.ref});
         };
@@ -6928,7 +6928,7 @@ pub fn mcpSetPartPoses(
 
     const entry = SavedLayout{
         .name = mcpWorkingName(alloc, project_dir, name, single, layout_arg),
-        .kind = KIND_MANUAL,
+        .kind = kind_manual,
         .ts = 0,
         .score = null,
         .parts = base,
@@ -6990,7 +6990,7 @@ pub fn mcpSetBoardOutline(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) HandlerError!bool {
-    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
+    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, mcp_err_missing_name);
     const layout_arg = mcpArgStr(args_val, "layout");
     const av = args_val orelse return mcpFail(out, alloc, "missing outline");
     if (av != .object) return mcpFail(out, alloc, "missing rect/pts");
@@ -7003,14 +7003,14 @@ pub fn mcpSetBoardOutline(
         return mcpFail(out, alloc, "invalid outline — need a positive-area rect {x,y,w,h} or a polygon pts of ≥3 vertices");
 
     const single = mcpIsSingleDesign(alloc, project_dir, name) orelse
-        return mcpFail(out, alloc, MCP_ERR_NO_DESIGN);
+        return mcpFail(out, alloc, mcp_err_no_design);
     const working = mcpReadWorking(alloc, project_dir, name, single, layout_arg);
     const parts: []const PartPose = if (working) |wl| wl.parts else mcpBootstrapParts(alloc, project_dir, name, layout_arg) orelse
         return mcpFail(out, alloc, "could not resolve a placement to attach the outline to");
 
     const entry = SavedLayout{
         .name = mcpWorkingName(alloc, project_dir, name, single, layout_arg),
-        .kind = KIND_MANUAL,
+        .kind = kind_manual,
         .ts = 0,
         .score = null,
         .parts = parts,
@@ -7022,9 +7022,9 @@ pub fn mcpSetBoardOutline(
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
-    try w.print(MCP_OK_LAYOUT_FMT, .{serve_root.getLiveVersion(name)});
+    try w.print(mcp_ok_layout_fmt, .{serve_root.getLiveVersion(name)});
     try writeJsonStr(w, entry.name);
-    try w.writeAll(OUTLINE_OPEN);
+    try w.writeAll(outline_open);
     try writeSavedOutlineJson(w, outline);
     try w.writeAll("}");
     try out.appendSlice(alloc, aw.written());
@@ -7057,7 +7057,7 @@ pub fn mcpRoutePcb(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) HandlerError!bool {
-    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
+    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, mcp_err_missing_name);
     const layout_arg = mcpArgStr(args_val, "layout");
     const scope = mcpArgStrList(alloc, args_val, "nets");
 
@@ -7107,7 +7107,7 @@ pub fn mcpRoutePcb(
 
     const entry = SavedLayout{
         .name = mcpWorkingName(alloc, project_dir, name, single, layout_arg),
-        .kind = KIND_MANUAL,
+        .kind = kind_manual,
         .ts = 0,
         .score = null,
         .parts = if (working) |wl| wl.parts else posesFromPlacement(alloc, placement) orelse &.{},
@@ -7119,7 +7119,7 @@ pub fn mcpRoutePcb(
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
-    try w.print(MCP_OK_LAYOUT_FMT, .{serve_root.getLiveVersion(name)});
+    try w.print(mcp_ok_layout_fmt, .{serve_root.getLiveVersion(name)});
     try writeJsonStr(w, entry.name);
     try w.print(",\"routed\":{d},\"total\":{d},\"drc\":{d},\"trace_mm\":{d:.3},\"tracks\":{d},\"vias\":{d},\"scope\":", .{
         routed.routed, routed.total, drc_count, trace_mm, n_tracks, n_vias,
@@ -7152,12 +7152,12 @@ pub fn mcpSavePcbLayout(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) HandlerError!bool {
-    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
+    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, mcp_err_missing_name);
     const layout_name = mcpArgStr(args_val, "layout_name");
     const star = mcpArgBool(args_val, "star");
 
     const single = mcpIsSingleDesign(alloc, project_dir, name) orelse
-        return mcpFail(out, alloc, MCP_ERR_NO_DESIGN);
+        return mcpFail(out, alloc, mcp_err_no_design);
     // Read the current working state (blessed / single "layout") to re-save.
     const working = mcpReadWorking(alloc, project_dir, name, single, null) orelse
         return mcpFail(out, alloc, "no working layout to save — set poses (or an outline) first");
@@ -7165,7 +7165,7 @@ pub fn mcpSavePcbLayout(
     const target_name: []const u8 = layout_name orelse (if (single) "layout" else "manual");
     const entry = SavedLayout{
         .name = target_name,
-        .kind = KIND_MANUAL,
+        .kind = kind_manual,
         .ts = 0,
         .score = working.score,
         .parts = working.parts,
@@ -7196,12 +7196,12 @@ pub fn mcpClearRoutes(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) HandlerError!bool {
-    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
+    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, mcp_err_missing_name);
     const layout_arg = mcpArgStr(args_val, "layout");
     const scope = mcpArgStrList(alloc, args_val, "nets");
 
     const single = mcpIsSingleDesign(alloc, project_dir, name) orelse
-        return mcpFail(out, alloc, MCP_ERR_NO_DESIGN);
+        return mcpFail(out, alloc, mcp_err_no_design);
     const working = mcpReadWorking(alloc, project_dir, name, single, layout_arg) orelse
         return mcpFail(out, alloc, "no working layout to clear");
 
@@ -7220,7 +7220,7 @@ pub fn mcpClearRoutes(
 
     const entry = SavedLayout{
         .name = working.name,
-        .kind = KIND_MANUAL,
+        .kind = kind_manual,
         .ts = 0,
         .score = working.score,
         .parts = working.parts,
@@ -7232,7 +7232,7 @@ pub fn mcpClearRoutes(
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
-    try w.print(MCP_OK_LAYOUT_FMT, .{serve_root.getLiveVersion(name)});
+    try w.print(mcp_ok_layout_fmt, .{serve_root.getLiveVersion(name)});
     try writeJsonStr(w, entry.name);
     try w.print(",\"cleared\":{d}}}", .{cleared});
     try out.appendSlice(alloc, aw.written());
@@ -7296,7 +7296,7 @@ pub fn mcpRunFabReadiness(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) HandlerError!bool {
-    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, MCP_ERR_MISSING_NAME);
+    const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, mcp_err_missing_name);
     const layout_arg = mcpArgStr(args_val, "layout");
     const fv = mcpFabView(alloc, project_dir, name, layout_arg) orelse
         return mcpFail(out, alloc, "no saved layout — set poses and save a layout first");
@@ -7320,7 +7320,7 @@ test "layouts sidecar round-trips cache slot" {
     const parts = [_]PartPose{.{ .ref = "U1", .x = 1.5, .y = -2.0, .rot = 90 }};
     const layouts = [_]SavedLayout{.{
         .name = "best",
-        .kind = KIND_MANUAL,
+        .kind = kind_manual,
         .ts = 123,
         .score = .{ .hpwl = 10, .loop = 2, .caps = 1, .objective = 42 },
         .parts = &parts,
@@ -7355,8 +7355,8 @@ test "layouts sidecar round-trips rough flag" {
 
     const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
     const layouts = [_]SavedLayout{
-        .{ .name = "rough seed", .kind = KIND_AUTO, .ts = 1, .score = null, .parts = &parts, .rough = true },
-        .{ .name = "hand", .kind = KIND_MANUAL, .ts = 2, .score = null, .parts = &parts },
+        .{ .name = "rough seed", .kind = kind_auto, .ts = 1, .score = null, .parts = &parts, .rough = true },
+        .{ .name = "hand", .kind = kind_manual, .ts = 2, .score = null, .parts = &parts },
     };
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -7375,7 +7375,7 @@ test "layouts sidecar emits rev only when non-zero" {
     const alloc = arena_state.allocator();
 
     const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
-    const layouts = [_]SavedLayout{.{ .name = "layout", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts, .default = true }};
+    const layouts = [_]SavedLayout{.{ .name = "layout", .kind = kind_manual, .ts = 1, .score = null, .parts = &parts, .default = true }};
 
     // rev > 0 → serialized at the root.
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -7408,7 +7408,7 @@ test "layout sidecar rev reads back and a save stamps the next rev" {
 
     // A save stamps disk_rev + 1 = 1; a follow-up read sees it.
     const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
-    const layouts = [_]SavedLayout{.{ .name = "layout", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts, .default = true }};
+    const layouts = [_]SavedLayout{.{ .name = "layout", .kind = kind_manual, .ts = 1, .score = null, .parts = &parts, .default = true }};
     writeLayoutsFile(alloc, project, "foo", &layouts, null, 1);
     try std.testing.expectEqual(@as(i64, 1), readLayoutRev(alloc, project, "foo", null));
 
@@ -7432,7 +7432,7 @@ test "MCP persist bumps the sidecar rev and snapshots history" {
     // Two MCP persists: each stamps disk rev + 1 (0→1→2), so an open editor
     // tab holding the old rev 409s on its next save instead of clobbering.
     const parts = [_]PartPose{.{ .ref = "U1", .x = 1, .y = 2, .rot = 0 }};
-    const entry = SavedLayout{ .name = "layout", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts, .default = true };
+    const entry = SavedLayout{ .name = "layout", .kind = kind_manual, .ts = 1, .score = null, .parts = &parts, .default = true };
     mcpPersistWorking(alloc, project, "foo", true, entry, true);
     try std.testing.expectEqual(@as(i64, 1), readLayoutRev(alloc, project, "foo", null));
     mcpPersistWorking(alloc, project, "foo", true, entry, true);
@@ -7468,7 +7468,7 @@ test "layouts sidecar round-trips part origin" {
         .{ .ref = "C1", .x = 1, .y = 2, .rot = 90, .origin = "C_VDDIN_BULK" },
         .{ .ref = "U1", .x = 0, .y = 0, .rot = 0 },
     };
-    const layouts = [_]SavedLayout{.{ .name = "hand", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts }};
+    const layouts = [_]SavedLayout{.{ .name = "hand", .kind = kind_manual, .ts = 1, .score = null, .parts = &parts }};
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
     try writeLayoutsFileJson(&aw.writer, &layouts, null);
@@ -7491,7 +7491,7 @@ test "layouts sidecar round-trips a drawn outline" {
     const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
     const layouts = [_]SavedLayout{.{
         .name = "outlined",
-        .kind = KIND_MANUAL,
+        .kind = kind_manual,
         .ts = 1,
         .score = null,
         .parts = &parts,
@@ -7521,7 +7521,7 @@ test "layouts sidecar round-trips a polygon outline" {
     const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
     const layouts = [_]SavedLayout{.{
         .name = "poly-outlined",
-        .kind = KIND_MANUAL,
+        .kind = kind_manual,
         .ts = 1,
         .score = null,
         .parts = &parts,
@@ -7565,7 +7565,7 @@ test "layouts sidecar round-trips board texts" {
     };
     const layouts = [_]SavedLayout{.{
         .name = "labelled",
-        .kind = KIND_MANUAL,
+        .kind = kind_manual,
         .ts = 1,
         .score = null,
         .parts = &parts,
@@ -7601,7 +7601,7 @@ test "layouts sidecar round-trips saved routes" {
     const vias = [_]SavedVia{.{ .x = 1, .y = 0, .d = 0.6, .drill = 0.3, .net = "VBUS" }};
     const layouts = [_]SavedLayout{.{
         .name = "routed",
-        .kind = KIND_MANUAL,
+        .kind = kind_manual,
         .ts = 1,
         .score = null,
         .parts = &parts,
@@ -7640,7 +7640,7 @@ test "layouts sidecar round-trips inner-layer copper and legacy layer defaults" 
     };
     const layouts = [_]SavedLayout{.{
         .name = "routed",
-        .kind = KIND_MANUAL,
+        .kind = kind_manual,
         .ts = 1,
         .score = null,
         .parts = &parts,
@@ -7687,7 +7687,7 @@ test "layouts sidecar round-trips the copper stamp group tag" {
     const vias = [_]SavedVia{.{ .x = 1, .y = 0, .d = 0.6, .drill = 0.3, .net = "GND", .g = "buck" }};
     const layouts = [_]SavedLayout{.{
         .name = "routed",
-        .kind = KIND_MANUAL,
+        .kind = kind_manual,
         .ts = 1,
         .score = null,
         .parts = &parts,
@@ -7716,7 +7716,7 @@ test "stamped copper nets map to parent nets with slug fallback" {
     try ok_ref.put(alloc, "U1", "buck/U11");
     // Parent side: design pad buck/U11.2 is on parent net "5V0".
     var dpin = std.StringHashMapUnmanaged([]const u8).empty;
-    try dpin.put(alloc, try std.fmt.allocPrint(alloc, PIN_KEY_FMT, .{ "buck/U11", "2" }), "5V0");
+    try dpin.put(alloc, try std.fmt.allocPrint(alloc, pin_key_fmt, .{ "buck/U11", "2" }), "5V0");
 
     const tracks = [_]SavedTrack{
         .{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .w = 0.3, .net = "VOUT" },
@@ -7744,7 +7744,7 @@ test "layouts sidecar round-trips side and locked" {
         .{ .ref = "U1", .x = 1, .y = 2, .rot = 0, .side = .bottom, .locked = true },
         .{ .ref = "C1", .x = 3, .y = 4, .rot = 90 },
     };
-    const layouts = [_]SavedLayout{.{ .name = "two-sided", .kind = KIND_MANUAL, .ts = 1, .score = null, .parts = &parts }};
+    const layouts = [_]SavedLayout{.{ .name = "two-sided", .kind = kind_manual, .ts = 1, .score = null, .parts = &parts }};
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
     try writeLayoutsFileJson(&aw.writer, &layouts, null);

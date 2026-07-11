@@ -52,13 +52,13 @@ pub const Severity = enum { err, warn, info };
 
 /// Microchip's hard limit: keep the pin→decap trace under ~6 mm or the leg
 /// inductance defeats the cap.
-const DECAP_MAX_LEG_MM: f64 = 6.0;
+const decap_max_leg_mm: f64 = 6.0;
 /// A feedback node within this courtyard gap of a switching/clock/RF aggressor
 /// is at coupling risk.
-const FB_AGGRESSOR_GAP_MM: f64 = 2.0;
+const fb_aggressor_gap_mm: f64 = 2.0;
 /// A hot loop only counts as "not tightest" when it's this much looser than the
 /// best non-hot loop — a margin so near-ties don't churn the lint.
-const HOT_LOOP_MARGIN: f64 = 1.3;
+const hot_loop_margin: f64 = 1.3;
 
 /// Run every gate over the solved placement. Returns a heap slice of findings
 /// (possibly empty) the caller frees with `freeFindings`.
@@ -89,7 +89,7 @@ fn lintDecapDistance(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, ou
     defer refs.deinit(alloc);
     for (p.loops) |L| {
         if (L.cap < policy.part_role.len and policy.part_role[L.cap] == .bulk_cap) continue;
-        if (legMm(p, L) > DECAP_MAX_LEG_MM) try refs.append(alloc, p.parts[L.cap].ref_des);
+        if (legMm(p, L) > decap_max_leg_mm) try refs.append(alloc, p.parts[L.cap].ref_des);
     }
     if (refs.items.len == 0) return;
     const refs_owned = try alloc.dupe([]const u8, refs.items);
@@ -161,7 +161,7 @@ fn lintHotLoopTightest(alloc: Allocator, p: Placement, policy: mp.ModulePolicy, 
     defer refs.deinit(alloc);
     for (p.loops) |L| {
         if (!isHotLoop(policy, L)) continue;
-        if (optimizer.loopNh(p.parts, L) > min_nonhot * HOT_LOOP_MARGIN) try refs.append(alloc, p.parts[L.cap].ref_des);
+        if (optimizer.loopNh(p.parts, L) > min_nonhot * hot_loop_margin) try refs.append(alloc, p.parts[L.cap].ref_des);
     }
     if (refs.items.len == 0) return;
     const refs_owned = try alloc.dupe([]const u8, refs.items);
@@ -195,7 +195,7 @@ fn lintFeedbackAggressor(alloc: Allocator, p: Placement, policy: mp.ModulePolicy
             }
         }
         const ai = best orelse continue;
-        if (best_gap >= FB_AGGRESSOR_GAP_MM) continue;
+        if (best_gap >= fb_aggressor_gap_mm) continue;
         const pair = try alloc.dupe([]const u8, &.{ fp.ref_des, p.parts[ai].ref_des });
         errdefer alloc.free(pair);
         try out.append(alloc, .{

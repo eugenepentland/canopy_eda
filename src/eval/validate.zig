@@ -9,13 +9,13 @@ const Node = ast.Node;
 const Env = env_mod.Env;
 
 // ── Constants ─────────────────────────────────────────────────────
-const VOLTAGE_MISMATCH_TOLERANCE_V: f64 = 0.01;
+const voltage_mismatch_tolerance_v: f64 = 0.01;
 /// A section description is a one-line, high-level summary of what the block
 /// is *for* — not a parts list. Anything longer than this (counted in Unicode
 /// codepoints, so the em-dashes and arrows these summaries favour aren't
 /// over-counted) should move to `;;` comments on the source. Warned, not
 /// enforced, so already-verbose designs keep building.
-const SECTION_DESCRIPTION_MAX_CHARS: usize = 100;
+const section_description_max_chars: usize = 100;
 
 /// Run post-build validations on a design block and its sub-blocks.
 pub fn validateDesign(self: *Evaluator, block: *const DesignBlock) EvalError!void {
@@ -119,7 +119,7 @@ fn checkVoltageMismatches(self: *Evaluator, block: *const DesignBlock) !void {
         if (entries.len < 2) continue;
         const first_v = entries[0].voltage;
         for (entries[1..]) |e| {
-            if (@abs(e.voltage - first_v) > VOLTAGE_MISMATCH_TOLERANCE_V) {
+            if (@abs(e.voltage - first_v) > voltage_mismatch_tolerance_v) {
                 const msg = std.fmt.allocPrint(
                     self.allocator,
                     "Voltage mismatch on net \"{s}\": {s} declares {d:.1}V but {s} declares {d:.1}V",
@@ -173,13 +173,13 @@ fn checkSectionDescriptionLength(self: *Evaluator, block: *const DesignBlock) !v
 /// `SECTION_DESCRIPTION_MAX_CHARS` codepoints. Empty descriptions never warn.
 fn warnIfDescriptionLong(self: *Evaluator, name: []const u8, description: []const u8) !void {
     const count = descriptionCharCount(description);
-    if (count <= SECTION_DESCRIPTION_MAX_CHARS) return;
+    if (count <= section_description_max_chars) return;
     const msg = std.fmt.allocPrint(
         self.allocator,
         "Section \"{s}\" description is {d} chars (limit {d}) — keep it high-level " ++
             "(what the block does); move part numbers / addresses / implementation " ++
             "detail to ;; comments in the .sexp",
-        .{ name, count, SECTION_DESCRIPTION_MAX_CHARS },
+        .{ name, count, section_description_max_chars },
     ) catch return;
     try self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true });
 }

@@ -14,9 +14,9 @@ const fmt_const = @import("format.zig");
 
 const Node = ast.Node;
 
-const PROP_REFERENCE = fmt_const.PROP_REFERENCE;
-const PROP_VALUE = fmt_const.PROP_VALUE;
-const PROP_CANOPY_UUID = fmt_const.PROP_CANOPY_UUID;
+const prop_reference = fmt_const.prop_reference;
+const prop_value = fmt_const.prop_value;
+const prop_canopy_uuid = fmt_const.prop_canopy_uuid;
 
 pub const ReadError = error{InvalidPcbRoot} || std.mem.Allocator.Error || parser.ParseError;
 
@@ -134,11 +134,11 @@ fn readProperty(arena: std.mem.Allocator, node: Node, fp: *sync.BoardFp) std.mem
     if (cl.len < 3) return;
     const key = cl[1].asString() orelse return;
     const value = cl[2].asString() orelse return;
-    if (std.mem.eql(u8, key, PROP_REFERENCE)) {
+    if (std.mem.eql(u8, key, prop_reference)) {
         fp.ref = value;
-    } else if (std.mem.eql(u8, key, PROP_VALUE)) {
+    } else if (std.mem.eql(u8, key, prop_value)) {
         fp.value = value;
-    } else if (std.mem.eql(u8, key, PROP_CANOPY_UUID)) {
+    } else if (std.mem.eql(u8, key, prop_canopy_uuid)) {
         fp.uuid = value;
     } else {
         try fp.fields.put(arena, key, value);

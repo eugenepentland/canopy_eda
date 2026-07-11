@@ -13,18 +13,18 @@ const eval_modules = @import("eval/modules.zig");
 const import_kicad = @import("import_kicad.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
-const PROJECT_DIR_FLAG = "--project-dir";
-const OUTPUT_DIR_FLAG = "--output-dir";
-const OUT_OF_MEMORY_MSG = "Out of memory\n";
-const BUILD_ERROR_FMT = "Build error: {}\n";
-const DIAG_ERROR_FMT = "{s}:{d}:{d}: error: {s}\n";
-const BUILD_FAILED_ASSERTION_MSG = "Build failed: assertion violations\n";
-const CANNOT_WRITE_FMT = "Cannot write {s}: {}\n";
-const PASS_FMT = "PASS: {s}\n";
-const WARN_FMT = "WARN: {s}\n";
-const FAIL_FMT = "FAIL: {s}\n";
-const IDENTITY_RESOLUTION_ERROR_FMT = "Identity resolution error: {}\n";
-const WROTE_BYTES_FMT = "Wrote {s} ({d} bytes)\n";
+const project_dir_flag = "--project-dir";
+const output_dir_flag = "--output-dir";
+const out_of_memory_msg = "Out of memory\n";
+const build_error_fmt = "Build error: {}\n";
+const diag_error_fmt = "{s}:{d}:{d}: error: {s}\n";
+const build_failed_assertion_msg = "Build failed: assertion violations\n";
+const cannot_write_fmt = "Cannot write {s}: {}\n";
+const pass_fmt = "PASS: {s}\n";
+const warn_fmt = "WARN: {s}\n";
+const fail_fmt = "FAIL: {s}\n";
+const identity_resolution_error_fmt = "Identity resolution error: {}\n";
+const wrote_bytes_fmt = "Wrote {s} ({d} bytes)\n";
 
 /// Error set for the CLI command handlers in this file. Wide on purpose:
 /// each `cmd*` orchestrates the evaluator (`EvalError`), file IO, network
@@ -75,7 +75,7 @@ pub const CommandError = std.mem.Allocator.Error ||
 fn moduleBlock(eval: *Evaluator, name: []const u8) *env_mod.DesignBlock {
     const result = eval_modules.instantiateStandalone(eval, name) catch |err| {
         if (eval.last_error) |diag| {
-            std.debug.print(DIAG_ERROR_FMT, .{ name, diag.span.line, diag.span.col, diag.message });
+            std.debug.print(diag_error_fmt, .{ name, diag.span.line, diag.span.col, diag.message });
         }
         std.debug.print("error: {s} is neither a design nor a buildable module ({s})\n", .{ name, @errorName(err) });
         std.process.exit(1);
@@ -96,7 +96,7 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     var severity_filter: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
+        if (std.mem.eql(u8, args[i], project_dir_flag) and i + 1 < args.len) {
             project_dir = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--severity") and i + 1 < args.len) {
@@ -176,7 +176,7 @@ fn parseBuildArgs(args: []const []const u8) BuildArgs {
     var push_name: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
+        if (std.mem.eql(u8, args[i], project_dir_flag) and i + 1 < args.len) {
             out.project_dir = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--push")) {
@@ -187,7 +187,7 @@ fn parseBuildArgs(args: []const []const u8) BuildArgs {
                 push_name = args[i + 1];
                 i += 1;
             }
-        } else if (std.mem.eql(u8, args[i], OUTPUT_DIR_FLAG) and i + 1 < args.len) {
+        } else if (std.mem.eql(u8, args[i], output_dir_flag) and i + 1 < args.len) {
             out.output_dir = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--server") and i + 1 < args.len) {
@@ -221,7 +221,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     };
 
     const board_path = paths.designSourcePath(allocator, project_dir, design) catch {
-        std.debug.print(OUT_OF_MEMORY_MSG, .{});
+        std.debug.print(out_of_memory_msg, .{});
         std.process.exit(1);
     };
     defer allocator.free(board_path);
@@ -233,9 +233,9 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
         // Render the stashed diagnostic (span + message + module call
         // chain) when one exists — the bare error code is the fallback.
         if (eval.last_error) |diag| {
-            std.debug.print(DIAG_ERROR_FMT, .{ board_path, diag.span.line, diag.span.col, diag.message });
+            std.debug.print(diag_error_fmt, .{ board_path, diag.span.line, diag.span.col, diag.message });
         }
-        std.debug.print(BUILD_ERROR_FMT, .{err});
+        std.debug.print(build_error_fmt, .{err});
         std.process.exit(1);
     };
 
@@ -267,29 +267,29 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     var has_failure = false;
     for (eval.assertions.items) |assertion| {
         if (assertion.passed) {
-            std.debug.print(PASS_FMT, .{assertion.message});
+            std.debug.print(pass_fmt, .{assertion.message});
         } else if (assertion.is_warning) {
-            std.debug.print(WARN_FMT, .{assertion.message});
+            std.debug.print(warn_fmt, .{assertion.message});
         } else {
-            std.debug.print(FAIL_FMT, .{assertion.message});
+            std.debug.print(fail_fmt, .{assertion.message});
             has_failure = true;
         }
     }
 
     if (has_failure) {
-        std.debug.print(BUILD_FAILED_ASSERTION_MSG, .{});
+        std.debug.print(build_failed_assertion_msg, .{});
         std.process.exit(1);
     }
 
     {
         {
             const ids_path = paths.designSiblingPath(allocator, project_dir, design, ".bom") catch {
-                std.debug.print(OUT_OF_MEMORY_MSG, .{});
+                std.debug.print(out_of_memory_msg, .{});
                 std.process.exit(1);
             };
             defer allocator.free(ids_path);
             bom.resolveIdentities(allocator, block, ids_path, project_dir) catch |err| {
-                std.debug.print(IDENTITY_RESOLUTION_ERROR_FMT, .{err});
+                std.debug.print(identity_resolution_error_fmt, .{err});
                 std.process.exit(1);
             };
 
@@ -301,7 +301,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
 
             if (output_dir) |dir| {
                 const out_path = std.fmt.allocPrint(allocator, "{s}/{s}.sexp", .{ dir, design }) catch {
-                    std.debug.print(OUT_OF_MEMORY_MSG, .{});
+                    std.debug.print(out_of_memory_msg, .{});
                     std.process.exit(1);
                 };
                 defer allocator.free(out_path);
@@ -324,7 +324,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
             // durable artifact, the push is a live-view convenience.
             if (want_push) {
                 const url = std.fmt.allocPrint(allocator, "{s}/api/push/{s}", .{ server_url, design }) catch {
-                    std.debug.print(OUT_OF_MEMORY_MSG, .{});
+                    std.debug.print(out_of_memory_msg, .{});
                     std.process.exit(1);
                 };
                 defer allocator.free(url);
@@ -356,10 +356,10 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     var design_name: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
+        if (std.mem.eql(u8, args[i], project_dir_flag) and i + 1 < args.len) {
             project_dir = args[i + 1];
             i += 1;
-        } else if (std.mem.eql(u8, args[i], OUTPUT_DIR_FLAG) and i + 1 < args.len) {
+        } else if (std.mem.eql(u8, args[i], output_dir_flag) and i + 1 < args.len) {
             output_dir = args[i + 1];
             i += 1;
         } else if (!std.mem.startsWith(u8, args[i], "--")) {
@@ -377,7 +377,7 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     };
 
     const board_path = paths.designSourcePath(allocator, project_dir, name) catch {
-        std.debug.print(OUT_OF_MEMORY_MSG, .{});
+        std.debug.print(out_of_memory_msg, .{});
         std.process.exit(1);
     };
     defer allocator.free(board_path);
@@ -389,9 +389,9 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
         // Render the stashed diagnostic (span + message + module call
         // chain) when one exists — the bare error code is the fallback.
         if (eval.last_error) |diag| {
-            std.debug.print(DIAG_ERROR_FMT, .{ board_path, diag.span.line, diag.span.col, diag.message });
+            std.debug.print(diag_error_fmt, .{ board_path, diag.span.line, diag.span.col, diag.message });
         }
-        std.debug.print(BUILD_ERROR_FMT, .{err});
+        std.debug.print(build_error_fmt, .{err});
         std.process.exit(1);
     };
 
@@ -407,29 +407,29 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     var has_failure = false;
     for (eval.assertions.items) |assertion| {
         if (assertion.passed) {
-            std.debug.print(PASS_FMT, .{assertion.message});
+            std.debug.print(pass_fmt, .{assertion.message});
         } else if (assertion.is_warning) {
-            std.debug.print(WARN_FMT, .{assertion.message});
+            std.debug.print(warn_fmt, .{assertion.message});
         } else {
-            std.debug.print(FAIL_FMT, .{assertion.message});
+            std.debug.print(fail_fmt, .{assertion.message});
             has_failure = true;
         }
     }
 
     if (has_failure) {
-        std.debug.print(BUILD_FAILED_ASSERTION_MSG, .{});
+        std.debug.print(build_failed_assertion_msg, .{});
         std.process.exit(1);
     }
 
     {
         {
             const ids_path = paths.designSiblingPath(allocator, project_dir, name, ".bom") catch {
-                std.debug.print(OUT_OF_MEMORY_MSG, .{});
+                std.debug.print(out_of_memory_msg, .{});
                 std.process.exit(1);
             };
             defer allocator.free(ids_path);
             bom.resolveIdentities(allocator, block, ids_path, project_dir) catch |err| {
-                std.debug.print(IDENTITY_RESOLUTION_ERROR_FMT, .{err});
+                std.debug.print(identity_resolution_error_fmt, .{err});
                 std.process.exit(1);
             };
 
@@ -462,7 +462,7 @@ pub fn cmdImportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     var fold_prefix: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], PROJECT_DIR_FLAG) and i + 1 < args.len) {
+        if (std.mem.eql(u8, args[i], project_dir_flag) and i + 1 < args.len) {
             project_dir = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--name") and i + 1 < args.len) {
@@ -556,7 +556,7 @@ fn pushToServer(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
 
 test "parseBuildArgs: bare positional does not imply push" {
     // spec: commands - a lone positional design name builds without pushing
-    const args = [_][]const u8{ PROJECT_DIR_FLAG, "projects/designs", "stm32n6" };
+    const args = [_][]const u8{ project_dir_flag, "projects/designs", "stm32n6" };
     const got = parseBuildArgs(&args);
     try std.testing.expectEqualStrings("projects/designs", got.project_dir);
     try std.testing.expectEqualStrings("stm32n6", got.design.?);
@@ -574,7 +574,7 @@ test "parseBuildArgs: --push <name> requests a push of that design" {
 
 test "parseBuildArgs: bare --push pushes the positional design" {
     // spec: commands - a bare --push flag pushes the positional design
-    const args = [_][]const u8{ "--push", PROJECT_DIR_FLAG, "d", "adf5901" };
+    const args = [_][]const u8{ "--push", project_dir_flag, "d", "adf5901" };
     const got = parseBuildArgs(&args);
     try std.testing.expect(got.want_push);
     try std.testing.expectEqualStrings("d", got.project_dir);
@@ -583,7 +583,7 @@ test "parseBuildArgs: bare --push pushes the positional design" {
 
 test "parseBuildArgs: --output-dir without --push does not push" {
     // spec: commands - --output-dir writes a file without a network push
-    const args = [_][]const u8{ OUTPUT_DIR_FLAG, "/tmp/out", "lt3045" };
+    const args = [_][]const u8{ output_dir_flag, "/tmp/out", "lt3045" };
     const got = parseBuildArgs(&args);
     try std.testing.expect(!got.want_push);
     try std.testing.expectEqualStrings("/tmp/out", got.output_dir.?);

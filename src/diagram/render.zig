@@ -45,7 +45,7 @@ const checked_attr: []const u8 = " checked";
 /// now read off the Layout (or fallback System) view, so it gets no tab of its
 /// own. Power / Clocks / Control and any designer-declared class still do.
 fn isSignalView(graph: *const Graph, id: ClassId) bool {
-    return id != types.CLASS_RF and graph.isView(id);
+    return id != types.class_rf and graph.isView(id);
 }
 
 /// Render the whole tabbed diagram. The lead tab is the author-placed **Layout**
@@ -414,7 +414,7 @@ fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layo
         // paths, drawn as sharp right-angle polylines (`sharp`); the staged
         // System / Function views keep the flowing-Bézier style over lane routes.
         for (lay.routes) |r| {
-            if (r.class == types.CLASS_POWER) {
+            if (r.class == types.class_power) {
                 if (rails) |p| {
                     try drawSysEdge(w, r, railColor(p, r.label), sys_rail_width, sys_rail_opacity, rail_mode);
                 } else {
@@ -430,7 +430,7 @@ fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layo
         // Arrowheads after the boxes so they sit on top of the block border and
         // read as "drives into this block". Signal edges only.
         for (lay.routes) |r| {
-            if (r.class == types.CLASS_POWER) continue;
+            if (r.class == types.class_power) continue;
             try writeArrowhead(w, r, classColor(graph, r.class));
         }
         // Labels: signal edges always; power edges too in rail mode (so each rail
@@ -438,7 +438,7 @@ fn renderSystemView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layo
         var labeled: std.StringHashMapUnmanaged(void) = .empty;
         for (lay.routes) |r| {
             if (r.label.len == 0) continue;
-            const is_power = r.class == types.CLASS_POWER;
+            const is_power = r.class == types.class_power;
             if (is_power and rails == null) continue;
             const color = if (is_power) railColor(rails.?, r.label) else classColor(graph, r.class);
             const key = try std.fmt.allocPrint(arena, "{d}|{s}", .{ r.from_gid, r.label });
@@ -579,12 +579,12 @@ fn renderView(allocator: Allocator, graph: *const Graph, view: ClassId, w: *Writ
 
     // Power edges are colored per rail voltage (with a legend above the SVG);
     // every other view uses its single accent color.
-    const palette: ?[]const VoltColor = if (view == types.CLASS_POWER) try buildVoltPalette(arena, graph) else null;
+    const palette: ?[]const VoltColor = if (view == types.class_power) try buildVoltPalette(arena, graph) else null;
 
     try writePanelOpen(w, graph.classes[view].key);
     if (palette) |p| try writeLegend(w, p, lay);
     try writeSvgOpen(w, lay.width, lay.height, false);
-    if (view == types.CLASS_POWER) {
+    if (view == types.class_power) {
         try renderPowerView(arena, w, graph, lay, palette);
     } else {
         // Z-ordered passes: edges first (node rects paint over their ends), then
@@ -817,7 +817,7 @@ const RailColor = struct { name: []const u8, color: []const u8 };
 fn buildRailPalette(arena: Allocator, graph: *const Graph) Allocator.Error![]const RailColor {
     var names: std.ArrayList([]const u8) = .empty;
     for (graph.edges) |e| {
-        if (e.class != types.CLASS_POWER or e.label.len == 0) continue;
+        if (e.class != types.class_power or e.label.len == 0) continue;
         var seen = false;
         for (names.items) |x| {
             if (std.mem.eql(u8, x, e.label)) {
@@ -857,7 +857,7 @@ const volt_palette = [_][]const u8{
 fn buildVoltPalette(arena: Allocator, graph: *const Graph) Allocator.Error![]const VoltColor {
     var vs: std.ArrayList(f64) = .empty;
     for (graph.edges) |e| {
-        if (e.class != types.CLASS_POWER) continue;
+        if (e.class != types.class_power) continue;
         const v = e.voltage orelse continue;
         var seen = false;
         for (vs.items) |x| {
@@ -989,7 +989,7 @@ fn writeOrthEdge(w: *Writer, r: layout.Route, color: []const u8, width: ?f64, op
 /// Draws the power supply tree: rail-colored wires first, then the source /
 /// regulator cards and the per-rail load buckets on top.
 fn renderPowerView(arena: Allocator, w: *Writer, graph: *const Graph, lay: layout.Layout, palette: ?[]const VoltColor) (Allocator.Error || Writer.Error)!void {
-    const power_color = graph.classes[types.CLASS_POWER].color;
+    const power_color = graph.classes[types.class_power].color;
     for (lay.routes) |r| try writeCurveEdge(w, r, edgeColor(power_color, palette, r.voltage));
     for (lay.power_boxes) |b| {
         const bv: ?f64 = if (std.math.isNan(b.v)) null else b.v;
@@ -1210,7 +1210,7 @@ fn writeEscaped(w: *Writer, s: []const u8) Writer.Error!void {
 
 // ── CSS ────────────────────────────────────────────────────────────────
 
-pub const CSS =
+pub const css =
     \\.dg-wrap{margin:12px 0 4px;padding:10px;background:#0d1117;border:1px solid #21262d;border-radius:8px;}
     \\.dg-radio{position:absolute;width:0;height:0;opacity:0;pointer-events:none;}
     \\.dg-tabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;}
@@ -1298,7 +1298,7 @@ test "renderTabs emits only tabs for views that have edges" {
     // A control-class edge (an I2C/SPI/GPIO net) gets its own Control tab; a
     // class with no edge (Power here) gets none.
     var nodes = [_]types.Node{ mkNode("MCU"), mkNode("Sensor") };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "I2C_SDA" }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.class_control, .label = "I2C_SDA" }};
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
@@ -1341,7 +1341,7 @@ test "renderTabs leads with the Block overview tab when groups are declared" {
 // spec: diagram/render - RF signal edges get no tab of their own; the flow shows in the Layout/System view
 test "renderTabs omits the RF tab even when RF edges exist" {
     var nodes = [_]types.Node{ mkNode("MIX"), mkNode("J1") };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_RF, .label = "ADF_CH1" }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.class_rf, .label = "ADF_CH1" }};
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
@@ -1376,8 +1376,8 @@ test "renderTabs emits a tab for a designer-declared class" {
 test "renderTabs draws edge-label pills after every wire" {
     var nodes = [_]types.Node{ mkNode("A"), mkNode("B"), mkNode("C") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "N1" },
-        .{ .from = 0, .to = 2, .class = types.CLASS_CONTROL, .label = "N2" },
+        .{ .from = 0, .to = 1, .class = types.class_control, .label = "N1" },
+        .{ .from = 0, .to = 2, .class = types.class_control, .label = "N2" },
     };
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -1398,8 +1398,8 @@ test "renderTabs draws edge-label pills after every wire" {
 test "renderTabs draws one label for a net fanned to many consumers" {
     var nodes = [_]types.Node{ mkNode("HUB"), mkNode("A"), mkNode("B") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "LO_OUT" },
-        .{ .from = 0, .to = 2, .class = types.CLASS_CONTROL, .label = "LO_OUT" },
+        .{ .from = 0, .to = 1, .class = types.class_control, .label = "LO_OUT" },
+        .{ .from = 0, .to = 2, .class = types.class_control, .label = "LO_OUT" },
     };
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -1415,7 +1415,7 @@ test "renderTabs draws one label for a net fanned to many consumers" {
 // spec: diagram/render - Draws per-rail load buckets with rail-colored headings in the power view
 test "renderTabs draws load buckets in the power view" {
     var nodes = [_]types.Node{ mkNode("REG"), mkNode("A") };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "v", .voltage = 3.3 }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.class_power, .label = "v", .voltage = 3.3 }};
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
@@ -1435,7 +1435,7 @@ test "renderTabs links power-view cards and load pills to their sections" {
         .{ .label = "REG", .subtitle = "", .category = .power, .slug = "reg", .inputs = &.{}, .outputs = &.{} },
         .{ .label = "A", .subtitle = "", .category = .peripheral, .slug = "load-a", .inputs = &.{}, .outputs = &.{} },
     };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "v", .voltage = 3.3 }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.class_power, .label = "v", .voltage = 3.3 }};
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
@@ -1453,8 +1453,8 @@ test "renderTabs links power-view cards and load pills to their sections" {
 test "renderTabs colors power edges by voltage with a legend" {
     var nodes = [_]types.Node{ mkNode("REG"), mkNode("A"), mkNode("B") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "V3P3", .voltage = 3.3 },
-        .{ .from = 0, .to = 2, .class = types.CLASS_POWER, .label = "V1P8", .voltage = 1.8 },
+        .{ .from = 0, .to = 1, .class = types.class_power, .label = "V3P3", .voltage = 3.3 },
+        .{ .from = 0, .to = 2, .class = types.class_power, .label = "V1P8", .voltage = 1.8 },
     };
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -1471,7 +1471,7 @@ test "renderTabs colors power edges by voltage with a legend" {
 // spec: diagram/render - Puts the combined System view first and selects it by default
 test "renderTabs prepends a default-checked System tab" {
     var nodes = [_]types.Node{ mkNode("MCU"), mkNode("Sensor") };
-    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.CLASS_CONTROL, .label = "I2C_SDA" }};
+    var edges = [_]types.Edge{.{ .from = 0, .to = 1, .class = types.class_control, .label = "I2C_SDA" }};
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
@@ -1493,8 +1493,8 @@ test "renderTabs System view combines all classes color-coded with a legend" {
     // view shows both, each wire in its own class color, plus a class legend.
     var nodes = [_]types.Node{ mkNode("REG"), mkNode("MCU"), mkNode("Sensor") };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "V3P3", .voltage = 3.3 },
-        .{ .from = 1, .to = 2, .class = types.CLASS_CONTROL, .label = "I2C" },
+        .{ .from = 0, .to = 1, .class = types.class_power, .label = "V3P3", .voltage = 3.3 },
+        .{ .from = 1, .to = 2, .class = types.class_control, .label = "I2C" },
     };
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -1522,8 +1522,8 @@ test "renderTabs System view draws functional band headers" {
         .{ .label = "Sensor", .subtitle = "", .category = .sensor, .slug = "", .inputs = &.{}, .outputs = &.{} },
     };
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "3V3", .voltage = 3.3 },
-        .{ .from = 1, .to = 2, .class = types.CLASS_CONTROL, .label = "I2C" },
+        .{ .from = 0, .to = 1, .class = types.class_power, .label = "3V3", .voltage = 3.3 },
+        .{ .from = 1, .to = 2, .class = types.class_control, .label = "I2C" },
     };
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -1584,8 +1584,8 @@ test "buildVoltPalette dedups power edges that share a voltage" {
     // `@abs(x+v)` two equal voltages (|3.3+3.3|=6.6) no longer match, so the
     // duplicate would leak a spurious second level.
     var edges = [_]types.Edge{
-        .{ .from = 0, .to = 1, .class = types.CLASS_POWER, .label = "V1", .voltage = 3.3 },
-        .{ .from = 0, .to = 2, .class = types.CLASS_POWER, .label = "V2", .voltage = 3.3 },
+        .{ .from = 0, .to = 1, .class = types.class_power, .label = "V1", .voltage = 3.3 },
+        .{ .from = 0, .to = 2, .class = types.class_power, .label = "V2", .voltage = 3.3 },
     };
     var graph = Graph{ .nodes = &nodes, .edges = &edges };
     const pal = try buildVoltPalette(arena_state.allocator(), &graph);

@@ -23,8 +23,8 @@ const docgen = @import("docgen.zig");
 const mcp_tools = @import("serve/mcp_tools.zig");
 const component_info = @import("serve/component_info.zig");
 
-const MAX_DESIGN_BYTES: usize = 4 * 1024 * 1024;
-const DESIGN_BLOCK_MARKER = "(design-block";
+const max_design_bytes: usize = 4 * 1024 * 1024;
+const design_block_marker = "(design-block";
 
 /// Error set for the public CLI handlers. Each `cmd*` catches the wide,
 /// caller-dependent errors of the shared emitters (which take `w: anytype`)
@@ -274,8 +274,8 @@ pub fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryE
         if (std.mem.indexOfScalar(u8, stem, '.') != null) continue; // skip `.checks.sexp` etc.
 
         const full = try std.fmt.allocPrint(a, "{s}/{s}", .{ src_path, entry.path });
-        const src = infra_fs.cwd().readFileAlloc(a, full, MAX_DESIGN_BYTES) catch continue;
-        const db = std.mem.indexOf(u8, src, DESIGN_BLOCK_MARKER) orelse continue;
+        const src = infra_fs.cwd().readFileAlloc(a, full, max_design_bytes) catch continue;
+        const db = std.mem.indexOf(u8, src, design_block_marker) orelse continue;
         try rows.append(a, .{
             .name = try a.dupe(u8, stem),
             .title = try extractTitle(a, src, db),
@@ -301,7 +301,7 @@ pub fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryE
 /// Extract the quoted title immediately after `(design-block` at `db_idx`.
 /// Returns "" when the title is not a bare string (e.g. `(design-block (fmt …))`).
 fn extractTitle(allocator: std.mem.Allocator, src: []const u8, db_idx: usize) ![]const u8 {
-    var i = db_idx + DESIGN_BLOCK_MARKER.len;
+    var i = db_idx + design_block_marker.len;
     while (i < src.len and std.ascii.isWhitespace(src[i])) : (i += 1) {}
     if (i >= src.len or src[i] != '"') return allocator.dupe(u8, "");
     i += 1;

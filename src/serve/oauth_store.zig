@@ -8,9 +8,9 @@ const infra_random = @import("../infra/random.zig");
 const auth_store = @import("auth_store.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
-const AUTH_CODE_TTL_SECS: i64 = 600; // 10 min
-const ACCESS_TOKEN_TTL_DAYS: i64 = 30;
-const ACCESS_TOKEN_TTL_SECS: i64 = ACCESS_TOKEN_TTL_DAYS * std.time.s_per_day;
+const auth_code_ttl_secs: i64 = 600; // 10 min
+const access_token_ttl_days: i64 = 30;
+const access_token_ttl_secs: i64 = access_token_ttl_days * std.time.s_per_day;
 
 /// Persisted OAuth client record (one per Claude Code install). Secrets are
 /// hashed via SHA-256 before storage so a leaked `oauth_clients.json`
@@ -478,7 +478,7 @@ pub fn issueCode(
         .email = try store_alloc.dupe(u8, email),
         .code_challenge = try store_alloc.dupe(u8, code_challenge),
         .scope = try store_alloc.dupe(u8, scope),
-        .expires_at = clock.timestamp() + AUTH_CODE_TTL_SECS,
+        .expires_at = clock.timestamp() + auth_code_ttl_secs,
     };
     try codes_map.?.put(store_alloc, code, entry);
     return code;
@@ -571,7 +571,7 @@ pub fn issueToken(
         .client_id = try store_alloc.dupe(u8, client_id),
         .email = try store_alloc.dupe(u8, email),
         .scope = try store_alloc.dupe(u8, scope),
-        .expires_at = clock.timestamp() + ACCESS_TOKEN_TTL_SECS,
+        .expires_at = clock.timestamp() + access_token_ttl_secs,
     });
     saveTokens(allocator, auth_dir);
     return raw;

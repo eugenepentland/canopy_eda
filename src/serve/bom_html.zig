@@ -16,7 +16,7 @@ fn safeHref(url: []const u8) bool {
 }
 
 // ── Constants ─────────────────────────────────────────────────────
-const STEP_EXT_LEN: usize = ".step".len;
+const step_ext_len: usize = ".step".len;
 
 /// Error set for the BOM rendering helpers — a writer-or-allocator union
 /// because the `anytype` writer parameters are called with both
@@ -95,7 +95,7 @@ pub fn collectMissing(
                     var iter = d.iterate();
                     while (iter.next() catch null) |entry| {
                         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".step")) continue;
-                        const basename = entry.name[0 .. entry.name.len - STEP_EXT_LEN];
+                        const basename = entry.name[0 .. entry.name.len - step_ext_len];
                         if ((inst.footprint.len > 0 and
                             (std.mem.indexOf(u8, inst.footprint, basename) != null or
                                 std.mem.indexOf(u8, basename, inst.footprint) != null)) or

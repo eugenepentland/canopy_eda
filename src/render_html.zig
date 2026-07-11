@@ -34,16 +34,16 @@ const layout_status = @import("layout_status.zig");
 const isHub = draw.isHub;
 const pinOrder = draw.pinOrder;
 
-const MUTED_EM_DASH = review_html.mutedDash;
+const muted_em_dash = review_html.mutedDash;
 
 // Shared table-row HTML fragments — reused across the port tables and the
 // module-layout checklist so the literals aren't duplicated (guardian's
 // repeated-string-literal check).
-const ROW_TD_CODE_OPEN = "<tr><td><code>";
-const TD_CELL_SEP = "</td><td>";
-const ROW_TD_CLOSE = "</td></tr>";
-const TABLE_DETAILS_CLOSE = "</tbody></table></details>";
-const PILL_WARN = "pill-warn";
+const row_td_code_open = "<tr><td><code>";
+const td_cell_sep = "</td><td>";
+const row_td_close = "</td></tr>";
+const table_details_close = "</tbody></table></details>";
+const pill_warn = "pill-warn";
 
 const Allocator = std.mem.Allocator;
 
@@ -94,7 +94,7 @@ pub fn renderToHtml(
     try w.writeAll("<link rel=\"stylesheet\" href=\"/static/schematic.css\">");
     try w.writeAll("<style>");
     try w.writeAll(navbar_css);
-    if (review_doc != null) try w.writeAll(review_html.BODY_CSS);
+    if (review_doc != null) try w.writeAll(review_html.body_css);
     try w.writeAll("</style></head><body>");
 
     try pages_tmpl.Navbar.render(.{""}, w);
@@ -248,7 +248,7 @@ pub fn renderToHtml(
     // Per-sub-circuit Schematic ⇄ PCB toggle wiring — reuses the DESIGN_NAME
     // global declared by writeScripts, so it must follow that call. Only emitted
     // when there are sub circuits (matching the global PCB-settings bar above).
-    if (block.sub_blocks.len > 0) try w.writeAll(SUBC_TOGGLE_SCRIPT);
+    if (block.sub_blocks.len > 0) try w.writeAll(subc_toggle_script);
     if (review_doc != null) {
         // review_notes.js (design-note handlers) reuses DESIGN_NAME —
         // already declared as a global by writeScripts above.
@@ -541,7 +541,7 @@ pub fn renderHubSvg(
 /// a markdown viewer) but keeps the visual identity (component box colors,
 /// pin label fonts, net stroke colors). Embed once at the top of an
 /// exported document; per-hub SVGs reference these classes.
-pub const STATIC_SVG_CSS =
+pub const static_svg_css =
     \\svg.hub-inset{display:block;width:100%;max-width:900px;height:auto;}
     \\svg .component rect{fill:#16213e;stroke:#4a9eff;stroke-width:1.5;}
     \\svg .component text{fill:#e6e6e6;font-family:"SF Mono",monospace;}
@@ -571,14 +571,14 @@ fn writeSection(
     const status_pill: []const u8 = switch (sec.status) {
         .concept => "pill-concept",
         .implemented => "pill-ok",
-        .review => PILL_WARN,
+        .review => pill_warn,
     };
     try w.writeAll("<div class=\"sec-head\"><h2>");
     try writeHtmlEscaped(w, sec.name);
     try w.print("</h2><span class=\"pill {s}\">{s}</span>", .{ status_pill, @tagName(sec.status) });
     const sec_cov = try coverage.computeSectionCoverage(allocator, block, sec, check_results);
     if (sec_cov.checked > 0) {
-        const cov_class: []const u8 = if (sec_cov.complete == sec_cov.checked) "pill-pass" else PILL_WARN;
+        const cov_class: []const u8 = if (sec_cov.complete == sec_cov.checked) "pill-pass" else pill_warn;
         try w.print(
             "<span class=\"pill {s}\" title=\"Click 'Coverage' below to see what's checked and what's missing\">{d}/{d} complete</span>",
             .{ cov_class, sec_cov.complete, sec_cov.checked },
@@ -1085,11 +1085,11 @@ fn writeSectionPorts(w: anytype, sec: Section) !void {
     );
     try w.writeAll("<table class=\"ports\"><thead><tr><th>Port</th><th>Dir</th><th>Type</th><th>Voltage</th><th>Role/Protocol</th></tr></thead><tbody>");
     for (sec.ports) |p| {
-        try w.writeAll(ROW_TD_CODE_OPEN);
+        try w.writeAll(row_td_code_open);
         try writeHtmlEscaped(w, p.name);
         try w.print("</code></td><td>{s}</td><td>{s}</td><td>", .{ @tagName(p.direction), @tagName(p.signal_type) });
-        if (p.voltage) |v| try w.print("{d}V", .{v}) else try w.writeAll(MUTED_EM_DASH);
-        try w.writeAll(TD_CELL_SEP);
+        if (p.voltage) |v| try w.print("{d}V", .{v}) else try w.writeAll(muted_em_dash);
+        try w.writeAll(td_cell_sep);
         if (p.protocol.len > 0) {
             try w.writeAll("<code>");
             try writeHtmlEscaped(w, p.protocol);
@@ -1099,10 +1099,10 @@ fn writeSectionPorts(w: anytype, sec: Section) !void {
             if (p.protocol.len > 0) try w.writeAll(" · ");
             try writeHtmlEscaped(w, p.role);
         }
-        if (p.protocol.len == 0 and p.role.len == 0) try w.writeAll(MUTED_EM_DASH);
-        try w.writeAll(ROW_TD_CLOSE);
+        if (p.protocol.len == 0 and p.role.len == 0) try w.writeAll(muted_em_dash);
+        try w.writeAll(row_td_close);
     }
-    try w.writeAll(TABLE_DETAILS_CLOSE);
+    try w.writeAll(table_details_close);
 }
 
 /// Render the per-section "Boundary contracts" block on the schematic page —
@@ -1130,13 +1130,13 @@ fn writeSectionBoundaryContracts(w: anytype, sec: Section) !void {
     try w.writeAll("</tr></thead><tbody>");
     for (sec.ports) |p| {
         const e = p.electrical orelse continue;
-        try w.writeAll(ROW_TD_CODE_OPEN);
+        try w.writeAll(row_td_code_open);
         try writeHtmlEscaped(w, p.name);
         try w.print("</code></td><td>{s}</td><td>", .{@tagName(p.direction)});
         if (e.electrical_type) |t| {
             try writeHtmlEscaped(w, @tagName(t));
         } else {
-            try w.writeAll(MUTED_EM_DASH);
+            try w.writeAll(muted_em_dash);
         }
         try w.writeAll("</td>");
         try writeContractVoltCell(w, e.v_oh_typ);
@@ -1148,17 +1148,17 @@ fn writeSectionBoundaryContracts(w: anytype, sec: Section) !void {
         if (e.drive) |d| {
             try writeHtmlEscaped(w, @tagName(d));
         } else {
-            try w.writeAll(MUTED_EM_DASH);
+            try w.writeAll(muted_em_dash);
         }
-        try w.writeAll(TD_CELL_SEP);
+        try w.writeAll(td_cell_sep);
         if (e.domain.len > 0) {
             try writeHtmlEscaped(w, e.domain);
         } else {
-            try w.writeAll(MUTED_EM_DASH);
+            try w.writeAll(muted_em_dash);
         }
-        try w.writeAll(ROW_TD_CLOSE);
+        try w.writeAll(row_td_close);
     }
-    try w.writeAll(TABLE_DETAILS_CLOSE);
+    try w.writeAll(table_details_close);
 }
 
 fn writeContractVoltCell(w: anytype, v: ?f64) !void {
@@ -1166,7 +1166,7 @@ fn writeContractVoltCell(w: anytype, v: ?f64) !void {
     if (v) |x| {
         try w.print("{d:.2}", .{x});
     } else {
-        try w.writeAll(MUTED_EM_DASH);
+        try w.writeAll(muted_em_dash);
     }
     try w.writeAll("</td>");
 }
@@ -1426,7 +1426,7 @@ fn writeModuleLayoutStatus(allocator: Allocator, project_dir: []const u8, w: *st
         }
     }
     const total = block.sub_blocks.len;
-    const summary_pill: []const u8 = if (missing == 0) "pill-ok" else PILL_WARN;
+    const summary_pill: []const u8 = if (missing == 0) "pill-ok" else pill_warn;
 
     try w.print(
         "<details id=\"page-module-layouts\" class=\"sch-bom-card page-anchor\"{s}>",
@@ -1461,7 +1461,7 @@ fn writeModuleLayoutStatus(allocator: Allocator, project_dir: []const u8, w: *st
         "<th>Rough</th><th>Starred</th></tr></thead><tbody>");
     for (block.sub_blocks, statuses) |sb, st| {
         const mod_name = moduleSourceName(sb);
-        try w.writeAll(ROW_TD_CODE_OPEN);
+        try w.writeAll(row_td_code_open);
         try writeHtmlEscaped(w, sb.name);
         try w.writeAll("</code></td><td>");
         if (sb.source.len > 0) {
@@ -1484,29 +1484,29 @@ fn writeModuleLayoutStatus(allocator: Allocator, project_dir: []const u8, w: *st
         }
 
         // Rough — has a rough placement been seeded for this module?
-        try w.writeAll(TD_CELL_SEP);
+        try w.writeAll(td_cell_sep);
         if (mod_name == null) {
-            try w.writeAll(LAYOUT_DASH);
+            try w.writeAll(layout_dash);
         } else if (st.rough) {
             try w.writeAll("<span class=\"pill pill-ok\">rough \u{2713}</span>");
         } else {
-            try w.writeAll(ROUGH_TODO_CELL);
+            try w.writeAll(rough_todo_cell);
         }
 
         // Starred — has a finished layout been starred (the ★ / sync default)?
-        try w.writeAll(TD_CELL_SEP);
+        try w.writeAll(td_cell_sep);
         if (mod_name == null) {
-            try w.writeAll(LAYOUT_DASH);
+            try w.writeAll(layout_dash);
         } else if (st.starred) {
             try w.writeAll("<span class=\"pill pill-ok\">starred \u{2605}</span>");
         } else if (sb.reflow) {
             try w.writeAll("<span class=\"pill pill-concept\">reflow — parent places</span>");
         } else {
-            try w.writeAll(STARRED_TODO_CELL);
+            try w.writeAll(starred_todo_cell);
         }
-        try w.writeAll(ROW_TD_CLOSE);
+        try w.writeAll(row_td_close);
     }
-    try w.writeAll(TABLE_DETAILS_CLOSE);
+    try w.writeAll(table_details_close);
 }
 
 /// The module name a sub-block instantiates, for resolving its layout sidecar:
@@ -1520,14 +1520,14 @@ fn moduleSourceName(sb: env_mod.SubBlock) ?[]const u8 {
 }
 
 /// Shared "no data" cell for the Rough/Starred columns (a non-module sub-block).
-const LAYOUT_DASH = "<span class=\"muted\">—</span>";
+const layout_dash = "<span class=\"muted\">—</span>";
 
 /// Rough column, not-yet-seeded state.
-const ROUGH_TODO_CELL = "<span class=\"pill pill-todo\" title=\"No rough placement seeded yet — " ++
+const rough_todo_cell = "<span class=\"pill pill-todo\" title=\"No rough placement seeded yet — " ++
     "open the module's PCB Layout and hit Rough\">pending</span>";
 
 /// Starred column, not-yet-starred state.
-const STARRED_TODO_CELL = "<span class=\"pill pill-todo\" title=\"No layout starred yet — " ++
+const starred_todo_cell = "<span class=\"pill pill-todo\" title=\"No layout starred yet — " ++
     "finish the layout and star it (\u{2605}) on the module's PCB Layout view\">\u{2606} not yet</span>";
 
 /// Wires every sub circuit card's Schematic ⇄ PCB Layout toggle. Clicking "PCB
@@ -1540,7 +1540,7 @@ const STARRED_TODO_CELL = "<span class=\"pill pill-todo\" title=\"No layout star
 /// (one per card) and resolves each card via `closest`, so a section that adopts
 /// an attached sub circuit doesn't double-wire it. Reuses the `DESIGN_NAME`
 /// global declared by writeScripts, so this must be emitted after it.
-const SUBC_TOGGLE_SCRIPT =
+const subc_toggle_script =
     \\<script>(function(){
     \\function gv(id,dflt){var e=document.getElementById(id);var v=e?parseFloat(e.value):NaN;return (v>0)?v:dflt;}
     \\function gck(id){var e=document.getElementById(id);return (e&&e.checked)?1:0;}
@@ -1775,7 +1775,7 @@ fn writeAssertionsJson(w: anytype, review_doc: ?review.ReviewDoc) !void {
 /// JS bundle for the schematic viewer (sidebar search, click handlers, live
 /// reload). Served verbatim from `/static/schematic_viewer.js` — exposed pub
 /// so `static_assets.zig` can register it without a second `@embedFile`.
-pub const SCHEMATIC_VIEWER_JS = @import("serve/schematic_viewer_js.zig").SCHEMATIC_VIEWER_JS;
+pub const schematic_viewer_js_asset = @import("serve/schematic_viewer_js.zig").schematic_viewer_js_asset;
 
 /// Walk the design and emit a JSON object the sidebar JS uses for search +
 /// inspection. Shape:
@@ -2113,7 +2113,7 @@ fn writeUrlEncoded(w: anytype, s: []const u8) !void {
 /// classifier's column styles. Served from `/static/schematic.css` — exposed
 /// pub so `static_assets.zig` can register it without re-`@embedFile`-ing
 /// the source file.
-pub const SCHEMATIC_CSS = @embedFile("assets/schematic_inline.css") ++ block_diagram.DIAGRAM_CSS;
+pub const schematic_css = @embedFile("assets/schematic_inline.css") ++ block_diagram.diagram_css;
 
 test "loadPinoutNames rejects a top list whose head is not pinout" {
     var tmp = std.testing.tmpDir(.{});

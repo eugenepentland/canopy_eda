@@ -242,7 +242,7 @@ pub const Report = struct {
 
 /// Coordinate tolerance (mm): our 4.6 format rounds to 1e-6 mm, so 1e-4 is
 /// three orders of margin while still catching a real frame/scale bug.
-pub const EPS_MM: f64 = 1e-4;
+pub const eps_mm: f64 = 1e-4;
 
 /// Read `gerber_bytes` (one copper layer our writer produced) back and confirm
 /// every `flashes` and `segments` expectation appears at its frame-mapped
@@ -297,7 +297,7 @@ pub fn verifyCopperLayer(
 }
 
 fn approx(a: f64, b: f64) bool {
-    return @abs(a - b) <= EPS_MM;
+    return @abs(a - b) <= eps_mm;
 }
 
 /// Does parsed flash `gf` satisfy expectation `ef` at frame-mapped point `p`?

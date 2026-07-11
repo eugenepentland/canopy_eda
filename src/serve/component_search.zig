@@ -17,26 +17,26 @@ const std = @import("std");
 const rate_limiter = @import("rate_limiter.zig");
 
 // ── Endpoints / headers ───────────────────────────────────────────
-const HOST = "https://componentsearchengine.com";
-const PART_VIEW_PREFIX = "/part-view/";
-const PART_ID_MARKER = "partID=";
+const host_name = "https://componentsearchengine.com";
+const part_view_prefix = "/part-view/";
+const part_id_marker = "partID=";
 /// Suggestion-API URL template — `{HOST}` then the percent-encoded query.
-const SUGGESTION_URL_FMT = "{s}/partApi/suggestion?partNumber={s}";
-const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " ++
+const suggestion_url_fmt = "{s}/partApi/suggestion?partNumber={s}";
+const user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " ++
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
-const REFERER_HEADER = "referer: " ++ HOST ++ "/";
-const COOKIE_NAME = "connect.sid=";
+const referer_header = "referer: " ++ host_name ++ "/";
+const cookie_name = "connect.sid=";
 
 // ── Tunables ──────────────────────────────────────────────────────
-const PAGE_TIMEOUT_SECS = "20";
-const DOWNLOAD_TIMEOUT_SECS = "60";
-const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
+const page_timeout_secs = "20";
+const download_timeout_secs = "60";
+const max_page_bytes: usize = 8 * 1024 * 1024;
+const max_download_bytes: usize = 64 * 1024 * 1024;
 
 // Repeated literals, hoisted so the suggestion parsers and error tables share one copy.
-const FIELD_MANUFACTURER = "manufacturer";
-const FIELD_PART_NAME = "part_name";
-const OOM_MSG = "out of memory";
+const field_manufacturer = "manufacturer";
+const field_part_name = "part_name";
+const oom_msg = "out of memory";
 
 /// Outcome of a successful footprint fetch. All slices are owned by the
 /// allocator passed to `downloadFootprint` (a request arena in the MCP path).
@@ -67,7 +67,7 @@ pub fn errorMessage(err: DownloadError) []const u8 {
         error.ModelUnavailable => "Component Search Engine has no downloadable model for this part yet (data entry incomplete)",
         error.DownloadFailed => "model download request failed (curl/network error)",
         error.InvalidCookie => "CSE_CONNECT_SID was rejected or has expired (got a login page, not a zip)",
-        error.OutOfMemory => OOM_MSG,
+        error.OutOfMemory => oom_msg,
     };
 }
 
@@ -120,7 +120,7 @@ pub fn datasheetErrorMessage(err: DatasheetError) []const u8 {
         error.NoDatasheet => "Component Search Engine has no datasheet on file for this part",
         error.DownloadFailed => "datasheet download request failed (curl/network error)",
         error.NotPdf => "the datasheet URL did not return a valid PDF",
-        error.OutOfMemory => OOM_MSG,
+        error.OutOfMemory => oom_msg,
     };
 }
 
@@ -137,7 +137,7 @@ pub fn downloadDatasheet(
 
     // The datasheet host (e.g. IHS) just wants a browser UA + referer, both of
     // which `httpGet` always sends; no CSE cookie needed off-site.
-    const pdf = httpGet(allocator, url, null, MAX_DOWNLOAD_BYTES, DOWNLOAD_TIMEOUT_SECS) orelse
+    const pdf = httpGet(allocator, url, null, max_download_bytes, download_timeout_secs) orelse
         return error.DownloadFailed;
     if (!looksLikePdf(pdf)) return error.NotPdf;
 
@@ -168,7 +168,7 @@ pub const SearchError = error{SearchFailed} || std.mem.Allocator.Error;
 pub fn searchErrorMessage(err: SearchError) []const u8 {
     return switch (err) {
         error.SearchFailed => "CSE search request failed (network error, or CSE_CONNECT_SID rejected)",
-        error.OutOfMemory => OOM_MSG,
+        error.OutOfMemory => oom_msg,
     };
 }
 
@@ -232,15 +232,15 @@ fn suggestQuery(
     connect_sid: []const u8,
 ) std.mem.Allocator.Error!?ResolvedPart {
     const enc = try percentEncode(allocator, term);
-    const url = try std.fmt.allocPrint(allocator, SUGGESTION_URL_FMT, .{ HOST, enc });
-    const body = httpGet(allocator, url, connect_sid, MAX_PAGE_BYTES, PAGE_TIMEOUT_SECS) orelse return null;
+    const url = try std.fmt.allocPrint(allocator, suggestion_url_fmt, .{ host_name, enc });
+    const body = httpGet(allocator, url, connect_sid, max_page_bytes, page_timeout_secs) orelse return null;
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return null;
     defer parsed.deinit();
     const chosen = pickSuggestion(parsed.value, term, manufacturer) orelse return null;
 
-    const pn = strField(chosen, FIELD_PART_NAME) orelse return null;
-    const mfg = strField(chosen, FIELD_MANUFACTURER) orelse "";
+    const pn = strField(chosen, field_part_name) orelse return null;
+    const mfg = strField(chosen, field_manufacturer) orelse "";
     const enc_name = try percentEncode(allocator, pn);
     const enc_mfg = try percentEncode(allocator, mfg);
     const samac = extractPartId(chosen);
@@ -248,7 +248,7 @@ fn suggestQuery(
     return .{
         .part_name = try allocator.dupe(u8, pn),
         .manufacturer = try allocator.dupe(u8, mfg),
-        .detail_path = try std.fmt.allocPrint(allocator, "{s}{s}/{s}", .{ PART_VIEW_PREFIX, enc_name, enc_mfg }),
+        .detail_path = try std.fmt.allocPrint(allocator, "{s}{s}/{s}", .{ part_view_prefix, enc_name, enc_mfg }),
         .samac_id = if (samac) |s| try allocator.dupe(u8, s) else null,
         .datasheet_url = if (ds_url) |u| try allocator.dupe(u8, u) else null,
     };
@@ -276,11 +276,11 @@ fn pickSuggestion(root: std.json.Value, term: []const u8, manufacturer: ?[]const
     // when given, still applies among the exact matches.
     var first_exact: ?std.json.Value = null;
     for (items) |s| {
-        const pn = strField(s, FIELD_PART_NAME) orelse continue;
+        const pn = strField(s, field_part_name) orelse continue;
         if (!std.ascii.eqlIgnoreCase(pn, term)) continue;
         if (first_exact == null) first_exact = s;
         if (manufacturer) |want| {
-            const mfg = strField(s, FIELD_MANUFACTURER) orelse "";
+            const mfg = strField(s, field_manufacturer) orelse "";
             if (std.ascii.indexOfIgnoreCase(mfg, want) != null) return s;
         } else return s;
     }
@@ -288,7 +288,7 @@ fn pickSuggestion(root: std.json.Value, term: []const u8, manufacturer: ?[]const
     // No exact part match — fall back to the manufacturer filter, else the first.
     const want = manufacturer orelse return items[0];
     for (items) |s| {
-        const mfg = strField(s, FIELD_MANUFACTURER) orelse continue;
+        const mfg = strField(s, field_manufacturer) orelse continue;
         if (std.ascii.indexOfIgnoreCase(mfg, want) != null) return s;
     }
     return items[0];
@@ -306,8 +306,8 @@ fn suggestList(
     any_ok: *bool,
 ) std.mem.Allocator.Error![]SearchHit {
     const enc = try percentEncode(allocator, term);
-    const url = try std.fmt.allocPrint(allocator, SUGGESTION_URL_FMT, .{ HOST, enc });
-    const body = httpGet(allocator, url, connect_sid, MAX_PAGE_BYTES, PAGE_TIMEOUT_SECS) orelse return &.{};
+    const url = try std.fmt.allocPrint(allocator, suggestion_url_fmt, .{ host_name, enc });
+    const body = httpGet(allocator, url, connect_sid, max_page_bytes, page_timeout_secs) orelse return &.{};
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return &.{};
     defer parsed.deinit();
     any_ok.* = true;
@@ -320,8 +320,8 @@ fn collectHits(allocator: std.mem.Allocator, root: std.json.Value, limit: usize)
     var list: std.ArrayList(SearchHit) = .empty;
     for (items) |s| {
         if (list.items.len >= limit) break;
-        const pn = strField(s, FIELD_PART_NAME) orelse continue;
-        const mfg = strField(s, FIELD_MANUFACTURER) orelse "";
+        const pn = strField(s, field_part_name) orelse continue;
+        const mfg = strField(s, field_manufacturer) orelse "";
         const samac = extractPartId(s);
         const ds = suggestionDatasheetUrl(s);
         try list.append(allocator, .{
@@ -338,8 +338,8 @@ fn collectHits(allocator: std.mem.Allocator, root: std.json.Value, limit: usize)
 /// (`…/3D.php?partID=231980`). Slice into the parsed tree.
 fn extractPartId(suggestion: std.json.Value) ?[]const u8 {
     const view = strField(suggestion, "3D View") orelse return null;
-    const idx = std.mem.indexOf(u8, view, PART_ID_MARKER) orelse return null;
-    const start = idx + PART_ID_MARKER.len;
+    const idx = std.mem.indexOf(u8, view, part_id_marker) orelse return null;
+    const start = idx + part_id_marker.len;
     var end = start;
     while (end < view.len and view[end] >= '0' and view[end] <= '9') : (end += 1) {}
     return if (end == start) null else view[start..end];
@@ -363,7 +363,7 @@ fn strField(v: std.json.Value, key: []const u8) ?[]const u8 {
 
 /// Minimum length for a relaxed search variant — shorter prefixes match too
 /// much to be useful.
-const MIN_VARIANT_LEN = 3;
+const min_variant_len = 3;
 
 /// Ordered, de-duplicated search terms to try: the exact part number first,
 /// then relaxations that recover the base/family when the full orderable part
@@ -389,7 +389,7 @@ fn searchVariants(allocator: std.mem.Allocator, part_number: []const u8) std.mem
 }
 
 fn addVariant(allocator: std.mem.Allocator, list: *std.ArrayList([]const u8), term: []const u8) std.mem.Allocator.Error!void {
-    if (term.len < MIN_VARIANT_LEN) return;
+    if (term.len < min_variant_len) return;
     for (list.items) |existing| {
         if (std.mem.eql(u8, existing, term)) return;
     }
@@ -412,9 +412,9 @@ fn downloadModel(
     const url = try std.fmt.allocPrint(
         allocator,
         "{s}/partApi/model/download?from={s}&id={s}",
-        .{ HOST, from_param, samac_id },
+        .{ host_name, from_param, samac_id },
     );
-    const body = httpGet(allocator, url, connect_sid, MAX_DOWNLOAD_BYTES, DOWNLOAD_TIMEOUT_SECS) orelse
+    const body = httpGet(allocator, url, connect_sid, max_download_bytes, download_timeout_secs) orelse
         return error.DownloadFailed;
     if (looksLikeZip(body)) return body;
     if (std.mem.startsWith(u8, body, "Error")) return error.ModelUnavailable;
@@ -438,10 +438,10 @@ fn httpGet(
     var argv: std.ArrayList([]const u8) = .empty;
     argv.appendSlice(allocator, &.{
         "curl", "-sS",      "-L", "--max-time",   timeout_secs,
-        "-A",   USER_AGENT, "-H", REFERER_HEADER,
+        "-A",   user_agent, "-H", referer_header,
     }) catch return null;
     if (cookie) |c| {
-        const cookie_arg = std.fmt.allocPrint(allocator, "{s}{s}", .{ COOKIE_NAME, c }) catch return null;
+        const cookie_arg = std.fmt.allocPrint(allocator, "{s}{s}", .{ cookie_name, c }) catch return null;
         argv.appendSlice(allocator, &.{ "-b", cookie_arg }) catch return null;
     }
     // `--` terminates option parsing so a vendor-supplied URL beginning with
@@ -459,7 +459,7 @@ fn httpGet(
 
 // ── Pure helpers ──────────────────────────────────────────────────
 
-const HEX = "0123456789ABCDEF";
+const hex = "0123456789ABCDEF";
 
 fn isUnreserved(c: u8) bool {
     return (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or
@@ -475,7 +475,7 @@ fn percentEncode(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.
         if (isUnreserved(c)) {
             try out.append(allocator, c);
         } else {
-            try out.appendSlice(allocator, &.{ '%', HEX[c >> 4], HEX[c & 0x0F] });
+            try out.appendSlice(allocator, &.{ '%', hex[c >> 4], hex[c & 0x0F] });
         }
     }
     return out.toOwnedSlice(allocator);

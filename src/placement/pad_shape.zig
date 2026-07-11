@@ -30,7 +30,7 @@ pub const Shape = struct {
 /// corners as ~100-200 fine arc points; collapsing them to within this distance
 /// leaves ~10 corner points (concavities preserved), which is well under the
 /// clearance rule yet keeps the per-pad distance maths cheap.
-const SIMPLIFY_TOL_MM: f64 = 0.03;
+const simplify_tol_mm: f64 = 0.03;
 
 /// World collision shape of `pad` on `part`, honouring the part's pose. A custom
 /// pad carries its outline transformed into world space and simplified (box from
@@ -50,7 +50,7 @@ pub fn worldShape(arena: std.mem.Allocator, part: optimizer.Part, pad: geometry.
             x1 = @max(x1, w[0]);
             y1 = @max(y1, w[1]);
         }
-        return .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1, .poly = try simplifyRing(arena, wp, SIMPLIFY_TOL_MM) };
+        return .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1, .poly = try simplifyRing(arena, wp, simplify_tol_mm) };
     }
     const c = optimizer.worldPadCenter(part, pad.x, pad.y);
     // Total pad orientation = part pose + the pad's own `(pos … ROT)`. A
@@ -255,7 +255,7 @@ const testing = std.testing;
 // An L pad: a top bar (y∈[2,3]) plus a right prong (x∈[2,3]), leaving a notch in
 // the bottom-left (x∈[0,2], y∈[0,2]) — the shape of a thermal pad relieved around
 // a corner pin. Bounding box is the full [0,3]x[0,3] square.
-const L_POLY = [_][2]f64{
+const l_poly = [_][2]f64{
     .{ 0, 2 }, .{ 2, 2 }, .{ 2, 0 }, .{ 3, 0 }, .{ 3, 3 }, .{ 0, 3 }, .{ 0, 2 },
 };
 
@@ -268,15 +268,15 @@ test "pointDist sees the notch of a concave pad as outside the copper" {
 
     // A point in the bottom-left notch: inside the bounding box but NOT on copper
     // (slack large enough to force the exact outline path).
-    try testing.expect(pointDist(bx0, by0, bx1, by1, &L_POLY, 0.5, 0.5, 5.0) > 0.4);
+    try testing.expect(pointDist(bx0, by0, bx1, by1, &l_poly, 0.5, 0.5, 5.0) > 0.4);
     // A point on the top bar and on the prong: real copper, distance 0.
-    try testing.expectEqual(@as(f64, 0), pointDist(bx0, by0, bx1, by1, &L_POLY, 1.5, 2.5, 5.0));
-    try testing.expectEqual(@as(f64, 0), pointDist(bx0, by0, bx1, by1, &L_POLY, 2.5, 0.5, 5.0));
+    try testing.expectEqual(@as(f64, 0), pointDist(bx0, by0, bx1, by1, &l_poly, 1.5, 2.5, 5.0));
+    try testing.expectEqual(@as(f64, 0), pointDist(bx0, by0, bx1, by1, &l_poly, 2.5, 0.5, 5.0));
     // A point just outside a recessed edge still measures against the real
     // outline, not the box: the notch corner is 1.5 mm of clear copper away.
-    try testing.expect(pointDist(bx0, by0, bx1, by1, &L_POLY, -0.4, 0.5, 5.0) > 0.39);
+    try testing.expect(pointDist(bx0, by0, bx1, by1, &l_poly, -0.4, 0.5, 5.0) > 0.39);
     // Far beyond the slack: the cheap box distance is returned, outline skipped.
-    try testing.expect(@abs(pointDist(bx0, by0, bx1, by1, &L_POLY, 5, 1, 0.5) - 2.0) < 1e-9);
+    try testing.expect(@abs(pointDist(bx0, by0, bx1, by1, &l_poly, 5, 1, 0.5) - 2.0) < 1e-9);
 }
 
 // spec: placement/pad_shape - simplifies a dense outline to a few corners within tolerance
@@ -304,7 +304,7 @@ test "simplifyRing collapses collinear arc points but keeps real corners" {
 
 // spec: placement/pad_shape - shapeGap clears a pad nested in a concave neighbour's notch
 test "shapeGap frees a pad sitting in a concave pad's notch" {
-    const notch = Shape{ .x0 = 0, .y0 = 0, .x1 = 3, .y1 = 3, .poly = &L_POLY };
+    const notch = Shape{ .x0 = 0, .y0 = 0, .x1 = 3, .y1 = 3, .poly = &l_poly };
     // A small pad sitting in the bottom-left notch — its bounding box overlaps
     // the concave pad's box, but the real outlines are well clear.
     const inset = Shape{ .x0 = 0.3, .y0 = 0.3, .x1 = 0.9, .y1 = 0.9 };

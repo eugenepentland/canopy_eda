@@ -14,20 +14,20 @@ const writeNetlist = netlist_mod.writeNetlist;
 const extractPadNames = netlist_mod.extractPadNames;
 
 // ── Constants ─────────────────────────────────────────────────────
-const FOOTPRINT_PATH_TEMPLATE = "{s}/lib/footprints/{s}.sexp";
-const MODEL_MAX_BYTES: usize = 20 * 1024 * 1024;
+const footprint_path_template = "{s}/lib/footprints/{s}.sexp";
+const model_max_bytes: usize = 20 * 1024 * 1024;
 // UUID v5 byte indices (RFC 4122)
-const UUID_VERSION_BYTE: usize = 6;
-const UUID_VARIANT_BYTE: usize = 8;
-const UUID_BYTE_5: usize = 5;
-const UUID_BYTE_7: usize = 7;
-const UUID_BYTE_9: usize = 9;
-const UUID_BYTE_10: usize = 10;
-const UUID_BYTE_11: usize = 11;
-const UUID_BYTE_12: usize = 12;
-const UUID_BYTE_13: usize = 13;
-const UUID_BYTE_14: usize = 14;
-const UUID_BYTE_15: usize = 15;
+const uuid_version_byte: usize = 6;
+const uuid_variant_byte: usize = 8;
+const uuid_byte_5: usize = 5;
+const uuid_byte_7: usize = 7;
+const uuid_byte_9: usize = 9;
+const uuid_byte_10: usize = 10;
+const uuid_byte_11: usize = 11;
+const uuid_byte_12: usize = 12;
+const uuid_byte_13: usize = 13;
+const uuid_byte_14: usize = 14;
+const uuid_byte_15: usize = 15;
 const extractFootprintName = netlist_mod.extractFootprintName;
 const exportFootprintMod = footprint_mod.exportFootprintMod;
 const findModelFile = footprint_mod.findModelFile;
@@ -62,14 +62,14 @@ pub fn uuidFromId(allocator: std.mem.Allocator, id: []const u8) std.mem.Allocato
     // Format as UUID v5 style: xxxxxxxx-xxxx-5xxx-yxxx-xxxxxxxxxxxx
     var bytes: [16]u8 = undefined;
     @memcpy(&bytes, hash[0..16]);
-    bytes[UUID_VERSION_BYTE] = (bytes[UUID_VERSION_BYTE] & 0x0f) | 0x50; // version 5
-    bytes[UUID_VARIANT_BYTE] = (bytes[UUID_VARIANT_BYTE] & 0x3f) | 0x80; // variant 1
+    bytes[uuid_version_byte] = (bytes[uuid_version_byte] & 0x0f) | 0x50; // version 5
+    bytes[uuid_variant_byte] = (bytes[uuid_variant_byte] & 0x3f) | 0x80; // variant 1
     return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}" ++
         "-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
         bytes[0],                 bytes[1],            bytes[2],                 bytes[3],
-        bytes[4],                 bytes[UUID_BYTE_5],  bytes[UUID_VERSION_BYTE], bytes[UUID_BYTE_7],
-        bytes[UUID_VARIANT_BYTE], bytes[UUID_BYTE_9],  bytes[UUID_BYTE_10],      bytes[UUID_BYTE_11],
-        bytes[UUID_BYTE_12],      bytes[UUID_BYTE_13], bytes[UUID_BYTE_14],      bytes[UUID_BYTE_15],
+        bytes[4],                 bytes[uuid_byte_5],  bytes[uuid_version_byte], bytes[uuid_byte_7],
+        bytes[uuid_variant_byte], bytes[uuid_byte_9],  bytes[uuid_byte_10],      bytes[uuid_byte_11],
+        bytes[uuid_byte_12],      bytes[uuid_byte_13], bytes[uuid_byte_14],      bytes[uuid_byte_15],
     });
 }
 
@@ -167,7 +167,7 @@ fn buildPadMap(
     for (instances) |inst| {
         if (inst.footprint.len == 0) continue;
         if (fp_pad_map.contains(inst.footprint)) continue;
-        const fp_path = try std.fmt.allocPrint(allocator, FOOTPRINT_PATH_TEMPLATE, .{ project_dir, inst.footprint });
+        const fp_path = try std.fmt.allocPrint(allocator, footprint_path_template, .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
         const fp_src = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
         defer allocator.free(fp_src);
@@ -241,7 +241,7 @@ pub fn exportKicad(
         try fp_components.put(allocator, inst.footprint, inst.component);
 
         // Load and parse footprint .sexp to get declared name
-        const fp_path = try std.fmt.allocPrint(allocator, FOOTPRINT_PATH_TEMPLATE, .{ project_dir, inst.footprint });
+        const fp_path = try std.fmt.allocPrint(allocator, footprint_path_template, .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
 
         const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch |err| {
@@ -349,7 +349,7 @@ pub fn exportNetlistOnly(
         if (processed_fps.contains(inst.footprint)) continue;
         try processed_fps.put(allocator, inst.footprint, {});
 
-        const fp_path = try std.fmt.allocPrint(allocator, FOOTPRINT_PATH_TEMPLATE, .{ project_dir, inst.footprint });
+        const fp_path = try std.fmt.allocPrint(allocator, footprint_path_template, .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
 
         const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch {
@@ -406,7 +406,7 @@ pub fn exportKicadZip(
         if (processed_fps.contains(inst.footprint)) continue;
         try processed_fps.put(allocator, inst.footprint, {});
 
-        const fp_path = try std.fmt.allocPrint(allocator, FOOTPRINT_PATH_TEMPLATE, .{ project_dir, inst.footprint });
+        const fp_path = try std.fmt.allocPrint(allocator, footprint_path_template, .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
 
         const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch {
@@ -449,7 +449,7 @@ pub fn exportKicadZip(
             defer if (mcfg == null) allocator.free(mname);
             const src_path = try std.fmt.allocPrint(allocator, "{s}/lib/models/{s}", .{ project_dir, mname });
             defer allocator.free(src_path);
-            const model_data = infra_fs.cwd().readFileAlloc(allocator, src_path, MODEL_MAX_BYTES) catch continue;
+            const model_data = infra_fs.cwd().readFileAlloc(allocator, src_path, model_max_bytes) catch continue;
             const model_filename = try std.fmt.allocPrint(allocator, "models/{s}", .{mname});
             try zip_files.append(allocator, .{ .name = model_filename, .data = model_data });
         }

@@ -18,20 +18,20 @@ const Env = env_mod.Env;
 const BlockDef = env_mod.BlockDef;
 
 // ── Constants ─────────────────────────────────────────────────────
-const FOOTPRINT_FORM = "footprint";
+const footprint_form = "footprint";
 
 /// Maximum module call nesting. A self-recursive module — an authoring typo
 /// like `(defmodule m () (m))`, or two modules calling each other — would
 /// otherwise recurse until the process stack overflows and takes down the
 /// shared server. Real module trees nest only a handful deep; this cap is
 /// generous but finite.
-const MAX_MODULE_DEPTH: usize = 64;
+const max_module_depth: usize = 64;
 
 /// Standard passive families auto-imported into every design and module
 /// before their body evaluates. The list mirrors the inventory in
 /// projects/designs/lib/components/ — keep both in sync when adding a new
 /// 04xx/06xx package family.
-const PASSIVES_PRELUDE = [_][]const u8{
+const passives_prelude = [_][]const u8{
     "cap-0201", "cap-0402", "cap-0603",     "cap-0805",
     "res-0201", "res-0402", "res-0603",     "res-0805",
     "ind-0201", "ind-0402", "ind-0603",     "ind-0805",
@@ -50,7 +50,7 @@ const PASSIVES_PRELUDE = [_][]const u8{
 pub fn loadPassivesPrelude(self: *Evaluator, env: *Env) void {
     if (self.passives_prelude_loaded) return;
     self.passives_prelude_loaded = true;
-    for (PASSIVES_PRELUDE) |name| {
+    for (passives_prelude) |name| {
         resolveImport(self, name, env) catch continue;
     }
 }
@@ -207,7 +207,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
 
     // Known structural fields (not properties)
     const skip_fields = [_][]const u8{
-        "symbol",              FOOTPRINT_FORM,
+        "symbol",              footprint_form,
         "pinout",              "component",
         "parameter",           "component-family",
         "bus",                 "note",
@@ -249,7 +249,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             props.append(self.allocator, .{ .key = "description", .value = val }) catch continue;
         } else if (std.mem.eql(u8, field, "symbol")) {
             symbol_name = cl[1].asText() orelse "";
-        } else if (std.mem.eql(u8, field, FOOTPRINT_FORM)) {
+        } else if (std.mem.eql(u8, field, footprint_form)) {
             footprint_name = cl[1].asText() orelse "";
         } else if (std.mem.eql(u8, field, "pinout")) {
             pinout_name = cl[1].asText() orelse "";
@@ -344,7 +344,7 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
             const cl = child.asList().?;
             if (cl.len >= 2) symbol_name = cl[1].asText() orelse "";
         }
-        if (child.isForm(FOOTPRINT_FORM)) {
+        if (child.isForm(footprint_form)) {
             const cl = child.asList().?;
             if (cl.len >= 2) footprint_name = cl[1].asText() orelse "";
         }
@@ -541,8 +541,8 @@ pub fn callModule(self: *Evaluator, mod: BlockDef, call_args: []const Node, call
     // `callModule` until the native stack overflows. The `module_stack` depth
     // already tracks the active call chain, so cap it here with a diagnostic
     // that still carries the frames leading in.
-    if (self.module_stack.items.len >= MAX_MODULE_DEPTH) {
-        self.setErrorFmt(call_span, "module recursion too deep (>{d}) calling '{s}' — check for a module that calls itself (directly or in a cycle)", .{ MAX_MODULE_DEPTH, mod.name });
+    if (self.module_stack.items.len >= max_module_depth) {
+        self.setErrorFmt(call_span, "module recursion too deep (>{d}) calling '{s}' — check for a module that calls itself (directly or in a cycle)", .{ max_module_depth, mod.name });
         return EvalError.InvalidForm;
     }
 

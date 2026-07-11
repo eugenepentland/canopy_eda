@@ -32,7 +32,7 @@ const Side = pcb_describe.Side;
 
 /// `Side` has 5 variants (left, right, top, bottom, center); index a per-edge
 /// tally by `@intFromEnum`.
-const N_SIDES = @typeInfo(Side).@"enum".fields.len;
+const n_sides = @typeInfo(Side).@"enum".fields.len;
 
 /// Per-edge tally for one interchangeable class: how many parts the rough seed
 /// and the starred layout each placed on each IC edge, and how many edges agree.
@@ -40,8 +40,8 @@ pub const ClassDist = struct {
     class: []const u8,
     /// Total parts of this class (rough count = starred count for one design).
     n: usize = 0,
-    rough: [N_SIDES]usize = [_]usize{0} ** N_SIDES,
-    starred: [N_SIDES]usize = [_]usize{0} ** N_SIDES,
+    rough: [n_sides]usize = [_]usize{0} ** n_sides,
+    starred: [n_sides]usize = [_]usize{0} ** n_sides,
     /// Sum over edges of `min(rough, starred)` — parts the rough put where the
     /// starred layout also wanted a same-class part.
     matched: usize = 0,
@@ -107,7 +107,7 @@ pub fn matchInfos(alloc: std.mem.Allocator, rough: []const PInfo, starred: []con
         var cd = e.value_ptr.*;
         var m: usize = 0;
         var n: usize = 0;
-        for (0..N_SIDES) |k| {
+        for (0..n_sides) |k| {
             m += @min(cd.rough[k], cd.starred[k]);
             n += cd.rough[k];
         }
@@ -242,10 +242,10 @@ pub fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: 
     // The raw objectives are emitted too so an offline λ sweep can recompute.
     const rough_obj = rough.placement.breakdown.objective;
     const star_obj = star.placement.breakdown.objective;
-    const hyb = style_score.hybridScore(rough_obj, star_obj, style.style_pct, style_score.LAMBDA_DEFAULT);
+    const hyb = style_score.hybridScore(rough_obj, star_obj, style.style_pct, style_score.lambda_default);
     w.print(
         ",\"rough_obj\":{d:.2},\"star_obj\":{d:.2},\"obj_rel\":{d:.3},\"hybrid\":{d:.3},\"lambda\":{d:.2}",
-        .{ rough_obj, star_obj, hyb.obj_rel, hyb.hybrid, style_score.LAMBDA_DEFAULT },
+        .{ rough_obj, star_obj, hyb.obj_rel, hyb.hybrid, style_score.lambda_default },
     ) catch return error.BuildFailed;
     w.print(",\"n\":{d},\"area_match_pct\":{d:.1},\"classes\":[", .{ res.n, res.area_match_pct }) catch return error.BuildFailed;
     for (res.classes, 0..) |cd, i| {
@@ -263,7 +263,7 @@ pub fn layoutMatchJson(alloc: std.mem.Allocator, project_dir: []const u8, name: 
 }
 
 /// Emit a `"left":n,"right":n,…` edge tally object body (no braces).
-fn writeSideTally(w: *std.Io.Writer, counts: [N_SIDES]usize) pcb_layout_page.PngError!void {
+fn writeSideTally(w: *std.Io.Writer, counts: [n_sides]usize) pcb_layout_page.PngError!void {
     inline for (@typeInfo(Side).@"enum".fields, 0..) |f, k| {
         if (k > 0) w.writeAll(",") catch return error.BuildFailed;
         w.print("\"{s}\":{d}", .{ f.name, counts[k] }) catch return error.BuildFailed;

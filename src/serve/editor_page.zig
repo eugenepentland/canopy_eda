@@ -128,8 +128,8 @@ pub fn editorPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     try w.print("<title>{s} — Sheet Editor</title>", .{name});
     try w.writeAll("<style>");
-    try w.writeAll(assets_css.NAVBAR_CSS);
-    try w.writeAll(EDITOR_CSS);
+    try w.writeAll(assets_css.navbar_css);
+    try w.writeAll(editor_css);
     try w.writeAll("</style></head><body>");
 
     // Minimal top bar (self-contained — no template dependency).
@@ -176,4 +176,4 @@ pub fn editorPage(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Hand
     res.body = aw.written();
 }
 
-const EDITOR_CSS = @embedFile("assets/editor.css");
+const editor_css = @embedFile("assets/editor.css");

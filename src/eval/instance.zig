@@ -8,7 +8,7 @@ const ids = @import("ids.zig");
 const PinNetDecl = evaluator_mod.PinNetDecl;
 
 // ── Constants ─────────────────────────────────────────────────────
-const SERIES_NAMED_REF_MIN_ARITY: usize = 5;
+const series_named_ref_min_arity: usize = 5;
 
 const Node = ast.Node;
 const Value = env_mod.Value;
@@ -627,7 +627,7 @@ pub fn evalSeriesForm(
         }
     } else {
         // Named ref-des: (series "REF" (comp) "NET1" "NET2")
-        if (form_children.len < SERIES_NAMED_REF_MIN_ARITY) return;
+        if (form_children.len < series_named_ref_min_arity) return;
         const s_ref = first_val.asString() orelse return;
         const s_comp_val = try self.evalNode(form_children[2], env);
         const s_comp_offset = ids.componentSourceOffset(form_children[2]);

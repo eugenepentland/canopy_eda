@@ -15,7 +15,7 @@ const infra_random = @import("../infra/random.zig");
 // ── Constants ─────────────────────────────────────────────────────
 /// Number of letters (a-f) we map the leading hex byte into so the first
 /// character of an ID is always alphabetic.
-const ID_FIRST_LETTER_RANGE: u8 = 6;
+const id_first_letter_range: u8 = 6;
 
 const Node = ast.Node;
 const Instance = env_mod.Instance;
@@ -387,7 +387,7 @@ pub fn parseId(children: []const Node) ?[]const u8 {
 /// Number of re-roll attempts `generateId` makes before giving up. At ~30 bits
 /// of entropy and a few hundred components the first draw almost always wins;
 /// this bound just guarantees the loop terminates.
-const ID_GEN_MAX_ATTEMPTS: usize = 1024;
+const id_gen_max_attempts: usize = 1024;
 
 /// Register an 8-char token in the design-wide uniqueness set. Idempotent —
 /// safe to call with a token that is already present. An allocator failure
@@ -436,10 +436,10 @@ pub fn prescanIds(self: *Evaluator, forms: []const Node) void {
 /// is registered before it is returned.
 pub fn generateId(self: *Evaluator) EvalError![]const u8 {
     var attempt: usize = 0;
-    while (attempt < ID_GEN_MAX_ATTEMPTS) : (attempt += 1) {
+    while (attempt < id_gen_max_attempts) : (attempt += 1) {
         var bytes: [4]u8 = undefined;
         infra_random.bytes(&bytes);
-        const first: u8 = (bytes[0] % ID_FIRST_LETTER_RANGE) + 'a'; // ensure first char is a-f letter
+        const first: u8 = (bytes[0] % id_first_letter_range) + 'a'; // ensure first char is a-f letter
         const id = std.fmt.allocPrint(
             self.allocator,
             "{c}{x:0>2}{x:0>2}{x:0>2}{x:0>1}",
@@ -472,7 +472,7 @@ pub fn deriveChildId(self: *Evaluator, parent_id: []const u8, context: []const u
     hasher.update(idx_str);
     const hash = hasher.finalResult();
     // Ensure first char is a letter (so tokenizer parses as atom)
-    const first: u8 = (hash[0] % ID_FIRST_LETTER_RANGE) + 'a';
+    const first: u8 = (hash[0] % id_first_letter_range) + 'a';
     const id = std.fmt.allocPrint(self.allocator, "{c}{x:0>2}{x:0>2}{x:0>2}{x:0>1}", .{ first, hash[1], hash[2], hash[3], hash[0] & 0x0f }) catch return EvalError.OutOfMemory;
     if (self.design_ids.contains(id)) {
         log.warn("derived id '{s}' collides with an existing id (parent '{s}', context '{s}', index {d}) — two parts may share a KiCad footprint identity", .{ id, parent_id, context, index });

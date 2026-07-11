@@ -150,7 +150,7 @@ const NetNaming = struct {
         };
         for (cluster) |pi| {
             for (ctx.parts[pi].pads) |pad| {
-                if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.UNCONNECTED_PREFIX)) continue;
+                if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.unconnected_prefix)) continue;
                 if (self.local.contains(pad.net)) continue;
                 const class = fold.classifyNet(ctx, pad.net, chan);
                 if (class == .indexed) {
@@ -303,7 +303,7 @@ fn renderInstance(ctx: *fold.FoldCtx, w: anytype, pi: usize, ref: []const u8, na
     var order: std.ArrayList([]const u8) = .empty; // local net order
     var pins_of = std.StringHashMapUnmanaged(std.ArrayList([]const u8)).empty;
     for (part.pads) |pad| {
-        if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.UNCONNECTED_PREFIX)) continue;
+        if (pad.net.len == 0 or std.mem.startsWith(u8, pad.net, ik.unconnected_prefix)) continue;
         const local = names.local.get(pad.net) orelse continue;
         const slot = try pins_of.getOrPut(ctx.arena, local);
         if (!slot.found_existing) {
@@ -373,7 +373,7 @@ test "NetNaming.build drops unconnected pad nets" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var pads = [_]ik.Pad{.{ .number = "1", .net = ik.UNCONNECTED_PREFIX ++ "(R1-Pad1)", .func = "" }};
+    var pads = [_]ik.Pad{.{ .number = "1", .net = ik.unconnected_prefix ++ "(R1-Pad1)", .func = "" }};
     const parts = [_]ik.Part{.{
         .ref = "R1",
         .value = "10k",

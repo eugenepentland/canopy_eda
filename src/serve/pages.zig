@@ -167,5 +167,5 @@ fn collectHomeModules(
 /// inlining the CSS into every response.
 pub fn cssPage(_: *Handler, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .CSS;
-    res.body = assets_css.INDEX_CSS;
+    res.body = assets_css.index_css;
 }

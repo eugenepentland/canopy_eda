@@ -90,27 +90,27 @@ pub const RouteResult = struct {
 /// huge board from allocating an enormous grid; modules stay far under this.
 /// Total node count scales with the stackup's signal-layer count (the cap is
 /// per layer), and a bail is reported via `RouteResult.grid_overflow`.
-const MAX_NODES: usize = 200_000;
-const EMPTY: i32 = -1;
-const VIA_COST_MULT: f64 = 4.0; // a layer change costs ~4 grid steps
+const max_nodes: usize = 200_000;
+const empty_cell: i32 = -1;
+const via_cost_mult: f64 = 4.0; // a layer change costs ~4 grid steps
 /// Nets with at most this many pads get the top-layer-first attempt (feedback
 /// taps, straps, short two/three-pad signals). Fat nets skip it — see pass 2.
-const TOP_FIRST_MAX_PADS: usize = 4;
+const top_first_max_pads: usize = 4;
 /// Top-layer-first runs only on boards no larger than this. Bigger boards are
 /// dense enough that forcing short nets onto the surface costs more (slow failed
 /// searches) than it saves and disturbs the routing of other nets — see pass 2.
-const TOP_FIRST_MAX_PARTS: usize = 32;
+const top_first_max_parts: usize = 32;
 /// Return-path stitching runs only on boards no larger than this. The pass is
 /// purely additive (it can't disturb existing routing), but it runs a via search
 /// per unstitched signal via, so a huge board's already-long route is left alone.
-const STITCH_MAX_PARTS: usize = 48;
-const SQRT2: f64 = 1.4142135623730951; // diagonal step length vs. orthogonal
+const stitch_max_parts: usize = 48;
+const sqrt2: f64 = 1.4142135623730951; // diagonal step length vs. orthogonal
 /// Step-cost multiplier for maze moves onto an outer layer a declared pour
 /// covers: every signal trace there slices the pour into islands, so signals
 /// prefer the un-poured face — but the layer stays usable when the other side
 /// is walled off (the Gerber emission carves clearance around whatever lands
 /// there, so the result is legal either way).
-const POUR_COST_MULT: f64 = 1.5;
+const pour_cost_mult: f64 = 1.5;
 /// Step-cost multiplier for maze moves on an INNER signal layer (index ≥ 2,
 /// from a `(stackup …)` with more than two plane-free copper layers). Kept
 /// mild: an inner dive already pays two via costs, so this only breaks the
@@ -118,7 +118,7 @@ const POUR_COST_MULT: f64 = 1.5;
 /// all its copper on the outer faces (identical to the 2-layer result), while
 /// a congested crossing still dives inner the moment the surface detour
 /// exceeds ~25% of the path. No-op on ≤2-signal boards (no such layer exists).
-const INNER_COST_MULT: f64 = 1.25;
+const inner_cost_mult: f64 = 1.25;
 
 /// Pass 1 of `route`: ground/plane nets. Each pad of a plane-carrying net
 /// drops a via to its plane — except pads already sitting IN an outer-layer
@@ -217,7 +217,7 @@ fn greedyPass(
             break :blk true;
         };
         var ok = false;
-        if (top_first and one_layer and pts.len <= TOP_FIRST_MAX_PADS) {
+        if (top_first and one_layer and pts.len <= top_first_max_pads) {
             const t_mark = tracks.items.len;
             const v_mark = vias.items.len;
             ctx.allow_vias = false;
@@ -258,8 +258,8 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     const oy = placement.miny - margin;
     const nx: usize = @intFromFloat(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
     const ny: usize = @intFromFloat(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
-    if (nx * ny == 0 or nx * ny > MAX_NODES) {
-        return .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0, .grid_overflow = nx * ny > MAX_NODES };
+    if (nx * ny == 0 or nx * ny > max_nodes) {
+        return .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0, .grid_overflow = nx * ny > max_nodes };
     }
     const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
 
@@ -325,7 +325,7 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     // with the outline test, slow) surface search, and the few that succeed shift
     // the greedy first-come routing enough to strand other nets — so we skip it
     // and route exactly as before. Mirrors the routed-scoring part gate.
-    const top_first = placement.parts.len <= TOP_FIRST_MAX_PARTS;
+    const top_first = placement.parts.len <= top_first_max_parts;
     // Greedy first-routed-wins pass. Every maze net's outcome lands in
     // `routable` (priority order) — the working set the bounded rip-up pass then
     // revisits. `routed`/`failed` are tallied from it *after* rip-up, so a net
@@ -386,7 +386,7 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     // additive: it only appends GND vias, so no existing copper moves. A via that
     // can't be stitched (no DRC-safe room) simply stays flagged. Gated to modest
     // boards so a big board's route doesn't grow a search per signal via.
-    if (placement.parts.len <= STITCH_MAX_PARTS) {
+    if (placement.parts.len <= stitch_max_parts) {
         if (firstGroundNet(placement)) |gnet| {
             setNetParams(&ctx, placement, @intCast(gnet));
             const n_before = vias.items.len;
@@ -396,13 +396,13 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
                 var stitched = false;
                 for (vias.items) |gv| {
                     if (!isGndVia(placement, gv.net)) continue;
-                    if (std.math.hypot(v.x - gv.x, v.y - gv.y) <= RETURN_PATH_RADIUS_MM) {
+                    if (std.math.hypot(v.x - gv.x, v.y - gv.y) <= return_path_radius_mm) {
                         stitched = true;
                         break;
                     }
                 }
                 if (stitched) continue;
-                const pos = findStitchVia(&ctx, vias.items, tracks.items, .{ v.x, v.y }, gnet, RETURN_PATH_RADIUS_MM) orelse continue;
+                const pos = findStitchVia(&ctx, vias.items, tracks.items, .{ v.x, v.y }, gnet, return_path_radius_mm) orelse continue;
                 try vias.append(arena, .{ .x = pos[0], .y = pos[1], .dia = ctx.params.via_dia, .drill = ctx.params.via_drill, .net = gnet });
                 stampViaOcc(&ctx, pos[0], pos[1], gnet);
             }
@@ -441,7 +441,7 @@ pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, para
     const oy = placement.miny - margin;
     const nx: usize = @intFromFloat(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
     const ny: usize = @intFromFloat(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
-    if (nx * ny == 0 or nx * ny > MAX_NODES) return &.{};
+    if (nx * ny == 0 or nx * ny > max_nodes) return &.{};
     const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
 
     const n_signal: usize = placement.rules.signalLayerCount();
@@ -532,7 +532,7 @@ pub const LoopRouter = struct {
         const oy = miny - margin;
         const nx: usize = @intFromFloat(@ceil((maxx - minx + 2 * margin) / g) + 1);
         const ny: usize = @intFromFloat(@ceil((maxy - miny + 2 * margin) / g) + 1);
-        if (nx * ny == 0 or nx * ny > MAX_NODES) return .{ .ctx = undefined, .ready = false };
+        if (nx * ny == 0 or nx * ny > max_nodes) return .{ .ctx = undefined, .ready = false };
         const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
 
         // The loop surrogate always measures on the two OUTER faces — it
@@ -569,8 +569,8 @@ pub const LoopRouter = struct {
     /// can't connect them (boxed in) or the router isn't ready.
     pub fn legLen(self: *LoopRouter, cap_c: [2]f64, hub_c: [2]f64, net_id: i32) std.mem.Allocator.Error!?f64 {
         if (!self.ready or net_id < 0) return null;
-        for (self.ctx.occ) |l| @memset(l, EMPTY);
-        for (self.ctx.resv) |l| @memset(l, EMPTY);
+        for (self.ctx.occ) |l| @memset(l, empty_cell);
+        for (self.ctx.resv) |l| @memset(l, empty_cell);
         var tracks: std.ArrayList(Track) = .empty;
         var vias: std.ArrayList(Via) = .empty;
         const pts = [_]NetPt{
@@ -624,7 +624,7 @@ fn allocLayerGrids(arena: std.mem.Allocator, n_layers: usize, nodes: usize) std.
     const out = try arena.alloc([]i32, n_layers);
     for (out) |*l| {
         l.* = try arena.alloc(i32, nodes);
-        @memset(l.*, EMPTY);
+        @memset(l.*, empty_cell);
     }
     return out;
 }
@@ -674,12 +674,12 @@ fn buildObstacles(arena: std.mem.Allocator, parts: []const Part, nets: []const F
 /// dominates; the intrinsic rank only orders nets the author left unranked and
 /// breaks ties between equal-ranked ones. Three bits leaves the auto rules room
 /// to grow; today they use only ranks 0–1.
-const NETCLASS_BITS = 3;
+const netclass_bits = 3;
 
 /// Highest authored `(net-class … (priority N))` tier a net can declare —
 /// parse-time clamps to this, and `netPriority` clamps again defensively so a
 /// corrupt rule can't shift garbage into the sort key's high bits.
-const MAX_NET_PRIORITY: u32 = 7;
+const max_net_priority: u32 = 7;
 
 /// A net's routing priority. Primary key (high bits): the authored
 /// `(net-class … (priority N))` tier from the design source, 0 when the net is
@@ -691,12 +691,12 @@ const MAX_NET_PRIORITY: u32 = 7;
 /// first-routed wins).
 fn netPriority(placement: optimizer.Placement, idx_of: *std.StringHashMapUnmanaged(usize), net: FlatNet, net_i: usize) u32 {
     const authored: u32 = if (net_i < placement.rules.net.len)
-        @min(placement.rules.net[net_i].priority, MAX_NET_PRIORITY)
+        @min(placement.rules.net[net_i].priority, max_net_priority)
     else
         0;
     var rank = netClassRank(net.name);
     if (rank == 0 and isInductorBridge(placement, idx_of, net)) rank = 1;
-    return (authored << NETCLASS_BITS) | rank;
+    return (authored << netclass_bits) | rank;
 }
 
 /// Intrinsic routing-order rank for a net from its name-based `NetClass`
@@ -949,7 +949,7 @@ fn trimStub(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, b:
 
 /// Rings (grid steps) the escape-via fan searches outward before giving up —
 /// ~3 mm at the default pitch, enough to clear a dense module's pad field.
-const ESCAPE_VIA_RINGS: usize = 12;
+const escape_via_rings: usize = 12;
 
 /// Find the *nearest* DRC-safe spot for a single-pin breakout's escape via — the
 /// in-tool version of hand-routing a pin that has nothing to land on: drop a via
@@ -979,7 +979,7 @@ fn escapeFan(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, d
     const grid = ctx.grid;
     const ang0 = std.math.atan2(dir[1], dir[0]);
     var ring: usize = 1;
-    while (ring <= ESCAPE_VIA_RINGS) : (ring += 1) {
+    while (ring <= escape_via_rings) : (ring += 1) {
         const rad = @as(f64, @floatFromInt(ring)) * grid.g;
         var k: usize = 0;
         while (k < 8) : (k += 1) {
@@ -1215,7 +1215,7 @@ fn stampDisc(ctx: *Ctx, x: f64, y: f64, net: i32, dist: f64, layer: u8, both: bo
             const n = @as(usize, @intCast(iy)) * grid.nx + @as(usize, @intCast(ix));
             for (ctx.occ, 0..) |occ_l, li| {
                 if (!both and li != layer) continue;
-                if (occ_l[n] == EMPTY) occ_l[n] = net;
+                if (occ_l[n] == empty_cell) occ_l[n] = net;
             }
         }
     }
@@ -1276,8 +1276,8 @@ fn viaAllowed(ctx: *Ctx, n: usize, net: i32) bool {
             if (std.math.hypot(wx - x, wy - y) > dist) continue;
             const m = @as(usize, @intCast(iy)) * grid.nx + @as(usize, @intCast(ix));
             for (ctx.occ, ctx.resv) |occ_l, resv_l| {
-                if (occ_l[m] != EMPTY and occ_l[m] != net) return false;
-                if (resv_l[m] != EMPTY and resv_l[m] != net) return false;
+                if (occ_l[m] != empty_cell and occ_l[m] != net) return false;
+                if (resv_l[m] != empty_cell and resv_l[m] != net) return false;
             }
         }
     }
@@ -1439,9 +1439,9 @@ inline fn accumPad(p: PadObs, layer: usize, px: f64, py: f64, net: i32, use_poly
 
 fn blocked(ctx: *Ctx, layer: usize, n: usize, net: i32) bool {
     const o = ctx.occ[layer][n];
-    if (o != EMPTY and o != net) return true;
+    if (o != empty_cell and o != net) return true;
     const rv = ctx.resv[layer][n];
-    if (rv != EMPTY and rv != net) return true;
+    if (rv != empty_cell and rv != net) return true;
     return foreignPadAt(ctx, layer, n, net);
 }
 
@@ -1573,7 +1573,7 @@ fn routeNet(ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayList(Trac
 
 /// Rings the pad-gateway search fans outward — ~1.5 mm at the default pitch,
 /// enough to clear a QFN pad collar plus the ground-via ring beside it.
-const GATE_RINGS: usize = 6;
+const gate_rings: usize = 6;
 
 /// Collect the off-grid gateway nodes of pad terminal `pt`: grid nodes within
 /// `GATE_RINGS` of the pad centre that are themselves routable AND reachable
@@ -1589,7 +1589,7 @@ fn padGateways(ctx: *Ctx, tracks: []const Track, vias: []const Via, pt: NetPt, n
     const dir = groundFanDir(ctx, c, net);
     const ang0 = std.math.atan2(dir[1], dir[0]);
     var ring: usize = 1;
-    while (ring <= GATE_RINGS) : (ring += 1) {
+    while (ring <= gate_rings) : (ring += 1) {
         const rad = @as(f64, @floatFromInt(ring)) * grid.g;
         var k: usize = 0;
         while (k < 8) : (k += 1) {
@@ -1636,10 +1636,10 @@ fn gateStub(ctx: *Ctx, net: i32, pt: NetPt, key: usize, tracks: *std.ArrayList(T
 fn clearNetOcc(ctx: *Ctx, net: i32) void {
     for (ctx.occ, ctx.resv) |occ_l, resv_l| {
         for (occ_l) |*c| {
-            if (c.* == net) c.* = EMPTY;
+            if (c.* == net) c.* = empty_cell;
         }
         for (resv_l) |*c| {
-            if (c.* == net) c.* = EMPTY;
+            if (c.* == net) c.* = empty_cell;
         }
     }
 }
@@ -1669,12 +1669,12 @@ const RipNet = struct { net_i: usize, pri: u32, ok: bool };
 /// Rip-up passes cap: at most this many full sweeps over the failed nets. Each
 /// sweep is O(failed × (probe + rip + reroute)); 3 is plenty for module boards
 /// and keeps the worst case a small multiple of the single greedy pass.
-const RIPUP_MAX_ROUNDS: usize = 3;
+const ripup_max_rounds: usize = 3;
 /// Per-cell penalty (× grid pitch) the blocker probe charges for stepping onto
 /// foreign copper. Large enough that the probe crosses copper only when there is
 /// no pad-free detour — so the nets it reports are the ones actually walling the
 /// failed net in, not incidental copper it could have gone around.
-const RIPUP_CROSS_PEN: f64 = 200.0;
+const ripup_cross_pen: f64 = 200.0;
 
 /// True when at least one net in the working set is still unrouted — the cheap
 /// guard that keeps rip-up (and its scratch arena) off fully-routed boards.
@@ -1745,15 +1745,15 @@ fn softEnter(ctx: *Ctx, layer: usize, n: usize, net: i32) ?f64 {
     if (foreignPadAt(ctx, layer, n, net)) return null;
     var pen: f64 = 0;
     const o = ctx.occ[layer][n];
-    if (o != EMPTY and o != net) pen += RIPUP_CROSS_PEN * ctx.grid.g;
+    if (o != empty_cell and o != net) pen += ripup_cross_pen * ctx.grid.g;
     const rv = ctx.resv[layer][n];
-    if (rv != EMPTY and rv != net) pen += RIPUP_CROSS_PEN * ctx.grid.g;
+    if (rv != empty_cell and rv != net) pen += ripup_cross_pen * ctx.grid.g;
     return pen;
 }
 
 /// Relax one probe move onto `(to_layer, to_node)` at base step cost `base`,
 /// adding the soft entry penalty. A hard-pad-blocked target is skipped.
-fn softStep(ctx: *Ctx, pq: *PQ, dist: []f64, prev: []i64, net: i32, from_key: usize, to_layer: usize, to_node: ?usize, base: f64) std.mem.Allocator.Error!void {
+fn softStep(ctx: *Ctx, pq: *Pq, dist: []f64, prev: []i64, net: i32, from_key: usize, to_layer: usize, to_node: ?usize, base: f64) std.mem.Allocator.Error!void {
     const tn = to_node orelse return;
     const enter = softEnter(ctx, to_layer, tn, net) orelse return;
     const nodes = ctx.grid.nx * ctx.grid.ny;
@@ -1771,7 +1771,7 @@ fn softStep(ctx: *Ctx, pq: *PQ, dist: []f64, prev: []i64, net: i32, from_key: us
 /// only a hard-pad-blocked flank forbids the diagonal.
 fn softDiag(
     ctx: *Ctx,
-    pq: *PQ,
+    pq: *Pq,
     dist: []f64,
     prev: []i64,
     net: i32,
@@ -1786,7 +1786,7 @@ fn softDiag(
     const c1 = neighbor(grid, ix, iy, dx, 0) orelse return;
     const c2 = neighbor(grid, ix, iy, 0, dy) orelse return;
     if (softEnter(ctx, layer, c1, net) == null or softEnter(ctx, layer, c2, net) == null) return;
-    try softStep(ctx, pq, dist, prev, net, from_key, layer, neighbor(grid, ix, iy, dx, dy), grid.g * SQRT2);
+    try softStep(ctx, pq, dist, prev, net, from_key, layer, neighbor(grid, ix, iy, dx, dy), grid.g * sqrt2);
 }
 
 /// Soft Dijkstra from `src`'s access node to `goal`'s, foreign copper passable
@@ -1834,7 +1834,7 @@ fn softProbe(ctx: *Ctx, net: i32, src: NetPt, goal: NetPt, crossed: *std.AutoHas
         if (n_layers > 1) {
             for (0..n_layers) |to_layer| {
                 if (to_layer == layer) continue;
-                try softStep(ctx, &pq, dist, prev, net, it.key, to_layer, n, grid.g * VIA_COST_MULT);
+                try softStep(ctx, &pq, dist, prev, net, it.key, to_layer, n, grid.g * via_cost_mult);
             }
         }
     }
@@ -1845,9 +1845,9 @@ fn softProbe(ctx: *Ctx, net: i32, src: NetPt, goal: NetPt, crossed: *std.AutoHas
         const layer = k / nodes;
         const nn = k % nodes;
         const o = ctx.occ[layer][nn];
-        if (o != EMPTY and o != net) try crossed.put(scratch, o, {});
+        if (o != empty_cell and o != net) try crossed.put(scratch, o, {});
         const rv = ctx.resv[layer][nn];
-        if (rv != EMPTY and rv != net) try crossed.put(scratch, rv, {});
+        if (rv != empty_cell and rv != net) try crossed.put(scratch, rv, {});
         const p = prev[k];
         if (p < 0) break;
         k = @intCast(p);
@@ -2012,7 +2012,7 @@ fn ripUpReroute(
     var scratch_inst = std.heap.ArenaAllocator.init(ctx.arena);
     defer scratch_inst.deinit();
     var rounds: usize = 0;
-    while (rounds < RIPUP_MAX_ROUNDS) {
+    while (rounds < ripup_max_rounds) {
         rounds += 1;
         var progress = false;
         for (routable) |*rn| {
@@ -2165,7 +2165,7 @@ fn dijkstra(
         if (ctx.allow_vias and n_layers > 1 and viaAllowed(ctx, n, net)) {
             for (0..n_layers) |to_layer| {
                 if (to_layer == layer) continue;
-                try relaxStep(ctx, &pq, dist, prev, net, it.key, to_layer, n, grid.g * VIA_COST_MULT);
+                try relaxStep(ctx, &pq, dist, prev, net, it.key, to_layer, n, grid.g * via_cost_mult);
             }
         }
     }
@@ -2183,11 +2183,11 @@ fn neighbor(grid: Grid, ix: usize, iy: usize, dx: i64, dy: i64) ?usize {
     return @as(usize, @intCast(y)) * grid.nx + @as(usize, @intCast(x));
 }
 
-const PQ = std.PriorityQueue(QItem, void, qLess);
+const Pq = std.PriorityQueue(QItem, void, qLess);
 
 fn relaxStep(
     ctx: *Ctx,
-    pq: *PQ,
+    pq: *Pq,
     dist: []f64,
     prev: []i64,
     net: i32,
@@ -2204,9 +2204,9 @@ fn relaxStep(
     // steps on an inner signal layer carry the mild `INNER_COST_MULT` bias
     // so equal-length paths stay on the outer faces.
     const eff = if (to_layer >= 2)
-        step * INNER_COST_MULT
+        step * inner_cost_mult
     else if (ctx.pour[to_layer])
-        step * POUR_COST_MULT
+        step * pour_cost_mult
     else
         step;
     const nd = dist[from_key] + eff;
@@ -2222,7 +2222,7 @@ fn relaxStep(
 /// clips the corner of a pad it must clear (no corner-cutting).
 fn relaxDiag(
     ctx: *Ctx,
-    pq: *PQ,
+    pq: *Pq,
     dist: []f64,
     prev: []i64,
     net: i32,
@@ -2237,7 +2237,7 @@ fn relaxDiag(
     const c1 = neighbor(grid, ix, iy, dx, 0) orelse return;
     const c2 = neighbor(grid, ix, iy, 0, dy) orelse return;
     if (blocked(ctx, layer, c1, net) or blocked(ctx, layer, c2, net)) return;
-    try relaxStep(ctx, pq, dist, prev, net, from_key, layer, neighbor(grid, ix, iy, dx, dy), grid.g * SQRT2);
+    try relaxStep(ctx, pq, dist, prev, net, from_key, layer, neighbor(grid, ix, iy, dx, dy), grid.g * sqrt2);
 }
 
 /// Walk `prev` from the goal back to a source, stamp the path as net copper,
@@ -2340,7 +2340,7 @@ fn emitSeg(ctx: *Ctx, tracks: *std.ArrayList(Track), a_key: usize, b_key: usize,
 /// A signal via needs a GND stitching via within this radius (mm) for its return
 /// current to stay continuous across the layer change. ~2 mm is a common
 /// stitching guideline for the low-MHz–GHz range these modules operate in.
-pub const RETURN_PATH_RADIUS_MM: f64 = 2.0;
+pub const return_path_radius_mm: f64 = 2.0;
 
 /// True when via net index `net` is a ground (plane-drop / stitching) via.
 fn isGndVia(placement: optimizer.Placement, net: i32) bool {
@@ -2846,7 +2846,7 @@ test "returnPathViolations flags unstitched signal vias" {
         .{ .x = 5, .y = 0, .dia = 0.4, .net = 1 },
     };
     const far_res = RouteResult{ .tracks = &.{}, .vias = &far, .routed = 0, .total = 0 };
-    try testing.expectEqual(@as(usize, 1), returnPathViolations(placement, far_res, RETURN_PATH_RADIUS_MM));
+    try testing.expectEqual(@as(usize, 1), returnPathViolations(placement, far_res, return_path_radius_mm));
 
     // Move the GND via within the radius → the signal via is stitched (0 warnings).
     const near = [_]Via{
@@ -2854,7 +2854,7 @@ test "returnPathViolations flags unstitched signal vias" {
         .{ .x = 1, .y = 0, .dia = 0.4, .net = 1 },
     };
     const near_res = RouteResult{ .tracks = &.{}, .vias = &near, .routed = 0, .total = 0 };
-    try testing.expectEqual(@as(usize, 0), returnPathViolations(placement, near_res, RETURN_PATH_RADIUS_MM));
+    try testing.expectEqual(@as(usize, 0), returnPathViolations(placement, near_res, return_path_radius_mm));
 }
 
 // spec: placement/router - stitches each signal via's return path with a nearby GND plane via
@@ -2905,9 +2905,9 @@ test "route stitches a signal escape via with a ground via" {
     }
     try testing.expect(sig != null and gnd != null);
     // The stitch via sits within the return-path radius of the signal via…
-    try testing.expect(std.math.hypot(gnd.?.x - sig.?.x, gnd.?.y - sig.?.y) <= RETURN_PATH_RADIUS_MM);
+    try testing.expect(std.math.hypot(gnd.?.x - sig.?.x, gnd.?.y - sig.?.y) <= return_path_radius_mm);
     // …so the routed board reports no return-path discontinuity.
-    try testing.expectEqual(@as(usize, 0), returnPathViolations(placement, r, RETURN_PATH_RADIUS_MM));
+    try testing.expectEqual(@as(usize, 0), returnPathViolations(placement, r, return_path_radius_mm));
 }
 
 // spec: placement/router - escapes a single-pin breakout to an inner layer with a short stub and a via
@@ -3511,7 +3511,7 @@ fn diagCornersReserved(ctx: *Ctx, lo: usize, hi: usize, net: i32) bool {
         if (ctx.resv[0][c1] != net or ctx.resv[0][c2] != net) return false;
         if (!blocked(ctx, 0, c1, net + 1)) return false; // foreign net must be blocked
         if (blocked(ctx, 0, c1, net)) return false; // owner must stay passable
-        if (ctx.occ[0][c1] != EMPTY) return false; // reserved ≠ copper
+        if (ctx.occ[0][c1] != empty_cell) return false; // reserved ≠ copper
     }
     return true;
 }

@@ -14,12 +14,12 @@ const ast = @import("../sexpr/ast.zig");
 const infra_fs = @import("../infra/fs.zig");
 const Node = ast.Node;
 
-const MAX_FOOTPRINT_BYTES: usize = 1024 * 1024;
-const PATH_FMT = "{s}/lib/footprints/{s}.sexp";
+const max_footprint_bytes: usize = 1024 * 1024;
+const path_fmt = "{s}/lib/footprints/{s}.sexp";
 /// Extra clearance baked into a part's courtyard half-extents so the
 /// optimizer leaves a little air between adjacent parts. Public so the
 /// courtyard editor can invert it (effective extent ↔ written rect).
-pub const BBOX_MARGIN_MM: f64 = 0.15;
+pub const bbox_margin_mm: f64 = 0.15;
 
 /// One pad, positioned relative to the footprint origin (mm). `shape` and
 /// `poly` are carried only for rendering (the PCB-layout page draws the real
@@ -65,7 +65,7 @@ pub const Pad = struct {
 
 /// KiCad's default roundrect corner ratio (corner radius ÷ shorter side) when
 /// a `roundrect` pad declares no explicit `(roundrect_rratio …)`.
-pub const DEFAULT_RRATIO: f64 = 0.25;
+pub const default_rratio: f64 = 0.25;
 
 /// A silkscreen line segment (footprint-local mm).
 pub const SilkLine = struct { x1: f64, y1: f64, x2: f64, y2: f64 };
@@ -98,9 +98,9 @@ pub fn load(
     pin_count_hint: usize,
     margin: f64,
 ) Geom {
-    const path = std.fmt.allocPrint(arena, PATH_FMT, .{ project_dir, fp_name }) catch
+    const path = std.fmt.allocPrint(arena, path_fmt, .{ project_dir, fp_name }) catch
         return fallbackGeom(pin_count_hint);
-    const source = infra_fs.cwd().readFileAlloc(arena, path, MAX_FOOTPRINT_BYTES) catch
+    const source = infra_fs.cwd().readFileAlloc(arena, path, max_footprint_bytes) catch
         return fallbackGeom(pin_count_hint);
     const nodes = parser.parse(arena, source) catch return fallbackGeom(pin_count_hint);
     if (nodes.len == 0 or !nodes[0].isForm("footprint")) return fallbackGeom(pin_count_hint);
@@ -400,7 +400,7 @@ test "load falls back to a synthesized box for a missing footprint" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    const g = load(arena, "/nonexistent-project-dir", "does-not-exist", 10, BBOX_MARGIN_MM);
+    const g = load(arena, "/nonexistent-project-dir", "does-not-exist", 10, bbox_margin_mm);
     try testing.expect(g.fallback);
     try testing.expectEqual(@as(usize, 0), g.pads.len);
     try testing.expect(g.hw > 0 and g.hh > 0);

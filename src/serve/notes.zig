@@ -23,29 +23,29 @@ const serve_root = @import("../serve.zig");
 const Handler = serve_root.Handler;
 const json_writer = @import("../json_writer.zig");
 
-const MAX_NOTES_BYTES: usize = 1 * 1024 * 1024;
-const ISO_DATE_LEN: usize = 10; // YYYY-MM-DD
-const NOTE_ID_HEX_LEN: usize = 8;
-const ARROW = " -> ";
-const TASK_OPEN_PREFIX = "- [ ] ";
-const TASK_DONE_PREFIX = "- [x] ";
+const max_notes_bytes: usize = 1 * 1024 * 1024;
+const iso_date_len: usize = 10; // YYYY-MM-DD
+const note_id_hex_len: usize = 8;
+const arrow_glyph = " -> ";
+const task_open_prefix = "- [ ] ";
+const task_done_prefix = "- [x] ";
 
 // HTTP status codes
-const HTTP_BAD_REQUEST: u16 = 400;
-const HTTP_NOT_FOUND: u16 = 404;
-const HTTP_PAYLOAD_TOO_LARGE: u16 = 413;
-const HTTP_INTERNAL_ERROR: u16 = 500;
+const http_bad_request: u16 = 400;
+const http_not_found: u16 = 404;
+const http_payload_too_large: u16 = 413;
+const http_internal_error: u16 = 500;
 
 // JSON / header literals reused across handlers
-const CORS_HEADER = "access-control-allow-origin";
-const ERR_MISSING_NAME = "{\"error\":\"missing name\"}";
-const ERR_NO_BODY = "{\"error\":\"no body\"}";
-const ERR_INVALID_JSON = "{\"error\":\"invalid json\"}";
-const ERR_RESOLVE_PATH = "{\"error\":\"cannot resolve notes path\"}";
-const ERR_READ_NOTES = "{\"error\":\"cannot read notes\"}";
-const ERR_WRITE_NOTES = "{\"error\":\"cannot write notes\"}";
-const ERR_NOT_OBJECT = "{\"error\":\"body must be a JSON object\"}";
-const OK_JSON = "{\"ok\":true}";
+const cors_header = "access-control-allow-origin";
+const err_missing_name = "{\"error\":\"missing name\"}";
+const err_no_body = "{\"error\":\"no body\"}";
+const err_invalid_json = "{\"error\":\"invalid json\"}";
+const err_resolve_path = "{\"error\":\"cannot resolve notes path\"}";
+const err_read_notes = "{\"error\":\"cannot read notes\"}";
+const err_write_notes = "{\"error\":\"cannot write notes\"}";
+const err_not_object = "{\"error\":\"body must be a JSON object\"}";
+const ok_json = "{\"ok\":true}";
 
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
@@ -117,24 +117,24 @@ pub fn parseNotes(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocat
 fn parseTaskLine(line: []const u8) ?Note {
     var rest: []const u8 = line;
     var status: NoteStatus = .open;
-    if (std.mem.startsWith(u8, rest, TASK_OPEN_PREFIX)) {
-        rest = rest[TASK_OPEN_PREFIX.len..];
-    } else if (std.mem.startsWith(u8, rest, TASK_DONE_PREFIX) or std.mem.startsWith(u8, rest, "- [X] ")) {
-        rest = rest[TASK_DONE_PREFIX.len..];
+    if (std.mem.startsWith(u8, rest, task_open_prefix)) {
+        rest = rest[task_open_prefix.len..];
+    } else if (std.mem.startsWith(u8, rest, task_done_prefix) or std.mem.startsWith(u8, rest, "- [X] ")) {
+        rest = rest[task_done_prefix.len..];
         status = .done;
     } else return null;
 
-    if (rest.len < ISO_DATE_LEN or !isIsoDate(rest[0..ISO_DATE_LEN])) return null;
-    const created = rest[0..ISO_DATE_LEN];
-    rest = rest[ISO_DATE_LEN..];
+    if (rest.len < iso_date_len or !isIsoDate(rest[0..iso_date_len])) return null;
+    const created = rest[0..iso_date_len];
+    rest = rest[iso_date_len..];
 
     var completed: ?[]const u8 = null;
     if (status == .done) {
-        if (!std.mem.startsWith(u8, rest, ARROW) or rest.len < ARROW.len + ISO_DATE_LEN) return null;
-        rest = rest[ARROW.len..];
-        if (!isIsoDate(rest[0..ISO_DATE_LEN])) return null;
-        completed = rest[0..ISO_DATE_LEN];
-        rest = rest[ISO_DATE_LEN..];
+        if (!std.mem.startsWith(u8, rest, arrow_glyph) or rest.len < arrow_glyph.len + iso_date_len) return null;
+        rest = rest[arrow_glyph.len..];
+        if (!isIsoDate(rest[0..iso_date_len])) return null;
+        completed = rest[0..iso_date_len];
+        rest = rest[iso_date_len..];
     }
 
     if (rest.len < 4 or rest[0] != ' ' or rest[1] != '(') return null;
@@ -152,7 +152,7 @@ fn parseTaskLine(line: []const u8) ?Note {
 }
 
 fn isIsoDate(s: []const u8) bool {
-    if (s.len != ISO_DATE_LEN) return false;
+    if (s.len != iso_date_len) return false;
     for ([_]usize{ 0, 1, 2, 3, 5, 6, 8, 9 }) |i| if (!std.ascii.isDigit(s[i])) return false;
     if (s[4] != '-' or s[7] != '-') return false;
     return true;
@@ -174,9 +174,9 @@ pub fn renderNotes(allocator: std.mem.Allocator, notes: Notes) ![]u8 {
 
 fn writeTaskLine(w: anytype, t: Note) !void {
     if (t.completed) |done| {
-        try w.print("{s}{s} -> {s} ({s}) {s}\n", .{ TASK_DONE_PREFIX, t.created, done, t.id, t.text });
+        try w.print("{s}{s} -> {s} ({s}) {s}\n", .{ task_done_prefix, t.created, done, t.id, t.text });
     } else {
-        try w.print("{s}{s} ({s}) {s}\n", .{ TASK_OPEN_PREFIX, t.created, t.id, t.text });
+        try w.print("{s}{s} ({s}) {s}\n", .{ task_open_prefix, t.created, t.id, t.text });
     }
 }
 
@@ -213,7 +213,7 @@ pub fn loadNotes(
 ) !Notes {
     const path = try notesPath(allocator, project_dir, name);
     defer allocator.free(path);
-    const data = infra_fs.cwd().readFileAlloc(allocator, path, MAX_NOTES_BYTES) catch |e| switch (e) {
+    const data = infra_fs.cwd().readFileAlloc(allocator, path, max_notes_bytes) catch |e| switch (e) {
         error.FileNotFound => {
             out_raw.* = null;
             return .{ .tasks = &.{}, .scratchpad = "" };
@@ -278,7 +278,7 @@ fn jsonError(res: *httpz.Response, status: u16, msg: []const u8) void {
 
 fn setJsonHeaders(res: *httpz.Response) void {
     res.content_type = .JSON;
-    res.header(CORS_HEADER, "*");
+    res.header(cors_header, "*");
 }
 
 /// GET /api/notes/:name — `{"text":"<raw markdown>"}`. Kept for the
@@ -286,14 +286,14 @@ fn setJsonHeaders(res: *httpz.Response) void {
 pub fn getNotesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     setJsonHeaders(res);
 
-    const name = req.param("name") orelse return jsonError(res, HTTP_NOT_FOUND, ERR_MISSING_NAME);
+    const name = req.param("name") orelse return jsonError(res, http_not_found, err_missing_name);
 
-    const path = notesPath(ctx.allocator, ctx.project_dir, name) catch return jsonError(res, HTTP_INTERNAL_ERROR, ERR_RESOLVE_PATH);
+    const path = notesPath(ctx.allocator, ctx.project_dir, name) catch return jsonError(res, http_internal_error, err_resolve_path);
     defer ctx.allocator.free(path);
 
-    const data: ?[]u8 = infra_fs.cwd().readFileAlloc(ctx.allocator, path, MAX_NOTES_BYTES) catch |e| switch (e) {
+    const data: ?[]u8 = infra_fs.cwd().readFileAlloc(ctx.allocator, path, max_notes_bytes) catch |e| switch (e) {
         error.FileNotFound => null,
-        else => return jsonError(res, HTTP_INTERNAL_ERROR, ERR_READ_NOTES),
+        else => return jsonError(res, http_internal_error, err_read_notes),
     };
     defer if (data) |d| ctx.allocator.free(d);
     const text: []const u8 = data orelse "";
@@ -312,35 +312,35 @@ pub fn getNotesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 pub fn saveNotesApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     setJsonHeaders(res);
 
-    const name = req.param("name") orelse return jsonError(res, HTTP_NOT_FOUND, ERR_MISSING_NAME);
-    const body = req.body() orelse return jsonError(res, HTTP_BAD_REQUEST, ERR_NO_BODY);
+    const name = req.param("name") orelse return jsonError(res, http_not_found, err_missing_name);
+    const body = req.body() orelse return jsonError(res, http_bad_request, err_no_body);
 
     const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch
-        return jsonError(res, HTTP_BAD_REQUEST, ERR_INVALID_JSON);
+        return jsonError(res, http_bad_request, err_invalid_json);
     defer parsed.deinit();
-    if (parsed.value != .object) return jsonError(res, HTTP_BAD_REQUEST, ERR_NOT_OBJECT);
-    const text_val = parsed.value.object.get("text") orelse return jsonError(res, HTTP_BAD_REQUEST, "{\"error\":\"missing text\"}");
-    if (text_val != .string) return jsonError(res, HTTP_BAD_REQUEST, "{\"error\":\"text must be a string\"}");
-    if (text_val.string.len > MAX_NOTES_BYTES) return jsonError(res, HTTP_PAYLOAD_TOO_LARGE, "{\"error\":\"notes too large\"}");
+    if (parsed.value != .object) return jsonError(res, http_bad_request, err_not_object);
+    const text_val = parsed.value.object.get("text") orelse return jsonError(res, http_bad_request, "{\"error\":\"missing text\"}");
+    if (text_val != .string) return jsonError(res, http_bad_request, "{\"error\":\"text must be a string\"}");
+    if (text_val.string.len > max_notes_bytes) return jsonError(res, http_payload_too_large, "{\"error\":\"notes too large\"}");
 
-    const path = notesPath(ctx.allocator, ctx.project_dir, name) catch return jsonError(res, HTTP_INTERNAL_ERROR, ERR_RESOLVE_PATH);
+    const path = notesPath(ctx.allocator, ctx.project_dir, name) catch return jsonError(res, http_internal_error, err_resolve_path);
     defer ctx.allocator.free(path);
-    const file = infra_fs.cwd().createFile(path, .{}) catch return jsonError(res, HTTP_INTERNAL_ERROR, ERR_WRITE_NOTES);
+    const file = infra_fs.cwd().createFile(path, .{}) catch return jsonError(res, http_internal_error, err_write_notes);
     defer file.close();
-    file.writeAll(text_val.string) catch return jsonError(res, HTTP_INTERNAL_ERROR, "{\"error\":\"write failed\"}");
+    file.writeAll(text_val.string) catch return jsonError(res, http_internal_error, "{\"error\":\"write failed\"}");
 
-    res.body = OK_JSON;
+    res.body = ok_json;
 }
 
 /// GET /api/notes/:name/tasks — `{"tasks":[…],"scratchpad":"…"}`. Used
 /// by the web UI to render the structured TODO list.
 pub fn getTasksApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     setJsonHeaders(res);
-    const name = req.param("name") orelse return jsonError(res, HTTP_NOT_FOUND, ERR_MISSING_NAME);
+    const name = req.param("name") orelse return jsonError(res, http_not_found, err_missing_name);
 
     var raw: ?[]u8 = null;
     const notes = loadNotes(ctx.allocator, ctx.project_dir, name, &raw) catch
-        return jsonError(res, HTTP_INTERNAL_ERROR, ERR_READ_NOTES);
+        return jsonError(res, http_internal_error, err_read_notes);
     defer if (raw) |d| ctx.allocator.free(d);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -353,19 +353,19 @@ pub fn getTasksApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) Han
 /// open task with today's date and a fresh id. Returns the new task.
 pub fn addTaskApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     setJsonHeaders(res);
-    const name = req.param("name") orelse return jsonError(res, HTTP_NOT_FOUND, ERR_MISSING_NAME);
-    const body = req.body() orelse return jsonError(res, HTTP_BAD_REQUEST, ERR_NO_BODY);
+    const name = req.param("name") orelse return jsonError(res, http_not_found, err_missing_name);
+    const body = req.body() orelse return jsonError(res, http_bad_request, err_no_body);
 
     const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch
-        return jsonError(res, HTTP_BAD_REQUEST, ERR_INVALID_JSON);
+        return jsonError(res, http_bad_request, err_invalid_json);
     defer parsed.deinit();
-    if (parsed.value != .object) return jsonError(res, HTTP_BAD_REQUEST, ERR_NOT_OBJECT);
-    const text_val = parsed.value.object.get("text") orelse return jsonError(res, HTTP_BAD_REQUEST, "{\"error\":\"missing text\"}");
+    if (parsed.value != .object) return jsonError(res, http_bad_request, err_not_object);
+    const text_val = parsed.value.object.get("text") orelse return jsonError(res, http_bad_request, "{\"error\":\"missing text\"}");
     if (text_val != .string or text_val.string.len == 0)
-        return jsonError(res, HTTP_BAD_REQUEST, "{\"error\":\"text must be a non-empty string\"}");
+        return jsonError(res, http_bad_request, "{\"error\":\"text must be a non-empty string\"}");
 
     const new_task = addTaskCore(ctx.allocator, ctx.project_dir, name, text_val.string) catch
-        return jsonError(res, HTTP_INTERNAL_ERROR, "{\"error\":\"add failed\"}");
+        return jsonError(res, http_internal_error, "{\"error\":\"add failed\"}");
 
     var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(ctx.allocator);
@@ -397,22 +397,22 @@ pub const TaskMutation = enum { complete, reopen, remove };
 
 fn mutateTaskByIdApi(ctx: *Handler, req: *httpz.Request, res: *httpz.Response, mode: TaskMutation) HandlerError!void {
     setJsonHeaders(res);
-    const name = req.param("name") orelse return jsonError(res, HTTP_NOT_FOUND, ERR_MISSING_NAME);
-    const body = req.body() orelse return jsonError(res, HTTP_BAD_REQUEST, ERR_NO_BODY);
+    const name = req.param("name") orelse return jsonError(res, http_not_found, err_missing_name);
+    const body = req.body() orelse return jsonError(res, http_bad_request, err_no_body);
 
     const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch
-        return jsonError(res, HTTP_BAD_REQUEST, ERR_INVALID_JSON);
+        return jsonError(res, http_bad_request, err_invalid_json);
     defer parsed.deinit();
-    if (parsed.value != .object) return jsonError(res, HTTP_BAD_REQUEST, ERR_NOT_OBJECT);
-    const id_val = parsed.value.object.get("id") orelse return jsonError(res, HTTP_BAD_REQUEST, "{\"error\":\"missing id\"}");
+    if (parsed.value != .object) return jsonError(res, http_bad_request, err_not_object);
+    const id_val = parsed.value.object.get("id") orelse return jsonError(res, http_bad_request, "{\"error\":\"missing id\"}");
     if (id_val != .string or id_val.string.len == 0)
-        return jsonError(res, HTTP_BAD_REQUEST, "{\"error\":\"id must be a non-empty string\"}");
+        return jsonError(res, http_bad_request, "{\"error\":\"id must be a non-empty string\"}");
 
     const result = mutateTaskCore(ctx.allocator, ctx.project_dir, name, id_val.string, mode) catch
-        return jsonError(res, HTTP_INTERNAL_ERROR, "{\"error\":\"mutate failed\"}");
-    if (result == null) return jsonError(res, HTTP_NOT_FOUND, "{\"error\":\"task id not found\"}");
+        return jsonError(res, http_internal_error, "{\"error\":\"mutate failed\"}");
+    if (result == null) return jsonError(res, http_not_found, "{\"error\":\"task id not found\"}");
 
-    res.body = OK_JSON;
+    res.body = ok_json;
 }
 
 // ── Core mutation helpers (shared with MCP) ──────────────────────────

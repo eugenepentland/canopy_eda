@@ -14,12 +14,12 @@ const auth = @import("serve/auth.zig");
 const users = @import("serve/users.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
-const DEFAULT_SERVE_PORT: u16 = 7050;
-const PARSE_PORT_RADIX: u8 = 10;
-const FILTER_FLAG = "--filter";
-const CONVERT_ERROR_FMT = "Convert error: {}\n";
-const ERROR_READING_FMT = "Error reading {s}: {}\n";
-const ALT_SOURCE_MAX_BYTES: usize = 20 * 1024 * 1024;
+const default_serve_port: u16 = 7050;
+const parse_port_radix: u8 = 10;
+const filter_flag = "--filter";
+const convert_error_fmt = "Convert error: {}\n";
+const error_reading_fmt = "Error reading {s}: {}\n";
+const alt_source_max_bytes: usize = 20 * 1024 * 1024;
 
 /// Return the value of `--<flag>` if present anywhere in `args`, else null.
 fn optionalArg(args: [][:0]u8, flag: []const u8) ?[]const u8 {
@@ -110,21 +110,21 @@ pub fn main() !void {
             std.debug.print("Usage: netlisp convert-symbol <file.kicad_sym> [--filter <name>]\n", .{});
             std.process.exit(1);
         }
-        try cmdConvertSymbol(allocator, args[2], optionalArg(args[3..], FILTER_FLAG));
+        try cmdConvertSymbol(allocator, args[2], optionalArg(args[3..], filter_flag));
     } else if (std.mem.eql(u8, command, "convert-package")) {
         if (args.len < 4) {
             std.debug.print("Usage: netlisp convert-package <file.kicad_sym> <file.kicad_mod> [--name <n>] [--filter <f>]\n", .{});
             std.process.exit(1);
         }
         const pkg_name = optionalArg(args[4..], "--name") orelse "package";
-        const filter = optionalArg(args[4..], FILTER_FLAG);
+        const filter = optionalArg(args[4..], filter_flag);
         try cmdConvertPackage(allocator, args[2], args[3], pkg_name, filter);
     } else if (std.mem.eql(u8, command, "convert-pinout")) {
         if (args.len < 3) {
             std.debug.print("Usage: netlisp convert-pinout <file.kicad_sym> [--filter <name>]\n", .{});
             std.process.exit(1);
         }
-        try cmdConvertPinout(allocator, args[2], optionalArg(args[3..], FILTER_FLAG));
+        try cmdConvertPinout(allocator, args[2], optionalArg(args[3..], filter_flag));
     } else if (std.mem.eql(u8, command, "merge-alt-functions")) {
         if (args.len < 4) {
             std.debug.print("Usage: netlisp merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]\n", .{});
@@ -138,9 +138,9 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, command, "serve")) {
         const project_dir = optionalArg(args[2..], "--project-dir") orelse ".";
         const port: u16 = if (optionalArg(args[2..], "--port")) |p|
-            std.fmt.parseInt(u16, p, PARSE_PORT_RADIX) catch DEFAULT_SERVE_PORT
+            std.fmt.parseInt(u16, p, parse_port_radix) catch default_serve_port
         else
-            DEFAULT_SERVE_PORT;
+            default_serve_port;
         const auth_dir_override = optionalArg(args[2..], "--auth-dir") orelse readAuthDirEnv(allocator);
         try serve_mod.serve(allocator, port, project_dir, auth_dir_override);
     } else if (std.mem.eql(u8, command, "mint-plugin-token")) {
@@ -201,7 +201,7 @@ fn cmdGenLanguageDocs(allocator: std.mem.Allocator, out_path: []const u8, check_
 
 fn cmdParse(allocator: std.mem.Allocator, path: []const u8) !void {
     const source = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(ERROR_READING_FMT, .{ path, err });
+        std.debug.print(error_reading_fmt, .{ path, err });
         std.process.exit(1);
     };
     defer allocator.free(source);
@@ -222,13 +222,13 @@ fn cmdParse(allocator: std.mem.Allocator, path: []const u8) !void {
 
 fn cmdConvertFootprint(allocator: std.mem.Allocator, path: []const u8) !void {
     const source = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(ERROR_READING_FMT, .{ path, err });
+        std.debug.print(error_reading_fmt, .{ path, err });
         std.process.exit(1);
     };
     defer allocator.free(source);
 
     const output = footprint_conv.convertFootprint(allocator, source) catch |err| {
-        std.debug.print(CONVERT_ERROR_FMT, .{err});
+        std.debug.print(convert_error_fmt, .{err});
         std.process.exit(1);
     };
     defer allocator.free(output);
@@ -239,18 +239,18 @@ fn cmdConvertFootprint(allocator: std.mem.Allocator, path: []const u8) !void {
 
 fn cmdConvertPackage(allocator: std.mem.Allocator, sym_path: []const u8, fp_path: []const u8, name: []const u8, filter: ?[]const u8) !void {
     const sym_source = infra_fs.cwd().readFileAlloc(allocator, sym_path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(ERROR_READING_FMT, .{ sym_path, err });
+        std.debug.print(error_reading_fmt, .{ sym_path, err });
         std.process.exit(1);
     };
     defer allocator.free(sym_source);
     const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(ERROR_READING_FMT, .{ fp_path, err });
+        std.debug.print(error_reading_fmt, .{ fp_path, err });
         std.process.exit(1);
     };
     defer allocator.free(fp_source);
 
     const output = symbol_conv.generatePackage(allocator, sym_source, fp_source, name, filter) catch |err| {
-        std.debug.print(CONVERT_ERROR_FMT, .{err});
+        std.debug.print(convert_error_fmt, .{err});
         std.process.exit(1);
     };
     defer allocator.free(output);
@@ -261,12 +261,12 @@ fn cmdConvertPackage(allocator: std.mem.Allocator, sym_path: []const u8, fp_path
 
 fn cmdMergeAltFunctions(allocator: std.mem.Allocator, pinout_path: []const u8, src_path: []const u8, write_back: bool) !void {
     const pinout_src = infra_fs.cwd().readFileAlloc(allocator, pinout_path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(ERROR_READING_FMT, .{ pinout_path, err });
+        std.debug.print(error_reading_fmt, .{ pinout_path, err });
         std.process.exit(1);
     };
     defer allocator.free(pinout_src);
-    const alt_src = infra_fs.cwd().readFileAlloc(allocator, src_path, ALT_SOURCE_MAX_BYTES) catch |err| {
-        std.debug.print(ERROR_READING_FMT, .{ src_path, err });
+    const alt_src = infra_fs.cwd().readFileAlloc(allocator, src_path, alt_source_max_bytes) catch |err| {
+        std.debug.print(error_reading_fmt, .{ src_path, err });
         std.process.exit(1);
     };
     defer allocator.free(alt_src);
@@ -295,13 +295,13 @@ fn cmdMergeAltFunctions(allocator: std.mem.Allocator, pinout_path: []const u8, s
 
 fn cmdConvertPinout(allocator: std.mem.Allocator, path: []const u8, filter: ?[]const u8) !void {
     const source = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(ERROR_READING_FMT, .{ path, err });
+        std.debug.print(error_reading_fmt, .{ path, err });
         std.process.exit(1);
     };
     defer allocator.free(source);
 
     const output = symbol_conv.generatePinout(allocator, source, filter) catch |err| {
-        std.debug.print(CONVERT_ERROR_FMT, .{err});
+        std.debug.print(convert_error_fmt, .{err});
         std.process.exit(1);
     };
     defer allocator.free(output);
@@ -312,13 +312,13 @@ fn cmdConvertPinout(allocator: std.mem.Allocator, path: []const u8, filter: ?[]c
 
 fn cmdConvertSymbol(allocator: std.mem.Allocator, path: []const u8, filter: ?[]const u8) !void {
     const source = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(ERROR_READING_FMT, .{ path, err });
+        std.debug.print(error_reading_fmt, .{ path, err });
         std.process.exit(1);
     };
     defer allocator.free(source);
 
     const output = symbol_conv.convertSymbol(allocator, source, filter) catch |err| {
-        std.debug.print(CONVERT_ERROR_FMT, .{err});
+        std.debug.print(convert_error_fmt, .{err});
         std.process.exit(1);
     };
     defer allocator.free(output);

@@ -114,9 +114,9 @@ const RoutedSummary = struct {
 pub const DescribeError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
 /// `"origin"` JSON key — the stable module-local name, emitted beside every ref.
-const ORIGIN_KEY = ",\"origin\":";
+const origin_key_head = ",\"origin\":";
 /// Opening of a `{"ref": …}` object — emitted for parts, hub-pad maps, and roles.
-const REF_KEY = "{\"ref\":";
+const ref_key = "{\"ref\":";
 
 /// Emit the full facts document. Split from `describeDesign` so tests can run
 /// it on a hand-built `Placement` without a project on disk.
@@ -165,7 +165,7 @@ pub fn writeDescribeJson(
     if (anchor) |ai| {
         try w.writeAll(",\"anchor\":{\"ref\":");
         try pcb_layout_page.writeJsonStr(w, p.parts[ai].ref_des);
-        try w.writeAll(ORIGIN_KEY);
+        try w.writeAll(origin_key_head);
         try pcb_layout_page.writeJsonStr(w, originOf(p, ai));
         try w.writeAll("}");
     }
@@ -223,9 +223,9 @@ pub fn writeDescribeJson(
     try w.writeAll(",\"parts\":[");
     for (p.parts, 0..) |part, pi| {
         if (pi > 0) try w.writeAll(",");
-        try w.writeAll(REF_KEY);
+        try w.writeAll(ref_key);
         try pcb_layout_page.writeJsonStr(w, part.ref_des);
-        try w.writeAll(ORIGIN_KEY);
+        try w.writeAll(origin_key_head);
         try pcb_layout_page.writeJsonStr(w, originOf(p, pi));
         try w.print(",\"kind\":\"{s}\",\"x\":{d:.2},\"y\":{d:.2},\"rot\":{d:.0},\"w_mm\":{d:.2},\"h_mm\":{d:.2}", .{
             if (part.kind == .hub) "hub" else "passive",
@@ -277,7 +277,7 @@ pub fn writeDescribeJson(
         const hw_ = world(hub, L.hub_pwr_pin.x, L.hub_pwr_pin.y);
         try w.writeAll("{\"cap\":");
         try pcb_layout_page.writeJsonStr(w, cap.ref_des);
-        try w.writeAll(ORIGIN_KEY);
+        try w.writeAll(origin_key_head);
         try pcb_layout_page.writeJsonStr(w, originOf(p, L.cap));
         try w.writeAll(",\"hub\":");
         try pcb_layout_page.writeJsonStr(w, hub.ref_des);
@@ -387,7 +387,7 @@ fn groundish(name: []const u8) bool {
 
 /// Loops flagged "long": worse than twice the median inductance (and over an
 /// absolute floor so tiny boards don't lint their best loop).
-const LONG_LOOP_FLOOR_NH: f64 = 3.0;
+const long_loop_floor_nh: f64 = 3.0;
 
 /// One lint entry: `{"rule","severity","refs":[…],"msg"}`.
 fn lintItem(
@@ -428,7 +428,7 @@ fn writeModulePolicy(
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"hub\":");
         try pcb_layout_page.writeJsonStr(w, p.parts[m.hub].ref_des);
-        try w.writeAll(ORIGIN_KEY);
+        try w.writeAll(origin_key_head);
         try pcb_layout_page.writeJsonStr(w, originOf(p, m.hub));
         try w.print(",\"class\":\"{s}\",\"has_inductor\":{}}}", .{ @tagName(m.class), m.has_inductor });
     }
@@ -450,9 +450,9 @@ fn writeModulePolicy(
         if (r == .other or r == .anchor_ic) continue;
         if (!first) try w.writeAll(",");
         first = false;
-        try w.writeAll(REF_KEY);
+        try w.writeAll(ref_key);
         try pcb_layout_page.writeJsonStr(w, part.ref_des);
-        try w.writeAll(ORIGIN_KEY);
+        try w.writeAll(origin_key_head);
         try pcb_layout_page.writeJsonStr(w, originOf(p, i));
         try w.print(",\"role\":\"{s}\"}}", .{@tagName(r)});
     }
@@ -529,7 +529,7 @@ fn writeLint(
         var refs: std.ArrayList([]const u8) = .empty;
         defer refs.deinit(alloc);
         for (p.loops, 0..) |L, i| {
-            if (nhs[i] > 2 * median and nhs[i] > LONG_LOOP_FLOOR_NH) {
+            if (nhs[i] > 2 * median and nhs[i] > long_loop_floor_nh) {
                 try refs.append(alloc, p.parts[L.cap].ref_des);
             }
         }
@@ -581,9 +581,9 @@ fn writeHubPads(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placem
         if (part.kind != .hub) continue;
         if (!first_hub) try w.writeAll(",");
         first_hub = false;
-        try w.writeAll(REF_KEY);
+        try w.writeAll(ref_key);
         try pcb_layout_page.writeJsonStr(w, part.ref_des);
-        try w.writeAll(ORIGIN_KEY);
+        try w.writeAll(origin_key_head);
         try pcb_layout_page.writeJsonStr(w, originOf(p, pi));
         try w.writeAll(",\"nets\":[");
 

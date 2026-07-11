@@ -36,7 +36,7 @@ const SubBlock = env_mod.SubBlock;
 /// may expand to. A real bus is dozens of lanes wide; a value of thousands is
 /// a typo or a hostile file. Without it, `(bus-net "X" 0 100000000 "sub")`
 /// allocates 100M net ties — an OOM DoS the HTTP server evaluates on push.
-const MAX_BUS_EXPANSION: usize = 4096;
+const max_bus_expansion: usize = 4096;
 
 /// True if the design-block body contains a bare `(hierarchical-ids)` form,
 /// which opts into Option-4 sub-block identity.
@@ -420,8 +420,8 @@ fn evalBusNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_
     const start = numberAsUsize(try self.evalNode(form_children[2], env)) orelse return;
     const end = numberAsUsize(try self.evalNode(form_children[3], env)) orelse return;
     if (end < start) return;
-    if (end - start >= MAX_BUS_EXPANSION) {
-        self.warnFmt(form_children[0].span, "(bus-net …) index range {d}..{d} exceeds the {d}-lane cap — ignored", .{ start, end, MAX_BUS_EXPANSION });
+    if (end - start >= max_bus_expansion) {
+        self.warnFmt(form_children[0].span, "(bus-net …) index range {d}..{d} exceeds the {d}-lane cap — ignored", .{ start, end, max_bus_expansion });
         return;
     }
 
@@ -2685,12 +2685,12 @@ test "parseVerifies reads a ref-des target as a ref-des sign-off" {
 /// return the evaluator (caller inspects `warnings`). page_allocator:
 /// evaluator allocations are intentionally never freed (project convention).
 /// Cap family name shared by the warning/cascade test fixtures.
-const TEST_CAP_FAMILY = "cap-0402";
+const test_cap_family = "cap-0402";
 
 fn evalWarningFixture(alloc: std.mem.Allocator, eval: *Evaluator, source: []const u8) !void {
     eval.* = Evaluator.init(alloc, ".");
-    try eval.component_cache.put(alloc, TEST_CAP_FAMILY, .{
-        .name = TEST_CAP_FAMILY,
+    try eval.component_cache.put(alloc, test_cap_family, .{
+        .name = test_cap_family,
         .symbol_name = "",
         .footprint_name = "",
         .is_family = true,
@@ -2801,7 +2801,7 @@ test "inert form heads are warning-free" {
 /// Find the first cap-0402 instance in a block, or null.
 fn findCapInstance(block: *const DesignBlock) ?Instance {
     for (block.instances) |inst| {
-        if (std.mem.eql(u8, inst.component, TEST_CAP_FAMILY)) return inst;
+        if (std.mem.eql(u8, inst.component, test_cap_family)) return inst;
     }
     return null;
 }

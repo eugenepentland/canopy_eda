@@ -80,9 +80,9 @@ pub fn renderToMarkdown(
     // CSS subset for the inline SVGs that follow. Must come before any
     // <svg> body. Reuses the page's curated subset (no JS hooks).
     try w.writeAll("<style>\n");
-    try w.writeAll(render_html.STATIC_SVG_CSS);
+    try w.writeAll(render_html.static_svg_css);
     try w.writeAll("\n");
-    try w.writeAll(block_diagram.DIAGRAM_CSS);
+    try w.writeAll(block_diagram.diagram_css);
     try w.writeAll("\n</style>\n\n");
 
     // Verdict first: summary, the system overview, then the validation block

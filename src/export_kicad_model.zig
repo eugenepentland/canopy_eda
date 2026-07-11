@@ -16,9 +16,9 @@ const findModelFile = footprint_mod.findModelFile;
 
 // ── Constants ─────────────────────────────────────────────────────
 /// Length of the JSON key prefix `"rotation":[` (advance past it to read array).
-const ROTATION_KEY_LEN: usize = 12;
+const rotation_key_len: usize = 12;
 /// Length of the JSON key prefix `"model":"` (advance past it to read string).
-const MODEL_KEY_LEN: usize = 9;
+const model_key_len: usize = 9;
 const findSourceKicadMod = footprint_mod.findSourceKicadMod;
 const useSourceKicadMod = footprint_mod.useSourceKicadMod;
 const extractFootprintName = netlist_mod.extractFootprintName;
@@ -78,13 +78,13 @@ pub fn loadModelConfig(allocator: std.mem.Allocator, project_dir: []const u8) Mo
             }
         }
         if (std.mem.indexOf(u8, obj, "\"rotation\":[")) |rs| {
-            const arr_start = rs + ROTATION_KEY_LEN;
+            const arr_start = rs + rotation_key_len;
             if (std.mem.indexOfPos(u8, obj, arr_start, "]")) |arr_end| {
                 transform.rotation = parseFloat3(obj[arr_start..arr_end]);
             }
         }
         if (std.mem.indexOf(u8, obj, "\"model\":\"")) |ms| {
-            const val_start = ms + MODEL_KEY_LEN;
+            const val_start = ms + model_key_len;
             if (std.mem.indexOfPos(u8, obj, val_start, "\"")) |val_end| {
                 transform.model = allocator.dupe(u8, obj[val_start..val_end]) catch null;
             }

@@ -13,14 +13,14 @@ const Evaluator = @import("evaluator.zig").Evaluator;
 const Env = env_mod.Env;
 
 /// Maximum edit distance for a did-you-mean candidate.
-const MAX_EDIT_DISTANCE: usize = 2;
+const max_edit_distance: usize = 2;
 /// Names longer than this skip the Levenshtein scan (cost cap; real
 /// component names are far shorter).
-const MAX_NAME_LEN: usize = 64;
+const max_name_len: usize = 64;
 /// Library sub-directories searched for both the import hint and the
 /// did-you-mean stem candidates — the same paths `modules.resolveImport`
 /// walks.
-const LIB_PREFIXES = [_][]const u8{ "lib/components/", "lib/modules/" };
+const lib_prefixes = [_][]const u8{ "lib/components/", "lib/modules/" };
 
 /// Build the diagnostic message for an unbound name. Returns an allocated
 /// slice (never freed — project memory convention):
@@ -42,7 +42,7 @@ pub fn unboundMessage(self: *Evaluator, name: []const u8, env: *const Env) []con
 /// path `(import …)` resolution uses.
 fn existsInLibrary(self: *Evaluator, name: []const u8) bool {
     for (libRoots(self)) |root| {
-        for (LIB_PREFIXES) |prefix| {
+        for (lib_prefixes) |prefix| {
             const path = std.fmt.allocPrint(self.allocator, "{s}/{s}{s}.sexp", .{ root, prefix, name }) catch return false;
             defer self.allocator.free(path);
             infra_fs.cwd().access(path, .{}) catch continue;
@@ -68,9 +68,9 @@ fn libRoots(self: *Evaluator) []const []const u8 {
 /// bindings (walking the scope chain), the component cache, and library
 /// file stems. Ties resolve to the smallest distance, first seen.
 fn nearestName(self: *Evaluator, name: []const u8, env: *const Env) ?[]const u8 {
-    if (name.len > MAX_NAME_LEN) return null;
+    if (name.len > max_name_len) return null;
     var best: ?[]const u8 = null;
-    var best_dist: usize = MAX_EDIT_DISTANCE + 1;
+    var best_dist: usize = max_edit_distance + 1;
 
     var scope: ?*const Env = env;
     while (scope) |e| : (scope = e.parent) {
@@ -89,7 +89,7 @@ fn nearestName(self: *Evaluator, name: []const u8, env: *const Env) ?[]const u8 
 /// buffer, and the winning candidate must outlive the scan).
 fn considerLibraryStems(self: *Evaluator, name: []const u8, best: *?[]const u8, best_dist: *usize) void {
     for (libRoots(self)) |root| {
-        for (LIB_PREFIXES) |prefix| {
+        for (lib_prefixes) |prefix| {
             const dir_path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ root, prefix }) catch continue;
             defer self.allocator.free(dir_path);
             var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
@@ -114,10 +114,10 @@ fn considerLibraryStems(self: *Evaluator, name: []const u8, best: *?[]const u8, 
 
 /// Update the running best candidate with `candidate` if it is closer.
 fn considerCandidate(name: []const u8, candidate: []const u8, best: *?[]const u8, best_dist: *usize) void {
-    if (candidate.len > MAX_NAME_LEN) return;
+    if (candidate.len > max_name_len) return;
     if (std.mem.eql(u8, name, candidate)) return;
     const len_diff = if (name.len > candidate.len) name.len - candidate.len else candidate.len - name.len;
-    if (len_diff > MAX_EDIT_DISTANCE) return;
+    if (len_diff > max_edit_distance) return;
     const d = editDistance(name, candidate);
     if (d < best_dist.*) {
         best_dist.* = d;
@@ -128,7 +128,7 @@ fn considerCandidate(name: []const u8, candidate: []const u8, best: *?[]const u8
 /// Classic two-row Levenshtein distance, sized for component-name-length
 /// strings (`MAX_NAME_LEN` cap enforced by the callers).
 fn editDistance(a: []const u8, b: []const u8) usize {
-    var rows: [2][MAX_NAME_LEN + 1]usize = undefined;
+    var rows: [2][max_name_len + 1]usize = undefined;
     var prev = &rows[0];
     var curr = &rows[1];
     for (0..b.len + 1) |j| prev[j] = j;

@@ -24,54 +24,54 @@ const font = @import("font5x7.zig");
 const Rgb = raster.Rgb;
 
 // ── Theme (matches BOARD_JS — KiCad pcbnew default colours) ────────────────
-const BG = Rgb.hex("#001023"); // KiCad dark navy canvas
-const COURT_COL = Rgb.hex("#D864FF"); // courtyard outline (KiCad magenta, drawn dim)
-const SILK = Rgb.hex("#F0F0F0"); // F.Silkscreen white
-const SILK_BOT = Rgb.hex("#E8B2C8"); // B.Silkscreen pink
-const PAD_COL = Rgb.hex("#C83434"); // F.Cu SMD pad copper
-const PAD_COL_BOT = Rgb.hex("#4D7FC4"); // B.Cu SMD pad copper
-const PAD_PTH = Rgb.hex("#d0a028"); // through-hole pad annulus (KiCad PTH gold)
-const PAD_NPTH = Rgb.hex("#26323e"); // non-plated hole rim (no copper)
-const AW_PROX = Rgb.hex("#ea580c"); // hot decoupling loop / proximity hug
-const AW_GND = Rgb.hex("#22b8cf"); // ground return airwire
-const AW_SIG = Rgb.hex("#ffffff"); // ratsnest airwire (KiCad white, drawn ~35% alpha)
-const LOOP_RET = Rgb.hex("#58a6ff"); // L2 ground-return overlay
-const TRACK_TOP = Rgb.hex("#C83434"); // F.Cu trace
-const TRACK_BOT = Rgb.hex("#4D7FC4"); // B.Cu trace
+const bg = Rgb.hex("#001023"); // KiCad dark navy canvas
+const court_col = Rgb.hex("#D864FF"); // courtyard outline (KiCad magenta, drawn dim)
+const silk_rgb = Rgb.hex("#F0F0F0"); // F.Silkscreen white
+const silk_bot = Rgb.hex("#E8B2C8"); // B.Silkscreen pink
+const pad_col = Rgb.hex("#C83434"); // F.Cu SMD pad copper
+const pad_col_bot = Rgb.hex("#4D7FC4"); // B.Cu SMD pad copper
+const pad_pth = Rgb.hex("#d0a028"); // through-hole pad annulus (KiCad PTH gold)
+const pad_npth = Rgb.hex("#26323e"); // non-plated hole rim (no copper)
+const aw_prox = Rgb.hex("#ea580c"); // hot decoupling loop / proximity hug
+const aw_gnd = Rgb.hex("#22b8cf"); // ground return airwire
+const aw_sig = Rgb.hex("#ffffff"); // ratsnest airwire (KiCad white, drawn ~35% alpha)
+const loop_ret = Rgb.hex("#58a6ff"); // L2 ground-return overlay
+const track_top = Rgb.hex("#C83434"); // F.Cu trace
+const track_bot = Rgb.hex("#4D7FC4"); // B.Cu trace
 // Inner signal-layer traces, cycling (mirrors optimizer.INNER_LAYER_COLORS
 // so the PNG matches the browser viewer's palette).
-const TRACK_INNER = [_]Rgb{ Rgb.hex("#C2C200"), Rgb.hex("#C200C2"), Rgb.hex("#C2C2C2"), Rgb.hex("#00C2C2") };
+const track_inner = [_]Rgb{ Rgb.hex("#C2C200"), Rgb.hex("#C200C2"), Rgb.hex("#C2C2C2"), Rgb.hex("#00C2C2") };
 
 /// Trace colour for a routed track's signal layer (0 = top red, 1 = bottom
 /// blue, inner layers cycle KiCad's In1../In4 palette).
 fn trackColor(layer: u8) Rgb {
-    if (layer == 0) return TRACK_TOP;
-    if (layer == 1) return TRACK_BOT;
-    return TRACK_INNER[(layer - 2) % TRACK_INNER.len];
+    if (layer == 0) return track_top;
+    if (layer == 1) return track_bot;
+    return track_inner[(layer - 2) % track_inner.len];
 }
-const VIA_COL = Rgb.hex("#B2B27A"); // via annulus (KiCad muted olive-gold)
-const VIA_HOLE = Rgb.hex("#001023");
-const PAD_HOLE = Rgb.hex("#001023"); // drilled bore punched through a thru/npth pad
-const DRC_COL = Rgb.hex("#f4432c"); // DRC marker (KiCad red-orange)
-const ACCENT = Rgb.hex("#f5c542"); // focus highlight
-const TEXT_COL = Rgb.hex("#c9d1d9");
-const TEXT_DIM = Rgb.hex("#7d8590");
-const GOOD_COL = Rgb.hex("#3fb950"); // improvement (compare Δ ≤ 0)
-const GRID_COL = Rgb.hex("#2a3a4a"); // reference grid lines
-const EDGE_COL = Rgb.hex("#D0D2CD"); // board outline (KiCad Edge.Cuts)
+const via_col = Rgb.hex("#B2B27A"); // via annulus (KiCad muted olive-gold)
+const via_hole = Rgb.hex("#001023");
+const pad_hole = Rgb.hex("#001023"); // drilled bore punched through a thru/npth pad
+const drc_col = Rgb.hex("#f4432c"); // DRC marker (KiCad red-orange)
+const accent_rgb = Rgb.hex("#f5c542"); // focus highlight
+const text_col = Rgb.hex("#c9d1d9");
+const text_dim = Rgb.hex("#7d8590");
+const good_col = Rgb.hex("#3fb950"); // improvement (compare Δ ≤ 0)
+const grid_col = Rgb.hex("#2a3a4a"); // reference grid lines
+const edge_col = Rgb.hex("#D0D2CD"); // board outline (KiCad Edge.Cuts)
 // Blame heatmap ramp: cheap (cool) → expensive (hot).
-const BLAME_LO = Rgb.hex("#15302a");
-const BLAME_MID = Rgb.hex("#b8860b");
-const BLAME_HI = Rgb.hex("#c0392b");
+const blame_lo = Rgb.hex("#15302a");
+const blame_mid = Rgb.hex("#b8860b");
+const blame_hi = Rgb.hex("#c0392b");
 
-const MARGIN_MM: f64 = 2.0;
-const MIN_W: u32 = 400;
-const MAX_W: u32 = 2200;
-const MAX_H: u32 = 2600;
-const SS: u32 = 2; // supersample factor for anti-aliasing
-const HEADER_H: u32 = 46; // title + objective score line (+ focus/compare line)
-const LEGEND_H: u32 = 22;
-const DIM_A: f32 = 0.20; // alpha for de-emphasised elements in focus mode
+const margin_mm: f64 = 2.0;
+const min_w: u32 = 400;
+const max_w: u32 = 2200;
+const max_h: u32 = 2600;
+const ss: u32 = 2; // supersample factor for anti-aliasing
+const header_h_px: u32 = 46; // title + objective score line (+ focus/compare line)
+const legend_h_px: u32 = 22;
+const dim_a: f32 = 0.20; // alpha for de-emphasised elements in focus mode
 
 /// Which name labels parts: the flattened ref-des (`C150`), the stable
 /// module-local origin name a `(placement …)` spec is written in (`C_BOOT1`),
@@ -169,30 +169,30 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
             vmaxy = p.parts[pi].y + r;
         }
     }
-    const cw_mm = @max(vmaxx - vminx, 1.0) + 2 * MARGIN_MM;
-    const ch_mm = @max(vmaxy - vminy, 1.0) + 2 * MARGIN_MM;
+    const cw_mm = @max(vmaxx - vminx, 1.0) + 2 * margin_mm;
+    const ch_mm = @max(vmaxy - vminy, 1.0) + 2 * margin_mm;
 
-    var board_w = std.math.clamp(opts.width, MIN_W, MAX_W);
+    var board_w = std.math.clamp(opts.width, min_w, max_w);
     var scale = @as(f64, @floatFromInt(board_w)) / cw_mm;
     var board_h_f = ch_mm * scale;
-    if (board_h_f > MAX_H) {
-        scale = @as(f64, @floatFromInt(MAX_H)) / ch_mm;
-        board_h_f = @floatFromInt(MAX_H);
+    if (board_h_f > max_h) {
+        scale = @as(f64, @floatFromInt(max_h)) / ch_mm;
+        board_h_f = @floatFromInt(max_h);
         // Guard the narrowing: a NaN/±inf or absurd coordinate leaking out of
         // the placement optimizer would make a bare `@intFromFloat` UB in the
         // runtime-safety-off ReleaseSmall prod build. Fall back to MIN_W, then
         // re-clamp to the valid canvas-width band.
-        board_w = std.math.clamp(numeric.checkedInt(u32, @round(cw_mm * scale)) orelse MIN_W, MIN_W, MAX_W);
+        board_w = std.math.clamp(numeric.checkedInt(u32, @round(cw_mm * scale)) orelse min_w, min_w, max_w);
     }
     // Same guard; board_h is bounded above by MAX_H (board_h_f ≤ MAX_H here),
     // and a non-finite result collapses to a 1px-tall board rather than UB.
-    const board_h: u32 = std.math.clamp(numeric.checkedInt(u32, @round(board_h_f)) orelse 1, 1, MAX_H);
+    const board_h: u32 = std.math.clamp(numeric.checkedInt(u32, @round(board_h_f)) orelse 1, 1, max_h);
 
     const focus = opts.highlight_nets.len > 0 or opts.highlight_refs.len > 0;
-    const header_h: u32 = if (opts.bare) 0 else HEADER_H;
-    const legend_h: u32 = if (opts.bare) 0 else LEGEND_H;
+    const header_h: u32 = if (opts.bare) 0 else header_h_px;
+    const legend_h: u32 = if (opts.bare) 0 else legend_h_px;
     const total_h = header_h + board_h + legend_h;
-    var cv = try raster.Canvas.init(alloc, board_w, total_h, SS, BG);
+    var cv = try raster.Canvas.init(alloc, board_w, total_h, ss, bg);
     errdefer cv.deinit();
 
     // Highlight sets: full net names matching any token, and uppercased refs.
@@ -306,9 +306,9 @@ fn findPartByName(alloc: std.mem.Allocator, p: optimizer.Placement, name: []cons
 
 /// Hubs to tile in a contact sheet, biggest first (the parts whose pin
 /// neighbourhoods an agent actually needs to inspect).
-const SHEET_MAX_TILES: usize = 6;
+const sheet_max_tiles: usize = 6;
 /// Closeup tiles per contact-sheet row.
-const SHEET_COLS: u32 = 3;
+const sheet_cols: u32 = 3;
 
 /// Contact sheet: the whole board on top, then per-hub closeups with pad net
 /// labels — one image answers both "what's the arrangement" and "what sits at
@@ -327,11 +327,11 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
         try hubs.append(alloc, pi);
     }
     std.mem.sort(usize, hubs.items, p.parts, hubAreaDesc);
-    const ntiles = @min(hubs.items.len, SHEET_MAX_TILES);
+    const ntiles = @min(hubs.items.len, sheet_max_tiles);
     if (ntiles == 0) return main_cv.toPng(alloc);
 
-    const ncols: u32 = @min(@as(u32, @intCast(ntiles)), SHEET_COLS);
-    const tile_w = @max(main_cv.w / ncols, MIN_W);
+    const ncols: u32 = @min(@as(u32, @intCast(ntiles)), sheet_cols);
+    const tile_w = @max(main_cv.w / ncols, min_w);
     var tiles: std.ArrayList(raster.Canvas) = .empty;
     defer {
         for (tiles.items) |*t| t.deinit();
@@ -361,7 +361,7 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
             part.ref_des
         else
             std.fmt.bufPrint(&buf, "{s}={s}", .{ part.ref_des, origin }) catch part.ref_des;
-        tcv.text(4, 3, cap, 11, SHEET_CAP_COL, 1.0, .start);
+        tcv.text(4, 3, cap, 11, sheet_cap_col, 1.0, .start);
         try tiles.append(alloc, tcv);
     }
 
@@ -375,26 +375,26 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
         row_h[r] = @max(row_h[r], t.h);
     }
     var total_h = main_cv.h;
-    for (row_h) |h| total_h += h + SHEET_GAP_PX;
-    var master = try raster.Canvas.init(alloc, main_cv.w, total_h, SS, BG);
+    for (row_h) |h| total_h += h + sheet_gap_px;
+    var master = try raster.Canvas.init(alloc, main_cv.w, total_h, ss, bg);
     defer master.deinit();
     master.blit(&main_cv, 0, 0);
-    var y = main_cv.h + SHEET_GAP_PX;
+    var y = main_cv.h + sheet_gap_px;
     for (0..nrows) |r| {
         for (0..ncols) |c| {
             const i = r * ncols + c;
             if (i >= tiles.items.len) break;
             master.blit(&tiles.items[i], @as(u32, @intCast(c)) * tile_w, y);
         }
-        y += row_h[r] + SHEET_GAP_PX;
+        y += row_h[r] + sheet_gap_px;
     }
     return master.toPng(alloc);
 }
 
 /// Gap (final px) between contact-sheet rows.
-const SHEET_GAP_PX: u32 = 4;
+const sheet_gap_px: u32 = 4;
 /// Tile-caption colour (matches the dim header text).
-const SHEET_CAP_COL = raster.Rgb.hex("8b949e");
+const sheet_cap_col = raster.Rgb.hex("8b949e");
 
 fn hubAreaDesc(parts: []const optimizer.Part, a: usize, b: usize) bool {
     return parts[a].hw * parts[a].hh > parts[b].hw * parts[b].hh;
@@ -450,10 +450,10 @@ const Ctx = struct {
     autofill_set: *std.StringHashMapUnmanaged(void),
 
     fn xpx(self: *Ctx, mm: f64) f32 {
-        return @floatCast((mm - self.minx + MARGIN_MM) * self.scale);
+        return @floatCast((mm - self.minx + margin_mm) * self.scale);
     }
     fn ypx(self: *Ctx, mm: f64) f32 {
-        return self.yoff + @as(f32, @floatCast((mm - self.miny + MARGIN_MM) * self.scale));
+        return self.yoff + @as(f32, @floatCast((mm - self.miny + margin_mm) * self.scale));
     }
     fn len(self: *Ctx, mm: f64) f32 {
         return @floatCast(mm * self.scale);
@@ -545,7 +545,7 @@ const Ctx = struct {
     fn drawParts(self: *Ctx) void {
         for (self.p.parts, 0..) |part, pi| {
             const active = self.partActive(part);
-            const base_a: f32 = if (active) 1.0 else DIM_A;
+            const base_a: f32 = if (active) 1.0 else dim_a;
             // Courtyard (rotated quad about the box centre — offset from the
             // part origin when the library rect is off-origin). KiCad-style:
             // a thin dim magenta outline, NO fill — the part reads from its
@@ -558,25 +558,25 @@ const Ctx = struct {
             if (self.opts.blame and pi < self.blame_norm.len) {
                 self.cv.fillPoly(&court, blameColor(self.blame_norm[pi]), base_a);
             }
-            self.cv.strokePath(&court, .closed, self.outlineW(active), COURT_COL, base_a * 0.35);
+            self.cv.strokePath(&court, .closed, self.outlineW(active), court_col, base_a * 0.35);
             if (self.focus and active and (self.refHot(part.ref_des))) {
-                self.cv.strokePath(&court, .closed, self.outlineW(true) + self.pw(1.5), ACCENT, 0.9);
+                self.cv.strokePath(&court, .closed, self.outlineW(true) + self.pw(1.5), accent_rgb, 0.9);
             }
             // A part the `(placement …)` spec left unplaced sits in a staging
             // band — cross it out so it never reads as a deliberate placement.
             if (self.isUnplaced(part.ref_des)) {
-                self.cv.fillPoly(&court, DRC_COL, 0.12);
-                self.cv.strokePath(&court, .closed, self.outlineW(true), DRC_COL, 0.9);
-                self.cv.line(court[0][0], court[0][1], court[2][0], court[2][1], self.pw(1.0), DRC_COL, 0.8, .butt);
-                self.cv.line(court[1][0], court[1][1], court[3][0], court[3][1], self.pw(1.0), DRC_COL, 0.8, .butt);
+                self.cv.fillPoly(&court, drc_col, 0.12);
+                self.cv.strokePath(&court, .closed, self.outlineW(true), drc_col, 0.9);
+                self.cv.line(court[0][0], court[0][1], court[2][0], court[2][1], self.pw(1.0), drc_col, 0.8, .butt);
+                self.cv.line(court[1][0], court[1][1], court[3][0], court[3][1], self.pw(1.0), drc_col, 0.8, .butt);
             } else if (self.isAutoFilled(part.ref_des)) {
                 // Auto-filled: a usable position the spec doesn't pin — amber
                 // outline so the agent can tell authored from solver-chosen.
-                self.cv.strokePath(&court, .closed, self.outlineW(true), ACCENT, 0.75);
+                self.cv.strokePath(&court, .closed, self.outlineW(true), accent_rgb, 0.75);
             }
             // Silk (footprint-local, rotates with the part) — F.Silk white on
             // top, B.Silk pink on bottom-side parts.
-            const silk_col = if (part.side == .bottom) SILK_BOT else SILK;
+            const silk_col = if (part.side == .bottom) silk_bot else silk_rgb;
             for (part.silk_lines) |sl| {
                 const a = self.lp(part, sl.x1, sl.y1);
                 const b = self.lp(part, sl.x2, sl.y2);
@@ -597,10 +597,10 @@ const Ctx = struct {
             // colour, plated through-hole pads gold on every layer, NPTH
             // mounting holes as a dim copper-free rim.
             const layer_col = if (pad.drill > 0)
-                (if (pad.npth) PAD_NPTH else PAD_PTH)
-            else if (part.side == .bottom) PAD_COL_BOT else PAD_COL;
-            const col = if (hot) ACCENT else layer_col;
-            const a: f32 = if (hot or active) 1.0 else DIM_A;
+                (if (pad.npth) pad_npth else pad_pth)
+            else if (part.side == .bottom) pad_col_bot else pad_col;
+            const col = if (hot) accent_rgb else layer_col;
+            const a: f32 = if (hot or active) 1.0 else dim_a;
             if (pad.poly.len >= 3) {
                 // KiCad custom pads carry full copper outlines (100-200+ pts);
                 // a 64-slot stack scratch covers the common case, larger spill
@@ -651,11 +651,11 @@ const Ctx = struct {
                 if (pad.isSlot()) {
                     const e1 = self.lp(part, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
                     const e2 = self.lp(part, pad.x - pad.slot_half[0], pad.y - pad.slot_half[1]);
-                    self.cv.line(e1[0], e1[1], e2[0], e2[1], @max(self.len(pad.drill), self.pw(1.2)), PAD_HOLE, a, .round);
+                    self.cv.line(e1[0], e1[1], e2[0], e2[1], @max(self.len(pad.drill), self.pw(1.2)), pad_hole, a, .round);
                 } else {
                     const c = self.lp(part, pad.x, pad.y);
                     const hr = @max(self.len(pad.drill / 2), self.pw(0.6));
-                    self.cv.disc(c[0], c[1], hr, PAD_HOLE, a);
+                    self.cv.disc(c[0], c[1], hr, pad_hole, a);
                 }
             }
         }
@@ -679,11 +679,11 @@ const Ctx = struct {
             if (self.focus) {
                 const net = self.netOf(self.p.parts[l.a].ref_des, self.nearestPad(l.a, l.ax, l.ay));
                 if (self.netHot(net)) {
-                    col2 = ACCENT;
+                    col2 = accent_rgb;
                     alpha = 1.0;
                     w = 1.6;
                 } else {
-                    alpha = DIM_A * 0.6;
+                    alpha = dim_a * 0.6;
                 }
             }
             self.cv.line(a_pt[0], a_pt[1], b_pt[0], b_pt[1], self.pw(w), col2, alpha, .butt);
@@ -718,19 +718,19 @@ const Ctx = struct {
             const pp = self.lp(hub, L.hub_pwr_pin.x, L.hub_pwr_pin.y);
             const gp = self.lp(hub, L.hub_gnd_pin.x, L.hub_gnd_pin.y);
             const dim = self.focus and !(self.partActive(cap) or self.partActive(hub));
-            const a: f32 = if (dim) DIM_A * 0.6 else 0.9;
+            const a: f32 = if (dim) dim_a * 0.6 else 0.9;
             // Power-leg ribbon width grows with the loop's inductance share, so
             // the loops dominating the objective read as the fattest.
             const nh = optimizer.loopNh(self.p.parts, L);
             const w = std.math.clamp(1.0 + nh * 0.7, 1.0, 5.0);
-            self.cv.line(cp[0], cp[1], pp[0], pp[1], self.pw(w), AW_PROX, a, .butt);
+            self.cv.line(cp[0], cp[1], pp[0], pp[1], self.pw(w), aw_prox, a, .butt);
             // L2 ground-return path cap_gnd → cap_pwr → hub_pwr → hub_gnd.
             const ret = [_][2]f32{ cg, cp, pp, gp };
-            self.cv.strokePath(&ret, .open, self.pw(1.1), LOOP_RET, a * 0.85);
+            self.cv.strokePath(&ret, .open, self.pw(1.1), loop_ret, a * 0.85);
             if (self.opts.loop_labels) {
                 var buf: [24]u8 = undefined;
                 const s = std.fmt.bufPrint(&buf, "{d:.1}nH", .{nh}) catch "";
-                self.cv.text((cp[0] + pp[0]) / 2, (cp[1] + pp[1]) / 2 - self.pw(6), s, self.pw(8), AW_PROX, a, .middle);
+                self.cv.text((cp[0] + pp[0]) / 2, (cp[1] + pp[1]) / 2 - self.pw(6), s, self.pw(8), aw_prox, a, .middle);
             }
         }
     }
@@ -743,15 +743,15 @@ const Ctx = struct {
         for (r.vias) |v| {
             const c = [_]f32{ self.xpx(v.x), self.ypx(v.y) };
             const rad = @max(self.len(v.dia / 2), self.pw(1.2));
-            self.cv.disc(c[0], c[1], rad, VIA_COL, 1.0);
-            self.cv.disc(c[0], c[1], rad * 0.45, VIA_HOLE, 1.0);
+            self.cv.disc(c[0], c[1], rad, via_col, 1.0);
+            self.cv.disc(c[0], c[1], rad * 0.45, via_hole, 1.0);
         }
     }
 
     fn drawViolations(self: *Ctx, violations: []const drc.Violation) void {
         for (violations) |v| {
             const c = [_]f32{ self.xpx(v.x), self.ypx(v.y) };
-            self.cv.ring(c[0], c[1], self.pw(5), self.pw(1.6), DRC_COL, 1.0);
+            self.cv.ring(c[0], c[1], self.pw(5), self.pw(1.6), drc_col, 1.0);
         }
     }
 
@@ -766,10 +766,10 @@ const Ctx = struct {
             const mm = std.math.hypot(cw[0] - hwd[0], cw[1] - hwd[1]);
             const a = [_]f32{ self.xpx(cw[0]), self.ypx(cw[1]) };
             const b = [_]f32{ self.xpx(hwd[0]), self.ypx(hwd[1]) };
-            self.cv.line(a[0], a[1], b[0], b[1], self.pw(0.6), TEXT_COL, 0.75, .round);
+            self.cv.line(a[0], a[1], b[0], b[1], self.pw(0.6), text_col, 0.75, .round);
             var buf: [24]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "{d:.2}mm", .{mm}) catch "";
-            self.cv.text((a[0] + b[0]) / 2, (a[1] + b[1]) / 2 + self.pw(2), s, self.pw(8), TEXT_COL, 0.95, .middle);
+            self.cv.text((a[0] + b[0]) / 2, (a[1] + b[1]) / 2 + self.pw(2), s, self.pw(8), text_col, 0.95, .middle);
         }
     }
 
@@ -797,7 +797,7 @@ const Ctx = struct {
                 defer if (heap) self.cv.alloc.free(pts);
                 const n = @min(poly.len, pts.len);
                 for (poly[0..n], 0..) |pp, i| pts[i] = .{ self.xpx(pp[0]), self.ypx(pp[1]) };
-                self.cv.strokePath(pts[0..n], .closed, self.pw(1.4), EDGE_COL, 0.9);
+                self.cv.strokePath(pts[0..n], .closed, self.pw(1.4), edge_col, 0.9);
                 self.labelBoardDims(r, x0, y0);
                 return;
             }
@@ -805,7 +805,7 @@ const Ctx = struct {
         const x1 = self.xpx(r.minx + r.w);
         const y1 = self.ypx(r.miny + r.h);
         const pts = [_][2]f32{ .{ x0, y0 }, .{ x1, y0 }, .{ x1, y1 }, .{ x0, y1 }, .{ x0, y0 } };
-        self.cv.strokePath(&pts, .open, self.pw(1.4), EDGE_COL, 0.9);
+        self.cv.strokePath(&pts, .open, self.pw(1.4), edge_col, 0.9);
         self.labelBoardDims(r, x0, y0);
     }
 
@@ -813,7 +813,7 @@ const Ctx = struct {
     fn labelBoardDims(self: *Ctx, r: optimizer.BoardRect, x0: f32, y0: f32) void {
         var buf: [32]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "{d:.0}x{d:.0}mm", .{ r.w, r.h }) catch "";
-        self.cv.text(x0 + self.pw(4), y0 + self.pw(3), s, self.pw(8), EDGE_COL, 0.9, .start);
+        self.cv.text(x0 + self.pw(4), y0 + self.pw(3), s, self.pw(8), edge_col, 0.9, .start);
     }
 
     /// Declared outer-layer copper pours, under the parts: a translucent
@@ -828,7 +828,7 @@ const Ctx = struct {
             const r = export_fab.outlineRect(self.p);
             const x0 = self.xpx(r.minx);
             const y0 = self.ypx(r.miny);
-            const col = if (side == .top) TRACK_TOP else TRACK_BOT;
+            const col = if (side == .top) track_top else track_bot;
             self.cv.fillRect(x0, y0, self.len(r.w), self.len(r.h), col, if (side == .top) 0.10 else 0.12);
             var buf: [96]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "{s} pour - {s}", .{ net, if (side == .top) "F.Cu" else "B.Cu" }) catch "";
@@ -841,24 +841,24 @@ const Ctx = struct {
     fn drawGrid(self: *Ctx) void {
         const step = gridStep(self.p.maxx - self.p.minx, self.p.maxy - self.p.miny);
         const top = self.yoff;
-        const bot = @as(f32, @floatFromInt(self.cv.h - LEGEND_H));
-        const left = self.xpx(self.minx - MARGIN_MM);
-        const right = self.xpx(self.p.maxx + MARGIN_MM);
-        var gx = @ceil((self.minx - MARGIN_MM) / step) * step;
-        while (gx <= self.p.maxx + MARGIN_MM + 1e-6) : (gx += step) {
+        const bot = @as(f32, @floatFromInt(self.cv.h - legend_h_px));
+        const left = self.xpx(self.minx - margin_mm);
+        const right = self.xpx(self.p.maxx + margin_mm);
+        var gx = @ceil((self.minx - margin_mm) / step) * step;
+        while (gx <= self.p.maxx + margin_mm + 1e-6) : (gx += step) {
             const px = self.xpx(gx);
-            self.cv.line(px, top, px, bot, self.pw(0.4), GRID_COL, 0.5, .butt);
+            self.cv.line(px, top, px, bot, self.pw(0.4), grid_col, 0.5, .butt);
             var buf: [16]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "{d:.0}", .{gx}) catch "";
-            self.cv.text(px, bot - self.pw(9), s, self.pw(7), TEXT_DIM, 0.7, .middle);
+            self.cv.text(px, bot - self.pw(9), s, self.pw(7), text_dim, 0.7, .middle);
         }
-        var gy = @ceil((self.miny - MARGIN_MM) / step) * step;
-        while (gy <= self.p.maxy + MARGIN_MM + 1e-6) : (gy += step) {
+        var gy = @ceil((self.miny - margin_mm) / step) * step;
+        while (gy <= self.p.maxy + margin_mm + 1e-6) : (gy += step) {
             const py = self.ypx(gy);
-            self.cv.line(left, py, right, py, self.pw(0.4), GRID_COL, 0.5, .butt);
+            self.cv.line(left, py, right, py, self.pw(0.4), grid_col, 0.5, .butt);
             var buf: [16]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "{d:.0}", .{gy}) catch "";
-            self.cv.text(left + self.pw(2), py - self.pw(3), s, self.pw(7), TEXT_DIM, 0.7, .start);
+            self.cv.text(left + self.pw(2), py - self.pw(3), s, self.pw(7), text_dim, 0.7, .start);
         }
     }
 
@@ -872,7 +872,7 @@ const Ctx = struct {
                 self.lp(old, -old.hw, -old.hh), self.lp(old, old.hw, -old.hh),
                 self.lp(old, old.hw, old.hh),   self.lp(old, -old.hw, old.hh),
             };
-            self.cv.strokePath(&court, .closed, self.pw(0.8), TEXT_DIM, 0.45);
+            self.cv.strokePath(&court, .closed, self.pw(0.8), text_dim, 0.45);
         }
     }
 
@@ -885,8 +885,8 @@ const Ctx = struct {
             if (std.math.hypot(part.x - old.x, part.y - old.y) < 0.05) continue;
             const a = [_]f32{ self.xpx(old.x), self.ypx(old.y) };
             const b = [_]f32{ self.xpx(part.x), self.ypx(part.y) };
-            self.cv.line(a[0], a[1], b[0], b[1], self.pw(1.0), ACCENT, 0.85, .round);
-            self.cv.disc(b[0], b[1], self.pw(2.0), ACCENT, 0.9);
+            self.cv.line(a[0], a[1], b[0], b[1], self.pw(1.0), accent_rgb, 0.85, .round);
+            self.cv.disc(b[0], b[1], self.pw(2.0), accent_rgb, 0.9);
         }
     }
 
@@ -973,19 +973,19 @@ const Ctx = struct {
         for (0..n) |k| {
             const m = marks[k] orelse continue;
             const r = self.pw(8);
-            self.cv.disc(m[0], m[1], r, BG, 0.7);
-            self.cv.ring(m[0], m[1], r, self.pw(1.5), ACCENT, 0.95);
+            self.cv.disc(m[0], m[1], r, bg, 0.7);
+            self.cv.ring(m[0], m[1], r, self.pw(1.5), accent_rgb, 0.95);
             var nb: [4]u8 = undefined;
             const s = std.fmt.bufPrint(&nb, "{d}", .{k + 1}) catch "";
-            self.cv.text(m[0], m[1] - self.pw(4), s, self.pw(8), ACCENT, 1.0, .middle);
+            self.cv.text(m[0], m[1] - self.pw(4), s, self.pw(8), accent_rgb, 1.0, .middle);
         }
         // Panel on the right edge; drops below the blame panel when both are on.
         const x = @as(f32, @floatFromInt(self.cv.w)) - self.pw(215);
         var y = self.yoff + self.pw(6) + (if (self.opts.blame) self.pw(50) else @as(f32, 0));
-        self.cv.text(x, y, "CRITIQUE (fix first)", self.pw(8), TEXT_COL, 0.95, .start);
+        self.cv.text(x, y, "CRITIQUE (fix first)", self.pw(8), text_col, 0.95, .start);
         y += self.pw(12);
         for (0..n) |k| {
-            self.cv.text(x, y, lines[k], self.pw(8), ACCENT, 0.95, .start);
+            self.cv.text(x, y, lines[k], self.pw(8), accent_rgb, 0.95, .start);
             y += self.pw(11);
         }
     }
@@ -1014,7 +1014,7 @@ const Ctx = struct {
         }
         const x = @as(f32, @floatFromInt(self.cv.w)) - self.pw(130);
         var y = self.yoff + self.pw(6);
-        self.cv.text(x, y, "WORST (blame)", self.pw(8), TEXT_COL, 0.95, .start);
+        self.cv.text(x, y, "WORST (blame)", self.pw(8), text_col, 0.95, .start);
         y += self.pw(12);
         for (0..3) |k| {
             if (val[k] < 0) break;
@@ -1034,10 +1034,10 @@ const Ctx = struct {
             const cx = self.xpx(part.x);
             const top = self.ypx(part.y) - self.len(eff_hh) - h - self.pw(2);
             const col = if (self.isUnplaced(part.ref_des))
-                DRC_COL
+                drc_col
             else if (self.focus and self.refHot(part.ref_des))
-                ACCENT
-            else if (part.side == .bottom) SILK_BOT else SILK;
+                accent_rgb
+            else if (part.side == .bottom) silk_bot else silk_rgb;
             var buf: [96]u8 = undefined;
             self.cv.text(cx, top, self.partLabel(pi, &buf), h, col, 1.0, .middle);
         }
@@ -1079,15 +1079,15 @@ const Ctx = struct {
         };
         for (self.opts.texts) |t| {
             if (t.text.len == 0) continue;
-            const pitch = if (t.size > 0) t.size / @as(f64, @floatFromInt(font.GH)) else font.DEFAULT_SIZE_MM / @as(f64, @floatFromInt(font.GH));
-            const adv = @as(f64, @floatFromInt(font.GW + 1)) * pitch;
+            const pitch = if (t.size > 0) t.size / @as(f64, @floatFromInt(font.gh)) else font.default_size_mm / @as(f64, @floatFromInt(font.gh));
+            const adv = @as(f64, @floatFromInt(font.gw + 1)) * pitch;
             const total = @as(f64, @floatFromInt(t.text.len)) * adv - pitch;
             const a = @mod(t.rot, 360.0) * std.math.pi / 180.0;
             const ca = @cos(a);
             const sa = @sin(a);
             for (t.text, 0..) |ch, k| {
                 const gx0 = -total / 2 + @as(f64, @floatFromInt(k)) * adv;
-                const tcol = if (t.bottom) SILK_BOT else SILK;
+                const tcol = if (t.bottom) silk_bot else silk_rgb;
                 const pen = Pen{ .ctx = self, .cx = t.x, .cy = t.y, .gx0 = gx0, .pitch = pitch, .mirror = t.bottom, .ca = ca, .sa = sa, .col = tcol };
                 // The emit callback is infallible (error{}); the exhaustive
                 // switch on the empty error set is a no-op, not a swallowed error.
@@ -1117,8 +1117,8 @@ const Ctx = struct {
                 // pad onto the board (bright-on-dark everywhere).
                 const ty = c[1] - h / 2 + stagger;
                 const tw = raster.Canvas.textWidth(s, h);
-                self.cv.fillRect(c[0] - tw / 2 - self.pw(1), ty - self.pw(1), tw + self.pw(2), h + self.pw(2), BG, 0.55);
-                self.cv.text(c[0], ty, s, h, TEXT_COL, 1.0, .middle);
+                self.cv.fillRect(c[0] - tw / 2 - self.pw(1), ty - self.pw(1), tw + self.pw(2), h + self.pw(2), bg, 0.55);
+                self.cv.text(c[0], ty, s, h, text_col, 1.0, .middle);
             }
         }
     }
@@ -1126,7 +1126,7 @@ const Ctx = struct {
     fn drawHeader(self: *Ctx) void {
         const pad = self.pw(6);
         if (self.opts.title.len > 0) {
-            self.cv.text(pad, self.pw(3), self.opts.title, self.pw(13), TEXT_COL, 1.0, .start);
+            self.cv.text(pad, self.pw(3), self.opts.title, self.pw(13), text_col, 1.0, .start);
         }
         // Objective decomposition — every render is self-documenting.
         const b = self.p.breakdown;
@@ -1136,7 +1136,7 @@ const Ctx = struct {
             "obj {d:.1}  |  hpwl {d:.1}  loop {d:.1}nH  cmp {d:.0}mm2  cong {d:.1}",
             .{ b.objective, b.hpwl, b.loop_nh, b.alignment, b.congestion },
         ) catch "";
-        self.cv.text(pad, self.pw(20), score, self.pw(9), TEXT_DIM, 1.0, .start);
+        self.cv.text(pad, self.pw(20), score, self.pw(9), text_dim, 1.0, .start);
         // Top-right: staging status, so a board that left parts in the band (or
         // auto-filled some) is impossible to mistake for a finished layout. Auto-
         // filled parts are usable but unpinned — amber, between red and green.
@@ -1145,16 +1145,16 @@ const Ctx = struct {
             if (sp.unplaced.len > 0) {
                 var buf3: [64]u8 = undefined;
                 const s3 = std.fmt.bufPrint(&buf3, "{d} UNPLACED (staged)", .{sp.unplaced.len}) catch "";
-                self.cv.text(xr, self.pw(3), s3, self.pw(10), DRC_COL, 1.0, .end);
+                self.cv.text(xr, self.pw(3), s3, self.pw(10), drc_col, 1.0, .end);
                 if (sp.auto_filled.len > 0) {
                     var buf4: [48]u8 = undefined;
                     const s4 = std.fmt.bufPrint(&buf4, "+ {d} AUTO-FILLED", .{sp.auto_filled.len}) catch "";
-                    self.cv.text(xr, self.pw(15), s4, self.pw(9), ACCENT, 1.0, .end);
+                    self.cv.text(xr, self.pw(15), s4, self.pw(9), accent_rgb, 1.0, .end);
                 }
             } else if (sp.auto_filled.len > 0) {
                 var buf3: [64]u8 = undefined;
                 const s3 = std.fmt.bufPrint(&buf3, "{d} AUTO-FILLED", .{sp.auto_filled.len}) catch "";
-                self.cv.text(xr, self.pw(3), s3, self.pw(10), ACCENT, 1.0, .end);
+                self.cv.text(xr, self.pw(3), s3, self.pw(10), accent_rgb, 1.0, .end);
             }
         }
         // Third line: compare Δ if diffing, else the focus caption.
@@ -1163,21 +1163,21 @@ const Ctx = struct {
             const d = b.objective - c.breakdown.objective;
             const sign = if (d >= 0) "+" else "-";
             const s2 = std.fmt.bufPrint(&buf2, "vs base: d_obj {s}{d:.1} ({s})", .{ sign, @abs(d), if (d <= 0) "better" else "worse" }) catch "";
-            self.cv.text(pad, self.pw(32), s2, self.pw(9), if (d <= 0) GOOD_COL else DRC_COL, 1.0, .start);
+            self.cv.text(pad, self.pw(32), s2, self.pw(9), if (d <= 0) good_col else drc_col, 1.0, .start);
         } else if (self.focus) {
-            self.cv.text(pad, self.pw(32), self.caption, self.pw(8), ACCENT, 1.0, .start);
+            self.cv.text(pad, self.pw(32), self.caption, self.pw(8), accent_rgb, 1.0, .start);
         }
     }
 
     fn drawLegend(self: *Ctx, routed: bool) void {
-        const y: f32 = @as(f32, @floatFromInt(self.cv.h - LEGEND_H)) + self.pw(7);
+        const y: f32 = @as(f32, @floatFromInt(self.cv.h - legend_h_px)) + self.pw(7);
         var x = self.pw(6);
-        x = self.legendItem(x, y, AW_PROX, "HOT LOOP");
-        x = self.legendItem(x, y, AW_GND, "GND");
-        x = self.legendItem(x, y, AW_SIG, "SIGNAL");
+        x = self.legendItem(x, y, aw_prox, "HOT LOOP");
+        x = self.legendItem(x, y, aw_gnd, "GND");
+        x = self.legendItem(x, y, aw_sig, "SIGNAL");
         if (routed) {
-            x = self.legendItem(x, y, TRACK_TOP, "F.CU");
-            x = self.legendItem(x, y, TRACK_BOT, "B.CU");
+            x = self.legendItem(x, y, track_top, "F.CU");
+            x = self.legendItem(x, y, track_bot, "B.CU");
             // Inner routable layers (a >2-signal stackup): one entry each,
             // named from the stackup so the legend matches the Gerber files.
             const n_sig = self.p.rules.signalLayerCount();
@@ -1187,12 +1187,12 @@ const Ctx = struct {
                 const nm = self.p.rules.signalLayerName(sig, &lname_buf);
                 x = self.legendItem(x, y, trackColor(sig), nm);
             }
-            x = self.legendItem(x, y, VIA_COL, "VIA");
+            x = self.legendItem(x, y, via_col, "VIA");
         }
-        if (self.focus) x = self.legendItem(x, y, ACCENT, "FOCUS");
+        if (self.focus) x = self.legendItem(x, y, accent_rgb, "FOCUS");
         if (self.opts.spec) |sp| {
-            if (sp.unplaced.len > 0) x = self.legendItem(x, y, DRC_COL, "UNPLACED");
-            if (sp.auto_filled.len > 0) x = self.legendItem(x, y, ACCENT, "AUTO-FILLED");
+            if (sp.unplaced.len > 0) x = self.legendItem(x, y, drc_col, "UNPLACED");
+            if (sp.auto_filled.len > 0) x = self.legendItem(x, y, accent_rgb, "AUTO-FILLED");
         }
     }
 
@@ -1201,7 +1201,7 @@ const Ctx = struct {
         self.cv.fillRect(x, y, sw, sw, col, 1.0);
         const tx = x + sw + self.pw(3);
         const h = self.pw(8);
-        self.cv.text(tx, y, label, h, TEXT_DIM, 1.0, .start);
+        self.cv.text(tx, y, label, h, text_dim, 1.0, .start);
         return tx + raster.Canvas.textWidth(label, h) + self.pw(12);
     }
 
@@ -1219,9 +1219,9 @@ const Ctx = struct {
 /// Colour an airwire by its kind (mirrors BOARD_JS; an if-chain rather than a
 /// switch so the RatKind switch isn't duplicated across modules).
 fn awColor(kind: optimizer.RatKind) Rgb {
-    if (kind == .proximity) return AW_PROX;
-    if (kind == .ground) return AW_GND;
-    return AW_SIG;
+    if (kind == .proximity) return aw_prox;
+    if (kind == .ground) return aw_gnd;
+    return aw_sig;
 }
 
 /// One channel of a linear colour blend.
@@ -1237,7 +1237,7 @@ fn lerpRgb(a: Rgb, b: Rgb, t: f64) Rgb {
 }
 /// Heatmap colour for a normalized blame value: cheap (cool) → expensive (hot).
 fn blameColor(t: f64) Rgb {
-    return if (t < 0.5) lerpRgb(BLAME_LO, BLAME_MID, t * 2) else lerpRgb(BLAME_MID, BLAME_HI, (t - 0.5) * 2);
+    return if (t < 0.5) lerpRgb(blame_lo, blame_mid, t * 2) else lerpRgb(blame_mid, blame_hi, (t - 0.5) * 2);
 }
 /// Reference-grid spacing (mm): 1/2/5/10 so the line count stays legible.
 fn gridStep(span_x: f64, span_y: f64) f64 {
