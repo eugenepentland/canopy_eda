@@ -918,6 +918,8 @@ src/serve/auth.zig::validateBearerToken | fn validateBearerToken(ctx: *Server, r
 src/serve/auth.zig::validatePluginBearerToken | fn validatePluginBearerToken(ctx: *Server, req: *httpz.Request) bool
 src/serve/auth_store.zig::ensureAuthDir | fn ensureAuthDir(auth_dir: []const u8) void
 src/serve/auth_store.zig::sha256Hex | fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) std.mem.Allocator.Error![]u8
+src/serve/board_backup.zig::WriteFileAtomicError value
+src/serve/board_backup.zig::writeFileAtomic | fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, contents: []const u8) WriteFileAtomicError!void
 src/serve/bom_html.zig::BomCounts struct_
 src/serve/bom_html.zig::BomError value
 src/serve/bom_html.zig::SymbolPin struct_
