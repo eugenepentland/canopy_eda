@@ -439,6 +439,7 @@ test {
     _ = @import("serve/auth_store.zig");
     _ = @import("serve/users.zig");
     _ = @import("serve/sync.zig");
+    _ = @import("serve/board_backup.zig");
     _ = @import("serve/component_search.zig");
     _ = @import("serve/digikey.zig");
     _ = @import("serve/rate_limiter.zig");

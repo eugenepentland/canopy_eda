@@ -9,7 +9,6 @@ const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
-const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
 const numeric = @import("../numeric.zig");
@@ -25,6 +24,7 @@ const env_mod = @import("../eval/env.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const pcb_layout = @import("pcb_layout_page.zig");
+const board_backup = @import("board_backup.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
@@ -147,6 +147,16 @@ fn opTargetUuid(m: BoardFp) []const u8 {
     return m.uuid;
 }
 
+/// Footprint-geometry policy for matched (already-placed) parts, from the
+/// sync's query flags. `.auto` — swap only when the board footprint's name
+/// doesn't resolve to the design's (plus per-part 3D-model-drift re-bakes).
+/// `.refresh_all` — `?refresh=1`, re-bake every matched part's geometry.
+/// `.none` — `?no_swap=1`, never emit swap_footprint: matched footprints keep
+/// their existing (often hand-tuned) board lands, and each withheld swap is
+/// tallied in `SyncSummary.swaps_suppressed` instead. `?no_swap=1` wins over
+/// `?refresh=1` when both are set.
+const SwapMode = enum { auto, refresh_all, none };
+
 /// Full request payload for `runSyncPlan`: the board's current footprint
 /// list plus the knobs that influence matching (migration heuristics,
 /// stale-prune mode, applied-op suppression). Built by the file-based PCB
@@ -167,15 +177,13 @@ pub const ParsedSyncPlan = struct {
     /// which pin. The caps then sit on electrically-distinct nets, so the user
     /// rejoins them with copper/zone (or a net-tie). Opt-in via `?dot_nets=1`.
     dot_nets: bool,
-    /// When true, re-bake the footprint geometry of every matched
-    /// (already-placed) part by emitting a same-name `swap_footprint` with a
-    /// freshly-generated definition. `swapFootprint` preserves `at`/`uuid`/
-    /// `layer`/`locked`/custom properties and re-applies pad nets, so the
-    /// part keeps its position, identity, and routing while picking up any
-    /// new silkscreen/fab geometry. Opt-in via `?refresh=1`; the default sync
-    /// leaves placed footprints' geometry untouched. Lets a board built
-    /// before the silk/fab fixes backfill outlines without moving anything.
-    refresh: bool = false,
+    /// Footprint-geometry policy for matched parts — see `SwapMode`. A swap
+    /// (`swapFootprint`) preserves `at`/`uuid`/`layer`/`locked`/custom
+    /// properties and re-applies pad nets, so it never moves a part — but it
+    /// DOES replace the pad geometry with the design library's land pattern,
+    /// which is why `.none` (`?no_swap=1`) exists for boards whose lands are
+    /// hand-tuned and must survive a sync.
+    swap: SwapMode = .auto,
     /// When true (default), a first-insertion sync that seeds parts from the
     /// design's default layout also writes their GND-plane stitching vias into
     /// the board (see `loadSyncVias` + `emitLayoutVias`). Opt-out via
@@ -726,6 +734,10 @@ const SyncSummary = struct {
     /// Surfaced to the user via the agent's result toast so they can
     /// see "the server kept trying to re-do work that already landed."
     suppressed: u32 = 0,
+    /// swap_footprint ops a `?no_swap=1` sync withheld — matched parts whose
+    /// geometry differs from the design library but whose existing board
+    /// lands were deliberately kept (see `SwapMode.none`).
+    swaps_suppressed: u32 = 0,
     /// GND stitching vias emitted when seeding fresh parts from the default
     /// layout (`emitLayoutVias`). Pre-dedup count; the writer reports how many
     /// actually landed (`ApplyStats.vias_added`) after position de-dup.
@@ -948,7 +960,7 @@ pub fn runSyncPlan(
         .spc = &spc,
         .summary = &summary,
         .migrate_heuristic = parsed.migrate_heuristic,
-        .refresh = parsed.refresh,
+        .swap = parsed.swap,
         .sub_blocks = block.sub_blocks,
         .emit_layout_vias = parsed.emit_layout_vias,
         .dot_nets = parsed.dot_nets,
@@ -982,17 +994,7 @@ pub fn runSyncPlan(
     var resp_buf: std.ArrayList(u8) = .empty;
     const rw = resp_buf.writer(handler_alloc);
     const version = serve_root.getLiveVersion(name);
-    try rw.print(
-        "{{\"design_version\":{d},\"summary\":{{" ++
-            "\"updated\":{d},\"relabeled\":{d},\"added\":{d},\"removed\":{d}," ++
-            "\"swapped\":{d},\"flagged_stale\":{d},\"suppressed\":{d},\"vias\":{d}" ++
-            "}},\"sub_circuits\":",
-        .{
-            version,               summary.updated,    summary.relabeled,
-            summary.added,         summary.removed,    summary.swapped,
-            summary.flagged_stale, summary.suppressed, summary.vias,
-        },
-    );
+    try writeSummaryEnvelope(rw, version, summary);
     try rw.writeAll(sub_circuits_json);
     try rw.writeAll(",\"ops\":");
     try rw.writeAll(ops_buf.items);
@@ -1003,6 +1005,24 @@ pub fn runSyncPlan(
         .version = version,
         .summary = summary,
     };
+}
+
+/// Write the sync response's opening — design version + the summary counter
+/// object — up to and including the `"sub_circuits":` key the caller follows
+/// with the sub-circuit list, the ops array, and the closing brace.
+fn writeSummaryEnvelope(w: anytype, version: u64, summary: SyncSummary) !void {
+    try w.print(
+        "{{\"design_version\":{d},\"summary\":{{" ++
+            "\"updated\":{d},\"relabeled\":{d},\"added\":{d},\"removed\":{d}," ++
+            "\"swapped\":{d},\"flagged_stale\":{d},\"suppressed\":{d}," ++
+            "\"swaps_suppressed\":{d},\"vias\":{d}}},\"sub_circuits\":",
+        .{
+            version,               summary.updated,    summary.relabeled,
+            summary.added,         summary.removed,    summary.swapped,
+            summary.flagged_stale, summary.suppressed, summary.swaps_suppressed,
+            summary.vias,
+        },
+    );
 }
 
 const kicad_pcb_reader = @import("../kicad_pcb/reader.zig");
@@ -1027,10 +1047,13 @@ const max_pcb_bytes: usize = 64 * 1024 * 1024;
 /// (`VDD.U18.IN`) as pad nets instead of collapsing to the rail, so each
 /// bypass cap shows which pin it belongs to; `?refresh=1` re-bakes every
 /// matched part's footprint geometry (same-name swap) so an existing board
-/// backfills new silkscreen/fab outlines without moving anything. Every
-/// non-dry write runs the placement guard: if the new board would move,
-/// rotate, or side-flip an existing footprint, the sync answers HTTP 409
-/// and writes nothing.
+/// backfills new silkscreen/fab outlines without moving anything;
+/// `?no_swap=1` does the opposite — no swap_footprint op is emitted at all,
+/// so matched footprints keep their existing (hand-tuned) board lands while
+/// every other op type still flows; the withheld swaps are counted in the
+/// summary's `swaps_suppressed`. Every non-dry write runs the placement
+/// guard: if the new board would move, rotate, or side-flip an existing
+/// footprint, the sync answers HTTP 409 and writes nothing.
 pub fn syncKicadPcbApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
@@ -1050,10 +1073,17 @@ pub fn syncKicadPcbApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     const migrate = !isQueryFlagSet(req, "no_migrate");
     // `?dot_nets=1` keeps each decoupling cap on its own per-pin sub-net.
     const dot_nets = isQueryFlagSet(req, "dot_nets");
-    // `?refresh=1` re-bakes every matched part's footprint geometry (same-name
-    // swap) so a board backfills new silkscreen/fab without moving anything.
-    const refresh = isQueryFlagSet(req, "refresh");
-    runKicadPcbSync(ctx, req, res, name, dry_run, prune_stale, migrate, dot_nets, refresh) catch |err| switch (err) {
+    // Geometry policy for matched parts: `?no_swap=1` keeps every existing
+    // board land (no swap_footprint at all — it wins over `?refresh=1`);
+    // `?refresh=1` re-bakes every matched part's geometry (same-name swap)
+    // so a board backfills new silkscreen/fab without moving anything.
+    const swap: SwapMode = if (isQueryFlagSet(req, "no_swap"))
+        .none
+    else if (isQueryFlagSet(req, "refresh"))
+        .refresh_all
+    else
+        .auto;
+    runKicadPcbSync(ctx, req, res, name, dry_run, prune_stale, migrate, dot_nets, swap) catch |err| switch (err) {
         error.PcbPathUnset => sendError(res, http_bad_request, err_no_pcb_path),
         error.PcbReadFailed => sendError(res, http_internal_error, err_pcb_read_failed),
         error.PcbParseFailed => sendError(res, http_internal_error, err_pcb_parse_failed),
@@ -1093,7 +1123,7 @@ fn runKicadPcbSync(
     prune_stale: bool,
     migrate: bool,
     dot_nets: bool,
-    refresh: bool,
+    swap: SwapMode,
 ) KicadPcbSyncError!void {
     // Resolve the design and its declared PCB path.
     const board_path = try paths.designSourcePath(req.arena, ctx.project_dir, name);
@@ -1131,7 +1161,7 @@ fn runKicadPcbSync(
         .prune_stale = prune_stale,
         .migrate_heuristic = migrate,
         .dot_nets = dot_nets,
-        .refresh = refresh,
+        .swap = swap,
         .emit_layout_vias = !isQueryFlagSet(req, "no_layout_vias"),
         .applied_ops = std.StringHashMapUnmanaged(void).empty,
         .seed_groups = seed.groups,
@@ -1184,7 +1214,7 @@ fn runKicadPcbSync(
             return;
         }
     }
-    if (wrote_file) writeFileAtomic(req.arena, pcb_path, new_pcb) catch return error.PcbWriteFailed;
+    if (wrote_file) board_backup.writeFileAtomic(req.arena, pcb_path, new_pcb) catch return error.PcbWriteFailed;
 
     // Mirror the schematic source (the design `.sexp` + every sub-block module/
     // file it uses, recursively) into a read-only `<design>-source/` folder
@@ -1222,7 +1252,7 @@ fn runKicadPcbSync(
         },
     );
     try rw.print(",\"source_copied\":{d}", .{source_copied});
-    try rw.print(",\"models_copied\":{d}", .{models_copied});
+    try rw.print(",\"models_copied\":{d},\"swaps_suppressed\":{d}", .{ models_copied, run.summary.swaps_suppressed });
     if (lock_warning) |msg| {
         if (wrote_file) {
             try rw.writeAll(",\"warning\":");
@@ -1320,80 +1350,6 @@ fn extractOpsArrayJson(envelope: []const u8) ?[]const u8 {
     const last_brace = std.mem.lastIndexOfScalar(u8, envelope, '}') orelse return null;
     if (last_brace <= start) return null;
     return envelope[start..last_brace];
-}
-
-/// How many timestamped board backups (`<path>.bak-<stamp>`) to keep per
-/// `.kicad_pcb`. Older ones are pruned best-effort after each backup.
-const max_board_backups: usize = 10;
-/// Suffix between the board filename and the backup timestamp.
-const backup_infix = ".bak-";
-/// Subfolder (beside the `.kicad_pcb`) the rolled backups live in, so the
-/// board's own directory isn't littered with `.bak-*` siblings.
-const backup_dir_name = "backups";
-
-/// The `backups/` directory beside `path` where its rolled backups are kept.
-fn backupDirPath(arena: std.mem.Allocator, path: []const u8) std.mem.Allocator.Error![]u8 {
-    const dir = std.fs.path.dirname(path) orelse ".";
-    return std.fs.path.join(arena, &.{ dir, backup_dir_name });
-}
-
-/// Whether `path` currently exists on disk (a missing board = first sync,
-/// nothing to back up yet).
-fn boardExists(path: []const u8) bool {
-    infra_fs.cwd().access(path, .{}) catch return false;
-    return true;
-}
-
-/// Render an epoch-seconds value as `YYYY-MM-DDTHH-MM-SS` — the same
-/// filesystem-safe, lexicographically-sortable stamp the history snapshots
-/// use, so sorting backup filenames sorts them chronologically.
-fn formatBackupStamp(arena: std.mem.Allocator, epoch_sec: u64) std.mem.Allocator.Error![]u8 {
-    const es = std.time.epoch.EpochSeconds{ .secs = epoch_sec };
-    const year_day = es.getEpochDay().calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    const day_sec = es.getDaySeconds();
-    return std.fmt.allocPrint(arena, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}-{d:0>2}-{d:0>2}", .{
-        @as(u32, year_day.year),
-        month_day.month.numeric(),
-        @as(u32, month_day.day_index) + 1,
-        day_sec.getHoursIntoDay(),
-        day_sec.getMinutesIntoHour(),
-        day_sec.getSecondsIntoMinute(),
-    });
-}
-
-/// Best-effort cap on the number of `<path>.bak-*` siblings: keeps the
-/// newest MAX_BOARD_BACKUPS (the stamp sorts chronologically), deletes the
-/// rest. Any failure is logged and ignored — a failed prune must never
-/// fail the sync whose backup already succeeded.
-fn pruneBackups(arena: std.mem.Allocator, path: []const u8) void {
-    pruneBackupsImpl(arena, path) catch |e|
-        log.warn("kicad-pcb backup prune for {s} failed: {s}", .{ path, @errorName(e) });
-}
-
-fn pruneBackupsImpl(arena: std.mem.Allocator, path: []const u8) !void {
-    const backup_dir = try backupDirPath(arena, path);
-    const prefix = try std.fmt.allocPrint(arena, "{s}{s}", .{ std.fs.path.basename(path), backup_infix });
-    var dir = infra_fs.cwd().openDir(backup_dir, .{ .iterate = true }) catch |e| switch (e) {
-        // No backups/ folder yet (e.g. nothing has ever been rolled) → nothing
-        // to prune.
-        error.FileNotFound => return,
-        else => return e,
-    };
-    defer dir.close();
-    var names: std.ArrayList([]const u8) = .empty;
-    var it = dir.iterate();
-    while (try it.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
-        try names.append(arena, try arena.dupe(u8, entry.name));
-    }
-    if (names.items.len <= max_board_backups) return;
-    std.mem.sort([]const u8, names.items, {}, lessThanStr);
-    for (names.items[0 .. names.items.len - max_board_backups]) |n| {
-        dir.deleteFile(n) catch |e|
-            log.warn("kicad-pcb backup prune: delete {s} failed: {s}", .{ n, @errorName(e) });
-    }
 }
 
 // ── Placement guard ──────────────────────────────────────────────────
@@ -1505,49 +1461,6 @@ fn placementViolations(arena: std.mem.Allocator, old_src: []const u8, new_src: [
     if (count > max_placement_violations_listed)
         try mw.print(" (+{d} more)", .{count - max_placement_violations_listed});
     return msg.items;
-}
-
-/// Write `contents` to `path` atomically via tmp file → fsync(file) →
-/// rename. NAS callers concerned about partial visibility through NFS
-/// caches can run `sync` post-hoc; for a human-driven button press the
-/// rename is durable enough in practice.
-fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, contents: []const u8) !void {
-    // Roll the current file to `backups/<name>.bak-<timestamp>` before
-    // overwriting so a bad sync (e.g. an unwanted prune) is one copy away from
-    // undo — the board lives on the NAS, outside git, so this is the only
-    // safety net. Backups live in a `backups/` subfolder beside the board (not
-    // as `.bak-*` siblings) so the KiCad project directory stays tidy.
-    // Timestamped (rather than a single `.bak`) so a quick second push can't
-    // clobber the only good backup; `pruneBackups` keeps the newest
-    // MAX_BOARD_BACKUPS. Abort the whole write if the backup can't be made;
-    // better to fail loudly than overwrite with no fallback. A missing source
-    // board = first sync, nothing to back up yet, so skip the roll entirely
-    // (and don't leave an empty backups/ folder behind).
-    if (boardExists(path)) {
-        const now = clock.timestamp();
-        const stamp = try formatBackupStamp(arena, if (now < 0) 0 else @intCast(now));
-        const backup_dir = try backupDirPath(arena, path);
-        try infra_fs.cwd().makePath(backup_dir);
-        const backup_name = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ std.fs.path.basename(path), backup_infix, stamp });
-        const backup_path = try std.fs.path.join(arena, &.{ backup_dir, backup_name });
-        try infra_fs.cwd().copyFile(path, infra_fs.cwd(), backup_path, .{});
-        pruneBackups(arena, path);
-    }
-
-    const tmp_path = try std.fmt.allocPrint(arena, "{s}.tmp", .{path});
-
-    var tmp = try infra_fs.cwd().createFile(tmp_path, .{ .truncate = true });
-    {
-        defer tmp.close();
-        try tmp.writeAll(contents);
-        // Best-effort durability before the rename. On systems where
-        // fsync isn't supported (in-memory FS in some test sandboxes)
-        // we still want the rename to proceed — surfacing the error
-        // would make the whole sync fail for a non-actionable reason.
-        tmp.sync() catch |e| log.warn("kicad-pcb tmp fsync failed: {s}", .{@errorName(e)});
-    }
-
-    try infra_fs.cwd().rename(tmp_path, path);
 }
 
 // ── Read-only source mirror beside the board ─────────────────────────
@@ -1895,8 +1808,8 @@ const DiffContext = struct {
     spc: *SyncPlanContext,
     summary: *SyncSummary,
     migrate_heuristic: bool,
-    /// Re-bake matched parts' geometry via a same-name swap (see ParsedSyncPlan.refresh).
-    refresh: bool,
+    /// Footprint-geometry policy for matched parts (see ParsedSyncPlan.swap).
+    swap: SwapMode,
     /// The design's top-level sub-blocks (name → module source + scoped block).
     /// `emitStagedAdds` consults these to seed a not-yet-placed sub-block from
     /// *its own* module default layout, as a unit in the staging area, rather
@@ -2406,6 +2319,53 @@ const MatchCounts = struct {
     meta: u32 = 0,
 };
 
+/// Emit (or withhold) the footprint-geometry swap for one matched part;
+/// returns 1 when a material swap op landed, else 0. A swap is wanted when
+/// the board footprint's name doesn't resolve to the design's (`geometry`),
+/// when `?refresh=1` re-bakes every matched part (`refresh`), or when the
+/// part's 3D-model orientation drifted from `model-config.json` (`model` —
+/// the 3D-alignment workflow: realign in the viewer → Save → next push
+/// re-bakes just the drifted parts). `swapFootprint` preserves
+/// at/uuid/layer/locked + custom properties and re-applies pad nets, so a
+/// swap never moves the part — but it DOES replace the pad geometry with the
+/// design library's land pattern. In no-swap mode (`?no_swap=1`) every wanted
+/// swap is therefore withheld and tallied in `summary.swaps_suppressed`
+/// instead: matched footprints keep their existing (often hand-tuned) board
+/// lands while field and pad-net ops flow unchanged. The reason tag lets the
+/// preview modal file the row under "Footprint updates" vs "3D model updates".
+fn emitSwapForMatch(
+    d: *DiffContext,
+    inst: export_kicad.FlatInstance,
+    m: BoardFp,
+    fp_name_short: []const u8,
+    w: anytype,
+    first: *bool,
+) !u32 {
+    const geometry = !footprintNameMatches(d, m.footprint_name, fp_name_short);
+    const rebake = !geometry and
+        (d.swap == .refresh_all or modelDrifted(d, inst, m, fp_name_short));
+    if (!geometry and !rebake) return 0;
+    // Loaded before the no-swap gate so the suppressed tally counts exactly
+    // the swaps a default sync would have planned (a missing lib footprint
+    // never emits — and so never suppresses — anything).
+    const kmod = loadKicadMod(d.spc, fp_name_short, inst.component) orelse return 0;
+    if (d.swap == .none) {
+        d.summary.swaps_suppressed += 1;
+        return 0;
+    }
+    const fp_def = loadFootprintDef(d.spc, fp_name_short);
+    const reason = if (geometry)
+        swap_reason_geometry
+    else if (d.swap == .refresh_all)
+        swap_reason_refresh
+    else
+        swap_reason_model;
+    const target = opTargetUuid(m);
+    try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map, reason);
+    d.summary.swapped += 1;
+    return 1;
+}
+
 fn handleMatched(
     d: *DiffContext,
     inst: export_kicad.FlatInstance,
@@ -2422,32 +2382,7 @@ fn handleMatched(
     // matches until the backfill op lands on a future sync.
     if (m.kicad_uuid.len > 0) try d.matched_uuids.put(d.spc.arena, m.kicad_uuid, {});
     const target = opTargetUuid(m);
-    if (!footprintNameMatches(d, m.footprint_name, fp_name_short)) {
-        if (loadKicadMod(d.spc, fp_name_short, inst.component)) |kmod| {
-            const fp_def = loadFootprintDef(d.spc, fp_name_short);
-            try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map, swap_reason_geometry);
-            d.summary.swapped += 1;
-            counts.material += 1;
-        }
-    } else if (d.refresh or modelDrifted(d, inst, m, fp_name_short)) {
-        // Same-name re-bake. Triggered by `?refresh=1` (re-bake every part's
-        // geometry so a board built before a silk/fab fix picks up the
-        // outlines) OR, on a normal push, when this part's 3D-model orientation
-        // drifted from `model-config.json` — the 3D-alignment workflow: realign
-        // in the viewer → Save → next push re-bakes just the drifted parts.
-        // swapFootprint preserves at/uuid/layer/locked + custom properties and
-        // re-applies pad nets, so nothing moves; only the geometry (incl. the
-        // `(model …)` block via buildKicadMod) is refreshed. The reason tag
-        // lets the preview file the row under "3D model updates" vs
-        // "Footprint updates".
-        if (loadKicadMod(d.spc, fp_name_short, inst.component)) |kmod| {
-            const fp_def = loadFootprintDef(d.spc, fp_name_short);
-            const reason = if (d.refresh) swap_reason_refresh else swap_reason_model;
-            try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map, reason);
-            d.summary.swapped += 1;
-            counts.material += 1;
-        }
-    }
+    counts.material += try emitSwapForMatch(d, inst, m, fp_name_short, w, first);
     // The "old" / "ref" keys on set_field ops are display metadata for the
     // preview modal (rename rows read "FB1 → L2", value rows name the part);
     // the file writer and the IPC agent ignore keys they don't know.
@@ -3724,9 +3659,12 @@ fn emitPadNetOps(
             // carries a net. Clear it only when that net is a single-pad signal
             // the design now puts on a different pad of this instance (a moved
             // pin) — never a multi-pad GND/power net or a net the design
-            // doesn't know, which are left untouched.
+            // doesn't know, which are left untouched. "Moved" also requires the
+            // design's target pad to actually exist on the board footprint —
+            // see `netMovedToAnotherBoardPad` for why (the XTX1 stub case).
             const ck = std.fmt.bufPrint(&ck_buf, "{s}|{s}", .{ ref_des, cp.net }) catch continue;
             if ((d.net_pad_count.get(ck) orelse 0) != 1) continue;
+            if (!netMovedToAnotherBoardPad(pad_net_map, ref_des, cp, client_pads)) continue;
             if (try emitOpUnlessApplied(d, w, first, "set_pad_net", .{
                 .{ "uuid", uuid },
                 .{ "pad", cp.number },
@@ -3738,6 +3676,30 @@ fn emitPadNetOps(
         }
     }
     return emitted;
+}
+
+/// True when the design assigns `stale.net` to a DIFFERENT pad that also
+/// exists on the board footprint — the genuine "moved pin" the stale-pad
+/// clear in `emitPadNetOps` targets. False when the design carries that net
+/// only under pad names the board doesn't have: then the two sides name the
+/// same connection in different pad domains — e.g. a `(stub …)`-modeled part
+/// whose named signals (`HX-`, `EY+`) face the board's numeric pads, like the
+/// XTX1 printed antenna patch — and clearing the board pad would disconnect
+/// copper the design in fact drives. Such pads must be left untouched.
+fn netMovedToAnotherBoardPad(
+    pad_net_map: *std.StringHashMapUnmanaged([]const u8),
+    ref_des: []const u8,
+    stale: PadAssign,
+    client_pads: []const PadAssign,
+) bool {
+    var kb: [256]u8 = undefined;
+    for (client_pads) |other| {
+        if (std.mem.eql(u8, other.number, stale.number)) continue;
+        const k = std.fmt.bufPrint(&kb, "{s}|{s}", .{ ref_des, other.number }) catch continue;
+        const want = pad_net_map.get(k) orelse continue;
+        if (std.mem.eql(u8, want, stale.net)) return true;
+    }
+    return false;
 }
 
 fn writePadNetsArray(
@@ -4125,79 +4087,6 @@ test "writeGeomBlockProtoJson traces a poly as one segment per edge" {
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, buf.items, "BL_F_SilkS"));
 }
 
-// spec: serve/sync - formatBackupStamp renders epoch seconds as a sortable filesystem-safe stamp
-test "formatBackupStamp renders epoch zero as a sortable filesystem-safe stamp" {
-    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer aa.deinit();
-    const stamp = try formatBackupStamp(aa.allocator(), 0);
-    try std.testing.expectEqualStrings("1970-01-01T00-00-00", stamp);
-}
-
-/// Test helper: pre-seed `n` stamped backups of `b.kicad_pcb`. 1969 stamps
-/// sort before any real clock stamp, so a prune must drop the oldest of
-/// these, never the freshly-rolled backup.
-fn writeStaleBackupsForTest(dir: std.fs.Dir, arena: std.mem.Allocator, n: usize) !void {
-    try dir.makePath(backup_dir_name);
-    var bdir = try dir.openDir(backup_dir_name, .{});
-    defer bdir.close();
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const bname = try std.fmt.allocPrint(arena, "b.kicad_pcb.bak-1969-01-01T00-00-{d:0>2}", .{i});
-        try bdir.writeFile(.{ .sub_path = bname, .data = "stale" });
-    }
-}
-
-const BackupScanForTest = struct { count: usize, fresh_holds_old: bool, oldest_present: bool };
-
-/// Test helper: tally the `b.kicad_pcb.bak-*` files in the `backups/` folder —
-/// how many, whether the oldest 1969 stamp survived, and whether the fresh
-/// (real-clock) backup carries the pre-write board contents.
-fn scanBackupsForTest(dir: std.fs.Dir, arena: std.mem.Allocator) !BackupScanForTest {
-    var out = BackupScanForTest{ .count = 0, .fresh_holds_old = false, .oldest_present = false };
-    var bdir = dir.openDir(backup_dir_name, .{ .iterate = true }) catch |e| switch (e) {
-        error.FileNotFound => return out,
-        else => return e,
-    };
-    defer bdir.close();
-    var it = bdir.iterate();
-    while (try it.next()) |entry| {
-        if (!std.mem.startsWith(u8, entry.name, "b.kicad_pcb.bak-")) continue;
-        out.count += 1;
-        if (std.mem.endsWith(u8, entry.name, "1969-01-01T00-00-00")) out.oldest_present = true;
-        if (std.mem.indexOf(u8, entry.name, "1969") == null) {
-            const content = try bdir.readFileAlloc(arena, entry.name, 64);
-            out.fresh_holds_old = std.mem.eql(u8, content, "old-board");
-        }
-    }
-    return out;
-}
-
-// spec: serve/sync - writeFileAtomic rolls a timestamped board backup and prunes beyond MAX_BOARD_BACKUPS
-test "writeFileAtomic rolls a timestamped backup and prunes beyond the cap" {
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer aa.deinit();
-    const arena = aa.allocator();
-
-    const root = try tmp.dir.realpathAlloc(arena, ".");
-    const board_path = try std.fmt.allocPrint(arena, "{s}/b.kicad_pcb", .{root});
-    try tmp.dir.writeFile(.{ .sub_path = "b.kicad_pcb", .data = "old-board" });
-    // Start at the cap so the freshly-rolled backup pushes the count over it.
-    try writeStaleBackupsForTest(tmp.dir, arena, max_board_backups);
-
-    try writeFileAtomic(arena, board_path, "new-board");
-
-    const got = try tmp.dir.readFileAlloc(arena, "b.kicad_pcb", 64);
-    try std.testing.expectEqualStrings("new-board", got);
-    // Cap holds after the new backup joined: the oldest 1969 stamp was pruned
-    // and the fresh backup carries the pre-write contents.
-    const scan = try scanBackupsForTest(tmp.dir, arena);
-    try std.testing.expectEqual(max_board_backups, scan.count);
-    try std.testing.expect(scan.fresh_holds_old);
-    try std.testing.expect(!scan.oldest_present);
-}
-
 // spec: serve/sync - placement guard reports moved, rotated, or side-flipped footprints and exempts adds/removes
 test "placementViolations flags moved and side-flipped parts but not adds or removes" {
     var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -4253,4 +4142,162 @@ test "parseCirclePoints accepts a two-element centre list" {
     try std.testing.expectEqual(@as(f64, 3.0), c.cx);
     try std.testing.expectEqual(@as(f64, 4.0), c.cy);
     try std.testing.expectEqual(@as(f64, 1.5), c.r);
+}
+
+/// Test fixture: every map/list a DiffContext points at, over one arena, so a
+/// test can build a real context without the full runSyncPlan pipeline.
+const TestDiffState = struct {
+    by_uuid: std.StringHashMapUnmanaged(BoardFp) = .empty,
+    by_ref: std.StringHashMapUnmanaged(BoardFp) = .empty,
+    by_kicad_uuid: std.StringHashMapUnmanaged(BoardFp) = .empty,
+    by_migration: std.StringHashMapUnmanaged(BoardFp) = .empty,
+    by_netsig: std.StringHashMapUnmanaged(BoardFp) = .empty,
+    reserved_kicad_uuids: std.StringHashMapUnmanaged(void) = .empty,
+    pad_net_map: std.StringHashMapUnmanaged([]const u8) = .empty,
+    pad_full_net: std.StringHashMapUnmanaged([]const u8) = .empty,
+    net_hub_pins: std.StringHashMapUnmanaged(std.ArrayList(export_kicad.FlatPin)) = .empty,
+    ref_to_section: std.StringHashMapUnmanaged([]const u8) = .empty,
+    staging_layout: StagingLayout = .{ .by_ref = .empty, .max_n = 0 },
+    pending_adds: std.ArrayList(PendingAdd) = .empty,
+    net_pad_count: std.StringHashMapUnmanaged(u32) = .empty,
+    matched_uuids: std.StringHashMapUnmanaged(void) = .empty,
+    canonical_fp_name: std.StringHashMapUnmanaged([]const u8) = .empty,
+    applied_ops: std.StringHashMapUnmanaged(void) = .empty,
+    group_anchors: std.StringHashMapUnmanaged(GroupAnchor) = .empty,
+    summary: SyncSummary = .{},
+
+    fn ctx(self: *TestDiffState, spc: *SyncPlanContext, swap: SwapMode) DiffContext {
+        return .{
+            .by_uuid = &self.by_uuid,
+            .by_ref = &self.by_ref,
+            .by_kicad_uuid = &self.by_kicad_uuid,
+            .by_migration = &self.by_migration,
+            .by_netsig = &self.by_netsig,
+            .reserved_kicad_uuids = &self.reserved_kicad_uuids,
+            .pad_net_map = &self.pad_net_map,
+            .pad_full_net = &self.pad_full_net,
+            .net_hub_pins = &self.net_hub_pins,
+            .ref_to_section = &self.ref_to_section,
+            .staging_layout = &self.staging_layout,
+            .premade_layout = null,
+            .pending_adds = &self.pending_adds,
+            .net_pad_count = &self.net_pad_count,
+            .matched_uuids = &self.matched_uuids,
+            .canonical_fp_name = &self.canonical_fp_name,
+            .applied_ops = &self.applied_ops,
+            .spc = spc,
+            .summary = &self.summary,
+            .migrate_heuristic = false,
+            .swap = swap,
+            .sub_blocks = &.{},
+            .emit_layout_vias = false,
+            .dot_nets = false,
+            .board_fresh = false,
+            .group_anchors = &self.group_anchors,
+        };
+    }
+};
+
+// spec: serve/sync - no-swap mode withholds swap_footprint as swaps_suppressed while set_field ops still flow
+test "no-swap mode suppresses the geometry swap but keeps field ops" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    const project_dir = try tmp.dir.realpathAlloc(arena, ".");
+    try tmp.dir.makePath("lib/footprints");
+    try tmp.dir.writeFile(.{ .sub_path = "lib/footprints/swaptest-0201.sexp", .data = 
+        \\(footprint "C_Test_Land"
+        \\  (pad 1 smd roundrect (pos -0.32 0.00) (size 0.46 0.40))
+        \\  (pad 2 smd roundrect (pos 0.32 0.00) (size 0.46 0.40)))
+    });
+
+    // The board part carries a hand-tuned land whose name doesn't resolve to
+    // the design's footprint, and a stale value — a default sync plans a
+    // geometry swap plus a value set_field; no-swap must withhold ONLY the swap.
+    const inst = export_kicad.FlatInstance{
+        .ref_des = "C1",
+        .component = "swaptest",
+        .value = "100nF",
+        .footprint = "lib:swaptest-0201",
+        .properties = &.{},
+        .uuid = "u-c1",
+    };
+    const m = BoardFp{
+        .uuid = "u-c1",
+        .kicad_uuid = "k-c1",
+        .ref = "C1",
+        .value = "10nF",
+        .footprint_name = "HandTuned_Land",
+        .fields = .{},
+        .pads = &.{},
+        .locked = false,
+    };
+
+    for ([_]SwapMode{ .auto, .none }) |mode| {
+        var model_cfg = export_kicad.loadModelConfig(arena, project_dir);
+        var spc = SyncPlanContext{ .arena = arena, .project_dir = project_dir, .model_cfg = &model_cfg };
+        var state = TestDiffState{};
+        var d = state.ctx(&spc, mode);
+        var buf: std.ArrayList(u8) = .empty;
+        const w = buf.writer(arena);
+        var first = true;
+        var counts = MatchCounts{};
+        try handleMatched(&d, inst, m, "swaptest-0201", null, "", &w, &first, &counts);
+        const swapped_in_ops = std.mem.indexOf(u8, buf.items, "\"op\":\"swap_footprint\"") != null;
+        // The value edit flows in BOTH modes.
+        try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"op\":\"set_field\"") != null);
+        if (mode == .none) {
+            try std.testing.expect(!swapped_in_ops);
+            try std.testing.expectEqual(@as(u32, 1), state.summary.swaps_suppressed);
+            try std.testing.expectEqual(@as(u32, 0), state.summary.swapped);
+        } else {
+            try std.testing.expect(swapped_in_ops);
+            try std.testing.expectEqual(@as(u32, 0), state.summary.swaps_suppressed);
+            try std.testing.expectEqual(@as(u32, 1), state.summary.swapped);
+        }
+    }
+}
+
+// spec: serve/sync - a stale board pad is cleared only when the design nets that signal on another pad the board footprint actually has
+test "stale-pad clear requires the moved-to pad to exist on the board" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+
+    // XTX1 case: the design (a stub) nets TXEMVS_HX- on its NAMED pad "HX-";
+    // the board's pad domain is numeric ("1"). Same net, different pad naming
+    // — NOT a moved pin, so the board pad must keep its net (no op at all).
+    {
+        var state = TestDiffState{};
+        var d = state.ctx(&spc, .auto);
+        try state.pad_net_map.put(arena, "XTX1|HX-", "TXEMVS_HX-");
+        try state.net_pad_count.put(arena, "XTX1|TXEMVS_HX-", 1);
+        var buf: std.ArrayList(u8) = .empty;
+        const w = buf.writer(arena);
+        var first = true;
+        const pads = [_]PadAssign{.{ .number = "1", .net = "TXEMVS_HX-" }};
+        const n = try emitPadNetOps(&d, &w, &first, "k-x1", "XTX1", &state.pad_net_map, &pads);
+        try std.testing.expectEqual(@as(u32, 0), n);
+        try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+    }
+    // Genuine moved pin: the design moved SIG from pad 1 to pad 2, and pad 2
+    // exists on the board — the stale pad 1 is cleared and pad 2 re-netted.
+    {
+        var state = TestDiffState{};
+        var d = state.ctx(&spc, .auto);
+        try state.pad_net_map.put(arena, "R5|2", "SIG");
+        try state.net_pad_count.put(arena, "R5|SIG", 1);
+        var buf: std.ArrayList(u8) = .empty;
+        const w = buf.writer(arena);
+        var first = true;
+        const pads = [_]PadAssign{ .{ .number = "1", .net = "SIG" }, .{ .number = "2", .net = "" } };
+        const n = try emitPadNetOps(&d, &w, &first, "k-r5", "R5", &state.pad_net_map, &pads);
+        try std.testing.expectEqual(@as(u32, 2), n);
+        try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"pad\":\"1\",\"net\":\"\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"pad\":\"2\",\"net\":\"SIG\"") != null);
+    }
 }

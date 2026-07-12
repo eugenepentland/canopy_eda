@@ -829,6 +829,8 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - loadFootprintDefImpl ships a footprint's fab geometry on F.Fab so the synced part keeps its outline
 - writeGeomBlockProtoJson traces a (poly …) outline as boundary segments and emits (rect …) on the block's layer
 - maybeCollapseDotSubNet folds a per-pin sub-net to its rail by default but keeps it verbatim in dot-net mode
+- no-swap mode withholds swap_footprint as swaps_suppressed while set_field ops still flow
+- a stale board pad is cleared only when the design nets that signal on another pad the board footprint actually has
 - formatBackupStamp renders epoch seconds as a sortable filesystem-safe stamp
 - writeFileAtomic rolls a timestamped board backup and prunes beyond MAX_BOARD_BACKUPS
 - placement guard reports moved, rotated, or side-flipped footprints and exempts adds/removes

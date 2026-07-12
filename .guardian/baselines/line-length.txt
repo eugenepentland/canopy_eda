@@ -108,7 +108,7 @@
 12 src/serve/rough_best.zig
 2 src/serve/schematic_page.zig
 10 src/serve/style_score.zig
-31 src/serve/sync.zig
+30 src/serve/sync.zig
 8 src/serve/templates/account.zig
 3 src/serve/templates/auth.zig
 5 src/serve/templates/library.zig
