@@ -4421,9 +4421,9 @@ const tip_poly = "Polygon board outline (L/T shapes, cutout-free " ++
     "the last vertex, Esc cancels. After closing, drag a vertex handle to edit. Saved with the layout (Save/Update); " ++
     "becomes the exact board edge the renderers draw, the board-edge DRC measures, and the Gerber Edge.Cuts traces.";
 const tip_draw = "Route tracks (X): click a pad to start a trace, click to " ++
-    "fix corners (45\u{b0}/grid snapped, Shift = free angle), V drops a via and flips layer, click a same-net pad or " ++
-    "double-click to finish, Backspace steps back, Esc ends. Right-click deletes the track/via under the cursor. " ++
-    "Copper is saved with the layout (Save/Update).";
+    "fix corners (45\u{b0}/grid snapped, / switches the corner posture, Shift = free angle), V drops a via and flips " ++
+    "layer, click a same-net pad or double-click to finish, Backspace steps back, Esc ends. Right-click deletes the " ++
+    "track/via under the cursor. Copper is saved with the layout (Save/Update).";
 const tip_text = "Silkscreen text (T): click on the board to place a label " ++
     "(grid-snapped, on the active side). Click an existing label to edit its content / size / rotation / side, drag to " ++
     "move it, R rotates 90\u{b0}, Del or right-click deletes. Saved with the layout (Save/Update); emitted on the silk " ++
@@ -4611,6 +4611,12 @@ fn writeLayDelta(w: *std.Io.Writer, s: LayoutScore, auto: LayoutScore) std.Io.Wr
 /// Opening tag shared by the board-view toggle chips (Ratsnest / Net colours /
 /// Heatmap / Legend) — extracted so the repeated literal stays in one place.
 const view_chip_open = "<label class=\"view-chip\" ";
+/// Tooltip `title="…">` attributes shared by the embed tabs-row chips and the
+/// Appearance dock's Objects tab (the same toggle renders in both places).
+const tip_rats_attr = "title=\"Show the ratsnest airwires + decoupling-loop overlays (pin-to-pin) — " ++
+    "uncheck to hide them and read the bare placement\">";
+const tip_netcol_attr = "title=\"Give every net its own pad/airwire colour (no-connect white, GND brown, " ++
+    "power warm) so connectivity reads off the board without the schematic\">";
 
 fn writeTabsRow(w: *std.Io.Writer, route_open: bool, with_view_controls: bool) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-tabs\">");
@@ -4628,14 +4634,9 @@ fn writeTabsRow(w: *std.Io.Writer, route_open: bool, with_view_controls: bool) s
     // the tool strip — writeSidebar calls this with `with_view_controls=false`.
     if (with_view_controls) {
         try w.writeAll("<span class=\"tabs-sep\"></span>");
-        try w.writeAll(view_chip_open ++
-            "title=\"Show the ratsnest airwires + decoupling-loop overlays (pin-to-pin) — " ++
-            "uncheck to hide them and read the bare placement\">" ++
+        try w.writeAll(view_chip_open ++ tip_rats_attr ++
             "<input type=\"checkbox\" id=\"v-rats\" checked> Ratsnest</label>");
-        try w.writeAll(view_chip_open ++
-            "title=\"Give every net its own pad/airwire colour — no-connect white, GND " ++
-            "brown, power warm, each signal net a distinct colour — so connectivity " ++
-            "reads off the board without the schematic\">" ++
+        try w.writeAll(view_chip_open ++ tip_netcol_attr ++
             "<input type=\"checkbox\" id=\"v-netcol\"> Net colours</label>");
         try w.writeAll(view_chip_open ++
             "title=\"Tint each part green→red by its share of the objective (cost/blame heatmap)\">" ++
@@ -5173,12 +5174,9 @@ fn writeAppearance(w: *std.Io.Writer) std.Io.Writer.Error!void {
         "<button class=\"ap-tab\" data-aptab=\"ap-objects\">Objects</button></div>" ++
         "<div class=\"ap-pane\" id=\"ap-layers\"></div>" ++
         "<div class=\"ap-pane\" id=\"ap-objects\" hidden>" ++
-        "<label class=\"ap-row\" title=\"Show the ratsnest airwires + decoupling-loop overlays (pin-to-pin) — " ++
-        "uncheck to hide them and read the bare placement\">" ++
+        "<label class=\"ap-row\" " ++ tip_rats_attr ++
         "<input type=\"checkbox\" id=\"v-rats\" checked><span>Ratsnest</span></label>" ++
-        "<label class=\"ap-row\" title=\"Give every net its own pad/airwire colour — no-connect white, GND " ++
-        "brown, power warm, each signal net a distinct colour — so connectivity " ++
-        "reads off the board without the schematic\">" ++
+        "<label class=\"ap-row\" " ++ tip_netcol_attr ++
         "<input type=\"checkbox\" id=\"v-netcol\"><span>Net colours</span></label>" ++
         "<label class=\"ap-row\" title=\"Tint each part green→red by its share of the objective (cost/blame heatmap)\">" ++
         "<input type=\"checkbox\" id=\"v-heat\"><span>Heatmap</span></label>" ++
@@ -7455,6 +7453,15 @@ test "scorebar source classifies the starred default layout" {
     try std.testing.expectEqual(LayoutSource.spec, classifyLayoutSource(null, false, true, null, "best", cached));
     // No starred layout, just the auto cache → cache.
     try std.testing.expectEqual(LayoutSource.cache, classifyLayoutSource(null, false, false, null, null, cached));
+}
+
+// spec: Web Server - The /pcb-layout page names the corner-posture toggle and offers Net colours
+test "draw tooltip names the posture toggle and the Appearance dock offers Net colours" {
+    try std.testing.expect(std.mem.indexOf(u8, tip_draw, "/ switches the corner posture") != null);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeAppearance(&aw.writer);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "id=\"v-netcol\"") != null);
 }
 
 // spec: Web Server - A saved layout round-trips each part's renumber-stable origin key through the sidecar

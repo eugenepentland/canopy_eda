@@ -33,7 +33,7 @@ function visKey(l){return l===0?"top":(l===1?"bottom":("l"+l));}
 // ── Live view state (layers / grid / units) — audit 1.5 ─────────────────
 // Persisted per design in localStorage alongside the existing "pcb-rigid-off:"
 // key. `G` stays the footprint-editor grid constant; snap uses gridMM (0 = off).
-var viewKey="pcb-view:"+PCB.name,viewSt={grid:G,units:"mm",vis:{top:1,bottom:1,silk:1,rats:1,drc:1,edge:1}};
+var viewKey="pcb-view:"+PCB.name,viewSt={grid:G,units:"mm",vis:{top:1,bottom:1,silk:1,rats:1,drc:1,edge:1,netcol:0}};
 for(var _li=2;_li<NSIG;_li++)viewSt.vis["l"+_li]=1; // inner copper defaults visible
 try{var _vs=JSON.parse(localStorage.getItem(viewKey)||"null");if(_vs){
  if(typeof _vs.grid==="number")viewSt.grid=_vs.grid;
@@ -550,14 +550,25 @@ function layerAlpha(layer){if(!viewSt.vis[visKey(layer)])return 0;
 function anyCopperVisible(){for(var i=0;i<LYR.length;i++)if(viewSt.vis[visKey(LYR[i].l)])return true;return false;}
 // cop/only: drag-cache split — cop is the Set of tracks/vias a rigid-group
 // drag translates live; only=false paints the rest, only=true just those.
+// Copper paints per layer in KiCad's order — physical stack bottom-up
+// (B.Cu, deepest inner … first inner, F.Cu) with the ACTIVE layer last, so
+// the layer being routed always reads on top of foreign copper.
+function trackLayerOrder(){var ord=[];
+ if(NSIG>1)ord.push(1);
+ for(var i=NSIG-1;i>=2;i--)ord.push(i);
+ ord.push(0);
+ ord=ord.filter(function(L){return L!==activeLayer;});ord.push(activeLayer);
+ return ord;}
 function paintTracks(ctx,cop,only){
  ctx.lineCap="round";
- (PCB.tracks||[]).forEach(function(t){
-  if(cop&&cop.has(t)!==(only||false))return;
-  var a=layerAlpha(t.l||0);if(a<=0)return;ctx.globalAlpha=a;
-  ctx.strokeStyle=layerColor(t.l||0);
-  ctx.lineWidth=Math.max(t.w*S,1.2);
-  ctx.beginPath();ctx.moveTo(X(t.x1),Y(t.y1));ctx.lineTo(X(t.x2),Y(t.y2));ctx.stroke();});
+ trackLayerOrder().forEach(function(L){
+  var a=layerAlpha(L);if(a<=0)return;
+  ctx.globalAlpha=a;ctx.strokeStyle=layerColor(L);
+  (PCB.tracks||[]).forEach(function(t){
+   if((t.l||0)!==L)return;
+   if(cop&&cop.has(t)!==(only||false))return;
+   ctx.lineWidth=Math.max(t.w*S,1.2);
+   ctx.beginPath();ctx.moveTo(X(t.x1),Y(t.y1));ctx.lineTo(X(t.x2),Y(t.y2));ctx.stroke();});});
  ctx.globalAlpha=1;ctx.lineCap="butt";
  // Vias span every copper layer — hide only when ALL of them are hidden.
  if(!anyCopperVisible())return;
@@ -1056,6 +1067,7 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Polygon outline (Enter close &middot; Backspace undo &middot; Esc cancel)</span><kbd>⬡ Poly, then click vertices</kbd></div>'+
   '<div class="kbd-row"><span>Hand-route mode (click pad → trace)</span><kbd>X</kbd></div>'+
   '<div class="kbd-row"><span>Drop via + flip layer (while routing)</span><kbd>V</kbd></div>'+
+  '<div class="kbd-row"><span>Switch 45&deg; corner posture (while routing)</span><kbd>/</kbd></div>'+
   '<div class="kbd-row"><span>Step back / finish trace</span><kbd>Backspace / Enter &middot; dbl-click</kbd></div>'+
   '<div class="kbd-row"><span>Delete track or via (in route mode)</span><kbd>right-click</kbd></div>'+
   '<div class="kbd-row"><span>Move part (snaps to grid)</span><kbd>drag part</kbd></div>'+
@@ -1906,15 +1918,30 @@ function drawModeSet(on){if(RO)return;drawMode=on;if(!on)dtrace=null;
  if(on&&textMode)txArm(false);
  if(on&&PCB.rulerOff)PCB.rulerOff();
  svg.style.cursor=on?"crosshair":"";drawBtnSync();ovPaintSoon();}
-// 45°-family snap from the last vertex: H / V / diagonal by dominance, on
-// the grid. Shift = free angle (grid only).
-function drawSnap(m,free){var dg=snapG(),gx=Math.round(m.x/dg)*dg,gy=Math.round(m.y/dg)*dg;
- if(free||!dtrace)return {x:gx,y:gy};
- var ax=dtrace.lx,ay=dtrace.ly,dx=gx-ax,dy=gy-ay;
- if(Math.abs(dx)>2*Math.abs(dy))return {x:gx,y:ay};
- if(Math.abs(dy)>2*Math.abs(dx))return {x:ax,y:gy};
- var ml=Math.min(Math.abs(dx),Math.abs(dy));
- return {x:ax+(dx<0?-ml:ml),y:ay+(dy<0?-ml:ml)};}
+// Grid snap for the draw tool. The old H/V/diagonal *projection* is gone:
+// a click now reaches the exact snapped point via drawPath's octilinear
+// leg pair (KiCad's router posture), so nothing gets projected away.
+function drawSnap(m){var dg=snapG();
+ return {x:Math.round(m.x/dg)*dg,y:Math.round(m.y/dg)*dg};}
+// KiCad-style corner posture: the route from the last vertex to the target
+// is up to TWO octilinear legs — one axis-aligned, one 45° diagonal.
+// drawPosture 0 = axis leg first, diagonal into the target ("line then 45°");
+// 1 = diagonal leg first, axis into the target. '/' toggles while routing,
+// exactly like KiCad's interactive router. Returns [target] when one leg
+// already reaches it (pure H/V/45° displacement).
+var drawPosture=0;
+function drawPath(ax,ay,t){
+ var dx=t.x-ax,dy=t.y-ay,adx=Math.abs(dx),ady=Math.abs(dy);
+ if(adx<1e-9||ady<1e-9||Math.abs(adx-ady)<1e-9)return [t];
+ var m=Math.min(adx,ady),sx=dx<0?-1:1,sy=dy<0?-1:1,mid;
+ if(drawPosture===0)mid=(adx>ady)?{x:t.x-sx*m,y:ay}:{x:ax,y:t.y-sy*m};
+ else mid={x:ax+sx*m,y:ay+sy*m};
+ return [mid,t];}
+// Target point + the leg chain that reaches it. Shift = free angle: one
+// direct grid-snapped segment, no posture legs.
+function drawLegs(m,shift){var t=drawTarget(m,shift);
+ if(shift||!dtrace)return {t:t,legs:[t]};
+ return {t:t,legs:drawPath(dtrace.lx,dtrace.ly,t)};}
 function padTarget(m){var i=partAt(m.x,m.y);if(i<0)return null;
  var pd=padAt(i,m.x,m.y);if(!pd)return null;
  var c=wpt(i,pd.x,pd.y);
@@ -2056,20 +2083,27 @@ function drawClick(m,shift){
   routeStatMsg("start a trace on a pad (or existing copper)",true);return;}
  var pt2=padTarget(m);
  if(pt2&&pt2.net&&pt2.net===dtrace.net){
-  if(drawTargetViolates(pt2.x,pt2.y)){routeStatMsg("that would violate clearance — reroute the last leg",true);return;}
-  drawSeg(pt2.x,pt2.y);drawEnd();return;}
+  // Finish on a pad through the SAME posture legs the preview showed, so
+  // the committed copper is exactly the previewed path.
+  var pl=drawPath(dtrace.lx,dtrace.ly,{x:pt2.x,y:pt2.y});
+  if(drawLegsViolate(pl)){routeStatMsg("that would violate clearance — reroute the last leg",true);return;}
+  pl.forEach(function(q){drawSeg(q.x,q.y);});drawEnd();return;}
  if(pt2&&pt2.net&&pt2.net!==dtrace.net){
   routeStatMsg("that pad is on "+nLeaf(pt2.net)+" — trace is on "+nLeaf(dtrace.net),true);return;}
- var s=drawTarget(m,shift);
- if(drawTargetViolates(s.x,s.y)){routeStatMsg("that segment violates clearance (drawn red) — move the corner",true);return;}
- drawSeg(s.x,s.y);drawBtnSync();ovPaintSoon();}
+ var dl=drawLegs(m,shift);
+ if(drawLegsViolate(dl.legs)){routeStatMsg("that segment violates clearance (drawn red) — move the corner",true);return;}
+ dl.legs.forEach(function(q){drawSeg(q.x,q.y);});drawBtnSync();ovPaintSoon();}
 // Resolve the committed target point for a click: magnet first (unless Shift),
-// then the 45°/grid snap.
+// then the grid snap.
 function drawTarget(m,shift){if(!shift){var mg=magSnap(m,dtrace&&dtrace.net);if(mg)return mg;}
- return drawSnap(m,shift);}
-// Would a segment from the last vertex to (x,y) breach clearance?
-function drawTargetViolates(x,y){if(!dtrace)return false;
- return !!segViolation(dtrace.lx,dtrace.ly,x,y,dtrace.l,dtrace.net,dtrace.w/2,dtrace.laid);}
+ return drawSnap(m);}
+// Would the leg chain from the last vertex breach clearance on any leg?
+function drawLegsViolate(legs){if(!dtrace)return false;
+ var fx=dtrace.lx,fy=dtrace.ly;
+ for(var i=0;i<legs.length;i++){
+  if(segViolation(fx,fy,legs[i].x,legs[i].y,dtrace.l,dtrace.net,dtrace.w/2,dtrace.laid))return true;
+  fx=legs[i].x;fy=legs[i].y;}
+ return false;}
 // The signal layer a via drop lands the trace on: the ACTIVE layer when the
 // user parked it somewhere other than the trace's current layer (explicit
 // intent), else the next VISIBLE signal layer in cycle order — so V on a
@@ -2093,16 +2127,20 @@ function drawDelAt(m){var v=drawHitVia(m);
  if(v){recordUndo();PCB.vias=PCB.vias.filter(function(q){return q!==v;});routeStatMsg();ovPaintSoon();scheduleDrc();return;}
  var t=drawHitTrack(m);
  if(t){recordUndo();PCB.tracks=PCB.tracks.filter(function(q){return q!==t;});routeStatMsg();ovPaintSoon();scheduleDrc();}}
-// Rubber-band preview segment from the last vertex to the (snapped) cursor.
-// A magnet hit snaps to a pad/track endpoint; a clearance-violating preview
-// draws RED (dashed) so the user sees a dead short before committing it.
+// Route-head preview: the exact leg chain a click will commit (posture legs
+// from drawPath), drawn SOLID at the real track width with round caps —
+// KiCad-style, so what you see is precisely the copper you get. Only a
+// clearance-violating head goes RED + dashed (the "won't commit" signal).
 function paintDraw(ctx){if(!drawMode||!dtrace||!drawCur)return;
- var s=drawTarget(drawCur,drawShift);
- var bad=!!segViolation(dtrace.lx,dtrace.ly,s.x,s.y,dtrace.l,dtrace.net,dtrace.w/2,dtrace.laid);
- ctx.save();ctx.globalAlpha=bad?0.9:0.7;ctx.lineCap="round";ctx.setLineDash([4,3]);
+ var dl=drawLegs(drawCur,drawShift),s=dl.t;
+ var bad=drawLegsViolate(dl.legs);
+ ctx.save();ctx.globalAlpha=bad?0.9:0.75;ctx.lineCap="round";ctx.lineJoin="round";
+ if(bad)ctx.setLineDash([4,3]);
  ctx.strokeStyle=bad?"#ff4d4d":layerColor(dtrace.l);
  ctx.lineWidth=Math.max(dtrace.w*S,1.2);
- ctx.beginPath();ctx.moveTo(X(dtrace.lx),Y(dtrace.ly));ctx.lineTo(X(s.x),Y(s.y));ctx.stroke();
+ ctx.beginPath();ctx.moveTo(X(dtrace.lx),Y(dtrace.ly));
+ dl.legs.forEach(function(q){ctx.lineTo(X(q.x),Y(q.y));});
+ ctx.stroke();
  // magnet indicator: a small ring at a snapped target
  if(s.mag){ctx.setLineDash([]);ctx.globalAlpha=0.95;ctx.strokeStyle="#7ee787";ctx.lineWidth=1.4;
   ctx.beginPath();ctx.arc(X(s.x),Y(s.y),4,0,6.2832);ctx.stroke();}
@@ -2119,6 +2157,8 @@ document.addEventListener("keydown",function(ev){if(RO||kbTyping(ev.target))retu
  if((ev.key=="x"||ev.key=="X")&&!ev.ctrlKey&&!ev.metaKey){ev.preventDefault();drawModeSet(!drawMode);return;}
  if(!drawMode)return;
  if(ev.key=="v"||ev.key=="V"){ev.preventDefault();drawViaHere();return;}
+ if(ev.key=="/"){ev.preventDefault();drawPosture^=1;
+  routeStatMsg("corner posture: "+(drawPosture?"45° then line":"line then 45°"));ovPaintSoon();return;}
  if(ev.key=="Backspace"){ev.preventDefault();drawBack();return;}
  if(ev.key=="Enter"&&dtrace){ev.preventDefault();drawEnd();return;}});
 // Per-kind marker tooltip. Courtyard/silk have no clearance rule, so the
@@ -2525,6 +2565,7 @@ fitVB(); // initial fit to the container + overlay paint + label visibility
    rows+=chk(id,copperLabel(L),{on:v[visKey(L.l)],c:L.c});});
   rows+=chk("lp-silk","Silk / labels",{on:v.silk,c:"#8b949e"})+
    chk("lp-rats","Ratsnest",{on:v.rats,c:"#9aa7b4"})+
+   chk("lp-netcol","Net colours",{on:v.netcol,c:"linear-gradient(90deg,#e5484d,#f0b72f,#2ec27e,#58a6ff)"})+
    chk("lp-drc","DRC markers",{on:v.drc,c:"#ef4444"})+
    '<div class="lp-sep"></div>'+
    '<label>Active <select id="pcb-actlayer">';
@@ -2532,9 +2573,11 @@ fitVB(); // initial fit to the container + overlay paint + label visibility
    (L.l===0?"Top (F.Cu)":(L.l===1?"Bottom (B.Cu)":L.name))+'</option>';});
   rows+='</select></label>';
   pop.innerHTML=rows;
-  map["lp-silk"]="silk";map["lp-rats"]="rats";map["lp-drc"]="drc";
+  map["lp-silk"]="silk";map["lp-rats"]="rats";map["lp-netcol"]="netcol";map["lp-drc"]="drc";
   Object.keys(map).forEach(function(id){var c=document.getElementById(id);
-   c.addEventListener("change",function(){viewSt.vis[map[id]]=c.checked?1:0;viewSave();paintSoon();drawDrc();rats();});});
+   c.addEventListener("change",function(){viewSt.vis[map[id]]=c.checked?1:0;viewSave();
+    if(map[id]==="netcol")netColSync(); // net-colour state fans out to every control
+    paintSoon();drawDrc();rats();});});
   var al=document.getElementById("pcb-actlayer");al.value=String(activeLayer);
   al.addEventListener("change",function(){var nl=parseInt(al.value,10);
    activeLayer=(nl>=0&&nl<NSIG)?nl:0;if(dtrace)dtrace.l=activeLayer;paintSoon();drawBtnSync();});}
@@ -2561,7 +2604,9 @@ fitVB(); // initial fit to the container + overlay paint + label visibility
     apEyeBtn(key,!!viewSt.vis[key])+'</div>';});
   h+='<div class="ap-h">Board</div>';
   [["silk","F.Silkscreen","#F0F0F0"],["edge","Edge.Cuts","#D0D2CD"],
-   ["rats","Ratsnest","#9aa7b4"],["drc","DRC markers","#f4432c"]].forEach(function(rw){
+   ["rats","Ratsnest","#9aa7b4"],
+   ["netcol","Net colours","linear-gradient(90deg,#e5484d,#f0b72f,#2ec27e,#58a6ff)"],
+   ["drc","DRC markers","#f4432c"]].forEach(function(rw){
    h+='<div class="ap-lrow" data-ap-fixed="'+rw[0]+'">'+
     '<span class="ap-sw" style="background:'+rw[2]+'"></span><span class="ap-name">'+rw[1]+'</span>'+
     apEyeBtn(rw[0],!!viewSt.vis[rw[0]])+'</div>';});
@@ -2577,6 +2622,7 @@ fitVB(); // initial fit to the container + overlay paint + label visibility
     var kv=b.getAttribute("data-ap-eye");
     viewSt.vis[kv]=viewSt.vis[kv]?0:1;viewSave();
     b.classList.toggle("off",!viewSt.vis[kv]);
+    if(kv==="netcol")netColSync(); // net-colour state fans out to every control
     paintSoon();drawDrc();rats();drawBoardRect();});});}
  PCB.apSync=function(){if(!apBox)return;
   apBox.querySelectorAll("[data-ap-layer]").forEach(function(r){
@@ -2692,10 +2738,12 @@ if(legCb)legCb.addEventListener("change",function(){var l=document.getElementByI
 //    pin → white; off, pads go back to copper. Orthogonal to the heatmap
 //    (which tints courtyards). rats() honours the flag, so re-drawing the
 //    ratsnest re-applies the airwire colours.
-//    OPT-IN (KiCad default look is layer-coloured pads): initial state reads
-//    the checkbox, which the server now emits unchecked; pages without the
-//    toggle (read-only embeds) stay in the layer-coloured default.
-var netColOn=(function(){var e=document.getElementById("v-netcol");return e?e.checked:false;})();
+//    OPT-IN (KiCad default look is layer-coloured pads), but the choice
+//    PERSISTS per design in viewSt (localStorage) so it survives reloads.
+//    Three controls drive one state through netColSet: the Objects-tab
+//    checkbox (v-netcol), the Appearance Layers-tab row, and the embed's
+//    layers popover — netColSync keeps them all agreeing.
+var netColOn=!!viewSt.vis.netcol;
 // ── Ratsnest toggle: the airwires + decoupling-loop overlays live in gR;
 //    rats() honours this flag (early-returns after clearing), so once off they
 //    stay hidden through drags/rotations until toggled back on.
@@ -2703,12 +2751,16 @@ var ratsOn=true;
 var ratsCb=document.getElementById("v-rats");
 if(ratsCb)ratsCb.addEventListener("change",function(){ratsOn=ratsCb.checked;rats();});
 function netColorOf(nk){if(!nk||!PCB.netcolor)return null;return PCB.netcolor[nk]||null;}
-function applyNetColors(){paintSoon();} // paint reads netColOn/PCB.netcolor
-var netColCb=document.getElementById("v-netcol");
-if(netColCb)netColCb.addEventListener("change",function(){netColOn=netColCb.checked;
+// Reflect the current netcol state into every control + the legend, repaint.
+function netColSync(){netColOn=!!viewSt.vis.netcol;
+ var cb=document.getElementById("v-netcol");if(cb)cb.checked=netColOn;
  var nl=document.getElementById("net-legend");if(nl)nl.hidden=!netColOn;
- applyNetColors();rats();});
-applyNetColors(); rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();
+ var eye=document.querySelector('[data-ap-eye="netcol"]');if(eye)eye.classList.toggle("off",!netColOn);
+ paintSoon();rats();}
+function netColSet(on){viewSt.vis.netcol=on?1:0;viewSave();netColSync();}
+var netColCb=document.getElementById("v-netcol");
+if(netColCb)netColCb.addEventListener("change",function(){netColSet(netColCb.checked);});
+netColSync(); rats(); showScore(PCB.auto); drawRoute(); drawClr(); drawDrc();
 markUnplaced(PCB.placement&&PCB.placement.unplaced);
 // Populate the DRC count chip on load when the board already carries copper
 // (restored saved routes) — so the fab-readiness signal is honest immediately,
