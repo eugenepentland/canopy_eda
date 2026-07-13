@@ -34,6 +34,7 @@ const schematic_page = @import("serve/schematic_page.zig");
 const editor_page = @import("serve/editor_page.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
 const pcb_describe = @import("serve/pcb_describe.zig");
+const drc_rules = @import("serve/drc_rules.zig");
 const layout_match = @import("serve/layout_match.zig");
 const rough_best = @import("serve/rough_best.zig");
 const modules_page = @import("serve/modules.zig");
@@ -384,6 +385,8 @@ fn registerPcbRoutes(router: anytype) void {
     router.post("/api/pcb-score-batch/:name", pcb_layout_page.pcbScoreBatchApi, .{});
     router.post("/api/pcb-route/:name", pcb_layout_page.pcbRouteApi, .{});
     router.post("/api/pcb-drc/:name", pcb_layout_page.pcbDrcApi, .{});
+    router.get("/api/pcb-drc-rules/:name", drc_rules.getApi, .{});
+    router.post("/api/pcb-drc-rules/:name", drc_rules.setApi, .{});
     router.post("/api/pcb-regen-start/:name", pcb_layout_page.pcbRegenStartApi, .{});
     router.get("/api/pcb-progress/:name", pcb_layout_page.pcbProgressApi, .{});
     router.post("/api/courtyard/:name", pcb_layout_page.savePcbCourtyardApi, .{});

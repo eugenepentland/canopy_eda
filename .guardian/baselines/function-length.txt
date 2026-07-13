@@ -48,8 +48,8 @@
 125 src/serve/library.zig|collectRows
 126 src/serve/mcp_tools.zig|listDesignSummaries
 188 src/serve/pcb_describe.zig|writeDescribeJson
-191 src/serve/pcb_layout_page.zig|pcbLayoutPage
-150 src/serve/pcb_layout_page.zig|saveNamedLayoutApi
+188 src/serve/pcb_layout_page.zig|pcbLayoutPage
+147 src/serve/pcb_layout_page.zig|saveNamedLayoutApi
 125 src/serve/pcb_layout_page.zig|writeBlobHead
 177 src/serve/pcb_layout_page.zig|writePcbData
 150 src/serve/sync.zig|runKicadPcbSync

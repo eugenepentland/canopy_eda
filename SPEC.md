@@ -990,6 +990,8 @@ Public functions: designSourcePath, designSiblingPath
 - An MCP layout mutation snapshots the sidecar to history and bumps the rev like a viewer Save
 - The /pcb-layout page names the corner-posture toggle and offers Net colours
 - A DRC violation carries a stable 4-hex id emitted by the shared JSON writer
+- Per-design DRC rule overrides retag or drop violations before every reporting surface
+- The /pcb-layout Properties dock hosts the inspector with segment editing and DRC rule settings
 
 ## fab_readiness
 

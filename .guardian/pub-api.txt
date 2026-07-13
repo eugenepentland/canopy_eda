@@ -987,7 +987,16 @@ src/serve/digikey.zig::default_base value
 src/serve/digikey.zig::downloadDatasheet | fn downloadDatasheet( allocator: std.mem.Allocator, base: []const u8, client_id: []const u8, client_secret: []const u8, part_number: []const u8, manufacturer: ?[]const u8, ) DatasheetError!DatasheetResult
 src/serve/digikey.zig::resolveMpn | fn resolveMpn( allocator: std.mem.Allocator, base: []const u8, client_id: []const u8, client_secret: []const u8, query: []const u8, limit: usize, ) SearchError![]Product
 src/serve/digikey.zig::searchErrorMessage | fn searchErrorMessage(err: SearchError) []const u8
+src/serve/drc_json.zig::kindStr | fn kindStr(k: drc.Kind) []const u8
 src/serve/drc_json.zig::writeViolation | fn writeViolation(w: *std.Io.Writer, v: drc.Violation) std.Io.Writer.Error!void
+src/serve/drc_rules.zig::Action enum_
+src/serve/drc_rules.zig::Rules struct_
+src/serve/drc_rules.zig::apply | fn apply(alloc: std.mem.Allocator, rules: Rules, list: []const drc.Violation) []const drc.Violation
+src/serve/drc_rules.zig::checkFiltered | fn checkFiltered( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, placement: optimizer.Placement, r: router.RouteResult, clearance: f64, ) []const drc.Violation
+src/serve/drc_rules.zig::getApi | fn getApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/drc_rules.zig::load | fn load(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) Rules
+src/serve/drc_rules.zig::setApi | fn setApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/drc_rules.zig::writeKindsJson | fn writeKindsJson(w: *std.Io.Writer, rules: Rules) std.Io.Writer.Error!void
 src/serve/edit.zig::AssertionFailure struct_
 src/serve/edit.zig::BuildReport struct_
 src/serve/edit.zig::EditError value
