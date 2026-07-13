@@ -19,6 +19,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const geometry = @import("../placement/geometry.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
+const drc_json = @import("drc_json.zig");
 const outline_mod = @import("../placement/outline.zig");
 const pour = @import("../placement/pour.zig");
 const export_fab = @import("../export_fab.zig");
@@ -1919,9 +1920,7 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     try w.writeAll("{\"drc\":[");
     for (violations, 0..) |vio, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\",\"sev\":\"{s}\"}}", .{
-            vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind), drcSevStr(vio.severity),
-        });
+        try writeViolation(w, vio);
     }
     try w.print("],\"n\":{d}}}", .{violations.len});
     res.content_type = .JSON;
@@ -5571,9 +5570,7 @@ fn writeRoutedArrays(
     try w.writeAll("],\"drc\":[");
     for (violations, 0..) |vio, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("{{\"x\":{d},\"y\":{d},\"gap\":{d},\"clr\":{d},\"k\":\"{s}\",\"sev\":\"{s}\"}}", .{
-            vio.x, vio.y, vio.gap, vio.clearance, drcKindStr(vio.kind), drcSevStr(vio.severity),
-        });
+        try writeViolation(w, vio);
     }
     // Names of the nets the router could NOT fully connect — the actionable
     // half of the routed/total count (which connections are missing, not just
@@ -5727,35 +5724,9 @@ fn netNameOf(nets: []const export_kicad.FlatNet, idx: i32) []const u8 {
 }
 
 /// Short label for a DRC violation kind (shown in the marker tooltip).
-fn drcKindStr(k: drc.Kind) []const u8 {
-    return switch (k) {
-        .via_pad => "via↔pad",
-        .via_via => "via↔via",
-        .via_track => "via↔track",
-        .track_track => "track↔track",
-        .track_pad => "track↔pad",
-        .pad_pad => "pad↔pad",
-        .annular => "annular ring",
-        .pad_annular => "pad annular ring",
-        .board_edge => "board edge",
-        .courtyard => "courtyard overlap",
-        .hole_hole => "hole↔hole",
-        .min_drill => "min drill",
-        .track_width => "track width",
-        .mask_sliver => "mask sliver",
-        .silk_over_pad => "silk over pad",
-    };
-}
-
-/// The severity word for a DRC violation kind, matching `drc.Violation.severity`
-/// — surfaced in the JSON so the viewer chip can split the error / warning
-/// counts and the client tooltip can style them apart.
-fn drcSevStr(sev: drc.Severity) []const u8 {
-    return switch (sev) {
-        .err => "err",
-        .warn => "warn",
-    };
-}
+/// DRC violation JSON (incl. the short traceable id) lives in drc_json.zig —
+/// one writer for every surface, so ids can never drift between endpoints.
+const writeViolation = drc_json.writeViolation;
 
 // ── Small helpers ────────────────────────────────────────────────────────
 

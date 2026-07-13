@@ -16,6 +16,7 @@ const httpz = @import("httpz");
 const optimizer = @import("../placement/optimizer.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
+const drc_json = @import("drc_json.zig");
 const outline_mod = @import("../placement/outline.zig");
 const module_policy = @import("../placement/module_policy.zig");
 const layout_lint = @import("../placement/layout_lint.zig");
@@ -80,6 +81,7 @@ pub fn describeDesign(
             .tracks = r.tracks.len,
             .vias = r.vias.len,
             .drc = v.len,
+            .drc_list = v,
             .routed = r.routed,
             .total = r.total,
             .unrouted = r.failed,
@@ -100,6 +102,9 @@ const RoutedSummary = struct {
     tracks: usize,
     vias: usize,
     drc: usize,
+    /// The violations behind the count, each carrying its short traceable id
+    /// (pcb_layout_page.violationId) — same records the viewer shows.
+    drc_list: []const drc.Violation = &.{},
     routed: usize = 0,
     total: usize = 0,
     unrouted: []const []const u8 = &.{},
@@ -319,6 +324,11 @@ fn writeRoutedJson(w: *std.Io.Writer, r: RoutedSummary) std.Io.Writer.Error!void
     for (r.unrouted, 0..) |name_s, i| {
         if (i > 0) try w.writeAll(",");
         try pcb_layout_page.writeJsonStr(w, name_s);
+    }
+    try w.writeAll("],\"drc_list\":[");
+    for (r.drc_list, 0..) |vio, i| {
+        if (i > 0) try w.writeAll(",");
+        try drc_json.writeViolation(w, vio);
     }
     try w.writeAll("]");
     try w.print(",\"ripup_rounds\":{d}", .{r.ripup_rounds});

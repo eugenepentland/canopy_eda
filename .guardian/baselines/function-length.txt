@@ -27,7 +27,7 @@
 153 src/placement/optimizer.zig|packPadAnchored
 149 src/placement/optimizer.zig|prepare
 170 src/placement/optimizer.zig|resolveConstraints
-179 src/placement/router.zig|route
+141 src/placement/router.zig|route
 195 src/render_html.zig|renderToHtml
 128 src/render_html.zig|writeRequirementsDetails
 178 src/render_json.zig|collectGroupConnections

@@ -62,7 +62,7 @@
 1 src/placement/outline.zig
 2 src/placement/pad_shape.zig
 31 src/placement/pour.zig
-66 src/placement/router.zig
+65 src/placement/router.zig
 2 src/render_block_types.zig
 14 src/render_html.zig
 31 src/render_json.zig
