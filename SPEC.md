@@ -177,6 +177,7 @@ Public functions: route, perNetRouted, returnPathViolations
 - reserves diagonal corner cells so later nets keep trace-to-trace clearance
 - escapes a fine-pitch pad through an off-grid gateway stub when no grid lane clears
 - a hemmed breakout keeps its stub clear of foreign pads instead of crossing them
+- keeps every placed via a hole-to-hole wall from every other drilled hole
 
 ## placement/drc
 
@@ -203,6 +204,7 @@ Public functions: check, countKind
 - an oval slot's hole-to-hole clearance is measured end-to-end (capsule), not at its centre
 - flags a thin solder-mask web between two adjacent pad openings, and is a warning
 - flags silkscreen that crosses a foreign pad's mask opening, as a warning
+- auto-places a ref-des clear of foreign pads when a side is free, else flags a boxed-in label
 - flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt
 - flags a track narrower than its net-class width, else the board minimum, as an error
 - existing copper violations are error-severity; only the hygiene checks are warnings
@@ -987,6 +989,7 @@ Public functions: designSourcePath, designSiblingPath
 - readLayoutRev reads the sidecar rev (0 for a legacy file), and a save stamps disk_rev+1
 - An MCP layout mutation snapshots the sidecar to history and bumps the rev like a viewer Save
 - The /pcb-layout page names the corner-posture toggle and offers Net colours
+- A DRC violation carries a stable 4-hex id emitted by the shared JSON writer
 
 ## fab_readiness
 

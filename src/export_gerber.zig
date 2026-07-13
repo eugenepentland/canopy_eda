@@ -438,7 +438,7 @@ fn writePaste(g: *Gx, placement: optimizer.Placement, side: optimizer.Side) Erro
 /// text on this side. Bottom-side text mirrors so it reads correctly when the
 /// board is flipped.
 fn writeSilk(g: *Gx, placement: optimizer.Placement, side: optimizer.Side, texts: []const font.BoardText) Error!void {
-    for (placement.parts) |p| {
+    for (placement.parts, 0..) |p, pi| {
         if (p.side != side) continue;
         try g.use(.c, silk_w_mm, 0);
         for (p.silk_lines) |l| {
@@ -450,7 +450,7 @@ fn writeSilk(g: *Gx, placement: optimizer.Placement, side: optimizer.Side, texts
             const c = optimizer.worldPadCenter(p, ci.cx, ci.cy);
             try strokeCircle(g, c[0], c[1], ci.r);
         }
-        try drawRefDes(g, p);
+        try drawRefDes(g, placement, pi);
     }
     // Board-level user silkscreen text (Text tool / sidecar `texts[]`).
     const bottom = side == .bottom;
@@ -752,17 +752,16 @@ fn quarterRot(rot: f64) bool {
 
 // ── Silkscreen text ─────────────────────────────────────────────────────────
 
-/// Stroke the ref-des in 5x7 pixels centred above the part's courtyard.
-/// Bottom-side parts mirror horizontally (readable from the bottom view).
-fn drawRefDes(g: *Gx, p: optimizer.Part) Error!void {
-    if (p.ref_des.len == 0) return;
-    const q = quarterRot(p.rot);
-    const hh = if (q) p.hw else p.hh;
-    const cc = optimizer.worldPadCenter(p, p.ccx, p.ccy);
-    const ty = cc[1] - hh - (font.gh * text_px_mm) / 2 - 0.2;
-    // Ref-des uppercases (its font predates lowercase) at the fixed 0.15 mm
-    // pitch — kept byte-identical (see TextGeom defaults).
-    try drawText(g, cc[0], ty, p.ref_des, .{ .mirror = p.side == .bottom, .upper = true });
+/// Stroke part `pi`'s ref-des at its auto-placed box (see `pad_shape.refDesBox`,
+/// which the `silk_over_pad` DRC also computes, so the check matches the fab). A
+/// clear part keeps its byte-identical legacy placement. Bottom parts mirror;
+/// uppercases (the font predates lowercase) at the fixed 0.15 mm pitch.
+fn drawRefDes(g: *Gx, placement: optimizer.Placement, pi: usize) Error!void {
+    const p = placement.parts[pi];
+    const s_layer: u8 = if (p.side == .bottom) 1 else 0;
+    const openings = try pad_shape.padOpenings(g.arena, placement, pi, s_layer, placement.rules.design.mask_margin);
+    const b = pad_shape.refDesBox(placement, pi, openings) orelse return;
+    try drawText(g, (b[0] + b[2]) / 2, (b[1] + b[3]) / 2, p.ref_des, .{ .mirror = p.side == .bottom, .upper = true });
 }
 
 /// How a silkscreen string is laid out: the per-pixel pitch (mm), whether x

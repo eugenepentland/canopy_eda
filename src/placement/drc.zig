@@ -17,14 +17,8 @@ const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
 const pad_shape = @import("pad_shape.zig");
 const outline = @import("outline.zig");
-const font = @import("../font5x7.zig");
 const export_kicad = @import("../export_kicad.zig");
 const numeric = @import("../numeric.zig");
-
-/// Silkscreen ref-des pixel pitch (mm) — mirrors `export_gerber.zig`'s
-/// `TEXT_PX_MM`, so the ref-des bounding box the `silk_over_pad` check measures
-/// matches the strokes the Gerber writer actually draws.
-const silk_text_px_mm: f64 = 0.15;
 
 const FlatNet = export_kicad.FlatNet;
 
@@ -510,18 +504,38 @@ fn checkSilkOverPad(
     for (placement.parts, 0..) |part, pi| {
         if (part.silk_lines.len == 0 and part.silk_circles.len == 0 and part.ref_des.len == 0) continue;
         const s_layer: u8 = if (part.side == .bottom) 1 else 0;
-        if (silkOverPadHit(part, pads, pi, s_layer, mask_margin)) |hit| {
+        // The foreign pad openings this part's silk must miss — the SAME set that
+        // auto-places the ref-des (see `refDesBox`), so the label the check draws
+        // is the label the Gerber writer strokes.
+        const openings = try foreignOpenings(arena, pads, pi, s_layer, mask_margin);
+        const rb = pad_shape.refDesBox(placement, pi, openings);
+        if (silkOverPadHit(part, openings, rb)) |hit| {
             try out.append(arena, .{ .x = hit[0], .y = hit[1], .gap = 0, .clearance = 0, .kind = .silk_over_pad, .severity = .warn });
         }
     }
 }
 
-/// The first place `part`'s silkscreen (lines, circles, or ref-des text) crosses
-/// a foreign pad's mask opening on side `s_layer`, or null when it's clear.
-fn silkOverPadHit(part: optimizer.Part, pads: []const PadBox, pi: usize, s_layer: u8, mask_margin: f64) ?[2]f64 {
+/// The foreign pad mask-openings (world boxes) `pi`'s silk is judged against —
+/// every OTHER part's pad that opens on side `s_layer`, grown by `margin`.
+fn foreignOpenings(
+    arena: std.mem.Allocator,
+    pads: []const PadBox,
+    pi: usize,
+    s_layer: u8,
+    margin: f64,
+) std.mem.Allocator.Error![]const [4]f64 {
+    var out: std.ArrayList([4]f64) = .empty;
     for (pads) |p| {
         if (p.part == pi) continue; // own footprint's silk-vs-pad = geometry
-        const ob = padOpening(p, s_layer, mask_margin) orelse continue;
+        if (padOpening(p, s_layer, margin)) |ob| try out.append(arena, ob);
+    }
+    return out.toOwnedSlice(arena);
+}
+
+/// The first place `part`'s silkscreen (lines, circles, or the auto-placed
+/// ref-des box `rb`) crosses one of the foreign `openings`, or null when clear.
+fn silkOverPadHit(part: optimizer.Part, openings: []const [4]f64, rb: ?[4]f64) ?[2]f64 {
+    for (openings) |ob| {
         for (part.silk_lines) |l| {
             const a = optimizer.worldPadCenter(part, l.x1, l.y1);
             const b = optimizer.worldPadCenter(part, l.x2, l.y2);
@@ -531,9 +545,7 @@ fn silkOverPadHit(part: optimizer.Part, pads: []const PadBox, pi: usize, s_layer
             const c = optimizer.worldPadCenter(part, ci.cx, ci.cy);
             if (circleRectHit(c[0], c[1], ci.r, ob)) return .{ c[0], c[1] };
         }
-        if (refDesBox(part)) |rb| {
-            if (boxOverlap(rb, ob)) |hit| return hit;
-        }
+        if (rb) |box| if (boxOverlap(box, ob)) |hit| return hit;
     }
     return null;
 }
@@ -569,31 +581,6 @@ fn checkTrackWidth(
 fn padOpening(p: PadBox, s_layer: u8, margin: f64) ?[4]f64 {
     if (!(p.thru or p.layer == s_layer)) return null;
     return .{ p.x0 - margin, p.y0 - margin, p.x1 + margin, p.y1 + margin };
-}
-
-/// The world-space bounding box of a part's auto ref-des silk strokes, laid out
-/// exactly as `export_gerber.drawRefDes` places them (5×7 glyphs at
-/// `SILK_TEXT_PX_MM` pitch, centred above the courtyard). Null when the part
-/// has no ref-des. Quarter-turned parts use the rotated courtyard half-height.
-fn refDesBox(p: optimizer.Part) ?[4]f64 {
-    if (p.ref_des.len == 0) return null;
-    const px = silk_text_px_mm;
-    const gh: f64 = @floatFromInt(font.gh);
-    const adv = @as(f64, @floatFromInt(font.gw + 1)) * px;
-    const total_w = @as(f64, @floatFromInt(p.ref_des.len)) * adv - px;
-    const height = gh * px;
-    const q = quarterRot(p.rot);
-    const hh = if (q) p.hw else p.hh;
-    const cc = optimizer.worldPadCenter(p, p.ccx, p.ccy);
-    const cy = cc[1] - hh - height / 2 - 0.2;
-    return .{ cc[0] - total_w / 2, cy - height / 2, cc[0] + total_w / 2, cy + height / 2 };
-}
-
-/// True for 90°/270° poses (courtyard w/h swap) — mirrors the same rule in
-/// `export_gerber`/`pad_shape` so the ref-des box lines up with the drawn text.
-fn quarterRot(rot: f64) bool {
-    const qm = @mod(@round(rot), 360);
-    return qm == 90 or qm == 270;
 }
 
 /// If segment (ax,ay)-(bx,by) penetrates the interior of the AABB `box`
@@ -1664,6 +1651,40 @@ test "check flags silkscreen over a foreign pad" {
         .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &r_pad, .fallback = false, .x = 2, .y = 0 },
     };
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&ok_parts), routed, 0.127), .silk_over_pad));
+}
+
+// spec: placement/drc - auto-places a ref-des clear of foreign pads when a side is free, else flags a boxed-in label
+test "check auto-nudges a ref-des to a clear side before flagging silk over a pad" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+
+    // U1's "above" ref-des slot is blocked by R1's pad (R1 sits just above U1),
+    // but the below/beside slots are clear — the label auto-places clear, so the
+    // legacy above-only placement's false positive is gone.
+    const r_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var cp = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.3, .hh = 0.3, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &r_pad, .fallback = false, .y = -1.5 },
+    };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&cp), routed, 0.127), .silk_over_pad));
+
+    // Hem U1's label in with a ring of foreign pads on all four candidate sides:
+    // no clear anchor exists, so the fallback (above) lands on a pad and flags
+    // exactly once (one marker per owner part — not per stroke).
+    const ring = [_]G.Pad{
+        .{ .number = "1", .x = 0, .y = -1.0, .w = 0.6, .h = 0.6 },
+        .{ .number = "2", .x = 0, .y = 1.0, .w = 0.6, .h = 0.6 },
+        .{ .number = "3", .x = 1.3, .y = 0, .w = 0.6, .h = 0.6 },
+        .{ .number = "4", .x = -1.3, .y = 0, .w = 0.6, .h = 0.6 },
+    };
+    var bp = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.3, .hh = 0.3, .pads = &.{}, .fallback = false },
+        .{ .ref_des = "J1", .kind = .hub, .hw = 0.2, .hh = 0.2, .pads = &ring, .fallback = false },
+    };
+    try testing.expectEqual(@as(usize, 1), countKind(try check(arena, partsOnly(&bp), routed, 0.127), .silk_over_pad));
 }
 
 // spec: placement/drc - flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt

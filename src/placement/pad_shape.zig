@@ -14,6 +14,7 @@
 const std = @import("std");
 const optimizer = @import("optimizer.zig");
 const geometry = @import("geometry.zig");
+const font = @import("../font5x7.zig");
 
 /// A pad's world-space collision shape: its bounding box (always) plus, for a
 /// custom pad, the real copper outline in world mm (`poly`; empty ⇒ the box is
@@ -248,6 +249,92 @@ fn segsIntersect(p1: [2]f64, p2: [2]f64, p3: [2]f64, p4: [2]f64) bool {
     return false;
 }
 
+// ── Ref-des silk placement (shared by export_gerber + drc) ───────────────────
+
+/// Silk ref-des stroke pitch (mm) — mirrors `export_gerber.text_px_mm`.
+const silk_px_mm: f64 = 0.15;
+/// Gap (mm) between an auto-placed ref-des box and the courtyard edge it sits
+/// off — the legacy `drawRefDes` offset.
+const label_gap_mm: f64 = 0.2;
+
+/// True for 90°/270° poses (courtyard w/h swap), matching `export_gerber`.
+fn quarterRot(rot: f64) bool {
+    const qm = @mod(@round(rot), 360);
+    return qm == 90 or qm == 270;
+}
+
+/// The foreign pad mask-openings (world boxes, grown by `margin`) that part
+/// `pi`'s silk must miss — every OTHER part's pad opening on side `s_layer` (its
+/// side, or any through-hole). One source of truth for both the Gerber ref-des
+/// auto-placement and the silk-over-pad DRC, so the drawn label and the check
+/// agree on where the pads are.
+pub fn padOpenings(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    pi: usize,
+    s_layer: u8,
+    margin: f64,
+) std.mem.Allocator.Error![]const [4]f64 {
+    var out: std.ArrayList([4]f64) = .empty;
+    for (placement.parts, 0..) |q, qi| {
+        if (qi == pi) continue;
+        const ql: u8 = if (q.side == .bottom) 1 else 0;
+        for (q.pads) |pad| {
+            if (!(pad.thru or ql == s_layer)) continue;
+            const b = try worldShape(arena, q, pad);
+            try out.append(arena, .{ b.x0 - margin, b.y0 - margin, b.x1 + margin, b.y1 + margin });
+        }
+    }
+    return out.toOwnedSlice(arena);
+}
+
+/// The world bounding box of part `pi`'s auto-placed ref-des silk, or null when
+/// it has no ref-des. The label box is tried above → below → right → left of the
+/// courtyard (a `label_gap_mm` margin off each edge); the first side clear of
+/// every `opening` wins, falling back to ABOVE (the legacy position) when the
+/// label is boxed in on all four — so a clear part keeps its byte-identical
+/// placement and a genuinely hemmed-in label is still drawn (and DRC-flagged).
+pub fn refDesBox(placement: optimizer.Placement, pi: usize, openings: []const [4]f64) ?[4]f64 {
+    const p = placement.parts[pi];
+    if (p.ref_des.len == 0) return null;
+    const adv = @as(f64, @floatFromInt(font.gw + 1)) * silk_px_mm;
+    const tw = @as(f64, @floatFromInt(p.ref_des.len)) * adv - silk_px_mm;
+    const th = @as(f64, @floatFromInt(font.gh)) * silk_px_mm;
+    const q = quarterRot(p.rot);
+    const hw = if (q) p.hh else p.hw;
+    const hh = if (q) p.hw else p.hh;
+    const cc = optimizer.worldPadCenter(p, p.ccx, p.ccy);
+    const gap = label_gap_mm;
+    const cands = [_][2]f64{
+        .{ cc[0], cc[1] - hh - th / 2 - gap }, // above (legacy)
+        .{ cc[0], cc[1] + hh + th / 2 + gap }, // below
+        .{ cc[0] + hw + tw / 2 + gap, cc[1] }, // right
+        .{ cc[0] - hw - tw / 2 - gap, cc[1] }, // left
+    };
+    var a = cands[0];
+    for (cands) |c| {
+        if (labelClear(c, tw, th, openings)) {
+            a = c;
+            break;
+        }
+    }
+    return .{ a[0] - tw / 2, a[1] - th / 2, a[0] + tw / 2, a[1] + th / 2 };
+}
+
+/// True when the label box centred at `a` (size `tw`×`th`) strictly overlaps no
+/// `opening` — edge-touching counts as clear.
+fn labelClear(a: [2]f64, tw: f64, th: f64, openings: []const [4]f64) bool {
+    const bx0 = a[0] - tw / 2;
+    const by0 = a[1] - th / 2;
+    const bx1 = a[0] + tw / 2;
+    const by1 = a[1] + th / 2;
+    const e: f64 = 1e-9;
+    for (openings) |o| {
+        if (bx1 > o[0] + e and bx0 < o[2] - e and by1 > o[1] + e and by0 < o[3] - e) return false;
+    }
+    return true;
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -339,4 +426,31 @@ test "worldShape rotated-rectangle box corners are centre minus/plus the half-ex
     try testing.expectApproxEqAbs(@as(f64, 20) - r, s.y0, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 10) + r, s.x1, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 20) + r, s.y1, 1e-9);
+}
+
+test "refDesBox keeps the above anchor when clear and nudges to the next free side" {
+    const p = optimizer.Part{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false };
+    var parts = [_]optimizer.Part{p};
+    const pl = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 2,
+        .maxy = 2,
+        .generated = true,
+    };
+    // No openings ⇒ the box sits ABOVE the courtyard (legacy). "U1" is 2 glyphs
+    // wide; the box centre y is -hh - th/2 - gap = -0.5 - 0.525 - 0.2 = -1.225.
+    const above = refDesBox(pl, 0, &.{}).?;
+    try testing.expectApproxEqAbs(@as(f64, -1.225), (above[1] + above[3]) / 2, 1e-9);
+    // An opening straddling the above slot pushes the label BELOW (centre +1.225).
+    const block = [_][4]f64{.{ -2, -2, 2, -0.7 }};
+    const below = refDesBox(pl, 0, &block).?;
+    try testing.expectApproxEqAbs(@as(f64, 1.225), (below[1] + below[3]) / 2, 1e-9);
 }

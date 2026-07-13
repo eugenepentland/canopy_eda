@@ -638,7 +638,9 @@ src/placement/outline.zig::roundedRectPoly | fn roundedRectPoly(alloc: std.mem.A
 src/placement/outline.zig::segCrossesEdge | fn segCrossesEdge(poly: []const [2]f64, x1: f64, y1: f64, x2: f64, y2: f64) ?[2]f64
 src/placement/outline.zig::signedInset | fn signedInset(poly: []const [2]f64, x: f64, y: f64) f64
 src/placement/pad_shape.zig::Shape struct_
+src/placement/pad_shape.zig::padOpenings | fn padOpenings( arena: std.mem.Allocator, placement: optimizer.Placement, pi: usize, s_layer: u8, margin: f64, ) std.mem.Allocator.Error![]const [4]f64
 src/placement/pad_shape.zig::pointDist | fn pointDist(x0: f64, y0: f64, x1: f64, y1: f64, poly: []const [2]f64, px: f64, py: f64, slack: f64) f64
+src/placement/pad_shape.zig::refDesBox | fn refDesBox(placement: optimizer.Placement, pi: usize, openings: []const [4]f64) ?[4]f64
 src/placement/pad_shape.zig::shapeGap | fn shapeGap(a: Shape, b: Shape, slack: f64) f64
 src/placement/pad_shape.zig::worldShape | fn worldShape(arena: std.mem.Allocator, part: optimizer.Part, pad: geometry.Pad) std.mem.Allocator.Error!Shape
 src/placement/pin_roles.zig::NcRequirement enum_
@@ -985,6 +987,7 @@ src/serve/digikey.zig::default_base value
 src/serve/digikey.zig::downloadDatasheet | fn downloadDatasheet( allocator: std.mem.Allocator, base: []const u8, client_id: []const u8, client_secret: []const u8, part_number: []const u8, manufacturer: ?[]const u8, ) DatasheetError!DatasheetResult
 src/serve/digikey.zig::resolveMpn | fn resolveMpn( allocator: std.mem.Allocator, base: []const u8, client_id: []const u8, client_secret: []const u8, query: []const u8, limit: usize, ) SearchError![]Product
 src/serve/digikey.zig::searchErrorMessage | fn searchErrorMessage(err: SearchError) []const u8
+src/serve/drc_json.zig::writeViolation | fn writeViolation(w: *std.Io.Writer, v: drc.Violation) std.Io.Writer.Error!void
 src/serve/edit.zig::AssertionFailure struct_
 src/serve/edit.zig::BuildReport struct_
 src/serve/edit.zig::EditError value

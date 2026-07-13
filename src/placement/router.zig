@@ -238,6 +238,41 @@ fn greedyPass(
     }
 }
 
+/// `buildRouteCtx` outcome: `.empty` (0-node grid) / `.overflow` (past `max_nodes`).
+const CtxResult = union(enum) { ok: Ctx, empty, overflow };
+
+/// Build the routing grid + base `Ctx` that `route` and `groundVias` share
+/// verbatim (they MUST stay in lockstep): grid pitch sized to the WIDEST net
+/// class, obstacles = every pad (mirroring `drc.zig`); `.pour` filled by `route`.
+fn buildRouteCtx(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    params: RouteParams,
+) std.mem.Allocator.Error!CtxResult {
+    const maxp = maxRouteParams(placement, params);
+    const g = @max(maxp.track_width + maxp.clearance, 0.05);
+    const margin = 1.0;
+    const nx = numeric.toCount(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
+    const ny = numeric.toCount(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
+    if (nx * ny == 0) return .empty;
+    if (nx * ny > max_nodes) return .overflow;
+    const n_signal: usize = placement.rules.signalLayerCount();
+    const obs = try buildObstacles(arena, placement.parts, placement.nets);
+    return .{ .ok = .{
+        .arena = arena,
+        .grid = .{ .ox = placement.minx - margin, .oy = placement.miny - margin, .g = g, .nx = nx, .ny = ny },
+        .obs = obs,
+        .reach = params.track_width / 2 + params.clearance,
+        .occ = try allocLayerGrids(arena, n_signal, nx * ny),
+        .resv = try allocLayerGrids(arena, n_signal, nx * ny),
+        .params = params,
+        .base = params,
+        .index_reach = maxp.track_width / 2 + maxp.clearance,
+        .has_bottom_pads = anyBottomPads(obs),
+        .hole_to_hole = placement.rules.design.hole_to_hole,
+    } };
+}
+
 /// Route `placement` under `params`. All output is allocated in `arena`.
 pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams) std.mem.Allocator.Error!RouteResult {
     var tracks: std.ArrayList(Track) = .empty;
@@ -248,54 +283,16 @@ pub fn route(arena: std.mem.Allocator, placement: optimizer.Placement, params: R
     var idx_of = std.StringHashMapUnmanaged(usize).empty;
     for (placement.parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
 
-    // Grid pitch sized to the WIDEST class on the board, so adjacent occupied
-    // grid lines satisfy clearance even between the widest pair of nets.
-    // No (net-class …) forms ⇒ maxp == params ⇒ the legacy grid, unchanged.
-    const maxp = maxRouteParams(placement, params);
-    const g = @max(maxp.track_width + maxp.clearance, 0.05);
-    const margin = 1.0;
-    const ox = placement.minx - margin;
-    const oy = placement.miny - margin;
-    const nx = numeric.toCount(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
-    const ny = numeric.toCount(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
-    if (nx * ny == 0 or nx * ny > max_nodes) {
-        return .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0, .grid_overflow = nx * ny > max_nodes };
-    }
-    const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
-
-    // Routed-copper occupancy per SIGNAL layer (one net per grid line ⇒
-    // adjacent lines are track+clearance apart, satisfying trace-to-trace
-    // DRC). The layer count comes from the stackup: the two outer faces plus
-    // every plane-free inner copper layer (legacy no-form boards stay at 2).
-    const n_signal: usize = placement.rules.signalLayerCount();
-    const occ = try allocLayerGrids(arena, n_signal, nx * ny);
-    // Diagonal corner reservations (see `emitPath`) — cells no foreign copper
-    // may enter, but which are NOT the net's own copper (never Dijkstra sources).
-    const resv = try allocLayerGrids(arena, n_signal, nx * ny);
-
-    // Pad obstacles: *every* pad's rectangle + its net — including pads on no
-    // net (net −1), so a via/trace keeps clearance from NC/mechanical pads too.
-    // Mirrors `drc.zig`'s pad set exactly, so what the router avoids is exactly
-    // what the DRC checks.
-    const obs = try buildObstacles(arena, placement.parts, placement.nets);
-
-    // Route each net. Ground → plane vias; others → maze on the signal layers.
-    const reach = params.track_width / 2 + params.clearance;
-    var ctx = Ctx{
-        .arena = arena,
-        .grid = grid,
-        .obs = obs,
-        .reach = reach,
-        .occ = occ,
-        .resv = resv,
-        .params = params,
-        .base = params,
-        .index_reach = maxp.track_width / 2 + maxp.clearance,
-        .has_bottom_pads = anyBottomPads(obs),
-        .pour = .{
-            placement.rules.pourNetOnSide(.top) != null,
-            placement.rules.pourNetOnSide(.bottom) != null,
-        },
+    // Grid + base Ctx — the setup `route`/`groundVias` share (`buildRouteCtx`);
+    // only `route` fills `.pour`. Ground → plane vias, others → maze.
+    var ctx = switch (try buildRouteCtx(arena, placement, params)) {
+        .ok => |c| c,
+        .empty => return .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 },
+        .overflow => return .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0, .grid_overflow = true },
+    };
+    ctx.pour = .{
+        placement.rules.pourNetOnSide(.top) != null,
+        placement.rules.pourNetOnSide(.bottom) != null,
     };
     var routed: usize = 0;
     var total: usize = 0;
@@ -433,34 +430,10 @@ pub fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, para
     var idx_of = std.StringHashMapUnmanaged(usize).empty;
     for (placement.parts, 0..) |p, i| try idx_of.put(arena, p.ref_des, i);
 
-    // Same max-class pitch as `route` (MUST stay in lockstep — see doc above).
-    const gmaxp = maxRouteParams(placement, params);
-    const g = @max(gmaxp.track_width + gmaxp.clearance, 0.05);
-    const margin = 1.0;
-    const ox = placement.minx - margin;
-    const oy = placement.miny - margin;
-    const nx = numeric.toCount(@ceil((placement.maxx - placement.minx + 2 * margin) / g) + 1);
-    const ny = numeric.toCount(@ceil((placement.maxy - placement.miny + 2 * margin) / g) + 1);
-    if (nx * ny == 0 or nx * ny > max_nodes) return &.{};
-    const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
-
-    const n_signal: usize = placement.rules.signalLayerCount();
-    const occ = try allocLayerGrids(arena, n_signal, nx * ny);
-    const resv = try allocLayerGrids(arena, n_signal, nx * ny);
-    const obs = try buildObstacles(arena, placement.parts, placement.nets);
-    const reach = params.track_width / 2 + params.clearance;
-    const maxp = maxRouteParams(placement, params);
-    var ctx = Ctx{
-        .arena = arena,
-        .grid = grid,
-        .obs = obs,
-        .reach = reach,
-        .occ = occ,
-        .resv = resv,
-        .params = params,
-        .base = params,
-        .index_reach = maxp.track_width / 2 + maxp.clearance,
-        .has_bottom_pads = anyBottomPads(obs),
+    // Same grid + base Ctx `route` builds — see `buildRouteCtx`.
+    var ctx = switch (try buildRouteCtx(arena, placement, params)) {
+        .ok => |c| c,
+        else => return &.{},
     };
 
     for (placement.nets, 0..) |net, net_i| {
@@ -816,6 +789,24 @@ fn viaClearsVias(ctx: *Ctx, placed: []const Via, x: f64, y: f64, net: i32) bool 
     return true;
 }
 
+/// True if a via drilled at (x,y) keeps the hole-to-hole WALL from every placed
+/// via's drill, so the web is manufacturable. Ignores net: two same-net GND vias
+/// still need a wall between their drills (the `hole↔hole` DRC rule, which
+/// same-net copper clearance doesn't enforce). Centre distance ≥ the two drill
+/// radii + the rule (matching `drc.checkDrillRules`); a coincident duplicate is
+/// skipped. Foreign PAD holes need no test — copper clearance dominates the wall.
+fn viaClearsHoles(ctx: *Ctx, placed: []const Via, x: f64, y: f64) bool {
+    const vr = ctx.params.via_drill / 2;
+    if (vr <= 0) return true;
+    for (placed) |v| {
+        if (v.drill <= 0) continue;
+        const d = std.math.hypot(x - v.x, y - v.y);
+        if (d < 1e-6) continue; // coincident duplicate — no wall to lose
+        if (d < vr + v.drill / 2 + ctx.hole_to_hole - 1e-9) return false;
+    }
+    return true;
+}
+
 /// True if a via of the configured size at (x,y) on net `net` keeps copper
 /// clearance from every routed track on a *different* net — the via↔track rule
 /// the DRC then re-checks (so an escape via can't be dropped on foreign copper).
@@ -987,6 +978,7 @@ fn escapeFan(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, d
             const s = [2]f64{ a[0] + rad * @cos(ang), a[1] + rad * @sin(ang) };
             if (!viaClearsPads(ctx, s[0], s[1], net)) continue;
             if (!viaClearsVias(ctx, placed, s[0], s[1], net)) continue;
+            if (!viaClearsHoles(ctx, placed, s[0], s[1])) continue;
             if (!viaClearsTracks(ctx, tracks, s[0], s[1], net)) continue;
             // The stub itself must clear every foreign pad, placed via, and
             // routed track — all are fixed and won't re-check this later
@@ -1066,7 +1058,8 @@ fn findGroundVia(ctx: *Ctx, placed: []const Via, c: [2]f64, net: i32) ?[2]f64 {
     // the pad is large enough to clear its neighbours).
     {
         const s = grid.snap(c[0], c[1]);
-        if (viaClearsPads(ctx, s[0], s[1], net) and viaClearsVias(ctx, placed, s[0], s[1], net) and segClearsPads(ctx, c, s, net))
+        if (viaClearsPads(ctx, s[0], s[1], net) and viaClearsVias(ctx, placed, s[0], s[1], net) and
+            viaClearsHoles(ctx, placed, s[0], s[1]) and segClearsPads(ctx, c, s, net))
             return s;
     }
     // Otherwise fan outward (away from foreign pads) in growing rings, snapping
@@ -1082,6 +1075,7 @@ fn findGroundVia(ctx: *Ctx, placed: []const Via, c: [2]f64, net: i32) ?[2]f64 {
             const s = grid.snap(c[0] + rad * @cos(a), c[1] + rad * @sin(a));
             if (!viaClearsPads(ctx, s[0], s[1], net)) continue;
             if (!viaClearsVias(ctx, placed, s[0], s[1], net)) continue;
+            if (!viaClearsHoles(ctx, placed, s[0], s[1])) continue;
             if (!segClearsPads(ctx, c, s, net)) continue;
             return s;
         }
@@ -1109,6 +1103,7 @@ fn findStitchVia(ctx: *Ctx, placed: []const Via, tracks: []const Track, c: [2]f6
             if (std.math.hypot(s[0] - c[0], s[1] - c[1]) > max_r) continue;
             if (!viaClearsPads(ctx, s[0], s[1], net)) continue;
             if (!viaClearsVias(ctx, placed, s[0], s[1], net)) continue;
+            if (!viaClearsHoles(ctx, placed, s[0], s[1])) continue;
             if (!viaClearsTracks(ctx, tracks, s[0], s[1], net)) continue;
             return s;
         }
@@ -1311,6 +1306,9 @@ const Ctx = struct {
     /// The caller's defaults, kept pristine so each net's overlay starts
     /// from the same base.
     base: RouteParams = .{},
+    /// Hole-to-hole wall (mm) via placement keeps from every placed via drill —
+    /// `placement.rules.design.hole_to_hole` (see `viaClearsHoles`).
+    hole_to_hole: f64 = 0.25,
     /// Pad-index prefilter reach — the MAX reach any net class can need, so
     /// the lazily-built PadGrid stays a superset for every net (exact tests
     /// still use the per-net `reach`).
@@ -3200,6 +3198,56 @@ test "perNetRouted totals a net's routed copper length and via count" {
     for (r.tracks) |t| sum += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
     try testing.expectApproxEqAbs(sum, per[0].mm, 1e-6);
     try testing.expectEqual(r.vias.len, per[0].vias);
+}
+
+// spec: placement/router - keeps every placed via a hole-to-hole wall from every other drilled hole
+test "same-net ground vias keep a manufacturable hole-to-hole wall" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+
+    // A hub with two GND pads 0.4 mm apart on a big open courtyard. Both are on
+    // the (implicitly planed) GND net, so pass 1 drops a via at each. At the
+    // 0.4 mm pad pitch a naive via-in-pad pair sits 0.4 mm centre-to-centre —
+    // with the 0.2 mm default drill that is a 0.2 mm wall, under the 0.25 mm
+    // hole-to-hole rule. The placer must fan the second via clear.
+    const pads = [_]G.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.3, .h = 0.3 },
+        .{ .number = "2", .x = 0.4, .y = 0, .w = 0.3, .h = 0.3 },
+    };
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+    };
+    const gnd = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "U1", .pin = "2" } };
+    const nets = [_]FlatNet{.{ .name = "GND", .pins = &gnd }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2.5,
+        .miny = -2.5,
+        .maxx = 2.5,
+        .maxy = 2.5,
+        .generated = true,
+    };
+    const r = try route(arena, placement, .{});
+    // Both GND pads are still served by a via (connectivity preserved)…
+    try testing.expect(r.vias.len >= 2);
+    // …and every drilled-hole pair clears the wall rule: centre distance is at
+    // least the two drill radii plus the 0.25 mm default hole-to-hole.
+    for (r.vias, 0..) |a, i| {
+        if (a.drill <= 0) continue;
+        for (r.vias[i + 1 ..]) |b| {
+            if (b.drill <= 0) continue;
+            const d = std.math.hypot(a.x - b.x, a.y - b.y);
+            try testing.expect(d >= a.drill / 2 + b.drill / 2 + 0.25 - 1e-6);
+        }
+    }
 }
 
 // spec: placement/router - rip-up runs no rounds when the greedy pass already routed every net

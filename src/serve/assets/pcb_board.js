@@ -249,6 +249,7 @@ function scenePaint(){paintQueued=false;
   paintClr(ctx);
   paintTracks(ctx);
   paintTexts(ctx,k); // silkscreen text sits above copper, under the draw overlay
+  paintInsp(ctx);
   paintDraw(ctx);}
  else{
   // Copper a rigid-group drag translates live (stamped tracks/vias) is
@@ -287,6 +288,7 @@ function scenePaint(){paintQueued=false;
   paintLinks(ctx,mov,true);
   paintClr(ctx,mov,true,cop);
   if(cop)paintTracks(ctx,cop,true);
+  paintInsp(ctx);
   paintDraw(ctx);}
  if(flashIdx>=0&&Date.now()<flashUntil){var fp=P[flashIdx];
   var fc=wpt(flashIdx,fp.ccx||0,fp.ccy||0);
@@ -393,7 +395,10 @@ function paintParts(ctx,k,mov,only){
    if(netColOn)fill=pd.net?(netColorOf(pd.net)||TH.pth):"#ffffff";
    else if(pd.drill>0)fill=pd.npth?TH.npth:TH.pth;
    else fill=bot?TH.padBot:TH.padTop;
-   if(hoverNet&&pd.net===hoverNet)fill="#f85149";
+   // Net highlight: hovered net, or the net being hand-routed right now —
+   // the whole net lights up while a trace is live, same as a net click.
+   var hlNet=hoverNet||(drawMode&&dtrace?dtrace.net:null);
+   if(hlNet&&pd.net===hlNet)fill="#f85149";
    if(fill!==lastFill){ctx.fillStyle=fill;lastFill=fill;}
    padPath(ctx,pd);ctx.fill();
    if(selNetCur&&pd.net===selNetCur){
@@ -529,9 +534,14 @@ function ovPaintSoon(){paintSoon();}
 // Ratsnest: KiCad's thin SOLID white at ~35% alpha by default; the opt-in
 // Net-colours view restores per-net-coloured airwires (with the classic
 // stronger alphas so the colours read).
+// An airwire DISAPPEARS once real copper connects its two pads (KiCad
+// behaviour) — linksRecompute below stamps l.done; recompute is deferred
+// to the first static paint after a copper/pose edit (never mid-drag).
 // mov/only: drag-cache split — a link is dynamic when EITHER endpoint moves.
 function paintLinks(ctx,mov,only){if(!ratsOn||!viewSt.vis.rats)return;
+ if(linksDirty&&!dragIdxSet())linksRecompute();
  (PCB.links||[]).forEach(function(l){
+  if(l.done)return; // connected by copper — no airwire
   if(mov&&(!!(mov[l.a]||mov[l.b]))!==only)return;
   var a=wpt(l.a,l.ax,l.ay),b=wpt(l.b,l.bx,l.by);
   if(netColOn){ctx.strokeStyle=linkCol(l);
@@ -600,6 +610,69 @@ function paintClr(ctx,mov,only,cop){
  ctx.globalAlpha=1;ctx.lineCap="butt";}
 window.addEventListener("resize",paintSoon);
 
+// ── Ratsnest connectivity: hide airwires their copper already satisfies ──
+// Union-find over quantized copper points, one pass per net that has links:
+// a track joins its two endpoints on its layer, a via joins its point across
+// every layer, and a pad adopts any point inside its rect on a compatible
+// layer (thru pads on all layers). T-joints — an endpoint landing ON another
+// same-net segment, which both hand routing and the router's welds produce —
+// union through a point-on-segment tolerance. A link is `done` when its two
+// pads land in one component. Recomputed lazily (copperTouched marks dirty;
+// the first static paintLinks flushes), so drags never pay for it.
+var linksDirty=true;
+function copperTouched(){linksDirty=true;
+ inspClear();} // inspected copper/marker facts are stale after any edit
+function connKey(x,y,l){return Math.round(x*1000)+","+Math.round(y*1000)+","+l;}
+function linksRecompute(){linksDirty=false;
+ var links=PCB.links||[];if(!links.length)return;
+ var nets={};
+ links.forEach(function(l){l.done=false;if(l.net)nets[netCollapse(l.net)]=1;});
+ var par={};
+ function find(k){
+  if(par[k]===undefined){par[k]=k;return k;}
+  var r=k;while(par[r]!==r)r=par[r];
+  while(par[k]!==r){var n=par[k];par[k]=r;k=n;}
+  return r;}
+ function union(a,b){par[find(a)]=find(b);}
+ Object.keys(nets).forEach(function(net){
+  var ts=(PCB.tracks||[]).filter(function(t){return t.net&&netCollapse(t.net)===net;});
+  var vs=(PCB.vias||[]).filter(function(v){return v.net&&netCollapse(v.net)===net;});
+  if(!ts.length&&!vs.length)return;
+  var pts=[]; // every copper point: {x,y,l,key} (via layer -1 = all layers)
+  ts.forEach(function(t){var L=t.l||0;
+   union(connKey(t.x1,t.y1,L),connKey(t.x2,t.y2,L));
+   pts.push({x:t.x1,y:t.y1,l:L},{x:t.x2,y:t.y2,l:L});});
+  vs.forEach(function(v){for(var L=1;L<NSIG;L++)union(connKey(v.x,v.y,0),connKey(v.x,v.y,L));
+   pts.push({x:v.x,y:v.y,l:-1});});
+  // T-joints: endpoint (or via) sitting on another segment's body
+  pts.forEach(function(q){ts.forEach(function(t){var L=t.l||0;
+   if(q.l!==-1&&q.l!==L)return;
+   if(ptSegDist(q.x,q.y,t.x1,t.y1,t.x2,t.y2)<=(t.w||0.25)/2+0.02)
+    union(connKey(q.x,q.y,q.l===-1?L:q.l),connKey(t.x1,t.y1,L));});});
+  // pads adopt contained copper points
+  P.forEach(function(i_p,i){var bot=(i_p.side==="bottom")?1:0;
+   (i_p.pads||[]).forEach(function(pd,j){
+    if(!pd.net||netCollapse(pd.net)!==net)return;
+    var r=wrect(i,pd),thru=(pd.drill>0),pk="pad:"+i+":"+j;
+    pts.forEach(function(q){
+     if(!thru&&q.l!==-1&&q.l!==bot)return;
+     if(q.x<r.x0-0.02||q.x>r.x1+0.02||q.y<r.y0-0.02||q.y>r.y1+0.02)return;
+     union(pk,connKey(q.x,q.y,q.l===-1?0:q.l));});});});
+ });
+ // a link is done when both endpoint pads resolved and share a component
+ var left=0;
+ links.forEach(function(l){
+  var pa=connPadNode(l.a,l.ax,l.ay),pb=connPadNode(l.b,l.bx,l.by);
+  if(pa&&pb&&par[pa]!==undefined&&par[pb]!==undefined&&find(pa)===find(pb))l.done=true;
+  if(!l.done)left++;});
+ PCB.links_left=left;}
+// The pad node id for a link endpoint (part index + the pad's LOCAL centre,
+// which is exactly what writeLinks emitted — so match by local coords).
+function connPadNode(i,lx,ly){var p=P[i];if(!p)return null;
+ var pads=p.pads||[];
+ for(var j=0;j<pads.length;j++)
+  if(Math.abs(pads[j].x-lx)<1e-6&&Math.abs(pads[j].y-ly)<1e-6)return "pad:"+i+":"+j;
+ return null;}
 // ── Ratsnest: airwires on the canvas; loop overlays stay SVG ────────────
 var gRP=document.createElementNS(NS,"g");
 gR.appendChild(gRP);
@@ -1094,7 +1167,7 @@ var SPACE=false;
 document.addEventListener("keydown",function(ev){if((ev.key===" "||ev.code==="Space")&&!kbTyping(ev.target)){SPACE=true;ev.preventDefault();}});
 document.addEventListener("keyup",function(ev){if(ev.key===" "||ev.code==="Space")SPACE=false;});
 document.addEventListener("keydown",function(ev){
- if(ev.key=="Escape"){if(kbdOv){kbdClose();}else if(drawMode){if(dtrace)drawEnd();else drawModeSet(false);}else if(textMode){if(txSel>=0){txSelect(-1);}else txArm(false);}else if(polyMode){if(polyPts){polyPts=null;polyCur=null;drawBoardRect();}else polyArm(false);}else if(outlineMode){outDraw=null;outlineArm(false);drawBoardRect();}else{selClear();clearSel();}return;}
+ if(ev.key=="Escape"){if(kbdOv){kbdClose();}else if(drawMode){if(dtrace)drawEnd();else drawModeSet(false);}else if(textMode){if(txSel>=0){txSelect(-1);}else txArm(false);}else if(polyMode){if(polyPts){polyPts=null;polyCur=null;drawBoardRect();}else polyArm(false);}else if(outlineMode){outDraw=null;outlineArm(false);drawBoardRect();}else if(insp){inspClear();}else{selClear();clearSel();}return;}
  if(polyMode&&ev.key=="Enter"){ev.preventDefault();polyClose();return;}
  if(polyMode&&(ev.key=="Backspace"||ev.key=="Delete")){ev.preventDefault();polyPop();return;}
  var typing=kbTyping(ev.target);
@@ -1218,7 +1291,7 @@ function applyDraft(d){recordUndo();
   if((d.tracks&&d.tracks.length)||(d.vias&&d.vias.length)){PCB.tracks=d.tracks||[];PCB.vias=d.vias||[];PCB.drc=[];drawRoute();drawDrc();}
   PCB.texts=(d.texts||[]).map(function(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t.size||1,text:t.text};});
   PCB.outline=d.outline||null;drawBoardRect();}
- paintSoon();markDirty();}
+ copperTouched();paintSoon();markDirty();}
 // Banner offering Restore/Discard of a found draft (fixed bar at top of page).
 function showDraftBanner(d,stale){if(document.getElementById("pcb-draft-banner"))return;
  var bar=mkEl("div");bar.id="pcb-draft-banner";
@@ -1284,7 +1357,7 @@ function bindLayLoad(b){b.addEventListener("click",function(){var nm=b.getAttrib
   PCB.tracks=L.routes.tracks||[];PCB.vias=L.routes.vias||[];PCB.drc=[];drawRoute();drawDrc();}
  PCB.outline=L.outline||null;drawBoardRect();
  PCB.texts=(L.texts||[]).map(function(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t.size||1,text:t.text};});
- txSel=-1;txPopClose();paintSoon();
+ txSel=-1;txPopClose();copperTouched();paintSoon();
  setActiveLayout(nm);});}
 function bindLayDel(b){b.addEventListener("click",function(){var nm=b.getAttribute("data-lay-del");
  if(!window.confirm("Delete layout \""+nm+"\"?"))return;
@@ -1705,6 +1778,11 @@ svg.addEventListener("pointermove",function(ev){
   svg.style.cursor=(outlineMode||polyMode)?"":(hi<0?"":(P[hi].locked?"not-allowed":(RO?"":"grab")));
   paintSoon();}});
 function clickPart(ev,i){var m=mm(ev),pd=padAt(i,m.x,m.y);
+ // Every part-click path funnels here, so overlapping copper / DRC markers
+ // get one precedence rule: marker > pad > via/track > the part itself.
+ if(!anyDrawTool()){var ihp=inspHitForPart(m,i);
+  if(ihp){inspShow(ihp,ev);return;}
+  inspClear();}
  if(pd&&pd.net)selNet(pd.net);
  if(!RO)selectComp(P[i].ref);}
 svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.pointerId);}catch(e){}
@@ -1738,7 +1816,13 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
    msg.textContent=PCB.outline?"outline set — Save/Update to keep":"outline cleared — Save/Update to keep";}
   return;}
  if(pan){var click=!pan.moved,tapi=pan.tapi;pan=null;svg.style.cursor="";
-  if(click){if(tapi>=0)clickPart(ev,tapi);else{selClear();clearSel();selNet(null);}}return;}
+  if(click){
+   // Part clicks route through clickPart (which owns the marker/pad/copper
+   // precedence); empty-space clicks inspect bare copper before deselecting.
+   if(tapi>=0)clickPart(ev,tapi);
+   else{var ih=anyDrawTool()?null:inspHit(mm(ev));
+    if(ih){inspShow(ih,ev);}
+    else{inspClear();selClear();clearSel();selNet(null);}}}return;}
  if(marq){var box=marq,mv=marq.moved;if(marqEl&&marqEl.parentNode)marqEl.parentNode.removeChild(marqEl);marqEl=null;marq=null;
   if(mv){var ax=Math.min(box.x0,box.x1),ay=Math.min(box.y0,box.y1),bx=Math.max(box.x0,box.x1),by=Math.max(box.y0,box.y1);
    // Intersection test: a part is caught when its courtyard box overlaps the
@@ -1747,7 +1831,13 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
    var pick=[];P.forEach(function(p,i){var b=partAABB(i);
     if(!(b.x1<ax||b.x0>bx||b.y1<ay||b.y0>by))pick.push(i);});
    clearSel();selSet(pick);}
-  else{selClear();clearSel();selNet(null);}return;}});
+  else{
+   // A stationary click on empty board: copper / DRC-marker inspection
+   // before falling through to plain deselect.
+   var anyTool2=drawMode||textMode||polyMode||outlineMode||PCB.rulerOn;
+   var ih2=anyTool2?null:inspHit(mm(ev));
+   if(ih2){inspShow(ih2,ev);}
+   else{inspClear();selClear();clearSel();selNet(null);}}return;}});
 // ── T Text tool: board-level silkscreen labels ──────────────────────────
 // Each entry {x,y,rot,side,size,text} is world-mm, drawn in a silk colour
 // (distinct from ref-des) with the same 5x7-ish proportions the PNG/Gerber
@@ -2070,10 +2160,30 @@ function drawSeg(x2,y2){if(Math.abs(x2-dtrace.lx)<1e-9&&Math.abs(y2-dtrace.ly)<1
  dtrace.lx=x2;dtrace.ly=y2;dtrace.n++;}
 function drawEnd(){if(dtrace&&dtrace.n>0){recordUndo(dtrace.undo);scheduleDrc();}
  dtrace=null;drawBtnSync();ovPaintSoon();routeStatMsg();}
-function drawStart(net,layer,x,y){return {net:net,l:layer,w:trackW(),lx:x,ly:y,n:0,undo:snapAll(),laid:[]};}
+// Destination pads for a trace started on pad (pi,pd): the far end of every
+// still-unrouted airwire touching that pad — where this trace is *supposed*
+// to land. paintDraw pulses them amber (the click-highlight treatment), and
+// the whole net lights up hoverNet-style while the trace is live.
+function drawDests(pi,pd){var out=[];
+ if(pi==null||!pd)return out;
+ if(linksDirty)linksRecompute();
+ (PCB.links||[]).forEach(function(l){if(l.done)return;
+  var oi=-1,ox=0,oy=0;
+  if(l.a===pi&&Math.abs(l.ax-pd.x)<1e-6&&Math.abs(l.ay-pd.y)<1e-6){oi=l.b;ox=l.bx;oy=l.by;}
+  else if(l.b===pi&&Math.abs(l.bx-pd.x)<1e-6&&Math.abs(l.by-pd.y)<1e-6){oi=l.a;ox=l.ax;oy=l.ay;}
+  if(oi<0||!P[oi])return;
+  var opd=null;
+  (P[oi].pads||[]).forEach(function(q){if(Math.abs(q.x-ox)<1e-6&&Math.abs(q.y-oy)<1e-6)opd=q;});
+  out.push({i:oi,pd:opd,x:ox,y:oy});});
+ return out;}
+function drawStart(net,layer,x,y,pi,pd){
+ var dests=drawDests(pi,pd);
+ if(dests.length)routeStatMsg("route "+nLeaf(net)+" → "+
+  dests.map(function(d){return P[d.i].ref;}).join(", "));
+ return {net:net,l:layer,w:trackW(),lx:x,ly:y,n:0,undo:snapAll(),laid:[],dest:dests};}
 function drawClick(m,shift){
  if(!dtrace){var pt=padTarget(m);
-  if(pt&&pt.net){dtrace=drawStart(pt.net,pt.l,pt.x,pt.y);drawBtnSync();ovPaintSoon();return;}
+  if(pt&&pt.net){dtrace=drawStart(pt.net,pt.l,pt.x,pt.y,pt.i,pt.pd);drawBtnSync();ovPaintSoon();return;}
   var v=drawHitVia(m);
   if(v&&v.net){dtrace=drawStart(v.net,activeLayer,v.x,v.y);drawBtnSync();ovPaintSoon();return;}
   var t=drawHitTrack(m);
@@ -2131,7 +2241,24 @@ function drawDelAt(m){var v=drawHitVia(m);
 // from drawPath), drawn SOLID at the real track width with round caps —
 // KiCad-style, so what you see is precisely the copper you get. Only a
 // clearance-violating head goes RED + dashed (the "won't commit" signal).
-function paintDraw(ctx){if(!drawMode||!dtrace||!drawCur)return;
+// The airwire's far pad(s) pulse amber the whole time the trace is live —
+// the "connect me HERE" target.
+function paintDraw(ctx){if(!drawMode||!dtrace)return;
+ if(dtrace.dest&&dtrace.dest.length){
+  ctx.save();ctx.setLineDash([]);
+  var pu=0.55+0.45*Math.abs(Math.sin(Date.now()/240));
+  dtrace.dest.forEach(function(d){
+   var c=wpt(d.i,d.x,d.y);
+   if(d.pd){var r=wrect(d.i,d.pd);
+    ctx.globalAlpha=0.30*pu;ctx.fillStyle="#f0b72f";
+    ctx.fillRect(X(r.x0),Y(r.y0),(r.x1-r.x0)*S,(r.y1-r.y0)*S);}
+   ctx.globalAlpha=pu;ctx.strokeStyle="#f0b72f";ctx.lineWidth=1.6;
+   var rr=Math.max(6,(d.pd?Math.max(d.pd.w,d.pd.h):0.8)*S*0.75);
+   ctx.beginPath();ctx.arc(X(c.x),Y(c.y),rr,0,6.2832);ctx.stroke();});
+  ctx.restore();
+  setTimeout(paintSoon,60); // keep the target pulse alive while routing
+ }
+ if(!drawCur)return;
  var dl=drawLegs(drawCur,drawShift),s=dl.t;
  var bad=drawLegsViolate(dl.legs);
  ctx.save();ctx.globalAlpha=bad?0.9:0.75;ctx.lineCap="round";ctx.lineJoin="round";
@@ -2164,11 +2291,12 @@ document.addEventListener("keydown",function(ev){if(RO||kbTyping(ev.target))retu
 // Per-kind marker tooltip. Courtyard/silk have no clearance rule, so the
 // generic "gap X < clr" form reads as nonsense ("< 0 mm") — give them their own.
 function drcMsg(d){
- if(d.k=="courtyard overlap")return d.k+" — parts overlap by "+(-d.gap).toFixed(3)+" mm";
- if(d.k=="silk over pad")return d.k+" — silkscreen crosses a pad's solder-mask opening";
- if(d.k=="mask sliver")return d.k+" — mask web "+d.gap.toFixed(3)+" mm < "+d.clr+" mm min";
- if(d.k=="track width")return d.k+" — "+d.gap.toFixed(3)+" mm < "+d.clr+" mm required";
- return d.k+" — gap "+d.gap.toFixed(3)+" mm < "+d.clr+" mm";}
+ var tag=d.id?("#"+d.id+" "):""; // the violation's short traceable id
+ if(d.k=="courtyard overlap")return tag+d.k+" — parts overlap by "+(-d.gap).toFixed(3)+" mm";
+ if(d.k=="silk over pad")return tag+d.k+" — silkscreen crosses a pad's solder-mask opening";
+ if(d.k=="mask sliver")return tag+d.k+" — mask web "+d.gap.toFixed(3)+" mm < "+d.clr+" mm min";
+ if(d.k=="track width")return tag+d.k+" — "+d.gap.toFixed(3)+" mm < "+d.clr+" mm required";
+ return tag+d.k+" — gap "+d.gap.toFixed(3)+" mm < "+d.clr+" mm";}
 function drawDrc(){while(gD.firstChild)gD.removeChild(gD.firstChild);
  renderDrcList(); // keep the violations panel in sync regardless of marker visibility
  if(!viewSt.vis.drc)return;
@@ -2207,6 +2335,7 @@ function renderDrcList(){var lst=ensureDrcList();if(!lst)return;
  if(!v.length){lst.innerHTML='<div class="drc-empty">No DRC violations.</div>';return;}
  var h='';v.forEach(function(d,i){var loc=drcLoc(d),sc=drcSevClass(d);
   h+='<div class="drc-row'+(sc?" "+sc:"")+'" data-drc="'+i+'" title="Locate this violation on the board">'+
+   (d.id?'<span class="drc-loc">#'+pEsc(d.id)+'</span>':'')+
    '<span class="drc-k">'+pEsc(d.k||"violation")+'</span>'+
    (loc?'<span class="drc-loc">'+pEsc(loc)+'</span>':'')+
    '<span class="drc-gap">'+(d.gap!=null?(Math.round(d.gap*1000)/1000):"?")+' / '+(d.clr!=null?d.clr:"?")+' mm</span>'+
@@ -2216,12 +2345,92 @@ function renderDrcList(){var lst=ensureDrcList();if(!lst)return;
   row.addEventListener("click",function(){var d=(PCB.drc||[])[+row.getAttribute("data-drc")];
    lst.querySelectorAll(".drc-row").forEach(function(r){r.classList.remove("cur");});
    row.classList.add("cur");
-   if(d&&d.x!=null&&d.y!=null)focusPoint(d.x,d.y);});});}
+   if(d&&d.x!=null&&d.y!=null){insp={t:"drc",o:d};inspPopClose();focusPoint(d.x,d.y);}});});}
 function drcListToggle(){var lst=ensureDrcList();if(!lst)return;
  lst.hidden=!lst.hidden;if(!lst.hidden)renderDrcList();}
 (function(){var chip=document.getElementById("r-drc");
  if(chip&&!RO){chip.style.cursor="pointer";chip.title="Click to list / locate DRC violations";
   chip.addEventListener("click",drcListToggle);}})();
+// ── Copper / DRC inspector ────────────────────────────────────────────────
+// Click a track, via, or DRC marker in Select mode to inspect it: a popover
+// shows its facts (net, layer, geometry, the violation's traceable #id) and
+// Copy report puts a one-line description on the clipboard — made to be
+// pasted verbatim into a bug report or an agent chat. Esc / empty click /
+// any copper edit clears it.
+var insp=null; // {t:"track"|"via"|"drc", o:<live object>}
+function pxTolMm(px){var r=svg.getBoundingClientRect();
+ return px*(vb.w/Math.max(r.width,1))/S;}
+function inspHitDrc(m){var best=null,bd=Math.max(pxTolMm(12),0.3);
+ (PCB.drc||[]).forEach(function(d){if(d.x==null)return;
+  var dd=Math.hypot(m.x-d.x,m.y-d.y);if(dd<bd){bd=dd;best=d;}});return best;}
+function inspHitVia(m,strict){var best=null,bd=1e9,
+  tol=strict?0:Math.max(pxTolMm(6),0.15); // strict = inside the barrel only
+ (PCB.vias||[]).forEach(function(v){var d=Math.hypot(m.x-v.x,m.y-v.y)-(v.d||0.4)/2;
+  if(d<tol&&d<bd){bd=d;best=v;}});return best;}
+function inspHitTrack(m){var best=null,bd=1e9,tol=Math.max(pxTolMm(5),0.12);
+ (PCB.tracks||[]).forEach(function(t){
+  if(layerAlpha(t.l||0)<=0)return; // hidden layer — not clickable
+  var d=segDist(m.x,m.y,t)-(t.w||0.25)/2;
+  if(d<tol&&d<bd){bd=d;best=t;}});return best;}
+function inspHit(m){var d=inspHitDrc(m);if(d)return {t:"drc",o:d};
+ var v=inspHitVia(m);if(v)return {t:"via",o:v};
+ var t=inspHitTrack(m);if(t)return {t:"track",o:t};return null;}
+// Inspection hit for a click that is ALSO over part `pi`: a DRC marker wins
+// outright (debugging beats selection); a click INSIDE a via barrel wins
+// even on a pad (the stitch-via-in-ground-pad case — it's the smaller,
+// precise target); any other pad click stays a part click; bare vias and
+// tracks win only off-pad.
+function inspHitForPart(m,pi){var d=inspHitDrc(m);if(d)return {t:"drc",o:d};
+ var vs=inspHitVia(m,true);if(vs)return {t:"via",o:vs};
+ if(pi>=0&&padAt(pi,m.x,m.y))return null;
+ var v=inspHitVia(m);if(v)return {t:"via",o:v};
+ var t=inspHitTrack(m);if(t)return {t:"track",o:t};return null;}
+function anyDrawTool(){return drawMode||textMode||polyMode||outlineMode||!!PCB.rulerOn;}
+function n2(v){return (+v).toFixed(2);}
+function inspReport(){if(!insp)return "";var o=insp.o;
+ if(insp.t=="track")return "track net="+(o.net||"?")+" "+layerName(o.l||0)+
+  " w="+n2(o.w||0.25)+"mm ("+n2(o.x1)+","+n2(o.y1)+")→("+n2(o.x2)+","+n2(o.y2)+
+  ") len="+n2(Math.hypot(o.x2-o.x1,o.y2-o.y1))+"mm"+(o.g?" stamp="+o.g:"");
+ if(insp.t=="via")return "via net="+(o.net||"?")+" @("+n2(o.x)+","+n2(o.y)+
+  ") Ø"+n2(o.d||0.4)+"/"+n2((o.drill>0)?o.drill:viaGeo().drill)+"mm";
+ return "DRC #"+(o.id||"?")+" "+(o.k||"violation")+" ["+(o.sev||"err")+"] gap "+
+  (o.gap!=null?o.gap.toFixed(3):"?")+"mm < "+o.clr+"mm @("+n2(o.x)+","+n2(o.y)+")";}
+function inspPopClose(){var p=document.getElementById("insp-pop");
+ if(p&&p.parentNode)p.parentNode.removeChild(p);}
+function inspClear(){if(!insp)return;insp=null;inspPopClose();paintSoon();}
+function inspShow(hit,ev){insp=hit;inspPopClose();
+ var host=svg.parentNode;if(!host)return;
+ var pop=document.createElement("div");pop.id="insp-pop";
+ pop.style.cssText="position:absolute;z-index:40;background:#161b22;border:1px solid #30363d;"+
+  "border-radius:8px;padding:8px 10px;font-size:12px;color:#d6d7db;max-width:320px;"+
+  "box-shadow:0 6px 18px rgba(0,0,0,.5)";
+ var title=hit.t=="drc"?("DRC #"+(hit.o.id||"?")):hit.t;
+ pop.innerHTML='<div style="font-weight:700;margin-bottom:4px;color:#f0f1f3">'+pEsc(title)+'</div>'+
+  '<div style="white-space:pre-wrap;word-break:break-word">'+pEsc(inspReport())+'</div>'+
+  '<button id="insp-copy" class="btn" style="margin-top:6px;font-size:11px">Copy report</button>';
+ host.appendChild(pop);
+ var hr=host.getBoundingClientRect();
+ var px=ev.clientX-hr.left+14,py=ev.clientY-hr.top+10;
+ px=Math.min(px,hr.width-330);py=Math.min(py,hr.height-100); // stay inside the stage
+ pop.style.left=Math.max(4,px)+"px";pop.style.top=Math.max(4,py)+"px";
+ var cb=document.getElementById("insp-copy");
+ if(cb)cb.addEventListener("click",function(){
+  function done(ok){cb.textContent=ok?"copied ✓":"copy failed";}
+  if(navigator.clipboard&&navigator.clipboard.writeText)
+   navigator.clipboard.writeText(inspReport()).then(function(){done(true);},function(){done(false);});
+  else done(false);});
+ paintSoon();}
+// Selected copper / marker highlight, painted above the copper.
+function paintInsp(ctx){if(!insp)return;var o=insp.o;
+ ctx.save();ctx.setLineDash([]);ctx.strokeStyle="#ffd33d";
+ if(insp.t=="track"){ctx.lineCap="round";ctx.globalAlpha=0.85;
+  ctx.lineWidth=Math.max((o.w||0.25)*S,1.2)+3;
+  ctx.beginPath();ctx.moveTo(X(o.x1),Y(o.y1));ctx.lineTo(X(o.x2),Y(o.y2));ctx.stroke();}
+ else{var rr=(insp.t=="via")?Math.max((o.d||0.4)/2*S,2.5)+4:12;
+  ctx.lineWidth=2;ctx.globalAlpha=0.5+0.5*Math.abs(Math.sin(Date.now()/240));
+  ctx.beginPath();ctx.arc(X(o.x),Y(o.y),rr,0,6.2832);ctx.stroke();
+  setTimeout(paintSoon,60);}
+ ctx.restore();}
 // ── Auto-DRC after copper edits (debounced ~800 ms) ─────────────────────
 // Every copper mutation (draw/delete/Stamp/route apply) and every Save
 // schedules a server DRC of the CURRENT poses + copper via /api/pcb-drc, so
@@ -2246,12 +2455,15 @@ function runDrcNow(){if(RO)return;var seq=++drcSeq;drcChip(-1);
   .then(function(j){if(seq!==drcSeq)return; // a newer check superseded this one
     PCB.drc=j.drc||[];drawDrc();drcChip((j.drc||[]).length);})
   .catch(function(){if(seq===drcSeq)drcChip(0);});}
-function scheduleDrc(){if(RO)return;if(drcTimer)clearTimeout(drcTimer);
+function scheduleDrc(){if(RO)return;
+ copperTouched(); // every copper/pose edit funnels here — refresh airwire doneness
+ if(drcTimer)clearTimeout(drcTimer);
  drcTimer=setTimeout(function(){drcTimer=null;runDrcNow();},800);}
 function setStat(id,cls,txt){var e=document.getElementById(id);
  if(e){e.className="route-stat"+(cls?" "+cls:"");e.textContent=txt;}}
 function clearRoute(){if(!(PCB.tracks&&PCB.tracks.length)&&!(PCB.vias&&PCB.vias.length)&&!(PCB.drc&&PCB.drc.length))return;
- PCB.tracks=[];PCB.vias=[];PCB.drc=[];drawRoute();drawClr();drawDrc();setStat("r-stat","","");setStat("r-drc","","");setStat("r-rp","","");}
+ PCB.tracks=[];PCB.vias=[];PCB.drc=[];copperTouched();
+ drawRoute();drawClr();drawDrc();setStat("r-stat","","");setStat("r-drc","","");setStat("r-rp","","");}
 var courtState=null;
 function partByRef(ref){for(var i=0;i<P.length;i++)if(P[i].ref===ref)return P[i];return null;}
 function gceil(v){return Math.ceil(v/G-1e-9)*G;}
@@ -2433,7 +2645,7 @@ if(rgo)rgo.addEventListener("click",function(){
    headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
   .then(function(r){if(!r.ok)throw 0;return r.json();})
   .then(function(j){PCB.tracks=j.tracks||[];PCB.vias=j.vias||[];PCB.drc=j.drc||[];
-    if(payload.clearance>0)PCB.clr=payload.clearance;drawRoute();drawClr();drawDrc();
+    if(payload.clearance>0)PCB.clr=payload.clearance;copperTouched();drawRoute();drawClr();drawDrc();
     rats();/* re-run with tracks present: routedNow is now true, so the loop
            overlay drops its preview GND vias and only the router's real vias
            remain — no preview+routed via doubling on the bypass caps. */
