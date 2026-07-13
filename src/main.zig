@@ -467,6 +467,7 @@ test {
     _ = @import("serve/pcb_layout_page.zig");
     _ = @import("serve/pcb_describe.zig");
     _ = @import("serve/drc_json.zig");
+    _ = @import("serve/drc_rules.zig");
     _ = @import("serve/diag_format.zig");
     _ = @import("serve/edit_assist.zig");
     _ = @import("serve/upload.zig");

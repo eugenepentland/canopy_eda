@@ -17,6 +17,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
 const drc_json = @import("drc_json.zig");
+const drc_rules = @import("drc_rules.zig");
 const outline_mod = @import("../placement/outline.zig");
 const module_policy = @import("../placement/module_policy.zig");
 const layout_lint = @import("../placement/layout_lint.zig");
@@ -73,7 +74,7 @@ pub fn describeDesign(
     const route_params = solved.placement.rules.design.routeParams();
     const routed: ?RoutedSummary = if (opts.route) blk: {
         const r = router.route(alloc, solved.placement, route_params) catch break :blk null;
-        const v = drc.check(alloc, solved.placement, r, route_params.clearance) catch &.{};
+        const v = drc_rules.checkFiltered(alloc, project_dir, name, solved.placement, r, route_params.clearance);
         var trace: f64 = 0;
         for (r.tracks) |t| trace += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
         break :blk .{

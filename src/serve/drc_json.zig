@@ -8,8 +8,8 @@ const std = @import("std");
 const drc = @import("../placement/drc.zig");
 
 /// The human-readable kind word for a violation, shared by the JSON writer
-/// and the viewer's tooltips/panel rows.
-fn kindStr(k: drc.Kind) []const u8 {
+/// and the viewer's tooltips/panel rows (and the DRC-rules settings table).
+pub fn kindStr(k: drc.Kind) []const u8 {
     return switch (k) {
         .via_pad => "via↔pad",
         .via_via => "via↔via",

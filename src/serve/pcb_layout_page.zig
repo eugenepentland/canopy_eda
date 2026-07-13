@@ -20,6 +20,7 @@ const geometry = @import("../placement/geometry.zig");
 const router = @import("../placement/router.zig");
 const drc = @import("../placement/drc.zig");
 const drc_json = @import("drc_json.zig");
+const drc_rules = @import("drc_rules.zig");
 const outline_mod = @import("../placement/outline.zig");
 const pour = @import("../placement/pour.zig");
 const export_fab = @import("../export_fab.zig");
@@ -366,10 +367,7 @@ fn placeForChoice(
 /// GET /pcb-layout/:name — evaluate the design, run the optimizer, and return
 /// the interactive (drag + live-score) inline-SVG preview with a sidebar.
 pub fn pcbLayoutPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
 
     // Resolve `name` to a renderable block: a design under `src/` first, else
     // a reusable module under `lib/modules/` (so the modules page can preview
@@ -818,10 +816,7 @@ fn parseToggles(req: *httpz.Request) Toggles {
 /// worse on the visible metric but wins on the true objective can be told apart.
 /// Honours the same ?regen / tuning query as the page.
 pub fn pcbLayoutJsonApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
     var module_res: ?modules_mod.ResolvedBlock = null;
@@ -872,7 +867,7 @@ pub fn pcbLayoutJsonApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     const ro = parseRoute(req, placement.rules.design.routeParams());
     const routed_metrics: ?RoutedMetrics = if (ro.run) blk: {
         const r = router.route(ctx.allocator, placement, ro.params) catch break :blk null;
-        const v = drc.check(ctx.allocator, placement, r, ro.params.clearance) catch &.{};
+        const v = drc_rules.checkFiltered(ctx.allocator, ctx.project_dir, name, placement, r, ro.params.clearance);
         var trace: f64 = 0;
         for (r.tracks) |t| trace += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
         break :blk .{
@@ -1121,7 +1116,7 @@ pub fn renderDesignPng(
     const route_params = placement.rules.design.routeParams();
     const routed: ?router.RouteResult = if (opts.route) (router.route(alloc, placement, route_params) catch null) else null;
     const violations: []const drc.Violation = if (routed) |r|
-        (drc.check(alloc, placement, r, route_params.clearance) catch &.{})
+        drc_rules.checkFiltered(alloc, project_dir, name, placement, r, route_params.clearance)
     else
         &.{};
 
@@ -1232,10 +1227,7 @@ pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngReq
 /// allocator, so a leaked image per call would never be reclaimed.
 pub fn pcbPngApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const arena = req.arena;
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     const opts = pngRequestFromQuery(arena, req);
     const png_bytes = renderDesignPng(arena, ctx.project_dir, name, opts) catch |e| {
         res.status = if (e == error.BlockNotFound or e == error.SubNotFound) 404 else 500;
@@ -1524,10 +1516,7 @@ fn regenThread(job: *RegenJob) void {
 /// If a run for this design is already in flight, its generation is returned and
 /// no second solver is spawned (one per design at a time).
 pub fn pcbRegenStartApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     const tune = parseTuning(req);
     const begin = serve_root.pcbJobBegin(name);
     if (begin.fresh) spawn: {
@@ -1565,10 +1554,7 @@ pub fn pcbRegenStartApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
 /// (`{pass,score,parts}`) or null. `{"gen":0,"none":true}` means no run has been
 /// started for this design.
 pub fn pcbProgressApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     res.content_type = .JSON;
     const snap = serve_root.pcbJobSnapshot(ctx.allocator, name) orelse {
         res.body = "{\"gen\":0,\"none\":true}";
@@ -1593,15 +1579,8 @@ pub fn pcbProgressApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
 /// is the same `{"parts":[{ref,x,y,rot}, …]}` the save endpoint takes; returns
 /// the full breakdown for those exact positions. Honours the ?tuning query.
 pub fn pcbScoreApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
-    const body = req.body() orelse {
-        res.status = 400;
-        res.body = "no body";
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
+    const body = bodyParam(req, res) orelse return;
     const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
         res.body = bad_json_msg;
@@ -1710,15 +1689,8 @@ pub fn pcbScoreApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
 /// the page embeds, so the client redraws in place — no page reload, which is
 /// what used to snap the layout back to auto.
 pub fn pcbRouteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
-    const body = req.body() orelse {
-        res.status = 400;
-        res.body = "no body";
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
+    const body = bodyParam(req, res) orelse return;
     const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
         res.body = bad_json_msg;
@@ -1797,7 +1769,7 @@ pub fn pcbRouteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         res.body = "Routing error";
         return;
     };
-    const violations: []const drc.Violation = drc.check(ctx.allocator, placement, routed, rp.clearance) catch &.{};
+    const violations = drc_rules.checkFiltered(ctx.allocator, ctx.project_dir, name, placement, routed, rp.clearance);
 
     const rp_warn = router.returnPathViolations(placement, routed, router.return_path_radius_mm);
 
@@ -1819,15 +1791,8 @@ pub fn pcbRouteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
 /// verify hand-drawn copper continuously (debounced after any copper edit + on
 /// Save) instead of only when the user clicks Route.
 pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
-    const body = req.body() orelse {
-        res.status = 400;
-        res.body = "no body";
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
+    const body = bodyParam(req, res) orelse return;
     const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
         res.body = bad_json_msg;
@@ -1913,7 +1878,7 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
         empty_rr;
 
     const clearance = if (body_clearance > 0) body_clearance else placement.rules.design.clearance;
-    const violations: []const drc.Violation = drc.check(ctx.allocator, placement, rr, clearance) catch &.{};
+    const violations = drc_rules.checkFiltered(ctx.allocator, ctx.project_dir, name, placement, rr, clearance);
 
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &aw.writer;
@@ -2019,10 +1984,7 @@ fn blessedFabView(ctx: *Server, req: *httpz.Request, res: *httpz.Response, name:
 /// BOM CSV. Do-Not-Populate parts are dropped by default; `?dnp=keep` lists
 /// them (a fully-populated variant).
 pub fn pcbCentroidApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     const fv = blessedFabView(ctx, req, res, name) orelse return;
     var aw: std.Io.Writer.Allocating = .init(req.arena);
     try export_fab.centroidCsv(&aw.writer, fv.placement.parts, fv.placement.instances, fv.frame, dnpMode(req));
@@ -2034,10 +1996,7 @@ pub fn pcbCentroidApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
 /// blessed poses: plated through-hole pads + the ★ layout's persisted routed
 /// vias (PTH), or the non-plated mounting holes (`?npth=1`).
 pub fn pcbDrillApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     const fv = blessedFabView(ctx, req, res, name) orelse return;
     const class: export_fab.DrillClass = if (queryFlag(req, "npth")) .non_plated else .plated;
     var aw: std.Io.Writer.Allocating = .init(req.arena);
@@ -2048,11 +2007,13 @@ pub fn pcbDrillApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
 
 /// Run the fab-readiness report over a resolved `FabView` (the same view the
 /// Gerber export builds), so the check and the files describe the same board.
-fn fabReadinessFor(req: *httpz.Request, fv: FabView) HandlerError!fab_readiness.Report {
+fn fabReadinessFor(ctx: *Server, req: *httpz.Request, fv: FabView) HandlerError!fab_readiness.Report {
     const copper = export_gerber.Copper{ .tracks = fv.tracks, .vias = fv.vias };
+    const name = req.param("name") orelse "";
     return fab_readiness.check(req.arena, fv.placement, copper, .{
         .from_saved_layout = fv.from_saved,
         .keep_dnp = queryKeepDnp(req),
+        .drc_rules = drc_rules.load(req.arena, ctx.project_dir, name),
     });
 }
 
@@ -2062,12 +2023,9 @@ fn fabReadinessFor(req: *httpz.Request, fv: FabView) HandlerError!fab_readiness.
 /// The viewer fetches this before download and gates on it; `pcbGerbersApi`
 /// enforces it server-side (409 on errors unless `?force=1`).
 pub fn pcbFabReadinessApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     const fv = blessedFabView(ctx, req, res, name) orelse return;
-    const report = try fabReadinessFor(req, fv);
+    const report = try fabReadinessFor(ctx, req, fv);
     var aw: std.Io.Writer.Allocating = .init(req.arena);
     try fab_readiness.writeJson(&aw.writer, report);
     res.content_type = .JSON;
@@ -2088,15 +2046,12 @@ pub fn pcbFabReadinessApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
 /// ZIP as before. `?dnp=keep` keeps Do-Not-Populate parts in the centroid CSV
 /// (dropped by default).
 pub fn pcbGerbersApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     const fv = blessedFabView(ctx, req, res, name) orelse return;
 
     // Pre-fab gate: block on errors unless explicitly forced.
     if (!queryFlag(req, "force")) {
-        const report = try fabReadinessFor(req, fv);
+        const report = try fabReadinessFor(ctx, req, fv);
         if (!report.ok()) {
             res.status = 409;
             var jw: std.Io.Writer.Allocating = .init(req.arena);
@@ -2158,10 +2113,7 @@ pub fn pcbGerbersApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
 /// server (no client-side metric). Upserts by name (re-save overwrites in
 /// place); a new name is prepended so the newest sits at the top of the list.
 pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     const root = parseJsonObject(req, res) orelse return;
     const nm_v = root.object.get("name") orelse {
         res.status = 400;
@@ -2312,10 +2264,7 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
 /// snapshots (newest first) as `{"snapshots":[{"id":…}, …]}`. Each Save/Update
 /// rolls the previous sidecar into history; this backs a restore picker.
 pub fn pcbLayoutHistoryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     const snaps = history.listLayoutSnapshots(req.arena, ctx.project_dir, name) catch {
         res.status = 500;
         res.body = "history unavailable";
@@ -2342,10 +2291,7 @@ pub fn pcbLayoutHistoryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respon
 /// of clobbering the restored state. Design-level only (sub circuits keep
 /// multi-snapshot in-file history). Returns `{"ok":true,"rev":N}`.
 pub fn restoreLayoutHistoryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     const root = parseJsonObject(req, res) orelse return;
     const id_v = root.object.get("id") orelse {
         res.status = 400;
@@ -2384,10 +2330,7 @@ pub fn restoreLayoutHistoryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Re
 
 /// POST /api/pcb-layouts/:name/delete — drop a named layout. Body: `{"name"}`.
 pub fn deleteNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     const root = parseJsonObject(req, res) orelse return;
     const nm_v = root.object.get("name") orelse {
         res.status = 400;
@@ -2415,10 +2358,7 @@ pub fn deleteNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
 /// A name that matches no entry just clears it. Persists the top-level
 /// `"default"` field to `.layouts.json`; returns `{"ok":true}`.
 pub fn setDefaultLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     const root = parseJsonObject(req, res) orelse return;
     const nm_v = root.object.get("name") orelse {
         res.status = 400;
@@ -2454,10 +2394,7 @@ pub fn setDefaultLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respon
 /// ignored; returns `{"ok":true,"rescored":N}`. A layout with no stored parts,
 /// or one whose scoring fails, keeps its previous score.
 pub fn rescoreLayoutsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     const sub = subSlug(req);
     const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
     if (existing.len == 0) {
@@ -2522,10 +2459,7 @@ pub fn rescoreLayoutsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
 /// persists nothing). The raw terms the client re-weighs are weight-independent,
 /// so the result is stable regardless of `?tuning` (honoured only for parity).
 pub fn pcbScoreBatchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name = req.param("name") orelse {
-        res.status = 404;
-        return;
-    };
+    const name = nameParam(req, res) orelse return;
     const sub = subSlug(req);
     const layouts = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
 
@@ -2641,11 +2575,7 @@ fn courtFloorGrid(v: f64) f64 {
 ///     *effective* half-extents about the origin.
 /// Mode defaults to "size" when absent. Then re-pack via `?regen=1`.
 pub fn savePcbCourtyardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const body = req.body() orelse {
-        res.status = 400;
-        res.body = "no body";
-        return;
-    };
+    const body = bodyParam(req, res) orelse return;
     const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch {
         res.status = 400;
         res.body = bad_json_msg;
@@ -3292,6 +3222,7 @@ fn resolveShownView(
     layouts: []const SavedLayout,
     shown: ?[]const u8,
 ) ShownView {
+    const name = req.param("name") orelse "";
     // Drawn outline wins over the authored (board (size …)) rectangle — it's
     // the explicit per-layout edit.
     const outline_drawn = applyShownOutline(placement, layouts, shown);
@@ -3305,7 +3236,7 @@ fn resolveShownView(
         if (saved) |sr| routed = restoreRoutes(ctx.allocator, sr, placement.nets);
     }
     const violations: []const drc.Violation = if (routed) |r|
-        (drc.check(ctx.allocator, placement.*, r, ro.params.clearance) catch &.{})
+        drc_rules.checkFiltered(ctx.allocator, ctx.project_dir, name, placement.*, r, ro.params.clearance)
     else
         &.{};
     return .{ .ro = ro, .routed = routed, .violations = violations, .outline_drawn = outline_drawn, .saved = saved, .texts = shownTexts(layouts, shown) };
@@ -5314,6 +5245,39 @@ fn writePadsJson(
     try w.writeAll("]");
 }
 
+/// The request body, or null with a 400 already written — the guard every
+/// JSON-POST handler opens with.
+fn bodyParam(req: *httpz.Request, res: *httpz.Response) ?[]const u8 {
+    return req.body() orelse {
+        res.status = 400;
+        res.body = "no body";
+        return null;
+    };
+}
+
+/// The `:name` route param, or null with a 404 already written — the guard
+/// every per-design handler opens with.
+fn nameParam(req: *httpz.Request, res: *httpz.Response) ?[]const u8 {
+    return req.param("name") orelse {
+        res.status = 404;
+        return null;
+    };
+}
+
+/// Emit `,"drc_kinds":[…],` — the per-kind DRC rules table (built-in default +
+/// current override) the viewer's ⚙ Rules menu renders. Sits between the
+/// blob's name and layouts fields, so it carries both surrounding commas.
+fn writeDrcKindsField(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) HandlerError!void {
+    try w.writeAll(",\"drc_kinds\":");
+    try drc_rules.writeKindsJson(w, drc_rules.load(alloc, project_dir, name));
+    try w.writeAll(",");
+}
+
 fn writePcbData(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
@@ -5354,7 +5318,7 @@ fn writePcbData(
     try writeBreakdownJson(w, p.breakdown, params);
     try w.writeAll(",\"name\":");
     try writeJsonStr(w, name);
-    try w.writeAll(",");
+    try writeDrcKindsField(w, alloc, project_dir, name);
     try writeLayoutsJson(w, layouts);
 
     // Raw per-part objective blame → the live "Heatmap" toggle tints each
@@ -7270,7 +7234,10 @@ pub fn mcpRunFabReadiness(
     const fv = mcpFabView(alloc, project_dir, name, layout_arg) orelse
         return mcpFail(out, alloc, "no saved layout — set poses and save a layout first");
     const copper = export_gerber.Copper{ .tracks = fv.tracks, .vias = fv.vias };
-    const report = fab_readiness.check(alloc, fv.placement, copper, .{ .from_saved_layout = fv.from_saved }) catch |e|
+    const report = fab_readiness.check(alloc, fv.placement, copper, .{
+        .from_saved_layout = fv.from_saved,
+        .drc_rules = drc_rules.load(alloc, project_dir, name),
+    }) catch |e|
         return mcpFailFmt(out, alloc, "fab-readiness check failed: {s}", .{@errorName(e)});
     var aw: std.Io.Writer.Allocating = .init(alloc);
     try fab_readiness.writeJson(&aw.writer, report);

@@ -822,6 +822,7 @@ function pSelRow(k,id,opts,cur,locked){var o='';opts.forEach(function(op){
  return '<div class="prop-row"><span class="k">'+k+'</span>'+
   '<select class="pv-in" id="'+id+'"'+(locked?' disabled':'')+'>'+o+'</select></div>';}
 function renderProps(){var body=document.getElementById("prop-body");if(!body)return;
+ if(insp){renderInspProps(body);return;}
  var p=selRef?partByRef(selRef):null;
  if(!p){body.innerHTML='<div class="prop-empty">Click a part on the board to see its properties.'+
   '<br><span class="prop-empty-n">'+P.length+' components</span></div>';return;}
@@ -1143,6 +1144,8 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Switch 45&deg; corner posture (while routing)</span><kbd>/</kbd></div>'+
   '<div class="kbd-row"><span>Step back / finish trace</span><kbd>Backspace / Enter &middot; dbl-click</kbd></div>'+
   '<div class="kbd-row"><span>Delete track or via (in route mode)</span><kbd>right-click</kbd></div>'+
+  '<div class="kbd-row"><span>Inspect copper / DRC marker (Select mode)</span><kbd>click it</kbd></div>'+
+  '<div class="kbd-row"><span>Slide selected track (Shift = free) &middot; delete</span><kbd>drag &middot; Del</kbd></div>'+
   '<div class="kbd-row"><span>Move part (snaps to grid)</span><kbd>drag part</kbd></div>'+
   '<div class="kbd-row"><span>Select box (multi-select)</span><kbd>drag empty space</kbd></div>'+
   '<div class="kbd-row"><span>Move all selected together</span><kbd>drag a selected part</kbd></div>'+
@@ -1179,6 +1182,12 @@ document.addEventListener("keydown",function(ev){
   if(ev.key=="r"||ev.key=="R"){ev.preventDefault();var t=PCB.texts[txSel];recordUndo();
    t.rot=((((t.rot||0)+(ev.shiftKey?-90:90))%360)+360)%360;paintSoon();txPopReposition(txSel);txDirty();return;}
   if(ev.key=="Delete"||ev.key=="Backspace"){ev.preventDefault();txDelete(txSel);return;}}
+ // Selected copper (docked inspector): Del/Backspace removes the track/via.
+ if((ev.key=="Delete"||ev.key=="Backspace")&&!typing&&!RO&&insp&&!anyDrawTool()){
+  if(insp.t=="track"||insp.t=="via"){ev.preventDefault();recordUndo();
+   if(insp.t=="track")PCB.tracks=(PCB.tracks||[]).filter(function(q){return q!==insp.o;});
+   else PCB.vias=(PCB.vias||[]).filter(function(q){return q!==insp.o;});
+   routeStatMsg();scheduleDrc();paintSoon();return;}}
  if((ev.key=="r"||ev.key=="R")&&cur>=0&&!typing){ev.preventDefault();if(P[cur].locked)return;
    // Mirror the drag priority (pointerdown): a marquee multi-select that
    // includes the hovered part rotates as ONE rigid body about the
@@ -1670,6 +1679,36 @@ function startPan(ev){pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:fal
  slop:ev.pointerType==="touch"?8:3,tapi:-1};
  pcap(ev);svg.style.cursor="grabbing";}
 var clickCand=null; // pressed a part but won't drag (RO page / locked part)
+// ── Track-segment editing (Select mode) ─────────────────────────────────
+// Grabbing a track slides it along its perpendicular (Shift = free move);
+// segments and vias sharing its endpoints stretch to follow — KiCad's
+// free-angle drag — so connectivity is preserved. Del removes the selection.
+var segdrag=null;
+function segAttached(t,x,y){var eps=2e-3,out=[],anyVia=false;
+ (PCB.vias||[]).forEach(function(v){if(Math.abs(v.x-x)<eps&&Math.abs(v.y-y)<eps){out.push({v:v});anyVia=true;}});
+ (PCB.tracks||[]).forEach(function(q){if(q===t)return;
+  if(!anyVia&&(q.l||0)!==(t.l||0))return; // cross-layer joins only through a via
+  if(Math.abs(q.x1-x)<eps&&Math.abs(q.y1-y)<eps)out.push({q:q,e:1});
+  else if(Math.abs(q.x2-x)<eps&&Math.abs(q.y2-y)<eps)out.push({q:q,e:2});});
+ return out;}
+function segStart(t,m){var dx=t.x2-t.x1,dy=t.y2-t.y1,L=Math.hypot(dx,dy)||1;
+ return {t:t,m0:m,moved:false,snap:snapAll(),o:{x1:t.x1,y1:t.y1,x2:t.x2,y2:t.y2},
+  px:-dy/L,py:dx/L,a:segAttached(t,t.x1,t.y1),b:segAttached(t,t.x2,t.y2)};}
+function segFollow(list,nx,ny){list.forEach(function(w){
+ if(w.v){w.v.x=nx;w.v.y=ny;}
+ else if(w.e===1){w.q.x1=nx;w.q.y1=ny;}
+ else{w.q.x2=nx;w.q.y2=ny;}});}
+function segMove(m,free){var sd=segdrag,g=snapG();
+ var dx=m.x-sd.m0.x,dy=m.y-sd.m0.y,mx,my;
+ if(free){mx=Math.round(dx/g)*g;my=Math.round(dy/g)*g;}
+ else{var k=Math.round((dx*sd.px+dy*sd.py)/g)*g;mx=sd.px*k;my=sd.py*k;}
+ var nx1=sd.o.x1+mx,ny1=sd.o.y1+my,nx2=sd.o.x2+mx,ny2=sd.o.y2+my;
+ if(nx1===sd.t.x1&&ny1===sd.t.y1&&nx2===sd.t.x2&&ny2===sd.t.y2)return;
+ if(!sd.moved){sd.moved=true;svg.style.cursor="grabbing";}
+ sd.t.x1=nx1;sd.t.y1=ny1;sd.t.x2=nx2;sd.t.y2=ny2;
+ segFollow(sd.a,nx1,ny1);segFollow(sd.b,nx2,ny2);
+ if(insp&&insp.o===sd.t)renderProps();
+ paintSoon();}
 // Touch gestures (phones/tablets): one finger anywhere = pan the board, a tap
 // (no movement) = select the part/pad under it, two fingers = pinch zoom.
 // Part dragging and marquee select stay pointer-precise (mouse/pen) — a finger
@@ -1724,6 +1763,10 @@ svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.pre
  var m=mm(ev),hi=partAt(m.x,m.y);
  if(hi<0){
   if(!RO){var uv=vtxAt(m);if(uv>=0){vdrag={i:uv,moved:false,snap:snapAll()};pcap(ev);return;}}
+  // A track under the press arms a segment drag (a stationary click just
+  // selects it); via / DRC-marker presses keep today's click-to-inspect.
+  if(!RO&&!anyDrawTool()){var sh=inspHit(m);
+   if(sh&&sh.t==="track"){segdrag=segStart(sh.o,m);pcap(ev);return;}}
   marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false};pcap(ev);
   marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);return;}
  // Part gesture (hit-tested — parts are canvas-painted, not DOM).
@@ -1742,6 +1785,7 @@ svg.addEventListener("pointermove",function(ev){
   if(vo&&vo.pts&&vdrag.i<vo.pts.length&&(vo.pts[vdrag.i][0]!==vgx||vo.pts[vdrag.i][1]!==vgy)){
    vo.pts[vdrag.i]=[vgx,vgy];vdrag.moved=true;outlineBboxSync();drawBoardRect();}
   return;}
+ if(segdrag){segMove(mm(ev),ev.shiftKey);return;}
  if(polyMode&&polyPts){polyCur=mm(ev);drawBoardRect();return;}
  if(txDrag){var tm=mm(ev),t=PCB.texts[txDrag.i];if(t){
    var nx=Math.round((tm.x+txDrag.ox)/G)*G,ny=Math.round((tm.y+txDrag.oy)/G)*G;
@@ -1776,7 +1820,9 @@ svg.addEventListener("pointermove",function(ev){
   var hg=(hi>=0)?grpOf(P[hi].ref):null;
   hoverGrpName=(hg&&grpRigid(hg))?hg:null;
   svg.style.cursor=(outlineMode||polyMode)?"":(hi<0?"":(P[hi].locked?"not-allowed":(RO?"":"grab")));
-  paintSoon();}});
+  paintSoon();}
+ if(hi<0&&!RO&&!anyDrawTool()&&!SPACE){var mvc=inspHitTrack(hm)?"move":"";
+  if(svg.style.cursor!==mvc&&(svg.style.cursor===""||svg.style.cursor==="move"))svg.style.cursor=mvc;}});
 function clickPart(ev,i){var m=mm(ev),pd=padAt(i,m.x,m.y);
  // Every part-click path funnels here, so overlapping copper / DRC markers
  // get one precedence rule: marker > pad > via/track > the part itself.
@@ -1792,6 +1838,9 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
   // one undo step (Ctrl+Z reverts the whole vertex move).
   if(vd.moved){if(vd.snap)recordUndo(vd.snap);else markDirty();outlineMsg("outline edited — Save/Update to keep");}
   return;}
+ if(segdrag){var sgd=segdrag;segdrag=null;svg.style.cursor="";
+  if(sgd.moved){recordUndo(sgd.snap);routeStatMsg();scheduleDrc();}
+  inspSet({t:"track",o:sgd.t});return;}
  if(txDrag){var moved=txDrag.moved,ti=txDrag.i,tsnap=txDrag.snap;txDrag=null;if(moved){recordUndo(tsnap);txDirty();txPopReposition(ti);}return;}
  if(typeof gdrag!=="undefined"&&gdrag){var gmv=gdrag.moved,gsnap=gdrag.snap,gdn=gdrag.down;gdrag=null;svg.style.cursor="";
   // No movement = a plain click on a rigid-group / multi-selected part —
@@ -2330,10 +2379,35 @@ function drcLoc(d){
  if(d.nets&&d.nets.length)return [].concat(d.nets).join(" · ");
  if(d.refs&&d.refs.length)return [].concat(d.refs).join(" · ");
  if(d.net)return d.net;if(d.ref)return d.ref;return "";}
+// Per-kind DRC rule settings — the \u2699 Rules menu in the violations panel.
+// Each kind picks Error / Warning / Ignore; deviations from the built-in
+// default POST to /api/pcb-drc-rules/<design> (persisted server-side, so the
+// APIs, the fab gate, and this viewer all judge the board the same way).
+var drcRulesOpen=false;
+function drcRulesHtml(){var ks=PCB.drc_kinds||[];
+ if(!ks.length)return '<div class="drc-empty">rule table unavailable</div>';
+ var h='<div id="drc-rules" style="padding:2px 0 6px;border-bottom:1px solid #2c2d31">';
+ ks.forEach(function(kk,i){var eff=kk.ov||kk.def;
+  h+='<div class="drc-row" style="cursor:default"><span class="drc-k">'+pEsc(kk.label)+'</span>'+
+   '<select class="pv-in" data-drck="'+i+'" style="width:118px">';
+  [["err","Error"],["warn","Warning"],["ignore","Ignore"]].forEach(function(op){
+   h+='<option value="'+op[0]+'"'+(op[0]===eff?' selected':'')+'>'+op[1]+(op[0]===kk.def?" (default)":"")+'</option>';});
+  h+='</select></div>';});
+ return h+'</div>';}
+function drcRulesPost(){var ov={};
+ (PCB.drc_kinds||[]).forEach(function(kk){if(kk.ov&&kk.ov!==kk.def)ov[kk.k]=kk.ov;});
+ fetch("/api/pcb-drc-rules/"+encodeURIComponent(PCB.name),{method:"POST",
+   headers:{"Content-Type":"application/json"},body:JSON.stringify(ov)})
+  .then(function(r){if(!r.ok)throw 0;return r.json();})
+  .then(function(j){if(j.kinds)PCB.drc_kinds=j.kinds;runDrcNow();})
+  .catch(function(){routeStatMsg("saving DRC rules failed",true);});}
 function renderDrcList(){var lst=ensureDrcList();if(!lst)return;
  var v=PCB.drc||[];
- if(!v.length){lst.innerHTML='<div class="drc-empty">No DRC violations.</div>';return;}
- var h='';v.forEach(function(d,i){var loc=drcLoc(d),sc=drcSevClass(d);
+ var h='<div class="drc-row" style="cursor:default;font-weight:600"><span class="drc-k">'+
+  (v.length?(v.length+" violation"+(v.length>1?"s":"")):"No DRC violations")+'</span>'+
+  '<button id="drc-cog" class="btn" style="font-size:11px" title="Choose which checks count as errors or warnings, or are ignored — saved with the design, honoured by the APIs and the fab gate too">\u2699 Rules</button></div>';
+ if(drcRulesOpen)h+=drcRulesHtml();
+ v.forEach(function(d,i){var loc=drcLoc(d),sc=drcSevClass(d);
   h+='<div class="drc-row'+(sc?" "+sc:"")+'" data-drc="'+i+'" title="Locate this violation on the board">'+
    (d.id?'<span class="drc-loc">#'+pEsc(d.id)+'</span>':'')+
    '<span class="drc-k">'+pEsc(d.k||"violation")+'</span>'+
@@ -2341,22 +2415,27 @@ function renderDrcList(){var lst=ensureDrcList();if(!lst)return;
    '<span class="drc-gap">'+(d.gap!=null?(Math.round(d.gap*1000)/1000):"?")+' / '+(d.clr!=null?d.clr:"?")+' mm</span>'+
    '</div>';});
  lst.innerHTML=h;
+ var cog=document.getElementById("drc-cog");
+ if(cog)cog.addEventListener("click",function(){drcRulesOpen=!drcRulesOpen;renderDrcList();});
+ lst.querySelectorAll("[data-drck]").forEach(function(sl){
+  sl.addEventListener("change",function(){var kk=(PCB.drc_kinds||[])[+sl.getAttribute("data-drck")];
+   if(!kk)return;kk.ov=(sl.value===kk.def)?null:sl.value;drcRulesPost();});});
  lst.querySelectorAll("[data-drc]").forEach(function(row){
   row.addEventListener("click",function(){var d=(PCB.drc||[])[+row.getAttribute("data-drc")];
    lst.querySelectorAll(".drc-row").forEach(function(r){r.classList.remove("cur");});
    row.classList.add("cur");
-   if(d&&d.x!=null&&d.y!=null){insp={t:"drc",o:d};inspPopClose();focusPoint(d.x,d.y);}});});}
+   if(d&&d.x!=null&&d.y!=null){inspSet({t:"drc",o:d});focusPoint(d.x,d.y);}});});}
 function drcListToggle(){var lst=ensureDrcList();if(!lst)return;
  lst.hidden=!lst.hidden;if(!lst.hidden)renderDrcList();}
 (function(){var chip=document.getElementById("r-drc");
  if(chip&&!RO){chip.style.cursor="pointer";chip.title="Click to list / locate DRC violations";
   chip.addEventListener("click",drcListToggle);}})();
 // ── Copper / DRC inspector ────────────────────────────────────────────────
-// Click a track, via, or DRC marker in Select mode to inspect it: a popover
-// shows its facts (net, layer, geometry, the violation's traceable #id) and
-// Copy report puts a one-line description on the clipboard — made to be
-// pasted verbatim into a bug report or an agent chat. Esc / empty click /
-// any copper edit clears it.
+// Click a track, via, or DRC marker in Select mode to inspect it: the sidebar
+// Properties panel shows its facts (net, layer, geometry, the violation's
+// traceable #id) and Copy report puts a one-line description on the clipboard
+// — made to be pasted verbatim into a bug report or an agent chat. Esc /
+// empty click / any copper edit clears it.
 var insp=null; // {t:"track"|"via"|"drc", o:<live object>}
 function pxTolMm(px){var r=svg.getBoundingClientRect();
  return px*(vb.w/Math.max(r.width,1))/S;}
@@ -2397,8 +2476,51 @@ function inspReport(){if(!insp)return "";var o=insp.o;
   (o.gap!=null?o.gap.toFixed(3):"?")+"mm < "+o.clr+"mm @("+n2(o.x)+","+n2(o.y)+")";}
 function inspPopClose(){var p=document.getElementById("insp-pop");
  if(p&&p.parentNode)p.parentNode.removeChild(p);}
-function inspClear(){if(!insp)return;insp=null;inspPopClose();paintSoon();}
-function inspShow(hit,ev){insp=hit;inspPopClose();
+function inspClear(){if(!insp)return;insp=null;inspPopClose();renderProps();paintSoon();}
+// Docked inspection: selecting copper / a DRC marker fills the sidebar
+// Properties panel (renderProps branches on `insp`); the floating popover
+// survives only for pages without the sidebar (embedded previews).
+function inspSet(hit){insp=hit;inspPopClose();renderProps();paintSoon();}
+function renderInspProps(body){var o=insp.o,h="",hint='<div class="prop-lock">';
+ if(insp.t=="track"){
+  h='<div class="prop-head"><span class="prop-ref">Track</span>'+
+   (o.net?'<span class="prop-val">'+pEsc(nLeaf(o.net))+'</span>':'')+'</div>'+
+   '<div class="prop-rows">'+pRow("Net",o.net||"?")+pRow("Layer",layerName(o.l||0))+
+   pRow("Width",n2(o.w||0.25)+" mm")+
+   pRow("From","("+n2(o.x1)+", "+n2(o.y1)+")")+pRow("To","("+n2(o.x2)+", "+n2(o.y2)+")")+
+   pRow("Length",n2(Math.hypot(o.x2-o.x1,o.y2-o.y1))+" mm")+(o.g?pRow("Stamp",o.g):"")+'</div>';
+  if(!RO)h+=hint+'Drag slides the segment (Shift = free move) · <kbd>Del</kbd> deletes · <kbd>Esc</kbd> deselects</div>';
+ }else if(insp.t=="via"){
+  h='<div class="prop-head"><span class="prop-ref">Via</span>'+
+   (o.net?'<span class="prop-val">'+pEsc(nLeaf(o.net))+'</span>':'')+'</div>'+
+   '<div class="prop-rows">'+pRow("Net",o.net||"?")+pRow("Position","("+n2(o.x)+", "+n2(o.y)+")")+
+   pRow("Diameter",n2(o.d||0.4)+" mm")+pRow("Drill",n2((o.drill>0)?o.drill:viaGeo().drill)+" mm")+
+   (o.g?pRow("Stamp",o.g):"")+'</div>';
+  if(!RO)h+=hint+'<kbd>Del</kbd> deletes · <kbd>Esc</kbd> deselects</div>';
+ }else{
+  h='<div class="prop-head"><span class="prop-ref">DRC #'+pEsc(o.id||"?")+'</span>'+
+   '<span class="prop-val">'+pEsc(o.k||"violation")+'</span></div>'+
+   '<div class="prop-rows">'+pRow("Severity",o.sev=="warn"?"warning":"error")+
+   pRow("Measured",o.gap!=null?o.gap.toFixed(3)+" mm":"?")+
+   pRow("Required",(o.clr!=null?o.clr:"?")+" mm")+pRow("At","("+n2(o.x)+", "+n2(o.y)+")")+'</div>'+
+   hint+pEsc(drcMsg(o))+'</div>';
+ }
+ h+='<div style="display:flex;gap:8px;padding:8px 12px">'+
+  '<button id="insp-copy" class="btn" style="font-size:11px">Copy report</button>'+
+  '<button id="insp-goto" class="btn" style="font-size:11px" title="Pan/zoom to it">\u2316 Locate</button></div>';
+ body.innerHTML=h;
+ var cb=document.getElementById("insp-copy");
+ if(cb)cb.addEventListener("click",function(){
+  function done(ok){cb.textContent=ok?"copied \u2713":"copy failed";}
+  if(navigator.clipboard&&navigator.clipboard.writeText)
+   navigator.clipboard.writeText(inspReport()).then(function(){done(true);},function(){done(false);});
+  else done(false);});
+ var gb=document.getElementById("insp-goto");
+ if(gb)gb.addEventListener("click",function(){var q=insp&&insp.o;if(!q)return;
+  focusPoint(q.x!=null?q.x:(q.x1+q.x2)/2,q.y!=null?q.y:(q.y1+q.y2)/2);});}
+function inspShow(hit,ev){
+ if(document.getElementById("prop-body")){inspSet(hit);return;}
+ insp=hit;inspPopClose();
  var host=svg.parentNode;if(!host)return;
  var pop=document.createElement("div");pop.id="insp-pop";
  pop.style.cssText="position:absolute;z-index:40;background:#161b22;border:1px solid #30363d;"+

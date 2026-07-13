@@ -24,6 +24,7 @@ const std = @import("std");
 const optimizer = @import("placement/optimizer.zig");
 const router = @import("placement/router.zig");
 const drc = @import("placement/drc.zig");
+const drc_rules = @import("serve/drc_rules.zig");
 const pour = @import("placement/pour.zig");
 const export_gerber = @import("export_gerber.zig");
 const export_fab = @import("export_fab.zig");
@@ -92,6 +93,10 @@ pub const Context = struct {
     /// CSV (`?dnp=keep`). Since the default now DROPS them, the
     /// `dnp-in-centroid` warning fires only in keep-mode.
     keep_dnp: bool = false,
+    /// The design's per-kind DRC severity overrides (`<design>.drc-rules.json`),
+    /// pre-loaded by the caller — the gate must agree with the viewer on what
+    /// counts as an error, so an `ignore`d kind never blocks the fab package.
+    drc_rules: drc_rules.Rules = .{},
 };
 
 /// Run the readiness report. `copper` is the blessed layout's persisted routed
@@ -173,7 +178,7 @@ pub fn check(
         .routed = 0,
         .total = 0,
     };
-    const violations = drc.check(arena, placement, routed, clearance) catch &.{};
+    const violations = drc_rules.apply(arena, ctx.drc_rules, drc.check(arena, placement, routed, clearance) catch &.{});
     stats.drc_violations = violations.len;
     // Partition by severity: error-severity violations block the gate; warnings
     // (courtyard overlap, mask slivers, silkscreen over a pad) flow through as
