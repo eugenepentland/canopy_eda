@@ -1139,7 +1139,7 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Move whole sub-circuit</span><kbd>drag any of its parts</kbd></div>'+
   '<div class="kbd-row"><span>Draw board outline (click = clear)</span><kbd>▭ Outline, then drag</kbd></div>'+
   '<div class="kbd-row"><span>Polygon outline (Enter close &middot; Backspace undo &middot; Esc cancel)</span><kbd>⬡ Poly, then click vertices</kbd></div>'+
-  '<div class="kbd-row"><span>Hand-route mode (click pad → trace)</span><kbd>X</kbd></div>'+
+  '<div class="kbd-row"><span>Hand-route mode (click pad → trace; head stops at clearance obstacles)</span><kbd>X</kbd></div>'+
   '<div class="kbd-row"><span>Drop via + flip layer (while routing)</span><kbd>V</kbd></div>'+
   '<div class="kbd-row"><span>Switch 45&deg; corner posture (while routing)</span><kbd>/</kbd></div>'+
   '<div class="kbd-row"><span>Step back / finish trace</span><kbd>Backspace / Enter &middot; dbl-click</kbd></div>'+
@@ -1680,9 +1680,12 @@ function startPan(ev){pan={cx:ev.clientX,cy:ev.clientY,vx:vb.x,vy:vb.y,moved:fal
  pcap(ev);svg.style.cursor="grabbing";}
 var clickCand=null; // pressed a part but won't drag (RO page / locked part)
 // ── Track-segment editing (Select mode) ─────────────────────────────────
-// Grabbing a track slides it along its perpendicular (Shift = free move);
-// segments and vias sharing its endpoints stretch to follow — KiCad's
-// free-angle drag — so connectivity is preserved. Del removes the selection.
+// KiCad's drag45: the grabbed segment slides along its own normal and keeps
+// its direction; each neighbour keeps ITS angle too — corners re-solve as the
+// intersection of the two fixed direction lines, so neighbours only extend or
+// shorten. A collinear run (or a bare/pad end) gets a perpendicular jog
+// segment inserted (dropped again if it ends zero-length); a via or 3-way
+// junction translates rigidly. Shift = free move (whole node follows).
 var segdrag=null;
 function segAttached(t,x,y){var eps=2e-3,out=[],anyVia=false;
  (PCB.vias||[]).forEach(function(v){if(Math.abs(v.x-x)<eps&&Math.abs(v.y-y)<eps){out.push({v:v});anyVia=true;}});
@@ -1691,24 +1694,57 @@ function segAttached(t,x,y){var eps=2e-3,out=[],anyVia=false;
   if(Math.abs(q.x1-x)<eps&&Math.abs(q.y1-y)<eps)out.push({q:q,e:1});
   else if(Math.abs(q.x2-x)<eps&&Math.abs(q.y2-y)<eps)out.push({q:q,e:2});});
  return out;}
+// How one end of the dragged segment behaves while it slides (see above):
+// corner (angle-preserving intersection) / jog (perpendicular connector,
+// anchored at the old point) / free (rigid node translate).
+function segPlan(t,x,y,d){var at=segAttached(t,x,y);
+ var vias=at.filter(function(w){return w.v;}),trs=at.filter(function(w){return w.q;});
+ if(!vias.length&&trs.length===1){var w=trs[0],q=w.q;
+  var fx=(w.e===1)?q.x2:q.x1,fy=(w.e===1)?q.y2:q.y1;
+  var ex=x-fx,ey=y-fy,eL=Math.hypot(ex,ey);
+  if(eL>1e-9){ex/=eL;ey/=eL;
+   if(Math.abs(d.x*ey-d.y*ex)>1e-6)return {mode:"corner",w:w,q:q,fx:fx,fy:fy,ex:ex,ey:ey,at:at};
+   return {mode:"jog",sx:x,sy:y,jog:null,at:at};}}
+ if(!at.length)return {mode:"jog",sx:x,sy:y,jog:null,at:at};
+ return {mode:"free",at:at};}
 function segStart(t,m){var dx=t.x2-t.x1,dy=t.y2-t.y1,L=Math.hypot(dx,dy)||1;
+ var d={x:dx/L,y:dy/L};
  return {t:t,m0:m,moved:false,snap:snapAll(),o:{x1:t.x1,y1:t.y1,x2:t.x2,y2:t.y2},
-  px:-dy/L,py:dx/L,a:segAttached(t,t.x1,t.y1),b:segAttached(t,t.x2,t.y2)};}
+  d:d,px:-d.y,py:d.x,a:segPlan(t,t.x1,t.y1,d),b:segPlan(t,t.x2,t.y2,d)};}
 function segFollow(list,nx,ny){list.forEach(function(w){
  if(w.v){w.v.x=nx;w.v.y=ny;}
  else if(w.e===1){w.q.x1=nx;w.q.y1=ny;}
  else{w.q.x2=nx;w.q.y2=ny;}});}
+function segJogDrop(pl){if(pl.jog){PCB.tracks=PCB.tracks.filter(function(q){return q!==pl.jog;});pl.jog=null;}}
+// New position for one endpoint whose original was `o`, slid by (mx,my).
+function segEnd(sd,pl,o,mx,my,free){var ax=o.x+mx,ay=o.y+my;
+ if(free||pl.mode==="free"){if(pl.jog)segJogDrop(pl);segFollow(pl.at,ax,ay);return {x:ax,y:ay};}
+ if(pl.mode==="corner"){
+  var cr=sd.d.x*pl.ey-sd.d.y*pl.ex;
+  var tp=((pl.fx-ax)*pl.ey-(pl.fy-ay)*pl.ex)/cr;
+  var cx=ax+tp*sd.d.x,cy=ay+tp*sd.d.y;
+  if(pl.w.e===1){pl.q.x1=cx;pl.q.y1=cy;}else{pl.q.x2=cx;pl.q.y2=cy;}
+  return {x:cx,y:cy};}
+ // jog: the anchor point stays put (on the collinear run / the pad); a
+ // perpendicular connector carries the moved endpoint.
+ if(!pl.jog){pl.jog={x1:pl.sx,y1:pl.sy,x2:ax,y2:ay,l:sd.t.l||0,w:sd.t.w,net:sd.t.net||""};
+  (PCB.tracks=PCB.tracks||[]).push(pl.jog);}
+ else{pl.jog.x2=ax;pl.jog.y2=ay;}
+ return {x:ax,y:ay};}
 function segMove(m,free){var sd=segdrag,g=snapG();
  var dx=m.x-sd.m0.x,dy=m.y-sd.m0.y,mx,my;
  if(free){mx=Math.round(dx/g)*g;my=Math.round(dy/g)*g;}
  else{var k=Math.round((dx*sd.px+dy*sd.py)/g)*g;mx=sd.px*k;my=sd.py*k;}
- var nx1=sd.o.x1+mx,ny1=sd.o.y1+my,nx2=sd.o.x2+mx,ny2=sd.o.y2+my;
- if(nx1===sd.t.x1&&ny1===sd.t.y1&&nx2===sd.t.x2&&ny2===sd.t.y2)return;
+ var e1=segEnd(sd,sd.a,{x:sd.o.x1,y:sd.o.y1},mx,my,free);
+ var e2=segEnd(sd,sd.b,{x:sd.o.x2,y:sd.o.y2},mx,my,free);
+ if(e1.x===sd.t.x1&&e1.y===sd.t.y1&&e2.x===sd.t.x2&&e2.y===sd.t.y2)return;
  if(!sd.moved){sd.moved=true;svg.style.cursor="grabbing";}
- sd.t.x1=nx1;sd.t.y1=ny1;sd.t.x2=nx2;sd.t.y2=ny2;
- segFollow(sd.a,nx1,ny1);segFollow(sd.b,nx2,ny2);
+ sd.t.x1=e1.x;sd.t.y1=e1.y;sd.t.x2=e2.x;sd.t.y2=e2.y;
  if(insp&&insp.o===sd.t)renderProps();
  paintSoon();}
+// Drop jogs that ended zero-length (slid back home / never left).
+function segJogClean(sd){[sd.a,sd.b].forEach(function(pl){var j=pl&&pl.jog;
+ if(j&&Math.hypot(j.x2-j.x1,j.y2-j.y1)<1e-6){PCB.tracks=PCB.tracks.filter(function(q){return q!==j;});pl.jog=null;}});}
 // Touch gestures (phones/tablets): one finger anywhere = pan the board, a tap
 // (no movement) = select the part/pad under it, two fingers = pinch zoom.
 // Part dragging and marquee select stay pointer-precise (mouse/pen) — a finger
@@ -1839,6 +1875,7 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
   if(vd.moved){if(vd.snap)recordUndo(vd.snap);else markDirty();outlineMsg("outline edited — Save/Update to keep");}
   return;}
  if(segdrag){var sgd=segdrag;segdrag=null;svg.style.cursor="";
+  segJogClean(sgd);
   if(sgd.moved){recordUndo(sgd.snap);routeStatMsg();scheduleDrc();}
   inspSet({t:"track",o:sgd.t});return;}
  if(txDrag){var moved=txDrag.moved,ti=txDrag.i,tsnap=txDrag.snap;txDrag=null;if(moved){recordUndo(tsnap);txDirty();txPopReposition(ti);}return;}
@@ -2069,18 +2106,49 @@ function drawSnap(m){var dg=snapG();
 // exactly like KiCad's interactive router. Returns [target] when one leg
 // already reaches it (pure H/V/45° displacement).
 var drawPosture=0;
-function drawPath(ax,ay,t){
+function drawPath(ax,ay,t,posture){
+ var po=(posture==null)?drawPosture:posture;
  var dx=t.x-ax,dy=t.y-ay,adx=Math.abs(dx),ady=Math.abs(dy);
  if(adx<1e-9||ady<1e-9||Math.abs(adx-ady)<1e-9)return [t];
  var m=Math.min(adx,ady),sx=dx<0?-1:1,sy=dy<0?-1:1,mid;
- if(drawPosture===0)mid=(adx>ady)?{x:t.x-sx*m,y:ay}:{x:ax,y:t.y-sy*m};
+ if(po===0)mid=(adx>ady)?{x:t.x-sx*m,y:ay}:{x:ax,y:t.y-sy*m};
  else mid={x:ax+sx*m,y:ay+sy*m};
  return [mid,t];}
+// ── Obstacle pushback while drawing ─────────────────────────────────────
+// KiCad-style: the route head never advances into a clearance violation.
+// When the posture legs collide, the OTHER posture is tried first (the
+// router's auto-posture dodge); if both collide the chain is clipped at the
+// last legal grid point toward the cursor, so the head visibly sticks at the
+// obstacle instead of laying violating copper.
+function clipLegs(legs){
+ var pts=[{x:dtrace.lx,y:dtrace.ly}],g=snapG(),cand=[],i,k;
+ legs.forEach(function(q){pts.push({x:q.x,y:q.y});});
+ for(i=1;i<pts.length;i++){var a=pts[i-1],b=pts[i];
+  var L=Math.hypot(b.x-a.x,b.y-a.y);if(L<1e-9)continue;
+  var diag=Math.abs(Math.abs(b.x-a.x)-Math.abs(b.y-a.y))<1e-9&&Math.abs(b.x-a.x)>1e-9;
+  var q1=diag?g*Math.SQRT2:g,n=Math.max(1,Math.floor(L/q1+1e-9));
+  for(k=1;k<n;k++)cand.push({i:i,x:a.x+(b.x-a.x)*(k*q1/L),y:a.y+(b.y-a.y)*(k*q1/L)});
+  cand.push({i:i,x:b.x,y:b.y});}
+ if(!cand.length)return [];
+ function legsAt(ci){var c=cand[ci],out=[];
+  for(var j=1;j<c.i;j++)out.push(pts[j]);
+  out.push({x:c.x,y:c.y});return out;}
+ // Prefix legality is monotone (a violating sub-segment stays inside every
+ // longer prefix), so binary-search the longest legal candidate.
+ var lo=-1,hi=cand.length-1;
+ if(!drawLegsViolate(legsAt(hi)))return legsAt(hi);
+ while(hi-lo>1){var mid2=(lo+hi)>>1;
+  if(drawLegsViolate(legsAt(mid2)))hi=mid2;else lo=mid2;}
+ return lo<0?[]:legsAt(lo);}
 // Target point + the leg chain that reaches it. Shift = free angle: one
 // direct grid-snapped segment, no posture legs.
 function drawLegs(m,shift){var t=drawTarget(m,shift);
- if(shift||!dtrace)return {t:t,legs:[t]};
- return {t:t,legs:drawPath(dtrace.lx,dtrace.ly,t)};}
+ if(!dtrace)return {t:t,legs:[t]};
+ var legs=shift?[t]:drawPath(dtrace.lx,dtrace.ly,t);
+ if(!drawLegsViolate(legs))return {t:t,legs:legs};
+ if(!shift){var alt=drawPath(dtrace.lx,dtrace.ly,t,drawPosture^1);
+  if(!drawLegsViolate(alt))return {t:t,legs:alt,dodged:true};}
+ return {t:t,legs:clipLegs(legs),clipped:true};}
 function padTarget(m){var i=partAt(m.x,m.y);if(i<0)return null;
  var pd=padAt(i,m.x,m.y);if(!pd)return null;
  var c=wpt(i,pd.x,pd.y);
@@ -2242,15 +2310,20 @@ function drawClick(m,shift){
   routeStatMsg("start a trace on a pad (or existing copper)",true);return;}
  var pt2=padTarget(m);
  if(pt2&&pt2.net&&pt2.net===dtrace.net){
-  // Finish on a pad through the SAME posture legs the preview showed, so
-  // the committed copper is exactly the previewed path.
+  // Finish on a pad through the SAME posture legs the preview showed (the
+  // committed copper is exactly the previewed path), dodging to the other
+  // posture when the shown one collides.
   var pl=drawPath(dtrace.lx,dtrace.ly,{x:pt2.x,y:pt2.y});
-  if(drawLegsViolate(pl)){routeStatMsg("that would violate clearance — reroute the last leg",true);return;}
+  if(drawLegsViolate(pl)){
+   var pa=drawPath(dtrace.lx,dtrace.ly,{x:pt2.x,y:pt2.y},drawPosture^1);
+   if(drawLegsViolate(pa)){routeStatMsg("that would violate clearance — reroute the last leg",true);return;}
+   pl=pa;}
   pl.forEach(function(q){drawSeg(q.x,q.y);});drawEnd();return;}
  if(pt2&&pt2.net&&pt2.net!==dtrace.net){
   routeStatMsg("that pad is on "+nLeaf(pt2.net)+" — trace is on "+nLeaf(dtrace.net),true);return;}
  var dl=drawLegs(m,shift);
- if(drawLegsViolate(dl.legs)){routeStatMsg("that segment violates clearance (drawn red) — move the corner",true);return;}
+ if(!dl.legs.length){routeStatMsg("blocked by clearance — no room toward that point",true);return;}
+ if(dl.clipped)routeStatMsg("head clipped at the clearance boundary — route around the obstacle",true);
  dl.legs.forEach(function(q){drawSeg(q.x,q.y);});drawBtnSync();ovPaintSoon();}
 // Resolve the committed target point for a click: magnet first (unless Shift),
 // then the grid snap.
@@ -2309,14 +2382,17 @@ function paintDraw(ctx){if(!drawMode||!dtrace)return;
  }
  if(!drawCur)return;
  var dl=drawLegs(drawCur,drawShift),s=dl.t;
- var bad=drawLegsViolate(dl.legs);
- ctx.save();ctx.globalAlpha=bad?0.9:0.75;ctx.lineCap="round";ctx.lineJoin="round";
- if(bad)ctx.setLineDash([4,3]);
- ctx.strokeStyle=bad?"#ff4d4d":layerColor(dtrace.l);
+ ctx.save();ctx.lineCap="round";ctx.lineJoin="round";
  ctx.lineWidth=Math.max(dtrace.w*S,1.2);
- ctx.beginPath();ctx.moveTo(X(dtrace.lx),Y(dtrace.ly));
- dl.legs.forEach(function(q){ctx.lineTo(X(q.x),Y(q.y));});
- ctx.stroke();
+ if(dl.legs.length){ctx.globalAlpha=0.75;ctx.setLineDash([]);
+  ctx.strokeStyle=layerColor(dtrace.l);
+  ctx.beginPath();ctx.moveTo(X(dtrace.lx),Y(dtrace.ly));
+  dl.legs.forEach(function(q){ctx.lineTo(X(q.x),Y(q.y));});
+  ctx.stroke();}
+ if(dl.clipped){ // blocked remainder: red dashed ghost to the cursor target
+  var lp=dl.legs.length?dl.legs[dl.legs.length-1]:{x:dtrace.lx,y:dtrace.ly};
+  ctx.globalAlpha=0.9;ctx.setLineDash([4,3]);ctx.strokeStyle="#ff4d4d";
+  ctx.beginPath();ctx.moveTo(X(lp.x),Y(lp.y));ctx.lineTo(X(s.x),Y(s.y));ctx.stroke();}
  // magnet indicator: a small ring at a snapped target
  if(s.mag){ctx.setLineDash([]);ctx.globalAlpha=0.95;ctx.strokeStyle="#7ee787";ctx.lineWidth=1.4;
   ctx.beginPath();ctx.arc(X(s.x),Y(s.y),4,0,6.2832);ctx.stroke();}

@@ -254,3 +254,19 @@ test "viewer JS wires the docked inspector, segment editing, and the DRC rules m
     try std.testing.expect(std.mem.indexOf(u8, js, "/api/pcb-drc-rules/") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "drc-cog") != null);
 }
+
+// spec: Web Server - Segment drags preserve neighbour track angles and insert perpendicular jogs on collinear runs
+test "viewer JS drags segments KiCad-style: corner intersections and collinear jogs" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "function segPlan") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "\"corner\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "segJogClean") != null);
+}
+
+// spec: Web Server - The hand-route head dodges or clips at clearance obstacles instead of drawing violating copper
+test "viewer JS pushes the route head back: posture dodge then clearance clip" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "function clipLegs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "dodged:true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "clipped:true") != null);
+}

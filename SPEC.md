@@ -992,6 +992,8 @@ Public functions: designSourcePath, designSiblingPath
 - A DRC violation carries a stable 4-hex id emitted by the shared JSON writer
 - Per-design DRC rule overrides retag or drop violations before every reporting surface
 - The /pcb-layout Properties dock hosts the inspector with segment editing and DRC rule settings
+- Segment drags preserve neighbour track angles and insert perpendicular jogs on collinear runs
+- The hand-route head dodges or clips at clearance obstacles instead of drawing violating copper
 
 ## fab_readiness
 
