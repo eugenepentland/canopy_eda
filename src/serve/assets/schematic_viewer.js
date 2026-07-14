@@ -1618,6 +1618,10 @@
       var where = s.on_board && s.anchor
         ? 'around ' + escapeHtml(leafRef(s.anchor)) + ' (already on board)'
         : 'off-board, in the shared layout box';
+      // The seed flips/rotates the whole group to match the anchor IC's board
+      // pose; flag when it lands bottom-side or turned so it's not a surprise.
+      if (s.on_board && s.side === 'bottom') where += ' · ↓bottom';
+      if (s.on_board && s.rot) where += ' · ↻' + s.rot + '°';
       // The module ★ snapshot's routed copper carried onto the board with the
       // parts: only shown when the snapshot actually has tracks/vias.
       var copper = '';

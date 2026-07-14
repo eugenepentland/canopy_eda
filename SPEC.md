@@ -870,9 +870,16 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - writeFileAtomic rolls a timestamped board backup and prunes beyond MAX_BOARD_BACKUPS
 - placement guard reports moved, rotated, or side-flipped footprints and exempts adds/removes
 - placement guard passes when every existing footprint keeps its pose
+- computeGroupAnchors matches a group's anchor to the board through the same relink tiers the differ uses
 - placeOneSelected keys an on-board anchor by origin_key to centre its module's seeded passives
 - seeded sub-circuit copper lands on the board with bridged nets and the group offset
 - buildSubCircuitsJson reports each seedable group's module track and via counts
+- kicadRotToNetlisp inverts netlispRotToKicad for top and bottom parts
+- groupTransform is a pure translation for a same-side unrotated anchor
+- placeOneSelected flips a seeded sub-circuit to a bottom-side anchor
+- placeOneSelected rotates a seeded sub-circuit to match a 180-degree anchor
+- emitSeedCopper mirrors flipped sub-circuit copper and swaps its outer layer
+- a flipped seed keeps coincident pads coincident on the board
 
 ## serve/vfs
 

@@ -887,12 +887,6 @@ pub fn runSyncPlan(
         if (bfp.kicad_uuid.len > 0) try by_kicad_uuid.put(arena, bfp.kicad_uuid, bfp);
     }
 
-    // Per-sub-circuit anchors for the explicit-seeding path (Push modal): which
-    // part anchors each group and whether it (and thus a live re-centre origin)
-    // is already on the board. Cheap regardless of selection; also feeds the
-    // dry-run's `sub_circuits` enumeration.
-    var group_anchors = try computeGroupAnchors(arena, instances.items, &by_uuid, &by_ref, parsed.board_positions, &ref_to_section);
-
     // Heuristic index for --migrate mode. Maps each design instance's
     // canopy uuid → the board footprint it should adopt placement from,
     // when both sides have the same count of footprints with the same
@@ -947,6 +941,7 @@ pub fn runSyncPlan(
 
     try w.writeAll("[");
 
+    var group_anchors = std.StringHashMapUnmanaged(GroupAnchor).empty; // filled below
     var applied_ops_local = parsed.applied_ops;
     var diff_ctx = DiffContext{
         .by_uuid = &by_uuid,
@@ -978,6 +973,10 @@ pub fn runSyncPlan(
         .seed_all = parsed.seed_all,
         .group_anchors = &group_anchors,
     };
+    // Per-sub-circuit anchors (Push-modal seeding + dry-run enum), off diff_ctx so
+    // the anchor match runs the diff loop's OWN relink tiers — a drifted board the
+    // sync relabels still centres its group on first pass, not only after a re-sync.
+    group_anchors = try computeGroupAnchors(arena, instances.items, &diff_ctx, parsed.board_positions);
     for (instances.items) |inst| try handleInstance(&diff_ctx, inst, &w, &first_op);
 
     // Adds were buffered during the walk; lay them out grouped by section
@@ -2696,6 +2695,26 @@ fn emitOp(w: anytype, first: *bool, op: []const u8, fields: anytype) !void {
     try w.*.writeAll("}");
 }
 
+/// Bake a netlisp-model rotation (deg, page CW-positive) into KiCad's stored
+/// `(at … angle)` for a footprint on `back` ? B.Cu : F.Cu. KiCad's angle is
+/// CCW-positive, so the model angle is negated; a back part's netlisp local-X
+/// mirror vs KiCad's stored local-Y mirror differ by a half-turn folded in here
+/// (see `emitAddOp`'s call site for the full rationale). `kicadRotToNetlisp` is
+/// the exact inverse — the round-trip is unit-tested for both sides.
+fn netlispRotToKicad(rot_deg: f64, back: bool) f64 {
+    const back_half_turn: f64 = if (back) 180.0 else 0.0;
+    return @mod(360.0 - rot_deg + back_half_turn, 360.0);
+}
+
+/// Read a placed footprint's netlisp-model rotation back off the board, undoing
+/// `netlispRotToKicad`. The bake is its own inverse in this algebra (`net = mod(
+/// 360 − kicad + (back?180:0), 360)`), so a footprint's stored `(at)` angle and
+/// its `B.`-prefixed layer recover the model rotation the seeder reasons in.
+fn kicadRotToNetlisp(kicad_rot: f64, back: bool) f64 {
+    const back_half_turn: f64 = if (back) 180.0 else 0.0;
+    return @mod(360.0 - kicad_rot + back_half_turn, 360.0);
+}
+
 /// Where a first-insert footprint lands: staging position (board nm),
 /// rotation (deg, page CW-positive — negated for KiCad inside emitAddOp),
 /// and which board side it goes on.
@@ -2781,8 +2800,7 @@ fn emitAddOp(
     // X (before rotation) for a bottom part, while KiCad's stored back-side
     // convention mirrors local Y (see writer.adaptKmodChild) — the two mirrors
     // differ by exactly a half-turn, folded into the stored angle here.
-    const back_half_turn: f64 = if (pose.back) 180.0 else 0.0;
-    const kicad_rot = @mod(360.0 - pose.rot_deg + back_half_turn, 360.0);
+    const kicad_rot = netlispRotToKicad(pose.rot_deg, pose.back);
     if (kicad_rot != 0) try w.*.print(",\"rot\":{d}", .{kicad_rot});
     // Board side: the writer lands the new footprint on B.Cu with its geometry
     // adapted to KiCad's stored back-side form. Omitted for front (legacy shape).
@@ -2972,6 +2990,12 @@ const GroupAnchor = struct {
     on_board: bool = false,
     board_x: f64 = 0,
     board_y: f64 = 0,
+    /// The anchor footprint's netlisp-model rotation + side as placed on the
+    /// board (decoded from its `(at)` angle + layer via `kicadRotToNetlisp`).
+    /// `placeOneSelected` composes these into the group transform so a seeded
+    /// sub-circuit follows a rotated / bottom-side anchor, not just its position.
+    board_rot: f64 = 0,
+    board_back: bool = false,
 };
 
 /// Rank a flattened ref-des as a placement anchor by its prefix letter: an IC
@@ -2988,23 +3012,19 @@ fn anchorRank(ref_des: []const u8) u8 {
     };
 }
 
-/// Pick each sub-circuit group's anchor (see `GroupAnchor`) and resolve whether
-/// it's already on the board. Groups are the same keys `sectionForRef` returns
-/// (section name, or sub-block name for a `sub/Ux` ref). Board presence is the
-/// same canopy-uuid-then-ref-des match the diff loop uses; the live position
-/// comes from `board_positions` (KiCad-uuid keyed). Result lives on `arena`.
+/// Pick each sub-circuit group's anchor (see `GroupAnchor`); resolve whether it's
+/// on the board by sharing `d`'s indexes so the match runs the diff loop's relink
+/// tiers. Groups are `sectionForRef`'s keys; live pos from `board_positions`.
 fn computeGroupAnchors(
     arena: std.mem.Allocator,
     instances: []const export_kicad.FlatInstance,
-    by_uuid: *std.StringHashMapUnmanaged(BoardFp),
-    by_ref: *std.StringHashMapUnmanaged(BoardFp),
+    d: *const DiffContext,
     board_positions: ?*const std.StringHashMapUnmanaged(FpPlacement),
-    ref_to_section: *std.StringHashMapUnmanaged([]const u8),
 ) !std.StringHashMapUnmanaged(GroupAnchor) {
     var out = std.StringHashMapUnmanaged(GroupAnchor).empty;
     var rank_of = std.StringHashMapUnmanaged(u8).empty;
     for (instances) |inst| {
-        const sec = sectionForRef(inst.ref_des, ref_to_section);
+        const sec = sectionForRef(inst.ref_des, d.ref_to_section);
         if (sec.len == 0) continue;
         const rank = anchorRank(inst.ref_des);
         const better = blk: {
@@ -3016,7 +3036,9 @@ fn computeGroupAnchors(
         };
         if (!better) continue;
         var ga = GroupAnchor{ .ref = inst.ref_des, .origin_key = inst.origin_key };
-        const bfp: ?BoardFp = by_uuid.get(inst.uuid) orelse by_ref.get(inst.ref_des);
+        // Diff loop's own relink tiers (matchInstance): netsig/uuid/ref/migration.
+        const bfp: ?BoardFp = d.by_netsig.get(inst.uuid) orelse d.by_uuid.get(inst.uuid) orelse
+            d.by_ref.get(inst.ref_des) orelse d.by_migration.get(inst.uuid);
         if (bfp) |m| {
             if (board_positions) |bp| {
                 if (m.kicad_uuid.len > 0) {
@@ -3024,6 +3046,8 @@ fn computeGroupAnchors(
                         ga.on_board = true;
                         ga.board_x = p.x;
                         ga.board_y = p.y;
+                        ga.board_back = std.mem.startsWith(u8, p.layer, "B.");
+                        ga.board_rot = kicadRotToNetlisp(p.rot, ga.board_back);
                     }
                 }
             }
@@ -3060,14 +3084,14 @@ const SeedBox = struct { x0: f64, y0: f64, x1: f64, y1: f64, label: []const u8, 
 /// One seeded sub-circuit's module copper to carry onto the board: the module ★
 /// snapshot's routes (module-local mm + module-local net names), the module → parent
 /// net-name bridge, the sub-block slug (for the private-net `<slug>/NET` fallback),
-/// and the total (dx, dy) mm offset applied to that sub-circuit's parts — so
-/// `emitSeedCopper` translates the copper by the SAME offset the footprints got.
+/// and the rigid `xform` applied to that sub-circuit's parts — so `emitSeedCopper`
+/// transforms the copper by the SAME transform the footprints got (mirroring +
+/// F.Cu↔B.Cu layer swap on a flip, a pure translation on the common same-side case).
 const SeedCopper = struct {
     routes: pcb_layout.SavedRoutes,
     net_map: std.StringHashMapUnmanaged([]const u8),
     slug: []const u8,
-    dx: f64,
-    dy: f64,
+    xform: Pose2D,
 };
 /// The output collectors `placeOneSelected` appends into, bundled so its
 /// signature stays small: `leftover` (parts the source doesn't name), `placed`
@@ -3185,20 +3209,105 @@ fn planSelectedGroups(
             .routes = c.routes,
             .net_map = c.net_map,
             .slug = c.slug,
-            .dx = c.dx + ob.dx,
-            .dy = c.dy + ob.dy,
+            .xform = c.xform.translated(ob.dx, ob.dy),
         });
     }
     return .{ .placed = placed.items, .boxes = ob.boxes, .copper = copper.items };
 }
 
+/// A rigid 2-D placement transform in the netlisp pose model — the algebra a
+/// seeded sub-circuit uses to follow its anchor IC onto a rotated / bottom-side
+/// board pose. Maps a footprint-local point v to world as
+/// `apply(v) = rotate(mirrorX(v)) + (tx,ty)`, where `mirrorX` negates x iff
+/// `mirror` and `rotate` is the {0,90,180,270} matrix of `optimizer.rotateLocal`
+/// applied in the netlisp y-down frame. A part's `SyncPose` (x,y,rot,side) is
+/// exactly such a transform (mirror ⟺ side==bottom) — the mirror-before-rotate
+/// order matches `optimizer.worldPt`, the authoritative pose→pad-world math, so
+/// composing these preserves every pad's relative position under a flip.
+const Pose2D = struct {
+    tx: f64 = 0,
+    ty: f64 = 0,
+    rot: f64 = 0,
+    mirror: bool = false,
+
+    /// `optimizer.rotateLocal`'s CCW {0,90,180,270} matrix (the netlisp y-down
+    /// frame). Non-right angles fall through to identity — module poses only
+    /// ever carry the four right angles.
+    fn rotate(deg: f64, x: f64, y: f64) [2]f64 {
+        return switch (numeric.checkedInt(i64, @round(@mod(deg, 360.0))) orelse 0) {
+            90 => .{ -y, x },
+            180 => .{ -x, -y },
+            270 => .{ y, -x },
+            else => .{ x, y },
+        };
+    }
+
+    /// Linear part only (rotate∘mirrorX, no translation).
+    fn applyLin(self: Pose2D, x: f64, y: f64) [2]f64 {
+        return rotate(self.rot, if (self.mirror) -x else x, y);
+    }
+
+    /// World point of footprint-local (x,y).
+    fn apply(self: Pose2D, x: f64, y: f64) [2]f64 {
+        const l = self.applyLin(x, y);
+        return .{ l[0] + self.tx, l[1] + self.ty };
+    }
+
+    /// `self ∘ other` — apply `other` first, then `self`. Mirror XORs; rotation
+    /// adds, negated by `self`'s mirror (since Mir·R(θ)=R(−θ)·Mir); translation
+    /// is `self`'s linear part on `other`'s translation plus `self`'s own.
+    fn compose(self: Pose2D, other: Pose2D) Pose2D {
+        const t = self.applyLin(other.tx, other.ty);
+        return .{
+            .tx = t[0] + self.tx,
+            .ty = t[1] + self.ty,
+            .rot = @mod(self.rot + (if (self.mirror) -other.rot else other.rot), 360.0),
+            .mirror = self.mirror != other.mirror,
+        };
+    }
+
+    /// The inverse transform: `inverse() ∘ self == identity`.
+    fn inverse(self: Pose2D) Pose2D {
+        var out = Pose2D{ .rot = @mod(if (self.mirror) self.rot else -self.rot, 360.0), .mirror = self.mirror };
+        const t = out.applyLin(self.tx, self.ty);
+        out.tx = -t[0];
+        out.ty = -t[1];
+        return out;
+    }
+
+    /// Post-compose a pure translation (shift the transform's output by dx,dy) —
+    /// how the off-board block's one shared offset folds into its copper transform.
+    fn translated(self: Pose2D, dx: f64, dy: f64) Pose2D {
+        return .{ .tx = self.tx + dx, .ty = self.ty + dy, .rot = self.rot, .mirror = self.mirror };
+    }
+};
+
+/// A module ★-layout pose as a `Pose2D` (mirror ⟺ bottom side).
+fn poseFromSync(sp: pcb_layout.SyncPose) Pose2D {
+    return .{ .tx = sp.x, .ty = sp.y, .rot = sp.rot, .mirror = sp.side == .bottom };
+}
+
+/// The rigid transform that carries a seeded sub-circuit from its module ★
+/// layout onto the board so its anchor IC lands on the anchor's LIVE board pose
+/// — position, rotation, AND side: `board_anchor ∘ inverse(module_anchor)`.
+/// Applying it to every part's module pose reproduces the module's internal
+/// geometry exactly while flipping/rotating the whole group to match a
+/// bottom-side or rotated anchor. Reduces to a pure translation (rot 0, no
+/// mirror) when the anchor keeps the module's side and rotation — the common
+/// same-side case, byte-identical to the old `target − src_anchor` offset.
+fn groupTransform(module_anchor: pcb_layout.SyncPose, a: GroupAnchor) Pose2D {
+    const board = Pose2D{ .tx = a.board_x, .ty = a.board_y, .rot = a.board_rot, .mirror = a.board_back };
+    return board.compose(poseFromSync(module_anchor).inverse());
+}
+
 /// Place one selected sub-circuit's parts from its `src` poses, re-anchored so
-/// the sub-circuit's IC lands on its target — its live board position when
-/// already placed (parts go straight to `placed`, on the board), else its
-/// parent-cache spot (parts go to `block` for the shared off-board offset). The
-/// re-anchor offset is `target − src_anchor`, so the module's own internal
-/// geometry is preserved exactly while the IC moves to where the board wants it.
-/// Parts the source doesn't name go to `leftover`.
+/// the sub-circuit's IC lands on its target. When the IC is already on the board
+/// the whole group rides a rigid `groupTransform` (position + rotation + side)
+/// onto the board, so a bottom-side or rotated anchor takes its passives (and
+/// copper) with it — the same-side, zero-rotation case reduces to the old pure
+/// translation. Otherwise the IC lands at its parent-cache spot and the parts
+/// join the shared OFF-BOARD block (top-side, translate-only, unchanged). Parts
+/// the source doesn't name go to `leftover`.
 fn placeOneSelected(
     d: *DiffContext,
     sec: []const u8,
@@ -3211,6 +3320,7 @@ fn placeOneSelected(
     const arena = d.spc.arena;
     var offx: f64 = 0;
     var offy: f64 = 0;
+    var xform: Pose2D = .{}; // module-world → board-world (the on-board rigid transform)
     var on_board = false;
     if (anchor) |a| {
         // A module source is keyed by origin_key, so key the anchor by its own
@@ -3222,8 +3332,7 @@ fn placeOneSelected(
         if (src.map.get(akey)) |as_| {
             if (a.on_board) {
                 on_board = true;
-                offx = a.board_x - as_.x;
-                offy = a.board_y - as_.y;
+                xform = groupTransform(as_, a);
             } else if (d.premade_layout) |cache| if (cache.get(a.ref)) |cp| {
                 offx = cp.x - as_.x;
                 offy = cp.y - as_.y;
@@ -3237,28 +3346,23 @@ fn placeOneSelected(
             try acc.leftover.append(arena, pa);
             continue;
         };
-        const bx = sp.x + offx;
-        const by = sp.y + offy;
-        if (on_board)
-            try acc.placed.append(arena, .{
-                .pa = pa,
-                .x_mm = bx,
-                .y_mm = by,
-                .rot = sp.rot,
-                .back = sp.side == .bottom,
-            })
-        else
-            try acc.block.append(arena, .{ .pa = pa, .bx = bx, .by = by, .rot = sp.rot, .sec = sec });
+        if (on_board) {
+            const np = xform.compose(poseFromSync(sp));
+            try acc.placed.append(arena, .{ .pa = pa, .x_mm = np.tx, .y_mm = np.ty, .rot = np.rot, .back = np.mirror });
+        } else {
+            try acc.block.append(arena, .{ .pa = pa, .bx = sp.x + offx, .by = sp.y + offy, .rot = sp.rot, .sec = sec });
+        }
     }
     if (on_board) d.summary.blocks += 1;
-    // Carry the module's routed copper along at the same offset its parts got.
-    // The module-local coordinates share the pose frame, so translating tracks/
-    // vias by (offx, offy) lands them under the seeded footprints. On-board copper
-    // has its final offset now; off-board copper still owes the shared block
-    // offset, added in `planSelectedGroups`.
+    // Carry the module's routed copper along under the SAME transform its parts
+    // got — the module-local coordinates share the pose frame. On-board copper
+    // rides the rigid transform (mirroring endpoints + swapping F.Cu↔B.Cu when
+    // flipped); off-board copper is a pure translation that still owes the shared
+    // block offset, folded in by `planSelectedGroups`.
     if (src.is_module) if (src.routes) |sr| {
         const net_map = try subCircuitNetMap(d, src.pin_nets, idxs, adds);
-        const job = SeedCopper{ .routes = sr, .net_map = net_map, .slug = sec, .dx = offx, .dy = offy };
+        const cop_xform = if (on_board) xform else Pose2D{ .tx = offx, .ty = offy };
+        const job = SeedCopper{ .routes = sr, .net_map = net_map, .slug = sec, .xform = cop_xform };
         try (if (on_board) acc.copper else acc.block_copper).append(arena, job);
     };
 }
@@ -3325,9 +3429,25 @@ fn kicadCopperLayer(arena: std.mem.Allocator, l: u8) ![]const u8 {
     };
 }
 
+/// The router layer index a seeded track/via takes after its group's transform:
+/// a flipped group (`mirror`) swaps its OUTER signal layers (F.Cu↔B.Cu, i.e.
+/// 0↔1). Inner-layer indices (l≥2) are left as-is — module ★ copper is
+/// essentially always outer (l∈{0,1}), and reversing an inner stack needs the
+/// board's layer count, which isn't cheaply known here. `kicadCopperLayer` then
+/// maps the (possibly swapped) index to its KiCad name.
+fn copperLayerSided(l: u8, mirror: bool) u8 {
+    if (!mirror) return l;
+    return switch (l) {
+        0 => 1,
+        1 => 0,
+        else => l,
+    };
+}
+
 /// Emit `add_track` / `add_via` ops for each seeded sub-circuit's module copper
-/// (`jobs`), translating every endpoint by the job's (dx, dy) — the same offset
-/// its footprints got — and bridging module net names to parent nets. Named-only
+/// (`jobs`), applying the job's rigid `xform` to every endpoint/centre — the same
+/// transform its footprints got, so a flipped group's copper mirrors and swaps
+/// F.Cu↔B.Cu — and bridging module net names to parent nets. Named-only
 /// (unbridged, empty-name) copper is skipped. Counted in `d.summary`.
 fn emitSeedCopper(d: *DiffContext, w: anytype, first: *bool, jobs: []const SeedCopper) !void {
     const arena = d.spc.arena;
@@ -3335,14 +3455,16 @@ fn emitSeedCopper(d: *DiffContext, w: anytype, first: *bool, jobs: []const SeedC
         for (job.routes.tracks) |t| {
             const net = bridgedCopperNet(arena, job.net_map, job.slug, t.net);
             if (net.len == 0) continue;
-            const layer = try kicadCopperLayer(arena, t.l);
+            const layer = try kicadCopperLayer(arena, copperLayerSided(t.l, job.xform.mirror));
+            const p1 = job.xform.apply(t.x1, t.y1);
+            const p2 = job.xform.apply(t.x2, t.y2);
             if (!first.*) try w.*.writeAll(",");
             first.* = false;
             try w.*.writeAll("{\"op\":\"add_track\",\"net\":");
             try json_writer.writeString(w.*, net);
             try w.*.print(",\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"width\":{d},\"layer\":", .{
-                mmToNm(t.x1 + job.dx), mmToNm(t.y1 + job.dy),
-                mmToNm(t.x2 + job.dx), mmToNm(t.y2 + job.dy),
+                mmToNm(p1[0]), mmToNm(p1[1]),
+                mmToNm(p2[0]), mmToNm(p2[1]),
                 mmToNm(t.w),
             });
             try json_writer.writeString(w.*, layer);
@@ -3352,12 +3474,13 @@ fn emitSeedCopper(d: *DiffContext, w: anytype, first: *bool, jobs: []const SeedC
         for (job.routes.vias) |v| {
             const net = bridgedCopperNet(arena, job.net_map, job.slug, v.net);
             if (net.len == 0) continue;
+            const c = job.xform.apply(v.x, v.y);
             if (!first.*) try w.*.writeAll(",");
             first.* = false;
             try w.*.writeAll(add_via_op_open);
             try json_writer.writeString(w.*, net);
             try w.*.print(via_coords_fmt, .{
-                mmToNm(v.x + job.dx), mmToNm(v.y + job.dy), mmToNm(v.d), mmToNm(v.drill),
+                mmToNm(c[0]), mmToNm(c[1]), mmToNm(v.d), mmToNm(v.drill),
             });
             d.summary.vias += 1;
         }
@@ -3469,6 +3592,10 @@ fn buildSubCircuitsJson(arena: std.mem.Allocator, d: *DiffContext) ![]const u8 {
         if (anchor) |a| {
             try json_writer.writeString(w, a.ref);
             try w.print(",\"on_board\":{}", .{a.on_board});
+            // When the on-board anchor is bottom-side / rotated, the seed flips
+            // the whole group to match — surface it so the Push modal can show it.
+            if (a.on_board and a.board_back) try w.writeAll(",\"side\":\"bottom\"");
+            if (a.on_board and a.board_rot != 0) try w.print(",\"rot\":{d}", .{a.board_rot});
         } else {
             try w.writeAll("null,\"on_board\":false");
         }
@@ -4715,4 +4842,373 @@ test "buildSubCircuitsJson advertises per-group copper counts" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"pwr\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"parts\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"tracks\":0,\"vias\":0") != null);
+}
+
+// spec: serve/sync - computeGroupAnchors matches a group's anchor to the board through the same relink tiers the differ uses
+test "computeGroupAnchors resolves an anchor on-board through the net-signature relink tier" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+
+    // The design anchor U2 lives in sub-block "pll". On a drifted board both
+    // its canopy_uuid and its flattened ref MISS the exact indexes (a fresh
+    // import renumbered it), but the --migrate net-signature relink pairs it by
+    // canopy uuid → the placed board fp (board ref drifted to U9). Sharing the
+    // diff context's indexes, the first pass must read the anchor on_board —
+    // exactly as the diff loop's matchInstance relabels it — so the sub-circuit
+    // centres on the placed IC instead of staging off-board.
+    const anchor = export_kicad.FlatInstance{
+        .ref_des = "pll/U2",
+        .component = "adf4372",
+        .value = "",
+        .footprint = "lib:qfn",
+        .properties = &.{},
+        .uuid = "canopy-u2",
+        .origin_key = "U2",
+    };
+    var instances = [_]export_kicad.FlatInstance{anchor};
+
+    var state = TestDiffState{};
+    try state.ref_to_section.put(arena, "pll/U2", "pll");
+    // Only the relink index (keyed by canopy uuid) pairs the anchor; by_uuid
+    // and by_ref both miss, so the pre-fix two-tier match reported off-board.
+    try state.by_netsig.put(arena, "canopy-u2", testFp("", "kid-U2", "U9"));
+    var d = state.ctx(&spc, .auto);
+
+    var positions = std.StringHashMapUnmanaged(FpPlacement).empty;
+    try positions.put(arena, "kid-U2", .{ .ref = "U9", .x = 42.5, .y = 7.25, .rot = 0, .layer = "F.Cu" });
+
+    var anchors = try computeGroupAnchors(arena, &instances, &d, &positions);
+    const ga = anchors.get("pll") orelse return error.NoAnchorForGroup;
+    try std.testing.expect(ga.on_board);
+    try std.testing.expectEqual(@as(f64, 42.5), ga.board_x);
+    try std.testing.expectEqual(@as(f64, 7.25), ga.board_y);
+}
+
+/// Test helper: a freshly-added cap in sub-block `sec`, keyed by `origin_key`.
+fn seedCapAdd(ref: []const u8, key: []const u8, uuid: []const u8, sec: []const u8) PendingAdd {
+    return .{
+        .inst = .{
+            .ref_des = ref,
+            .component = "cap",
+            .origin_key = key,
+            .value = "100nF",
+            .footprint = "lib:c",
+            .properties = &.{},
+            .uuid = uuid,
+        },
+        .fp_name = "c0402",
+        .canopy_net = null,
+        .section = sec,
+    };
+}
+
+/// Test helper: a `SeedAccum` whose five output lists are freshly allocated on
+/// `arena`, so a test can run `placeOneSelected` and read `acc.placed`/`acc.copper`.
+fn freshAccum(arena: std.mem.Allocator) !SeedAccum {
+    const mk = struct {
+        fn one(a: std.mem.Allocator, comptime T: type) !*std.ArrayList(T) {
+            const p = try a.create(std.ArrayList(T));
+            p.* = .empty;
+            return p;
+        }
+    }.one;
+    return .{
+        .leftover = try mk(arena, PendingAdd),
+        .placed = try mk(arena, PositionedAdd),
+        .block = try mk(arena, NamedAdd),
+        .copper = try mk(arena, SeedCopper),
+        .block_copper = try mk(arena, SeedCopper),
+    };
+}
+
+/// Test helper: the positioned add whose part ref-des matches `ref` (null if none).
+fn seededPose(items: []const PositionedAdd, ref: []const u8) ?PositionedAdd {
+    for (items) |p| if (std.mem.eql(u8, p.pa.inst.ref_des, ref)) return p;
+    return null;
+}
+
+/// Test-only independent oracle for a footprint-local (lx,ly) → world (mm) point,
+/// replicating optimizer.zig `worldPt`/`rotateLocal` (the authoritative pose→pad
+/// math): the netlisp model is y-down and a bottom part mirrors local X *before*
+/// rotating. Inlined (not routed through `Pose2D`) so it can't share a bug with
+/// the code under test. Source of truth: src/placement/optimizer.zig `worldPt`.
+fn padWorldTest(x: f64, y: f64, rot: f64, back: bool, lx: f64, ly: f64) [2]f64 {
+    const mlx = if (back) -lx else lx;
+    const r: [2]f64 = switch (numeric.checkedInt(i64, @round(@mod(rot, 360.0))) orelse 0) {
+        90 => .{ -ly, mlx },
+        180 => .{ -mlx, -ly },
+        270 => .{ ly, -mlx },
+        else => .{ mlx, ly },
+    };
+    return .{ x + r[0], y + r[1] };
+}
+
+// spec: serve/sync - kicadRotToNetlisp inverts netlispRotToKicad for top and bottom parts
+test "kicad rotation encode/decode round-trip on both board sides" {
+    const cases = [_]struct { rot: f64, back: bool }{
+        .{ .rot = 0, .back = false },   .{ .rot = 90, .back = false },
+        .{ .rot = 180, .back = false }, .{ .rot = 270, .back = false },
+        .{ .rot = 0, .back = true },    .{ .rot = 90, .back = true },
+        .{ .rot = 180, .back = true },  .{ .rot = 270, .back = true },
+    };
+    for (cases) |c| {
+        const kic = netlispRotToKicad(c.rot, c.back);
+        // decode(encode(x)) == x — reading a placed part's angle recovers the model.
+        try std.testing.expectEqual(c.rot, kicadRotToNetlisp(kic, c.back));
+        // …and re-encoding the decoded value returns the same stored KiCad angle.
+        try std.testing.expectEqual(kic, netlispRotToKicad(kicadRotToNetlisp(kic, c.back), c.back));
+    }
+}
+
+// spec: serve/sync - groupTransform is a pure translation for a same-side unrotated anchor
+test "groupTransform is a pure translation for a same-side, unrotated anchor" {
+    // Module anchor at (10,10) top, unrotated; board anchor at (50,40) top,
+    // unrotated → the transform must be exactly the old offset with no mirror/rot.
+    const g = groupTransform(.{ .x = 10, .y = 10, .rot = 0 }, .{
+        .ref = "U1",
+        .on_board = true,
+        .board_x = 50,
+        .board_y = 40,
+    });
+    try std.testing.expectEqual(@as(f64, 40), g.tx);
+    try std.testing.expectEqual(@as(f64, 30), g.ty);
+    try std.testing.expectEqual(@as(f64, 0), g.rot);
+    try std.testing.expect(!g.mirror);
+    // Applying it to a part pose is a plain translate — same numbers the old
+    // `sp + off` path produced (byte-for-byte with the translate-only seeder).
+    const p = g.compose(poseFromSync(.{ .x = 12, .y = 13, .rot = 90 }));
+    try std.testing.expectEqual(@as(f64, 52), p.tx);
+    try std.testing.expectEqual(@as(f64, 43), p.ty);
+    try std.testing.expectEqual(@as(f64, 90), p.rot);
+    try std.testing.expect(!p.mirror);
+}
+
+// spec: serve/sync - placeOneSelected flips a seeded sub-circuit to a bottom-side anchor
+test "placeOneSelected flips a seeded sub-circuit to match a bottom-side anchor" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    var d = state.ctx(&spc, .auto);
+
+    // Module ★ layout, all parts TOP-side: anchor U1 at (10,10), two caps.
+    var src_map = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    try src_map.put(arena, "U1", .{ .x = 10, .y = 10, .rot = 0 });
+    try src_map.put(arena, "C1", .{ .x = 12, .y = 10, .rot = 0 });
+    try src_map.put(arena, "C2", .{ .x = 10, .y = 13, .rot = 90 });
+    const src = SubCircuitSrc{ .map = src_map, .is_module = true };
+
+    // The anchor IC is on the board at (50,40) but on B.Cu (board_back=true),
+    // unrotated. The whole group must flip to the bottom and mirror about it.
+    const anchor = GroupAnchor{
+        .ref = "lna2/U1",
+        .origin_key = "U1",
+        .on_board = true,
+        .board_x = 50,
+        .board_y = 40,
+        .board_back = true,
+    };
+    const adds = [_]PendingAdd{
+        seedCapAdd("lna2/C1", "C1", "u-c1", "lna2"),
+        seedCapAdd("lna2/C2", "C2", "u-c2", "lna2"),
+    };
+    const idxs = [_]usize{ 0, 1 };
+
+    var acc = try freshAccum(arena);
+    try placeOneSelected(&d, "lna2", &idxs, &adds, src, anchor, &acc);
+    const placed = acc.placed.items;
+
+    try std.testing.expectEqual(@as(usize, 2), placed.len);
+    // C1 (12,10) → x-mirrored about the anchor to (48,40), rot unchanged, on B.Cu.
+    const c1 = seededPose(placed, "lna2/C1") orelse return error.MissingSeededPart;
+    try std.testing.expectEqual(@as(f64, 48), c1.x_mm);
+    try std.testing.expectEqual(@as(f64, 40), c1.y_mm);
+    try std.testing.expectEqual(@as(f64, 0), c1.rot);
+    try std.testing.expect(c1.back);
+    // C2 (10,13) rot 90 → (50,43), rotation mirrored to 270, on B.Cu.
+    const c2 = seededPose(placed, "lna2/C2") orelse return error.MissingSeededPart;
+    try std.testing.expectEqual(@as(f64, 50), c2.x_mm);
+    try std.testing.expectEqual(@as(f64, 43), c2.y_mm);
+    try std.testing.expectEqual(@as(f64, 270), c2.rot);
+    try std.testing.expect(c2.back);
+}
+
+// spec: serve/sync - placeOneSelected rotates a seeded sub-circuit to match a 180-degree anchor
+test "placeOneSelected rotates a seeded sub-circuit to match a 180-degree anchor" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    var d = state.ctx(&spc, .auto);
+
+    var src_map = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    try src_map.put(arena, "U1", .{ .x = 10, .y = 10, .rot = 0 });
+    try src_map.put(arena, "C1", .{ .x = 12, .y = 10, .rot = 0 });
+    try src_map.put(arena, "C2", .{ .x = 10, .y = 13, .rot = 90 });
+    const src = SubCircuitSrc{ .map = src_map, .is_module = true };
+
+    // Anchor on the board top-side but turned 180° (board_back=false, rot 180) —
+    // the group rotates 180° about it, staying top-side.
+    const anchor = GroupAnchor{
+        .ref = "lna2/U1",
+        .origin_key = "U1",
+        .on_board = true,
+        .board_x = 50,
+        .board_y = 40,
+        .board_rot = 180,
+    };
+    const adds = [_]PendingAdd{
+        seedCapAdd("lna2/C1", "C1", "u-c1", "lna2"),
+        seedCapAdd("lna2/C2", "C2", "u-c2", "lna2"),
+    };
+    const idxs = [_]usize{ 0, 1 };
+
+    var acc = try freshAccum(arena);
+    try placeOneSelected(&d, "lna2", &idxs, &adds, src, anchor, &acc);
+    const placed = acc.placed.items;
+
+    // C1 (12,10) rotated 180° about anchor → (48,40), rot 180, top-side.
+    const c1 = seededPose(placed, "lna2/C1") orelse return error.MissingSeededPart;
+    try std.testing.expectEqual(@as(f64, 48), c1.x_mm);
+    try std.testing.expectEqual(@as(f64, 40), c1.y_mm);
+    try std.testing.expectEqual(@as(f64, 180), c1.rot);
+    try std.testing.expect(!c1.back);
+    // C2 (10,13) rot 90 → (50,37), rot 270, top-side.
+    const c2 = seededPose(placed, "lna2/C2") orelse return error.MissingSeededPart;
+    try std.testing.expectEqual(@as(f64, 50), c2.x_mm);
+    try std.testing.expectEqual(@as(f64, 37), c2.y_mm);
+    try std.testing.expectEqual(@as(f64, 270), c2.rot);
+    try std.testing.expect(!c2.back);
+}
+
+// spec: serve/sync - emitSeedCopper mirrors flipped sub-circuit copper and swaps its outer layer
+test "emitSeedCopper mirrors and layer-swaps a flipped sub-circuit's copper" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    try state.pad_net_map.put(arena, "lna2/C1|1", "VBUS");
+    try state.pad_net_map.put(arena, "lna2/C1|2", "lna2/GNDA");
+    var d = state.ctx(&spc, .auto);
+
+    var src_map = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    try src_map.put(arena, "U1", .{ .x = 10, .y = 10, .rot = 0 });
+    try src_map.put(arena, "C1", .{ .x = 12, .y = 10, .rot = 0 });
+    // A top-signal (l0) rail track and a bottom-signal (l1) ground track.
+    const routes_json =
+        \\{"tracks":[
+        \\{"x1":12,"y1":10,"x2":13,"y2":10,"l":0,"w":0.2,"net":"VBUS_M"},
+        \\{"x1":12,"y1":11,"x2":12,"y2":12,"l":1,"w":0.2,"net":"GNDA_M"}
+        \\],"vias":[{"x":12,"y":10,"d":0.4,"drill":0.2,"net":"VBUS_M"}]}
+    ;
+    const routes_val = try std.json.parseFromSliceLeaky(std.json.Value, arena, routes_json, .{});
+    const routes = pcb_layout.parseSavedRoutes(arena, routes_val).?;
+    const pin_nets = [_]pcb_layout.SubPinNet{
+        .{ .net = "VBUS_M", .origin_key = "C1", .pad = "1" },
+        .{ .net = "GNDA_M", .origin_key = "C1", .pad = "2" },
+    };
+    const src = SubCircuitSrc{ .map = src_map, .is_module = true, .routes = routes, .pin_nets = &pin_nets };
+
+    // Anchor on B.Cu at (50,40), unrotated → group transform {tx60,ty30,mirror}.
+    const anchor = GroupAnchor{
+        .ref = "lna2/U1",
+        .origin_key = "U1",
+        .on_board = true,
+        .board_x = 50,
+        .board_y = 40,
+        .board_back = true,
+    };
+    const adds = [_]PendingAdd{seedCapAdd("lna2/C1", "C1", "u-c1", "lna2")};
+    const idxs = [_]usize{0};
+
+    var acc = try freshAccum(arena);
+    try placeOneSelected(&d, "lna2", &idxs, &adds, src, anchor, &acc);
+    try std.testing.expectEqual(@as(usize, 1), acc.copper.items.len);
+
+    var buf: std.ArrayList(u8) = .empty;
+    const w = buf.writer(arena);
+    var first = true;
+    try emitSeedCopper(&d, &w, &first, acc.copper.items);
+    const out = buf.items;
+
+    try std.testing.expectEqual(@as(u32, 2), d.summary.tracks);
+    try std.testing.expectEqual(@as(u32, 1), d.summary.vias);
+    // The l0 VBUS rail mirrors (12,10)-(13,10) → (48,40)-(47,40) and, flipped,
+    // now routes on B.Cu (0→1) instead of F.Cu.
+    const vbus_seg = "\"net\":\"VBUS\",\"x1\":48000000,\"y1\":40000000," ++
+        "\"x2\":47000000,\"y2\":40000000,\"width\":200000,\"layer\":\"B.Cu\"";
+    try std.testing.expect(std.mem.indexOf(u8, out, vbus_seg) != null);
+    // The l1 ground mirrors (12,11)-(12,12) → (48,41)-(48,42) and lands on F.Cu.
+    const gnd_seg = "\"net\":\"lna2/GNDA\",\"x1\":48000000,\"y1\":41000000," ++
+        "\"x2\":48000000,\"y2\":42000000,\"width\":200000,\"layer\":\"F.Cu\"";
+    try std.testing.expect(std.mem.indexOf(u8, out, gnd_seg) != null);
+    // The via centre mirrors with the group (through-hole, no layer).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"x\":48000000,\"y\":40000000") != null);
+}
+
+// spec: serve/sync - a flipped seed keeps coincident pads coincident on the board
+test "a flipped seed preserves pad coincidence from the module layout" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    var d = state.ctx(&spc, .auto);
+
+    // Module ★ layout: anchor U1 (10,10) top with an IC pad at local (2,0), and a
+    // cap C1 (13,10) rot 90 top with a pad at local (0,1). In module-world both
+    // pads sit at (12,10) — the shared node the router connected. (Verified with
+    // the independent worldPt oracle so the premise itself can't be miscoded.)
+    const ic_local = [2]f64{ 2, 0 };
+    const cap_local = [2]f64{ 0, 1 };
+    const ic_mod = padWorldTest(10, 10, 0, false, ic_local[0], ic_local[1]);
+    const cap_mod = padWorldTest(13, 10, 90, false, cap_local[0], cap_local[1]);
+    try std.testing.expectApproxEqAbs(ic_mod[0], cap_mod[0], 1e-9);
+    try std.testing.expectApproxEqAbs(ic_mod[1], cap_mod[1], 1e-9);
+
+    var src_map = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    try src_map.put(arena, "U1", .{ .x = 10, .y = 10, .rot = 0 });
+    try src_map.put(arena, "C1", .{ .x = 13, .y = 10, .rot = 90 });
+    const src = SubCircuitSrc{ .map = src_map, .is_module = true };
+
+    // Flip the group onto B.Cu around the anchor's board pose (50,40) on B.Cu.
+    const anchor = GroupAnchor{
+        .ref = "lna2/U1",
+        .origin_key = "U1",
+        .on_board = true,
+        .board_x = 50,
+        .board_y = 40,
+        .board_back = true,
+    };
+    const adds = [_]PendingAdd{seedCapAdd("lna2/C1", "C1", "u-c1", "lna2")};
+    const idxs = [_]usize{0};
+
+    var acc = try freshAccum(arena);
+    try placeOneSelected(&d, "lna2", &idxs, &adds, src, anchor, &acc);
+
+    // The IC's pad on its BOARD pose (= the anchor's board pose, IC not re-added).
+    const ic_board = padWorldTest(
+        anchor.board_x,
+        anchor.board_y,
+        anchor.board_rot,
+        anchor.board_back,
+        ic_local[0],
+        ic_local[1],
+    );
+    // The cap's pad on its emitted board pose. If the flip preserved the module's
+    // internal geometry, the two pads must still coincide on the board.
+    const c1 = seededPose(acc.placed.items, "lna2/C1") orelse return error.MissingSeededPart;
+    const cap_board = padWorldTest(c1.x_mm, c1.y_mm, c1.rot, c1.back, cap_local[0], cap_local[1]);
+    try std.testing.expectApproxEqAbs(ic_board[0], cap_board[0], 1e-9);
+    try std.testing.expectApproxEqAbs(ic_board[1], cap_board[1], 1e-9);
 }
