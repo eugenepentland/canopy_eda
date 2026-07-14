@@ -2949,9 +2949,13 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
 /// ties → lowest ref-des); when it's on the board its live position lets
 /// `seedSelectedGroups` re-centre the group's saved layout there (the IC stays
 /// put, the rest of the sub-circuit flows in around it). `ref` is the flattened
-/// ref-des used to look the anchor's saved pose up in the whole-design layout.
+/// ref-des used to look the anchor's saved pose up in the whole-design layout;
+/// `origin_key` is the anchor instance's stable module-local key, used to look
+/// it up in a module's origin-key-keyed layout (see `SubCircuitSrc.is_module`)
+/// even when the anchor is already placed and thus absent from the pending adds.
 const GroupAnchor = struct {
     ref: []const u8,
+    origin_key: []const u8 = "",
     on_board: bool = false,
     board_x: f64 = 0,
     board_y: f64 = 0,
@@ -2998,7 +3002,7 @@ fn computeGroupAnchors(
             break :blk std.mem.lessThan(u8, inst.ref_des, cur.ref);
         };
         if (!better) continue;
-        var ga = GroupAnchor{ .ref = inst.ref_des };
+        var ga = GroupAnchor{ .ref = inst.ref_des, .origin_key = inst.origin_key };
         const bfp: ?BoardFp = by_uuid.get(inst.uuid) orelse by_ref.get(inst.ref_des);
         if (bfp) |m| {
             if (board_positions) |bp| {
@@ -3140,9 +3144,12 @@ fn placeOneSelected(
     var offy: f64 = 0;
     var on_board = false;
     if (anchor) |a| {
-        // A module source is keyed by origin_key, so resolve the anchor's
-        // origin_key from its add (its flattened ref-des won't key the map).
-        const akey = if (src.is_module) anchorOriginKey(adds, idxs, a.ref) else a.ref;
+        // A module source is keyed by origin_key, so key the anchor by its own
+        // `origin_key` (resolved from the flattened roster in
+        // `computeGroupAnchors`). Its flattened ref-des won't key the map, and
+        // this works even when the anchor IC is already placed — and thus absent
+        // from `adds` — which is exactly when its passives must centre on it.
+        const akey = if (src.is_module) a.origin_key else a.ref;
         if (src.map.get(akey)) |as_| {
             if (a.on_board) {
                 on_board = true;
@@ -3169,16 +3176,6 @@ fn placeOneSelected(
             try block.append(arena, .{ .pa = pa, .bx = bx, .by = by, .rot = sp.rot, .sec = sec });
     }
     if (on_board) d.summary.blocks += 1;
-}
-
-/// The `origin_key` of the add in `idxs` whose flattened ref-des is `ref` (the
-/// sub-circuit's anchor), or "" when not found — used to find the anchor inside
-/// an origin-key-keyed module layout.
-fn anchorOriginKey(adds: []const PendingAdd, idxs: []const usize, ref: []const u8) []const u8 {
-    for (idxs) |idx| {
-        if (std.mem.eql(u8, adds[idx].inst.ref_des, ref)) return adds[idx].inst.origin_key;
-    }
-    return "";
 }
 
 /// Translate the whole off-board `block` by ONE shared offset (its collective
@@ -4299,5 +4296,83 @@ test "stale-pad clear requires the moved-to pad to exist on the board" {
         try std.testing.expectEqual(@as(u32, 2), n);
         try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"pad\":\"1\",\"net\":\"\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"pad\":\"2\",\"net\":\"SIG\"") != null);
+    }
+}
+
+// spec: serve/sync - placeOneSelected keys an on-board anchor by origin_key to centre its module's seeded passives
+test "placeOneSelected centres a module sub-circuit on an on-board anchor absent from the adds" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    var d = state.ctx(&spc, .auto);
+
+    // A module ★ layout, keyed by origin_key: the anchor IC U1 at (10,10) plus
+    // two decoupling caps offset from it.
+    var src_map = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    try src_map.put(arena, "U1", .{ .x = 10, .y = 10, .rot = 0 });
+    try src_map.put(arena, "C1", .{ .x = 12, .y = 10, .rot = 90 });
+    try src_map.put(arena, "C2", .{ .x = 10, .y = 13, .rot = 0 });
+    const src = SubCircuitSrc{ .map = src_map, .is_module = true };
+
+    // The anchor IC is ALREADY placed on the board at (50,40) — so it is NOT
+    // among the adds; only its two caps are being added. Its `origin_key` still
+    // keys the module layout (that's the fix — resolved off the flattened roster
+    // by `computeGroupAnchors`, not from the adds).
+    const anchor = GroupAnchor{
+        .ref = "lna2/U1",
+        .origin_key = "U1",
+        .on_board = true,
+        .board_x = 50,
+        .board_y = 40,
+    };
+    const cap = struct {
+        fn add(ref: []const u8, key: []const u8, uuid: []const u8) PendingAdd {
+            return .{
+                .inst = .{
+                    .ref_des = ref,
+                    .component = "cap",
+                    .origin_key = key,
+                    .value = "100nF",
+                    .footprint = "lib:c",
+                    .properties = &.{},
+                    .uuid = uuid,
+                },
+                .fp_name = "c0402",
+                .canopy_net = null,
+                .section = "lna2",
+            };
+        }
+    }.add;
+    const adds = [_]PendingAdd{
+        cap("lna2/C1", "C1", "u-c1"),
+        cap("lna2/C2", "C2", "u-c2"),
+    };
+    const idxs = [_]usize{ 0, 1 };
+
+    var leftover: std.ArrayList(PendingAdd) = .empty;
+    var placed: std.ArrayList(PositionedAdd) = .empty;
+    var block: std.ArrayList(NamedAdd) = .empty;
+    try placeOneSelected(&d, "lna2", &idxs, &adds, src, anchor, &leftover, &placed, &block);
+
+    // Both caps land ON the board (offset = board(50,40) − anchor pose(10,10) =
+    // (40,30)); NONE in the off-board staging block or in leftover.
+    try std.testing.expectEqual(@as(usize, 2), placed.items.len);
+    try std.testing.expectEqual(@as(usize, 0), block.items.len);
+    try std.testing.expectEqual(@as(usize, 0), leftover.items.len);
+
+    // C1 pose (12,10) → (52,40) keeping rot; C2 pose (10,13) → (50,43). Match on
+    // ref-des so the assertion is order-independent.
+    for (placed.items) |p| {
+        if (std.mem.eql(u8, p.pa.inst.ref_des, "lna2/C1")) {
+            try std.testing.expectEqual(@as(f64, 52), p.x_mm);
+            try std.testing.expectEqual(@as(f64, 40), p.y_mm);
+            try std.testing.expectEqual(@as(f64, 90), p.rot);
+        } else {
+            try std.testing.expectEqual(@as(f64, 50), p.x_mm);
+            try std.testing.expectEqual(@as(f64, 43), p.y_mm);
+        }
     }
 }

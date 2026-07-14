@@ -837,6 +837,7 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - writeFileAtomic rolls a timestamped board backup and prunes beyond MAX_BOARD_BACKUPS
 - placement guard reports moved, rotated, or side-flipped footprints and exempts adds/removes
 - placement guard passes when every existing footprint keeps its pose
+- placeOneSelected keys an on-board anchor by origin_key to centre its module's seeded passives
 
 ## serve/vfs
 
