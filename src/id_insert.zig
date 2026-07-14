@@ -55,7 +55,7 @@ pub fn insertPendingIds(
     // Atomic write: tmp → rename. This is the one path here that mutates a
     // *hand-authored* source file (`src/<design>.sexp`), so a crash mid-write
     // must not truncate/destroy it. Mirrors the tmp→rename idiom in
-    // serve/oauth_store.zig (no serve/ import — replicated locally).
+    // serve/auth_store.zig (no serve/ import — replicated locally).
     var write_buf: [4096]u8 = undefined;
     var atomic = try infra_fs.cwd().atomicFile(source_path, .{ .write_buffer = &write_buf });
     defer atomic.deinit();

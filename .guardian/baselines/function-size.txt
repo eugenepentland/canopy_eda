@@ -131,6 +131,4 @@
 7 src/serve/sync.zig|populatePadNetMaps
 9 src/serve/sync.zig|runKicadPcbSync
 10 src/serve/sync.zig|seedOneSubBlock
-8 src/serve/templates/oauth.zig|_render
-7 src/serve/templates/oauth.zig|_signature
 8 src/serve/vfs.zig|editFile

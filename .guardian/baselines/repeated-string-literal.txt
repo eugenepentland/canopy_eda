@@ -3,11 +3,11 @@ duplicate const Node = "" across 2 files
 duplicate const download_timeout_secs = "60" across 2 files
 duplicate const header_cors_allow_origin = "access-control-allow-origin" across 4 files
 duplicate const name_field_prefix = "{\"name\":" across 2 files
-duplicate const ok_json_true = "{\"ok\":true}" across 5 files
+duplicate const ok_json_true = "{\"ok\":true}" across 3 files
 duplicate const sectionClose = "</section>" across 2 files
 duplicate const sexp_ext_len = ".sexp" across 2 files
 duplicate const sexp_path_template = "{s}/{s}.sexp" across 2 files
-duplicate const style_block = "<style>" across 4 files
+duplicate const style_block = "<style>" across 2 files
 duplicate const u8 = "." across 2 files
 src/import_kicad.zig: string literal {s}/lib/components/{s}.sexp appears 3 times — extract a const
 src/render_json.zig: string literal component appears 3 times — extract a const
@@ -17,28 +17,8 @@ src/serve/edit.zig: string literal missing net appears 3 times — extract a con
 src/serve/edit.zig: string literal missing to appears 3 times — extract a const
 src/serve/edit.zig: string literal not a design-block appears 4 times — extract a const
 src/serve/edit.zig: string literal {{\"ok\":true,\"version\":{d}}} appears 4 times — extract a const
-src/serve/templates/account.zig: string literal </button> appears 6 times — extract a const
-src/serve/templates/account.zig: string literal </label> appears 3 times — extract a const
-src/serve/templates/account.zig: string literal </option> appears 4 times — extract a const
-src/serve/templates/account.zig: string literal <div class=\"card\"> appears 4 times — extract a const
-src/serve/templates/account.zig: string literal <p class=\"muted\"> appears 5 times — extract a const
-src/serve/templates/auth.zig: string literal  id=\"email\" appears 3 times — extract a const
-src/serve/templates/auth.zig: string literal  placeholder=\"Email address\" appears 3 times — extract a const
-src/serve/templates/auth.zig: string literal  required appears 3 times — extract a const
-src/serve/templates/auth.zig: string literal  type=\"email\" appears 3 times — extract a const
-src/serve/templates/auth.zig: string literal <!DOCTYPE html> appears 4 times — extract a const
-src/serve/templates/auth.zig: string literal </button> appears 3 times — extract a const
-src/serve/templates/auth.zig: string literal </script> appears 4 times — extract a const
-src/serve/templates/auth.zig: string literal </title> appears 4 times — extract a const
-src/serve/templates/auth.zig: string literal <div class=\"auth-card\"> appears 4 times — extract a const
-src/serve/templates/auth.zig: string literal <div class=\"status\" id=\"status\"> appears 3 times — extract a const
-src/serve/templates/auth.zig: string literal <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"> appears 4 times — extract a const
-src/serve/templates/auth.zig: string literal <span class=\"brand\"> appears 4 times — extract a const
 src/serve/templates/library.zig: string literal  href=\" appears 3 times — extract a const
 src/serve/templates/library.zig: string literal </button> appears 3 times — extract a const
-src/serve/templates/oauth.zig: string literal  type=\"hidden\" appears 5 times — extract a const
-src/serve/templates/oauth.zig: string literal </strong> appears 3 times — extract a const
-src/serve/templates/oauth.zig: string literal <strong> appears 3 times — extract a const
 src/serve/templates/pages.zig: string literal  class=\"design-card-link\" appears 5 times — extract a const
 src/serve/templates/pages.zig: string literal  href=\" appears 6 times — extract a const
 src/serve/templates/pages.zig: string literal <div class=\"design-card-title\"> appears 3 times — extract a const

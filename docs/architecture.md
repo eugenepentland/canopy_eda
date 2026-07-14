@@ -170,7 +170,7 @@ Available as HTML at `GET /review/:name` or JSON at `GET /api/review/:name`. Sec
 
 Default port 7050. Dev URL: `http://localhost:7050`. Production URL: `https://co-circuit.eugenepentland.dev`.
 
-**Pages.** `/` (design list), `/schematics/:name` (schematic viewer), `/review/:name` (review viewer), `/library` (library upload), `/account` (OAuth client management), `/auth/*` (login/setup pages), `/pdf-view/:filename` (datasheet viewer).
+**Pages.** `/` (design list), `/schematics/:name` (schematic viewer), `/review/:name` (review viewer), `/library` (library upload), `/pdf-view/:filename` (datasheet viewer). Sign-in and account management are not netlisp pages — the navbar Account link points at ward's admin portal (`https://ward.eugenepentland.dev/admin`).
 
 **Read APIs.** `/api/designs`, `/api/scene-graph/:name`, `/api/review/:name`, `/api/erc/:name`, `/api/version/:name`, `/api/pinout/:name`, `/api/footprint/:name`, `/api/datasheets`, `/datasheets/:filename`.
 
@@ -180,15 +180,18 @@ Default port 7050. Dev URL: `http://localhost:7050`. Production URL: `https://co
 
 **KiCad sync orchestration.** `POST /api/sync-kicad-pcb/:name` — file-based sync: reads the `.kicad_pcb` at the design's `(kicad-pcb "<path>")` form, diffs it against the flattened netlist, and writes the updated board in place. See the [KiCad sync](#kicad-sync-file-based) section below.
 
-**MCP transport.** `POST /mcp` (streamable HTTP, the transport Claude Code's remote MCP connector uses), `GET /mcp` (WebSocket, for local testing). OAuth via `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`, `/oauth/authorize`, `/oauth/token`.
+**MCP transport.** `POST /mcp` (streamable HTTP, the transport Claude Code's remote MCP connector uses), `GET /mcp` (WebSocket, for local testing). Bearer tokens are issued by ward (the authorization server); netlisp only advertises it via `GET /.well-known/oauth-protected-resource` (RFC 9728) and introspects tokens against wardd. See **Authentication & authorisation** below.
 
 ### Authentication & authorisation
 
-- Passkey-first (WebAuthn challenge/complete), with a username+password fallback.
-- Three roles: `admin`, `writer`, `reader`. Admins mint single-use invite links (7-day TTL); the invite link encodes the role.
-- Per-install OAuth `client_id`/`client_secret` pairs for MCP clients. Secrets stored as SHA-256 hashes only. Persisted to `projects/designs/auth/oauth_clients.json` and `oauth_tokens.json`.
-- Plugin tokens (bearer) for the KiCad sync agent — minted via `netlisp mint-plugin-token`.
-- Localhost dev bypass: when no session exists and the request is from `localhost`, the account page falls back to a `dev@localhost` identity.
+netlisp is a **pure resource server** — it runs no auth of its own. Everything (passkeys/WebAuthn, sessions, invites, roles, OAuth) is delegated to **ward** (the `wardd` auth server, repo `~/ai/ward`, public `https://ward.eugenepentland.dev`, local `http://127.0.0.1:9000`). The adapter is `src/serve/ward_auth.zig` (HTTP seam in `src/infra/net.zig`).
+
+- **Browser sessions.** The `ward_session` cookie (domain `.eugenepentland.dev`) is verified against wardd `GET /verify`. No cookie → `302` to `https://ward.eugenepentland.dev/login?rd=<url>`; wardd unreachable → `503` (fail-closed).
+- **MCP / API bearers.** Verified against wardd's LAN-only `POST /oauth/introspect`; the token scope must contain the service name (`eda`). A `401` returns an RFC 9728 `WWW-Authenticate` pointing at `GET /.well-known/oauth-protected-resource`, which names ward as the authorization server.
+- **Roles.** ward member → `writer`, ward admin → `admin`, unknown → `reader` (write access gates the MCP mutation tools). Registration is invite-only through wardd; user/invite/client management lives in ward's admin portal (`/admin`).
+- **Plugin tokens (bearer).** For the KiCad sync agent — minted via `netlisp mint-plugin-token`, stored in `plugin_tokens.json` under the auth dir, checked *before* the ward bearer on `/api/sync-kicad-pcb/*`.
+- **Config (env / `.env`).** `WARD_VERIFY_URL`, `WARD_LOGIN_URL`, `WARD_INTROSPECT_URL`, `WARD_SERVICE_NAME` (default `eda`), `WARD_CACHE_TTL_SECS` (default `30`, the revocation-lag bound). Unset → fail closed (`503`) outside the dev bypass.
+- **Dev bypass.** `NETLISP_DEV` grants a local admin identity to a loopback, unproxied request (env opt-in) — no wardd needed for local development.
 
 ### MCP server
 
@@ -263,11 +266,10 @@ projects/designs/
 │   ├── pinouts/                  # extracted pinouts (pin → function lookups)
 │   └── datasheets/               # uploaded PDFs
 └── auth/
-    ├── oauth_clients.json        # OAuth client_id/secret-hash store
-    ├── oauth_tokens.json         # access-token store (hashed)
-    ├── plugin_tokens.json        # KiCad-agent bearer tokens
-    └── users.json                # passkey + password credentials
+    └── plugin_tokens.json        # KiCad-agent bearer tokens (eda_p_*)
 ```
+
+(Post ward-migration this is the only auth sidecar: passkeys, sessions, invites, and OAuth clients/tokens now live in wardd, not on disk here. The old `users.json` / `oauth_clients.json` / `oauth_tokens.json` stores are gone.)
 
 KiCad sync sidecars live next to the `.kicad_pcb` (not in `projects/designs/`):
 
@@ -298,9 +300,9 @@ KiCad sync sidecars live next to the `.kicad_pcb` (not in `projects/designs/`):
 | `netlisp convert-pinout <f.kicad_sym> [--filter <n>]` | Extract the pin → function pinout from a KiCad symbol. |
 | `netlisp merge-alt-functions <pinout.sexp> <alts.csv\|.xml> [--write]` | Enrich a pinout with alternate-function metadata. |
 | `netlisp mint-plugin-token [--label <l>] [--auth-dir D]` | Issue a bearer token for the KiCad sync agent. |
-| `netlisp mint-invite [...]` | Mint a single-use invite link (7-day TTL, role-gated). |
-| `netlisp set-password [...]` | Set or reset a user password and role (admin/writer/reader). |
 | `netlisp help` | Print usage. |
+
+(User/invite/password management is no longer a netlisp CLI — it moved to wardd's admin portal. The old `mint-invite` and `set-password` commands are gone.)
 
 ## 7. Appendix: HTTP & MCP surface
 
@@ -314,28 +316,12 @@ KiCad sync sidecars live next to the `.kicad_pcb` (not in `projects/designs/`):
 | GET | `/schematics/:name` | Schematic viewer page. |
 | GET | `/review/:name` | Review-doc HTML page. |
 | GET | `/library` | Library upload page. |
-| GET | `/account` | OAuth client management (per-user). |
 | GET | `/pdf-view/:filename` | Datasheet PDF viewer. |
 | GET | `/datasheets/:filename` | Serve a datasheet PDF. |
 
 #### Auth
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/auth/login` | Login page. |
-| GET | `/auth/setup` | First-run setup. |
-| GET | `/auth/login/challenge` | WebAuthn login challenge. |
-| POST | `/auth/login/complete` | WebAuthn login completion. |
-| GET | `/auth/register/challenge` | WebAuthn register challenge. |
-| POST | `/auth/register/complete` | WebAuthn register completion. |
-| POST | `/auth/logout` | Sign out. |
-| POST | `/auth/password/login` | Password login. |
-| POST | `/auth/password/set` | Set/reset password. |
-| GET | `/auth/password/status` | Whether password is set. |
-| GET | `/auth/credentials/list` | List user credentials. |
-| POST | `/auth/credentials/delete` | Delete a credential. |
-| GET | `/auth/manage` | Account management. |
-| GET | `/auth/invite/*` | Accept an invite link. |
-| POST | `/auth/invite/create` | Mint an invite link. |
+
+netlisp serves no login/account/authorization-server routes — those all live in wardd (`https://ward.eugenepentland.dev`). The only auth-related route netlisp exposes is the RFC 9728 protected-resource metadata (see MCP transport below); browser sessions are verified against wardd `GET /verify` and bearers against wardd `POST /oauth/introspect`. See **Authentication & authorisation**.
 
 #### Read APIs
 | Method | Path | Purpose |
@@ -379,11 +365,7 @@ KiCad sync sidecars live next to the `.kicad_pcb` (not in `projects/designs/`):
 | --- | --- | --- |
 | POST | `/mcp` | Streamable HTTP MCP transport. |
 | GET | `/mcp` | WebSocket MCP transport. |
-| GET | `/.well-known/oauth-authorization-server` | OAuth metadata (RFC 8414). |
-| GET | `/.well-known/oauth-protected-resource` | Protected-resource metadata (RFC 9728). |
-| GET | `/oauth/authorize` | OAuth consent page. |
-| POST | `/oauth/authorize/approve` | Consent form POST. |
-| POST | `/oauth/token` | Authorization-code exchange. |
+| GET | `/.well-known/oauth-protected-resource` | Protected-resource metadata (RFC 9728) — names ward as the authorization server. |
 
 ### MCP tools
 
