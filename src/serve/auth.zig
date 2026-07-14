@@ -58,16 +58,10 @@ fn viaProxy(req: *httpz.Request) bool {
 /// loopback, and the request did not come through a reverse proxy. Deriving
 /// "local" from the `Host` header — the previous behaviour — let any remote
 /// client send `Host: localhost` and obtain unauthenticated admin.
-fn isLocalhost(ctx: *Server, req: *httpz.Request) bool {
+pub fn isLocalhostRequest(ctx: *Server, req: *httpz.Request) bool {
     if (!ctx.dev_mode) return false;
     if (viaProxy(req)) return false;
     return peerIsLoopback(req);
-}
-
-/// True when the request qualifies for the local-development auth bypass
-/// (`ctx.dev_mode` + loopback peer + not proxied). See `isLocalhost`.
-pub fn isLocalhostRequest(ctx: *Server, req: *httpz.Request) bool {
-    return isLocalhost(ctx, req);
 }
 
 // ── Bearer helpers ───────────────────────────────────────────────────

@@ -44,6 +44,7 @@ const TestEnv = struct {
         self.state.ward.cfg = .{
             .verify_url = verify,
             .login_url = login,
+            .auth_server_url = "",
             .introspect_url = introspect,
             .service_name = service,
             .cache_ttl_secs = 300,
@@ -485,7 +486,7 @@ test "auth-request: a malformed sync bearer with ward configured is not admitted
 
 // spec: serve - A session-allowlisted public route is served without any credential
 test "auth-request: allowlisted public routes are served without any credential" {
-    const public_paths = [_][]const u8{ "/.well-known/oauth-protected-resource", "/static/app.css", "/auth/login" };
+    const public_paths = [_][]const u8{ "/.well-known/oauth-protected-resource", "/static/app.css" };
     for (public_paths) |p| {
         var env = TestEnv{ .a = std.testing.allocator };
         defer env.deinit();
@@ -529,6 +530,7 @@ test "auth-request: protected-resource metadata derives host and names the ward 
     env.state.ward.cfg = .{
         .verify_url = "",
         .login_url = login_url,
+        .auth_server_url = "",
         .introspect_url = "",
         .service_name = service,
         .cache_ttl_secs = 300,

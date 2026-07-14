@@ -29,6 +29,7 @@ src/config.zig::digikeyClientId | fn digikeyClientId(allocator: std.mem.Allocato
 src/config.zig::digikeyClientSecret | fn digikeyClientSecret(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::digikeyMaxInFlight | fn digikeyMaxInFlight(allocator: std.mem.Allocator) u32
 src/config.zig::digikeyMinIntervalMs | fn digikeyMinIntervalMs(allocator: std.mem.Allocator) u64
+src/config.zig::wardAuthServerUrl | fn wardAuthServerUrl(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::wardCacheTtlSecs | fn wardCacheTtlSecs(allocator: std.mem.Allocator, default: i64) i64
 src/config.zig::wardIntrospectUrl | fn wardIntrospectUrl(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::wardLoginUrl | fn wardLoginUrl(allocator: std.mem.Allocator) ?[]u8
@@ -1302,7 +1303,6 @@ src/serve/ward_auth.zig::Role enum_
 src/serve/ward_auth.zig::WardState struct_
 src/serve/ward_auth.zig::authMiddleware | fn authMiddleware(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!bool
 src/serve/ward_auth.zig::authServerUrl | fn authServerUrl(ctx: *Server) []const u8
-src/serve/ward_auth.zig::canAdmin | fn canAdmin(self: Role) bool
 src/serve/ward_auth.zig::canWrite | fn canWrite(self: Role) bool
 src/serve/ward_auth.zig::deriveAuthServer | fn deriveAuthServer(login_url: []const u8) []const u8
 src/serve/ward_auth.zig::init | fn init(self: *WardState, allocator: std.mem.Allocator) void

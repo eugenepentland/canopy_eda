@@ -60,16 +60,13 @@ const body_unavailable = "{\"error\":\"service_unavailable\",\"error_description
 const body_unauthorized = "{\"error\":\"unauthorized\",\"error_description\":\"missing or invalid bearer token\"}";
 const body_api_unauthorized = "{\"error\":\"unauthorized\"}";
 
-/// Public routes served without a ward session: the login/setup pages and the
-/// static assets they pull, the OAuth pages kept alive (dead) this phase, and
-/// the RFC 9728 metadata document. Mirrors the pre-migration exemptions minus
-/// the retired authorization-server metadata route.
+/// Public routes served without a ward session: the static assets the
+/// login/setup flow pulls and the RFC 9728 protected-resource metadata
+/// document. The homegrown `/auth/*` and OAuth authorization-server routes were
+/// deleted in the ward migration, so they are no longer allowlisted — a request
+/// to any such path now correctly falls through to the session gate.
 const public_routes = [_][]const u8{
-    "/auth/*",
     "/static/*",
-    "/oauth/authorize/*",
-    "/oauth/token",
-    "/oauth/register",
     "/.well-known/oauth-protected-resource",
 };
 
@@ -113,11 +110,6 @@ pub const Role = enum {
     pub fn canWrite(self: Role) bool {
         return self == .admin or self == .writer;
     }
-
-    /// Can this role manage other users? (Retained for callers that gate on it.)
-    pub fn canAdmin(self: Role) bool {
-        return self == .admin;
-    }
 };
 
 /// The ward-resolved identity a `/mcp` request carries into the MCP handler so
@@ -136,6 +128,9 @@ pub const Identity = struct {
 const WardConfig = struct {
     verify_url: []const u8,
     login_url: []const u8,
+    /// Explicit RFC 9728 authorization-server base URL. Empty string = unset:
+    /// `authServerUrl` then derives it by stripping `/login` off `login_url`.
+    auth_server_url: []const u8,
     introspect_url: []const u8,
     service_name: []const u8,
     cache_ttl_secs: i64,
@@ -166,6 +161,7 @@ pub const WardState = struct {
     cfg: WardConfig = .{
         .verify_url = "",
         .login_url = "",
+        .auth_server_url = "",
         .introspect_url = "",
         .service_name = default_service_name,
         .cache_ttl_secs = default_cache_ttl_secs,
@@ -223,6 +219,7 @@ fn loadConfig(allocator: std.mem.Allocator) WardConfig {
     return .{
         .verify_url = config.wardVerifyUrl(allocator) orelse "",
         .login_url = config.wardLoginUrl(allocator) orelse "",
+        .auth_server_url = config.wardAuthServerUrl(allocator) orelse "",
         .introspect_url = config.wardIntrospectUrl(allocator) orelse "",
         .service_name = config.wardServiceName(allocator) orelse default_service_name,
         .cache_ttl_secs = config.wardCacheTtlSecs(allocator, default_cache_ttl_secs),
@@ -269,10 +266,18 @@ pub fn deriveAuthServer(login_url: []const u8) []const u8 {
     return login_url;
 }
 
+/// Choose the RFC 9728 authorization-server base for `cfg`: the explicitly
+/// configured `WARD_AUTH_SERVER_URL` when set, else the value derived by
+/// stripping `/login` off the login URL (the historical, still-correct default).
+fn resolveAuthServer(cfg: WardConfig) []const u8 {
+    if (cfg.auth_server_url.len > 0) return cfg.auth_server_url;
+    return deriveAuthServer(cfg.login_url);
+}
+
 /// The ward authorization-server URL for the RFC 9728 protected-resource
 /// metadata document, taken from the running server's ward config.
 pub fn authServerUrl(ctx: *Server) []const u8 {
-    return deriveAuthServer(ctx.state.ward.cfg.login_url);
+    return resolveAuthServer(ctx.state.ward.cfg);
 }
 
 // ── RFC 9728 protected-resource metadata ───────────────────────────────
@@ -343,7 +348,9 @@ fn mcpGate(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!bo
     const challenge = try ward.resource.bearerChallenge(req.arena, try requestBaseUrl(req));
     const action = try bearerDecision(state, req, challenge);
     switch (action) {
-        .public => return true,
+        // Unreachable: this gate builds its BearerGate with an EMPTY allowlist
+        // (`.patterns = &.{}`), so ward never classifies a path as public here.
+        .public => unreachable,
         .allow => |id| {
             ctx.mcp_identity = .{ .username = id.username, .role = mapWardRole(id.role), .scope = id.scope };
             return true;
@@ -413,7 +420,10 @@ fn sessionGateMiddleware(ctx: *Server, req: *httpz.Request, res: *httpz.Response
     };
     const decision = try sessionDecision(state, req.arena, request);
     switch (decision.action) {
-        .public => return true,
+        // Unreachable: `sessionAllowlist().isPublic(path)` is checked at the top
+        // of this function and returns early, so a public path never reaches
+        // `requireUser` to come back as a `.public` action.
+        .public => unreachable,
         .allow => {
             if (requiresWrite(req) and !mapWardRole(decision.role).canWrite())
                 return forbidden(res, body_forbidden_write);
@@ -539,20 +549,24 @@ fn currentUrl(req: *httpz.Request) AuthError![]const u8 {
 
 // ── Response writers ───────────────────────────────────────────────────
 
+/// Write a JSON response with `status` and `body`, then stop dispatch (returns
+/// false). The shared shape behind the plain-body responders below; the redirect
+/// and bearer-challenge writers stay separate because they add a header.
+fn writeJson(res: *httpz.Response, status: u16, body: []const u8) bool {
+    res.status = status;
+    res.content_type = .JSON;
+    res.body = body;
+    return false;
+}
+
 /// Write a 503 fail-closed JSON response and stop dispatch.
 fn failClosed(res: *httpz.Response) bool {
-    res.status = http_service_unavailable;
-    res.content_type = .JSON;
-    res.body = body_unavailable;
-    return false;
+    return writeJson(res, http_service_unavailable, body_unavailable);
 }
 
 /// Write a 403 forbidden JSON response with `body` and stop dispatch.
 fn forbidden(res: *httpz.Response, body: []const u8) bool {
-    res.status = http_forbidden;
-    res.content_type = .JSON;
-    res.body = body;
-    return false;
+    return writeJson(res, http_forbidden, body);
 }
 
 /// Write a 302 redirect to `location` and stop dispatch.
@@ -573,10 +587,7 @@ fn unauthorizedBearer(res: *httpz.Response, challenge: []const u8) bool {
 
 /// Write a plain 401 JSON for an unauthenticated API request and stop dispatch.
 fn unauthorizedApi(res: *httpz.Response) bool {
-    res.status = http_unauthorized;
-    res.content_type = .JSON;
-    res.body = body_api_unauthorized;
-    return false;
+    return writeJson(res, http_unauthorized, body_api_unauthorized);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -616,6 +627,7 @@ test "session and bearer config predicates require their urls" {
     const empty = WardConfig{
         .verify_url = "",
         .login_url = "",
+        .auth_server_url = "",
         .introspect_url = "",
         .service_name = default_service_name,
         .cache_ttl_secs = default_cache_ttl_secs,
@@ -625,6 +637,7 @@ test "session and bearer config predicates require their urls" {
     const full = WardConfig{
         .verify_url = "v",
         .login_url = "l",
+        .auth_server_url = "",
         .introspect_url = "i",
         .service_name = default_service_name,
         .cache_ttl_secs = default_cache_ttl_secs,
@@ -636,6 +649,7 @@ test "session and bearer config predicates require their urls" {
     const verify_only = WardConfig{
         .verify_url = "v",
         .login_url = "",
+        .auth_server_url = "",
         .introspect_url = "",
         .service_name = default_service_name,
         .cache_ttl_secs = default_cache_ttl_secs,
@@ -643,6 +657,7 @@ test "session and bearer config predicates require their urls" {
     const login_only = WardConfig{
         .verify_url = "",
         .login_url = "l",
+        .auth_server_url = "",
         .introspect_url = "",
         .service_name = default_service_name,
         .cache_ttl_secs = default_cache_ttl_secs,
@@ -678,6 +693,30 @@ test "deriveAuthServer strips the trailing login path" {
     try std.testing.expectEqualStrings("bare-host", deriveAuthServer("bare-host"));
 }
 
+// spec: serve - The auth-server url prefers explicit config over the login-path strip
+test "resolveAuthServer prefers explicit config over the derived fallback" {
+    const explicit = WardConfig{
+        .verify_url = "",
+        .login_url = "https" ++ "://ward.example/login",
+        .auth_server_url = "https" ++ "://auth.example",
+        .introspect_url = "",
+        .service_name = default_service_name,
+        .cache_ttl_secs = default_cache_ttl_secs,
+    };
+    // An explicit WARD_AUTH_SERVER_URL wins verbatim, ignoring the login url.
+    try std.testing.expectEqualStrings("https" ++ "://auth.example", resolveAuthServer(explicit));
+    const derived = WardConfig{
+        .verify_url = "",
+        .login_url = "https" ++ "://ward.example/login",
+        .auth_server_url = "",
+        .introspect_url = "",
+        .service_name = default_service_name,
+        .cache_ttl_secs = default_cache_ttl_secs,
+    };
+    // Empty explicit config falls back to stripping /login off the login url.
+    try std.testing.expectEqualStrings("https" ++ "://ward.example", resolveAuthServer(derived));
+}
+
 // spec: serve - A cookieless session request is decided as a redirect to the ward login url carrying the return target
 test "a cookieless session request decides to redirect to the ward login" {
     const login = "https" ++ "://ward.example/login";
@@ -685,6 +724,7 @@ test "a cookieless session request decides to redirect to the ward login" {
     state.cfg = .{
         .verify_url = "http" ++ "://v",
         .login_url = login,
+        .auth_server_url = "",
         .introspect_url = "http" ++ "://i",
         .service_name = default_service_name,
         .cache_ttl_secs = 30,
@@ -750,14 +790,11 @@ test "cachedSessionRole reads the cached role for a session token" {
     try std.testing.expectEqual(ward.verdict.Role.unknown, cachedSessionRole(&state, "ward_session=tok", 131));
 }
 
-// spec: serve - The writer and admin roles may write while the reader role may not, and only admin may administer
-test "role write and admin predicates" {
+// spec: serve - Admin and writer may write while reader may not, and roles stringify lowercase
+test "role write predicate and toString" {
     try std.testing.expect(Role.admin.canWrite());
     try std.testing.expect(Role.writer.canWrite());
     try std.testing.expect(!Role.reader.canWrite());
-    try std.testing.expect(Role.admin.canAdmin());
-    try std.testing.expect(!Role.writer.canAdmin());
-    try std.testing.expect(!Role.reader.canAdmin());
     try std.testing.expectEqualStrings("admin", Role.admin.toString());
     try std.testing.expectEqualStrings("writer", Role.writer.toString());
     try std.testing.expectEqualStrings("reader", Role.reader.toString());
@@ -769,6 +806,7 @@ test "an unavailable session verifier fails closed through the netlisp gate" {
     state.cfg = .{
         .verify_url = "http" ++ "://v",
         .login_url = "https" ++ "://ward.example/login",
+        .auth_server_url = "",
         .introspect_url = "http" ++ "://i",
         .service_name = default_service_name,
         .cache_ttl_secs = 30,

@@ -99,6 +99,14 @@ pub fn wardServiceName(allocator: std.mem.Allocator) ?[]u8 {
     return lookup(allocator, "WARD_SERVICE_NAME");
 }
 
+/// Optional explicit ward authorization-server base URL (`WARD_AUTH_SERVER_URL`)
+/// published in the RFC 9728 protected-resource metadata document. Null when
+/// unset — the serve layer then derives it by stripping the `/login` suffix off
+/// `WARD_LOGIN_URL` (correct whenever the login URL ends in `/login`).
+pub fn wardAuthServerUrl(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "WARD_AUTH_SERVER_URL");
+}
+
 /// Ward verdict-cache lifetime in seconds (`WARD_CACHE_TTL_SECS`), bounding
 /// how long a logout/revocation lags. Falls back to `default` when unset or
 /// non-numeric.

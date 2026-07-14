@@ -809,11 +809,12 @@ Public functions: notFound, serve
 - The MCP scope check accepts a scope containing the service name and rejects one without it
 - The MCP role resolver returns the ward identity role, else admin on the dev bypass, else reader
 - The ward auth-server url is derived by stripping the login path from the configured login url
+- The auth-server url prefers explicit config over the login-path strip
 - A cookieless session request is decided as a redirect to the ward login url carrying the return target
 - An api path is distinguished from a non-api path for the 401-versus-redirect choice
 - The ward session cookie value is read from the cookie header and absent when empty or missing
 - A cached session role is read back by token and reported unknown when absent or expired
-- The writer and admin roles may write while the reader role may not, and only admin may administer
+- Admin and writer may write while reader may not, and roles stringify lowercase
 - An unavailable session verifier resolves the request to fail closed rather than admit it
 - A loopback request under dev mode bypasses auth even when the ward backend is unconfigured
 - A loopback request carrying any proxy header does not receive the dev bypass
