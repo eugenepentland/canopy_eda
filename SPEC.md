@@ -86,6 +86,8 @@ Public functions: applyOpsToSource, applyOpsToSourceWithStats
 - add bakes design properties (MPN, Manufacturer, …) on the first sync
 - add_via inserts a (via …) form stitching the GND net
 - add_via at an existing via position is a no-op
+- add_track inserts a (segment …) form on the op's layer
+- add_track at an existing segment (order-insensitive endpoints) is a no-op
 - create_board_item writes a section staging box as a (gr_rect …) on Dwgs.User
 - create_board_item writes a section label as a (gr_text …) on Dwgs.User
 - hides the refdes, value, and metadata so the silk/fab carries no auto-generated text
@@ -837,6 +839,9 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - writeFileAtomic rolls a timestamped board backup and prunes beyond MAX_BOARD_BACKUPS
 - placement guard reports moved, rotated, or side-flipped footprints and exempts adds/removes
 - placement guard passes when every existing footprint keeps its pose
+- placeOneSelected keys an on-board anchor by origin_key to centre its module's seeded passives
+- seeded sub-circuit copper lands on the board with bridged nets and the group offset
+- buildSubCircuitsJson reports each seedable group's module track and via counts
 
 ## serve/vfs
 

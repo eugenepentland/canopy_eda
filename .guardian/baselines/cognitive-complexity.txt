@@ -11,7 +11,7 @@
 27 src/eval/modules.zig|loadComponent
 42 src/eval/power_budget.zig|analyze
 29 src/export_kicad_footprint.zig|emitKicadPad
-35 src/kicad_pcb/writer.zig|applyOpsCounted
+34 src/kicad_pcb/writer.zig|applyOpsCounted
 31 src/main.zig|main
 27 src/placement/drc.zig|check
 36 src/placement/optimizer.zig|arrangeMacros

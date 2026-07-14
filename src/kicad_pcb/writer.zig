@@ -73,6 +73,10 @@ pub fn applyOpsToSource(arena: std.mem.Allocator, source: []const u8, ops_json: 
     return try printer.print(arena, out_nodes);
 }
 
+/// Copper items inserted from a layout seed this sync (de-duped counts). Nested
+/// inside `ApplyStats` so its two counters read as one concern.
+const CopperStats = struct { vias: u32 = 0, tracks: u32 = 0 };
+
 /// Stats returned alongside the rewritten file — Phase 4's UI surfaces
 /// these in the success message so the user sees "added 2, removed 1,
 /// pad-nets updated 14" instead of just "ok".
@@ -89,10 +93,12 @@ pub const ApplyStats = struct {
     /// bound into one draggable unit). De-duped against existing groups, so a
     /// re-sync of the same parts adds none.
     groups_added: u32 = 0,
-    /// GND stitching vias inserted this sync (`add_via` ops). An add_via whose
-    /// position already carries a via on the board is a no-op, so this counts
-    /// only the genuinely new vias.
-    vias_added: u32 = 0,
+    /// Copper inserted this sync from a layout seed: GND stitching vias
+    /// (`add_via`) and a seeded sub-circuit's routed tracks (`add_track`). Each
+    /// counts only the genuinely new items — a via/segment already on the board
+    /// at the same position is a de-duped no-op. Grouped into one nested struct
+    /// so the two counters read as one concern.
+    copper: CopperStats = .{},
     /// Properties hidden this sync — Reference (refdes), Value, Datasheet,
     /// Description, and the canopy_* tags all get `(hide yes)` so F.Fab/F.SilkS
     /// carry no auto-generated text. See propertyStaysVisible.
@@ -243,7 +249,84 @@ fn applyAddViaOp(
     if (viaExistsAt(existing_vias.items, vx, vy)) return;
     try existing_vias.append(arena, .{ .x = vx, .y = vy });
     try extra_vias.append(arena, try buildVia(arena, vx, vy, vdia, vdrill, vnet));
-    stats.vias_added += 1;
+    stats.copper.vias += 1;
+}
+
+/// Handle one `add_track` op: a routed copper segment from a seeded sub-circuit's
+/// module layout. Like `applyAddViaOp`, it de-dups against the board's existing
+/// segments (endpoints compared order-insensitively, plus the layer) so a re-seed
+/// never doubles a track, and references the net by name (the same name-only form
+/// `buildVia` / `setPadNet` use — modern pcbnew boards omit the top-level
+/// `(net <id> "name")` table). Coordinates + width arrive in nanometres; the
+/// layer arrives as its KiCad name ("F.Cu"/"B.Cu"/"In1.Cu"…). Skips a bad/empty op.
+fn applyAddTrackOp(
+    arena: std.mem.Allocator,
+    op_obj: std.json.ObjectMap,
+    existing_tracks: *std.ArrayList(SegKey),
+    extra_tracks: *std.ArrayList(Node),
+    stats: *ApplyStats,
+) WriteError!void {
+    const t = TrackSpec{
+        .x1 = jsonNumNm(op_obj.get("x1")) / nm_per_mm,
+        .y1 = jsonNumNm(op_obj.get("y1")) / nm_per_mm,
+        .x2 = jsonNumNm(op_obj.get("x2")) / nm_per_mm,
+        .y2 = jsonNumNm(op_obj.get("y2")) / nm_per_mm,
+        .width = jsonNumNm(op_obj.get("width")) / nm_per_mm,
+        .layer = jsonStr(op_obj.get("layer")),
+        .net = jsonStr(op_obj.get("net")),
+    };
+    if (t.width <= 0 or t.net.len == 0 or t.layer.len == 0) return;
+    const a = Vec2Mm{ .x = t.x1, .y = t.y1 };
+    const b = Vec2Mm{ .x = t.x2, .y = t.y2 };
+    if (segExistsAt(existing_tracks.items, a, b, t.layer)) return;
+    try existing_tracks.append(arena, .{ .a = a, .b = b, .layer = t.layer });
+    try extra_tracks.append(arena, try buildSegment(arena, t));
+    stats.copper.tracks += 1;
+}
+
+/// Working state for the ops that append fresh top-level board forms — copper
+/// (`add_via`/`add_track`), staging graphics (`create_board_item`) and KiCad
+/// groups (`group`). Holds the copper dedup indexes (existing via centres +
+/// segment keys), the new forms to append, and the shared group index. Bundled
+/// so `applyAppendOp` takes one pointer and keeps `applyOpsCounted`'s dispatch
+/// loop flat. `groups` aliases the same `GroupIndex` `indexBoardChildren` filled.
+const AppendOps = struct {
+    existing_vias: std.ArrayList(Vec2Mm) = .empty,
+    existing_tracks: std.ArrayList(SegKey) = .empty,
+    extra_vias: std.ArrayList(Node) = .empty,
+    extra_tracks: std.ArrayList(Node) = .empty,
+    extra_graphics: std.ArrayList(Node) = .empty,
+    extra_groups: std.ArrayList(Node) = .empty,
+    groups: *GroupIndex,
+};
+
+/// Dispatch the append-a-top-level-form ops. Returns true when `op_name` was one
+/// of `add_via` / `add_track` / `create_board_item` / `group` (and applied),
+/// false when it is some other op the caller must still handle.
+fn applyAppendOp(
+    arena: std.mem.Allocator,
+    op_name: []const u8,
+    op_obj: std.json.ObjectMap,
+    a: *AppendOps,
+    stats: *ApplyStats,
+) WriteError!bool {
+    if (std.mem.eql(u8, op_name, "add_via")) {
+        try applyAddViaOp(arena, op_obj, &a.existing_vias, &a.extra_vias, stats);
+        return true;
+    }
+    if (std.mem.eql(u8, op_name, "add_track")) {
+        try applyAddTrackOp(arena, op_obj, &a.existing_tracks, &a.extra_tracks, stats);
+        return true;
+    }
+    if (std.mem.eql(u8, op_name, "create_board_item")) {
+        try applyBoardItemOp(arena, op_obj, &a.extra_graphics, stats);
+        return true;
+    }
+    if (std.mem.eql(u8, op_name, "group")) {
+        try applyGroupOp(arena, op_obj, &a.extra_groups, a.groups, stats);
+        return true;
+    }
+    return false;
 }
 
 fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: []const std.json.Value, stats: *ApplyStats) WriteError!Node {
@@ -259,12 +342,15 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     var fp_by_uuid = std.StringHashMapUnmanaged(usize).empty;
     var net_id_by_name = std.StringHashMapUnmanaged(i64).empty;
     var existing_canopy_uuids = std.StringHashMapUnmanaged(void).empty;
-    // Centres (mm) of every via already on the board, so an `add_via` at an
-    // existing position is a no-op — keeps a re-seed of the same board from
-    // doubling its stitching vias.
-    var existing_vias: std.ArrayList(Vec2Mm) = .empty;
+    // Append-op working state: copper dedup indexes + the fresh top-level forms
+    // (vias/tracks/staging graphics/groups) to add. Existing via centres come
+    // from the shared board walk, existing segment keys from a separate pass so
+    // `indexBoardChildren`'s signature stays put; a coincident add_via/add_track
+    // is a no-op, so a re-seed never doubles its copper.
     var groups = GroupIndex{ .uuids = std.StringHashMapUnmanaged(void).empty, .members = std.StringHashMapUnmanaged(void).empty };
-    try indexBoardChildren(arena, root_children, &max_net_id, &fp_by_uuid, &net_id_by_name, &existing_canopy_uuids, &existing_vias, &groups);
+    var appends: AppendOps = .{ .groups = &groups };
+    try indexBoardChildren(arena, root_children, &max_net_id, &fp_by_uuid, &net_id_by_name, &existing_canopy_uuids, &appends.existing_vias, &groups);
+    try indexExistingTracks(root_children, &appends.existing_tracks, arena);
 
     // Apply each op, accumulating:
     //  - mutated_fp[index] = replacement node for the footprint at that index
@@ -278,10 +364,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
     var mutated_fp = std.AutoHashMapUnmanaged(usize, Node).empty;
     var removed_fp_indices = std.AutoHashMapUnmanaged(usize, void).empty;
     var extra_footprints: std.ArrayList(Node) = .empty;
-    var extra_graphics: std.ArrayList(Node) = .empty;
     var extra_nets: std.ArrayList(Node) = .empty;
-    var extra_vias: std.ArrayList(Node) = .empty;
-    var extra_groups: std.ArrayList(Node) = .empty;
     const had_top_level_nets = max_net_id >= 0;
 
     for (ops) |op_val| {
@@ -320,20 +403,7 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
             continue;
         }
 
-        if (std.mem.eql(u8, op_name, "create_board_item")) {
-            try applyBoardItemOp(arena, op_obj, &extra_graphics, stats);
-            continue;
-        }
-
-        if (std.mem.eql(u8, op_name, "add_via")) {
-            try applyAddViaOp(arena, op_obj, &existing_vias, &extra_vias, stats);
-            continue;
-        }
-
-        if (std.mem.eql(u8, op_name, "group")) {
-            try applyGroupOp(arena, op_obj, &extra_groups, &groups, stats);
-            continue;
-        }
+        if (try applyAppendOp(arena, op_name, op_obj, &appends, stats)) continue;
 
         // Remaining ops target an existing footprint.
         const idx = fp_by_uuid.get(target) orelse continue;
@@ -438,12 +508,14 @@ fn applyOpsCounted(arena: std.mem.Allocator, root_children: []const Node, ops: [
         if (try normalizePropertyVisibility(arena, fp, &stats.fields_hidden, &stats.fields_shown)) |fixed| out_fp = fixed;
         try new_children.append(arena, out_fp);
     }
-    // GND stitching vias from a layout seed (top-level forms, like footprints).
-    for (extra_vias.items) |v| try new_children.append(arena, v);
+    // Layout-seed copper (top-level forms, like footprints): GND stitching vias
+    // then the seeded sub-circuit's routed segments.
+    for (appends.extra_vias.items) |v| try new_children.append(arena, v);
+    for (appends.extra_tracks.items) |t| try new_children.append(arena, t);
     // Section staging boxes / labels (Dwgs.User graphics) go last.
-    for (extra_graphics.items) |g| try new_children.append(arena, g);
+    for (appends.extra_graphics.items) |g| try new_children.append(arena, g);
     // KiCad groups (reference the footprint uuids added above) go after them.
-    for (extra_groups.items) |g| try new_children.append(arena, g);
+    for (appends.extra_groups.items) |g| try new_children.append(arena, g);
 
     return Node.list(Span.zero, try new_children.toOwnedSlice(arena));
 }
@@ -1548,6 +1620,122 @@ fn buildVia(arena: std.mem.Allocator, x: f64, y: f64, dia: f64, drill: f64, net:
     return Node.list(Span.zero, children);
 }
 
+// ── Routed-copper segments (`add_track`) ─────────────────────────────────
+
+const form_segment = "segment";
+const form_start = "start";
+const form_end = "end";
+const form_width = "width";
+
+/// A routed segment's two endpoints (mm) + copper layer name — the dedup key so
+/// an `add_track` coincident with an existing segment on the same layer is a
+/// no-op (endpoints compared order-insensitively, see `segExistsAt`).
+const SegKey = struct { a: Vec2Mm, b: Vec2Mm, layer: []const u8 };
+
+/// All inputs to build one `(segment …)` node — bundled so `buildSegment` stays a
+/// two-argument builder. Coordinates + width are millimetres; `layer` is the
+/// KiCad copper-layer name; `net` is referenced by name only.
+const TrackSpec = struct {
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    width: f64,
+    layer: []const u8,
+    net: []const u8,
+};
+
+/// Read a `(<head> x y …)` form's first two numbers as a point (mm), or null when
+/// it has no parseable pair. Shared by the `(start …)` / `(end …)` readers.
+fn formPointMm(node: Node) ?Vec2Mm {
+    const l = node.asList() orelse return null;
+    if (l.len < 3) return null;
+    const x = l[1].asNumber() orelse return null;
+    const y = l[2].asNumber() orelse return null;
+    return .{ .x = x, .y = y };
+}
+
+/// A top-level `(segment …)` node's dedup key (start/end/layer), or null when it
+/// lacks a parseable start+end. Mirrors `viaCenterMm`.
+fn segmentKey(seg: Node) ?SegKey {
+    const cl = seg.asList() orelse return null;
+    var a: ?Vec2Mm = null;
+    var b: ?Vec2Mm = null;
+    var layer: []const u8 = "";
+    for (cl) |sub| {
+        if (sub.isForm(form_start)) {
+            a = formPointMm(sub);
+        } else if (sub.isForm(form_end)) {
+            b = formPointMm(sub);
+        } else if (sub.isForm(form_layer)) {
+            const ll = sub.asList() orelse continue;
+            if (ll.len >= 2) layer = ll[1].asString() orelse "";
+        }
+    }
+    return .{ .a = a orelse return null, .b = b orelse return null, .layer = layer };
+}
+
+/// Index every top-level `(segment …)` on the board into `out` (endpoints + layer)
+/// so `add_track` can de-dup against it. A separate pass from `indexBoardChildren`
+/// to leave that function's signature (already at its param ceiling) untouched.
+fn indexExistingTracks(
+    root_children: []const Node,
+    out: *std.ArrayList(SegKey),
+    arena: std.mem.Allocator,
+) std.mem.Allocator.Error!void {
+    for (root_children) |child| {
+        if (!child.isForm(form_segment)) continue;
+        if (segmentKey(child)) |k| try out.append(arena, k);
+    }
+}
+
+/// True when some segment in `existing` on the same `layer` shares this
+/// track's endpoints — compared order-insensitively (a↔b either way) within
+/// `via_dedup_mm`, since a re-drawn track can arrive with its ends swapped.
+fn segExistsAt(existing: []const SegKey, a: Vec2Mm, b: Vec2Mm, layer: []const u8) bool {
+    for (existing) |s| {
+        if (!std.mem.eql(u8, s.layer, layer)) continue;
+        if ((ptNear(s.a, a) and ptNear(s.b, b)) or (ptNear(s.a, b) and ptNear(s.b, a))) return true;
+    }
+    return false;
+}
+
+/// True when two points coincide within the copper coincidence epsilon
+/// (`via_dedup_mm`, the same tolerance the via dedup uses).
+fn ptNear(p: Vec2Mm, q: Vec2Mm) bool {
+    return @abs(p.x - q.x) <= via_dedup_mm and @abs(p.y - q.y) <= via_dedup_mm;
+}
+
+/// A `(<head> x y)` form — e.g. `(start 1 2)`, `(end 3 4)`.
+fn makePointForm(arena: std.mem.Allocator, head: []const u8, x: f64, y: f64) std.mem.Allocator.Error!Node {
+    var children = try arena.alloc(Node, 3);
+    children[0] = Node.atom(Span.zero, head);
+    children[1] = Node.float(Span.zero, x);
+    children[2] = Node.float(Span.zero, y);
+    return Node.list(Span.zero, children);
+}
+
+/// Build a routed `(segment (start …) (end …) (width …) (layer "…") (net "…")
+/// (uuid "…"))` node. The net is referenced by name only (same rationale as
+/// `buildVia`); the uuid is derived from the geometry so re-emitting the same
+/// segment is deterministic.
+fn buildSegment(arena: std.mem.Allocator, t: TrackSpec) WriteError!Node {
+    var children = try arena.alloc(Node, 7);
+    children[0] = Node.atom(Span.zero, form_segment);
+    children[1] = try makePointForm(arena, form_start, t.x1, t.y1);
+    children[2] = try makePointForm(arena, form_end, t.x2, t.y2);
+    children[3] = try makeFloatForm(arena, form_width, t.width);
+    children[4] = try makeLayerForm(arena, t.layer);
+    children[5] = try makeNetForm(arena, 0, t.net);
+    const seed = try std.fmt.allocPrint(
+        arena,
+        "seg:{d}:{d}:{d}:{d}:{s}:{s}",
+        .{ t.x1, t.y1, t.x2, t.y2, t.layer, t.net },
+    );
+    children[6] = try makeStringForm(arena, form_uuid, try boardItemUuid(arena, seed));
+    return Node.list(Span.zero, children);
+}
+
 /// Build a `(group "name" (uuid …) (members "u1" "u2" …))` node from a `group`
 /// op, or null when there's nothing left to group. Members already in an
 /// existing group are dropped (KiCad forbids a footprint in two groups) and
@@ -1842,7 +2030,7 @@ test "applyOpsToSource add_via inserts a via" {
     ;
     var stats: ApplyStats = .{};
     const out = try applyOpsToSourceWithStats(arena.allocator(), src, ops, &stats);
-    try std.testing.expectEqual(@as(u32, 1), stats.vias_added);
+    try std.testing.expectEqual(@as(u32, 1), stats.copper.vias);
     try std.testing.expect(std.mem.indexOf(u8, out, "(via") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(net \"GND\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "(layers \"F.Cu\" \"B.Cu\")") != null);
@@ -1874,7 +2062,7 @@ test "applyOpsToSource add_via dedups against an existing via" {
     ;
     var stats: ApplyStats = .{};
     const out = try applyOpsToSourceWithStats(arena.allocator(), src, ops, &stats);
-    try std.testing.expectEqual(@as(u32, 0), stats.vias_added);
+    try std.testing.expectEqual(@as(u32, 0), stats.copper.vias);
     const reparsed = try parser.parse(arena.allocator(), out);
     const root = reparsed[0].asList().?;
     var via_count: usize = 0;
@@ -1882,6 +2070,70 @@ test "applyOpsToSource add_via dedups against an existing via" {
         if (child.isForm(form_via)) via_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), via_count);
+}
+
+// spec: kicad_pcb/writer - add_track inserts a (segment …) form on the op's layer
+test "applyOpsToSource add_track inserts a segment" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402"
+        \\    (uuid "fp-1")
+        \\    (property "Reference" "R1")))
+    ;
+    // Coords + width arrive in nanometres (sync emits mmToNm); the layer is the
+    // KiCad copper name (bottom signal here) and the net is referenced by name.
+    const ops =
+        \\[{"op":"add_track","net":"VBUS","x1":1000000,"y1":2000000,"x2":5000000,"y2":2000000,"width":250000,"layer":"B.Cu"}]
+    ;
+    var stats: ApplyStats = .{};
+    const out = try applyOpsToSourceWithStats(arena.allocator(), src, ops, &stats);
+    try std.testing.expectEqual(@as(u32, 1), stats.copper.tracks);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(segment") != null);
+    // Whole-number floats print with a trailing ".0" (see printer.printFloat).
+    try std.testing.expect(std.mem.indexOf(u8, out, "(start 1.0 2.0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(end 5.0 2.0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(net \"VBUS\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(layer \"B.Cu\")") != null);
+    // The written board must re-parse and carry exactly one top-level segment.
+    const reparsed = try parser.parse(arena.allocator(), out);
+    const root = reparsed[0].asList().?;
+    var seg_count: usize = 0;
+    for (root) |child| {
+        if (child.isForm(form_segment)) seg_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), seg_count);
+}
+
+// spec: kicad_pcb/writer - add_track at an existing segment (order-insensitive endpoints) is a no-op
+test "applyOpsToSource add_track dedups against an existing segment" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    const src =
+        \\(kicad_pcb
+        \\  (footprint "R_0402" (uuid "fp-1") (property "Reference" "R1"))
+        \\  (segment (start 1 2) (end 5 2) (width 0.25) (layer "F.Cu") (net "VBUS")))
+    ;
+    // Same segment as the board already carries, but with the endpoints SWAPPED
+    // and on the same layer → the order-insensitive dedup must skip it.
+    const ops =
+        \\[{"op":"add_track","net":"VBUS","x1":5000000,"y1":2000000,"x2":1000000,"y2":2000000,"width":250000,"layer":"F.Cu"}]
+    ;
+    var stats: ApplyStats = .{};
+    const out = try applyOpsToSourceWithStats(arena.allocator(), src, ops, &stats);
+    try std.testing.expectEqual(@as(u32, 0), stats.copper.tracks);
+    const reparsed = try parser.parse(arena.allocator(), out);
+    const root = reparsed[0].asList().?;
+    var seg_count: usize = 0;
+    for (root) |child| {
+        if (child.isForm(form_segment)) seg_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), seg_count);
 }
 
 // spec: kicad_pcb/writer - add drops legacy (angle …) arcs the modern board parser rejects
