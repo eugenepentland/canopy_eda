@@ -33,7 +33,7 @@ function visKey(l){return l===0?"top":(l===1?"bottom":("l"+l));}
 // ── Live view state (layers / grid / units) — audit 1.5 ─────────────────
 // Persisted per design in localStorage alongside the existing "pcb-rigid-off:"
 // key. `G` stays the footprint-editor grid constant; snap uses gridMM (0 = off).
-var viewKey="pcb-view:"+PCB.name,viewSt={grid:G,units:"mm",vis:{top:1,bottom:1,silk:1,rats:1,drc:1,edge:1,netcol:0}};
+var viewKey="pcb-view:"+PCB.name,viewSt={grid:G,units:"mm",vis:{top:1,bottom:1,silk:1,rats:1,drc:1,edge:1,netcol:0,loops:0}};
 for(var _li=2;_li<NSIG;_li++)viewSt.vis["l"+_li]=1; // inner copper defaults visible
 try{var _vs=JSON.parse(localStorage.getItem(viewKey)||"null");if(_vs){
  if(typeof _vs.grid==="number")viewSt.grid=_vs.grid;
@@ -686,7 +686,7 @@ function linkCol(l){var col=l.k=="proximity"?"#ea580c":(l.k=="ground"?"#22b8cf":
 // world point is stale (and cgv/gpv come back null when the router can't fan
 // a via there at all), so draw the return *path* to the raw pad centre but
 // DON'T invent a via dot — Route re-derives the exact DRC-safe fan.
-function drawLoop(k){var L=PCB.loops[k],g=loopGs[k];if(!L||!g)return;
+function drawLoop(k){if(!viewSt.vis.loops)return;var L=PCB.loops[k],g=loopGs[k];if(!L||!g)return;
  while(g.firstChild)g.removeChild(g.firstChild);
  var routedNow=((PCB.tracks||[]).length>0);
  var cReal=(L.cgv&&!moved(L.cap)), dReal=(L.gpv&&!moved(L.hub));
@@ -705,7 +705,7 @@ function rats(){
  while(gRP.firstChild)gRP.removeChild(gRP.firstChild);
  loopGs=[];loopDirty=null; // full rebuild supersedes any pending per-loop redraws
  ovPaintSoon();   // airwires live on the canvas overlay
- if(!ratsOn)return;
+ if(!ratsOn||!viewSt.vis.loops)return;
  (PCB.loops||[]).forEach(function(L,k){var g=document.createElementNS(NS,"g");
    gRP.appendChild(g);loopGs.push(g);drawLoop(k);});
 }
@@ -1841,14 +1841,14 @@ svg.addEventListener("pointermove",function(ev){
  if(typeof gdrag!=="undefined"&&gdrag){var gg=snapG(),gm=mm(ev),gdx=Math.round((gm.x-gdrag.sx)/gg)*gg,gdy=Math.round((gm.y-gdrag.sy)/gg)*gg,any=false;
   gdrag.orig.forEach(function(o){var nx=o.x+gdx,ny=o.y+gdy;if(P[o.i].x!==nx||P[o.i].y!==ny){P[o.i].x=nx;P[o.i].y=ny;any=true;}});
   if(any){var gidx=gdrag.orig.map(function(o){return o.i;});
-   if(!gdrag.moved){gdrag.moved=true;clearRouteFor(gidx,gdrag.g);}
+   if(!gdrag.moved){gdrag.moved=true;copperTouched();}
    gdrag.ct.forEach(function(o){o.t.x1=o.x1+gdx;o.t.y1=o.y1+gdy;o.t.x2=o.x2+gdx;o.t.y2=o.y2+gdy;});
    gdrag.cv.forEach(function(o){o.v.x=o.x+gdx;o.v.y=o.y+gdy;});
    ratsUpdate(gidx);paintSoon();refreshUnplaced();}return;}
  if(typeof drag!=="undefined"&&drag){var dm=mm(ev),dg=snapG();
   var nx=Math.round((dm.x+drag.ox)/dg)*dg,ny=Math.round((dm.y+drag.oy)/dg)*dg,di=drag.i;
   if(nx!==P[di].x||ny!==P[di].y){P[di].x=nx;P[di].y=ny;
-   if(!drag.moved){drag.moved=true;clearRouteFor([di]);}ratsUpdate([di]);paintSoon();refreshUnplaced();
+   if(!drag.moved){drag.moved=true;copperTouched();}ratsUpdate([di]);paintSoon();refreshUnplaced();
    if(selRef===P[di].ref)updatePropLive();}return;}
  // No gesture: hover tracking for the keyboard targets + glow + cursor.
  var hm=mm(ev),hi=partAt(hm.x,hm.y);
@@ -1883,10 +1883,10 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
   // No movement = a plain click on a rigid-group / multi-selected part —
   // select it like any other part instead of swallowing the click.
   // Post-drag repaint drops the drag cache and restores pad labels.
-  if(gmv){recordUndo(gsnap);fetchScore();dragCacheDrop();paintSoon();}
+  if(gmv){recordUndo(gsnap);fetchScore();dragCacheDrop();paintSoon();if(anyCopper())scheduleDrc();}
   else if(gdn!=null&&gdn>=0)clickPart(ev,gdn);return;}
  if(typeof drag!=="undefined"&&drag){var dmv=drag.moved,dsnap=drag.snap,di2=drag.i;drag=null;svg.style.cursor="";
-  if(dmv){recordUndo(dsnap);fetchScore();dragCacheDrop();paintSoon();return;}
+  if(dmv){recordUndo(dsnap);fetchScore();dragCacheDrop();paintSoon();if(anyCopper())scheduleDrc();return;}
   clickPart(ev,di2);return;}
  if(clickCand){var cc=clickCand;clickCand=null;clickPart(ev,cc.i);return;}
  if(outDraw){var d=outDraw;outDraw=null;outlineArm(false);var og=snapG();
@@ -2039,6 +2039,7 @@ function drawVia(g,wx,wy,dia,drill){var r=Math.max(dia/2*S,2.5),rh=Math.min(Math
 // it), rides along when its whole group drags/rotates (keepG names the group
 // being rigidly moved — the caller transforms that copper itself), and is
 // dropped only when its own group is broken apart (a member moved alone).
+function anyCopper(){return (PCB.tracks||[]).length>0||(PCB.vias||[]).length>0;}
 function clearRouteFor(idxs,keepG){
  if(!((PCB.tracks||[]).length)&&!((PCB.vias||[]).length))return;
  var nets={};idxs.forEach(function(i){(P[i].pads||[]).forEach(function(pd){if(pd.net)nets[pd.net]=1;});});
@@ -2975,6 +2976,7 @@ fitVB(); // initial fit to the container + overlay paint + label visibility
    rows+=chk(id,copperLabel(L),{on:v[visKey(L.l)],c:L.c});});
   rows+=chk("lp-silk","Silk / labels",{on:v.silk,c:"#8b949e"})+
    chk("lp-rats","Ratsnest",{on:v.rats,c:"#9aa7b4"})+
+   chk("lp-loops","Decoupling loops",{on:v.loops,c:"#58a6ff"})+
    chk("lp-netcol","Net colours",{on:v.netcol,c:"linear-gradient(90deg,#e5484d,#f0b72f,#2ec27e,#58a6ff)"})+
    chk("lp-drc","DRC markers",{on:v.drc,c:"#ef4444"})+
    '<div class="lp-sep"></div>'+
@@ -2983,7 +2985,7 @@ fitVB(); // initial fit to the container + overlay paint + label visibility
    (L.l===0?"Top (F.Cu)":(L.l===1?"Bottom (B.Cu)":L.name))+'</option>';});
   rows+='</select></label>';
   pop.innerHTML=rows;
-  map["lp-silk"]="silk";map["lp-rats"]="rats";map["lp-netcol"]="netcol";map["lp-drc"]="drc";
+  map["lp-silk"]="silk";map["lp-rats"]="rats";map["lp-loops"]="loops";map["lp-netcol"]="netcol";map["lp-drc"]="drc";
   Object.keys(map).forEach(function(id){var c=document.getElementById(id);
    c.addEventListener("change",function(){viewSt.vis[map[id]]=c.checked?1:0;viewSave();
     if(map[id]==="netcol")netColSync(); // net-colour state fans out to every control
@@ -3015,6 +3017,7 @@ fitVB(); // initial fit to the container + overlay paint + label visibility
   h+='<div class="ap-h">Board</div>';
   [["silk","F.Silkscreen","#F0F0F0"],["edge","Edge.Cuts","#D0D2CD"],
    ["rats","Ratsnest","#9aa7b4"],
+   ["loops","Decoupling loops","#58a6ff"],
    ["netcol","Net colours","linear-gradient(90deg,#e5484d,#f0b72f,#2ec27e,#58a6ff)"],
    ["drc","DRC markers","#f4432c"]].forEach(function(rw){
    h+='<div class="ap-lrow" data-ap-fixed="'+rw[0]+'">'+

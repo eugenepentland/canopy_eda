@@ -270,3 +270,19 @@ test "viewer JS pushes the route head back: posture dodge then clearance clip" {
     try std.testing.expect(std.mem.indexOf(u8, js, "dodged:true") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "clipped:true") != null);
 }
+
+// spec: Web Server - Moving a placed component leaves its connected traces in place instead of deleting them
+test "viewer JS keeps copper on a part move: drag marks connectivity, does not clear the net" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "function anyCopper") != null);
+    // The single-part drag path marks connectivity dirty instead of clearing.
+    try std.testing.expect(std.mem.indexOf(u8, js, "copperTouched();}ratsUpdate([di])") != null);
+}
+
+// spec: Web Server - The decoupling-loop overlay has its own visibility toggle, hidden by default
+test "viewer JS gates the decoupling-loop overlay on a default-off `loops` flag" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "netcol:0,loops:0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(!viewSt.vis.loops)return") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "Decoupling loops") != null);
+}

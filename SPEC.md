@@ -994,6 +994,8 @@ Public functions: designSourcePath, designSiblingPath
 - The /pcb-layout Properties dock hosts the inspector with segment editing and DRC rule settings
 - Segment drags preserve neighbour track angles and insert perpendicular jogs on collinear runs
 - The hand-route head dodges or clips at clearance obstacles instead of drawing violating copper
+- Moving a placed component leaves its connected traces in place instead of deleting them
+- The decoupling-loop overlay has its own visibility toggle, hidden by default
 
 ## fab_readiness
 
