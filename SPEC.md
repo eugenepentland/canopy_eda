@@ -996,6 +996,8 @@ Public functions: designSourcePath, designSiblingPath
 - The hand-route head dodges or clips at clearance obstacles instead of drawing violating copper
 - Moving a placed component leaves its connected traces in place instead of deleting them
 - The decoupling-loop overlay has its own visibility toggle, hidden by default
+- The Objects tab offers a selection filter that skips unchecked object types when clicking
+- Routing toward a same-net pad snaps the whole approach onto the pad centreline
 
 ## fab_readiness
 

@@ -33,12 +33,13 @@ function visKey(l){return l===0?"top":(l===1?"bottom":("l"+l));}
 // ── Live view state (layers / grid / units) — audit 1.5 ─────────────────
 // Persisted per design in localStorage alongside the existing "pcb-rigid-off:"
 // key. `G` stays the footprint-editor grid constant; snap uses gridMM (0 = off).
-var viewKey="pcb-view:"+PCB.name,viewSt={grid:G,units:"mm",vis:{top:1,bottom:1,silk:1,rats:1,drc:1,edge:1,netcol:0,loops:0}};
+var viewKey="pcb-view:"+PCB.name,viewSt={grid:G,units:"mm",vis:{top:1,bottom:1,silk:1,rats:1,drc:1,edge:1,netcol:0,loops:0},filt:{fp:1,pad:1,track:1,via:1,drc:1}};
 for(var _li=2;_li<NSIG;_li++)viewSt.vis["l"+_li]=1; // inner copper defaults visible
 try{var _vs=JSON.parse(localStorage.getItem(viewKey)||"null");if(_vs){
  if(typeof _vs.grid==="number")viewSt.grid=_vs.grid;
  if(_vs.units)viewSt.units=_vs.units;
- if(_vs.vis)for(var _k in viewSt.vis)if(_vs.vis[_k]!==undefined)viewSt.vis[_k]=_vs.vis[_k];}}catch(e){}
+ if(_vs.vis)for(var _k in viewSt.vis)if(_vs.vis[_k]!==undefined)viewSt.vis[_k]=_vs.vis[_k];
+ if(_vs.filt)for(var _kf in viewSt.filt)if(_vs.filt[_kf]!==undefined)viewSt.filt[_kf]=_vs.filt[_kf];}}catch(e){}
 function viewSave(){try{localStorage.setItem(viewKey,JSON.stringify(viewSt));}catch(e){}}
 // Effective snap step (mm). grid "off" (0) → a tiny step so parts still move
 // smoothly but aren't quantized.
@@ -1796,7 +1797,7 @@ svg.addEventListener("pointerdown",function(ev){if(ev.target!==svg)return;ev.pre
   pcap(ev);return;}
  if(drawMode&&ev.button===0){drawClick(mm(ev),ev.shiftKey);return;}
  if(ev.pointerType==="touch"){touchDown(ev);return;}
- var m=mm(ev),hi=partAt(m.x,m.y);
+ var m=mm(ev),hi=viewSt.filt.fp?partAt(m.x,m.y):-1;
  if(hi<0){
   if(!RO){var uv=vtxAt(m);if(uv>=0){vdrag={i:uv,moved:false,snap:snapAll()};pcap(ev);return;}}
   // A track under the press arms a segment drag (a stationary click just
@@ -1865,7 +1866,7 @@ function clickPart(ev,i){var m=mm(ev),pd=padAt(i,m.x,m.y);
  if(!anyDrawTool()){var ihp=inspHitForPart(m,i);
   if(ihp){inspShow(ihp,ev);return;}
   inspClear();}
- if(pd&&pd.net)selNet(pd.net);
+ if(pd&&pd.net&&viewSt.filt.pad)selNet(pd.net);
  if(!RO)selectComp(P[i].ref);}
 svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.pointerId);}catch(e){}
  if(ev.pointerType==="touch")touchUp(ev);
@@ -1914,7 +1915,7 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
    // Intersection test: a part is caught when its courtyard box overlaps the
    // band — so a large IC whose origin sits outside the rubber-band still
    // selects (KiCad's crossing-window behaviour).
-   var pick=[];P.forEach(function(p,i){var b=partAABB(i);
+   var pick=[];if(viewSt.filt.fp)P.forEach(function(p,i){var b=partAABB(i);
     if(!(b.x1<ax||b.x0>bx||b.y1<ay||b.y0>by))pick.push(i);});
    clearSel();selSet(pick);}
   else{
@@ -2263,14 +2264,34 @@ function magSnap(m,net){var pxr=9; // screen-px capture radius
  var mr=svg.getBoundingClientRect();
  var wr=pxr*(vb.w/Math.max(mr.width,1))/S; // convert px→world mm at current zoom
  var best=null,bd=wr;
- // pad centres (prefer same-net, but any pad is a useful anchor)
+ // exact point snaps — land the endpoint ON copper (pad centres, any net;
+ // same-net track endpoints). These win when the cursor is right on a target.
  P.forEach(function(p,i){(p.pads||[]).forEach(function(pd){var c=wpt(i,pd.x,pd.y);
   var d=Math.hypot(c.x-m.x,c.y-m.y);if(d<bd){bd=d;best={x:c.x,y:c.y,mag:true};}});});
- // same-net track endpoints
  (PCB.tracks||[]).forEach(function(t){if(net&&t.net&&t.net!==net)return;
   [[t.x1,t.y1],[t.x2,t.y2]].forEach(function(e){var d=Math.hypot(e[0]-m.x,e[1]-m.y);
    if(d<bd){bd=d;best={x:e[0],y:e[1],mag:true};}});});
- return best;}
+ if(best)return best;
+ // Centre-line snap: while routing roughly along an axis toward a same-net pad
+ // AHEAD, lock the cross-axis onto that pad's centre so the WHOLE approach sits
+ // on its centreline (KiCad behaviour) — not just the last point pulled in. The
+ // along-axis stays on the cursor's grid so you slide freely down the line.
+ if(dtrace){
+  var dx=m.x-dtrace.lx,dy=m.y-dtrace.ly,adx=Math.abs(dx),ady=Math.abs(dy);
+  if(adx>1e-4||ady>1e-4){
+   var horiz=adx>=ady,sx=dx<0?-1:1,sy=dy<0?-1:1;
+   var corr=wr*2.0,dg=snapG(),cb=corr,cbest=null;
+   P.forEach(function(p,i){(p.pads||[]).forEach(function(pd){
+    if(!pd.net||!net||netCollapse(pd.net)!==netCollapse(net))return;
+    var c=wpt(i,pd.x,pd.y);
+    if(horiz){if((c.x-dtrace.lx)*sx<=0)return;var d=Math.abs(m.y-c.y);
+     if(d<cb){cb=d;cbest={x:Math.round(m.x/dg)*dg,y:c.y,mag:true};}}
+    else{if((c.y-dtrace.ly)*sy<=0)return;var d=Math.abs(m.x-c.x);
+     if(d<cb){cb=d;cbest={x:c.x,y:Math.round(m.y/dg)*dg,mag:true};}}});});
+   if(cbest)return cbest;
+  }
+ }
+ return null;}
 function drawSeg(x2,y2){if(Math.abs(x2-dtrace.lx)<1e-9&&Math.abs(y2-dtrace.ly)<1e-9)return;
  PCB.tracks=PCB.tracks||[];
  var seg={x1:dtrace.lx,y1:dtrace.ly,x2:x2,y2:y2,l:dtrace.l,w:dtrace.w,net:dtrace.net};
@@ -2516,14 +2537,14 @@ function drcListToggle(){var lst=ensureDrcList();if(!lst)return;
 var insp=null; // {t:"track"|"via"|"drc", o:<live object>}
 function pxTolMm(px){var r=svg.getBoundingClientRect();
  return px*(vb.w/Math.max(r.width,1))/S;}
-function inspHitDrc(m){var best=null,bd=Math.max(pxTolMm(12),0.3);
+function inspHitDrc(m){if(!viewSt.filt.drc)return null;var best=null,bd=Math.max(pxTolMm(12),0.3);
  (PCB.drc||[]).forEach(function(d){if(d.x==null)return;
   var dd=Math.hypot(m.x-d.x,m.y-d.y);if(dd<bd){bd=dd;best=d;}});return best;}
-function inspHitVia(m,strict){var best=null,bd=1e9,
+function inspHitVia(m,strict){if(!viewSt.filt.via)return null;var best=null,bd=1e9,
   tol=strict?0:Math.max(pxTolMm(6),0.15); // strict = inside the barrel only
  (PCB.vias||[]).forEach(function(v){var d=Math.hypot(m.x-v.x,m.y-v.y)-(v.d||0.4)/2;
   if(d<tol&&d<bd){bd=d;best=v;}});return best;}
-function inspHitTrack(m){var best=null,bd=1e9,tol=Math.max(pxTolMm(5),0.12);
+function inspHitTrack(m){if(!viewSt.filt.track)return null;var best=null,bd=1e9,tol=Math.max(pxTolMm(5),0.12);
  (PCB.tracks||[]).forEach(function(t){
   if(layerAlpha(t.l||0)<=0)return; // hidden layer — not clickable
   var d=segDist(m.x,m.y,t)-(t.w||0.25)/2;
@@ -2538,7 +2559,7 @@ function inspHit(m){var d=inspHitDrc(m);if(d)return {t:"drc",o:d};
 // tracks win only off-pad.
 function inspHitForPart(m,pi){var d=inspHitDrc(m);if(d)return {t:"drc",o:d};
  var vs=inspHitVia(m,true);if(vs)return {t:"via",o:vs};
- if(pi>=0&&padAt(pi,m.x,m.y))return null;
+ if(viewSt.filt.pad&&pi>=0&&padAt(pi,m.x,m.y))return null;
  var v=inspHitVia(m);if(v)return {t:"via",o:v};
  var t=inspHitTrack(m);if(t)return {t:"track",o:t};return null;}
 function anyDrawTool(){return drawMode||textMode||polyMode||outlineMode||!!PCB.rulerOn;}
@@ -3144,6 +3165,26 @@ if(heatCb)heatCb.addEventListener("change",function(){heatOn=heatCb.checked;
 var legCb=document.getElementById("v-legend");
 if(legCb)legCb.addEventListener("change",function(){var l=document.getElementById("pcb-legend");
  if(l)l.hidden=!legCb.checked;});
+// Selection filter (Objects tab): each unchecked type is skipped by the
+// hit-testers, so "Tracks off" lets you drag parts without grabbing copper,
+// "Footprints off" lets you click the track under a part, etc. Persists in
+// viewSt.filt. insp.t is track|via|drc, matching those three keys. The rows
+// are built here (not server markup) so the whole feature lives in one place.
+(function(){var box=document.getElementById("ap-objects");if(!box)return;
+ var rows=[["fp","Footprints","Click a component to select or drag it"],
+  ["pad","Pads","Click a pad to select its net"],
+  ["track","Tracks","Select, drag and delete tracks"],
+  ["via","Vias","Select and delete vias"],
+  ["drc","DRC markers","Click DRC markers to inspect them"]];
+ var h='<div class="ap-h">Selection filter</div>';
+ rows.forEach(function(r){h+='<label class="ap-row" title="'+pEsc(r[2])+
+  '"><input type="checkbox" id="sf-'+r[0]+'"><span>'+pEsc(r[1])+'</span></label>';});
+ box.insertAdjacentHTML("beforeend",h);
+ rows.forEach(function(r){var k=r[0],cb=document.getElementById("sf-"+k);if(!cb)return;
+  cb.checked=viewSt.filt[k]!==0;
+  cb.addEventListener("change",function(){viewSt.filt[k]=cb.checked?1:0;viewSave();
+   if(!cb.checked&&insp&&insp.t===k)inspClear(); // drop a now-unselectable inspection
+   paintSoon();});});})();
 // ── Net colours: give every net its own colour so connectivity reads off
 //    the board without the schematic. Per-net colour comes straight from
 //    PCB.netcolor[net] (no-connect → white, GND → brown, power → warm,

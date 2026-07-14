@@ -286,3 +286,19 @@ test "viewer JS gates the decoupling-loop overlay on a default-off `loops` flag"
     try std.testing.expect(std.mem.indexOf(u8, js, "if(!viewSt.vis.loops)return") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "Decoupling loops") != null);
 }
+
+// spec: Web Server - The Objects tab offers a selection filter that skips unchecked object types when clicking
+test "viewer wires a selection filter that gates the hit-testers" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "filt:{fp:1,pad:1,track:1,via:1,drc:1}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(!viewSt.filt.track)return null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "viewSt.filt.fp?partAt(m.x,m.y):-1") != null);
+}
+
+// spec: Web Server - Routing toward a same-net pad snaps the whole approach onto the pad centreline
+test "viewer JS centre-line snaps a route toward a same-net pad" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "Centre-line snap") != null);
+    // the along-axis stays on grid while the cross-axis locks to the pad centre
+    try std.testing.expect(std.mem.indexOf(u8, js, "cbest={x:Math.round(m.x/dg)*dg,y:c.y,mag:true}") != null);
+}
