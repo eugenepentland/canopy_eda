@@ -123,15 +123,10 @@ const write_prefixes = [_][]const u8{
 };
 
 /// Files matching any of these patterns are denied for both read and write.
-/// Anything OAuth-related, credentials, or `.env` files are blocked even
-/// though they live under directories that would otherwise be readable.
+/// The plugin-token store (and, more broadly, the whole `auth/` directory via
+/// `deny_prefixes`) and `.env` files are blocked even though they live under
+/// directories that would otherwise be readable.
 const deny_basenames = [_][]const u8{
-    "oauth_clients.json",
-    "oauth_tokens.json",
-    "sessions.json",
-    "credentials.json",
-    "users.json",
-    "invites.json",
     "plugin_tokens.json",
 };
 
@@ -1179,9 +1174,13 @@ test "checkAcl denies writes to lib/datasheets via write_file" {
 
 test "checkAcl denies auth and oauth paths" {
     // spec: serve/vfs - denies auth and oauth paths
+    // The whole auth/ directory is blocked by prefix (so anything that ever
+    // lived there — sessions, oauth clients/tokens — stays unreadable), and the
+    // surviving plugin-token store is blocked by basename even at the root.
     try std.testing.expectError(error.PermissionDenied, checkAcl("auth/sessions.json", .read));
-    try std.testing.expectError(error.PermissionDenied, checkAcl("oauth_clients.json", .read));
-    try std.testing.expectError(error.PermissionDenied, checkAcl("oauth_clients.json", .write));
+    try std.testing.expectError(error.PermissionDenied, checkAcl("auth/oauth_clients.json", .read));
+    try std.testing.expectError(error.PermissionDenied, checkAcl("plugin_tokens.json", .read));
+    try std.testing.expectError(error.PermissionDenied, checkAcl("plugin_tokens.json", .write));
 }
 
 test "checkAcl denies writes to history and out" {

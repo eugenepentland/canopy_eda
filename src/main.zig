@@ -16,8 +16,6 @@ const serve_mod = @import("serve.zig");
 const commands = @import("commands.zig");
 const query = @import("query.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
-const auth = @import("serve/auth.zig");
-const users = @import("serve/users.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const default_serve_port: u16 = 7050;
@@ -45,7 +43,7 @@ fn hasFlag(args: [][:0]u8, flag: []const u8) bool {
 }
 
 /// Read `EDA_AUTH_DIR` from the environment so multiple worktrees / project
-/// checkouts can share one passkey + session store. Returns `null` when the
+/// checkouts can share one plugin-token store. Returns `null` when the
 /// env var is unset; the caller falls back to the `<project_dir>/auth`
 /// default. Caller owns any returned slice (allocator-owned dupe).
 fn readAuthDirEnv(allocator: std.mem.Allocator) ?[]const u8 {
@@ -54,7 +52,7 @@ fn readAuthDirEnv(allocator: std.mem.Allocator) ?[]const u8 {
 
 /// Resolve the auth directory from CLI args, env, or `<project_dir>/auth`.
 /// Returns the same answer the long-running `serve` flow uses, so CLI helpers
-/// (mint-invite) operate on the same files the server writes.
+/// (mint-plugin-token) operate on the same files the server writes.
 fn resolveAuthDir(allocator: std.mem.Allocator, args: [][:0]u8) ![]const u8 {
     const project_dir = optionalArg(args, "--project-dir") orelse ".";
     if (optionalArg(args, "--auth-dir")) |d| return d;
@@ -159,8 +157,6 @@ pub fn main() !void {
         try stdout.writeAll(raw);
         try stdout.writeAll("\n");
         try stdout.writeAll("Save this token — it will not be shown again.\n");
-    } else if (std.mem.eql(u8, command, "mint-invite")) {
-        try cmdMintInvite(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "gen-language-docs")) {
         const out_path = optionalArg(args[2..], "--output") orelse "docs/language-forms.md";
         const check_only = hasFlag(args[2..], "--check");
@@ -337,34 +333,6 @@ fn cmdConvertSymbol(allocator: std.mem.Allocator, path: []const u8, filter: ?[]c
     try file.writeAll(output);
 }
 
-fn cmdMintInvite(allocator: std.mem.Allocator, args: [][:0]u8) !void {
-    const role = optionalArg(args, "--role") orelse "writer";
-    const created_by = optionalArg(args, "--created-by") orelse "cli";
-    const auth_dir = try resolveAuthDir(allocator, args);
-
-    if (users.Role.fromString(role) == null) {
-        std.debug.print("Invalid --role {s}. Use: admin, writer, reader.\n", .{role});
-        std.process.exit(1);
-    }
-
-    const token = auth.createInvite(allocator, auth_dir, created_by, role) catch |e| {
-        std.debug.print("Failed to mint invite: {s}\n", .{@errorName(e)});
-        std.process.exit(1);
-    };
-    defer allocator.free(token);
-
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll("Invite path: /auth/invite/");
-    try stdout.writeAll(token);
-    try stdout.writeAll("\n");
-    try stdout.writeAll("Token: ");
-    try stdout.writeAll(token);
-    try stdout.writeAll("\n");
-    try stdout.writeAll("Role: ");
-    try stdout.writeAll(role);
-    try stdout.writeAll("\nValid for 7 days, single-use. Prepend your server's origin to form the full URL.\n");
-}
-
 fn printUsage() !void {
     const file = std.fs.File.stdout();
     try file.writeAll(
@@ -384,7 +352,6 @@ fn printUsage() !void {
         \\  netlisp reference [section]             Print the DSL grammar reference (docs/language-forms.md)
         \\  netlisp serve [--project-dir <d>] [--port <n>]  Start web server (default port 7050)
         \\  netlisp mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
-        \\  netlisp mint-invite [--project-dir <d>] [--role <r>] [--auth-dir <d>]  Mint a single-use invite (7-day TTL)
         \\  netlisp import-kicad <board.kicad_pcb> [--project-dir <d>] [--name <n>] [--title <t>] [--dry-run]  Migrate a KiCad board into a netlisp design
         \\  netlisp export-kicad --project-dir <d> --output-dir <out> <name>  Export KiCad netlist + footprints
         \\  netlisp convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
@@ -437,7 +404,7 @@ test {
     _ = @import("serve.zig");
     _ = @import("serve/modules.zig");
     _ = @import("serve/auth_store.zig");
-    _ = @import("serve/users.zig");
+    _ = @import("serve/ward_auth.zig");
     _ = @import("serve/sync.zig");
     _ = @import("serve/board_backup.zig");
     _ = @import("serve/component_search.zig");
@@ -498,4 +465,5 @@ test {
     _ = @import("leak_tests/checks.zig");
     _ = @import("leak_tests/serve_stores.zig");
     _ = @import("leak_tests/serve_request.zig");
+    _ = @import("leak_tests/serve_auth_request.zig");
 }

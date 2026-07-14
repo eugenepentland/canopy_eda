@@ -5,7 +5,6 @@ const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const infra_random = @import("../infra/random.zig");
 const auth_store = @import("auth_store.zig");
-const oauth_store = @import("oauth_store.zig");
 
 /// Stored record for a minted plugin token. Only the hash is persisted —
 /// the raw token is shown once at mint time and never stored.
@@ -78,7 +77,7 @@ pub const PluginTokenStore = struct {
             w.print(",\"created_at\":{d}}}", .{t.created_at}) catch return;
         }
         w.writeAll("]") catch return;
-        oauth_store.writeFileAtomicWithBackup(allocator, path, bw.items);
+        auth_store.writeFileAtomicWithBackup(allocator, path, bw.items);
     }
 
     /// Mint a new plugin token. Returns the raw token string (prefix `eda_p_`) —

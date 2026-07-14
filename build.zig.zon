@@ -49,6 +49,16 @@
             .url = "git+https://github.com/lalinsky/zt#b40829fc06a69504f1d51db25ab5a688a3fb41c2",
             .hash = "zt-0.0.0-oSxxLHUWAgBRX_4qFpIbURNBtGasSCYdqcnRjcnItmT0",
         },
+        // Ward auth library (session-cookie + OAuth-bearer verification against
+        // the wardd server at ward.eugenepentland.dev). Relative-path dep like
+        // guardian: resolves to ~/ai/ward from the main checkout. Worktree
+        // builds resolve through two symlinks (.claude/ward -> ~/ai/ward plus
+        // .claude/canopy -> ~/ai/canopy — the latter because ward's own
+        // ../canopy/guardian-zig sub-dep is lexically joined to the symlinked
+        // location, not ward's real root).
+        .ward = .{
+            .path = "../../ward",
+        },
     },
     .paths = .{
         "build.zig",

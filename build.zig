@@ -24,6 +24,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Ward auth library — session-cookie + OAuth-bearer verification against
+    // wardd (ward.eugenepentland.dev). Pure-Zig module; sqlite/OpenSSL link
+    // only into the wardd binary, never into consumers.
+    const ward_dep = b.dependency("ward", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Version stamp baked into the binary: the short git hash of the checkout
     // at build time, used to version exported review packages. Falls back to
     // "unknown" outside a git checkout (or if `git` isn't on PATH).
@@ -33,11 +41,8 @@ pub fn build(b: *std.Build) void {
     // Compile .zt → .zig (run before any module that imports them).
     const templates_step = zt.addTemplates(b, zt_dep, &.{
         b.path("src/serve/templates/pages.zt"),
-        b.path("src/serve/templates/account.zt"),
         b.path("src/serve/templates/pdf_viewer.zt"),
-        b.path("src/serve/templates/oauth.zt"),
         b.path("src/serve/templates/library.zt"),
-        b.path("src/serve/templates/auth.zt"),
         b.path("src/serve/templates/mcp_docs.zt"),
     });
 
@@ -49,6 +54,7 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addImport("httpz", httpz.module("httpz"));
     exe_mod.addImport("zt", zt_dep.module("zt"));
+    exe_mod.addImport("ward", ward_dep.module("ward"));
     exe_mod.addOptions("build_options", build_options);
 
     const exe = b.addExecutable(.{
@@ -93,6 +99,7 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.addImport("httpz", httpz.module("httpz"));
     test_mod.addImport("zt", zt_dep.module("zt"));
+    test_mod.addImport("ward", ward_dep.module("ward"));
     test_mod.addOptions("build_options", build_options);
 
     const tests = b.addTest(.{

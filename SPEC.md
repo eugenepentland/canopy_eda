@@ -806,7 +806,38 @@ Public functions: writeSummaryTable, writePowerBudget, writePowerSequence, write
 
 Public functions: notFound, serve
 
-- A session minted on one ServerState instance is absent from an independent instance
+- Ward member maps to the writer role, admin to admin, and an unknown role to reader
+- An unconfigured ward adapter reports session and bearer paths unconfigured so requests fail closed
+- The MCP scope check accepts a scope containing the service name and rejects one without it
+- The MCP role resolver returns the ward identity role, else admin on the dev bypass, else reader
+- The ward auth-server url is derived by stripping the login path from the configured login url
+- The auth-server url prefers explicit config over the login-path strip
+- A cookieless session request is decided as a redirect to the ward login url carrying the return target
+- An api path is distinguished from a non-api path for the 401-versus-redirect choice
+- The ward session cookie value is read from the cookie header and absent when empty or missing
+- A cached session role is read back by token and reported unknown when absent or expired
+- Admin and writer may write while reader may not, and roles stringify lowercase
+- An unavailable session verifier resolves the request to fail closed rather than admit it
+- A loopback request under dev mode bypasses auth even when the ward backend is unconfigured
+- A loopback request carrying any proxy header does not receive the dev bypass
+- A request from a non-loopback peer does not receive the dev bypass
+- A loopback request with dev mode disabled does not receive the dev bypass
+- An ipv6 loopback peer receives the dev bypass while a non-loopback ipv6 peer does not
+- An unauthenticated api request is answered 401 json rather than a login redirect
+- An unauthenticated page request is redirected 302 to the ward login carrying the return url
+- A bearer-less mcp request is answered 401 with a resource-metadata www-authenticate challenge
+- An mcp request fails closed with 503 when the bearer introspection url is unconfigured
+- An mcp bearer is admitted for any valid ward token regardless of scope with its mapped role
+- A reader's mutating request is forbidden while a writer, a safe method, or a read-only post passes
+- A valid plugin token admits a sync request without a ward call while an invalid one falls through
+- A live ward bearer admits a sync request as the fallback when no plugin token matches
+- A malformed sync bearer with ward configured falls through to the session gate rather than admitting
+- A session-allowlisted public route is served without any credential
+- An allocation failure during the sync bearer fallback surfaces as an error rather than admitting
+- The protected-resource metadata derives its resource url from the host and names the ward server
+- A reader drives the read-only pcb-drc and pcb-score-batch posts but not the pcb-drc-rules write
+- A sync bearer scoped for another service is not admitted and falls through to the session gate
+- Ward state initialization builds distinct http clients for the session and bearer verify paths
 
 ## serve/sync
 
@@ -964,15 +995,12 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 - list_library without a query (or a blank one) lists every entry
 - The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
 
-## serve/users
-
-- The user/role store persists to and resolves from auth_dir, not the project dir (users.json lives at <auth_dir>/users.json)
-
 ## config
 
 Public functions: cseConnectSid, digikeyClientId, digikeyClientSecret, digikeyApiBase, cseMinIntervalMs, cseMaxInFlight, digikeyMinIntervalMs, digikeyMaxInFlight
 
 - stripQuotes removes one layer of matching quotes
+- The ward cache ttl maps a zero or out-of-range value to the default and keeps valid values
 
 ## paths
 

@@ -44,42 +44,6 @@ src/serve/notes.zig: pub const NoteStatus (enum_): has no /// doc comment
 src/serve/notes.zig: pub const Notes (struct_): has no /// doc comment
 src/serve/notes.zig: pub const TaskMutation (enum_): has no /// doc comment
 src/serve/rate_limiter.zig: pub fn init: has no /// doc comment
-src/serve/templates/account.zig: pub const Account (struct_): has no /// doc comment
-src/serve/templates/account.zig: pub const ClientCreateForm (struct_): has no /// doc comment
-src/serve/templates/account.zig: pub const ClientRow (struct_): has no /// doc comment
-src/serve/templates/account.zig: pub const InviteCard (struct_): has no /// doc comment
-src/serve/templates/account.zig: pub const OAuthClientsCard (struct_): has no /// doc comment
-src/serve/templates/account.zig: pub const PasskeysCard (struct_): has no /// doc comment
-src/serve/templates/account.zig: pub const UserRow (struct_): has no /// doc comment
-src/serve/templates/account.zig: pub const UsersCard (struct_): has no /// doc comment
-src/serve/templates/account.zig: pub fn bind: has no /// doc comment
-src/serve/templates/account.zig: pub fn bind: has no /// doc comment
-src/serve/templates/account.zig: pub fn bind: has no /// doc comment
-src/serve/templates/account.zig: pub fn bind: has no /// doc comment
-src/serve/templates/account.zig: pub fn bind: has no /// doc comment
-src/serve/templates/account.zig: pub fn bind: has no /// doc comment
-src/serve/templates/account.zig: pub fn bind: has no /// doc comment
-src/serve/templates/account.zig: pub fn bind: has no /// doc comment
-src/serve/templates/account.zig: pub fn render: has no /// doc comment
-src/serve/templates/account.zig: pub fn render: has no /// doc comment
-src/serve/templates/account.zig: pub fn render: has no /// doc comment
-src/serve/templates/account.zig: pub fn render: has no /// doc comment
-src/serve/templates/account.zig: pub fn render: has no /// doc comment
-src/serve/templates/account.zig: pub fn render: has no /// doc comment
-src/serve/templates/account.zig: pub fn render: has no /// doc comment
-src/serve/templates/account.zig: pub fn render: has no /// doc comment
-src/serve/templates/auth.zig: pub const InviteAccept (struct_): has no /// doc comment
-src/serve/templates/auth.zig: pub const InviteExpired (struct_): has no /// doc comment
-src/serve/templates/auth.zig: pub const Login (struct_): has no /// doc comment
-src/serve/templates/auth.zig: pub const Setup (struct_): has no /// doc comment
-src/serve/templates/auth.zig: pub fn bind: has no /// doc comment
-src/serve/templates/auth.zig: pub fn bind: has no /// doc comment
-src/serve/templates/auth.zig: pub fn bind: has no /// doc comment
-src/serve/templates/auth.zig: pub fn bind: has no /// doc comment
-src/serve/templates/auth.zig: pub fn render: has no /// doc comment
-src/serve/templates/auth.zig: pub fn render: has no /// doc comment
-src/serve/templates/auth.zig: pub fn render: has no /// doc comment
-src/serve/templates/auth.zig: pub fn render: has no /// doc comment
 src/serve/templates/library.zig: pub const Card (struct_): has no /// doc comment
 src/serve/templates/library.zig: pub const ComponentDetails (struct_): has no /// doc comment
 src/serve/templates/library.zig: pub const Library (struct_): has no /// doc comment
@@ -98,9 +62,6 @@ src/serve/templates/mcp_docs.zig: pub fn bind: has no /// doc comment
 src/serve/templates/mcp_docs.zig: pub fn render: has no /// doc comment
 src/serve/templates/mcp_docs.zig: pub fn render: has no /// doc comment
 src/serve/templates/mcp_docs.zig: pub fn render: has no /// doc comment
-src/serve/templates/oauth.zig: pub const Authorize (struct_): has no /// doc comment
-src/serve/templates/oauth.zig: pub fn bind: has no /// doc comment
-src/serve/templates/oauth.zig: pub fn render: has no /// doc comment
 src/serve/templates/pages.zig: pub const DesignCard (struct_): has no /// doc comment
 src/serve/templates/pages.zig: pub const Home (struct_): has no /// doc comment
 src/serve/templates/pages.zig: pub const ModuleCard (struct_): has no /// doc comment
@@ -117,8 +78,6 @@ src/serve/templates/pages.zig: pub fn render: has no /// doc comment
 src/serve/templates/pdf_viewer.zig: pub const Page (struct_): has no /// doc comment
 src/serve/templates/pdf_viewer.zig: pub fn bind: has no /// doc comment
 src/serve/templates/pdf_viewer.zig: pub fn render: has no /// doc comment
-src/serve/users.zig: pub fn fromString: has no /// doc comment
-src/serve/users.zig: pub fn toString: has no /// doc comment
 src/sexpr/ast.zig: pub const Tag (union_): has no /// doc comment
 src/sexpr/ast.zig: pub fn atom: has no /// doc comment
 src/sexpr/ast.zig: pub fn float: has no /// doc comment
