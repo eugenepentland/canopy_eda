@@ -190,8 +190,10 @@ const SavedTrack = struct { x1: f64, y1: f64, x2: f64, y2: f64, l: u8 = 0, w: f6
 const SavedVia = struct { x: f64, y: f64, d: f64, drill: f64 = 0, net: []const u8 = "", g: []const u8 = "" };
 
 /// A saved layout's persisted copper — the routed tracks/vias captured with
-/// the poses, so a Save → reload → Load round-trips the routing too.
-const SavedRoutes = struct { tracks: []const SavedTrack, vias: []const SavedVia };
+/// the poses, so a Save → reload → Load round-trips the routing too. Public so
+/// the KiCad sync can carry a seeded sub-circuit's module copper onto the board
+/// (see `SubBlockSeeds.routes`).
+pub const SavedRoutes = struct { tracks: []const SavedTrack, vias: []const SavedVia };
 
 /// Shared JSON fragments for copper serialization — the sidecar, the page
 /// blob, and the Stamp subroutes all write the identical track/via shape.
@@ -2980,7 +2982,9 @@ fn parsePartPoses(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const PartPos
 /// Parse a `{"tracks":[…],"vias":[…]}` saved-routes object (the same shape
 /// the live route JSON and the layouts sidecar use). Null when absent,
 /// malformed, or empty — an empty routes object is treated as "no routes".
-fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedRoutes {
+/// Public so the KiCad-sync tests can build a `SavedRoutes` from JSON (the
+/// `SavedTrack`/`SavedVia` element types stay private).
+pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedRoutes {
     const obj = v orelse return null;
     if (obj != .object) return null;
     var tracks: std.ArrayList(SavedTrack) = .empty;
@@ -3905,8 +3909,9 @@ pub const SubBlockSeeds = struct {
 };
 
 /// A flattened module pin sample: which module-local net the pad at
-/// (origin_key, pad) sits on. See `SubBlockSeeds.pin_nets`.
-const SubPinNet = struct { net: []const u8, origin_key: []const u8, pad: []const u8 };
+/// (origin_key, pad) sits on. See `SubBlockSeeds.pin_nets`. Public so the KiCad
+/// sync can bridge a seeded sub-circuit's module net names to parent nets.
+pub const SubPinNet = struct { net: []const u8, origin_key: []const u8, pad: []const u8 };
 
 /// The sub-block's saved module layout — the starred (★) snapshot when one
 /// bridges, else best current-flatten coverage (`chooseModuleSnapshot`) — keyed

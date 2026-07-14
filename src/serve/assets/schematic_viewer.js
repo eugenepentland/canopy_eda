@@ -1618,10 +1618,15 @@
       var where = s.on_board && s.anchor
         ? 'around ' + escapeHtml(leafRef(s.anchor)) + ' (already on board)'
         : 'off-board, in the shared layout box';
+      // The module ★ snapshot's routed copper carried onto the board with the
+      // parts: only shown when the snapshot actually has tracks/vias.
+      var copper = '';
+      if (s.tracks) copper += ' · ' + s.tracks + ' track' + (s.tracks === 1 ? '' : 's');
+      if (s.vias) copper += ' · ' + s.vias + ' via' + (s.vias === 1 ? '' : 's');
       return '<label class="kpv-seed-row">' +
         '<input type="checkbox" class="kpv-seed-cb" data-name="' + escapeAttr(s.name) + '">' +
         '<span class="kpv-seed-name">' + escapeHtml(s.name) + '</span>' +
-        '<span class="kpv-seed-hint">' + s.parts + ' part' + (s.parts === 1 ? '' : 's') + ' · ' + where + '</span>' +
+        '<span class="kpv-seed-hint">' + s.parts + ' part' + (s.parts === 1 ? '' : 's') + copper + ' · ' + where + '</span>' +
         '</label>';
     }).join('');
     return '<div class="kpv-seed">' +
@@ -1632,7 +1637,7 @@
           '<button type="button" class="kpv-seed-none">None</button>' +
         '</span>' +
       '</div>' +
-      '<div class="kpv-seed-note">Checked sub-circuits reproduce the saved PCB layout. Any whose IC is already on the board flow in around it; the rest are placed together in one labelled box just off the board — keeping their exact saved positions relative to each other — as a single draggable KiCad group. Unchecked parts go to the staging grid as before.</div>' +
+      '<div class="kpv-seed-note">Checked sub-circuits reproduce the saved PCB layout, including the module’s routed copper (tracks/vias) carried onto the board with the parts. Any whose IC is already on the board flow in around it; the rest are placed together in one labelled box just off the board — keeping their exact saved positions relative to each other — as a single draggable KiCad group. Unchecked parts go to the staging grid as before.</div>' +
       rows +
       '</div>';
   }
