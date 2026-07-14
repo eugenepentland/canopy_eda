@@ -502,14 +502,15 @@ fn checkSilkOverPad(
     mask_margin: f64,
 ) std.mem.Allocator.Error!void {
     for (placement.parts, 0..) |part, pi| {
-        if (part.silk_lines.len == 0 and part.silk_circles.len == 0 and part.ref_des.len == 0) continue;
+        // Only real footprint silk art (lines/circles) is judged. An auto-placed
+        // ref-des LABEL over a foreign pad is cosmetic (the fab clips silkscreen
+        // off pads) and ubiquitous on dense boards, so it is deliberately NOT a
+        // silk-over-pad violation — the label is still auto-placed + stroked on
+        // the Gerber via `pad_shape.refDesBox`, it just isn't flagged here.
+        if (part.silk_lines.len == 0 and part.silk_circles.len == 0) continue;
         const s_layer: u8 = if (part.side == .bottom) 1 else 0;
-        // The foreign pad openings this part's silk must miss — the SAME set that
-        // auto-places the ref-des (see `refDesBox`), so the label the check draws
-        // is the label the Gerber writer strokes.
         const openings = try foreignOpenings(arena, pads, pi, s_layer, mask_margin);
-        const rb = pad_shape.refDesBox(placement, pi, openings);
-        if (silkOverPadHit(part, openings, rb)) |hit| {
+        if (silkOverPadHit(part, openings)) |hit| {
             try out.append(arena, .{ .x = hit[0], .y = hit[1], .gap = 0, .clearance = 0, .kind = .silk_over_pad, .severity = .warn });
         }
     }
@@ -532,9 +533,10 @@ fn foreignOpenings(
     return out.toOwnedSlice(arena);
 }
 
-/// The first place `part`'s silkscreen (lines, circles, or the auto-placed
-/// ref-des box `rb`) crosses one of the foreign `openings`, or null when clear.
-fn silkOverPadHit(part: optimizer.Part, openings: []const [4]f64, rb: ?[4]f64) ?[2]f64 {
+/// The first place `part`'s footprint silkscreen (lines or circles) crosses one
+/// of the foreign `openings`, or null when clear. The auto-placed ref-des label
+/// is intentionally excluded (see `checkSilkOverPad`).
+fn silkOverPadHit(part: optimizer.Part, openings: []const [4]f64) ?[2]f64 {
     for (openings) |ob| {
         for (part.silk_lines) |l| {
             const a = optimizer.worldPadCenter(part, l.x1, l.y1);
@@ -545,7 +547,6 @@ fn silkOverPadHit(part: optimizer.Part, openings: []const [4]f64, rb: ?[4]f64) ?
             const c = optimizer.worldPadCenter(part, ci.cx, ci.cy);
             if (circleRectHit(c[0], c[1], ci.r, ob)) return .{ c[0], c[1] };
         }
-        if (rb) |box| if (boxOverlap(box, ob)) |hit| return hit;
     }
     return null;
 }
@@ -1653,27 +1654,19 @@ test "check flags silkscreen over a foreign pad" {
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&ok_parts), routed, 0.127), .silk_over_pad));
 }
 
-// spec: placement/drc - auto-places a ref-des clear of foreign pads when a side is free, else flags a boxed-in label
-test "check auto-nudges a ref-des to a clear side before flagging silk over a pad" {
+// spec: placement/drc - silk-over-pad ignores an auto-placed ref-des label; only footprint silk art is flagged
+test "check does not flag an auto-placed ref-des that overlaps a foreign pad" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
     const G = @import("geometry.zig");
     const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
 
-    // U1's "above" ref-des slot is blocked by R1's pad (R1 sits just above U1),
-    // but the below/beside slots are clear — the label auto-places clear, so the
-    // legacy above-only placement's false positive is gone.
-    const r_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
-    var cp = [_]optimizer.Part{
-        .{ .ref_des = "U1", .kind = .hub, .hw = 0.3, .hh = 0.3, .pads = &.{}, .fallback = false },
-        .{ .ref_des = "R1", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &r_pad, .fallback = false, .y = -1.5 },
-    };
-    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&cp), routed, 0.127), .silk_over_pad));
-
-    // Hem U1's label in with a ring of foreign pads on all four candidate sides:
-    // no clear anchor exists, so the fallback (above) lands on a pad and flags
-    // exactly once (one marker per owner part — not per stroke).
+    // U1 carries only a ref-des (no footprint silk). Hem its label in with a ring
+    // of foreign pads on all four candidate sides so the auto-placer can't find a
+    // clear spot and draws the label over a pad on the Gerber. A ref-des label
+    // over a pad is cosmetic (fab-clipped) and ubiquitous on dense boards, so it
+    // is NOT a silk-over-pad violation — only real footprint silk art counts.
     const ring = [_]G.Pad{
         .{ .number = "1", .x = 0, .y = -1.0, .w = 0.6, .h = 0.6 },
         .{ .number = "2", .x = 0, .y = 1.0, .w = 0.6, .h = 0.6 },
@@ -1684,9 +1677,8 @@ test "check auto-nudges a ref-des to a clear side before flagging silk over a pa
         .{ .ref_des = "U1", .kind = .hub, .hw = 0.3, .hh = 0.3, .pads = &.{}, .fallback = false },
         .{ .ref_des = "J1", .kind = .hub, .hw = 0.2, .hh = 0.2, .pads = &ring, .fallback = false },
     };
-    try testing.expectEqual(@as(usize, 1), countKind(try check(arena, partsOnly(&bp), routed, 0.127), .silk_over_pad));
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&bp), routed, 0.127), .silk_over_pad));
 }
-
 // spec: placement/drc - flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt
 test "check flags a thin pad annular ring" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);

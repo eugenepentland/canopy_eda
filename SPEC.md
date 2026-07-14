@@ -204,7 +204,7 @@ Public functions: check, countKind
 - an oval slot's hole-to-hole clearance is measured end-to-end (capsule), not at its centre
 - flags a thin solder-mask web between two adjacent pad openings, and is a warning
 - flags silkscreen that crosses a foreign pad's mask opening, as a warning
-- auto-places a ref-des clear of foreign pads when a side is free, else flags a boxed-in label
+- silk-over-pad ignores an auto-placed ref-des label; only footprint silk art is flagged
 - flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt
 - flags a track narrower than its net-class width, else the board minimum, as an error
 - existing copper violations are error-severity; only the hygiene checks are warnings
