@@ -824,7 +824,7 @@ Public functions: notFound, serve
 - An unauthenticated page request is redirected 302 to the ward login carrying the return url
 - A bearer-less mcp request is answered 401 with a resource-metadata www-authenticate challenge
 - An mcp request fails closed with 503 when the bearer introspection url is unconfigured
-- An mcp scope lacking the service is forbidden while one carrying it is admitted with its mapped role
+- An mcp bearer is admitted for any valid ward token regardless of scope with its mapped role
 - A reader's mutating request is forbidden while a writer, a safe method, or a read-only post passes
 - A valid plugin token admits a sync request without a ward call while an invalid one falls through
 - A live ward bearer admits a sync request as the fallback when no plugin token matches

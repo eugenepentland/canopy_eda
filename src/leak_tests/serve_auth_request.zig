@@ -239,14 +239,15 @@ test "auth-request: an mcp request fails closed when introspection is unconfigur
 
 // ── Bearer gate: scope enforcement + role mapping (cache-seeded, no network) ─
 
-// spec: serve - An mcp scope lacking the service is forbidden while one carrying it is admitted with its mapped role
-test "auth-request: mcp scope gating forbids a scopeless grant and admits a multi-entry one" {
+// spec: serve - An mcp bearer is admitted for any valid ward token regardless of scope with its mapped role
+test "auth-request: mcp admits any valid ward token regardless of scope" {
     var env = TestEnv{ .a = std.testing.allocator };
     defer env.deinit();
     env.initWard("http" ++ "://v", login_url, "http" ++ "://i");
     const now = std.time.timestamp();
 
-    // Case A — a scope without the service name is forbidden (403).
+    // Case A — a scope WITHOUT the service name is still admitted (writes are
+    // role-gated, not scope-gated, on the /mcp read path).
     {
         try env.state.ward.bearer.?.cache.put(bearer_token, "ada", .member, "files", now);
         var ht = httpz.testing.init(.{});
@@ -254,12 +255,12 @@ test "auth-request: mcp scope gating forbids a scopeless grant and admits a mult
         ht.url("/mcp");
         ht.header("authorization", "Bearer " ++ bearer_token);
         var srv = env.server(false);
-        try std.testing.expect(!try ward_auth.authMiddleware(&srv, ht.req, ht.res));
-        try std.testing.expectEqual(@as(u16, 403), ht.res.status);
-        try expectContains(ht.res.body, "missing service scope");
-        try std.testing.expect(srv.mcp_identity == null);
+        try std.testing.expect(try ward_auth.authMiddleware(&srv, ht.req, ht.res));
+        try std.testing.expect(srv.mcp_identity != null);
+        try std.testing.expectEqualStrings("files", srv.mcp_identity.?.scope);
+        try std.testing.expectEqual(ward_auth.Role.writer, srv.mcp_identity.?.role); // member → writer
     }
-    // Case B — a multi-entry scope carrying the service is admitted with the mapped role.
+    // Case B — a multi-entry scope is likewise admitted with the mapped role.
     {
         try env.state.ward.bearer.?.cache.put(bearer_token, "ada", .member, "files eda", now);
         var ht = httpz.testing.init(.{});
@@ -271,7 +272,7 @@ test "auth-request: mcp scope gating forbids a scopeless grant and admits a mult
         try std.testing.expect(srv.mcp_identity != null);
         try std.testing.expectEqualStrings("files eda", srv.mcp_identity.?.scope);
         try std.testing.expectEqualStrings("ada", srv.mcp_identity.?.username);
-        try std.testing.expectEqual(ward_auth.Role.writer, srv.mcp_identity.?.role); // member → writer
+        try std.testing.expectEqual(ward_auth.Role.writer, srv.mcp_identity.?.role);
     }
 }
 

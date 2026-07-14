@@ -56,7 +56,6 @@ const mcp_path_prefix = "/mcp";
 const sync_path_prefix = "/api/sync-kicad-pcb/";
 
 const body_forbidden_write = "{\"error\":\"forbidden\",\"error_description\":\"writer role required\"}";
-const body_forbidden_scope = "{\"error\":\"forbidden\",\"error_description\":\"missing service scope\"}";
 const body_unavailable = "{\"error\":\"service_unavailable\",\"error_description\":\"auth backend unavailable\"}";
 const body_unauthorized = "{\"error\":\"unauthorized\",\"error_description\":\"missing or invalid bearer token\"}";
 const body_api_unauthorized = "{\"error\":\"unauthorized\"}";
@@ -333,8 +332,11 @@ pub fn authMiddleware(ctx: *Server, req: *httpz.Request, res: *httpz.Response) A
     return sessionGateMiddleware(ctx, req, res);
 }
 
-/// The `/mcp` bearer gate: verify the token via ward introspection, enforce the
-/// service scope, and stash the resolved identity on `ctx` for the MCP handler.
+/// The `/mcp` bearer gate: verify the token via ward introspection and stash the
+/// resolved identity on `ctx` for the MCP handler. Any valid ward token is
+/// admitted — this is a personal-fleet posture where every ward user is trusted,
+/// and MCP mutation tools are gated by role (not scope). The eda-scope match is
+/// kept only on the sensitive sync-write path (see `wardBearerAllows`).
 fn mcpGate(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!bool {
     const state = &ctx.state.ward;
     if (!bearerConfigured(state.cfg)) return failClosed(res);
@@ -343,7 +345,6 @@ fn mcpGate(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!bo
     switch (action) {
         .public => return true,
         .allow => |id| {
-            if (!mcpScopeOk(id.scope, state.cfg.service_name)) return forbidden(res, body_forbidden_scope);
             ctx.mcp_identity = .{ .username = id.username, .role = mapWardRole(id.role), .scope = id.scope };
             return true;
         },
