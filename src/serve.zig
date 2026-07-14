@@ -39,12 +39,9 @@ const layout_match = @import("serve/layout_match.zig");
 const rough_best = @import("serve/rough_best.zig");
 const modules_page = @import("serve/modules.zig");
 const auth = @import("serve/auth.zig");
-const users_store = @import("serve/users.zig");
-const oauth_store = @import("serve/oauth_store.zig");
+const ward_auth = @import("serve/ward_auth.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 const mcp = @import("serve/mcp.zig");
-const oauth = @import("serve/oauth.zig");
-const account_page = @import("serve/account_page.zig");
 const static_assets = @import("serve/static_assets.zig");
 const sync = @import("serve/sync.zig");
 const notes = @import("serve/notes.zig");
@@ -229,18 +226,18 @@ pub fn pcbJobSnapshot(alloc: std.mem.Allocator, name: []const u8) ?PcbJobView {
 // every route handler through `Server.state`. Persisted stores keep their
 // exact on-disk formats and paths; only the in-memory containers moved.
 
-/// Mutable per-server state: the auth session + WebAuthn-challenge stores
-/// today, with the OAuth/user/plugin-token stores, HTML/module/summary caches,
-/// live-version + PCB-job tables, and rate limiters folding in as the
-/// serve-state migration lands. One instance per running server; two instances
-/// are fully independent, which is what makes per-test servers possible. Every
-/// field defaults to empty so `.{}` yields a fresh, unloaded server.
+/// Mutable per-server state. Post ward-migration this is the plugin-token store
+/// (bearer tokens for the KiCad sync helper) plus the ward auth adapter state;
+/// sessions, passkeys, users, and OAuth grants all live in wardd now. One
+/// instance per running server; two instances are fully independent, which is
+/// what makes per-test servers possible. Every field defaults to empty so
+/// `.{}` yields a fresh, unloaded server.
 pub const ServerState = struct {
-    sessions: auth.SessionStore = .{},
-    challenges: auth.ChallengeStore = .{},
-    users: users_store.UserStore = .{},
-    oauth: oauth_store.OAuthStore = .{},
     plugin_tokens: plugin_tokens.PluginTokenStore = .{},
+    /// Ward auth adapter state: verdict caches + HTTP client + resolved config,
+    /// built once in `serve()` via `WardState.init`. netlisp now verifies
+    /// sessions and bearer tokens against wardd through this.
+    ward: ward_auth.WardState = .{},
 };
 
 // ── Server ─────────────────────────────────────────────────────────────
@@ -252,14 +249,12 @@ pub const ServerState = struct {
 pub const Server = struct {
     allocator: std.mem.Allocator,
     project_dir: []const u8,
-    /// Directory holding the auth state files (`credentials.json`,
-    /// `sessions.json`, `users.json`, `invites.json`, `oauth_clients.json`,
-    /// `oauth_tokens.json`, `plugin_tokens.json`). Defaults to
-    /// `<project_dir>/auth` when no explicit override is supplied — the
-    /// historic location. Override via `netlisp serve --auth-dir <path>` or the
-    /// `EDA_AUTH_DIR` env var so multiple worktrees / project checkouts
-    /// share one passkey + session store and a passkey registered in one
-    /// worktree keeps working in the others.
+    /// Directory holding the auth state files. Post ward-migration this is only
+    /// `plugin_tokens.json` (the KiCad-sync bearer store) — passkeys, sessions,
+    /// users, and OAuth grants moved to wardd. Defaults to `<project_dir>/auth`
+    /// when no explicit override is supplied — the historic location. Override
+    /// via `netlisp serve --auth-dir <path>` or the `EDA_AUTH_DIR` env var so
+    /// multiple worktrees / project checkouts share one plugin-token store.
     auth_dir: []const u8,
 
     /// When true, requests arriving directly from the loopback interface (and
@@ -276,6 +271,11 @@ pub const Server = struct {
     /// as the migration lands). Borrowed — the single instance is owned by
     /// `serve()` and shared, by pointer, with every per-request `Server` copy.
     state: *ServerState,
+
+    /// The ward bearer identity the auth middleware resolved for a `/mcp`
+    /// request, so the MCP handler role-gates from it without re-introspecting
+    /// the token. Null for every non-`/mcp` request (and the dev-bypass path).
+    mcp_identity: ?ward_auth.Identity = null,
 
     pub const WebsocketHandler = mcp.Client;
 
@@ -410,6 +410,7 @@ pub fn serve(
     const dev_mode = @import("config.zig").devMode(allocator);
     if (dev_mode) std.debug.print("netlisp: NETLISP_DEV set — loopback requests bypass auth as dev@localhost\n", .{});
     var state: ServerState = .{}; // owned here; shared by pointer (see ServerState)
+    state.ward.init(allocator); // ward verdict caches + HTTP client from WARD_* env
     var handler = Server{ .allocator = allocator, .project_dir = project_dir, .auth_dir = effective_auth, .dev_mode = dev_mode, .state = &state };
     var server = try httpz.Server(*Server).init(allocator, .{
         .address = .all(port),
@@ -429,20 +430,6 @@ pub fn serve(
     }, &handler);
     const router = try server.router(.{});
 
-    // Auth routes (auth middleware exempts all /auth/* paths; handlers that
-    // need auth re-check the session internally)
-    router.get("/auth/login", auth.loginPage, .{});
-    router.get("/auth/setup", auth.setupPage, .{});
-    router.get("/auth/login/challenge", auth.loginChallengePage, .{});
-    router.post("/auth/login/complete", auth.loginCompletePage, .{});
-    router.get("/auth/register/challenge", auth.registerChallengePage, .{});
-    router.post("/auth/register/complete", auth.registerCompletePage, .{});
-    router.post("/auth/logout", auth.logoutApi, .{});
-    router.get("/auth/manage", account_page.manageRedirect, .{});
-    router.get("/auth/credentials/list", auth.listCredentialsApi, .{});
-    router.post("/auth/credentials/delete", auth.deleteCredentialApi, .{});
-    router.post("/auth/invite/create", auth.createInviteApi, .{});
-    router.get("/auth/invite/*", auth.invitePage, .{});
     // Pages
     router.get("/", pages.indexPage, .{});
     router.get("/style.css", pages.cssPage, .{});
@@ -553,25 +540,8 @@ pub fn serve(
     router.post("/mcp", mcp.postApi, .{});
     router.get("/mcp", mcp.upgrade, .{});
 
-    // OAuth 2.0 (authorization code + PKCE). Metadata endpoints let Claude
-    // Code discover the token/authorize URLs per RFC 8414 / RFC 9728.
-    router.get("/.well-known/oauth-authorization-server", oauth.metadataAuthServer, .{});
-    router.get("/.well-known/oauth-protected-resource", oauth.metadataProtectedResource, .{});
-    router.get("/oauth/authorize", oauth.authorizePage, .{});
-    router.post("/oauth/authorize/approve", oauth.authorizeApprove, .{});
-    router.post("/oauth/token", oauth.tokenEndpoint, .{});
-    // RFC 7591 Dynamic Client Registration: lets a native app self-register
-    // (loopback redirect_uri only) so users don't have to mint client_id +
-    // client_secret on /account by hand. The minted client has no owner
-    // email until the user signs in and approves on /oauth/authorize.
-    router.post("/oauth/register", oauth.registerEndpoint, .{});
-
-    // Account (user-facing OAuth client management)
-    router.get("/account", account_page.accountPage, .{});
-    router.post("/api/oauth/clients", account_page.createClientApi, .{});
-    router.post("/api/oauth/clients/:id/revoke", account_page.revokeClientApi, .{});
-    router.post("/api/users/role", account_page.updateUserRoleApi, .{});
-    router.post("/api/users/delete", account_page.deleteUserApi, .{});
+    // RFC 9728 protected-resource metadata only (wardd is the auth server now).
+    router.get("/.well-known/oauth-protected-resource", ward_auth.metadataProtectedResource, .{});
 
     std.debug.print("Listening on http://localhost:{d}\nProject: {s}\n", .{ port, project_dir });
     try server.listen();

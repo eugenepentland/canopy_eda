@@ -37,10 +37,8 @@
 134 src/render_pcb_png.zig|renderCanvas
 156 src/render_svg/connection.zig|renderGroupedConnections
 131 src/render_svg/context.zig|synthesizeSpokeConnections
-182 src/serve.zig|serve
+152 src/serve.zig|serve
 131 src/serve/api.zig|exportReviewPackageApi
-236 src/serve/auth.zig|loginCompletePage
-339 src/serve/auth.zig|registerCompletePage
 164 src/serve/bom_html.zig|writeSchematicBomHtml
 183 src/serve/edit.zig|addInstanceApi
 200 src/serve/edit.zig|editFootprintApi
@@ -55,6 +53,5 @@
 150 src/serve/sync.zig|runKicadPcbSync
 186 src/serve/sync.zig|runSyncPlan
 121 src/serve/templates/library.zig|_render
-134 src/serve/templates/oauth.zig|_render
 202 src/serve/templates/pages.zig|_render
 196 src/serve/upload_package.zig|uploadPackageApi

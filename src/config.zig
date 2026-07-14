@@ -72,6 +72,57 @@ pub fn devMode(allocator: std.mem.Allocator) bool {
     return true;
 }
 
+/// Ward verify endpoint (`WARD_VERIFY_URL`, e.g. http://127.0.0.1:9000/verify)
+/// the session middleware asks about each `ward_session` cookie. Null when
+/// unset — the serve layer then fails every session-gated request closed.
+pub fn wardVerifyUrl(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "WARD_VERIFY_URL");
+}
+
+/// Ward login page (`WARD_LOGIN_URL`) an unauthenticated session is redirected
+/// to; wardd appends its own `?rd=` return target. Null when unset.
+pub fn wardLoginUrl(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "WARD_LOGIN_URL");
+}
+
+/// Ward token-introspection endpoint (`WARD_INTROSPECT_URL`) the MCP bearer
+/// path POSTs `token=…` to. Null when unset — the bearer path then fails
+/// closed rather than admit an unverifiable token.
+pub fn wardIntrospectUrl(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "WARD_INTROSPECT_URL");
+}
+
+/// This service's ward name/scope (`WARD_SERVICE_NAME`), sent as the
+/// `X-Ward-Service` header and matched against a bearer token's scope. Null
+/// when unset — the caller substitutes its own default.
+pub fn wardServiceName(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "WARD_SERVICE_NAME");
+}
+
+/// Optional explicit ward authorization-server base URL (`WARD_AUTH_SERVER_URL`)
+/// published in the RFC 9728 protected-resource metadata document. Null when
+/// unset — the serve layer then derives it by stripping the `/login` suffix off
+/// `WARD_LOGIN_URL` (correct whenever the login URL ends in `/login`).
+pub fn wardAuthServerUrl(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "WARD_AUTH_SERVER_URL");
+}
+
+/// Ward verdict-cache lifetime in seconds (`WARD_CACHE_TTL_SECS`), bounding
+/// how long a logout/revocation lags. Falls back to `default` when unset or
+/// non-numeric.
+pub fn wardCacheTtlSecs(allocator: std.mem.Allocator, default: i64) i64 {
+    return wardCacheTtlFromRaw(lookupU64(allocator, "WARD_CACHE_TTL_SECS", 0), default);
+}
+
+/// Map a raw parsed TTL onto i64: an unset/zero value and any value that would
+/// overflow i64 both fall back to `default`. A checked cast (not `@intCast`)
+/// keeps a hostile `WARD_CACHE_TTL_SECS` in (i64_max, u64_max] from panicking
+/// the server on boot under ReleaseSafe.
+fn wardCacheTtlFromRaw(raw: u64, default: i64) i64 {
+    if (raw == 0) return default;
+    return std.math.cast(i64, raw) orelse default;
+}
+
 /// Resolve `key` from the real environment first, then from `.env`. Returns
 /// null when unset or empty. Caller owns the slice.
 fn lookup(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
@@ -119,4 +170,18 @@ test "stripQuotes removes matching quotes only" {
     try std.testing.expectEqualStrings("abc", stripQuotes("'abc'"));
     try std.testing.expectEqualStrings("a\"b", stripQuotes("a\"b"));
     try std.testing.expectEqualStrings("\"abc'", stripQuotes("\"abc'"));
+}
+
+test "wardCacheTtlFromRaw guards the i64 cast" {
+    // spec: config - The ward cache ttl maps a zero or out-of-range value to the default and keeps valid values
+    const default: i64 = 30;
+    // Unset/zero → default (preserves the raw==0 fallback).
+    try std.testing.expectEqual(default, wardCacheTtlFromRaw(0, default));
+    // A normal value passes through.
+    try std.testing.expectEqual(@as(i64, 45), wardCacheTtlFromRaw(45, default));
+    // The i64 boundary passes through; one past it and the u64 max both fall
+    // back to default instead of panicking on the cast (the boot-safety fix).
+    try std.testing.expectEqual(@as(i64, std.math.maxInt(i64)), wardCacheTtlFromRaw(std.math.maxInt(i64), default));
+    try std.testing.expectEqual(default, wardCacheTtlFromRaw(@as(u64, std.math.maxInt(i64)) + 1, default));
+    try std.testing.expectEqual(default, wardCacheTtlFromRaw(std.math.maxInt(u64), default));
 }

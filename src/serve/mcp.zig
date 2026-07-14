@@ -11,7 +11,7 @@ const log = @import("../infra/log.zig");
 
 const server_mod = @import("../serve.zig");
 const auth = @import("auth.zig");
-const users = @import("users.zig");
+const ward_auth = @import("ward_auth.zig");
 const mcp_tools = @import("mcp_tools.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -34,23 +34,20 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     error{ NoSpaceLeft, InvalidCompressionServerMaxBits };
 
 /// Per-connection MCP context: ties a streaming Client back to the parent
-/// HTTP `Server` and carries the authenticated user's email so role
+/// HTTP `Server` and carries the role pinned at upgrade time so role
 /// resolution can decide which mutation tools the session may invoke.
 pub const Context = struct {
     handler: *server_mod.Server,
-    email: []const u8,
+    role: ward_auth.Role,
 };
 
-fn resolveRole(ctx: *server_mod.Server, req: *httpz.Request) users.Role {
-    // Bearer-token path: look up the token's email.
-    if (auth.getBearerEmail(ctx, req)) |em| return ctx.state.users.getRole(ctx.allocator, ctx.auth_dir, em);
-    // Session path: look up the session's email.
-    if (auth.getSessionToken(req)) |tok| {
-        if (ctx.state.sessions.validate(ctx.allocator, ctx.auth_dir, tok)) |em| return ctx.state.users.getRole(ctx.allocator, ctx.auth_dir, em);
-    }
-    // Localhost dev bypass (opt-in NETLISP_DEV + loopback + not proxied).
-    if (auth.isLocalhostRequest(ctx, req)) return .admin;
-    return .reader;
+/// Resolve the MCP role for this request from the ward identity the auth
+/// middleware stashed on `ctx` (its already-mapped role), falling back to admin
+/// on the local-dev bypass and reader otherwise. The bearer token is validated
+/// exactly once, in the middleware — this path does not re-introspect it.
+fn resolveRole(ctx: *server_mod.Server, req: *httpz.Request) ward_auth.Role {
+    const bypass: ward_auth.DevBypass = if (auth.isLocalhostRequest(ctx, req)) .on else .off;
+    return ward_auth.mcpRoleFromIdentity(ctx.mcp_identity, bypass);
 }
 
 /// Parse a JSON-RPC frame and return the JSON response bytes (or null for a
@@ -63,7 +60,7 @@ pub fn dispatchFrame(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     data: []const u8,
-    role: users.Role,
+    role: ward_auth.Role,
 ) HandlerError!?[]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
         return parseErrorEnvelope(allocator);
@@ -114,7 +111,7 @@ fn handleToolCall(
     project_dir: []const u8,
     id_val: ?std.json.Value,
     params: ?std.json.Value,
-    role: users.Role,
+    role: ward_auth.Role,
 ) ![]const u8 {
     const p = params orelse return errorEnvelope(allocator, id_val, jsonrpc_invalid_params, "missing params");
     if (p != .object) return errorEnvelope(allocator, id_val, jsonrpc_invalid_params, "params must be an object");
@@ -286,26 +283,21 @@ pub const Client = struct {
     conn: *websocket.Conn,
     allocator: std.mem.Allocator,
     project_dir: []const u8,
-    auth_dir: []const u8,
-    email: []const u8,
-    /// Borrowed per-server state — owned by `serve()`, which outlives every
-    /// WebSocket connection, so the role lookup below reads the live stores.
-    state: *server_mod.ServerState,
+    /// Role pinned at upgrade time — the mapped ward role, or admin on the
+    /// dev bypass. Fixed for the connection's lifetime so a client cannot
+    /// escalate mid-connection.
+    role: ward_auth.Role,
 
     pub fn init(conn: *websocket.Conn, ctx: *const Context) !Client {
         return .{
             .conn = conn,
-            // The Client outlives the upgrade request, whose handler now
-            // carries a per-request arena — pin the connection's base
-            // allocator to the process allocator (per-message work runs in
-            // its own arena over it in `clientMessage`).
+            // The Client outlives the upgrade request, whose handler carries a
+            // per-request arena — pin the connection's base allocator to the
+            // process allocator (per-message work runs in its own arena over it
+            // in `clientMessage`).
             .allocator = std.heap.page_allocator,
             .project_dir = ctx.handler.project_dir,
-            .auth_dir = ctx.handler.auth_dir,
-            .state = ctx.handler.state,
-            // Dupe into the process allocator: `ctx.email` may be borrowed from
-            // the upgrade request's arena, which is reset once upgrade returns.
-            .email = try std.heap.page_allocator.dupe(u8, ctx.email),
+            .role = ctx.role,
         };
     }
 
@@ -313,17 +305,10 @@ pub const Client = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const aa = arena.allocator();
-        // WebSocket sessions are authenticated at upgrade time; role is fixed
-        // for the duration of the connection. An empty email means we could not
-        // identify the user (no session cookie AND no bearer token) — default
-        // to the least-privileged role, NEVER admin. (Previously an empty email
-        // fell through to admin, so any bearer-authenticated client — which has
-        // no session cookie — became admin over the WebSocket transport.)
-        const role = if (self.email.len > 0)
-            self.state.users.getRole(self.allocator, self.auth_dir, self.email)
-        else
-            users.Role.reader;
-        const reply_opt = dispatchFrame(aa, self.project_dir, data, role) catch |err| blk: {
+        // The role was pinned at upgrade time from the ward identity (or the
+        // dev bypass); it is fixed for the connection, so a client cannot
+        // escalate mid-connection.
+        const reply_opt = dispatchFrame(aa, self.project_dir, data, self.role) catch |err| blk: {
             log.warn("mcp dispatch error: {s}", .{@errorName(err)});
             break :blk @as(?[]const u8, null);
         };
@@ -331,21 +316,12 @@ pub const Client = struct {
     }
 };
 
-/// GET /mcp — perform the WebSocket upgrade for the local MCP transport,
-/// resolving the requesting user's email from their session cookie so the
-/// `Client` instance carries it for the lifetime of the connection.
+/// GET /mcp — perform the WebSocket upgrade for the local MCP transport. The
+/// auth middleware already resolved the ward bearer identity onto `ctx` (or
+/// admitted the request under the dev bypass); pin the mapped role onto the
+/// connection so it is fixed for the connection's lifetime.
 pub fn upgrade(ctx: *server_mod.Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const email = blk: {
-        // Bearer token first (remote MCP clients authenticate with one and
-        // carry no session cookie), then the session cookie for local browsers.
-        if (auth.getBearerEmail(ctx, req)) |em| break :blk em;
-        if (auth.getSessionToken(req)) |tok| {
-            if (ctx.state.sessions.validate(ctx.allocator, ctx.auth_dir, tok)) |em| break :blk em;
-        }
-        break :blk "";
-    };
-
-    const upgrade_ctx = Context{ .handler = ctx, .email = email };
+    const upgrade_ctx = Context{ .handler = ctx, .role = resolveRole(ctx, req) };
     if (try httpz.upgradeWebsocket(Client, req, res, &upgrade_ctx) == false) {
         res.status = http_bad_request;
         res.body = "expected websocket upgrade";

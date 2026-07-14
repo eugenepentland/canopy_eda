@@ -26,6 +26,9 @@ guardian_runtime.db
 
 # Claude Code worktree metadata (per-machine; not part of the project)
 .claude/worktrees/
+# Machine-local symlinks for the ward path dep (see build.zig.zon)
+.claude/ward
+.claude/canopy
 
 # Local credentials for outbound part-data APIs (see .env.example)
 .env

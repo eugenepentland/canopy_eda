@@ -12,7 +12,7 @@
 42 src/eval/power_budget.zig|analyze
 29 src/export_kicad_footprint.zig|emitKicadPad
 34 src/kicad_pcb/writer.zig|applyOpsCounted
-31 src/main.zig|main
+30 src/main.zig|main
 27 src/placement/drc.zig|check
 36 src/placement/optimizer.zig|arrangeMacros
 30 src/placement/optimizer.zig|assignSides
@@ -25,7 +25,6 @@
 33 src/render_svg/connection.zig|renderGroupedConnections
 29 src/render_svg/context.zig|synthesizeSpokeConnections
 35 src/req_checks.zig|findVoltageForNet
-28 src/serve/auth.zig|registerCompletePage
 35 src/serve/pcb_describe.zig|writeDescribeJson
 26 src/serve/pcb_layout_page.zig|writeBlobHead
 27 src/serve/pcb_layout_page.zig|writePcbData

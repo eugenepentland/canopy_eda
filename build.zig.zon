@@ -36,18 +36,33 @@
             .url = "git+https://github.com/karlseguin/http.zig#86ec1ae5fca398a58dfb06ae7fd8395b8ab2ab76",
             .hash = "httpz-0.0.0-PNVzrOlMBwDf2xnpIPCRXuFtO-qK6h2Vrl8n7_UjXZI1",
         },
-        // Guardian (code-quality gate) is an unpinned *relative-path* dep: it
-        // requires a sibling `../guardian-zig` checkout next to this repo. There
-        // is no published URL+hash yet, so a fresh clone must also clone
-        // guardian-zig alongside it for `zig build` to succeed (Guardian gates
-        // every build). Repin this to a `.url`+`.hash` once guardian-zig ships a
-        // tagged release artifact.
+        // Guardian (code-quality gate) is an unpinned *relative-path* dep: a
+        // sibling guardian-zig checkout at ~/ai/canopy/guardian-zig. The path is
+        // spelled `../../canopy/guardian-zig` (not `../guardian-zig`) so it
+        // normalizes to the SAME dependency key the `ward` dep composes to
+        // (ward → `../canopy/guardian-zig`); otherwise Zig sees guardian-zig as
+        // two modules and fails with "file exists in modules". From the main
+        // checkout this resolves directly; worktrees resolve it via the
+        // `.claude/canopy` symlink. There is no published URL+hash yet, so a
+        // fresh clone must also clone guardian-zig alongside it for `zig build`
+        // to succeed (Guardian gates every build). Repin to a `.url`+`.hash`
+        // once guardian-zig ships a tagged release artifact.
         .guardian = .{
-            .path = "../guardian-zig",
+            .path = "../../canopy/guardian-zig",
         },
         .zt = .{
             .url = "git+https://github.com/lalinsky/zt#b40829fc06a69504f1d51db25ab5a688a3fb41c2",
             .hash = "zt-0.0.0-oSxxLHUWAgBRX_4qFpIbURNBtGasSCYdqcnRjcnItmT0",
+        },
+        // Ward auth library (session-cookie + OAuth-bearer verification against
+        // the wardd server at ward.eugenepentland.dev). Relative-path dep like
+        // guardian: resolves to ~/ai/ward from the main checkout. Worktree
+        // builds resolve through two symlinks (.claude/ward -> ~/ai/ward plus
+        // .claude/canopy -> ~/ai/canopy — the latter because ward's own
+        // ../canopy/guardian-zig sub-dep is lexically joined to the symlinked
+        // location, not ward's real root).
+        .ward = .{
+            .path = "../../ward",
         },
     },
     .paths = .{
