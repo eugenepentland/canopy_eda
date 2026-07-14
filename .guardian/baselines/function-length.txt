@@ -53,7 +53,7 @@
 125 src/serve/pcb_layout_page.zig|writeBlobHead
 177 src/serve/pcb_layout_page.zig|writePcbData
 150 src/serve/sync.zig|runKicadPcbSync
-187 src/serve/sync.zig|runSyncPlan
+186 src/serve/sync.zig|runSyncPlan
 121 src/serve/templates/library.zig|_render
 134 src/serve/templates/oauth.zig|_render
 202 src/serve/templates/pages.zig|_render

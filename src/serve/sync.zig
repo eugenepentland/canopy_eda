@@ -887,12 +887,6 @@ pub fn runSyncPlan(
         if (bfp.kicad_uuid.len > 0) try by_kicad_uuid.put(arena, bfp.kicad_uuid, bfp);
     }
 
-    // Per-sub-circuit anchors for the explicit-seeding path (Push modal): which
-    // part anchors each group and whether it (and thus a live re-centre origin)
-    // is already on the board. Cheap regardless of selection; also feeds the
-    // dry-run's `sub_circuits` enumeration.
-    var group_anchors = try computeGroupAnchors(arena, instances.items, &by_uuid, &by_ref, parsed.board_positions, &ref_to_section);
-
     // Heuristic index for --migrate mode. Maps each design instance's
     // canopy uuid → the board footprint it should adopt placement from,
     // when both sides have the same count of footprints with the same
@@ -947,6 +941,7 @@ pub fn runSyncPlan(
 
     try w.writeAll("[");
 
+    var group_anchors = std.StringHashMapUnmanaged(GroupAnchor).empty; // filled below
     var applied_ops_local = parsed.applied_ops;
     var diff_ctx = DiffContext{
         .by_uuid = &by_uuid,
@@ -978,6 +973,10 @@ pub fn runSyncPlan(
         .seed_all = parsed.seed_all,
         .group_anchors = &group_anchors,
     };
+    // Per-sub-circuit anchors (Push-modal seeding + dry-run enum), off diff_ctx so
+    // the anchor match runs the diff loop's OWN relink tiers — a drifted board the
+    // sync relabels still centres its group on first pass, not only after a re-sync.
+    group_anchors = try computeGroupAnchors(arena, instances.items, &diff_ctx, parsed.board_positions);
     for (instances.items) |inst| try handleInstance(&diff_ctx, inst, &w, &first_op);
 
     // Adds were buffered during the walk; lay them out grouped by section
@@ -2988,23 +2987,19 @@ fn anchorRank(ref_des: []const u8) u8 {
     };
 }
 
-/// Pick each sub-circuit group's anchor (see `GroupAnchor`) and resolve whether
-/// it's already on the board. Groups are the same keys `sectionForRef` returns
-/// (section name, or sub-block name for a `sub/Ux` ref). Board presence is the
-/// same canopy-uuid-then-ref-des match the diff loop uses; the live position
-/// comes from `board_positions` (KiCad-uuid keyed). Result lives on `arena`.
+/// Pick each sub-circuit group's anchor (see `GroupAnchor`); resolve whether it's
+/// on the board by sharing `d`'s indexes so the match runs the diff loop's relink
+/// tiers. Groups are `sectionForRef`'s keys; live pos from `board_positions`.
 fn computeGroupAnchors(
     arena: std.mem.Allocator,
     instances: []const export_kicad.FlatInstance,
-    by_uuid: *std.StringHashMapUnmanaged(BoardFp),
-    by_ref: *std.StringHashMapUnmanaged(BoardFp),
+    d: *const DiffContext,
     board_positions: ?*const std.StringHashMapUnmanaged(FpPlacement),
-    ref_to_section: *std.StringHashMapUnmanaged([]const u8),
 ) !std.StringHashMapUnmanaged(GroupAnchor) {
     var out = std.StringHashMapUnmanaged(GroupAnchor).empty;
     var rank_of = std.StringHashMapUnmanaged(u8).empty;
     for (instances) |inst| {
-        const sec = sectionForRef(inst.ref_des, ref_to_section);
+        const sec = sectionForRef(inst.ref_des, d.ref_to_section);
         if (sec.len == 0) continue;
         const rank = anchorRank(inst.ref_des);
         const better = blk: {
@@ -3016,7 +3011,9 @@ fn computeGroupAnchors(
         };
         if (!better) continue;
         var ga = GroupAnchor{ .ref = inst.ref_des, .origin_key = inst.origin_key };
-        const bfp: ?BoardFp = by_uuid.get(inst.uuid) orelse by_ref.get(inst.ref_des);
+        // Diff loop's own relink tiers (matchInstance): netsig/uuid/ref/migration.
+        const bfp: ?BoardFp = d.by_netsig.get(inst.uuid) orelse d.by_uuid.get(inst.uuid) orelse
+            d.by_ref.get(inst.ref_des) orelse d.by_migration.get(inst.uuid);
         if (bfp) |m| {
             if (board_positions) |bp| {
                 if (m.kicad_uuid.len > 0) {
@@ -4715,4 +4712,47 @@ test "buildSubCircuitsJson advertises per-group copper counts" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"pwr\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"parts\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"tracks\":0,\"vias\":0") != null);
+}
+
+// spec: serve/sync - computeGroupAnchors matches a group's anchor to the board through the same relink tiers the differ uses
+test "computeGroupAnchors resolves an anchor on-board through the net-signature relink tier" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+
+    // The design anchor U2 lives in sub-block "pll". On a drifted board both
+    // its canopy_uuid and its flattened ref MISS the exact indexes (a fresh
+    // import renumbered it), but the --migrate net-signature relink pairs it by
+    // canopy uuid → the placed board fp (board ref drifted to U9). Sharing the
+    // diff context's indexes, the first pass must read the anchor on_board —
+    // exactly as the diff loop's matchInstance relabels it — so the sub-circuit
+    // centres on the placed IC instead of staging off-board.
+    const anchor = export_kicad.FlatInstance{
+        .ref_des = "pll/U2",
+        .component = "adf4372",
+        .value = "",
+        .footprint = "lib:qfn",
+        .properties = &.{},
+        .uuid = "canopy-u2",
+        .origin_key = "U2",
+    };
+    var instances = [_]export_kicad.FlatInstance{anchor};
+
+    var state = TestDiffState{};
+    try state.ref_to_section.put(arena, "pll/U2", "pll");
+    // Only the relink index (keyed by canopy uuid) pairs the anchor; by_uuid
+    // and by_ref both miss, so the pre-fix two-tier match reported off-board.
+    try state.by_netsig.put(arena, "canopy-u2", testFp("", "kid-U2", "U9"));
+    var d = state.ctx(&spc, .auto);
+
+    var positions = std.StringHashMapUnmanaged(FpPlacement).empty;
+    try positions.put(arena, "kid-U2", .{ .ref = "U9", .x = 42.5, .y = 7.25, .rot = 0, .layer = "F.Cu" });
+
+    var anchors = try computeGroupAnchors(arena, &instances, &d, &positions);
+    const ga = anchors.get("pll") orelse return error.NoAnchorForGroup;
+    try std.testing.expect(ga.on_board);
+    try std.testing.expectEqual(@as(f64, 42.5), ga.board_x);
+    try std.testing.expectEqual(@as(f64, 7.25), ga.board_y);
 }
