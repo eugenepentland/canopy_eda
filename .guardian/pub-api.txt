@@ -1175,8 +1175,10 @@ src/serve/pcb_layout_page.zig::PngError value
 src/serve/pcb_layout_page.zig::PngRequest struct_
 src/serve/pcb_layout_page.zig::RefPose value
 src/serve/pcb_layout_page.zig::SavedLayout struct_
+src/serve/pcb_layout_page.zig::SavedRoutes struct_
 src/serve/pcb_layout_page.zig::SolvedRequest struct_
 src/serve/pcb_layout_page.zig::SubBlockSeeds struct_
+src/serve/pcb_layout_page.zig::SubPinNet struct_
 src/serve/pcb_layout_page.zig::SyncPose struct_
 src/serve/pcb_layout_page.zig::SyncVia struct_
 src/serve/pcb_layout_page.zig::deleteNamedLayoutApi | fn deleteNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -1190,6 +1192,7 @@ src/serve/pcb_layout_page.zig::mcpRunFabReadiness | fn mcpRunFabReadiness( alloc
 src/serve/pcb_layout_page.zig::mcpSavePcbLayout | fn mcpSavePcbLayout( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/pcb_layout_page.zig::mcpSetBoardOutline | fn mcpSetBoardOutline( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/pcb_layout_page.zig::mcpSetPartPoses | fn mcpSetPartPoses( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::parseSavedRoutes | fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?SavedRoutes
 src/serve/pcb_layout_page.zig::pcbCentroidApi | fn pcbCentroidApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbDrcApi | fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbDrillApi | fn pcbDrillApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void

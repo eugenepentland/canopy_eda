@@ -83,6 +83,10 @@ const proto_layer_dwgs_user = "BL_Dwgs_User";
 const proto_type_url_boardtext = "type.googleapis.com/kiapi.board.types.BoardText";
 const proto_any_open = "{\"@type\":\"";
 const board_item_op_open = "{\"op\":\"" ++ op_create_board_item ++ "\",\"item\":";
+// Shared `add_via` op fragments (seeded-layout via emission — three call sites:
+// `emitLayoutVias`, `emitBlockVias`, `emitSeedCopper`).
+const add_via_op_open = "{\"op\":\"add_via\",\"net\":";
+const via_coords_fmt = ",\"x\":{d},\"y\":{d},\"dia\":{d},\"drill\":{d}}}";
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
@@ -740,8 +744,13 @@ const SyncSummary = struct {
     swaps_suppressed: u32 = 0,
     /// GND stitching vias emitted when seeding fresh parts from the default
     /// layout (`emitLayoutVias`). Pre-dedup count; the writer reports how many
-    /// actually landed (`ApplyStats.vias_added`) after position de-dup.
+    /// actually landed (`ApplyStats.copper.vias`) after position de-dup.
     vias: u32 = 0,
+    /// Routed copper segments emitted when seeding a sub-circuit from its module
+    /// layout (`emitSeedCopper`) — the module's hand routing carried onto the
+    /// board. Pre-dedup count; the writer reports how many actually landed
+    /// (`ApplyStats.copper.tracks`) after coincident-segment de-dup.
+    tracks: u32 = 0,
     /// Sub-blocks seeded from their own module default layout this sync
     /// (`seedSubBlocks`). When > 0, the whole-design via path (`emitLayoutVias`)
     /// is skipped — the per-block path owns via emission.
@@ -1015,12 +1024,12 @@ fn writeSummaryEnvelope(w: anytype, version: u64, summary: SyncSummary) !void {
         "{{\"design_version\":{d},\"summary\":{{" ++
             "\"updated\":{d},\"relabeled\":{d},\"added\":{d},\"removed\":{d}," ++
             "\"swapped\":{d},\"flagged_stale\":{d},\"suppressed\":{d}," ++
-            "\"swaps_suppressed\":{d},\"vias\":{d}}},\"sub_circuits\":",
+            "\"swaps_suppressed\":{d},\"vias\":{d},\"tracks\":{d}}},\"sub_circuits\":",
         .{
             version,               summary.updated,    summary.relabeled,
             summary.added,         summary.removed,    summary.swapped,
             summary.flagged_stale, summary.suppressed, summary.swaps_suppressed,
-            summary.vias,
+            summary.vias,          summary.tracks,
         },
     );
 }
@@ -1243,12 +1252,12 @@ fn runKicadPcbSync(
         "{{\"ok\":true,\"design_version\":{d}," ++
             "\"applied\":{{\"added\":{d},\"removed\":{d},\"swapped\":{d}," ++
             "\"fields_set\":{d},\"pad_nets_set\":{d},\"locked_changed\":{d}," ++
-            "\"fields_hidden\":{d},\"fields_shown\":{d},\"vias_added\":{d}}}",
+            "\"fields_hidden\":{d},\"fields_shown\":{d},\"vias_added\":{d},\"tracks_added\":{d}}}",
         .{
             run.version,          stats.added,         stats.removed,
             stats.swapped,        stats.fields_set,    stats.pad_nets_set,
             stats.locked_changed, stats.fields_hidden, stats.fields_shown,
-            stats.vias_added,
+            stats.copper.vias,    stats.copper.tracks,
         },
     );
     try rw.print(",\"source_copied\":{d}", .{source_copied});
@@ -1268,8 +1277,8 @@ fn runKicadPcbSync(
 fn statsAreZero(s: kicad_pcb_writer.ApplyStats) bool {
     return s.added == 0 and s.removed == 0 and s.swapped == 0 and
         s.fields_set == 0 and s.pad_nets_set == 0 and s.locked_changed == 0 and
-        s.fields_hidden == 0 and s.fields_shown == 0 and s.vias_added == 0 and
-        s.groups_added == 0;
+        s.fields_hidden == 0 and s.fields_shown == 0 and s.copper.vias == 0 and
+        s.groups_added == 0 and s.copper.tracks == 0;
 }
 
 /// Returns a user-facing message when pcbnew has the target board open
@@ -2912,6 +2921,10 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
                 try w.*.writeAll("]}");
             }
         }
+        // Carry each seeded sub-circuit's module routing onto the board, offset to
+        // sit under its footprints (the whole-design via path is skipped when any
+        // block seeds — see the emitLayoutVias call site).
+        try emitSeedCopper(d, w, first, plan.copper);
         return emitStagingGrid(d, w, first, leftover.items);
     }
 
@@ -3044,9 +3057,39 @@ const NamedAdd = struct { pa: PendingAdd, bx: f64, by: f64, rot: f64, sec: []con
 /// writer binds them into their own draggable KiCad `(group …)`. `emitStagedAdds`
 /// draws the rect/label + group op once per box.
 const SeedBox = struct { x0: f64, y0: f64, x1: f64, y1: f64, label: []const u8, members: []const []const u8 };
-/// The seeding planner's output: positioned adds + one off-board box per seeded
-/// sub-circuit (empty when every selected group anchored on the board).
-const SeedPlan = struct { placed: []const PositionedAdd, boxes: []const SeedBox };
+/// One seeded sub-circuit's module copper to carry onto the board: the module ★
+/// snapshot's routes (module-local mm + module-local net names), the module → parent
+/// net-name bridge, the sub-block slug (for the private-net `<slug>/NET` fallback),
+/// and the total (dx, dy) mm offset applied to that sub-circuit's parts — so
+/// `emitSeedCopper` translates the copper by the SAME offset the footprints got.
+const SeedCopper = struct {
+    routes: pcb_layout.SavedRoutes,
+    net_map: std.StringHashMapUnmanaged([]const u8),
+    slug: []const u8,
+    dx: f64,
+    dy: f64,
+};
+/// The output collectors `placeOneSelected` appends into, bundled so its
+/// signature stays small: `leftover` (parts the source doesn't name), `placed`
+/// (on-board positioned adds), `block` (off-board parts awaiting the shared
+/// offset), and the two copper buckets — `copper` (on-board, final offset) and
+/// `block_copper` (off-board, the shared block offset added in `planSelectedGroups`).
+const SeedAccum = struct {
+    leftover: *std.ArrayList(PendingAdd),
+    placed: *std.ArrayList(PositionedAdd),
+    block: *std.ArrayList(NamedAdd),
+    copper: *std.ArrayList(SeedCopper),
+    block_copper: *std.ArrayList(SeedCopper),
+};
+/// The seeding planner's output: positioned adds, one off-board box per seeded
+/// sub-circuit (empty when every selected group anchored on the board), and the
+/// per-sub-circuit module copper to lay down (empty when no seeded sub-block had
+/// routed copper).
+const SeedPlan = struct { placed: []const PositionedAdd, boxes: []const SeedBox, copper: []const SeedCopper };
+/// `finishOffBoardBlock`'s result: the per-sub-circuit labelled boxes plus the ONE
+/// shared (dx, dy) mm offset applied to the whole off-board block — so its copper
+/// can be shifted by the identical amount its parts were.
+const OffBoardResult = struct { boxes: []const SeedBox, dx: f64, dy: f64 };
 
 /// Fallback box label for off-board seeded parts that carry no sub-circuit name
 /// (top-level parts not inside a sub-block).
@@ -3059,7 +3102,15 @@ const seed_box_label = "Seeded layout — drag onto board";
 /// `FlatInstance.origin_key`, which survives `(hierarchical-ids)` renumbering).
 /// Everything else (sections, sub-blocks with no module layout) falls back to
 /// the parent design cache: `is_module = false`, keyed by full flattened ref.
-const SubCircuitSrc = struct { map: std.StringHashMapUnmanaged(pcb_layout.SyncPose), is_module: bool };
+/// A module source also carries the snapshot's routed copper (`routes`) and the
+/// module-pin → net bridge (`pin_nets`), so `emitSeedCopper` can lay the module's
+/// hand routing onto the board; both are empty on the parent-cache path.
+const SubCircuitSrc = struct {
+    map: std.StringHashMapUnmanaged(pcb_layout.SyncPose),
+    is_module: bool,
+    routes: ?pcb_layout.SavedRoutes = null,
+    pin_nets: []const pcb_layout.SubPinNet = &.{},
+};
 
 /// Resolve the pose source for sub-circuit `sec` (see `SubCircuitSrc`). Null when
 /// neither a module layout nor the parent cache can supply poses.
@@ -3068,7 +3119,7 @@ fn subCircuitSource(d: *DiffContext, sec: []const u8) !?SubCircuitSrc {
         // Module layout keyed by origin_key (survives the parent's ref-des
         // renumbering), matched per part on FlatInstance.origin_key.
         if (pcb_layout.subBlockPoseByOriginKey(d.spc.arena, d.spc.project_dir, sb)) |s|
-            return .{ .map = s.map, .is_module = true };
+            return .{ .map = s.map, .is_module = true, .routes = s.routes, .pin_nets = s.pin_nets };
     }
     if (d.premade_layout) |cache| return .{ .map = cache, .is_module = false };
     return null;
@@ -3104,6 +3155,15 @@ fn planSelectedGroups(
     // Off-board parts accumulate here (pre-offset board coords); the whole block
     // then shifts clear of the board with ONE shared offset.
     var block: std.ArrayList(NamedAdd) = .empty;
+    var copper: std.ArrayList(SeedCopper) = .empty;
+    var block_copper: std.ArrayList(SeedCopper) = .empty;
+    var acc = SeedAccum{
+        .leftover = leftover,
+        .placed = &placed,
+        .block = &block,
+        .copper = &copper,
+        .block_copper = &block_copper,
+    };
     for (order.items) |sec| {
         const idxs = (buckets.get(sec) orelse continue).items;
         if (!groupSelected(d, sec)) {
@@ -3114,11 +3174,22 @@ fn planSelectedGroups(
             for (idxs) |idx| try leftover.append(arena, adds[idx]);
             continue;
         };
-        try placeOneSelected(d, sec, idxs, adds, src, d.group_anchors.get(sec), leftover, &placed, &block);
+        try placeOneSelected(d, sec, idxs, adds, src, d.group_anchors.get(sec), &acc);
     }
-    const boxes = try finishOffBoardBlock(arena, block.items, &placed);
-    d.summary.blocks += @intCast(boxes.len);
-    return .{ .placed = placed.items, .boxes = boxes };
+    const ob = try finishOffBoardBlock(arena, block.items, &placed);
+    d.summary.blocks += @intCast(ob.boxes.len);
+    // The off-board block shifted by ONE shared offset; fold it into each of its
+    // sub-circuits' copper (their per-group anchor offset was recorded already).
+    for (block_copper.items) |c| {
+        try copper.append(arena, .{
+            .routes = c.routes,
+            .net_map = c.net_map,
+            .slug = c.slug,
+            .dx = c.dx + ob.dx,
+            .dy = c.dy + ob.dy,
+        });
+    }
+    return .{ .placed = placed.items, .boxes = ob.boxes, .copper = copper.items };
 }
 
 /// Place one selected sub-circuit's parts from its `src` poses, re-anchored so
@@ -3135,9 +3206,7 @@ fn placeOneSelected(
     adds: []const PendingAdd,
     src: SubCircuitSrc,
     anchor: ?GroupAnchor,
-    leftover: *std.ArrayList(PendingAdd),
-    placed: *std.ArrayList(PositionedAdd),
-    block: *std.ArrayList(NamedAdd),
+    acc: *SeedAccum,
 ) !void {
     const arena = d.spc.arena;
     var offx: f64 = 0;
@@ -3165,17 +3234,134 @@ fn placeOneSelected(
         const pa = adds[idx];
         const key = if (src.is_module) pa.inst.origin_key else pa.inst.ref_des;
         const sp = src.map.get(key) orelse {
-            try leftover.append(arena, pa);
+            try acc.leftover.append(arena, pa);
             continue;
         };
         const bx = sp.x + offx;
         const by = sp.y + offy;
         if (on_board)
-            try placed.append(arena, .{ .pa = pa, .x_mm = bx, .y_mm = by, .rot = sp.rot, .back = sp.side == .bottom })
+            try acc.placed.append(arena, .{
+                .pa = pa,
+                .x_mm = bx,
+                .y_mm = by,
+                .rot = sp.rot,
+                .back = sp.side == .bottom,
+            })
         else
-            try block.append(arena, .{ .pa = pa, .bx = bx, .by = by, .rot = sp.rot, .sec = sec });
+            try acc.block.append(arena, .{ .pa = pa, .bx = bx, .by = by, .rot = sp.rot, .sec = sec });
     }
     if (on_board) d.summary.blocks += 1;
+    // Carry the module's routed copper along at the same offset its parts got.
+    // The module-local coordinates share the pose frame, so translating tracks/
+    // vias by (offx, offy) lands them under the seeded footprints. On-board copper
+    // has its final offset now; off-board copper still owes the shared block
+    // offset, added in `planSelectedGroups`.
+    if (src.is_module) if (src.routes) |sr| {
+        const net_map = try subCircuitNetMap(d, src.pin_nets, idxs, adds);
+        const job = SeedCopper{ .routes = sr, .net_map = net_map, .slug = sec, .dx = offx, .dy = offy };
+        try (if (on_board) acc.copper else acc.block_copper).append(arena, job);
+    };
+}
+
+/// Map each of a seeded sub-circuit's module-local net names to the parent net
+/// its pads carry on the board, so `emitSeedCopper` lays the copper on the same
+/// net as the pads it connects. For each module pin sample `(net, origin_key,
+/// pad)` the parent ref is `origin_key → ref` (the sub-circuit's freshly-added
+/// parts — every net the seeded copper touches has at least one fresh pad), and
+/// the parent net is that pad's display net from `d.pad_net_map` ("ref|pin") — the
+/// exact spelling the netlist sync writes on the pad, so copper and pad agree even
+/// when a bare name collided and kept its `<slug>/…` prefix. Unresolved nets fall
+/// back to the `<slug>/NET` flatten spelling in `bridgedCopperNet`.
+fn subCircuitNetMap(
+    d: *DiffContext,
+    pin_nets: []const pcb_layout.SubPinNet,
+    idxs: []const usize,
+    adds: []const PendingAdd,
+) !std.StringHashMapUnmanaged([]const u8) {
+    const arena = d.spc.arena;
+    var ok_ref = std.StringHashMapUnmanaged([]const u8).empty;
+    for (idxs) |i| {
+        const inst = adds[i].inst;
+        if (inst.origin_key.len == 0) continue;
+        try ok_ref.put(arena, inst.origin_key, inst.ref_des);
+    }
+    var net_map = std.StringHashMapUnmanaged([]const u8).empty;
+    for (pin_nets) |ps| {
+        if (net_map.contains(ps.net)) continue;
+        const dref = ok_ref.get(ps.origin_key) orelse continue;
+        const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ dref, ps.pad });
+        const dn = d.pad_net_map.get(key) orelse continue;
+        try net_map.put(arena, ps.net, dn);
+    }
+    return net_map;
+}
+
+/// The parent-board net spelling for a module-local copper net: the bridged
+/// parent display net when a module pin resolved (`net_map`), else the
+/// `<slug>/NET` flatten spelling a module-private net takes in the parent netlist
+/// (mirrors `pcb_layout_page.mappedNet`). Empty string ⇒ skip (unnamed copper).
+fn bridgedCopperNet(
+    arena: std.mem.Allocator,
+    net_map: std.StringHashMapUnmanaged([]const u8),
+    slug: []const u8,
+    net: []const u8,
+) []const u8 {
+    if (net.len == 0) return "";
+    if (net_map.get(net)) |m| return m;
+    return std.fmt.allocPrint(arena, "{s}/{s}", .{ slug, net }) catch "";
+}
+
+/// KiCad copper-layer name for a router / `SavedTrack` layer index. The router
+/// numbers signal layers 0 = top (F.Cu), 1 = bottom (B.Cu); plane-free inner
+/// signal layers count up from 2 in stack order, matching `export_gerber.zig`'s
+/// `In{i-1}.Cu` naming (2 → In1.Cu, 3 → In2.Cu, …). Verified against
+/// `router.Track` ("layer 0 = top, 1 = bottom signal") and
+/// `export_gerber.planLayers`. Seeded vias are through-hole, so they need no map.
+fn kicadCopperLayer(arena: std.mem.Allocator, l: u8) ![]const u8 {
+    return switch (l) {
+        0 => "F.Cu",
+        1 => "B.Cu",
+        else => try std.fmt.allocPrint(arena, "In{d}.Cu", .{l - 1}),
+    };
+}
+
+/// Emit `add_track` / `add_via` ops for each seeded sub-circuit's module copper
+/// (`jobs`), translating every endpoint by the job's (dx, dy) — the same offset
+/// its footprints got — and bridging module net names to parent nets. Named-only
+/// (unbridged, empty-name) copper is skipped. Counted in `d.summary`.
+fn emitSeedCopper(d: *DiffContext, w: anytype, first: *bool, jobs: []const SeedCopper) !void {
+    const arena = d.spc.arena;
+    for (jobs) |job| {
+        for (job.routes.tracks) |t| {
+            const net = bridgedCopperNet(arena, job.net_map, job.slug, t.net);
+            if (net.len == 0) continue;
+            const layer = try kicadCopperLayer(arena, t.l);
+            if (!first.*) try w.*.writeAll(",");
+            first.* = false;
+            try w.*.writeAll("{\"op\":\"add_track\",\"net\":");
+            try json_writer.writeString(w.*, net);
+            try w.*.print(",\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"width\":{d},\"layer\":", .{
+                mmToNm(t.x1 + job.dx), mmToNm(t.y1 + job.dy),
+                mmToNm(t.x2 + job.dx), mmToNm(t.y2 + job.dy),
+                mmToNm(t.w),
+            });
+            try json_writer.writeString(w.*, layer);
+            try w.*.writeAll("}");
+            d.summary.tracks += 1;
+        }
+        for (job.routes.vias) |v| {
+            const net = bridgedCopperNet(arena, job.net_map, job.slug, v.net);
+            if (net.len == 0) continue;
+            if (!first.*) try w.*.writeAll(",");
+            first.* = false;
+            try w.*.writeAll(add_via_op_open);
+            try json_writer.writeString(w.*, net);
+            try w.*.print(via_coords_fmt, .{
+                mmToNm(v.x + job.dx), mmToNm(v.y + job.dy), mmToNm(v.d), mmToNm(v.drill),
+            });
+            d.summary.vias += 1;
+        }
+    }
 }
 
 /// Translate the whole off-board `block` by ONE shared offset (its collective
@@ -3190,8 +3376,8 @@ fn finishOffBoardBlock(
     arena: std.mem.Allocator,
     block: []const NamedAdd,
     placed: *std.ArrayList(PositionedAdd),
-) ![]const SeedBox {
-    if (block.len == 0) return &.{};
+) !OffBoardResult {
+    if (block.len == 0) return .{ .boxes = &.{}, .dx = 0, .dy = 0 };
     // ONE shared offset from the whole block's collective min-corner.
     var minx: f64 = std.math.floatMax(f64);
     var miny: f64 = std.math.floatMax(f64);
@@ -3234,7 +3420,7 @@ fn finishOffBoardBlock(
             .members = members.items,
         });
     }
-    return boxes.items;
+    return .{ .boxes = boxes.items, .dx = dx, .dy = dy };
 }
 
 /// Build the `sub_circuits` JSON array advertised in the dry-run response: one
@@ -3270,12 +3456,16 @@ fn buildSubCircuitsJson(arena: std.mem.Allocator, d: *DiffContext) ![]const u8 {
             if (src.map.get(key) != null) named += 1;
         }
         if (named == 0) continue;
+        // Module copper this group would carry onto the board (0 when the ★
+        // snapshot has no routes, or when the source is the parent cache).
+        const n_tracks = if (src.routes) |sr| sr.tracks.len else 0;
+        const n_vias = if (src.routes) |sr| sr.vias.len else 0;
         const anchor = d.group_anchors.get(sec);
         if (!emitted_first) try w.writeByte(',');
         emitted_first = false;
         try w.writeAll("{\"name\":");
         try json_writer.writeString(w, sec);
-        try w.print(",\"parts\":{d},\"anchor\":", .{named});
+        try w.print(",\"parts\":{d},\"tracks\":{d},\"vias\":{d},\"anchor\":", .{ named, n_tracks, n_vias });
         if (anchor) |a| {
             try json_writer.writeString(w, a.ref);
             try w.print(",\"on_board\":{}", .{a.on_board});
@@ -3448,9 +3638,9 @@ fn emitBlockVias(d: *DiffContext, w: anytype, first: *bool, block: *const env_mo
         if (net.len == 0) continue;
         if (!first.*) try w.*.writeAll(",");
         first.* = false;
-        try w.*.writeAll("{\"op\":\"add_via\",\"net\":");
+        try w.*.writeAll(add_via_op_open);
         try json_writer.writeString(w.*, net);
-        try w.*.print(",\"x\":{d},\"y\":{d},\"dia\":{d},\"drill\":{d}}}", .{
+        try w.*.print(via_coords_fmt, .{
             mmToNm(v.x + dx), mmToNm(v.y + dy), mmToNm(v.dia), mmToNm(v.drill),
         });
         d.summary.vias += 1;
@@ -3510,9 +3700,9 @@ fn emitLayoutVias(
         if (net.len == 0) continue;
         if (!first.*) try w.*.writeAll(",");
         first.* = false;
-        try w.*.writeAll("{\"op\":\"add_via\",\"net\":");
+        try w.*.writeAll(add_via_op_open);
         try json_writer.writeString(w.*, net);
-        try w.*.print(",\"x\":{d},\"y\":{d},\"dia\":{d},\"drill\":{d}}}", .{
+        try w.*.print(via_coords_fmt, .{
             mmToNm(v.x), mmToNm(v.y), mmToNm(v.dia), mmToNm(v.drill),
         });
         d.summary.vias += 1;
@@ -4355,13 +4545,25 @@ test "placeOneSelected centres a module sub-circuit on an on-board anchor absent
     var leftover: std.ArrayList(PendingAdd) = .empty;
     var placed: std.ArrayList(PositionedAdd) = .empty;
     var block: std.ArrayList(NamedAdd) = .empty;
-    try placeOneSelected(&d, "lna2", &idxs, &adds, src, anchor, &leftover, &placed, &block);
+    var copper: std.ArrayList(SeedCopper) = .empty;
+    var block_copper: std.ArrayList(SeedCopper) = .empty;
+    var acc = SeedAccum{
+        .leftover = &leftover,
+        .placed = &placed,
+        .block = &block,
+        .copper = &copper,
+        .block_copper = &block_copper,
+    };
+    try placeOneSelected(&d, "lna2", &idxs, &adds, src, anchor, &acc);
 
     // Both caps land ON the board (offset = board(50,40) − anchor pose(10,10) =
     // (40,30)); NONE in the off-board staging block or in leftover.
     try std.testing.expectEqual(@as(usize, 2), placed.items.len);
     try std.testing.expectEqual(@as(usize, 0), block.items.len);
     try std.testing.expectEqual(@as(usize, 0), leftover.items.len);
+    // This module source carries no routes, so no copper job is planned.
+    try std.testing.expectEqual(@as(usize, 0), copper.items.len);
+    try std.testing.expectEqual(@as(usize, 0), block_copper.items.len);
 
     // C1 pose (12,10) → (52,40) keeping rot; C2 pose (10,13) → (50,43). Match on
     // ref-des so the assertion is order-independent.
@@ -4375,4 +4577,142 @@ test "placeOneSelected centres a module sub-circuit on an on-board anchor absent
             try std.testing.expectEqual(@as(f64, 43), p.y_mm);
         }
     }
+}
+
+// spec: serve/sync - seeded sub-circuit copper lands on the board with bridged nets and the group offset
+test "emitSeedCopper lays a seeded sub-circuit's module copper with bridged nets and the group offset" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    // The pad nets the netlist sync writes for C1: pad 1 on the shared rail VBUS,
+    // pad 2 on a channel-private ground whose bare name collided so it kept its
+    // slug prefix (lna2/GNDA). Seeded copper must land on these EXACT spellings.
+    try state.pad_net_map.put(arena, "lna2/C1|1", "VBUS");
+    try state.pad_net_map.put(arena, "lna2/C1|2", "lna2/GNDA");
+    var d = state.ctx(&spc, .auto);
+
+    // Module ★ layout (origin_key-keyed) + its routed copper and pin→net bridge.
+    var src_map = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    try src_map.put(arena, "U1", .{ .x = 10, .y = 10, .rot = 0 });
+    try src_map.put(arena, "C1", .{ .x = 12, .y = 10, .rot = 0 });
+    // Module-local routes (built via the shared parser so the private SavedTrack/
+    // SavedVia types stay unexported): a top-signal bridged rail, a bottom-signal
+    // bridged private ground, and an unbridged module-private net.
+    const routes_json =
+        \\{"tracks":[
+        \\{"x1":12,"y1":10,"x2":13,"y2":10,"l":0,"w":0.2,"net":"VBUS_M"},
+        \\{"x1":12,"y1":11,"x2":12,"y2":12,"l":1,"w":0.2,"net":"GNDA_M"},
+        \\{"x1":1,"y1":1,"x2":2,"y2":2,"l":0,"w":0.2,"net":"PRIV_M"}
+        \\],"vias":[{"x":12,"y":10,"d":0.4,"drill":0.2,"net":"VBUS_M"}]}
+    ;
+    const routes_val = try std.json.parseFromSliceLeaky(std.json.Value, arena, routes_json, .{});
+    const routes = pcb_layout.parseSavedRoutes(arena, routes_val).?;
+    const pin_nets = [_]pcb_layout.SubPinNet{
+        .{ .net = "VBUS_M", .origin_key = "C1", .pad = "1" },
+        .{ .net = "GNDA_M", .origin_key = "C1", .pad = "2" },
+    };
+    const src = SubCircuitSrc{
+        .map = src_map,
+        .is_module = true,
+        .routes = routes,
+        .pin_nets = &pin_nets,
+    };
+
+    // Anchor IC already on the board at (50,40) → offset = (40,30).
+    const anchor = GroupAnchor{ .ref = "lna2/U1", .origin_key = "U1", .on_board = true, .board_x = 50, .board_y = 40 };
+    const adds = [_]PendingAdd{.{
+        .inst = .{
+            .ref_des = "lna2/C1",
+            .component = "cap",
+            .origin_key = "C1",
+            .value = "100nF",
+            .footprint = "lib:c",
+            .properties = &.{},
+            .uuid = "u-c1",
+        },
+        .fp_name = "c0402",
+        .canopy_net = null,
+        .section = "lna2",
+    }};
+    const idxs = [_]usize{0};
+
+    var leftover: std.ArrayList(PendingAdd) = .empty;
+    var placed: std.ArrayList(PositionedAdd) = .empty;
+    var block: std.ArrayList(NamedAdd) = .empty;
+    var copper: std.ArrayList(SeedCopper) = .empty;
+    var block_copper: std.ArrayList(SeedCopper) = .empty;
+    var acc = SeedAccum{
+        .leftover = &leftover,
+        .placed = &placed,
+        .block = &block,
+        .copper = &copper,
+        .block_copper = &block_copper,
+    };
+    try placeOneSelected(&d, "lna2", &idxs, &adds, src, anchor, &acc);
+
+    // On-board group → exactly one copper job carrying the final (40,30) offset.
+    try std.testing.expectEqual(@as(usize, 1), copper.items.len);
+    try std.testing.expectEqual(@as(usize, 0), block_copper.items.len);
+
+    var buf: std.ArrayList(u8) = .empty;
+    const w = buf.writer(arena);
+    var first = true;
+    try emitSeedCopper(&d, &w, &first, copper.items);
+    const out = buf.items;
+
+    // Three tracks + one via, tallied on the summary.
+    try std.testing.expectEqual(@as(u32, 3), d.summary.tracks);
+    try std.testing.expectEqual(@as(u32, 1), d.summary.vias);
+    // Bridged rail VBUS on F.Cu, translated (12,10)→(52,40) = 52e6, 40e6 nm.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"op\":\"add_track\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"VBUS\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"x1\":52000000,\"y1\":40000000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"layer\":\"F.Cu\"") != null);
+    // Bridged channel-private ground keeps its collision spelling, routed on B.Cu.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"lna2/GNDA\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"layer\":\"B.Cu\"") != null);
+    // Unbridged module-private net → the <slug>/NET flatten spelling.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"lna2/PRIV_M\"") != null);
+    // The via rides the same rail + offset.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"op\":\"add_via\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"x\":52000000,\"y\":40000000") != null);
+}
+
+// spec: serve/sync - buildSubCircuitsJson reports each seedable group's module track and via counts
+test "buildSubCircuitsJson advertises per-group copper counts" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    try state.pending_adds.append(arena, .{
+        .inst = .{
+            .ref_des = "R1",
+            .component = "res",
+            .origin_key = "R1",
+            .value = "10k",
+            .footprint = "lib:r",
+            .properties = &.{},
+            .uuid = "u-r1",
+        },
+        .fp_name = "r0402",
+        .canopy_net = null,
+        .section = "pwr",
+    });
+    try state.group_anchors.put(arena, "pwr", .{ .ref = "R1", .origin_key = "R1" });
+    var d = state.ctx(&spc, .auto);
+    // A whole-design cache names R1; the parent-cache source has no module routes,
+    // so this group's copper counts are zero — but the fields are always present.
+    var cache = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    try cache.put(arena, "R1", .{ .x = 0, .y = 0, .rot = 0 });
+    d.premade_layout = cache;
+
+    const out = try buildSubCircuitsJson(arena, &d);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"name\":\"pwr\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"parts\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"tracks\":0,\"vias\":0") != null);
 }

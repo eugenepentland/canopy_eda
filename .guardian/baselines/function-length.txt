@@ -20,7 +20,7 @@
 135 src/export_kicad_footprint.zig|emitKicadPad
 139 src/export_kicad_netlist.zig|applyNetTies
 171 src/fab_readiness.zig|check
-201 src/kicad_pcb/writer.zig|applyOpsCounted
+190 src/kicad_pcb/writer.zig|applyOpsCounted
 121 src/placement/drc.zig|check
 164 src/placement/optimizer.zig|arrangeMacros
 170 src/placement/optimizer.zig|packBoard

@@ -127,7 +127,7 @@
 7 src/serve/sync.zig|emitPadNetOps
 9 src/serve/sync.zig|emitSwapOp
 9 src/serve/sync.zig|handleMatched
-9 src/serve/sync.zig|placeOneSelected
+7 src/serve/sync.zig|placeOneSelected
 7 src/serve/sync.zig|populatePadNetMaps
 9 src/serve/sync.zig|runKicadPcbSync
 10 src/serve/sync.zig|seedOneSubBlock
