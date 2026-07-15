@@ -63,8 +63,9 @@ const Shapes = struct {
 };
 
 /// GET /api/footprint/:name — return a `lib/footprints/<name>.sexp` as a JSON
-/// footprint description (pads incl. custom polygons, courtyard, silkscreen +
-/// fabrication geometry). The shared client renderer `/static/footprint_svg.js`
+/// footprint description (geometry bounds, pads incl. custom polygons,
+/// courtyard, silkscreen + fabrication geometry). The shared client renderer
+/// `/static/footprint_svg.js`
 /// draws it — one engine for the library preview, the schematic sidebar, and
 /// the PCB-layout page — so a pad-shape change lands in exactly one place.
 pub fn footprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
@@ -305,18 +306,24 @@ fn grow(b: *BBox, x: f64, y: f64) void {
 }
 
 /// Emit the footprint as a JSON description for the shared client renderer:
-/// `{bbox, pads, silk, fab, courtyard}`. The renderer draws courtyard (dashed)
-/// behind fab + silkscreen, with pads (polygon/circle/oval/rect + id label) on
-/// top — see `/static/footprint_svg.js`.
+/// `{bbox, bounds, pads, silk, fab, courtyard}`. `bounds` is the exact union of
+/// the footprint geometry; `bbox` adds display padding for the SVG viewport.
+/// The renderer draws courtyard (dashed) behind fab + silkscreen, with pads
+/// (polygon/circle/oval/rect + id label) on top — see
+/// `/static/footprint_svg.js`.
 fn emitFootprintJson(w: anytype, shapes: Shapes) HandlerError!void {
-    var b = computeBBox(shapes);
-    b.min_x -= svg_bbox_pad;
-    b.min_y -= svg_bbox_pad;
-    b.max_x += svg_bbox_pad;
-    b.max_y += svg_bbox_pad;
+    const bounds = computeBBox(shapes);
+    var viewport = bounds;
+    viewport.min_x -= svg_bbox_pad;
+    viewport.min_y -= svg_bbox_pad;
+    viewport.max_x += svg_bbox_pad;
+    viewport.max_y += svg_bbox_pad;
 
     try w.print("{{\"bbox\":{{\"x\":{d:.3},\"y\":{d:.3},\"w\":{d:.3},\"h\":{d:.3}}}", .{
-        b.min_x, b.min_y, b.max_x - b.min_x, b.max_y - b.min_y,
+        viewport.min_x, viewport.min_y, viewport.max_x - viewport.min_x, viewport.max_y - viewport.min_y,
+    });
+    try w.print(",\"bounds\":{{\"x\":{d:.3},\"y\":{d:.3},\"w\":{d:.3},\"h\":{d:.3}}}", .{
+        bounds.min_x, bounds.min_y, bounds.max_x - bounds.min_x, bounds.max_y - bounds.min_y,
     });
 
     try w.writeAll(",\"pads\":[");
@@ -662,4 +669,30 @@ fn readBoardPolyPts(allocator: std.mem.Allocator, child: Node) HandlerError!?[]c
         return pts.items;
     }
     return null;
+}
+
+// spec: Web Server - Footprint preview reports exact geometry bounds separately from its padded SVG viewport
+test "footprint preview JSON separates geometry bounds from viewport padding" {
+    var shapes: Shapes = .{};
+    defer shapes.pads.deinit(std.testing.allocator);
+    try shapes.pads.append(std.testing.allocator, .{
+        .id = "1",
+        .x = 1,
+        .y = 2,
+        .w = 4,
+        .h = 6,
+        .shape = "rect",
+    });
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try emitFootprintJson(&aw.writer, shapes);
+
+    const json = aw.written();
+    const viewport_json = "\"bbox\":" ++
+        "{\"x\":-1.500,\"y\":-1.500,\"w\":5.000,\"h\":7.000}";
+    const bounds_json = "\"bounds\":" ++
+        "{\"x\":-1.000,\"y\":-1.000,\"w\":4.000,\"h\":6.000}";
+    try std.testing.expect(std.mem.indexOf(u8, json, viewport_json) != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, bounds_json) != null);
 }
