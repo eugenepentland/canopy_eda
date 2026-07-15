@@ -18,6 +18,7 @@ const sexpr_parser = @import("../sexpr/parser.zig");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("../eval/env.zig");
 const check_grammar = @import("../eval/check_grammar.zig");
+const electrical_mod = @import("../eval/electrical.zig");
 
 const max_component_bytes: usize = 1 * 1024 * 1024;
 
@@ -84,13 +85,37 @@ pub fn describeComponent(
         try collectComponentField(allocator, child, &info, &datasheets);
     }
 
-    // Resolve pinout: prefer explicit `(pinout "ref")`, fall back to component name.
-    const pinout_ref: []const u8 = if (info.pinout_ref.len > 0) info.pinout_ref else name;
-    const loaded = loadPinoutWithSource(allocator, project_dir, pinout_ref) catch |e| switch (e) {
+    // Resolve pinout the way the evaluator's instance builder does
+    // (src/eval/instance.zig): the component's `(pinout …)` ref first, then
+    // its `(symbol …)` ref, then the component name. Names with `#`
+    // (e.g. lt3045edd#pbf) are valid basenames used verbatim in the path.
+    const resolved_ref: []const u8 = if (info.pinout_ref.len > 0)
+        info.pinout_ref
+    else if (info.symbol_ref.len > 0)
+        info.symbol_ref
+    else
+        name;
+    const loaded = loadPinoutWithSource(allocator, project_dir, resolved_ref) catch |e| switch (e) {
         error.FileNotFound => LoadedPinout{ .pins = null, .source = null },
         else => return e,
     };
     defer freeLoadedPinout(allocator, loaded);
+
+    // Attach each pin's library `(electrical "FN" (type …))` type (matched by
+    // function name) so callers see the pad's electrical role inline instead
+    // of re-reading the component file.
+    var elec_types = try collectElectricalTypes(allocator, root_children[2..]);
+    defer elec_types.deinit(allocator);
+    if (loaded.pins) |pe| {
+        for (pe) |*p| {
+            if (elec_types.get(p.function)) |t| p.etype = t;
+        }
+    }
+
+    // Report the ref that actually resolved a pinout. Previously this echoed
+    // the raw `(pinout …)` value — an empty string whenever the component
+    // leaned on its symbol name, even though pins loaded fine.
+    if (loaded.pins != null) info.pinout_ref = resolved_ref;
 
     const w = out.writer(allocator);
     try writeComponentJson(allocator, w, name, info, datasheets.items, loaded, root_children[2..]);
@@ -184,6 +209,10 @@ const PinEntry = struct {
     id: []u8,
     function: []u8,
     alts: []PinAlt,
+    /// Kebab-cased electrical type from a matching `(electrical "FN" (type …))`
+    /// decl on the component; empty when the pin has no declared type. A static
+    /// literal (see `electricalTypeName`), so `freeLoadedPinout` never frees it.
+    etype: []const u8 = "",
 };
 
 /// Scan the raw pinout source for a `;; source: <path>` comment line and
@@ -295,6 +324,31 @@ fn parsePinoutBody(allocator: std.mem.Allocator, src: []const u8) !?[]PinEntry {
     return @as(?[]PinEntry, try pins.toOwnedSlice(allocator));
 }
 
+/// Scan the component body for `(electrical "FN" (type …))` decls and build a
+/// `function-name → kebab-cased-type` map, reusing the evaluator's
+/// `electrical.parse` so the type enum stays in lockstep with the ERC checks.
+/// Map keys are slices into the parsed component source (valid for the
+/// caller's scope); values are static literals. Caller owns the map.
+fn collectElectricalTypes(
+    allocator: std.mem.Allocator,
+    root_body: []const ast.Node,
+) !std.StringHashMapUnmanaged([]const u8) {
+    var map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    errdefer map.deinit(allocator);
+    for (root_body) |child| {
+        const cl = child.asList() orelse continue;
+        if (cl.len < 2) continue;
+        const tag = cl[0].asAtom() orelse continue;
+        if (!std.mem.eql(u8, tag, "electrical")) continue;
+        const decl = electrical_mod.parse(cl) orelse continue;
+        const et = decl.electrical_type orelse continue;
+        // Store the raw enum tag (e.g. "power_in"); the JSON writer dasherizes
+        // it to the `.sexp`/JSON spelling ("power-in") via `writeDasherized`.
+        try map.put(allocator, decl.pin, @tagName(et));
+    }
+    return map;
+}
+
 /// Emit the assembled component info as JSON. Pulls requirements straight
 /// from the AST so the same `parseCheck` the evaluator uses classifies the
 /// check kind — no risk of label drift between describe_component and the
@@ -344,10 +398,16 @@ fn writeComponentJson(
         try w.writeAll("[");
         for (pe, 0..) |p, i| {
             if (i > 0) try w.writeAll(",");
-            try w.writeAll("{\"id\":");
+            try w.writeAll("{\"pin\":");
             try json_writer.writeString(w, p.id);
             try w.writeAll(",\"function\":");
             try json_writer.writeString(w, p.function);
+            try w.writeAll(",\"type\":");
+            if (p.etype.len > 0) {
+                try w.writeByte('"');
+                try writeDasherized(w, p.etype);
+                try w.writeByte('"');
+            } else try w.writeAll("null");
             try w.writeAll(",\"alts\":[");
             for (p.alts, 0..) |a, ai| {
                 if (ai > 0) try w.writeAll(",");
@@ -428,10 +488,14 @@ fn writeRequirementJson(allocator: std.mem.Allocator, w: anytype, cl: []const as
 /// `@tagName` so adding a new check primitive requires only one edit
 /// (in `env.zig`) — this function picks it up automatically.
 fn writeCheckKindName(w: anytype, c: env_mod.Check) !void {
-    const tag = @tagName(c);
-    for (tag) |ch| {
-        try w.writeByte(if (ch == '_') '-' else ch);
-    }
+    try writeDasherized(w, @tagName(c));
+}
+
+/// Write `s` with each `_` rewritten to `-` — the `.sexp`/JSON kebab-case
+/// spelling of a Zig enum tag name (`power_in` → `power-in`). Shared by the
+/// pin `type` field and the requirement `check_kind` renderer.
+fn writeDasherized(w: anytype, s: []const u8) !void {
+    for (s) |ch| try w.writeByte(if (ch == '_') '-' else ch);
 }
 
 fn writeJsonError(allocator: std.mem.Allocator, out: *std.ArrayList(u8), msg: []const u8) !bool {
@@ -859,6 +923,63 @@ test "parsePinoutBody handles integer, atom, and string pin IDs" {
     try std.testing.expectEqualStrings("1", pins[0].id);
     try std.testing.expectEqualStrings("K5", pins[1].id);
     try std.testing.expectEqualStrings("A1", pins[2].id);
+}
+
+test "describeComponent resolves pinout via symbol and reports the resolved ref" {
+    // spec: serve/component_info - describeComponent resolves the pinout via the symbol ref and reports it
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.makePath("lib/pinouts");
+    // Component declares only a (symbol …) — no (pinout …) form — and the
+    // symbol name carries a '#', exercising the verbatim-basename path.
+    const comp = "(component \"widget\"\n  (symbol \"gen#sym\")\n  (footprint fp))\n";
+    const pinout = "(pinout \"gen#sym\"\n  (pin 1 \"A\")\n  (pin 2 \"B\"))\n";
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/widget.sexp", .data = comp });
+    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/gen#sym.sexp", .data = pinout });
+    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(proj);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try std.testing.expect(try describeComponent(alloc, proj, "widget", &out));
+    // Resolved via the symbol ref (not the bare component name) and reported.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"pinout_ref\":\"gen#sym\"") != null);
+    // Pins loaded, keyed "pin" for consistency with list_free_pins.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"pins\":null") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "{\"pin\":\"1\",\"function\":\"A\"") != null);
+}
+
+test "describeComponent attaches the electrical type to each matching pin" {
+    // spec: serve/component_info - describeComponent attaches the electrical type to each matching pin
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.makePath("lib/pinouts");
+    const comp =
+        "(component \"reg\"\n" ++
+        "  (pinout \"reg\")\n" ++
+        "  (electrical \"EN/UV\" (type input))\n" ++
+        "  (electrical \"OUT\" (type output)))\n";
+    const pinout =
+        "(pinout \"reg\"\n" ++
+        "  (pin 3 \"EN/UV\")\n" ++
+        "  (pin 10 \"OUT\")\n" ++
+        "  (pin 1 \"VIN\"))\n";
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/reg.sexp", .data = comp });
+    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/reg.sexp", .data = pinout });
+    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(proj);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try std.testing.expect(try describeComponent(alloc, proj, "reg", &out));
+    // Declared pins carry their electrical type; an undeclared pad reports null.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"function\":\"EN/UV\",\"type\":\"input\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"function\":\"OUT\",\"type\":\"output\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"function\":\"VIN\",\"type\":null") != null);
 }
 
 test "findSourceComment extracts the regenerate_pinout source line" {
