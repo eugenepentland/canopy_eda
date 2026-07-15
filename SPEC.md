@@ -1054,6 +1054,7 @@ Public functions: cseEmail, csePassword, digikeyClientId, digikeyClientSecret, d
 
 - stripQuotes removes one layer of matching quotes
 - The ward cache ttl maps a zero or out-of-range value to the default and keeps valid values
+- The git auto-commit env gate disables only on a bare 0 and is enabled otherwise
 
 ## paths
 
@@ -1086,6 +1087,13 @@ Public functions: designSourcePath, designSiblingPath
 - The decoupling-loop overlay has its own visibility toggle, hidden by default
 - The Objects tab offers a selection filter that skips unchecked object types when clicking
 - Routing toward a same-net pad snaps the whole approach onto the pad centreline
+- The auto-commit author is the ward user, falling back to the dev-admin identity
+- The auto-commit parses porcelain status into a dirty-path set including a rename's source
+- The auto-commit always excludes history snapshots and backup artifacts
+- The auto-commit stages only new-or-changed paths, never pre-existing loose work
+- The auto-commit message names the tool and touched paths on one greppable line
+- A per-mutation auto-commit records only touched paths as the ward user, sparing loose work
+- The auto-commit is a silent no-op when the project dir is not a git repository
 
 ## fab_readiness
 

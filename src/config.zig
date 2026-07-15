@@ -89,6 +89,24 @@ pub fn devMode(allocator: std.mem.Allocator) bool {
     return true;
 }
 
+/// Whether the server's per-mutation git auto-commit is enabled. On by default
+/// (when `--project-dir` is a git repo); the operator disables it by setting
+/// `NETLISP_GIT_AUTOCOMMIT=0` (env or `.env`). Any other value — including
+/// unset — leaves it enabled. The env read lives here so the `ban-env` policy
+/// holds; callers receive a plain bool.
+pub fn gitAutocommitEnabled(allocator: std.mem.Allocator) bool {
+    const v = lookup(allocator, "NETLISP_GIT_AUTOCOMMIT") orelse return true;
+    defer allocator.free(v);
+    return gitAutocommitEnabledFromRaw(v);
+}
+
+/// Map a raw `NETLISP_GIT_AUTOCOMMIT` value onto the enabled bool: only a bare
+/// `0` disables; every other value (and, via the caller, unset) is enabled. A
+/// pure helper so the gate is testable without touching the process environment.
+fn gitAutocommitEnabledFromRaw(raw: []const u8) bool {
+    return !std.mem.eql(u8, std.mem.trim(u8, raw, whitespace), "0");
+}
+
 /// Ward verify endpoint (`WARD_VERIFY_URL`, e.g. http://127.0.0.1:9000/verify)
 /// the session middleware asks about each `ward_session` cookie. Null when
 /// unset — the serve layer then fails every session-gated request closed.
@@ -187,6 +205,20 @@ test "stripQuotes removes matching quotes only" {
     try std.testing.expectEqualStrings("abc", stripQuotes("'abc'"));
     try std.testing.expectEqualStrings("a\"b", stripQuotes("a\"b"));
     try std.testing.expectEqualStrings("\"abc'", stripQuotes("\"abc'"));
+}
+
+test "gitAutocommitEnabledFromRaw disables only on a bare zero" {
+    // spec: config - The git auto-commit env gate disables only on a bare 0 and is enabled otherwise
+    // A bare 0 (with surrounding whitespace tolerated) disables auto-commit.
+    try std.testing.expect(!gitAutocommitEnabledFromRaw("0"));
+    try std.testing.expect(!gitAutocommitEnabledFromRaw(" 0 "));
+    // Every other value keeps it enabled: the affirmative 1, a word, and the
+    // empty string (a bare `NETLISP_GIT_AUTOCOMMIT=` in `.env`).
+    try std.testing.expect(gitAutocommitEnabledFromRaw("1"));
+    try std.testing.expect(gitAutocommitEnabledFromRaw("true"));
+    try std.testing.expect(gitAutocommitEnabledFromRaw(""));
+    // A lookalike ("00") is not the disable sentinel.
+    try std.testing.expect(gitAutocommitEnabledFromRaw("00"));
 }
 
 test "wardCacheTtlFromRaw guards the i64 cast" {

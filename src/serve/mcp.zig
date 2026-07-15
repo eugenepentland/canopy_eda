@@ -13,6 +13,7 @@ const server_mod = @import("../serve.zig");
 const auth = @import("auth.zig");
 const ward_auth = @import("ward_auth.zig");
 const mcp_tools = @import("mcp_tools.zig");
+const autocommit = @import("autocommit.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 // JSON-RPC 2.0 standard error codes (RFC).
@@ -39,6 +40,9 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
 pub const Context = struct {
     handler: *server_mod.Server,
     role: ward_auth.Role,
+    /// The acting ward username, pinned at upgrade time so the auto-commit can
+    /// attribute this connection's mutations. Null on the dev bypass.
+    username: ?[]const u8,
 };
 
 /// Resolve the MCP role for this request from the ward identity the auth
@@ -48,6 +52,21 @@ pub const Context = struct {
 fn resolveRole(ctx: *server_mod.Server, req: *httpz.Request) ward_auth.Role {
     const bypass: ward_auth.DevBypass = if (auth.isLocalhostRequest(ctx, req)) .on else .off;
     return ward_auth.mcpRoleFromIdentity(ctx.mcp_identity, bypass);
+}
+
+/// The acting ward username the auth middleware resolved for this request (used
+/// to attribute an auto-commit), or null on the dev bypass.
+fn actingUsername(ctx: *server_mod.Server) ?[]const u8 {
+    const id = ctx.mcp_identity orelse return null;
+    return id.username;
+}
+
+/// Copy the (request-arena-owned) username into `allocator` so a WebSocket
+/// connection can outlive the upgrade request that resolved it. Null passes
+/// through unchanged (the dev bypass).
+fn dupUsername(allocator: std.mem.Allocator, username: ?[]const u8) !?[]const u8 {
+    const u = username orelse return null;
+    return try allocator.dupe(u8, u);
 }
 
 /// Parse a JSON-RPC frame and return the JSON response bytes (or null for a
@@ -61,6 +80,7 @@ pub fn dispatchFrame(
     project_dir: []const u8,
     data: []const u8,
     role: ward_auth.Role,
+    username: ?[]const u8,
 ) HandlerError!?[]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
         return parseErrorEnvelope(allocator);
@@ -91,7 +111,7 @@ pub fn dispatchFrame(
         return try resultEnvelope(allocator, id_val, mcp_tools.tools_list_result);
     }
     if (std.mem.eql(u8, method, "tools/call")) {
-        return try handleToolCall(allocator, project_dir, id_val, params, role);
+        return try handleToolCall(allocator, project_dir, id_val, params, role, username);
     }
     if (std.mem.eql(u8, method, "resources/list")) {
         return try handleResourcesList(allocator, project_dir, id_val);
@@ -112,6 +132,7 @@ fn handleToolCall(
     id_val: ?std.json.Value,
     params: ?std.json.Value,
     role: ward_auth.Role,
+    username: ?[]const u8,
 ) ![]const u8 {
     const p = params orelse return errorEnvelope(allocator, id_val, jsonrpc_invalid_params, "missing params");
     if (p != .object) return errorEnvelope(allocator, id_val, jsonrpc_invalid_params, "params must be an object");
@@ -133,8 +154,18 @@ fn handleToolCall(
 
     const args_val: ?std.json.Value = p.object.get("arguments");
 
+    // Snapshot the repo before a mutation so a successful call can commit just
+    // the paths it touched, authored as the acting ward user. Best-effort: a
+    // null session (auto-commit off / not a git repo) skips the commit, and the
+    // commit itself never fails the tool result.
+    const is_mutation = mcp_tools.isMutationTool(tool_name);
+    var ac_session = if (is_mutation) autocommit.begin(allocator, project_dir) else null;
+    defer if (ac_session) |*s| s.deinit();
+
     var content_buf: std.ArrayList(u8) = .empty;
     const call_result = mcp_tools.call(allocator, project_dir, tool_name, args_val, &content_buf);
+
+    if (is_mutation and call_result.ok) autocommit.commit(ac_session, username, tool_name);
 
     var result: std.ArrayList(u8) = .empty;
     const rw = result.writer(allocator);
@@ -287,17 +318,23 @@ pub const Client = struct {
     /// dev bypass. Fixed for the connection's lifetime so a client cannot
     /// escalate mid-connection.
     role: ward_auth.Role,
+    /// The acting ward username, pinned + copied at upgrade time (the upgrade
+    /// request's arena is freed once init returns, so the borrowed identity must
+    /// be duped into the connection-lifetime allocator). Null on the dev bypass.
+    username: ?[]const u8,
 
     pub fn init(conn: *websocket.Conn, ctx: *const Context) !Client {
+        // The Client outlives the upgrade request, whose handler carries a
+        // per-request arena — pin the connection's base allocator to the
+        // process allocator (per-message work runs in its own arena over it
+        // in `clientMessage`).
+        const base = std.heap.page_allocator;
         return .{
             .conn = conn,
-            // The Client outlives the upgrade request, whose handler carries a
-            // per-request arena — pin the connection's base allocator to the
-            // process allocator (per-message work runs in its own arena over it
-            // in `clientMessage`).
-            .allocator = std.heap.page_allocator,
+            .allocator = base,
             .project_dir = ctx.handler.project_dir,
             .role = ctx.role,
+            .username = try dupUsername(base, ctx.username),
         };
     }
 
@@ -308,7 +345,7 @@ pub const Client = struct {
         // The role was pinned at upgrade time from the ward identity (or the
         // dev bypass); it is fixed for the connection, so a client cannot
         // escalate mid-connection.
-        const reply_opt = dispatchFrame(aa, self.project_dir, data, self.role) catch |err| blk: {
+        const reply_opt = dispatchFrame(aa, self.project_dir, data, self.role, self.username) catch |err| blk: {
             log.warn("mcp dispatch error: {s}", .{@errorName(err)});
             break :blk @as(?[]const u8, null);
         };
@@ -321,7 +358,7 @@ pub const Client = struct {
 /// admitted the request under the dev bypass); pin the mapped role onto the
 /// connection so it is fixed for the connection's lifetime.
 pub fn upgrade(ctx: *server_mod.Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const upgrade_ctx = Context{ .handler = ctx, .role = resolveRole(ctx, req) };
+    const upgrade_ctx = Context{ .handler = ctx, .role = resolveRole(ctx, req), .username = actingUsername(ctx) };
     if (try httpz.upgradeWebsocket(Client, req, res, &upgrade_ctx) == false) {
         res.status = http_bad_request;
         res.body = "expected websocket upgrade";
@@ -345,7 +382,7 @@ pub fn postApi(ctx: *server_mod.Server, req: *httpz.Request, res: *httpz.Respons
     const aa = arena.allocator();
 
     const role = resolveRole(ctx, req);
-    const reply_opt = dispatchFrame(aa, ctx.project_dir, body, role) catch |err| {
+    const reply_opt = dispatchFrame(aa, ctx.project_dir, body, role, actingUsername(ctx)) catch |err| {
         log.warn("mcp dispatch error: {s}", .{@errorName(err)});
         res.status = http_internal_error;
         res.body = "internal error";
