@@ -111,7 +111,7 @@ where each is accepted: **D** = design-block top level,
 | `(diagram hidden)` | ·S· | Opt this section out of the block-diagram view (schematic card still renders). |
 | `(hosts "sub1" "sub2" …)` | ·S· | Fold the named sub-blocks into this section's block-diagram node (explicit attachment). |
 | `(category <key>)` | ·S· | Set this section's diagram category (e.g. mcu, power, rf), overriding the name heuristic. |
-| `(group …)` | D·· | Visual group annotation rendered in the schematic. |
+| `(group "name" ("R1" "R2" …))` | D·· | Bundle ref-des components for the schematic renderer's visual grouping pass. Members are a LIST of ref-des strings. NOTE: a different, unrelated (group …) form lives inside (diagram-layout …) — there it takes variadic block keys (section names / sub-block handles), e.g. (group "Label" "Block A" "Block B" …), to cluster diagram blocks; that one is parsed inline by the layout form, not this registry entry. |
 | `(function "name" ["caption"] [(stack N)] (hosts "Section A" "Section B" …))` | D·· | Hand-authored functional super-block for the top-level system view: groups the named sections/sheets into one what-it-does block (caption = verb/spec line, stack N = ×N identical channels). The editor map draws these as the outermost zoom level. |
 | `(sub-block "name" (module-call args…))` | D·· | Instantiate a parameterised module inside the design. Its parts flatten into the netlist under the sub-block path prefix and the PCB solver places them with the rest of the board. |
 | `(verifies (req "REF" REQID) [rationale])` | D·· | Mark a requirement as satisfied by a specific instance. |

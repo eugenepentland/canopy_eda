@@ -12,7 +12,7 @@
 170 src/eval/design_block.zig|evalSection
 147 src/eval/design_block.zig|evalSubSection
 200 src/eval/design_block.zig|materializeBlock
-194 src/eval/instance.zig|buildInstance
+192 src/eval/instance.zig|buildInstance
 129 src/eval/modules.zig|loadComponent
 266 src/eval/power_budget.zig|analyze
 145 src/export_kicad.zig|exportKicad
