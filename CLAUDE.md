@@ -792,6 +792,28 @@ then `build` to push the new version. Mutation tools
 return the new `live_version`, so the browser picks up changes via its
 existing 2 s poll of `/api/version/:name`.
 
+**Auto-commit of MCP mutations (`src/serve/autocommit.zig`).** When
+`--project-dir` is a git checkout (in prod `projects/designs` is its own
+repo), every **successful** MCP mutation is committed to git so multi-user
+agent work gets attribution, durable history, and recoverability for free.
+The seam is one choke point in `src/serve/mcp.zig`'s tool dispatcher (so the
+frozen `mcp_tools.zig` handlers are untouched): it snapshots the repo's
+dirty paths *before* the mutation and commits exactly the paths that became
+newly dirty *after* it (`after − before`). This means it is **path-scoped**
+— never `git add .`/`-A`, so loose uncommitted human work already in the tree
+is never swept in — and `history/` snapshots plus `*.bak-*`/`backups/`
+artifacts are always excluded. The commit is **authored** as the acting ward
+user (`--author="<username> <username@ward>"`; the dev-bypass path authors as
+`netlisp-dev`) with the committer left as the server
+(`netlisp <netlisp@server>`); the one-line message is
+`mcp: <tool> <paths…>`. It is **fail-open** — git missing, not a repo, a
+commit race, or any non-zero git exit is logged to stderr and swallowed, so
+the mutation result never fails because of git — and git index operations are
+serialized by a mutex. Enabled by default; set **`NETLISP_GIT_AUTOCOMMIT=0`**
+(env or `.env`) to disable. HTTP mutation endpoints (edit-value, layout
+saves, uploads, attach-datasheet) do **not** yet share this seam — they are a
+follow-up.
+
 ```bash
 # Connect from Claude Code — no --client-id/--client-secret: ward is the
 # authorization server, discovered (RFC 9728/8414) and registered dynamically

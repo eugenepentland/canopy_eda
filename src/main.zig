@@ -412,6 +412,7 @@ test {
     _ = @import("serve/digikey.zig");
     _ = @import("serve/rate_limiter.zig");
     _ = @import("serve/subprocess.zig");
+    _ = @import("serve/autocommit.zig");
     _ = @import("serve/datasheet.zig");
     _ = @import("serve/library.zig");
     _ = @import("serve/library_3d.zig");

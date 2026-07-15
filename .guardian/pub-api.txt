@@ -30,6 +30,7 @@ src/config.zig::digikeyClientId | fn digikeyClientId(allocator: std.mem.Allocato
 src/config.zig::digikeyClientSecret | fn digikeyClientSecret(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::digikeyMaxInFlight | fn digikeyMaxInFlight(allocator: std.mem.Allocator) u32
 src/config.zig::digikeyMinIntervalMs | fn digikeyMinIntervalMs(allocator: std.mem.Allocator) u64
+src/config.zig::gitAutocommitEnabled | fn gitAutocommitEnabled(allocator: std.mem.Allocator) bool
 src/config.zig::wardAuthServerUrl | fn wardAuthServerUrl(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::wardCacheTtlSecs | fn wardCacheTtlSecs(allocator: std.mem.Allocator, default: i64) i64
 src/config.zig::wardIntrospectUrl | fn wardIntrospectUrl(allocator: std.mem.Allocator) ?[]u8
@@ -902,6 +903,10 @@ src/serve/auth.zig::validatePluginBearerToken | fn validatePluginBearerToken(ctx
 src/serve/auth_store.zig::ensureAuthDir | fn ensureAuthDir(auth_dir: []const u8) void
 src/serve/auth_store.zig::sha256Hex | fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) std.mem.Allocator.Error![]u8
 src/serve/auth_store.zig::writeFileAtomicWithBackup | fn writeFileAtomicWithBackup(allocator: std.mem.Allocator, path: []const u8, data: []const u8) void
+src/serve/autocommit.zig::Session struct_
+src/serve/autocommit.zig::begin | fn begin(allocator: std.mem.Allocator, project_dir: []const u8) ?Session
+src/serve/autocommit.zig::commit | fn commit(session: ?Session, username: ?[]const u8, tool_name: []const u8) void
+src/serve/autocommit.zig::deinit | fn deinit(self: *Session) void
 src/serve/board_backup.zig::WriteFileAtomicError value
 src/serve/board_backup.zig::writeFileAtomic | fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, contents: []const u8) WriteFileAtomicError!void
 src/serve/bom_html.zig::BomCounts struct_
@@ -1062,7 +1067,7 @@ src/serve/mcp.zig::Client struct_
 src/serve/mcp.zig::Context struct_
 src/serve/mcp.zig::HandlerError value
 src/serve/mcp.zig::clientMessage | fn clientMessage(self: *Client, data: []const u8) !void
-src/serve/mcp.zig::dispatchFrame | fn dispatchFrame( allocator: std.mem.Allocator, project_dir: []const u8, data: []const u8, role: ward_auth.Role, ) HandlerError!?[]const u8
+src/serve/mcp.zig::dispatchFrame | fn dispatchFrame( allocator: std.mem.Allocator, project_dir: []const u8, data: []const u8, role: ward_auth.Role, username: ?[]const u8, ) HandlerError!?[]const u8
 src/serve/mcp.zig::init | fn init(conn: *websocket.Conn, ctx: *const Context) !Client
 src/serve/mcp.zig::postApi | fn postApi(ctx: *server_mod.Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/mcp.zig::upgrade | fn upgrade(ctx: *server_mod.Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
