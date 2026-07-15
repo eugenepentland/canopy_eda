@@ -63,6 +63,27 @@ pub fn insertPendingIds(
     try atomic.finish();
 }
 
+/// Persist an evaluator's auto-minted `(id …)` / `(ids …)` forms back into the
+/// design source at `source_path`, exactly as the CLI `netlisp build`
+/// (`commands.cmdBuild`) does after eval. The trigger is the same non-empty
+/// `pending_ids` / `pending_child_ids` condition `cmdBuild` uses, so a design
+/// whose ids are already pinned mints nothing and the file is never rewritten
+/// (its sha stays stable — a no-op build must not churn the source). Returns
+/// true iff a write happened. Errors are logged and swallowed — id persistence
+/// is best-effort, mirroring the CLI's non-fatal handling.
+pub fn persistMintedIds(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    eval: *const Evaluator,
+) bool {
+    if (eval.pending_ids.items.len == 0 and eval.pending_child_ids.items.len == 0) return false;
+    insertPendingIds(allocator, source_path, eval.pending_ids.items, eval.pending_child_ids.items) catch |err| {
+        log.warn("[id-insert] persist failed for {s}: {s}", .{ source_path, @errorName(err) });
+        return false;
+    };
+    return true;
+}
+
 /// Pure core of `insertPendingIds`: given the original `source` bytes, return a
 /// freshly allocated copy with all `(id …)` and `(ids …)` insertions applied.
 /// Factored out so the edit logic is testable without touching the filesystem.
@@ -344,4 +365,108 @@ test "sourceHasToken matches only a whole delimited atom" {
     try std.testing.expect(sourceHasToken("abcd1234 tail", "abcd1234"));
     // A mere substring of a longer atom must not match.
     try std.testing.expect(!sourceHasToken("(ids abcd12345)", "abcd1234"));
+}
+
+// spec: id_insert - persistMintedIds writes minted ids back like the CLI and is a no-op when nothing is pending
+test "persistMintedIds pins hierarchical sub-block ids, stays idempotent, and skips pinned designs" {
+    // page_allocator: the evaluator allocates from it and never frees (AST slices
+    // reference source buffers), so testing.allocator would flag intentional leaks.
+    const alloc = std.heap.page_allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(project_dir);
+
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.makePath("lib/modules");
+    try tmp.dir.makePath("src");
+    try tmp.dir.writeFile(.{
+        .sub_path = "lib/components/cap.sexp",
+        .data =
+        \\(component-family cap
+        \\  (param-type capacitance)
+        \\  (footprint "0402"))
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "lib/components/0402.sexp",
+        .data = "(component 0402 (footprint \"0402.kicad_mod\"))",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "lib/modules/mymod.sexp",
+        .data =
+        \\(defmodule mymod ()
+        \\  (design-block "M"
+        \\    (import cap)
+        \\    (instance "C1" (cap "100nF")
+        \\      (pin 1 "VDD")
+        \\      (pin 2 "GND"))))
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "src/hier.sexp",
+        .data =
+        \\(design-block "Hier"
+        \\  (hierarchical-ids)
+        \\  (import mymod)
+        \\  (sub-block "a" (mymod))
+        \\  (sub-block "b" (mymod)))
+        ,
+    });
+
+    const hier_path = try std.fmt.allocPrint(alloc, "{s}/src/hier.sexp", .{project_dir});
+    defer alloc.free(hier_path);
+    const before = try infra_fs.cwd().readFileAlloc(alloc, hier_path, 1 << 20);
+    defer alloc.free(before);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, before, "(id "));
+
+    // First rebuild: the two sub-blocks lack (id …), so persist mints + writes them.
+    {
+        var eval = Evaluator.init(alloc, project_dir);
+        defer eval.deinit();
+        _ = try eval.evalFile(hier_path);
+        try std.testing.expect(persistMintedIds(alloc, hier_path, &eval));
+    }
+    const after1 = try infra_fs.cwd().readFileAlloc(alloc, hier_path, 1 << 20);
+    defer alloc.free(after1);
+    try std.testing.expect(!std.mem.eql(u8, before, after1));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, after1, "(id "));
+
+    // Second rebuild: ids are now pinned, nothing pending → no write, bytes stable.
+    {
+        var eval = Evaluator.init(alloc, project_dir);
+        defer eval.deinit();
+        _ = try eval.evalFile(hier_path);
+        try std.testing.expect(!persistMintedIds(alloc, hier_path, &eval));
+    }
+    const after2 = try infra_fs.cwd().readFileAlloc(alloc, hier_path, 1 << 20);
+    defer alloc.free(after2);
+    try std.testing.expectEqualStrings(after1, after2);
+
+    // A flat design whose instance already carries an (id …) mints nothing — the
+    // trigger matches the CLI's, so an already-pinned flat/legacy file is untouched.
+    try tmp.dir.writeFile(.{
+        .sub_path = "src/flat.sexp",
+        .data =
+        \\(design-block "Flat"
+        \\  (import cap)
+        \\  (instance "C9" (cap "100nF") (id aabbccdd)
+        \\    (pin 1 "VDD")
+        \\    (pin 2 "GND")))
+        ,
+    });
+    const flat_path = try std.fmt.allocPrint(alloc, "{s}/src/flat.sexp", .{project_dir});
+    defer alloc.free(flat_path);
+    const flat_before = try infra_fs.cwd().readFileAlloc(alloc, flat_path, 1 << 20);
+    defer alloc.free(flat_before);
+    {
+        var eval = Evaluator.init(alloc, project_dir);
+        defer eval.deinit();
+        _ = try eval.evalFile(flat_path);
+        try std.testing.expect(!persistMintedIds(alloc, flat_path, &eval));
+    }
+    const flat_after = try infra_fs.cwd().readFileAlloc(alloc, flat_path, 1 << 20);
+    defer alloc.free(flat_after);
+    try std.testing.expectEqualStrings(flat_before, flat_after);
 }

@@ -22,6 +22,7 @@ const sexpr_parser = @import("../sexpr/parser.zig");
 const erc_mod = @import("../erc.zig");
 const diag_format = @import("diag_format.zig");
 const datasheet_attach = @import("datasheet_attach.zig");
+const id_insert = @import("../id_insert.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
@@ -2165,16 +2166,14 @@ pub fn rebuildDesign(
         },
     };
 
+    // Persist auto-minted sub-block uuids / pending ids back into source, like the CLI build.
+    _ = id_insert.persistMintedIds(allocator, path, &eval);
     var failures: std.ArrayList(AssertionFailure) = .empty;
     for (eval.assertions.items) |a| {
-        if (a.passed) continue;
-        failures.append(allocator, .{ .message = a.message, .is_warning = a.is_warning }) catch break;
+        if (!a.passed) failures.append(allocator, .{ .message = a.message, .is_warning = a.is_warning }) catch break;
     }
-
-    // Copy the evaluator's non-fatal warnings out before `eval.deinit()` frees
-    // the backing ArrayList. The message slices themselves are allocated from
-    // `allocator` (== eval.allocator) and never freed, so the copied span/ptr
-    // pairs stay valid after the report escapes — same convention as `failures`.
+    // Copy warnings out before `eval.deinit()` frees the list; the message slices
+    // live in `allocator` (== eval.allocator) and are never freed — see failures.
     var warnings: std.ArrayList(BuildWarning) = .empty;
     for (eval.warnings.items) |wn| {
         warnings.append(allocator, .{ .line = wn.span.line, .col = wn.span.col, .message = wn.message }) catch break;

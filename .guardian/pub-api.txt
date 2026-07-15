@@ -491,6 +491,7 @@ src/gerber_verify.zig::verifyCopperLayer | fn verifyCopperLayer( arena: std.mem.
 src/id_insert.zig::IdInsertError value
 src/id_insert.zig::applyInserts | fn applyInserts( allocator: std.mem.Allocator, source: []const u8, pending: []const Evaluator.PendingId, pending_child: []const Evaluator.PendingChildId, ) IdInsertError![]u8
 src/id_insert.zig::insertPendingIds | fn insertPendingIds( allocator: std.mem.Allocator, source_path: []const u8, pending: []const Evaluator.PendingId, pending_child: []const Evaluator.PendingChildId, ) IdInsertError!void
+src/id_insert.zig::persistMintedIds | fn persistMintedIds( allocator: std.mem.Allocator, source_path: []const u8, eval: *const Evaluator, ) bool
 src/import_fold.zig::FoldChannel struct_
 src/import_fold.zig::FoldCtx struct_
 src/import_fold.zig::FoldError value
