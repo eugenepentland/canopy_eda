@@ -1,0 +1,22 @@
+#!/bin/sh
+
+# Give every linked worktree the main checkout's Zig local cache. Git invokes
+# this hook after `git worktree add`, before the new checkout is normally built.
+set -eu
+
+worktree_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+main_root=${common_dir%/.git}
+
+# The main checkout owns the shared cache directory.
+[ "$worktree_root" != "$main_root" ] || exit 0
+
+cache_link="$worktree_root/.zig-cache"
+shared_cache="$main_root/.zig-cache"
+
+# Never replace an existing cache or link. Existing worktrees are migrated
+# separately after their Git state has been checked.
+[ ! -e "$cache_link" ] && [ ! -L "$cache_link" ] || exit 0
+
+mkdir -p "$shared_cache"
+ln -s "$shared_cache" "$cache_link"
