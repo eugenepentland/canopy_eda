@@ -38,6 +38,7 @@ const render_pcb_png = @import("../render_pcb_png.zig");
 const docgen = @import("../docgen.zig");
 const page_cache = @import("page_cache.zig");
 const datasheet = @import("datasheet.zig");
+const mcp_flatten = @import("mcp_flatten.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const name_field_prefix = "{\"name\":";
@@ -563,19 +564,25 @@ fn toolListHistory(allocator: std.mem.Allocator, project_dir: []const u8, args_v
 
 fn toolListInstances(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    return listInstances(allocator, project_dir, name, out.writer(allocator));
+    return listInstances(allocator, project_dir, name, scopeArg(args_val), out.writer(allocator));
 }
 
 fn toolListFreePins(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
-    return listFreePins(allocator, project_dir, name, ref, optionalString(args_val, "filter"), out.writer(allocator));
+    const opts: FreePinOpts = .{ .filter = optionalString(args_val, "filter"), .scope = scopeArg(args_val) };
+    return listFreePins(allocator, project_dir, name, ref, opts, out.writer(allocator));
 }
 
 fn toolGetNet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const net = requireString(args_val, "net") orelse return missingArg(out, allocator, "net");
-    return getNet(allocator, project_dir, name, net, out.writer(allocator));
+    return getNet(allocator, project_dir, name, net, scopeArg(args_val), out.writer(allocator));
+}
+
+/// Read the `flatten` boolean tool arg (default true) as a `Scope`.
+fn scopeArg(args_val: ?std.json.Value) Scope {
+    return if (optionalBool(args_val, "flatten") orelse true) .flat else .top_level;
 }
 
 fn toolDescribeComponent(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
@@ -1761,58 +1768,14 @@ fn diffSets(
     while (it4.next()) |e| if (!old_nets.contains(e.key_ptr.*)) try changed_nets.put(allocator, e.key_ptr.*, {});
 }
 
-/// Best-effort classification of a pinout function name. Used by
-/// `list_free_pins` to filter and annotate unassigned pins. Heuristics are
-/// tuned for STM32 / common MCU pinouts and will degrade gracefully (return
-/// `.other`) on unfamiliar names — callers should not treat this as authoritative.
-const PinCategory = enum { gpio, power, clock, analog, other };
+/// Introspection scope for the by-name read tools: `flat` walks the whole
+/// sub-block-flattened design tree (the default — the honest netlist an agent
+/// verifies against), `top_level` keeps the legacy top-level-only view.
+pub const Scope = enum { flat, top_level };
 
-fn classifyPin(function: []const u8) PinCategory {
-    if (function.len == 0) return .other;
-    // STM32-style port pin: P[A-Z][digits], optionally followed by alt-function text.
-    if (function.len >= 3 and function[0] == 'P' and function[1] >= 'A' and function[1] <= 'Z') {
-        var all_digits = true;
-        for (function[2..]) |c| {
-            if (c < '0' or c > '9') {
-                all_digits = false;
-                break;
-            }
-        }
-        if (all_digits) return .gpio;
-    }
-    // Power: VDD, VSS, VCC, VBAT, VBUS, VREF, VDDA…
-    if (std.mem.startsWith(u8, function, "V") and function.len >= 2) {
-        const rest = function[1..];
-        if (std.mem.startsWith(u8, rest, "DD")) return .power;
-        if (std.mem.startsWith(u8, rest, "SS")) return .power;
-        if (std.mem.startsWith(u8, rest, "CC")) return .power;
-        if (std.mem.startsWith(u8, rest, "BAT")) return .power;
-        if (std.mem.startsWith(u8, rest, "BUS")) return .power;
-        if (std.mem.startsWith(u8, rest, "REF")) return .power;
-    }
-    if (std.mem.eql(u8, function, "GND") or std.mem.startsWith(u8, function, "GND_")) return .power;
-    // Analog: ADC_IN*, A[DI]C prefix, AIN*
-    if (std.mem.startsWith(u8, function, "ADC") or
-        std.mem.startsWith(u8, function, "AIN") or
-        std.mem.startsWith(u8, function, "DAC"))
-        return .analog;
-    // Clock: OSC*, XTAL*, CLK / CLKIN / CLKOUT prefix
-    if (std.mem.startsWith(u8, function, "OSC") or
-        std.mem.startsWith(u8, function, "XTAL") or
-        std.mem.startsWith(u8, function, "CLK"))
-        return .clock;
-    return .other;
-}
-
-fn categoryName(c: PinCategory) []const u8 {
-    return switch (c) {
-        .gpio => "gpio",
-        .power => "power",
-        .clock => "clock",
-        .analog => "analog",
-        .other => "other",
-    };
-}
+/// `list_free_pins` options: the optional category `filter` plus the `scope`
+/// (bundled so the handler stays within the parameter budget).
+pub const FreePinOpts = struct { filter: ?[]const u8 = null, scope: Scope = .flat };
 
 /// Return a pointer to the evaluated DesignBlock for `name`, or an error string
 /// written to `w` and null return. Caller must call `eval.deinit()` on the
@@ -1821,6 +1784,7 @@ pub fn listInstances(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
+    scope: Scope,
     w: anytype,
 ) !bool {
     var eval = Evaluator.init(allocator, project_dir);
@@ -1836,6 +1800,7 @@ pub fn listInstances(
         },
     };
     const block = nb.block;
+    if (scope == .flat) return mcp_flatten.listInstancesFlat(allocator, &eval, block, w);
 
     try w.writeAll("{\"instances\":[");
     for (block.instances, 0..) |inst, i| {
@@ -1851,14 +1816,7 @@ pub fn listInstances(
         try w.writeAll(json_value_key);
         try json_writer.writeString(w, inst.value);
 
-        // Pin count: prefer explicit parts if present (multi-part symbol);
-        // else fall back to the symbol's pinout map size.
-        var pin_count: usize = 0;
-        if (inst.parts.len > 0) {
-            for (inst.parts) |p| pin_count += p.pins.len;
-        } else if (inst.symbol.len > 0) {
-            if (ids.getSymbolPins(&eval, inst.symbol)) |pm| pin_count = pm.count();
-        }
+        const pin_count = mcp_flatten.instancePinCount(&eval, inst.component, inst.symbol, inst.parts);
         try w.print(",\"pin_count\":{d}}}", .{pin_count});
     }
     try w.writeAll("]}");
@@ -1873,9 +1831,10 @@ pub fn listFreePins(
     project_dir: []const u8,
     name: []const u8,
     ref_des: []const u8,
-    filter: ?[]const u8,
+    opts: FreePinOpts,
     w: anytype,
 ) ToolError!bool {
+    const filter = opts.filter;
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
@@ -1889,6 +1848,7 @@ pub fn listFreePins(
         },
     };
     const block = nb.block;
+    if (opts.scope == .flat) return mcp_flatten.listFreePinsFlat(allocator, &eval, block, ref_des, filter, w);
 
     var target: ?*const env_mod.Instance = null;
     for (block.instances) |*inst| {
@@ -1936,15 +1896,15 @@ pub fn listFreePins(
         const pin_id = e.key_ptr.*;
         if (assigned.contains(pin_id)) continue;
         const fname = e.value_ptr.*;
-        const cat = classifyPin(fname);
-        if (filter) |f| if (!std.mem.eql(u8, f, categoryName(cat))) continue;
+        const cat = mcp_flatten.classifyPin(fname);
+        if (filter) |f| if (!std.mem.eql(u8, f, mcp_flatten.categoryName(cat))) continue;
         if (!first) try w.writeAll(",");
         first = false;
         try w.writeAll("{\"pin\":");
         try json_writer.writeString(w, pin_id);
         try w.writeAll(function_field);
         try json_writer.writeString(w, fname);
-        try w.print(",\"category\":\"{s}\"}}", .{categoryName(cat)});
+        try w.print(",\"category\":\"{s}\"}}", .{mcp_flatten.categoryName(cat)});
     }
     try w.writeAll("],\"assigned_pins\":[");
     var it2 = pin_map.iterator();
@@ -1953,8 +1913,8 @@ pub fn listFreePins(
         const pin_id = e.key_ptr.*;
         const net_name = assigned.get(pin_id) orelse continue;
         const fname = e.value_ptr.*;
-        const cat = classifyPin(fname);
-        if (filter) |f| if (!std.mem.eql(u8, f, categoryName(cat))) continue;
+        const cat = mcp_flatten.classifyPin(fname);
+        if (filter) |f| if (!std.mem.eql(u8, f, mcp_flatten.categoryName(cat))) continue;
         if (!first2) try w.writeAll(",");
         first2 = false;
         try w.writeAll("{\"pin\":");
@@ -1963,7 +1923,7 @@ pub fn listFreePins(
         try json_writer.writeString(w, fname);
         try w.writeAll(json_net_key);
         try json_writer.writeString(w, net_name);
-        try w.print(",\"category\":\"{s}\"}}", .{categoryName(cat)});
+        try w.print(",\"category\":\"{s}\"}}", .{mcp_flatten.categoryName(cat)});
     }
     try w.writeAll("]}");
     return true;
@@ -1976,6 +1936,7 @@ pub fn getNet(
     project_dir: []const u8,
     name: []const u8,
     net_name: []const u8,
+    scope: Scope,
     w: anytype,
 ) !bool {
     var eval = Evaluator.init(allocator, project_dir);
@@ -1991,6 +1952,7 @@ pub fn getNet(
         },
     };
     const block = nb.block;
+    if (scope == .flat) return mcp_flatten.getNetFlat(allocator, &eval, block, net_name, w);
 
     var target: ?*const env_mod.Net = null;
     for (block.nets) |*n| {

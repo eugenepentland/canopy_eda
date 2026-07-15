@@ -299,6 +299,7 @@ Public functions: worldShape, pointDist, shapeGap
 - extractSection returns one ## section of the rendered reference, matching the title case-insensitively
 - SectionIterator walks every ## heading of the rendered reference in order
 - The generated reference names every category key so (category …) docs follow the classifier map
+- The generated reference has a Requirement checks section rendered from the checker's check_docs table
 
 ## eval/fmt
 
@@ -314,6 +315,11 @@ Public functions: worldShape, pointDist, shapeGap
 
 - Stores and retrieves values by name in an environment
 - Resolves names through a parent environment chain
+
+## eval/check_grammar
+
+- every check_docs row's syntax leads with the kebab-case keyword parseCheck dispatches on
+- parseCheck dispatches every documented check keyword to its Check variant via check_docs
 
 ## eval/pin_enrichment
 
@@ -906,9 +912,12 @@ Public functions: describeComponent, listRequirements, addRequirement, removeReq
 - kebab-cases every Check variant tag
 - findSourceComment finds the source-of-truth path
 - parsePinoutBody normalises pin ID shapes
+- describeComponent resolves the pinout via the symbol ref and reports it
+- describeComponent attaches the electrical type to each matching pin
 - listRequirements returns each requirement with its derived id
 - addRequirement appends a requirement form before the component close
 - addRequirement rejects a check clause the checker does not recognize
+- addRequirement rejection names the accepted check primitives and reference section
 - removeRequirement deletes a requirement by id or exact text
 - formEnd skips parens inside string literals
 - add list and remove requirement round-trip on disk
@@ -1019,6 +1028,11 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 - list_library with a query returns only fuzzily-matching entries ranked best-first
 - list_library without a query (or a blank one) lists every entry
 - The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
+- flatten makes list_instances include sub-block children with prefixed refs and origins
+- list_instances counts pins from the component pinout when the part declares no symbol
+- flatten makes get_net return the merged rail and resolve a sub-scoped net spelling
+- flatten makes list_free_pins match a flattened child by name and read merged assignments
+- flatten merges a sub-block stitch written against a port name whose module net differs
 
 ## config
 

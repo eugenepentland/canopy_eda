@@ -8,6 +8,8 @@
 //!   - `src/eval/fmt.zig`            `(fmt …)` directive table
 //!   - `src/sexpr/tokenizer.zig`     SI numeric-literal suffix tables
 //!   - `src/render_block_types.zig`  section-name classifier keywords
+//!   - `src/eval/check_grammar.zig`  requirement-check grammar (`check_docs`,
+//!                                   the same table `parseCheck` dispatches on)
 //!
 //! Three enforcement layers keep it honest: `requireAllDocumented` in
 //! forms.zig turns an undocumented form into a compile error; per-table
@@ -21,6 +23,7 @@ const forms = @import("eval/forms.zig");
 const fmt_mod = @import("eval/fmt.zig");
 const tokenizer_mod = @import("sexpr/tokenizer.zig");
 const block_types = @import("render_block_types.zig");
+const check_grammar = @import("eval/check_grammar.zig");
 const numeric = @import("numeric.zig");
 
 /// Render the full Markdown reference. The output is deterministic — the
@@ -161,6 +164,14 @@ fn renderTo(writer: anytype) !void {
         try writer.writeAll(" |\n");
     }
 
+    try renderClassifierKeywords(writer);
+
+    try renderRequirementChecks(writer);
+}
+
+/// Render the "Section-name classifier keywords" section from the
+/// `render_block_types` name-rule table and the `Category` enum.
+fn renderClassifierKeywords(writer: anytype) !void {
     try writer.writeAll(
         \\
         \\## Section-name classifier keywords
@@ -190,6 +201,39 @@ fn renderTo(writer: anytype) !void {
         try writer.print("`{s}`", .{@tagName(cat)});
     }
     try writer.writeAll(".\n");
+}
+
+/// Render the "Requirement checks" section from `check_grammar.check_docs` —
+/// the same table `parseCheck` dispatches on, so the documented grammar can
+/// never drift from the checker.
+fn renderRequirementChecks(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Requirement checks
+        \\
+        \\Machine-checkable rules that hang off a library
+        \\`(requirement "text" (check …))` form — the executable half of a
+        \\datasheet rule. Each is evaluated per placement of the part against
+        \\its **containing block** (a sub-block's check sees the sub-block's
+        \\nets, not the parent's). Pin references use the pinout **function
+        \\name** (`"VDD"`, `"EP"`) or a physical pad id. A rule is inherited by
+        \\every design instantiating the part; outcomes surface in `netlisp
+        \\check`, the review doc, and the MCP `run_checks` /
+        \\`list_component_requirements` tools. Author them with the
+        \\`add_component_requirement` MCP tool, whose `check` argument is one
+        \\`(check …)` form using one of the primitives below.
+        \\
+        \\| Check form | Asserts (against the containing block) |
+        \\| --- | --- |
+        \\
+    );
+    for (check_grammar.check_docs) |d| {
+        try writer.writeAll("| `");
+        try writeCell(writer, d.syntax);
+        try writer.writeAll("` | ");
+        try writeCell(writer, d.summary);
+        try writer.writeAll(" |\n");
+    }
 }
 
 /// Slice one `## `-headed section out of a rendered reference (heading
@@ -332,4 +376,21 @@ test "category keys section covers the classifier map" {
     for (block_types.category_keys.keys()) |key| {
         try std.testing.expect(std.meta.stringToEnum(block_types.Category, key) != null);
     }
+}
+
+// spec: docgen - The generated reference has a Requirement checks section rendered from the checker's check_docs table
+test "requirement checks section covers every check form" {
+    const alloc = std.testing.allocator;
+    const doc = try renderLanguageReference(alloc);
+    defer alloc.free(doc);
+
+    const sec = extractSection(doc, "Requirement checks").?;
+    try std.testing.expect(std.mem.startsWith(u8, sec, "## Requirement checks"));
+    // Each row of the checker's own dispatch table must be documented here —
+    // the summaries carry no `|`, so they survive verbatim into the cell.
+    for (check_grammar.check_docs) |d| {
+        try std.testing.expect(std.mem.indexOf(u8, sec, d.summary) != null);
+    }
+    // And the section is addressable by the MCP get_language_reference tool.
+    try std.testing.expect(extractSection(doc, "requirement checks") != null);
 }

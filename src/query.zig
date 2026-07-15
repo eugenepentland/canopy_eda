@@ -77,6 +77,20 @@ fn projectDir(args: []const []const u8) []const u8 {
     return optArg(args, "--project-dir") orelse ".";
 }
 
+/// True when the boolean flag `flag` appears anywhere in `args`.
+fn hasFlag(args: []const []const u8, flag: []const u8) bool {
+    for (args) |a| if (std.mem.eql(u8, a, flag)) return true;
+    return false;
+}
+
+/// Opt out of sub-block flattening (the introspection default) with this flag.
+const top_level_flag = "--top-level";
+
+/// Introspection scope: flattened by default, top-level-only with `--top-level`.
+fn scopeOf(args: []const []const u8) mcp_tools.Scope {
+    return if (hasFlag(args, top_level_flag)) .top_level else .flat;
+}
+
 /// Print a usage line and exit non-zero.
 fn usage(line: []const u8) noreturn {
     exit.fatal("Usage: netlisp {s}\n", .{line});
@@ -93,10 +107,10 @@ fn emit(bytes: []const u8) !void {
 
 /// `netlisp instances <design>` — every placed part as JSON.
 pub fn cmdInstances(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
-    const name = nthPositional(args, 0) orelse usage("instances [--project-dir <d>] <design>");
+    const name = nthPositional(args, 0) orelse usage("instances [--project-dir <d>] [--top-level] <design>");
     var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
-    const ok = mcp_tools.listInstances(allocator, projectDir(args), name, w) catch |e| {
+    const ok = mcp_tools.listInstances(allocator, projectDir(args), name, scopeOf(args), w) catch |e| {
         exit.fatal("instances: {s}: {s}\n", .{ name, @errorName(e) });
     };
     try emit(buf.items);
@@ -105,11 +119,11 @@ pub fn cmdInstances(allocator: std.mem.Allocator, args: []const []const u8) Quer
 
 /// `netlisp net <design> <net>` — every pin + passive on a net, as JSON.
 pub fn cmdNet(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
-    const name = nthPositional(args, 0) orelse usage("net [--project-dir <d>] <design> <net>");
-    const net = nthPositional(args, 1) orelse usage("net [--project-dir <d>] <design> <net>");
+    const name = nthPositional(args, 0) orelse usage("net [--project-dir <d>] [--top-level] <design> <net>");
+    const net = nthPositional(args, 1) orelse usage("net [--project-dir <d>] [--top-level] <design> <net>");
     var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
-    const ok = mcp_tools.getNet(allocator, projectDir(args), name, net, w) catch |e| {
+    const ok = mcp_tools.getNet(allocator, projectDir(args), name, net, scopeOf(args), w) catch |e| {
         exit.fatal("net: {s}/{s}: {s}\n", .{ name, net, @errorName(e) });
     };
     try emit(buf.items);
@@ -119,13 +133,14 @@ pub fn cmdNet(allocator: std.mem.Allocator, args: []const []const u8) QueryError
 /// `netlisp free-pins <design> <ref> [--category gpio|power|clock|analog|other]`
 /// — unassigned pins on an instance, with function names + classification.
 pub fn cmdFreePins(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
-    const spec = "free-pins [--project-dir <d>] <design> <ref> [--category gpio|power|clock|analog|other]";
+    const spec = "free-pins [--project-dir <d>] [--top-level] <design> <ref> [--category CAT]";
     const name = nthPositional(args, 0) orelse usage(spec);
     const ref = nthPositional(args, 1) orelse usage(spec);
     const category = optArg(args, "--category");
     var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
-    const ok = mcp_tools.listFreePins(allocator, projectDir(args), name, ref, category, w) catch |e| {
+    const opts: mcp_tools.FreePinOpts = .{ .filter = category, .scope = scopeOf(args) };
+    const ok = mcp_tools.listFreePins(allocator, projectDir(args), name, ref, opts, w) catch |e| {
         exit.fatal("free-pins: {s}/{s}: {s}\n", .{ name, ref, @errorName(e) });
     };
     try emit(buf.items);

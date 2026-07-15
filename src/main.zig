@@ -371,6 +371,7 @@ test {
     _ = @import("sexpr/parser.zig");
     _ = @import("sexpr/printer.zig");
     _ = @import("eval/env.zig");
+    _ = @import("eval/check_grammar.zig");
     _ = @import("eval/instance.zig");
     _ = @import("eval/builders.zig");
     _ = @import("eval/forms.zig");
@@ -442,6 +443,7 @@ test {
     _ = @import("serve/upload.zig");
     _ = @import("serve/component_info.zig");
     _ = @import("serve/design_diff.zig");
+    _ = @import("serve/mcp_flatten.zig");
     _ = @import("serve/datasheet_attach.zig");
     _ = @import("serve/page_cache.zig");
     _ = @import("deflate.zig");

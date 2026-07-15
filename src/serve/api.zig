@@ -752,7 +752,7 @@ pub fn freePinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     const w = buf.writer(ctx.allocator);
-    const ok = mcp_tools.listFreePins(ctx.allocator, ctx.project_dir, name, ref_des, null, w) catch {
+    const ok = mcp_tools.listFreePins(ctx.allocator, ctx.project_dir, name, ref_des, .{}, w) catch {
         res.status = http_internal_error;
         res.body = "{\"error\":\"internal\"}";
         return;

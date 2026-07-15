@@ -176,6 +176,10 @@ src/eval/builders.zig::processPinForm | fn processPinForm( self: *Evaluator, pin
 src/eval/builders.zig::warnUnknownPinsChild | fn warnUnknownPinsChild(self: *Evaluator, node: Node) void
 src/eval/builtins.zig::BuiltinError value
 src/eval/builtins.zig::evalBuiltinOp | fn evalBuiltinOp(op: Builtin, args: []const Value) BuiltinError!Value
+src/eval/check_grammar.zig::CheckDoc struct_
+src/eval/check_grammar.zig::check_docs value
+src/eval/check_grammar.zig::check_keyword_list value
+src/eval/check_grammar.zig::parseCheck | fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check
 src/eval/design_block.zig::evalDesignBlock | fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/design_block.zig::materializeBlock | fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const Node, env: *Env) EvalError!Value
 src/eval/electrical.zig::parse | fn parse(form_children: []const Node) ?ElectricalDecl
@@ -264,7 +268,6 @@ src/eval/env.zig::init | fn init(allocator: std.mem.Allocator, parent: ?*Env) En
 src/eval/env.zig::isPowerSource | fn isPowerSource(self: Port) bool
 src/eval/env.zig::isTestPoint | fn isTestPoint(component: []const u8) bool
 src/eval/env.zig::isTruthy | fn isTruthy(self: Value) bool
-src/eval/env.zig::parseCheck | fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check
 src/eval/env.zig::parseNoteRef | fn parseNoteRef(node: ast.Node) ?NoteRef
 src/eval/env.zig::put | fn put(self: *Env, name: []const u8, value: Value) !void
 src/eval/env.zig::refStyle | fn refStyle(self: DesignBlock) RefStyle
@@ -1069,18 +1072,27 @@ src/serve/mcp.zig::upgrade | fn upgrade(ctx: *server_mod.Server, req: *httpz.Req
 src/serve/mcp_docs.zig::ParamDoc struct_
 src/serve/mcp_docs.zig::ToolDoc struct_
 src/serve/mcp_docs.zig::mcpDocsPage | fn mcpDocsPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/mcp_flatten.zig::PinCategory enum_
+src/serve/mcp_flatten.zig::categoryName | fn categoryName(c: PinCategory) []const u8
+src/serve/mcp_flatten.zig::classifyPin | fn classifyPin(function: []const u8) PinCategory
+src/serve/mcp_flatten.zig::getNetFlat | fn getNetFlat( allocator: std.mem.Allocator, eval: *Evaluator, block: *const env_mod.DesignBlock, query: []const u8, w: anytype, ) !bool
+src/serve/mcp_flatten.zig::instancePinCount | fn instancePinCount( eval: *Evaluator, component: []const u8, symbol: []const u8, parts: []const env_mod.Part, ) usize
+src/serve/mcp_flatten.zig::listFreePinsFlat | fn listFreePinsFlat( allocator: std.mem.Allocator, eval: *Evaluator, block: *const env_mod.DesignBlock, ref_des: []const u8, filter: ?[]const u8, w: anytype, ) !bool
+src/serve/mcp_flatten.zig::listInstancesFlat | fn listInstancesFlat( allocator: std.mem.Allocator, eval: *Evaluator, block: *const env_mod.DesignBlock, w: anytype, ) !bool
 src/serve/mcp_tools.zig::CallResult struct_
 src/serve/mcp_tools.zig::DesignSummary struct_
+src/serve/mcp_tools.zig::FreePinOpts struct_
 src/serve/mcp_tools.zig::NamedBlock struct_
+src/serve/mcp_tools.zig::Scope enum_
 src/serve/mcp_tools.zig::ToolError value
 src/serve/mcp_tools.zig::call | fn call( allocator: std.mem.Allocator, project_dir: []const u8, tool_name: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) CallResult
 src/serve/mcp_tools.zig::evalNamedBlock | fn evalNamedBlock( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, eval: *Evaluator, ) ToolError!NamedBlock
-src/serve/mcp_tools.zig::getNet | fn getNet( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, net_name: []const u8, w: anytype, ) !bool
+src/serve/mcp_tools.zig::getNet | fn getNet( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, net_name: []const u8, scope: Scope, w: anytype, ) !bool
 src/serve/mcp_tools.zig::isMutationTool | fn isMutationTool(name: []const u8) bool
 src/serve/mcp_tools.zig::listDesignNames | fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) ToolError![][]const u8
 src/serve/mcp_tools.zig::listDesignSummaries | fn listDesignSummaries( allocator: std.mem.Allocator, project_dir: []const u8, ) ToolError![]DesignSummary
-src/serve/mcp_tools.zig::listFreePins | fn listFreePins( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, filter: ?[]const u8, w: anytype, ) ToolError!bool
-src/serve/mcp_tools.zig::listInstances | fn listInstances( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, w: anytype, ) !bool
+src/serve/mcp_tools.zig::listFreePins | fn listFreePins( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, opts: FreePinOpts, w: anytype, ) ToolError!bool
+src/serve/mcp_tools.zig::listInstances | fn listInstances( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, scope: Scope, w: anytype, ) !bool
 src/serve/mcp_tools.zig::listLibrarySubdir | fn listLibrarySubdir( allocator: std.mem.Allocator, project_dir: []const u8, sub: []const u8, query: ?[]const u8, w: anytype, ) !void
 src/serve/mcp_tools.zig::renderSceneGraph | fn renderSceneGraph( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ToolError![]const u8
 src/serve/mcp_tools.zig::runErcForNamedBlock | fn runErcForNamedBlock( allocator: std.mem.Allocator, nb: NamedBlock, project_dir: []const u8, ) std.mem.Allocator.Error![]const erc_mod.Violation
