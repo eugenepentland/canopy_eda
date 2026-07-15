@@ -395,6 +395,7 @@ Public functions: worldShape, pointDist, shapeGap
 - insertPendingIds aborts on a duplicate pending token
 - insertPendingIds aborts when a pending id already exists in the source
 - insertPendingIds writes a child (ids …) sidecar and stays idempotent
+- persistMintedIds writes minted ids back like the CLI and is a no-op when nothing is pending
 
 ## convert/footprint
 
