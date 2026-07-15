@@ -1,0 +1,29 @@
+<div id="lib-court-modal" class="court-modal" hidden>
+  <div class="court-dialog">
+    <div class="court-h">
+      <span id="lib-court-title">Courtyard</span>
+      <button id="lib-court-x" class="court-x" type="button" title="Close">×</button>
+    </div>
+    <svg id="lib-court-svg" class="court-svg" viewBox="0 0 260 220" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div class="court-mode">
+      <label><input type="radio" name="lib-court-mode" value="size" checked> Overall size</label>
+      <label><input type="radio" name="lib-court-mode" value="offset"> Pad offset</label>
+    </div>
+    <div class="court-fields" id="lib-court-fields-size">
+      <label>left <input id="lib-court-x0" type="number" step="0.1"></label>
+      <label>top <input id="lib-court-y0" type="number" step="0.1"></label>
+      <label>right <input id="lib-court-x1" type="number" step="0.1"></label>
+      <label>bottom <input id="lib-court-y1" type="number" step="0.1"></label>
+    </div>
+    <div class="court-fields" id="lib-court-fields-offset" hidden>
+      <label>Offset from pads <input id="lib-court-off" type="number" step="0.05" min="0"> mm</label>
+    </div>
+    <div id="lib-court-full" class="court-full"></div>
+    <div class="court-note" id="lib-court-note"></div>
+    <div class="court-actions">
+      <button id="lib-court-save" class="btn" type="button">Save courtyard</button>
+      <button id="lib-court-cancel" class="btn" type="button">Cancel</button>
+      <span id="lib-court-msg" class="savemsg"></span>
+    </div>
+  </div>
+</div>

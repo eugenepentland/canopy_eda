@@ -316,6 +316,7 @@ KiCad sync sidecars live next to the `.kicad_pcb` (not in `projects/designs/`):
 | GET | `/schematics/:name` | Schematic viewer page. |
 | GET | `/review/:name` | Review-doc HTML page. |
 | GET | `/library` | Library upload page. |
+| POST | `/api/library-courtyard/:name` | Rewrite a library footprint's rectangular courtyard from the Library editor. |
 | GET | `/pdf-view/:filename` | Datasheet PDF viewer. |
 | GET | `/datasheets/:filename` | Serve a datasheet PDF. |
 

@@ -1072,6 +1072,7 @@ Public functions: designSourcePath, designSiblingPath
 
 ## Web Server
 
+- Library previews edit footprint courtyards with PCB-style controls
 - Footprint preview reports exact geometry bounds separately from its padded SVG viewport
 - A saved layout round-trips a polygon board outline; the rect fields are re-derived as its bbox
 - Inner-layer copper (l ≥ 2) round-trips the sidecar; legacy entries without an l stay top copper

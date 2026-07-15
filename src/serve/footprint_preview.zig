@@ -10,6 +10,8 @@ const ast = @import("../sexpr/ast.zig");
 const Node = ast.Node;
 const export_kicad = @import("../export_kicad.zig");
 const footprint_mod = @import("../export_kicad_footprint.zig");
+const geometry = @import("../placement/geometry.zig");
+const optimizer = @import("../placement/optimizer.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const numeric = @import("../numeric.zig");
@@ -306,8 +308,10 @@ fn grow(b: *BBox, x: f64, y: f64) void {
 }
 
 /// Emit the footprint as a JSON description for the shared client renderer:
-/// `{bbox, bounds, pads, silk, fab, courtyard}`. `bounds` is the exact union of
-/// the footprint geometry; `bbox` adds display padding for the SVG viewport.
+/// `{bbox, bounds, editor, pads, silk, fab, courtyard}`. `bounds` is the exact
+/// union of the footprint geometry; `bbox` adds display padding for the SVG
+/// viewport. `editor` exposes the placement grid and effective-courtyard margin
+/// so the library editor uses the same sizing rules as the PCB editor.
 /// The renderer draws courtyard (dashed) behind fab + silkscreen, with pads
 /// (polygon/circle/oval/rect + id label) on top — see
 /// `/static/footprint_svg.js`.
@@ -324,6 +328,9 @@ fn emitFootprintJson(w: anytype, shapes: Shapes) HandlerError!void {
     });
     try w.print(",\"bounds\":{{\"x\":{d:.3},\"y\":{d:.3},\"w\":{d:.3},\"h\":{d:.3}}}", .{
         bounds.min_x, bounds.min_y, bounds.max_x - bounds.min_x, bounds.max_y - bounds.min_y,
+    });
+    try w.print(",\"editor\":{{\"grid\":{d:.3},\"margin\":{d:.3}}}", .{
+        optimizer.grid_mm, geometry.bbox_margin_mm,
     });
 
     try w.writeAll(",\"pads\":[");
@@ -695,4 +702,5 @@ test "footprint preview JSON separates geometry bounds from viewport padding" {
         "{\"x\":-1.000,\"y\":-1.000,\"w\":4.000,\"h\":6.000}";
     try std.testing.expect(std.mem.indexOf(u8, json, viewport_json) != null);
     try std.testing.expect(std.mem.indexOf(u8, json, bounds_json) != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"editor\":{\"grid\":0.100,\"margin\":0.150}") != null);
 }
