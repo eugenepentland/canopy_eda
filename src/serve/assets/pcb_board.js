@@ -2070,14 +2070,23 @@ if(clrIn)clrIn.addEventListener("input",drawClr);
 // Save/Update (routes ride the sidecar), so a module's hand routing saved on
 // its own page is exactly what Stamp later carries onto a parent board.
 var drawMode=false,dtrace=null,drawCur=null,drawShift=false;
-function trackW(){var v=parseFloat((document.getElementById("r-tw")||{}).value);return v>0?v:0.25;}
+var DRAW_W_KEY="pcb-draw-width:"+(PCB.name||"");
+function baseTrackW(){var v=parseFloat((document.getElementById("r-tw")||{}).value);return v>0?v:0.25;}
+function trackW(net){var s=document.getElementById("r-dw"),mode=s?s.value:"net",v;
+ if(mode==="net"){var c=netClassInfo(net||"");v=c&&parseFloat(c.width);return v>0?v:baseTrackW();}
+ if(mode==="custom")return baseTrackW();v=parseFloat(mode);return v>0?v:baseTrackW();}
+function drawWidthInit(){var s=document.getElementById("r-dw");if(!s)return;
+ try{var saved=localStorage.getItem(DRAW_W_KEY);if(saved&&s.querySelector('option[value="'+saved+'"]'))s.value=saved;}catch(e){}
+ s.addEventListener("change",function(){try{localStorage.setItem(DRAW_W_KEY,s.value);}catch(e){}
+  if(dtrace&&dtrace.n===0)dtrace.w=trackW(dtrace.net);drawBtnSync();ovPaintSoon();});}
+drawWidthInit();
 // Tool-strip radio state + the status bar's tool segment. The Select tool
 // lights up whenever no drawing mode is armed.
 function toolSync(){
  var ruler=!!PCB.rulerOn;
  var any=drawMode||textMode||polyMode||outlineMode||ruler;
  var sb=document.getElementById("tool-select");if(sb)sb.classList.toggle("on",!any);
- stSet("st-tool",drawMode?(dtrace?("route "+nLeaf(dtrace.net)+" · "+layerName(dtrace.l)):("route · "+layerName(activeLayer)))
+ stSet("st-tool",drawMode?(dtrace?("route "+nLeaf(dtrace.net)+" · "+layerName(dtrace.l)+" · "+dtrace.w+" mm"):("route · "+layerName(activeLayer)))
   :(textMode?"text":(polyMode?"poly outline":(outlineMode?"outline":(ruler?"measure":""))))); }
 function drawBtnSync(){var b=document.getElementById("pcb-draw");if(!b)return;
  b.classList.toggle("on",drawMode);
@@ -2091,6 +2100,7 @@ function drawBtnSync(){var b=document.getElementById("pcb-draw");if(!b)return;
  else b.textContent=lbl;
  toolSync();}
 function drawModeSet(on){if(RO)return;drawMode=on;if(!on)dtrace=null;
+ if(on){var rc=document.querySelector('.tab-chip[data-panel="panel-route"]');if(rc&&!rc.classList.contains("active"))rc.click();}
  if(on&&outlineMode)outlineArm(false);
  if(on&&polyMode)polyArm(false);
  if(on&&textMode)txArm(false);
@@ -2319,7 +2329,7 @@ function drawStart(net,layer,x,y,pi,pd){
  var dests=drawDests(pi,pd);
  if(dests.length)routeStatMsg("route "+nLeaf(net)+" → "+
   dests.map(function(d){return P[d.i].ref;}).join(", "));
- return {net:net,l:layer,w:trackW(),lx:x,ly:y,n:0,undo:snapAll(),laid:[],dest:dests};}
+ return {net:net,l:layer,w:trackW(net),lx:x,ly:y,n:0,undo:snapAll(),laid:[],dest:dests};}
 function drawClick(m,shift){
  if(!dtrace){var pt=padTarget(m);
   if(pt&&pt.net){dtrace=drawStart(pt.net,pt.l,pt.x,pt.y,pt.i,pt.pd);drawBtnSync();ovPaintSoon();return;}
@@ -2565,7 +2575,9 @@ function inspHitForPart(m,pi){var d=inspHitDrc(m);if(d)return {t:"drc",o:d};
 function anyDrawTool(){return drawMode||textMode||polyMode||outlineMode||!!PCB.rulerOn;}
 function n2(v){return (+v).toFixed(2);}
 function netClassInfo(net){var hit=null;(PCB.netclasses||[]).some(function(c){
- if(c.net===net){hit=c;return true;}return false;});return hit;}
+ if(c.net===net){hit=c;return true;}return false;});if(hit)return hit;
+ var key=netCollapse(net);(PCB.netclasses||[]).some(function(c){
+  if(netCollapse(c.net)===key){hit=c;return true;}return false;});return hit;}
 function inspReport(){if(!insp)return "";var o=insp.o;
  if(insp.t=="track")return "track net="+(o.net||"?")+" "+layerName(o.l||0)+
   " w="+n2(o.w||0.25)+"mm ("+n2(o.x1)+","+n2(o.y1)+")→("+n2(o.x2)+","+n2(o.y2)+

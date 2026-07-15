@@ -1077,6 +1077,7 @@ Public functions: designSourcePath, designSiblingPath
 - Stamped module copper keeps its group tag through the sidecar so rigid-group moves carry it
 - Stamped module copper maps its net names onto the parent design via the origin-key bridge, slug-prefixing private nets
 - Stamped copper adopts destination net-class geometry
+- the PCB draw-width menu defaults to the active net class and offers explicit standard widths
 - The layout sidecar is snapshotted into history and listed newest-first
 - Layout snapshots are pruned to the newest retention cap
 - Source-snapshot listing skips the reserved layouts subdir

@@ -4883,6 +4883,19 @@ fn svRow(w: *std.Io.Writer, key: []const u8, label: []const u8, weight: f64) std
 
 /// Routing panel: DRC inputs (mm) + a Route button (wired in BOARD_JS to
 /// reload with `?route=1&…`). Shows the routed/total tally + DRC result.
+const draw_width_menu =
+    "<label>Draw width <select id=\"r-dw\" " ++
+    "title=\"Width for newly drawn traces; Net class uses the active net's resolved rule\">" ++
+    "<option value=\"net\">Net class</option>" ++
+    "<option value=\"0.127\">0.127 mm (5 mil)</option>" ++
+    "<option value=\"0.1524\">0.1524 mm (6 mil)</option>" ++
+    "<option value=\"0.2032\">0.2032 mm (8 mil)</option>" ++
+    "<option value=\"0.254\">0.254 mm (10 mil)</option>" ++
+    "<option value=\"0.3048\">0.3048 mm (12 mil)</option>" ++
+    "<option value=\"0.5\">0.5 mm</option>" ++
+    "<option value=\"custom\">Custom / router value</option>" ++
+    "</select></label>";
+
 fn writeRoutePanel(
     w: *std.Io.Writer,
     params: router.RouteParams,
@@ -4895,7 +4908,12 @@ fn writeRoutePanel(
     try w.writeAll("<div class=\"pcb-route pcb-panel\" id=\"panel-route\"");
     if (!start_open) try w.writeAll(" hidden");
     try w.writeAll("><span class=\"tune-h\">Route</span>");
-    try w.print("<label>Track <input id=\"r-tw\" type=\"number\" step=\"0.05\" min=\"0.05\" value=\"{d}\"></label>", .{params.track_width});
+    try w.writeAll(draw_width_menu);
+    try w.print(
+        "<label>Router/custom <input id=\"r-tw\" type=\"number\" " ++
+            "step=\"0.05\" min=\"0.05\" value=\"{d}\"></label>",
+        .{params.track_width},
+    );
     try w.print("<label>Clearance <input id=\"r-cl\" type=\"number\" step=\"0.05\" min=\"0.05\" value=\"{d}\"></label>", .{params.clearance});
     try w.print("<label>Via drill <input id=\"r-vd\" type=\"number\" step=\"0.05\" min=\"0.1\" value=\"{d}\"></label>", .{params.via_drill});
     try w.print("<label>Via Ø <input id=\"r-va\" type=\"number\" step=\"0.05\" min=\"0.2\" value=\"{d}\"></label>", .{params.via_dia});
@@ -6175,6 +6193,8 @@ const page_css =
     \\.pcb-route{display:flex;gap:10px;align-items:center;margin:2px 0 8px;flex-wrap:wrap;font-size:12px;color:#9b9ca3}
     \\.pcb-route .tune-h{font-weight:700;color:#f0f1f3}
     \\.pcb-route label{display:flex;gap:4px;align-items:center}
+    \\.pcb-route select{font:inherit;font-size:12px;border:1px solid #3a3b40;background:#1a1b1e;
+    \\  color:#d6d7db;border-radius:4px;padding:2px 4px}
     \\.pcb-route input[type=number]{width:54px;font:inherit;font-size:12px;border:1px solid #3a3b40;
     \\  background:#1a1b1e;color:#d6d7db;border-radius:4px;padding:2px 4px}
     \\.pcb-route .muted{font-size:11px;color:#85868d}
@@ -7509,6 +7529,21 @@ test "draw tooltip names the posture toggle and the Appearance dock offers Net c
     defer aw.deinit();
     try writeAppearance(&aw.writer);
     try std.testing.expect(std.mem.indexOf(u8, aw.written(), "id=\"v-netcol\"") != null);
+}
+
+// spec: Web Server - the PCB draw-width menu defaults to the active net class and offers explicit standard widths
+test "route panel defaults drawn traces to net-class width" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeRoutePanel(&aw.writer, .{}, null, 0, 0, true, false);
+    const html = aw.written();
+    const menu = std.mem.indexOf(u8, html, "<select id=\"r-dw\"") orelse return error.TestMenuMissing;
+    const net_class = std.mem.indexOf(u8, html, "<option value=\"net\">Net class</option>") orelse
+        return error.TestNetClassMissing;
+    try std.testing.expect(menu < net_class);
+    try std.testing.expect(std.mem.indexOf(u8, html, "0.127 mm (5 mil)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "0.254 mm (10 mil)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "Custom / router value") != null);
 }
 
 // spec: Web Server - A saved layout round-trips each part's renumber-stable origin key through the sidecar
