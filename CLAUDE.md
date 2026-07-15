@@ -65,7 +65,7 @@ Dependencies: `httpz` (HTTP server), `guardian` (code-quality gate).
 
 ### Guardian gate
 
-Guardian runs its full **59-check suite on every `zig build` / `zig build
+Guardian runs its full **65-check suite on every `zig build` / `zig build
 test`** — formatting, the spec workflow, structural / public-API / style /
 error-handling / allocation checks, and git-aware process gates. It runs in
 **baseline mode**: existing violations are frozen in `.guardian/`, so only NEW
@@ -76,9 +76,10 @@ regressions fail. There is no bypass — fix the code, never loosen the gate.
   can only *shrink*. Do not raise a cap in `guardian.toml` to pass — improve the
   code; the improvement auto-lowers that item's ceiling.
 - **Spec workflow.** `SPEC.md` `- ` bullets map **1:1** to `// spec: Section -
-  Behavior` tags on tests. `[baseline] deny_growth = ["spec"]` is active: a new
-  bullet must land with its tagged test in the *same* change, and no refresh may
-  grow the spec baseline. `zig build spec-init` regenerates a starter SPEC.md.
+  Behavior` tags on tests. `[baseline] deny_growth = ["spec", "completeness"]`
+  is active: a new bullet must land with its tagged test in the *same* change,
+  and neither spec nor scenario-category debt may grow. `zig build spec-init`
+  regenerates a starter SPEC.md.
 
 Commands (`guardian-check` is the guardian dep's binary at
 `../guardian-zig/zig-out/bin/`, built by `zig build` there):
@@ -86,9 +87,14 @@ Commands (`guardian-check` is the guardian dep's binary at
 - `zig build` / `zig build test` — gated build/test (full suite).
 - `zig build mutate` — fast mutation tier: mutates only lines changed vs HEAD;
   for PR scope, `GUARDIAN_AGAINST=origin/main zig build mutate`.
+- `zig build test-fast` — focused fail-closed boundary smoke suite used before
+  the full suite for every mutation survivor.
 - `zig build mutate-full` — whole-tree mutation; ratchets the kill score in
   `.guardian/mutation.txt` (nightly tier — the score can only climb).
-- `guardian-check debt .` — non-gating frozen-debt / ratchet / mutation report.
+- `guardian-check debt .` — non-gating frozen-debt / ratchet / mutation report;
+  supports `--json`, `--check`, and dry-run `--prune-stale` (`--yes` deletes).
+- `guardian-check doctor .` — read-only metadata, integration, and cache audit.
+- `guardian-check spec-sync .` — dry-run suggestions for missing SPEC bullets.
 - `guardian-check commit --intent "msg" .` — **preferred agent commit flow**:
   gates the exact working-tree diff, then stages a safe path list and commits
   only on green (never `git add .`; `.guardian/` + SPEC.md ride the same commit).

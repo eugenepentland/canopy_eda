@@ -17,18 +17,17 @@ spec_file = "SPEC.md"
 [baseline]
 enabled = true
 # A refresh may never grow the spec baseline (fix the debt, or remove "spec" to override).
-deny_growth = ["spec"]
+deny_growth = ["spec", "completeness"]
 
 # Completeness checklist (opt-in). Every SPEC.md `## ` feature section must
 # ADDRESS or explicitly WAIVE all 8 scenario categories (empty inputs, large
 # inputs, unauthorized access, I/O failure, concurrent access, malformed
 # encoding, integer overflow, panic-free). `exempt_sections` is the visible
 # TODO ledger: a section stays exempt until its bullets/waivers cover the
-# categories; drop a name from the list to put that section live. The array
-# must stay on ONE line — guardian's toml parser only reads inline arrays.
+# categories. Baseline mode records the existing category debt and auto-prunes
+# it as sections become complete; deny_growth prevents new debt after adoption.
 [completeness]
 enabled = true
-exempt_sections = ["sexpr/tokenizer", "sexpr/parser", "sexpr/printer", "sexpr/ast", "kicad_pcb/format", "kicad_pcb/reader", "kicad_pcb/writer", "placement/geometry", "placement/optimizer", "placement/router", "placement/outline", "placement/pour", "placement/module_policy", "placement/layout_lint", "placement/pin_roles", "placement/pad_shape", "eval/builtins", "eval/forms", "docgen", "eval/fmt", "eval/env", "eval/check_grammar", "eval/pin_enrichment", "eval/modules", "eval/suggest", "eval/evaluator", "id_insert", "convert/footprint", "convert/symbol", "import_kicad", "import_fold", "convert/alt-functions", "emit", "parts", "export_kicad", "export_fab", "export_gerber", "zipfile", "bom", "bom-resolve", "render_html", "diagram/types", "diagram/membership", "diagram/classify", "diagram/collect", "diagram/layout", "diagram/lod", "diagram/render", "diagram/diagram", "render_svg", "erc", "eval/power_budget", "eval/power_sequencing", "eval/design_block", "eval/test_point", "eval/electrical", "eval/rails", "coverage", "review", "review_json", "review_md", "req_checks", "review_html", "serve", "serve/sync", "serve/vfs", "serve/component_info", "serve/mcp_docs", "serve/notes", "serve/upload_datasheet", "serve/edit", "serve/edit_assist", "serve/component_search", "serve/digikey", "serve/rate_limiter", "serve/subprocess", "serve/datasheet", "serve/mcp_tools", "serve/users", "config", "paths", "Web Server", "fab_readiness"]
 
 # Mutation testing. Static checks prove tests EXIST; mutation proves they BITE.
 # `zig build mutate` (fast tier) mutates only lines changed vs HEAD and never
@@ -50,7 +49,11 @@ exempt_sections = ["sexpr/tokenizer", "sexpr/parser", "sexpr/printer", "sexpr/as
 # mutation.txt ratchet already prevents any backsliding.
 min_score_pct = 32   # fail below this kill rate (gated tiers only); raise toward 80
 max_mutants   = 100  # deterministic sample cap for --full (see sizing note above)
-timeout_secs  = 300  # per-phase child-build timeout (a timeout counts as killed)
+fast_max_mutants = 8 # bounded PR/local tier; full survivors remain a nightly concern
+smoke_step = "test-fast" # focused tests first; every smoke survivor still runs the full suite
+timeout_secs  = 300  # baseline cap/fallback; repeated mutant timeouts are inconclusive
+timeout_retry_multiplier = 2 # retry a timeout before treating it as inconclusive
+retained_cache_suites = 3 # exact-digest history for branch/retry reuse
 min_mutants   = 4    # below this many viable mutants: informational, not gated
 
 # Float→int cast safety. `guard_fns` names the sanctioned narrowing wrappers
@@ -59,16 +62,26 @@ min_mutants   = 4    # below this many viable mutants: informational, not gated
 # toward the snapshot budget. `require_guard` path globs additionally hard-fail
 # ANY raw @intFromFloat under those dirs regardless of the budget — the strict
 # gate for subsystems already fully converted (untrusted eval/import inputs).
-# Arrays MUST stay on ONE line — guardian's toml parser only reads inline arrays.
 [int_from_float]
 guard_fns = ["checkedInt"]
-require_guard = ["src/eval/", "src/placement/", "src/kicad_pcb/", "src/import_kicad.zig"]
+require_guard = [
+  "src/eval/",
+  "src/placement/",
+  "src/kicad_pcb/",
+  "src/import_kicad.zig",
+]
 # Fuzz presence: each listed hand-rolled codec that parses untrusted input
 # (MCP / HTTP / file import) must carry a `std.testing.fuzz` harness, so the
-# coverage can never silently lapse. Array MUST stay on ONE line — guardian's
-# toml parser only reads inline arrays. See the "Fuzzing" note in CLAUDE.md.
+# coverage can never silently lapse. See the "Fuzzing" note in CLAUDE.md.
 [fuzz_presence]
-modules = ["src/sexpr/parser.zig", "src/sexpr/printer.zig", "src/deflate.zig", "src/kicad_pcb/reader.zig", "src/zipfile.zig", "src/png.zig"]
+modules = [
+  "src/sexpr/parser.zig",
+  "src/sexpr/printer.zig",
+  "src/deflate.zig",
+  "src/kicad_pcb/reader.zig",
+  "src/zipfile.zig",
+  "src/png.zig",
+]
 # src/exit.zig is netlisp's designated fatal helper (like guardian's own
 # src/reporter.zig): the one place a raw std.process.exit(nonzero) is allowed,
 # so every CLI fatal funnels through fatal()/failure() there.

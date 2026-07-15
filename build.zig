@@ -110,6 +110,40 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // Mutation smoke tier. Guardian runs this focused set first for each
+    // mutant, then still runs the complete test suite for every smoke survivor.
+    // A smoke failure therefore saves a full ~70s suite without weakening the
+    // final verdict. Keep the filters focused on small fail-closed boundary
+    // cases that commonly kill mutants quickly.
+    const fast_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fast_test_mod.addImport("httpz", httpz.module("httpz"));
+    fast_test_mod.addImport("zt", zt_dep.module("zt"));
+    fast_test_mod.addImport("ward", ward_dep.module("ward"));
+    fast_test_mod.addOptions("build_options", build_options);
+
+    const fast_tests = b.addTest(.{
+        .name = "mutation-smoke",
+        .root_module = fast_test_mod,
+        .filters = &.{
+            "parse rejects excessively deep nesting",
+            "fuzz: parser never crashes",
+            "modulo rejects non-positive divisor",
+            "checkedInt rejects",
+            "designSiblingPath rejects",
+            "sanitizeKicadName neutralizes traversal",
+            "route flags grid overflow",
+            "mcpSetPartPoses rejects an empty poses array",
+        },
+    });
+    fast_tests.step.dependOn(templates_step);
+    const run_fast_tests = b.addRunArtifact(fast_tests);
+    const fast_test_step = b.step("test-fast", "Run the mutation smoke-test subset");
+    fast_test_step.dependOn(&run_fast_tests.step);
+
     // Guardian — runs on every build. Baseline mode is configured in
     // guardian.toml: every check records existing violations once and
     // only fails when new ones appear, so the full check suite can be
