@@ -22,10 +22,18 @@ const part_view_prefix = "/part-view/";
 const part_id_marker = "partID=";
 /// Suggestion-API URL template — `{HOST}` then the percent-encoded query.
 const suggestion_url_fmt = "{s}/partApi/suggestion?partNumber={s}";
+/// Form-login endpoint — mints an authenticated `connect.sid` from credentials.
+const signin_url = host_name ++ "/signin";
+/// Un-challenged endpoint hit to mint an anonymous session (`_csrf` + cookies)
+/// before login. Any query works; the response body is ignored.
+const session_mint_url = host_name ++ "/partApi/suggestion?partNumber=x";
 const user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " ++
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 const referer_header = "referer: " ++ host_name ++ "/";
-const cookie_name = "connect.sid=";
+/// Fixed salt for the CSRF token. The server verifies by recomputing the hash
+/// from the salt embedded in the token, so a constant salt is accepted; it only
+/// may not contain the `-` separator.
+const csrf_salt = "netlisp0";
 
 // ── Tunables ──────────────────────────────────────────────────────
 const page_timeout_secs = "20";
@@ -72,18 +80,19 @@ pub fn errorMessage(err: DownloadError) []const u8 {
 }
 
 /// Full pipeline: resolve via the suggestion API → download the model ZIP by
-/// SamacSys part id. `connect_sid` is the raw `connect.sid` cookie value.
+/// SamacSys part id. `cookie` is the full `Cookie` header value (a
+/// `name=value; …` jar) — see `login`, or a `connect.sid=<sid>` override.
 pub fn downloadFootprint(
     allocator: std.mem.Allocator,
     part_number: []const u8,
     manufacturer: ?[]const u8,
-    connect_sid: []const u8,
+    cookie: []const u8,
 ) DownloadError!DownloadResult {
-    const part = (try resolvePart(allocator, part_number, manufacturer, connect_sid)) orelse
+    const part = (try resolvePart(allocator, part_number, manufacturer, cookie)) orelse
         return error.PartNotFound;
     const samac_id = part.samac_id orelse return error.SamacIdNotFound;
 
-    const zip = try downloadModel(allocator, part.detail_path, samac_id, connect_sid);
+    const zip = try downloadModel(allocator, part.detail_path, samac_id, cookie);
     return .{
         .zip_bytes = zip,
         .part_name = part.part_name,
@@ -91,6 +100,77 @@ pub fn downloadFootprint(
         .samac_id = samac_id,
         .suggested_filename = try safeFilename(allocator, part.part_name),
     };
+}
+
+// ── Credential auto-login ─────────────────────────────────────────
+
+pub const LoginError = error{
+    LoginRequestFailed,
+    NoCsrfSecret,
+    InvalidCredentials,
+    NoSession,
+} || std.mem.Allocator.Error;
+
+/// Stable, user-facing message for a `LoginError`.
+pub fn loginErrorMessage(err: LoginError) []const u8 {
+    return switch (err) {
+        error.LoginRequestFailed => "CSE login request failed (curl/network error)",
+        error.NoCsrfSecret => "CSE did not issue a CSRF cookie on the login page",
+        error.InvalidCredentials => "CSE rejected CSE_EMAIL / CSE_PASSWORD (login was not accepted)",
+        error.NoSession => "CSE login succeeded but issued no session cookie",
+        error.OutOfMemory => oom_msg,
+    };
+}
+
+/// Log in to Component Search Engine with `email` / `password` and return the
+/// authenticated cookie header (owned by `allocator`). Three steps: mint an
+/// anonymous session to obtain the `_csrf` secret, derive the CSRF token (npm
+/// `csrf` scheme), then POST the credential form to `/signin`. Success is a 302
+/// whose `Location` is not the sign-in page again; the new `connect.sid` rides
+/// in that response's `Set-Cookie`. The returned jar merges that authenticated
+/// `connect.sid` with the mint's `__cf_bm` — the protected model-download route
+/// needs the Cloudflare cookie too, not just the session id.
+pub fn login(
+    allocator: std.mem.Allocator,
+    email: []const u8,
+    password: []const u8,
+) LoginError![]u8 {
+    // 1. Anonymous GET — captures the `_csrf` secret + session cookies. Minted
+    // from the suggestion API (JSON, never Cloudflare-challenged), not `GET
+    // /signin` (an HTML page that sits behind the JS challenge).
+    const anon_headers = curlHeaders(allocator, session_mint_url, null, null) orelse
+        return error.LoginRequestFailed;
+    const anon_jar = try collectCookies(allocator, anon_headers);
+    const secret = cookieValue(anon_jar, "_csrf") orelse return error.NoCsrfSecret;
+    const token = try deriveCsrfToken(allocator, secret);
+
+    // 2. POST the credential form, carrying the anonymous cookies back.
+    const body = try std.fmt.allocPrint(
+        allocator,
+        "email={s}&password={s}&keepMe=on&_csrf={s}&returnUrl=%2F",
+        .{
+            try percentEncode(allocator, email),
+            try percentEncode(allocator, password),
+            try percentEncode(allocator, token),
+        },
+    );
+    const login_headers = curlHeaders(allocator, signin_url, anon_jar, body) orelse
+        return error.LoginRequestFailed;
+
+    // A successful login redirects to the returnUrl ("/"); a rejected one
+    // redirects back to "/signin" (or re-renders it).
+    if (headerValue(login_headers, "location")) |loc| {
+        if (std.mem.indexOf(u8, loc, "signin") != null) return error.InvalidCredentials;
+    }
+    // Merge login's Set-Cookie over the mint jar. CSE authenticates the EXISTING
+    // session in place — the login 302 usually re-sets no connect.sid, so the
+    // authenticated session id is the mint's connect.sid, carried through by the
+    // merge (kept only if login didn't re-issue one). The merge also preserves
+    // __cf_bm (Cloudflare), which the protected model-download route requires.
+    const login_jar = try collectCookies(allocator, login_headers);
+    const merged = try mergeCookies(allocator, login_jar, anon_jar);
+    if (cookieValue(merged, "connect.sid") == null) return error.NoSession;
+    return merged;
 }
 
 /// A datasheet fetched from CSE. Slices are owned by the allocator.
@@ -129,9 +209,9 @@ pub fn downloadDatasheet(
     allocator: std.mem.Allocator,
     part_number: []const u8,
     manufacturer: ?[]const u8,
-    connect_sid: []const u8,
+    cookie: []const u8,
 ) DatasheetError!DatasheetResult {
-    const part = (try resolvePart(allocator, part_number, manufacturer, connect_sid)) orelse
+    const part = (try resolvePart(allocator, part_number, manufacturer, cookie)) orelse
         return error.PartNotFound;
     const url = part.datasheet_url orelse return error.NoDatasheet;
 
@@ -181,12 +261,12 @@ pub fn searchErrorMessage(err: SearchError) []const u8 {
 pub fn searchComponents(
     allocator: std.mem.Allocator,
     query: []const u8,
-    connect_sid: []const u8,
+    cookie: []const u8,
     limit: usize,
 ) SearchError![]SearchHit {
     var any_ok = false;
     for (try searchVariants(allocator, query)) |term| {
-        const hits = try suggestList(allocator, term, connect_sid, limit, &any_ok);
+        const hits = try suggestList(allocator, term, cookie, limit, &any_ok);
         if (hits.len > 0) return hits;
     }
     if (!any_ok) return error.SearchFailed;
@@ -215,10 +295,10 @@ fn resolvePart(
     allocator: std.mem.Allocator,
     part_number: []const u8,
     manufacturer: ?[]const u8,
-    connect_sid: []const u8,
+    cookie: []const u8,
 ) std.mem.Allocator.Error!?ResolvedPart {
     for (try searchVariants(allocator, part_number)) |term| {
-        if (try suggestQuery(allocator, term, manufacturer, connect_sid)) |rp| return rp;
+        if (try suggestQuery(allocator, term, manufacturer, cookie)) |rp| return rp;
     }
     return null;
 }
@@ -229,11 +309,11 @@ fn suggestQuery(
     allocator: std.mem.Allocator,
     term: []const u8,
     manufacturer: ?[]const u8,
-    connect_sid: []const u8,
+    cookie: []const u8,
 ) std.mem.Allocator.Error!?ResolvedPart {
     const enc = try percentEncode(allocator, term);
     const url = try std.fmt.allocPrint(allocator, suggestion_url_fmt, .{ host_name, enc });
-    const body = httpGet(allocator, url, connect_sid, max_page_bytes, page_timeout_secs) orelse return null;
+    const body = httpGet(allocator, url, cookie, max_page_bytes, page_timeout_secs) orelse return null;
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return null;
     defer parsed.deinit();
@@ -301,13 +381,13 @@ fn pickSuggestion(root: std.json.Value, term: []const u8, manufacturer: ?[]const
 fn suggestList(
     allocator: std.mem.Allocator,
     term: []const u8,
-    connect_sid: []const u8,
+    cookie: []const u8,
     limit: usize,
     any_ok: *bool,
 ) std.mem.Allocator.Error![]SearchHit {
     const enc = try percentEncode(allocator, term);
     const url = try std.fmt.allocPrint(allocator, suggestion_url_fmt, .{ host_name, enc });
-    const body = httpGet(allocator, url, connect_sid, max_page_bytes, page_timeout_secs) orelse return &.{};
+    const body = httpGet(allocator, url, cookie, max_page_bytes, page_timeout_secs) orelse return &.{};
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return &.{};
     defer parsed.deinit();
     any_ok.* = true;
@@ -406,7 +486,7 @@ fn downloadModel(
     allocator: std.mem.Allocator,
     detail_path: []const u8,
     samac_id: []const u8,
-    connect_sid: []const u8,
+    cookie: []const u8,
 ) DownloadError![]u8 {
     const from_param = try percentEncode(allocator, detail_path);
     const url = try std.fmt.allocPrint(
@@ -414,7 +494,7 @@ fn downloadModel(
         "{s}/partApi/model/download?from={s}&id={s}",
         .{ host_name, from_param, samac_id },
     );
-    const body = httpGet(allocator, url, connect_sid, max_download_bytes, download_timeout_secs) orelse
+    const body = httpGet(allocator, url, cookie, max_download_bytes, download_timeout_secs) orelse
         return error.DownloadFailed;
     if (looksLikeZip(body)) return body;
     if (std.mem.startsWith(u8, body, "Error")) return error.ModelUnavailable;
@@ -423,9 +503,9 @@ fn downloadModel(
 
 // ── curl transport ────────────────────────────────────────────────
 
-/// GET `url` with browser-like headers (and an optional `connect.sid`
-/// cookie), following redirects. Returns the response body, or null on a
-/// spawn failure or non-zero exit.
+/// GET `url` with browser-like headers (and an optional `Cookie` header value,
+/// sent verbatim — a full `name=value; …` jar), following redirects. Returns
+/// the response body, or null on a spawn failure or non-zero exit.
 fn httpGet(
     allocator: std.mem.Allocator,
     url: []const u8,
@@ -440,10 +520,7 @@ fn httpGet(
         "curl", "-sS",      "-L", "--max-time",   timeout_secs,
         "-A",   user_agent, "-H", referer_header,
     }) catch return null;
-    if (cookie) |c| {
-        const cookie_arg = std.fmt.allocPrint(allocator, "{s}{s}", .{ cookie_name, c }) catch return null;
-        argv.appendSlice(allocator, &.{ "-b", cookie_arg }) catch return null;
-    }
+    if (cookie) |c| argv.appendSlice(allocator, &.{ "-b", c }) catch return null;
     // `--` terminates option parsing so a vendor-supplied URL beginning with
     // `-` can't be reinterpreted as a curl flag (arg-injection / SSRF hardening).
     argv.appendSlice(allocator, &.{ "--", url }) catch return null;
@@ -452,6 +529,44 @@ fn httpGet(
         .allocator = allocator,
         .argv = argv.items,
         .max_output_bytes = max_bytes,
+    }) catch return null;
+    if (res.term != .Exited or res.term.Exited != 0) return null;
+    return res.stdout;
+}
+
+/// Run curl with `-i` (response headers included) and **no** redirect-follow, so
+/// a login 302's `Set-Cookie` / `Location` are observable. A non-null
+/// `post_body` makes it a form POST (with `origin`/`referer` for CSRF); `cookie`
+/// is sent verbatim as the full `Cookie` header ("n1=v1; n2=v2"). Returns the
+/// raw response text (headers + body), or null on spawn / non-zero exit.
+fn curlHeaders(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    cookie: ?[]const u8,
+    post_body: ?[]const u8,
+) ?[]u8 {
+    rate_limiter.cse.acquire();
+    defer rate_limiter.cse.release();
+    var argv: std.ArrayList([]const u8) = .empty;
+    argv.appendSlice(allocator, &.{
+        "curl", "-sS", "-i", "--max-time", page_timeout_secs, "-A", user_agent,
+    }) catch return null;
+    if (post_body) |b| {
+        argv.appendSlice(allocator, &.{
+            "-H",     "origin: " ++ host_name,
+            "-H",     "referer: " ++ signin_url,
+            "--data", b,
+        }) catch return null;
+    } else {
+        argv.appendSlice(allocator, &.{ "-H", referer_header }) catch return null;
+    }
+    if (cookie) |c| argv.appendSlice(allocator, &.{ "-b", c }) catch return null;
+    argv.appendSlice(allocator, &.{ "--", url }) catch return null;
+
+    const res = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv.items,
+        .max_output_bytes = max_page_bytes,
     }) catch return null;
     if (res.term != .Exited or res.term.Exited != 0) return null;
     return res.stdout;
@@ -504,6 +619,90 @@ fn safeFilename(allocator: std.mem.Allocator, part_name: []const u8) std.mem.All
     }
     try out.appendSlice(allocator, ".zip");
     return out.toOwnedSlice(allocator);
+}
+
+/// Derive a CSRF token from the `_csrf` cookie secret, matching the npm `csrf`
+/// package: `salt + "-" + base64url(sha1(salt + "-" + secret))`, unpadded. The
+/// server verifies by recomputing from the salt embedded in the token, so the
+/// fixed `csrf_salt` is accepted.
+fn deriveCsrfToken(allocator: std.mem.Allocator, secret: []const u8) std.mem.Allocator.Error![]u8 {
+    var digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
+    var h = std.crypto.hash.Sha1.init(.{});
+    h.update(csrf_salt);
+    h.update("-");
+    h.update(secret);
+    h.final(&digest);
+
+    const enc = std.base64.url_safe_no_pad.Encoder;
+    var b64: [enc.calcSize(digest.len)]u8 = undefined;
+    const hash = enc.encode(&b64, &digest);
+    return std.fmt.allocPrint(allocator, "{s}-{s}", .{ csrf_salt, hash });
+}
+
+/// Fold every `Set-Cookie` in a raw HTTP response into one `name=value; …`
+/// cookie string (each cookie's attributes after the first `;` are dropped).
+fn collectCookies(allocator: std.mem.Allocator, raw_response: []const u8) std.mem.Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var lines = std.mem.splitScalar(u8, raw_response, '\n');
+    while (lines.next()) |line| {
+        const val = lineValueIgnoreCase(line, "set-cookie:") orelse continue;
+        const pair = val[0 .. std.mem.indexOfScalar(u8, val, ';') orelse val.len];
+        if (pair.len == 0) continue;
+        if (out.items.len != 0) try out.appendSlice(allocator, "; ");
+        try out.appendSlice(allocator, pair);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Value of cookie `name` in a `name=value; …` jar string, or null if absent.
+fn cookieValue(jar: []const u8, name: []const u8) ?[]const u8 {
+    var parts = std.mem.splitSequence(u8, jar, "; ");
+    while (parts.next()) |part| {
+        const eq = std.mem.indexOfScalar(u8, part, '=') orelse continue;
+        if (std.mem.eql(u8, part[0..eq], name)) return part[eq + 1 ..];
+    }
+    return null;
+}
+
+/// Merge two `name=value; …` jars: every cookie from `primary`, then each in
+/// `fallback` whose name is absent from `primary` (primary wins on collision).
+/// Carries the login's authenticated `connect.sid` while keeping the anonymous
+/// mint's `__cf_bm` / `cse_ab`.
+fn mergeCookies(allocator: std.mem.Allocator, primary: []const u8, fallback: []const u8) std.mem.Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    if (primary.len != 0) try out.appendSlice(allocator, primary);
+    var parts = std.mem.splitSequence(u8, fallback, "; ");
+    while (parts.next()) |part| {
+        const eq = std.mem.indexOfScalar(u8, part, '=') orelse continue;
+        if (cookieValue(primary, part[0..eq]) != null) continue;
+        if (out.items.len != 0) try out.appendSlice(allocator, "; ");
+        try out.appendSlice(allocator, part);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Value of the first HTTP header named `name` (case-insensitive) in a raw
+/// response, trimmed, or null if absent. `name` is given without the colon.
+fn headerValue(raw_response: []const u8, name: []const u8) ?[]const u8 {
+    const prefix_buf_max = 32;
+    var buf: [prefix_buf_max]u8 = undefined;
+    if (name.len + 1 > buf.len) return null;
+    @memcpy(buf[0..name.len], name);
+    buf[name.len] = ':';
+    const prefix = buf[0 .. name.len + 1];
+    var lines = std.mem.splitScalar(u8, raw_response, '\n');
+    while (lines.next()) |line| {
+        if (lineValueIgnoreCase(line, prefix)) |v| return v;
+    }
+    return null;
+}
+
+/// If `line` starts with `prefix` (ASCII case-insensitive), return the rest of
+/// the line trimmed of surrounding whitespace (including a trailing `\r`).
+fn lineValueIgnoreCase(line: []const u8, prefix: []const u8) ?[]const u8 {
+    if (line.len < prefix.len) return null;
+    if (!std.ascii.eqlIgnoreCase(line[0..prefix.len], prefix)) return null;
+    return std.mem.trim(u8, line[prefix.len..], " \t\r");
 }
 
 // ── Tests ─────────────────────────────────────────────────────────
@@ -577,6 +776,54 @@ test "safeFilename sanitises into LIB_<part>.zip" {
     const out = try safeFilename(a, "LMX2595/RHAT R7");
     defer a.free(out);
     try std.testing.expectEqualStrings("LIB_LMX2595_RHAT_R7.zip", out);
+}
+
+test "deriveCsrfToken matches the npm csrf scheme" {
+    // spec: serve/component_search - deriveCsrfToken derives the salted CSRF token
+    const a = std.testing.allocator;
+    const t1 = try deriveCsrfToken(a, "jnNnnJCwqTuXRKAO15KSvlgc");
+    defer a.free(t1);
+    try std.testing.expectEqualStrings("netlisp0-VTgdohbGlaGmf73Vlwo7F2bkoJw", t1);
+    // The token embeds the salt before the first '-', which is how the server
+    // recovers it to verify — so the value must be reproducible for a secret.
+    const t2 = try deriveCsrfToken(a, "abc");
+    defer a.free(t2);
+    try std.testing.expectEqualStrings("netlisp0-2749Ok32QJA4EQbVtZUBE-rVQb8", t2);
+}
+
+test "collectCookies folds Set-Cookie headers into a jar" {
+    // spec: serve/component_search - collectCookies folds Set-Cookie into a cookie jar
+    const a = std.testing.allocator;
+    const resp =
+        "HTTP/2 302\r\n" ++
+        "set-cookie: _csrf=SECRET123; Path=/\r\n" ++
+        "location: /\r\n" ++
+        "Set-Cookie: connect.sid=s%3Aabc.def; Path=/; HttpOnly\r\n" ++
+        "\r\nbody";
+    const jar = try collectCookies(a, resp);
+    defer a.free(jar);
+    try std.testing.expectEqualStrings("_csrf=SECRET123; connect.sid=s%3Aabc.def", jar);
+    try std.testing.expectEqualStrings("SECRET123", cookieValue(jar, "_csrf").?);
+    try std.testing.expectEqualStrings("s%3Aabc.def", cookieValue(jar, "connect.sid").?);
+    try std.testing.expect(cookieValue(jar, "missing") == null);
+}
+
+test "headerValue reads a header case-insensitively" {
+    // spec: serve/component_search - headerValue extracts a response header value
+    const resp = "HTTP/2 302\r\nLocation: /signin?error=1\r\nServer: x\r\n\r\n";
+    try std.testing.expectEqualStrings("/signin?error=1", headerValue(resp, "location").?);
+    try std.testing.expect(headerValue(resp, "content-type") == null);
+}
+
+test "mergeCookies overlays a session onto the mint jar" {
+    // spec: serve/component_search - mergeCookies overlays a session onto the mint jar
+    const a = std.testing.allocator;
+    const merged = try mergeCookies(a, "connect.sid=NEW; _csrf=B", "_csrf=A; __cf_bm=CF; cse_ab=X");
+    defer a.free(merged);
+    // primary wins on _csrf; the mint's __cf_bm / cse_ab are carried over.
+    try std.testing.expectEqualStrings("connect.sid=NEW; _csrf=B; __cf_bm=CF; cse_ab=X", merged);
+    try std.testing.expectEqualStrings("NEW", cookieValue(merged, "connect.sid").?);
+    try std.testing.expectEqualStrings("CF", cookieValue(merged, "__cf_bm").?);
 }
 
 test "collectHits maps suggestions to search hits" {

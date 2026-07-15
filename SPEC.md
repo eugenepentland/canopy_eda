@@ -963,7 +963,7 @@ Public functions: validateSourceApi, libIndexApi, saveDiagramLayoutApi
 
 ## serve/component_search
 
-Public functions: downloadFootprint, errorMessage, searchComponents, searchErrorMessage
+Public functions: downloadFootprint, errorMessage, searchComponents, searchErrorMessage, login, loginErrorMessage
 
 - percentEncode escapes spaces and reserved chars
 - looksLikeZip detects the ZIP magic bytes
@@ -971,6 +971,10 @@ Public functions: downloadFootprint, errorMessage, searchComponents, searchError
 - searchVariants relaxes the part number
 - parses part id and datasheet url from a suggestion
 - collectHits maps suggestions to search hits
+- deriveCsrfToken derives the salted CSRF token
+- collectCookies folds Set-Cookie into a cookie jar
+- headerValue extracts a response header value
+- mergeCookies overlays a session onto the mint jar
 
 ## serve/digikey
 
@@ -1018,7 +1022,7 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 
 ## config
 
-Public functions: cseConnectSid, digikeyClientId, digikeyClientSecret, digikeyApiBase, cseMinIntervalMs, cseMaxInFlight, digikeyMinIntervalMs, digikeyMaxInFlight
+Public functions: cseConnectSid, cseEmail, csePassword, digikeyClientId, digikeyClientSecret, digikeyApiBase, cseMinIntervalMs, cseMaxInFlight, digikeyMinIntervalMs, digikeyMaxInFlight
 
 - stripQuotes removes one layer of matching quotes
 - The ward cache ttl maps a zero or out-of-range value to the default and keeps valid values

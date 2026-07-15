@@ -1,3 +1,8 @@
+//! Server configuration: credentials, session secrets, and tunables read from
+//! the real environment first, then a `.env` file in the working directory.
+//! Centralised here (not in request handlers) so the `ban-env` policy holds —
+//! values are fetched once and threaded down as plain parameters. Every getter
+//! treats an empty value as unset.
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 
@@ -12,9 +17,26 @@ const max_dotenv_bytes: usize = 64 * 1024;
 const whitespace = " \t\r";
 
 /// Component Search Engine session cookie (`connect.sid` value) for
-/// `download_footprint`. From `CSE_CONNECT_SID`.
+/// `download_footprint`. From `CSE_CONNECT_SID`. A manual override that skips
+/// the email/password auto-login; empty or unset falls through to it.
 pub fn cseConnectSid(allocator: std.mem.Allocator) ?[]u8 {
-    return lookup(allocator, "CSE_CONNECT_SID");
+    return nonEmpty(lookup(allocator, "CSE_CONNECT_SID"));
+}
+
+/// Component Search Engine account email for auto-login. From `CSE_EMAIL`.
+pub fn cseEmail(allocator: std.mem.Allocator) ?[]u8 {
+    return nonEmpty(lookup(allocator, "CSE_EMAIL"));
+}
+
+/// Component Search Engine account password for auto-login. From `CSE_PASSWORD`.
+pub fn csePassword(allocator: std.mem.Allocator) ?[]u8 {
+    return nonEmpty(lookup(allocator, "CSE_PASSWORD"));
+}
+
+/// Treat an empty value the same as unset (a bare `KEY=` in `.env`).
+fn nonEmpty(v: ?[]u8) ?[]u8 {
+    const s = v orelse return null;
+    return if (s.len == 0) null else s;
 }
 
 /// DigiKey Product Information API OAuth2 client id, for `resolve_mpn`.

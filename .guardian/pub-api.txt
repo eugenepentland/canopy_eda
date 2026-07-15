@@ -21,8 +21,10 @@ src/commands.zig::cmdCheck | fn cmdCheck(allocator: std.mem.Allocator, args: []c
 src/commands.zig::cmdExportKicad | fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdImportKicad | fn cmdImportKicad(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/config.zig::cseConnectSid | fn cseConnectSid(allocator: std.mem.Allocator) ?[]u8
+src/config.zig::cseEmail | fn cseEmail(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::cseMaxInFlight | fn cseMaxInFlight(allocator: std.mem.Allocator) u32
 src/config.zig::cseMinIntervalMs | fn cseMinIntervalMs(allocator: std.mem.Allocator) u64
+src/config.zig::csePassword | fn csePassword(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::devMode | fn devMode(allocator: std.mem.Allocator) bool
 src/config.zig::digikeyApiBase | fn digikeyApiBase(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::digikeyClientId | fn digikeyClientId(allocator: std.mem.Allocator) ?[]u8
@@ -921,14 +923,21 @@ src/serve/component_search.zig::DatasheetError value
 src/serve/component_search.zig::DatasheetResult struct_
 src/serve/component_search.zig::DownloadError value
 src/serve/component_search.zig::DownloadResult struct_
+src/serve/component_search.zig::LoginError value
 src/serve/component_search.zig::SearchError value
 src/serve/component_search.zig::SearchHit struct_
 src/serve/component_search.zig::datasheetErrorMessage | fn datasheetErrorMessage(err: DatasheetError) []const u8
-src/serve/component_search.zig::downloadDatasheet | fn downloadDatasheet( allocator: std.mem.Allocator, part_number: []const u8, manufacturer: ?[]const u8, connect_sid: []const u8, ) DatasheetError!DatasheetResult
-src/serve/component_search.zig::downloadFootprint | fn downloadFootprint( allocator: std.mem.Allocator, part_number: []const u8, manufacturer: ?[]const u8, connect_sid: []const u8, ) DownloadError!DownloadResult
+src/serve/component_search.zig::downloadDatasheet | fn downloadDatasheet( allocator: std.mem.Allocator, part_number: []const u8, manufacturer: ?[]const u8, cookie: []const u8, ) DatasheetError!DatasheetResult
+src/serve/component_search.zig::downloadFootprint | fn downloadFootprint( allocator: std.mem.Allocator, part_number: []const u8, manufacturer: ?[]const u8, cookie: []const u8, ) DownloadError!DownloadResult
 src/serve/component_search.zig::errorMessage | fn errorMessage(err: DownloadError) []const u8
-src/serve/component_search.zig::searchComponents | fn searchComponents( allocator: std.mem.Allocator, query: []const u8, connect_sid: []const u8, limit: usize, ) SearchError![]SearchHit
+src/serve/component_search.zig::login | fn login( allocator: std.mem.Allocator, email: []const u8, password: []const u8, ) LoginError![]u8
+src/serve/component_search.zig::loginErrorMessage | fn loginErrorMessage(err: LoginError) []const u8
+src/serve/component_search.zig::searchComponents | fn searchComponents( allocator: std.mem.Allocator, query: []const u8, cookie: []const u8, limit: usize, ) SearchError![]SearchHit
 src/serve/component_search.zig::searchErrorMessage | fn searchErrorMessage(err: SearchError) []const u8
+src/serve/cse_session.zig::ResolveError value
+src/serve/cse_session.zig::resolve | fn resolve(allocator: std.mem.Allocator) ResolveError![]const u8
+src/serve/cse_session.zig::resolveErrorMessage | fn resolveErrorMessage(err: ResolveError) []const u8
+src/serve/cse_session.zig::resolveOrWrite | fn resolveOrWrite(w: anytype, allocator: std.mem.Allocator) !?[]const u8
 src/serve/datasheet.zig::read | fn read( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, offset: ?u64, limit: ?u64, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/datasheet_attach.zig::HandlerError value
 src/serve/datasheet_attach.zig::SpliceError value

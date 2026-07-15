@@ -2,7 +2,7 @@
 //! `tools/call` name out to one `tool*` handler that writes a JSON result into
 //! the caller's buffer; the registration table and the embedded
 //! `tools_list_result.json` are kept in lockstep (a test enforces it).
-
+//! Part-sourcing tools resolve their CSE session via `cse_session`.
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
@@ -28,6 +28,7 @@ const notes = @import("notes.zig");
 const symbol_conv = @import("../convert/symbol.zig");
 const config = @import("../config.zig");
 const component_search = @import("component_search.zig");
+const cse_session = @import("cse_session.zig");
 const digikey = @import("digikey.zig");
 const upload = @import("upload.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
@@ -977,19 +978,16 @@ fn toolBuild(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?s
 /// Fetch a part's ECAD model ZIP from Component Search Engine and run it
 /// through the same import pipeline as the `/api/upload-zip` route, creating
 /// `lib/{components,footprints,pinouts,models}` entries. The `connect.sid`
-/// session cookie is read server-side from `CSE_CONNECT_SID` (via
-/// `config.cseConnectSid`) — never passed over MCP. Returns the created
-/// library names on success, or `{ok:false,error}` if search, download
-/// (expired cookie), or import fails.
+/// session is resolved server-side by `cse_session.resolve` (auto-login from
+/// `CSE_EMAIL`/`CSE_PASSWORD`, or a `CSE_CONNECT_SID` override) — never passed
+/// over MCP. Returns the created library names on success, or
+/// `{ok:false,error}` if search, download, or import fails.
 fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const part_number = requireString(args_val, key_part_number) orelse return missingArg(out, allocator, key_part_number);
     const manufacturer = optionalString(args_val, "manufacturer");
     const w = out.writer(allocator);
 
-    const sid = config.cseConnectSid(allocator) orelse {
-        try w.writeAll("{\"ok\":false,\"error\":\"CSE_CONNECT_SID is not set on the server; cannot authenticate to Component Search Engine\"}");
-        return false;
-    };
+    const sid = (try cse_session.resolveOrWrite(w, allocator)) orelse return false;
 
     const dl = component_search.downloadFootprint(allocator, part_number, manufacturer, sid) catch |err| {
         try w.writeAll("{\"ok\":false,\"stage\":\"download\",\"error\":");
@@ -1083,7 +1081,8 @@ fn tryCseDatasheet(
     part_number: []const u8,
     manufacturer: ?[]const u8,
 ) !DatasheetOutcome {
-    const sid = config.cseConnectSid(allocator) orelse return .{ .unavailable = "CSE_CONNECT_SID not set" };
+    const sid = cse_session.resolve(allocator) catch |e|
+        return .{ .unavailable = cse_session.resolveErrorMessage(e) };
     const ds = component_search.downloadDatasheet(allocator, part_number, manufacturer, sid) catch |err|
         return .{ .unavailable = component_search.datasheetErrorMessage(err) };
     const ok = try finishDatasheet(w, allocator, project_dir, "componentsearchengine", ds.filename, ds.pdf_bytes, ds.part_name, ds.manufacturer, ds.source_url);
@@ -1152,10 +1151,7 @@ fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value,
     const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, search_limit_max)) else search_limit_default;
     const w = out.writer(allocator);
 
-    const sid = config.cseConnectSid(allocator) orelse {
-        try w.writeAll("{\"ok\":false,\"error\":\"CSE_CONNECT_SID is not set on the server; add it to .env\"}");
-        return false;
-    };
+    const sid = (try cse_session.resolveOrWrite(w, allocator)) orelse return false;
 
     const hits = component_search.searchComponents(allocator, query, sid, limit) catch |err| {
         try w.writeAll(json_err_open);
