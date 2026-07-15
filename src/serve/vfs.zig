@@ -436,6 +436,22 @@ pub fn readFile(
     var hash_hex: [64]u8 = undefined;
     sha256Hex(content, &hash_hex);
 
+    // A non-zero offset at or past EOF is almost always a paging bug (the
+    // caller kept advancing past the end); report it instead of silently
+    // returning empty content with truncated:false. offset 0 on an empty file
+    // is still fine (a legitimate read of a zero-byte file).
+    if (offset) |o| {
+        if (o > 0 and o >= content.len) {
+            const msg = try std.fmt.allocPrint(
+                allocator,
+                "offset {d} is beyond end of file (size {d})",
+                .{ o, content.len },
+            );
+            defer allocator.free(msg);
+            return writeError(out, allocator, msg);
+        }
+    }
+
     const off: usize = if (offset) |o| @intCast(@min(o, content.len)) else 0;
     const requested_end: usize = blk: {
         if (limit) |l| {
@@ -473,16 +489,32 @@ pub fn readFile(
     return true;
 }
 
-/// Atomically write `content` to a sandboxed path. Optional
-/// `expected_sha256` enables CAS — the write fails if the file has
-/// changed since the agent last read it. Refuses to overwrite an
+/// Whether `writeFile` replaces the file or concatenates onto it. Same enum
+/// reasoning as `ListMode`/`ReplaceMode` — keeps a bare `bool` out of the
+/// public signature.
+pub const WriteMode = enum { replace, append };
+
+/// Optional `writeFile` behaviour, bundled so the handler stays within the
+/// parameter budget. `expected_sha256` enables CAS (checked against the
+/// pre-append file when `mode == .append`); `mode` picks replace vs. append.
+pub const WriteOpts = struct {
+    expected_sha256: ?[]const u8 = null,
+    mode: WriteMode = .replace,
+};
+
+/// Atomically write `content` to a sandboxed path. `opts.mode == .append`
+/// concatenates `content` onto the existing file (empty if it doesn't exist
+/// yet) instead of replacing it; either way the write goes through the same
+/// temp-file+rename. Optional `opts.expected_sha256` enables CAS — the write
+/// fails if the file has changed since the agent last read it; for an append
+/// the CAS is checked against the PRE-append file. Refuses to overwrite an
 /// existing symlink so the human-managed link stays intact.
 pub fn writeFile(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     rel_path: []const u8,
     content: []const u8,
-    expected_sha256: ?[]const u8,
+    opts: WriteOpts,
     out: *std.ArrayList(u8),
 ) VfsError!bool {
     if (content.len > max_file_bytes) {
@@ -497,7 +529,7 @@ pub fn writeFile(
         if (stat.kind == .sym_link) {
             return writeError(out, allocator, err_refuse_symlink);
         }
-        if (expected_sha256) |expected| {
+        if (opts.expected_sha256) |expected| {
             const existing = infra_fs.cwd().readFileAlloc(allocator, resolved.abs, max_file_bytes) catch |e| switch (e) {
                 error.FileNotFound => return writeStaleSha(out, allocator, ""),
                 else => return e,
@@ -518,6 +550,27 @@ pub fn writeFile(
         };
     }
 
+    // In append mode, prepend the existing file's bytes (empty if absent) so
+    // the atomic rewrite lands existing++content. A plain write writes `content`.
+    var appended: ?[]u8 = null;
+    defer if (appended) |a| allocator.free(a);
+    const to_write: []const u8 = if (opts.mode == .replace) content else blk: {
+        const prior: []u8 = infra_fs.cwd().readFileAlloc(allocator, resolved.abs, max_file_bytes) catch |e| switch (e) {
+            error.FileNotFound => try allocator.alloc(u8, 0),
+            error.FileTooBig => return writeError(out, allocator, err_file_too_large),
+            else => return e,
+        };
+        defer allocator.free(prior);
+        const combined = try allocator.alloc(u8, prior.len + content.len);
+        @memcpy(combined[0..prior.len], prior);
+        @memcpy(combined[prior.len..], content);
+        appended = combined;
+        break :blk combined;
+    };
+    if (to_write.len > max_file_bytes) {
+        return writeError(out, allocator, err_file_too_large);
+    }
+
     {
         var write_buf: [4096]u8 = undefined;
         var atomic = infra_fs.cwd().atomicFile(resolved.abs, .{ .write_buffer = &write_buf }) catch |e| switch (e) {
@@ -525,19 +578,19 @@ pub fn writeFile(
             else => return e,
         };
         defer atomic.deinit();
-        atomic.file_writer.interface.writeAll(content) catch |e| switch (e) {
+        atomic.file_writer.interface.writeAll(to_write) catch |e| switch (e) {
             error.WriteFailed => return atomic.file_writer.err.?,
         };
         try atomic.finish();
     }
 
     var hash_hex: [64]u8 = undefined;
-    sha256Hex(content, &hash_hex);
+    sha256Hex(to_write, &hash_hex);
 
     const w = out.writer(allocator);
     try w.writeAll(json_path_open);
     try json_writer.writeString(w, resolved.rel);
-    try w.print(",\"bytes_written\":{d},\"sha256\":\"{s}\",\"dirty_designs\":", .{ content.len, hash_hex[0..] });
+    try w.print(",\"bytes_written\":{d},\"sha256\":\"{s}\",\"dirty_designs\":", .{ to_write.len, hash_hex[0..] });
     try writeDirtyDesigns(w, allocator, project_dir, resolved.rel);
     try w.writeAll(json_library_changes_key);
     try writeLibraryChanges(w, resolved.rel);
@@ -1076,13 +1129,18 @@ pub fn dirtyDesignsForPath(
 
     if (std.mem.startsWith(u8, rel_path, "src/")) {
         const tail = rel_path["src/".len..];
-        const base = if (std.mem.endsWith(u8, tail, ".sexp"))
+        const stripped = if (std.mem.endsWith(u8, tail, ".sexp"))
             tail[0 .. tail.len - ".sexp".len]
         else if (std.mem.endsWith(u8, tail, ".bom"))
             tail[0 .. tail.len - ".bom".len]
         else
             return out.toOwnedSlice(allocator);
-        if (std.mem.indexOfScalar(u8, base, '/') != null) return out.toOwnedSlice(allocator);
+        // Designs are discovered by file BASENAME regardless of nesting (see
+        // listDesignNames' dir.walk), so a nested design like
+        // src/boards/straps/straps.sexp is the design "straps". Use the
+        // basename so nested edits report their own design as dirty.
+        const base = std.fs.path.basename(stripped);
+        if (base.len == 0) return out.toOwnedSlice(allocator);
         try out.append(allocator, try allocator.dupe(u8, base));
         return out.toOwnedSlice(allocator);
     }
@@ -1263,4 +1321,107 @@ test "editFile applies a non-empty single-match replacement" {
     const after = try tmp.dir.readFileAlloc(alloc, "src/f.sexp", 1 << 20);
     defer alloc.free(after);
     try std.testing.expectEqualStrings("hello there", after);
+}
+
+test "readFile errors when the offset is at or past EOF" {
+    // spec: serve/vfs - readFile reports an error when a non-zero offset is at or beyond the end of the file
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("src");
+    try tmp.dir.writeFile(.{ .sub_path = "src/f.sexp", .data = "abcde" }); // 5 bytes
+    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(proj);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    // offset == size (5) is past the last byte → error, not silent-empty.
+    try std.testing.expect(!try readFile(alloc, proj, "src/f.sexp", 5, null, &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "beyond end of file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "size 5") != null);
+
+    // A valid in-range offset still succeeds.
+    out.clearRetainingCapacity();
+    try std.testing.expect(try readFile(alloc, proj, "src/f.sexp", 2, null, &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"content\":\"cde\"") != null);
+}
+
+test "writeFile append concatenates onto the existing file atomically" {
+    // spec: serve/vfs - writeFile append mode concatenates content onto the existing file
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("src");
+    try tmp.dir.writeFile(.{ .sub_path = "src/f.sexp", .data = "head" });
+    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(proj);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try std.testing.expect(try writeFile(alloc, proj, "src/f.sexp", "-tail", .{ .mode = .append }, &out));
+
+    const after = try tmp.dir.readFileAlloc(alloc, "src/f.sexp", 1 << 20);
+    defer alloc.free(after);
+    try std.testing.expectEqualStrings("head-tail", after);
+    // Response reports the FULL file size, not just the appended chunk.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"bytes_written\":9") != null);
+
+    // Append onto a not-yet-existing file behaves like a plain create.
+    out.clearRetainingCapacity();
+    try std.testing.expect(try writeFile(alloc, proj, "src/new.sexp", "fresh", .{ .mode = .append }, &out));
+    const created = try tmp.dir.readFileAlloc(alloc, "src/new.sexp", 1 << 20);
+    defer alloc.free(created);
+    try std.testing.expectEqualStrings("fresh", created);
+}
+
+test "writeFile append honours the CAS guard against the pre-append file" {
+    // spec: serve/vfs - writeFile append composes with expected_sha256 CAS checked against the pre-append file
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("src");
+    try tmp.dir.writeFile(.{ .sub_path = "src/f.sexp", .data = "base" });
+    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(proj);
+
+    var hex: [64]u8 = undefined;
+    sha256Hex("base", &hex);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    const cas_ok: WriteOpts = .{ .expected_sha256 = hex[0..], .mode = .append };
+    // Correct pre-append hash → append succeeds.
+    try std.testing.expect(try writeFile(alloc, proj, "src/f.sexp", "+more", cas_ok, &out));
+    const after = try tmp.dir.readFileAlloc(alloc, "src/f.sexp", 1 << 20);
+    defer alloc.free(after);
+    try std.testing.expectEqualStrings("base+more", after);
+
+    // A stale hash rejects the append (file left unchanged).
+    out.clearRetainingCapacity();
+    try std.testing.expect(!try writeFile(alloc, proj, "src/f.sexp", "!!!", cas_ok, &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"stale\":true") != null);
+    const unchanged = try tmp.dir.readFileAlloc(alloc, "src/f.sexp", 1 << 20);
+    defer alloc.free(unchanged);
+    try std.testing.expectEqualStrings("base+more", unchanged);
+}
+
+test "dirtyDesignsForPath resolves a nested src design to its basename" {
+    // spec: serve/vfs - dirtyDesignsForPath maps a nested src/**/<name>.sexp path to the design basename
+    const alloc = std.testing.allocator;
+    const nested = try dirtyDesignsForPath(alloc, "/proj", "src/boards/straps/straps.sexp");
+    defer {
+        for (nested) |d| alloc.free(d);
+        alloc.free(nested);
+    }
+    try std.testing.expectEqual(@as(usize, 1), nested.len);
+    try std.testing.expectEqualStrings("straps", nested[0]);
+
+    // A nested .bom edit resolves the same way.
+    const bom_dirty = try dirtyDesignsForPath(alloc, "/proj", "src/boards/straps/straps.bom");
+    defer {
+        for (bom_dirty) |d| alloc.free(d);
+        alloc.free(bom_dirty);
+    }
+    try std.testing.expectEqual(@as(usize, 1), bom_dirty.len);
+    try std.testing.expectEqualStrings("straps", bom_dirty[0]);
 }

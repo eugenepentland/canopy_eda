@@ -44,7 +44,7 @@
 10 src/review.zig|SectionReport
 14 src/review.zig|Summary
 10 src/serve/digikey.zig|Product
-8 src/serve/edit.zig|BuildReport
+9 src/serve/edit.zig|BuildReport
 12 src/serve/library.zig|LibraryRow
 14 src/serve/mcp_tools.zig|DesignSummary
 26 src/serve/pcb_layout_page.zig|PngRequest

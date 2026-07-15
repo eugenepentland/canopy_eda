@@ -39,6 +39,7 @@ const render_pcb_png = @import("../render_pcb_png.zig");
 const docgen = @import("../docgen.zig");
 const page_cache = @import("page_cache.zig");
 const mcp_flatten = @import("mcp_flatten.zig");
+const mcp_checks = @import("mcp_checks.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const name_field_prefix = "{\"name\":";
@@ -46,11 +47,14 @@ const ref_des_field_prefix = "{\"ref_des\":";
 const function_field = ",\"function\":";
 const key_components = "components";
 const key_footprints = "footprints";
-const err_not_design = "error: not a design";
-const err_build_failed = "error: build failed";
+/// Shared with `mcp_checks` (the `run_checks` handler moved there).
+pub const err_not_design = "error: not a design";
+/// Shared with `mcp_checks` (the `run_checks` handler moved there).
+pub const err_build_failed = "error: build failed";
 const err_line_template = "error: {s}";
 const version_snapshot_template = "{{\"ok\":true,\"version\":{d},\"snapshot\":";
-const json_net_key = ",\"net\":";
+/// Shared with `mcp_checks` (the ERC-violation JSON writer moved there).
+pub const json_net_key = ",\"net\":";
 const json_component_key = ",\"component\":";
 const json_value_key = ",\"value\":";
 /// Shared with `mcp_parts_tools` (resolve_mpn / check_stock envelopes).
@@ -65,7 +69,9 @@ pub const ToolError = std.mem.Allocator.Error || std.Io.Writer.Error || EvalErro
     std.fs.Dir.Iterator.Error || std.fs.Dir.OpenError || std.fs.File.OpenError || std.fs.File.ReadError ||
     error{ InvalidName, NotADesign, FileTooBig, StreamTooLong, NotOpenForReading, ReadOnlyFileSystem, LinkQuotaExceeded };
 
-fn warnResolveIdentities(name: []const u8, err: anyerror) void {
+/// Log a non-fatal BOM identity-resolution failure. Shared with `mcp_checks`
+/// (the `run_checks` handler) — resolution is best-effort on every read path.
+pub fn warnResolveIdentities(name: []const u8, err: anyerror) void {
     log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });
 }
 
@@ -273,7 +279,8 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "describe_pcb_layout")) return try toolDescribePcbLayout(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "compare_layout_to_starred")) return try toolCompareLayoutToStarred(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_version")) return try toolGetVersion(args_val, out, allocator);
-    if (std.mem.eql(u8, tool_name, "run_checks")) return try toolRunChecks(allocator, project_dir, args_val, out, w);
+    if (std.mem.eql(u8, tool_name, "run_checks"))
+        return try mcp_checks.toolRunChecks(allocator, project_dir, args_val, out, w);
     if (std.mem.eql(u8, tool_name, "read_datasheet")) return try mcp_parts_tools.toolReadDatasheet(allocator, project_dir, args_val, out);
     return null;
 }
@@ -382,6 +389,18 @@ fn toolListDesigns(allocator: std.mem.Allocator, project_dir: []const u8, w: any
     return true;
 }
 
+/// The four library subdirectories `list_library` exposes, in output order.
+const lib_kinds = [_][]const u8{ key_components, "modules", "pinouts", key_footprints };
+
+/// Default per-category cap on the ranked (query) results, so a broad query
+/// can't blow past a client's token budget. Overridable via the `limit` arg.
+const lib_query_limit_default: usize = 50;
+
+/// `list_library` — bounded library listing. Without a `query` each category
+/// is a lean `{count,names}` object (names only, no per-file description scan);
+/// with a `query` each category is the ranked `[{name,description}]` array,
+/// capped at `limit` (default 50). The optional `category`
+/// (components|modules|pinouts|footprints) scopes either mode to one subdir.
 fn toolListLibrary(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, w: anytype) !bool {
     // A blank/whitespace-only query is treated as "no filter" so callers can
     // pass an empty box without accidentally hiding the whole library.
@@ -390,20 +409,81 @@ fn toolListLibrary(allocator: std.mem.Allocator, project_dir: []const u8, args_v
         const trimmed = std.mem.trim(u8, q, " \t\r\n");
         break :blk if (trimmed.len == 0) null else trimmed;
     };
+    const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(l) else lib_query_limit_default;
+
+    const category = optionalString(args_val, "category");
+    if (category) |cat| {
+        var known = false;
+        for (lib_kinds) |k| {
+            if (std.mem.eql(u8, k, cat)) known = true;
+        }
+        if (!known) {
+            try w.print(
+                "{{\"error\":\"unknown category \\\"{s}\\\"; expected one of components|modules|pinouts|footprints\"}}",
+                .{cat},
+            );
+            return false;
+        }
+    }
+
     try w.writeAll("{");
-    const kinds = [_]struct { field: []const u8, sub: []const u8 }{
-        .{ .field = key_components, .sub = key_components },
-        .{ .field = "modules", .sub = "modules" },
-        .{ .field = "pinouts", .sub = "pinouts" },
-        .{ .field = key_footprints, .sub = key_footprints },
-    };
-    for (kinds, 0..) |k, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.print("\"{s}\":", .{k.field});
-        try listLibrarySubdir(allocator, project_dir, k.sub, query, w);
+    var first = true;
+    for (lib_kinds) |k| {
+        if (category) |cat| {
+            if (!std.mem.eql(u8, k, cat)) continue;
+        }
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.print("\"{s}\":", .{k});
+        if (query) |q| {
+            try listLibrarySubdir(allocator, project_dir, k, q, limit, w);
+        } else {
+            try writeLibraryNames(allocator, project_dir, k, w);
+        }
     }
     try w.writeAll("}");
     return true;
+}
+
+/// Names-only listing of one `lib/<sub>` directory for the no-query
+/// `list_library` path: emits `{"count":N,"names":[...]}` (alphabetically
+/// sorted) without opening a single file — no `(description …)` scan — so the
+/// response stays small and fast even on a library of hundreds of parts.
+fn writeLibraryNames(allocator: std.mem.Allocator, project_dir: []const u8, sub: []const u8, w: anytype) !void {
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/{s}", .{ project_dir, sub });
+    defer allocator.free(dir_path);
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+
+    if (infra_fs.cwd().openDir(dir_path, .{ .iterate = true })) |dir_open| {
+        var dir = dir_open;
+        defer dir.close();
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
+            const base = entry.name[0 .. entry.name.len - ".sexp".len];
+            try names.append(allocator, try allocator.dupe(u8, base));
+        }
+    } else |_| {}
+
+    std.sort.heap([]const u8, names.items, {}, lessThanStr);
+
+    try w.print("{{\"count\":{d},\"names\":[", .{names.items.len});
+    for (names.items, 0..) |n, i| {
+        if (i > 0) try w.writeAll(",");
+        try json_writer.writeString(w, n);
+    }
+    try w.writeAll("]}");
+}
+
+/// Alphabetical `[]const u8` order for `std.sort` (stable library listings).
+fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
 }
 
 fn toolListHistory(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
@@ -560,24 +640,6 @@ fn isBareModuleName(name: []const u8) bool {
 /// Emit one ERC violation as a JSON object {kind,severity,message[,ref][,net]}.
 /// Shared by run_checks, the build report, and preview_module so the three
 /// surfaces stay shape-identical.
-fn writeErcViolationJson(w: anytype, v: erc_mod.Violation) !void {
-    try w.writeAll("{\"kind\":\"");
-    try w.writeAll(@tagName(v.kind));
-    try w.writeAll("\",\"severity\":\"");
-    try w.writeAll(@tagName(v.severity));
-    try w.writeAll("\",\"message\":");
-    try json_writer.writeString(w, v.message);
-    if (v.ref_des.len > 0) {
-        try w.writeAll(",\"ref\":");
-        try json_writer.writeString(w, v.ref_des);
-    }
-    if (v.net.len > 0) {
-        try w.writeAll(json_net_key);
-        try json_writer.writeString(w, v.net);
-    }
-    try w.writeAll("}");
-}
-
 /// Compact JSON summary of an evaluated module block: title, ports,
 /// instances, nets, nested sub-blocks, ERC violations, and the assertions
 /// recorded during evaluation (a module's design math surfaces here).
@@ -635,7 +697,7 @@ fn writeModuleSummary(
     for (violations) |v| {
         if (!first) try w.writeAll(",");
         first = false;
-        try writeErcViolationJson(w, v);
+        try mcp_checks.writeErcViolationJson(w, v);
     }
     try w.writeAll("],\"assertions\":[");
     for (assertions, 0..) |a, i| {
@@ -747,11 +809,6 @@ fn toolGetVersion(args_val: ?std.json.Value, out: *std.ArrayList(u8), allocator:
     return true;
 }
 
-fn toolRunChecks(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), w: anytype) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    return runChecks(allocator, project_dir, name, optionalString(args_val, "severity"), optionalString(args_val, "changed_since"), w);
-}
-
 fn toolRestoreVersion(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const id = requireString(args_val, "id") orelse return missingArg(out, allocator, "id");
@@ -798,7 +855,11 @@ fn toolReadFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val:
 fn toolWriteFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const path = requireString(args_val, "path") orelse return missingArg(out, allocator, "path");
     const content = requireString(args_val, "content") orelse return missingArg(out, allocator, "content");
-    return vfs.writeFile(allocator, project_dir, path, content, optionalString(args_val, "expected_sha256"), out);
+    const mode: vfs.WriteMode = if (optionalBool(args_val, "append") orelse false) .append else .replace;
+    return vfs.writeFile(allocator, project_dir, path, content, .{
+        .expected_sha256 = optionalString(args_val, "expected_sha256"),
+        .mode = mode,
+    }, out);
 }
 
 fn toolEditFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
@@ -835,7 +896,7 @@ fn toolBuild(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?s
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const report = edit.rebuildDesign(allocator, project_dir, name);
     const w = out.writer(allocator);
-    try writeBuildReport(w, report);
+    try mcp_checks.writeBuildReport(w, report, optionalString(args_val, "severity"));
     return true;
 }
 
@@ -920,7 +981,7 @@ fn toolRegeneratePinout(
 
     var write_buf: std.ArrayList(u8) = .empty;
     defer write_buf.deinit(allocator);
-    const wrote_ok = try vfs.writeFile(allocator, project_dir, out_path, pinout_text, null, &write_buf);
+    const wrote_ok = try vfs.writeFile(allocator, project_dir, out_path, pinout_text, .{}, &write_buf);
     if (!wrote_ok) {
         // writeFile already emitted a structured `{"error":"..."}`.
         try w.writeAll(write_buf.items);
@@ -1043,13 +1104,16 @@ fn libEntryScore(query: []const u8, name: []const u8, description: ?[]const u8) 
 /// in `{project_dir}/lib/{sub}/`. Description is extracted from the first
 /// top-level (description "...") form in the file, or empty if absent.
 /// With a non-null `query`, only entries whose name or description fuzzily
-/// match are emitted, ranked best-first; with null `query`, every entry is
-/// emitted in directory order.
+/// match are emitted, ranked best-first, and truncated to `limit` entries
+/// (null `limit` = unbounded); with null `query`, every entry is emitted in
+/// directory order (the CLI `netlisp library` path — the MCP tool uses the
+/// leaner `writeLibraryNames` for its no-query mode instead).
 pub fn listLibrarySubdir(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     sub: []const u8,
     query: ?[]const u8,
+    limit: ?usize,
     w: anytype,
 ) !void {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/{s}", .{ project_dir, sub });
@@ -1109,6 +1173,9 @@ pub fn listLibrarySubdir(
 
     try w.writeAll("[");
     for (matches.items, 0..) |m, i| {
+        if (limit) |lim| {
+            if (i >= lim) break;
+        }
         if (i > 0) try w.writeAll(",");
         try writeLibEntry(w, m.name, m.description);
     }
@@ -1134,140 +1201,6 @@ fn extractDescription(allocator: std.mem.Allocator, path: []const u8) ?[]const u
     const start = idx + marker.len;
     const end = std.mem.indexOfScalarPos(u8, src, start, '"') orelse return null;
     return allocator.dupe(u8, src[start..end]) catch null;
-}
-
-fn runChecks(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    severity_filter: ?[]const u8,
-    changed_since: ?[]const u8,
-    w: anytype,
-) !bool {
-    var eval = Evaluator.init(allocator, project_dir);
-    defer eval.deinit();
-    const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
-        error.NotADesign => {
-            try w.writeAll(err_not_design);
-            return false;
-        },
-        else => {
-            try w.writeAll(err_build_failed);
-            return false;
-        },
-    };
-    const block = nb.block;
-
-    if (!nb.is_module) {
-        const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
-        defer allocator.free(bom_path);
-        bom.resolveIdentities(allocator, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
-    }
-
-    // If changed_since is set, compute the symmetric-difference sets of
-    // ref_des and net names between the prior snapshot and the current
-    // design. ERC violations are filtered to those touching these sets.
-    var changed_refs: std.StringHashMapUnmanaged(void) = .empty;
-    defer changed_refs.deinit(allocator);
-    var changed_nets: std.StringHashMapUnmanaged(void) = .empty;
-    defer changed_nets.deinit(allocator);
-    var have_change_filter = false;
-    if (changed_since) |cs| {
-        // Validate snapshot id for path traversal.
-        if (cs.len == 0 or std.mem.indexOf(u8, cs, "..") != null or std.mem.indexOfAny(u8, cs, "/\\") != null) {
-            try w.writeAll("error: invalid changed_since id");
-            return false;
-        }
-        const snap_path = try std.fmt.allocPrint(allocator, "{s}/history/{s}/{s}/{s}.sexp", .{ project_dir, name, cs, name });
-        defer allocator.free(snap_path);
-        var eval_old = Evaluator.init(allocator, project_dir);
-        defer eval_old.deinit();
-        if (eval_old.evalFile(snap_path)) |old_result| {
-            const old_block: *const env_mod.DesignBlock = switch (old_result) {
-                .design_block => |b| b,
-                else => {
-                    try w.writeAll("error: snapshot did not evaluate to a design");
-                    return false;
-                },
-            };
-            try diffSets(allocator, old_block, block, &changed_refs, &changed_nets);
-            have_change_filter = true;
-        } else |_| {
-            try w.writeAll("error: could not load snapshot");
-            return false;
-        }
-    }
-
-    try w.print("{{\"filtered\":{s}", .{if (have_change_filter or severity_filter != null) "true" else "false"});
-
-    if (have_change_filter) {
-        try w.writeAll(",\"changed_refs\":[");
-        var it = changed_refs.iterator();
-        var first = true;
-        while (it.next()) |e| {
-            if (!first) try w.writeAll(",");
-            first = false;
-            try json_writer.writeString(w, e.key_ptr.*);
-        }
-        try w.writeAll("],\"changed_nets\":[");
-        var it2 = changed_nets.iterator();
-        first = true;
-        while (it2.next()) |e| {
-            if (!first) try w.writeAll(",");
-            first = false;
-            try json_writer.writeString(w, e.key_ptr.*);
-        }
-        try w.writeAll("]");
-    }
-
-    try w.writeAll(",\"erc\":[");
-    const erc_all = try runErcForNamedBlock(allocator, nb, project_dir);
-    var first = true;
-    for (erc_all) |v| {
-        if (severity_filter) |sf| if (!std.mem.eql(u8, @tagName(v.severity), sf)) continue;
-        if (have_change_filter) {
-            const ref_hit = v.ref_des.len > 0 and changed_refs.contains(v.ref_des);
-            const net_hit = v.net.len > 0 and changed_nets.contains(v.net);
-            if (!ref_hit and !net_hit) continue;
-        }
-        if (!first) try w.writeAll(",");
-        first = false;
-        try writeErcViolationJson(w, v);
-    }
-    try w.writeAll("]}");
-    return true;
-}
-
-fn diffSets(
-    allocator: std.mem.Allocator,
-    old_block: *const env_mod.DesignBlock,
-    new_block: *const env_mod.DesignBlock,
-    changed_refs: *std.StringHashMapUnmanaged(void),
-    changed_nets: *std.StringHashMapUnmanaged(void),
-) !void {
-    var old_refs: std.StringHashMapUnmanaged(void) = .empty;
-    defer old_refs.deinit(allocator);
-    var new_refs: std.StringHashMapUnmanaged(void) = .empty;
-    defer new_refs.deinit(allocator);
-    var old_nets: std.StringHashMapUnmanaged(void) = .empty;
-    defer old_nets.deinit(allocator);
-    var new_nets: std.StringHashMapUnmanaged(void) = .empty;
-    defer new_nets.deinit(allocator);
-
-    for (old_block.instances) |i| try old_refs.put(allocator, i.ref_des, {});
-    for (new_block.instances) |i| try new_refs.put(allocator, i.ref_des, {});
-    for (old_block.nets) |n| try old_nets.put(allocator, n.name, {});
-    for (new_block.nets) |n| try new_nets.put(allocator, n.name, {});
-
-    var it = old_refs.iterator();
-    while (it.next()) |e| if (!new_refs.contains(e.key_ptr.*)) try changed_refs.put(allocator, e.key_ptr.*, {});
-    var it2 = new_refs.iterator();
-    while (it2.next()) |e| if (!old_refs.contains(e.key_ptr.*)) try changed_refs.put(allocator, e.key_ptr.*, {});
-
-    var it3 = old_nets.iterator();
-    while (it3.next()) |e| if (!new_nets.contains(e.key_ptr.*)) try changed_nets.put(allocator, e.key_ptr.*, {});
-    var it4 = new_nets.iterator();
-    while (it4.next()) |e| if (!old_nets.contains(e.key_ptr.*)) try changed_nets.put(allocator, e.key_ptr.*, {});
 }
 
 /// Introspection scope for the by-name read tools: `flat` walks the whole
@@ -1583,39 +1516,6 @@ pub fn optionalBool(args_val: ?std.json.Value, key: []const u8) ?bool {
     if (av != .object) return null;
     const v = av.object.get(key) orelse return null;
     return if (v == .bool) v.bool else null;
-}
-
-/// Render a `BuildReport` from `edit.rebuildDesign` as the JSON the MCP
-/// `build` tool returns. Failures keep the live_version unchanged but
-/// still report the error message and any partial assertion results.
-fn writeBuildReport(w: anytype, report: edit.BuildReport) !void {
-    try w.writeAll("{\"ok\":");
-    try w.writeAll(if (report.ok) "true" else "false");
-    try w.print(",\"version\":{d},\"eval_ok\":{s}", .{
-        report.version,
-        if (report.eval_ok) "true" else "false",
-    });
-    try w.writeAll(",\"snapshot\":");
-    if (report.snapshot) |s| try json_writer.writeString(w, s) else try w.writeAll("null");
-    try w.writeAll(",\"error\":");
-    if (report.error_message) |m| try json_writer.writeString(w, m) else try w.writeAll("null");
-    // Structured source-located build diagnostic (file/line/col/message/
-    // source_line) so an agent can jump straight to the failing form.
-    try w.writeAll(",\"diagnostic\":");
-    if (report.diagnostic) |d| try diag_format.writeJson(w, d) else try w.writeAll("null");
-    try w.writeAll(",\"assertion_failures\":[");
-    for (report.assertion_failures, 0..) |a, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"message\":");
-        try json_writer.writeString(w, a.message);
-        try w.print(",\"is_warning\":{s}}}", .{if (a.is_warning) "true" else "false"});
-    }
-    try w.writeAll("],\"erc\":[");
-    for (report.erc, 0..) |v, i| {
-        if (i > 0) try w.writeAll(",");
-        try writeErcViolationJson(w, v);
-    }
-    try w.writeAll("]}");
 }
 
 /// Write `s` as a JSON string literal (with escapes) to `w`.
@@ -2118,7 +2018,7 @@ test "list_library query returns only matching entries ranked best-first" {
     const proj = try tmp.dir.realpathAlloc(alloc, ".");
 
     var out: std.ArrayList(u8) = .empty;
-    try listLibrarySubdir(alloc, proj, "components", "stm32", out.writer(alloc));
+    try listLibrarySubdir(alloc, proj, "components", "stm32", null, out.writer(alloc));
 
     // The matching part appears; the unrelated cap is filtered out.
     try std.testing.expect(std.mem.indexOf(u8, out.items, "stm32n657l0h3q") != null);
@@ -2129,8 +2029,8 @@ test "list_library query returns only matching entries ranked best-first" {
     try std.testing.expect(name_pos < desc_pos);
 }
 
-test "list_library without a query lists every entry" {
-    // spec: serve/mcp_tools - list_library without a query (or a blank one) lists every entry
+test "list_library without a query returns names only with a count" {
+    // spec: serve/mcp_tools - list_library without a query returns a names-only {count,names} listing per category
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -2138,14 +2038,70 @@ test "list_library without a query lists every entry" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/aaa.sexp", .data = "(component \"aaa\")\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/bbb.sexp", .data = "(component \"bbb\")\n" });
+    try tmp.dir.writeFile(.{
+        .sub_path = "lib/components/aaa.sexp",
+        .data = "(component \"aaa\" (description \"first\"))\n",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "lib/components/bbb.sexp",
+        .data = "(component \"bbb\" (description \"second\"))\n",
+    });
     const proj = try tmp.dir.realpathAlloc(alloc, ".");
 
     var out: std.ArrayList(u8) = .empty;
-    try listLibrarySubdir(alloc, proj, "components", null, out.writer(alloc));
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "aaa") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "bbb") != null);
+    try writeLibraryNames(alloc, proj, "components", out.writer(alloc));
+    // Both names present, plus the count; descriptions are NOT scanned/emitted.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"count\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"aaa\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"bbb\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "first") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "second") == null);
+}
+
+test "list_library query results are capped by limit" {
+    // spec: serve/mcp_tools - list_library caps the ranked query results per category at the limit argument
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0402.sexp", .data = "(component \"cap-0402\")\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0603.sexp", .data = "(component \"cap-0603\")\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0805.sexp", .data = "(component \"cap-0805\")\n" });
+    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+
+    var out: std.ArrayList(u8) = .empty;
+    try listLibrarySubdir(alloc, proj, "components", "cap", 1, out.writer(alloc));
+    // Three parts match "cap" but the limit of 1 keeps only the top-ranked one.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.items, "\"name\":"));
+}
+
+test "list_library category scopes the listing to one subdir" {
+    // spec: serve/mcp_tools - list_library category argument scopes the response to a single library subdir
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("lib/components");
+    try tmp.dir.makePath("lib/modules");
+    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0402.sexp", .data = "(component \"cap-0402\")\n" });
+    try tmp.dir.writeFile(.{
+        .sub_path = "lib/modules/buck.sexp",
+        .data = "(defmodule buck () (design-block \"b\"))\n",
+    });
+    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"category\":\"modules\"}", .{});
+    var out: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try toolListLibrary(alloc, proj, args, out.writer(alloc)));
+    // Only the modules category is present in the response.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"modules\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"components\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "buck") != null);
 }
 
 /// (test helper) True when `name` is a registered tool in the `tools` table.

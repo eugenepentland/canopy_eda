@@ -983,6 +983,7 @@ src/serve/drc_rules.zig::setApi | fn setApi(ctx: *Server, req: *httpz.Request, r
 src/serve/drc_rules.zig::writeKindsJson | fn writeKindsJson(w: *std.Io.Writer, rules: Rules) std.Io.Writer.Error!void
 src/serve/edit.zig::AssertionFailure struct_
 src/serve/edit.zig::BuildReport struct_
+src/serve/edit.zig::BuildWarning struct_
 src/serve/edit.zig::EditError value
 src/serve/edit.zig::HandlerError value
 src/serve/edit.zig::MpnEditError value
@@ -1064,6 +1065,10 @@ src/serve/mcp.zig::dispatchFrame | fn dispatchFrame( allocator: std.mem.Allocato
 src/serve/mcp.zig::init | fn init(conn: *websocket.Conn, ctx: *const Context) !Client
 src/serve/mcp.zig::postApi | fn postApi(ctx: *server_mod.Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/mcp.zig::upgrade | fn upgrade(ctx: *server_mod.Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/mcp_checks.zig::severityPasses | fn severityPasses(v: erc_mod.Violation, filter: ?[]const u8) bool
+src/serve/mcp_checks.zig::toolRunChecks | fn toolRunChecks( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), w: anytype, ) !bool
+src/serve/mcp_checks.zig::writeBuildReport | fn writeBuildReport(w: anytype, report: edit.BuildReport, severity: ?[]const u8) !void
+src/serve/mcp_checks.zig::writeErcViolationJson | fn writeErcViolationJson(w: anytype, v: erc_mod.Violation) !void
 src/serve/mcp_docs.zig::ParamDoc struct_
 src/serve/mcp_docs.zig::ToolDoc struct_
 src/serve/mcp_docs.zig::mcpDocsPage | fn mcpDocsPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -1092,15 +1097,18 @@ src/serve/mcp_tools.zig::NamedBlock struct_
 src/serve/mcp_tools.zig::Scope enum_
 src/serve/mcp_tools.zig::ToolError value
 src/serve/mcp_tools.zig::call | fn call( allocator: std.mem.Allocator, project_dir: []const u8, tool_name: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) CallResult
+src/serve/mcp_tools.zig::err_build_failed value
+src/serve/mcp_tools.zig::err_not_design value
 src/serve/mcp_tools.zig::evalNamedBlock | fn evalNamedBlock( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, eval: *Evaluator, ) ToolError!NamedBlock
 src/serve/mcp_tools.zig::getNet | fn getNet( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, net_name: []const u8, scope: Scope, w: anytype, ) !bool
 src/serve/mcp_tools.zig::isMutationTool | fn isMutationTool(name: []const u8) bool
 src/serve/mcp_tools.zig::json_description_key value
+src/serve/mcp_tools.zig::json_net_key value
 src/serve/mcp_tools.zig::listDesignNames | fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) ToolError![][]const u8
 src/serve/mcp_tools.zig::listDesignSummaries | fn listDesignSummaries( allocator: std.mem.Allocator, project_dir: []const u8, ) ToolError![]DesignSummary
 src/serve/mcp_tools.zig::listFreePins | fn listFreePins( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, opts: FreePinOpts, w: anytype, ) ToolError!bool
 src/serve/mcp_tools.zig::listInstances | fn listInstances( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, scope: Scope, w: anytype, ) !bool
-src/serve/mcp_tools.zig::listLibrarySubdir | fn listLibrarySubdir( allocator: std.mem.Allocator, project_dir: []const u8, sub: []const u8, query: ?[]const u8, w: anytype, ) !void
+src/serve/mcp_tools.zig::listLibrarySubdir | fn listLibrarySubdir( allocator: std.mem.Allocator, project_dir: []const u8, sub: []const u8, query: ?[]const u8, limit: ?usize, w: anytype, ) !void
 src/serve/mcp_tools.zig::missingArg | fn missingArg(out: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!bool
 src/serve/mcp_tools.zig::optionalBool | fn optionalBool(args_val: ?std.json.Value, key: []const u8) ?bool
 src/serve/mcp_tools.zig::optionalString | fn optionalString(args_val: ?std.json.Value, key: []const u8) ?[]const u8
@@ -1109,6 +1117,7 @@ src/serve/mcp_tools.zig::renderSceneGraph | fn renderSceneGraph( allocator: std.
 src/serve/mcp_tools.zig::requireString | fn requireString(args_val: ?std.json.Value, key: []const u8) ?[]const u8
 src/serve/mcp_tools.zig::runErcForNamedBlock | fn runErcForNamedBlock( allocator: std.mem.Allocator, nb: NamedBlock, project_dir: []const u8, ) std.mem.Allocator.Error![]const erc_mod.Violation
 src/serve/mcp_tools.zig::tools_list_result value
+src/serve/mcp_tools.zig::warnResolveIdentities | fn warnResolveIdentities(name: []const u8, err: anyerror) void
 src/serve/modules.zig::HandlerError value
 src/serve/modules.zig::ModuleEntry struct_
 src/serve/modules.zig::ResolvedBlock struct_
@@ -1329,6 +1338,8 @@ src/serve/upload_package.zig::uploadPackageApi | fn uploadPackageApi(ctx: *Serve
 src/serve/vfs.zig::ListMode enum_
 src/serve/vfs.zig::ReplaceMode enum_
 src/serve/vfs.zig::VfsError value
+src/serve/vfs.zig::WriteMode enum_
+src/serve/vfs.zig::WriteOpts struct_
 src/serve/vfs.zig::deleteFile | fn deleteFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, out: *std.ArrayList(u8), ) VfsError!bool
 src/serve/vfs.zig::dirtyDesignsForPath | fn dirtyDesignsForPath( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, ) (std.mem.Allocator.Error || std.fs.Dir.OpenError || std.fs.Dir.Iterator.Error)![][]const u8
 src/serve/vfs.zig::editFile | fn editFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, old_string: []const u8, new_string: []const u8, expected_sha256: ?[]const u8, replace_mode: ReplaceMode, out: *std.ArrayList(u8), ) VfsError!bool
@@ -1336,7 +1347,7 @@ src/serve/vfs.zig::glob | fn glob( allocator: std.mem.Allocator, project_dir: []
 src/serve/vfs.zig::listDir | fn listDir( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, list_mode: ListMode, max_entries: ?u64, out: *std.ArrayList(u8), ) VfsError!bool
 src/serve/vfs.zig::moveFile | fn moveFile( allocator: std.mem.Allocator, project_dir: []const u8, from_rel: []const u8, to_rel: []const u8, out: *std.ArrayList(u8), ) VfsError!bool
 src/serve/vfs.zig::readFile | fn readFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, offset: ?u64, limit: ?u64, out: *std.ArrayList(u8), ) VfsError!bool
-src/serve/vfs.zig::writeFile | fn writeFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, content: []const u8, expected_sha256: ?[]const u8, out: *std.ArrayList(u8), ) VfsError!bool
+src/serve/vfs.zig::writeFile | fn writeFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, content: []const u8, opts: WriteOpts, out: *std.ArrayList(u8), ) VfsError!bool
 src/serve/ward_auth.zig::AuthError value
 src/serve/ward_auth.zig::DevBypass enum_
 src/serve/ward_auth.zig::Identity struct_
