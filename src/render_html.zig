@@ -323,10 +323,8 @@ fn writeHeader(
     has_kicad_pcb: bool,
 ) !void {
     // `schematic_path` is "/modules/" for a reusable module, "/schematics/" for
-    // a full design. Modules get the Schematic ⇄ PCB Layout switcher (small
-    // enough that the whole-block PCB layout is fast and useful); full designs
-    // intentionally omit it — see the head-links comment below.
-    const is_module = std.mem.eql(u8, schematic_path, "/modules/");
+    // a full design. Both get the Schematic ⇄ PCB Layout switcher so the two
+    // views toggle symmetrically from either page.
     const banner_class: []const u8 = switch (status) {
         .pass => "banner banner-pass",
         .warn => "banner banner-warn",
@@ -347,15 +345,13 @@ fn writeHeader(
     try w.writeAll("</div></div>");
     try w.print("<div class=\"{s}\">{s}</div>", .{ banner_class, banner_label });
     try w.writeAll("<div class=\"head-links\">");
-    // A module gets the Schematic ⇄ PCB Layout switcher (the PCB layout page
-    // links back here), so the two views toggle symmetrically.
-    if (is_module) {
-        try w.writeAll("<nav class=\"viewtoggle\" aria-label=\"View\"><a class=\"active\" href=\"/modules/");
-        try writeUrlEncoded(w, design_name);
-        try w.writeAll("\">Schematic</a><a href=\"/pcb-layout/");
-        try writeUrlEncoded(w, design_name);
-        try w.writeAll("\">PCB Layout</a></nav>");
-    }
+    // Schematic ⇄ PCB Layout switcher — active tab uses `schematic_path`.
+    try w.writeAll("<nav class=\"viewtoggle\" aria-label=\"View\"><a class=\"active\" href=\"");
+    try w.writeAll(schematic_path);
+    try writeUrlEncoded(w, design_name);
+    try w.writeAll("\">Schematic</a><a href=\"/pcb-layout/");
+    try writeUrlEncoded(w, design_name);
+    try w.writeAll("\">PCB Layout</a></nav>");
     // Deliberately minimal toolbar: Reload, Edit SRC, ERC, the BOM + design-review
     // exports, and a single PCB-sync control. Everything else (History,
     // Netlist export, datasheet upload) was moved off this bar to keep it
@@ -2135,4 +2131,25 @@ test "loadPinoutNames rejects a top list whose head is not pinout" {
     // `or`→`and` only bails when BOTH hold, so a well-formed non-pinout list would
     // parse into a spurious map instead of null.
     try std.testing.expect(loadPinoutNames(arena, path) == null);
+}
+
+test "schematic header view toggle links both designs and modules to PCB layout" {
+    // A design served at /schematics/ gets a view toggle whose active Schematic
+    // tab points back at /schematics/, with a sibling link to /pcb-layout/.
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeHeader(&aw.writer, "Demo", "demo", .pass, "/schematics/", .{}, false);
+    const html = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, html, "class=\"viewtoggle\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/schematics/demo\">Schematic</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/pcb-layout/demo\">PCB Layout</a>") != null);
+
+    // A module served at /modules/ gets the same toggle rooted at /modules/ —
+    // the switcher is symmetric across both page kinds.
+    var mw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer mw.deinit();
+    try writeHeader(&mw.writer, "Mod", "mod", .pass, "/modules/", .{}, false);
+    const mhtml = mw.written();
+    try std.testing.expect(std.mem.indexOf(u8, mhtml, "href=\"/modules/mod\">Schematic</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mhtml, "href=\"/pcb-layout/mod\">PCB Layout</a>") != null);
 }

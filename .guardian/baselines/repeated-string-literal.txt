@@ -19,7 +19,7 @@ src/serve/edit.zig: string literal not a design-block appears 4 times — extrac
 src/serve/edit.zig: string literal {{\"ok\":true,\"version\":{d}}} appears 4 times — extract a const
 src/serve/templates/library.zig: string literal  href=\" appears 3 times — extract a const
 src/serve/templates/library.zig: string literal </button> appears 3 times — extract a const
-src/serve/templates/pages.zig: string literal  class=\"design-card-link\" appears 5 times — extract a const
-src/serve/templates/pages.zig: string literal  href=\" appears 6 times — extract a const
+src/serve/templates/pages.zig: string literal  class=\"design-card-link\" appears 4 times — extract a const
+src/serve/templates/pages.zig: string literal  href=\" appears 5 times — extract a const
 src/serve/templates/pages.zig: string literal <div class=\"design-card-title\"> appears 3 times — extract a const
 src/serve/templates/pages.zig: string literal <span class=\"section-chip-more\"> appears 3 times — extract a const
