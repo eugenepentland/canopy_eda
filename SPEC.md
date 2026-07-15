@@ -653,16 +653,16 @@ Public functions: renderSchematic
 - Emits no voltage-domain violation when driver and receiver levels are compatible
 - Treats a section port with electrical metadata as a virtual driver and receiver on its net
 - Treats a top-level design port with electrical metadata as a virtual driver and receiver on its net
-- Warns when an active IC's library component declares no requirements
+- Errors when an active IC's library component declares no requirements
 - Accepts an MPN-identified fixed component as a valued passive (no missing_value)
 - Recognizes KiCad-style signed rails (+5V, -5.0V, +3V3, +5_0V) as power nets
 - Recognizes V_ underscore rails (V_3V3D, V_RF_3P3) as power nets
-- Exempts connectors, ignore-requirements support parts, and passive-class components from the requirements warning
+- Exempts connectors, ignore-requirements support parts, and passive-class components from the requirements error
 - a config strap tied directly to a rail is an error unless pulled through a resistor or blessed
 - strapBlessing distinguishes a reasoned blessing from a blank one and none
 - an unconnected pad the pinout wants connected is flagged by tier unless blessed
-- Does not warn for an IC that declares at least one requirement, nor for passives
-- Recurses sub-blocks and warns once per undocumented component
+- Does not flag an IC that declares at least one requirement, nor for passives
+- Recurses sub-blocks and flags once per undocumented component
 - an unbound HF decoupling cap on a multi-supply-pad rail is an error, with bound/bulk/rail-optout/per-pin caps exempt
 - config straps tied to the rail are excluded from the supply-pad count, like the placer's hubTargets
 
