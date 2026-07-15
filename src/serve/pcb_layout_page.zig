@@ -6632,7 +6632,13 @@ fn mcpProtectedWrite(alloc: std.mem.Allocator, project_dir: []const u8, name: []
     if (layoutsSidecar(alloc, project_dir, name, null, layouts_ext)) |scp| {
         _ = history.snapshotLayouts(alloc, project_dir, name, scp) catch null;
     }
-    writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name), readLayoutRev(alloc, project_dir, name, null) + 1);
+    // Refresh the optimizer-cache poses to the blessed layout so a default MCP
+    // read (rough → readAutoPoses, the cache slot — not the starred layout)
+    // reflects this write, not the pre-mutation scene (read-after-write bug #2;
+    // the solver applies a clean full cache verbatim). Tuning params survive.
+    var cache = readCacheSlot(alloc, project_dir, name) orelse CacheSlot{ .params = .{}, .parts = null };
+    if (blessedLayout(layouts)) |bl| cache.parts = bl.parts;
+    writeLayoutsFile(alloc, project_dir, name, layouts, cache, readLayoutRev(alloc, project_dir, name, null) + 1);
 }
 
 /// Net NAME at flattened-net index `idx` (−1 / out-of-range ⇒ "" — foreign
@@ -7382,6 +7388,46 @@ test "MCP persist bumps the sidecar rev and snapshots history" {
     // The pre-write sidecar landed in history/ (recoverable like a viewer Save).
     const snaps = try history.listLayoutSnapshots(alloc, project, "foo");
     try std.testing.expect(snaps.len >= 1);
+}
+
+// spec: Web Server - An MCP layout mutation refreshes the auto-layout cache poses so a default read reflects the write
+test "MCP persist refreshes the auto cache poses so a default read sees the mutation" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.makePath("src");
+
+    // A sidecar whose optimizer-cache slot holds a STALE pose (an earlier solve)
+    // and a tuning weight. This cache is the scene a default MCP read renders —
+    // `get_pcb_layout_image` / `describe_pcb_layout` default `rough`, so
+    // `solveForRequest` seeds from `readAutoPoses` (the cache), not the starred
+    // layout.
+    const stale = "{\"layouts\":[],\"cache\":{\"params\":{\"loop_w\":7.5}," ++
+        "\"parts\":[{\"ref\":\"U1\",\"x\":0,\"y\":0,\"rot\":0}]}}";
+    try tmp.dir.writeFile(.{ .sub_path = "src/foo.layouts.json", .data = stale });
+    const before = readAutoPoses(alloc, project, "foo") orelse return error.TestNoCache;
+    try std.testing.expectEqual(@as(usize, 1), before.len);
+    try std.testing.expectEqual(@as(f64, 0), before[0].x);
+
+    // An MCP mutation persists U1 at a distinctive new pose (as set_part_poses does).
+    const parts = [_]PartPose{.{ .ref = "U1", .x = 42, .y = 7, .rot = 90 }};
+    const entry = SavedLayout{ .name = "layout", .kind = kind_manual, .ts = 1, .score = null, .parts = &parts, .default = true };
+    mcpPersistWorking(alloc, project, "foo", true, entry, true);
+
+    // Read-after-write: the cache the default read consults now carries the
+    // mutation, not the pre-mutation pose (bug #2 would leave x at 0).
+    const after = readAutoPoses(alloc, project, "foo") orelse return error.TestNoCache;
+    try std.testing.expectEqual(@as(usize, 1), after.len);
+    try std.testing.expectEqual(@as(f64, 42), after[0].x);
+    try std.testing.expectEqual(@as(f64, 7), after[0].y);
+
+    // Only the poses are swapped — the stored tuning weight survives the refresh.
+    const slot = readCacheSlot(alloc, project, "foo") orelse return error.TestNoCache;
+    try std.testing.expectEqual(@as(f64, 7.5), slot.params.loop_w);
 }
 
 // spec: Web Server - The /pcb-layout page defaults to the design's starred (★) saved layout, below an explicit ?refine= snapshot and a (placement …) spec
