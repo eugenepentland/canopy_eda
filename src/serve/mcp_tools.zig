@@ -1,3 +1,8 @@
+//! MCP tool dispatch and read/introspection handlers. `call` fans a
+//! `tools/call` name out to one `tool*` handler that writes a JSON result into
+//! the caller's buffer; the registration table and the embedded
+//! `tools_list_result.json` are kept in lockstep (a test enforces it).
+
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
@@ -31,6 +36,7 @@ const layout_match = @import("layout_match.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
 const docgen = @import("../docgen.zig");
 const page_cache = @import("page_cache.zig");
+const datasheet = @import("datasheet.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const name_field_prefix = "{\"name\":";
@@ -2596,45 +2602,9 @@ pub fn renderSceneGraph(
 
 fn toolReadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const raw_name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const w = out.writer(allocator);
-
-    const upload_datasheet = @import("upload_datasheet.zig");
-    const sanitized = upload_datasheet.sanitizeFilename(allocator, raw_name) catch |e| {
-        try w.print("{{\"ok\":false,\"error\":\"invalid name: {s}\"}}", .{@errorName(e)});
-        return false;
-    };
-    defer allocator.free(sanitized);
-
-    const path = try std.fmt.allocPrint(allocator, "{s}/lib/datasheets/{s}", .{ project_dir, sanitized });
-    defer allocator.free(path);
-
-    // Check if the file exists
-    infra_fs.cwd().access(path, .{}) catch {
-        try w.writeAll("{\"ok\":false,\"error\":\"datasheet not found\"}");
-        return false;
-    };
-
-    const run_res = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &[_][]const u8{ "ps2ascii", path },
-    }) catch |err| {
-        try w.print("{{\"ok\":false,\"error\":\"failed to run ps2ascii: {s}\"}}", .{@errorName(err)});
-        return false;
-    };
-    defer {
-        allocator.free(run_res.stdout);
-        allocator.free(run_res.stderr);
-    }
-
-    if (run_res.term != .Exited or run_res.term.Exited != 0) {
-        try w.writeAll("{\"ok\":false,\"error\":\"ps2ascii returned error\"}");
-        return false;
-    }
-
-    try w.writeAll("{\"ok\":true,\"content\":");
-    try json_writer.writeString(w, run_res.stdout);
-    try w.writeAll("}");
-    return true;
+    const offset = optionalU64(args_val, "offset");
+    const limit = optionalU64(args_val, "limit");
+    return datasheet.read(allocator, project_dir, raw_name, offset, limit, out);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────
