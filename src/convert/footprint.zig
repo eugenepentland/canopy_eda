@@ -6,9 +6,9 @@ const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const printer_mod = @import("../sexpr/printer.zig");
+const numeric = @import("../numeric.zig");
 const Node = ast.Node;
 const Span = ast.Span;
-const numeric = @import("../numeric.zig");
 // ── Constants ─────────────────────────────────────────────────────
 const shape_roundrect = "roundrect";
 const silk_header = "  (silkscreen\n";
@@ -93,7 +93,9 @@ fn emitPad(w: anytype, node: Node) !void {
     var num_buf: [32]u8 = undefined;
     const num_str = children[1].asAtom() orelse children[1].asString() orelse blk: {
         if (children[1].asNumber()) |n| {
-            const i: i64 = numeric.checkedInt(i64, n) orelse 0;
+            // Reject a non-finite / out-of-range pad number before the
+            // `@intFromFloat` (UB in the safety-off prod build).
+            const i = numeric.checkedInt(i64, n) orelse return;
             break :blk std.fmt.bufPrint(&num_buf, "{d}", .{i}) catch return;
         }
         return;

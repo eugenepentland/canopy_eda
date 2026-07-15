@@ -41,6 +41,7 @@ const pages_tmpl = @import("templates/pages.zig");
 const serve_root = @import("../serve.zig");
 const history = @import("history.zig");
 const numeric = @import("../numeric.zig");
+const escape = @import("../escape.zig");
 const Server = serve_root.Server;
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -4816,7 +4817,10 @@ fn writeTuning(w: *std.Io.Writer, params: optimizer.Params) std.Io.Writer.Error!
 fn writeDocHead(w: *std.Io.Writer, title: []const u8, embed: bool, edit_embed: bool) std.Io.Writer.Error!void {
     try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
     try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-    try w.print("<title>{s} — PCB Layout</title>", .{title});
+    // `title` is the free-form design/module name — escape it, don't `{s}` it raw.
+    try w.writeAll("<title>");
+    try writeEscaped(w, title);
+    try w.writeAll(" — PCB Layout</title>");
     try w.writeAll("<style>");
     try w.writeAll(assets_css.navbar_css);
     try w.writeAll(page_css);
@@ -5870,14 +5874,7 @@ fn isGroundNet(name: []const u8) bool {
     return false;
 }
 
-fn writeEscaped(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    for (s) |c| switch (c) {
-        '&' => try w.writeAll("&amp;"),
-        '<' => try w.writeAll("&lt;"),
-        '>' => try w.writeAll("&gt;"),
-        else => try w.writeByte(c),
-    };
-}
+const writeEscaped = escape.writeXml;
 
 fn writeAttr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
     for (s) |c| switch (c) {

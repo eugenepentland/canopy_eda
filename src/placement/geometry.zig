@@ -354,7 +354,10 @@ fn fallbackGeom(pin_count_hint: usize) Geom {
 fn nodeText(arena: std.mem.Allocator, n: Node) []const u8 {
     if (n.asText()) |t| return t;
     if (n.asNumber()) |num| {
-        return std.fmt.allocPrint(arena, "{d}", .{numeric.checkedInt(i64, num) orelse 0}) catch "";
+        // A non-finite / out-of-range pad token can't be a real pad number;
+        // reject it before the `@intFromFloat` (UB in the safety-off prod build).
+        const i = numeric.checkedInt(i64, num) orelse return "";
+        return std.fmt.allocPrint(arena, "{d}", .{i}) catch "";
     }
     return "";
 }

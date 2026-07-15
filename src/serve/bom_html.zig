@@ -604,17 +604,24 @@ pub fn writeComponentsJson(
     for (block.instances) |inst| {
         if (written) try w.writeAll(",");
         try w.writeAll("\"");
-        if (prefix.len > 0 and !isStdRefDes(inst.ref_des)) try w.print("{s}/", .{prefix});
+        if (prefix.len > 0 and !isStdRefDes(inst.ref_des)) {
+            try writeJsonEscaped(w, prefix);
+            try w.writeAll("/");
+        }
         const fp_ok = footprintHasPads(allocator, project_dir, inst.footprint);
-        try w.print("{s}\":{{\"symbol\":\"{s}\",\"footprint\":\"{s}\",\"fpOk\":{s},\"value\":\"{s}\",\"component\":\"{s}\",\"srcOff\":{d},\"note\":\"", .{
-            inst.ref_des,
-            inst.symbol,
-            inst.footprint,
-            if (fp_ok) "true" else "false",
-            inst.value,
-            inst.component,
-            inst.source_offset,
-        });
+        // Every design-derived string (ref-des, symbol, footprint, value,
+        // component) routes through writeJsonEscaped so a `"` or `\` in a part
+        // value/name (inch marks, Windows paths) can't corrupt the JSON payload.
+        try writeJsonEscaped(w, inst.ref_des);
+        try w.writeAll("\":{\"symbol\":\"");
+        try writeJsonEscaped(w, inst.symbol);
+        try w.writeAll("\",\"footprint\":\"");
+        try writeJsonEscaped(w, inst.footprint);
+        try w.print("\",\"fpOk\":{s},\"value\":\"", .{if (fp_ok) "true" else "false"});
+        try writeJsonEscaped(w, inst.value);
+        try w.writeAll("\",\"component\":\"");
+        try writeJsonEscaped(w, inst.component);
+        try w.print("\",\"srcOff\":{d},\"note\":\"", .{inst.source_offset});
         // Find note for this instance
         for (block.notes) |note| {
             if (std.mem.eql(u8, note.ref_des, inst.ref_des)) {
@@ -628,7 +635,9 @@ pub fn writeComponentsJson(
         for (inst.parts) |part| {
             for (part.pins) |pp| {
                 if (pin_written) try w.writeAll(",");
-                try w.print("{{\"num\":\"{s}\",\"net\":\"", .{pp.pin});
+                try w.writeAll("{\"num\":\"");
+                try writeJsonEscaped(w, pp.pin);
+                try w.writeAll("\",\"net\":\"");
                 try writeJsonEscaped(w, pp.net);
                 try w.writeAll("\",\"pinName\":\"");
                 try writeJsonEscaped(w, pp.pin_name);
@@ -643,7 +652,9 @@ pub fn writeComponentsJson(
         if (sym_cache.get(inst.symbol) orelse sym_cache.get(inst.component)) |sym_pins| {
             for (sym_pins, 0..) |sp, si| {
                 if (si > 0) try w.writeAll(",");
-                try w.print("{{\"num\":\"{s}\",\"name\":\"", .{sp.num});
+                try w.writeAll("{\"num\":\"");
+                try writeJsonEscaped(w, sp.num);
+                try w.writeAll("\",\"name\":\"");
                 try writeJsonEscaped(w, sp.name);
                 try w.writeAll("\"}");
             }
@@ -751,12 +762,19 @@ pub fn writeNetsJson(allocator: std.mem.Allocator, w: anytype, block: *const env
     while (iter.next()) |entry| {
         if (written) try w.writeAll(",");
         try w.writeAll("\"");
-        if (prefix.len > 0) try w.print("{s}/", .{prefix});
-        try w.print("{s}\":[", .{entry.key_ptr.*});
+        if (prefix.len > 0) {
+            try writeJsonEscaped(w, prefix);
+            try w.writeAll("/");
+        }
+        try writeJsonEscaped(w, entry.key_ptr.*);
+        try w.writeAll("\":[");
         for (entry.value_ptr.items, 0..) |pin, pi| {
             if (pi > 0) try w.writeAll(",");
             try w.writeAll("\"");
-            try w.print("{s}.{s}\"", .{ pin.ref_des, pin.pin });
+            try writeJsonEscaped(w, pin.ref_des);
+            try w.writeAll(".");
+            try writeJsonEscaped(w, pin.pin);
+            try w.writeAll("\"");
         }
         try w.writeAll("]");
         written = true;

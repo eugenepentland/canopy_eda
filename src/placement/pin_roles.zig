@@ -113,7 +113,9 @@ fn loadList(arena: std.mem.Allocator, project_dir: []const u8, dir: []const u8, 
 fn nodeText(arena: std.mem.Allocator, n: Node) ?[]const u8 {
     if (n.asText()) |t| return t;
     if (n.asNumber()) |num| {
-        const i = numeric.checkedInt(i64, num) orelse 0;
+        // Reject a non-finite / out-of-range token before the `@intFromFloat`
+        // (UB in the safety-off prod build); mirrors `ids.pinId`.
+        const i = numeric.checkedInt(i64, num) orelse return null;
         return std.fmt.allocPrint(arena, "{d}", .{i}) catch null;
     }
     return null;

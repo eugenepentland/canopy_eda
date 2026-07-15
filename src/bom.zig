@@ -285,7 +285,7 @@ pub fn applyBomUuids(
         }
     }
 
-    applyBomUuidsRec(block, &uuid_map, allocator, "");
+    try applyBomUuidsRec(block, &uuid_map, allocator, "");
 }
 
 /// Apply the ref_des→uuid map through the block hierarchy, threading the
@@ -296,12 +296,12 @@ fn applyBomUuidsRec(
     uuid_map: *const std.StringHashMapUnmanaged([]const u8),
     allocator: std.mem.Allocator,
     prefix: []const u8,
-) void {
+) std.mem.Allocator.Error!void {
     // Apply to instances (uses @constCast — safe because block was just allocated)
     const instances: []Instance = @constCast(block.instances);
     for (instances) |*inst| {
         const key = if (prefix.len > 0)
-            (std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, inst.ref_des }) catch continue)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, inst.ref_des })
         else
             inst.ref_des;
         defer if (prefix.len > 0) allocator.free(key);
@@ -311,11 +311,11 @@ fn applyBomUuidsRec(
     }
     for (block.sub_blocks) |sb| {
         const child_prefix = if (prefix.len > 0)
-            (std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name }) catch continue)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name })
         else
             sb.name;
         defer if (prefix.len > 0) allocator.free(child_prefix);
-        applyBomUuidsRec(sb.block, uuid_map, allocator, child_prefix);
+        try applyBomUuidsRec(sb.block, uuid_map, allocator, child_prefix);
     }
 }
 
