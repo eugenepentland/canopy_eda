@@ -990,6 +990,20 @@ Public functions: init, acquire, release
 - acquire spaces successive call starts by the minimum interval
 - acquire blocks a caller once max_in_flight is reached until a release
 
+## serve/subprocess
+
+Public functions: runCaptured, deinit
+
+- runCaptured captures stdout and a zero exit code for an in-budget run
+- runCaptured reports timed_out and kills a child that overruns the deadline
+- runCaptured reports output_too_long when a child exceeds the byte cap
+
+## serve/datasheet
+
+Public functions: read
+
+- window clamps offset and limit to the text and flags truncation
+
 ## serve/mcp_tools
 
 Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesignSummaries, renderSceneGraph

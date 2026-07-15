@@ -929,6 +929,7 @@ src/serve/component_search.zig::downloadFootprint | fn downloadFootprint( alloca
 src/serve/component_search.zig::errorMessage | fn errorMessage(err: DownloadError) []const u8
 src/serve/component_search.zig::searchComponents | fn searchComponents( allocator: std.mem.Allocator, query: []const u8, connect_sid: []const u8, limit: usize, ) SearchError![]SearchHit
 src/serve/component_search.zig::searchErrorMessage | fn searchErrorMessage(err: SearchError) []const u8
+src/serve/datasheet.zig::read | fn read( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, offset: ?u64, limit: ?u64, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/datasheet_attach.zig::HandlerError value
 src/serve/datasheet_attach.zig::SpliceError value
 src/serve/datasheet_attach.zig::attachDatasheetApi | fn attachDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -1206,6 +1207,10 @@ src/serve/style_score.zig::rotSide | fn rotSide(side: Side, k: usize) Side
 src/serve/style_score.zig::styleScore | fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []const SInfo) std.mem.Allocator.Error!StyleResult
 src/serve/style_score.zig::w_edge value
 src/serve/style_score.zig::w_gap value
+src/serve/subprocess.zig::Outcome enum_
+src/serve/subprocess.zig::Result struct_
+src/serve/subprocess.zig::deinit | fn deinit(self: Result, allocator: std.mem.Allocator) void
+src/serve/subprocess.zig::runCaptured | fn runCaptured( allocator: std.mem.Allocator, argv: []const []const u8, max_output_bytes: usize, timeout_ms: u64, ) std.mem.Allocator.Error!Result
 src/serve/sync.zig::BoardFp struct_
 src/serve/sync.zig::HandlerError value
 src/serve/sync.zig::PadAssign struct_
