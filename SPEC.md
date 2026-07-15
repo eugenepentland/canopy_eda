@@ -1032,6 +1032,7 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 - list_instances counts pins from the component pinout when the part declares no symbol
 - flatten makes get_net return the merged rail and resolve a sub-scoped net spelling
 - flatten makes list_free_pins match a flattened child by name and read merged assignments
+- flatten merges a sub-block stitch written against a port name whose module net differs
 
 ## config
 
