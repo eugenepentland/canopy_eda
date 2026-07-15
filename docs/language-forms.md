@@ -149,3 +149,30 @@ declaration overrides the heuristic.
 | connector | `Connector`, `Expansion`, `Header`, `Mounting`, `SWD`, `Debug`, `RJ45`, `B2B` |
 
 Valid `(category <key>)` keys: `mcu`, `power`, `memory`, `peripheral`, `connector`, `clock`, `comms`, `sensor`, `analog`, `protection`.
+
+## Requirement checks
+
+Machine-checkable rules that hang off a library
+`(requirement "text" (check …))` form — the executable half of a
+datasheet rule. Each is evaluated per placement of the part against
+its **containing block** (a sub-block's check sees the sub-block's
+nets, not the parent's). Pin references use the pinout **function
+name** (`"VDD"`, `"EP"`) or a physical pad id. A rule is inherited by
+every design instantiating the part; outcomes surface in `netlisp
+check`, the review doc, and the MCP `run_checks` /
+`list_component_requirements` tools. Author them with the
+`add_component_requirement` MCP tool, whose `check` argument is one
+`(check …)` form using one of the primitives below.
+
+| Check form | Asserts (against the containing block) |
+| --- | --- |
+| `(connected (pin "A") (pin "B"))` | Both named pins of this instance must resolve to the same net. |
+| `(decoupling (pin "A") (pin "B") (min-uf F))` | At least one capacitor of value ≥ F µF must bridge the nets on pins A and B. |
+| `(pullup-range (pin "P") (net "N") (min-ohms L) (max-ohms H))` | A resistor of value in [L, H] Ω must bridge pin P's net and net N. |
+| `(voltage-range (pin "V") (min L) (max H))` | The voltage declared on pin V's net (via ports, walking DC-equivalent series parts) must lie in [L, H] V; a rated range must be a subset of it. |
+| `(tied-to-net (pin "P") (net "N"))` | Pin P must resolve to net N (alias-aware) — a datasheet fixed-rail tie. |
+| `(not-connected (pin "P"))` | Pin P must be left unconnected (no foreign co-pin, not a block port). |
+| `(pin-not-floating (pin "P"))` | Pin P must be tied to a defined level: a net with a co-pin or a block port. |
+| `(pins-on-same-net (pins "A" "B" …))` | Every listed pin function must resolve to the same net (N-pin connected). |
+| `(decoupling-per-pin (return-pin "GND") (pins "VDD_1" …) (min-uf F) (count N))` | At least N of the listed pins must each have a ≥ F µF cap to the return net. |
+| `(series-element (kind R\|L\|C) (pin "P") (target-net "N") (min X) (max Y))` | An R/L/C of value in [X, Y] (Ω/µH/µF by kind) must bridge pin P's net and N. |

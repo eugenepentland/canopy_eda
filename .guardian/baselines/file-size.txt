@@ -5,7 +5,7 @@
 2673 src/erc.zig
 1277 src/eval/builders.zig
 2036 src/eval/design_block.zig
-1460 src/eval/env.zig
+1292 src/eval/env.zig
 1020 src/export_gerber.zig
 1009 src/import_kicad.zig
 1838 src/kicad_pcb/writer.zig
@@ -15,7 +15,7 @@
 2245 src/render_json.zig
 1318 src/render_pcb_png.zig
 3013 src/serve/edit.zig
-2645 src/serve/mcp_tools.zig
+2610 src/serve/mcp_tools.zig
 7298 src/serve/pcb_layout_page.zig
 4216 src/serve/sync.zig
 1150 src/serve/vfs.zig
