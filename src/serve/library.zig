@@ -231,7 +231,8 @@ pub fn libraryPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) Handle
 /// POST /api/cse-fetch — body `{part_number, manufacturer?}`. Fetches the
 /// part's footprint (ECAD model → library entries) and datasheet from
 /// Component Search Engine in one shot by proxying the MCP `download_footprint`
-/// and `download_datasheet` tools (which read CSE_CONNECT_SID from env/.env).
+/// and `download_datasheet` tools (footprint download reads CSE_EMAIL /
+/// CSE_PASSWORD from env/.env; the datasheet path needs no CSE auth).
 /// Returns `{"footprint":<tool result>,"datasheet":<tool result>}`,
 /// each the tool's own JSON (or null on a non-JSON internal error). The heavy
 /// allocations (zip + PDF, several MB) go through a dedicated arena freed at
