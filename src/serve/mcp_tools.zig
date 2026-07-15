@@ -2,7 +2,7 @@
 //! `tools/call` name out to one `tool*` handler that writes a JSON result into
 //! the caller's buffer; the registration table and the embedded
 //! `tools_list_result.json` are kept in lockstep (a test enforces it).
-//! Part-sourcing tools resolve their CSE session via `cse_session`.
+//! Part-sourcing tools resolve their CSE Basic-auth credentials via `cse_auth`.
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
@@ -28,7 +28,7 @@ const notes = @import("notes.zig");
 const symbol_conv = @import("../convert/symbol.zig");
 const config = @import("../config.zig");
 const component_search = @import("component_search.zig");
-const cse_session = @import("cse_session.zig");
+const cse_auth = @import("cse_auth.zig");
 const digikey = @import("digikey.zig");
 const upload = @import("upload.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
@@ -977,19 +977,19 @@ fn toolBuild(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?s
 
 /// Fetch a part's ECAD model ZIP from Component Search Engine and run it
 /// through the same import pipeline as the `/api/upload-zip` route, creating
-/// `lib/{components,footprints,pinouts,models}` entries. The `connect.sid`
-/// session is resolved server-side by `cse_session.resolve` (auto-login from
-/// `CSE_EMAIL`/`CSE_PASSWORD`, or a `CSE_CONNECT_SID` override) — never passed
-/// over MCP. Returns the created library names on success, or
-/// `{ok:false,error}` if search, download, or import fails.
+/// `lib/{components,footprints,pinouts,models}` entries. The model download uses
+/// HTTP Basic auth resolved server-side by `cse_auth` (the `CSE_EMAIL` /
+/// `CSE_PASSWORD` account) — credentials are never passed over MCP. Returns the
+/// created library names on success, or `{ok:false,error}` if search, download,
+/// or import fails.
 fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const part_number = requireString(args_val, key_part_number) orelse return missingArg(out, allocator, key_part_number);
     const manufacturer = optionalString(args_val, "manufacturer");
     const w = out.writer(allocator);
 
-    const sid = (try cse_session.resolveOrWrite(w, allocator)) orelse return false;
+    const auth = (try cse_auth.resolveOrWrite(w, allocator)) orelse return false;
 
-    const dl = component_search.downloadFootprint(allocator, part_number, manufacturer, sid) catch |err| {
+    const dl = component_search.downloadFootprint(allocator, part_number, manufacturer, auth) catch |err| {
         try w.writeAll("{\"ok\":false,\"stage\":\"download\",\"error\":");
         try json_writer.writeString(w, component_search.errorMessage(err));
         try w.writeAll("}");
@@ -1028,12 +1028,13 @@ fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, 
 
 /// Fetch a part's datasheet PDF and store it under `lib/datasheets/`, where
 /// `read_datasheet` can extract its text. Tries Component Search Engine first
-/// (scraping the datasheet link via `CSE_CONNECT_SID`); if CSE has no datasheet
-/// on file (or isn't configured), falls back to DigiKey's `datasheet_url`
-/// (`DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET`), unwrapping any manufacturer
-/// interstitial and validating the `%PDF` magic. All credentials are read
-/// server-side, never over MCP. The success envelope's `source` says which
-/// provider supplied it; when both fail, `{ok:false,error,cse_error,digikey_error}`.
+/// (the suggestion API's datasheet link + an off-site PDF fetch, both
+/// unauthenticated); if CSE has no datasheet on file, falls back to DigiKey's
+/// `datasheet_url` (`DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET`), unwrapping
+/// any manufacturer interstitial and validating the `%PDF` magic. DigiKey
+/// credentials are read server-side, never over MCP. The success envelope's
+/// `source` says which provider supplied it; when both fail,
+/// `{ok:false,error,cse_error,digikey_error}`.
 fn toolDownloadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const part_number = requireString(args_val, key_part_number) orelse return missingArg(out, allocator, key_part_number);
     const manufacturer = optionalString(args_val, "manufacturer");
@@ -1072,8 +1073,8 @@ const DatasheetOutcome = union(enum) {
     unavailable: []const u8,
 };
 
-/// Try Component Search Engine. `unavailable` when `CSE_CONNECT_SID` is unset or
-/// CSE has no datasheet for the part.
+/// Try Component Search Engine (unauthenticated). `unavailable` when CSE has no
+/// datasheet for the part.
 fn tryCseDatasheet(
     w: anytype,
     allocator: std.mem.Allocator,
@@ -1081,9 +1082,7 @@ fn tryCseDatasheet(
     part_number: []const u8,
     manufacturer: ?[]const u8,
 ) !DatasheetOutcome {
-    const sid = cse_session.resolve(allocator) catch |e|
-        return .{ .unavailable = cse_session.resolveErrorMessage(e) };
-    const ds = component_search.downloadDatasheet(allocator, part_number, manufacturer, sid) catch |err|
+    const ds = component_search.downloadDatasheet(allocator, part_number, manufacturer) catch |err|
         return .{ .unavailable = component_search.datasheetErrorMessage(err) };
     const ok = try finishDatasheet(w, allocator, project_dir, "componentsearchengine", ds.filename, ds.pdf_bytes, ds.part_name, ds.manufacturer, ds.source_url);
     return if (ok) .ok else .store_failed;
@@ -1143,17 +1142,15 @@ fn finishDatasheet(
 /// anything — the read-only counterpart to `download_footprint`. The agent
 /// searches here, then passes a chosen `part_number` (with the reported
 /// `manufacturer` to disambiguate) to download_footprint/download_datasheet.
-/// `CSE_CONNECT_SID` is read server-side (never over MCP). Returns
+/// The suggestion API is public, so this needs no CSE credentials. Returns
 /// `{ok:true,query,count,results:[{part_number,manufacturer,has_model,has_datasheet}]}`,
-/// or `{ok:false,error}` on a network/auth failure.
+/// or `{ok:false,error}` on a network failure.
 fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const query = requireString(args_val, "query") orelse return missingArg(out, allocator, "query");
     const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, search_limit_max)) else search_limit_default;
     const w = out.writer(allocator);
 
-    const sid = (try cse_session.resolveOrWrite(w, allocator)) orelse return false;
-
-    const hits = component_search.searchComponents(allocator, query, sid, limit) catch |err| {
+    const hits = component_search.searchComponents(allocator, query, limit) catch |err| {
         try w.writeAll(json_err_open);
         try json_writer.writeString(w, component_search.searchErrorMessage(err));
         try w.writeAll("}");

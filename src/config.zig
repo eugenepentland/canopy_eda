@@ -16,19 +16,14 @@ const dotenv_path = ".env";
 const max_dotenv_bytes: usize = 64 * 1024;
 const whitespace = " \t\r";
 
-/// Component Search Engine session cookie (`connect.sid` value) for
-/// `download_footprint`. From `CSE_CONNECT_SID`. A manual override that skips
-/// the email/password auto-login; empty or unset falls through to it.
-pub fn cseConnectSid(allocator: std.mem.Allocator) ?[]u8 {
-    return nonEmpty(lookup(allocator, "CSE_CONNECT_SID"));
-}
-
-/// Component Search Engine account email for auto-login. From `CSE_EMAIL`.
+/// Component Search Engine account email for the model-download HTTP Basic
+/// auth. From `CSE_EMAIL`.
 pub fn cseEmail(allocator: std.mem.Allocator) ?[]u8 {
     return nonEmpty(lookup(allocator, "CSE_EMAIL"));
 }
 
-/// Component Search Engine account password for auto-login. From `CSE_PASSWORD`.
+/// Component Search Engine account password for the model-download HTTP Basic
+/// auth. From `CSE_PASSWORD`.
 pub fn csePassword(allocator: std.mem.Allocator) ?[]u8 {
     return nonEmpty(lookup(allocator, "CSE_PASSWORD"));
 }
