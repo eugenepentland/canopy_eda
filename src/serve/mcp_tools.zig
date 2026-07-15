@@ -40,6 +40,7 @@ const docgen = @import("../docgen.zig");
 const page_cache = @import("page_cache.zig");
 const mcp_flatten = @import("mcp_flatten.zig");
 const mcp_checks = @import("mcp_checks.zig");
+const schematic_view = @import("mcp_schematic_view.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const name_field_prefix = "{\"name\":";
@@ -533,9 +534,17 @@ fn toolDescribeComponent(allocator: std.mem.Allocator, project_dir: []const u8, 
 
 fn toolGetSchematic(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const graph = try renderSceneGraph(allocator, project_dir, name);
-    try out.writer(allocator).writeAll(graph);
-    return true;
+    const view = optionalString(args_val, "view") orelse "summary";
+    if (std.mem.eql(u8, view, "scene_graph") or std.mem.eql(u8, view, "full")) {
+        const graph = try renderSceneGraph(allocator, project_dir, name);
+        try out.writer(allocator).writeAll(graph);
+        return true;
+    }
+    if (!std.mem.eql(u8, view, "summary")) {
+        try out.appendSlice(allocator, "{\"ok\":false,\"error\":\"unknown view (expected summary or scene_graph)\"}");
+        return false;
+    }
+    return schematic_view.renderNamedSummary(allocator, project_dir, name, out);
 }
 
 /// `get_language_reference` — the auto-generated S-expression language
@@ -621,7 +630,8 @@ fn toolPreviewModule(allocator: std.mem.Allocator, project_dir: []const u8, args
         try w.writeAll("{\"ok\":false,\"error\":\"unknown view (expected summary or scene_graph)\"}");
         return false;
     }
-    try writeModuleSummary(allocator, w, project_dir, module, block, eval.assertions.items);
+    const ident: schematic_view.Ident = .{ .key = "module", .value = module };
+    try schematic_view.writeBlockSummary(allocator, w, project_dir, ident, block, eval.assertions.items);
     return true;
 }
 
@@ -635,78 +645,6 @@ fn isBareModuleName(name: []const u8) bool {
         if (!ok) return false;
     }
     return true;
-}
-
-/// Emit one ERC violation as a JSON object {kind,severity,message[,ref][,net]}.
-/// Shared by run_checks, the build report, and preview_module so the three
-/// surfaces stay shape-identical.
-/// Compact JSON summary of an evaluated module block: title, ports,
-/// instances, nets, nested sub-blocks, ERC violations, and the assertions
-/// recorded during evaluation (a module's design math surfaces here).
-/// Boundary `(port …)` nets are expected to look floating in isolation —
-/// the description in tools_list_result.json warns agents accordingly.
-fn writeModuleSummary(
-    allocator: std.mem.Allocator,
-    w: anytype,
-    project_dir: []const u8,
-    module: []const u8,
-    block: *const env_mod.DesignBlock,
-    assertions: []const env_mod.AssertionResult,
-) !void {
-    try w.writeAll("{\"ok\":true,\"module\":");
-    try json_writer.writeString(w, module);
-    try w.writeAll(",\"title\":");
-    try json_writer.writeString(w, block.name);
-    try w.writeAll(",\"ports\":[");
-    for (block.ports, 0..) |p, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll(name_field_prefix);
-        try json_writer.writeString(w, p.name);
-        try w.writeAll(json_net_key);
-        try json_writer.writeString(w, p.net);
-        try w.writeAll(",\"dir\":");
-        try json_writer.writeString(w, p.direction);
-        try w.writeAll("}");
-    }
-    try w.writeAll("],\"instances\":[");
-    for (block.instances, 0..) |inst, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll(ref_des_field_prefix);
-        try json_writer.writeString(w, inst.ref_des);
-        try w.writeAll(json_component_key);
-        try json_writer.writeString(w, inst.component);
-        try w.writeAll(json_value_key);
-        try json_writer.writeString(w, inst.value);
-        try w.writeAll("}");
-    }
-    try w.writeAll("],\"nets\":[");
-    for (block.nets, 0..) |net, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll(name_field_prefix);
-        try json_writer.writeString(w, net.name);
-        try w.print(",\"pin_count\":{d}}}", .{net.pins.len});
-    }
-    try w.writeAll("],\"sub_blocks\":[");
-    for (block.sub_blocks, 0..) |sb, i| {
-        if (i > 0) try w.writeAll(",");
-        try json_writer.writeString(w, sb.name);
-    }
-    try w.writeAll("],\"erc\":[");
-    const violations = try erc_mod.runErc(allocator, block, project_dir);
-    var first = true;
-    for (violations) |v| {
-        if (!first) try w.writeAll(",");
-        first = false;
-        try mcp_checks.writeErcViolationJson(w, v);
-    }
-    try w.writeAll("],\"assertions\":[");
-    for (assertions, 0..) |a, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.print("{{\"passed\":{},\"warning\":{},\"message\":", .{ a.passed, a.is_warning });
-        try json_writer.writeString(w, a.message);
-        try w.writeAll("}");
-    }
-    try w.writeAll("]}");
 }
 
 /// Structured spatial facts about the solved placement — the textual twin of
