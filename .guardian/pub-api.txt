@@ -1079,6 +1079,7 @@ src/serve/mcp_flatten.zig::getNetFlat | fn getNetFlat( allocator: std.mem.Alloca
 src/serve/mcp_flatten.zig::instancePinCount | fn instancePinCount( eval: *Evaluator, component: []const u8, symbol: []const u8, parts: []const env_mod.Part, ) usize
 src/serve/mcp_flatten.zig::listFreePinsFlat | fn listFreePinsFlat( allocator: std.mem.Allocator, eval: *Evaluator, block: *const env_mod.DesignBlock, ref_des: []const u8, filter: ?[]const u8, w: anytype, ) !bool
 src/serve/mcp_flatten.zig::listInstancesFlat | fn listInstancesFlat( allocator: std.mem.Allocator, eval: *Evaluator, block: *const env_mod.DesignBlock, w: anytype, ) !bool
+src/serve/mcp_read_opts.zig::describePcbOpts | fn describePcbOpts(args_val: ?std.json.Value) pcb_layout_page.PngRequest
 src/serve/mcp_tools.zig::CallResult struct_
 src/serve/mcp_tools.zig::DesignSummary struct_
 src/serve/mcp_tools.zig::FreePinOpts struct_

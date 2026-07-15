@@ -443,6 +443,8 @@ test {
     _ = @import("serve/upload.zig");
     _ = @import("serve/component_info.zig");
     _ = @import("serve/design_diff.zig");
+    _ = @import("serve/mcp_tools.zig");
+    _ = @import("serve/mcp_read_opts.zig");
     _ = @import("serve/mcp_flatten.zig");
     _ = @import("serve/datasheet_attach.zig");
     _ = @import("serve/page_cache.zig");
