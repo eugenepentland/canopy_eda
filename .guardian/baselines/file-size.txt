@@ -5,7 +5,7 @@
 2673 src/erc.zig
 1277 src/eval/builders.zig
 2036 src/eval/design_block.zig
-1460 src/eval/env.zig
+1292 src/eval/env.zig
 1020 src/export_gerber.zig
 1009 src/import_kicad.zig
 1838 src/kicad_pcb/writer.zig

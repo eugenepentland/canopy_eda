@@ -2,18 +2,14 @@
 //! around, the `Env` lexical scope chain, and the record types the built design
 //! carries — `DesignBlock`, `Instance`, `Net`, `Port`, `Note`, `Group`,
 //! `SubBlock`, `Check`, `Requirement`, … — plus small parse helpers
-//! (`parseCheck`, `parseNoteRef`). String fields borrow the source/AST buffers
-//! (never freed); this module is the shared vocabulary of the whole pipeline.
+//! (`parseNoteRef`). The requirement-check grammar (`parseCheck` and the
+//! `check_docs` table over `Check`) lives in `check_grammar.zig`. String
+//! fields borrow the source/AST buffers (never freed); this module is the
+//! shared vocabulary of the whole pipeline.
 
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const numeric = @import("../numeric.zig");
-
-// ── Constants ─────────────────────────────────────────────────────
-const pullup_range_min_children: usize = 5;
-const decoupling_per_pin_min_children: usize = 5;
-const series_element_min_children: usize = 6;
-const series_element_max_index: usize = 5;
 
 /// A value in the evaluator.
 pub const Value = union(enum) {
@@ -387,143 +383,6 @@ pub const Check = union(enum) {
 /// (R/L/C) the check engine filters by, and which value-parser to use.
 pub const SeriesKind = enum { R, L, C };
 
-/// Parse `(check (<primitive> ...))` nested inside a `(requirement ...)`
-/// body. Returns null if the form isn't a recognized check. Pin-list slices
-/// are allocated from `allocator` and share its lifetime (request arena in
-/// the serve path, evaluator allocator at build time).
-pub fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check {
-    const children = node.asList() orelse return null;
-    if (children.len < 2) return null;
-    const head = children[0].asAtom() orelse return null;
-    if (!std.mem.eql(u8, head, "check")) return null;
-    const body = children[1];
-    const body_children = body.asList() orelse return null;
-    if (body_children.len < 1) return null;
-    const kind = body_children[0].asAtom() orelse return null;
-
-    if (std.mem.eql(u8, kind, "connected")) {
-        if (body_children.len < 3) return null;
-        const a = pinArg(body_children[1]) orelse return null;
-        const b = pinArg(body_children[2]) orelse return null;
-        return .{ .connected = .{ .pin_a = a, .pin_b = b } };
-    }
-    if (std.mem.eql(u8, kind, "decoupling")) {
-        if (body_children.len < 4) return null;
-        const a = pinArg(body_children[1]) orelse return null;
-        const b = pinArg(body_children[2]) orelse return null;
-        const min_uf = namedNumberArg(body_children[3], "min-uf") orelse return null;
-        return .{ .decoupling = .{ .pin_a = a, .pin_b = b, .min_uf = min_uf } };
-    }
-    if (std.mem.eql(u8, kind, "pullup-range")) {
-        if (body_children.len < pullup_range_min_children) return null;
-        const p = pinArg(body_children[1]) orelse return null;
-        const net_name = netArg(body_children[2]) orelse return null;
-        const lo = namedNumberArg(body_children[3], "min-ohms") orelse return null;
-        const hi = namedNumberArg(body_children[4], "max-ohms") orelse return null;
-        return .{ .pullup_range = .{ .pin = p, .target_net = net_name, .min_ohms = lo, .max_ohms = hi } };
-    }
-    if (std.mem.eql(u8, kind, "voltage-range")) {
-        if (body_children.len < 4) return null;
-        const p = pinArg(body_children[1]) orelse return null;
-        const lo = namedNumberArg(body_children[2], "min") orelse return null;
-        const hi = namedNumberArg(body_children[3], "max") orelse return null;
-        return .{ .voltage_range = .{ .pin = p, .min_v = lo, .max_v = hi } };
-    }
-    if (std.mem.eql(u8, kind, "tied-to-net")) {
-        if (body_children.len < 3) return null;
-        const p = pinArg(body_children[1]) orelse return null;
-        const n = netArg(body_children[2]) orelse return null;
-        return .{ .tied_to_net = .{ .pin = p, .target_net = n } };
-    }
-    if (std.mem.eql(u8, kind, "not-connected")) {
-        if (body_children.len < 2) return null;
-        const p = pinArg(body_children[1]) orelse return null;
-        return .{ .not_connected = .{ .pin = p } };
-    }
-    if (std.mem.eql(u8, kind, "pin-not-floating")) {
-        if (body_children.len < 2) return null;
-        const p = pinArg(body_children[1]) orelse return null;
-        return .{ .pin_not_floating = .{ .pin = p } };
-    }
-    if (std.mem.eql(u8, kind, "pins-on-same-net")) {
-        if (body_children.len < 2) return null;
-        // Body: (pins-on-same-net (pins "A" "B" "C" ...))
-        const pins_form = body_children[1].asList() orelse return null;
-        if (pins_form.len < 3) return null;
-        const ph = pins_form[0].asAtom() orelse return null;
-        if (!std.mem.eql(u8, ph, "pins")) return null;
-        var list: std.ArrayList([]const u8) = .empty;
-        for (pins_form[1..]) |pn| {
-            const s = pn.asText() orelse continue;
-            list.append(allocator, s) catch return null;
-        }
-        if (list.items.len < 2) return null;
-        return .{ .pins_on_same_net = .{ .pins = list.toOwnedSlice(allocator) catch return null } };
-    }
-    if (std.mem.eql(u8, kind, "decoupling-per-pin")) {
-        if (body_children.len < decoupling_per_pin_min_children) return null;
-        // (decoupling-per-pin (return-pin "X") (pins "A" "B"...) (min-uf F) (count N))
-        const rp_form = body_children[1].asList() orelse return null;
-        if (rp_form.len < 2) return null;
-        const rp_head = rp_form[0].asAtom() orelse return null;
-        if (!std.mem.eql(u8, rp_head, "return-pin")) return null;
-        const return_pin = rp_form[1].asText() orelse return null;
-
-        const pins_form = body_children[2].asList() orelse return null;
-        if (pins_form.len < 2) return null;
-        const ph = pins_form[0].asAtom() orelse return null;
-        if (!std.mem.eql(u8, ph, "pins")) return null;
-        var list: std.ArrayList([]const u8) = .empty;
-        for (pins_form[1..]) |pn| {
-            const s = pn.asText() orelse continue;
-            list.append(allocator, s) catch return null;
-        }
-        if (list.items.len == 0) return null;
-
-        const min_uf = namedNumberArg(body_children[3], "min-uf") orelse return null;
-        const count_f = namedNumberArg(body_children[4], "count") orelse return null;
-        // Reject NaN/negative/out-of-range before narrowing (bare @intFromFloat
-        // is UB in the safety-off prod build; the old `< 0 ? 0` guard missed
-        // NaN and overflow). A non-representable count clamps to 0.
-        const count: u32 = numeric.checkedInt(u32, count_f) orelse 0;
-        return .{ .decoupling_per_pin = .{
-            .return_pin = return_pin,
-            .pins = list.toOwnedSlice(allocator) catch return null,
-            .min_uf = min_uf,
-            .count = count,
-        } };
-    }
-    if (std.mem.eql(u8, kind, "series-element")) {
-        if (body_children.len < series_element_min_children) return null;
-        // (series-element (kind R|L|C) (pin "P") (target-net "N") (min X) (max Y))
-        const kind_form = body_children[1].asList() orelse return null;
-        if (kind_form.len < 2) return null;
-        const kh = kind_form[0].asAtom() orelse return null;
-        if (!std.mem.eql(u8, kh, "kind")) return null;
-        const kind_atom = kind_form[1].asAtom() orelse return null;
-        const sk: SeriesKind = if (std.mem.eql(u8, kind_atom, "R")) .R //
-            else if (std.mem.eql(u8, kind_atom, "L")) .L //
-            else if (std.mem.eql(u8, kind_atom, "C")) .C //
-            else return null;
-        const p = pinArg(body_children[2]) orelse return null;
-        const tn_form = body_children[3].asList() orelse return null;
-        if (tn_form.len < 2) return null;
-        const tn_head = tn_form[0].asAtom() orelse return null;
-        if (!std.mem.eql(u8, tn_head, "target-net")) return null;
-        const target_net = tn_form[1].asText() orelse return null;
-        const lo = namedNumberArg(body_children[4], "min") orelse return null;
-        const hi = namedNumberArg(body_children[series_element_max_index], "max") orelse return null;
-        return .{ .series_element = .{
-            .kind = sk,
-            .pin = p,
-            .target_net = target_net,
-            .min = lo,
-            .max = hi,
-        } };
-    }
-    return null;
-}
-
 /// True if `needle` exactly equals any string in `haystack`. Used to test a
 /// field/form key against a fixed set of known/structural keywords.
 pub fn containsString(haystack: []const []const u8, needle: []const u8) bool {
@@ -531,30 +390,6 @@ pub fn containsString(haystack: []const []const u8, needle: []const u8) bool {
         if (std.mem.eql(u8, item, needle)) return true;
     }
     return false;
-}
-
-fn pinArg(node: ast.Node) ?[]const u8 {
-    const c = node.asList() orelse return null;
-    if (c.len < 2) return null;
-    const h = c[0].asAtom() orelse return null;
-    if (!std.mem.eql(u8, h, "pin")) return null;
-    return c[1].asText();
-}
-
-fn netArg(node: ast.Node) ?[]const u8 {
-    const c = node.asList() orelse return null;
-    if (c.len < 2) return null;
-    const h = c[0].asAtom() orelse return null;
-    if (!std.mem.eql(u8, h, "net")) return null;
-    return c[1].asText();
-}
-
-fn namedNumberArg(node: ast.Node, name: []const u8) ?f64 {
-    const c = node.asList() orelse return null;
-    if (c.len < 2) return null;
-    const h = c[0].asAtom() orelse return null;
-    if (!std.mem.eql(u8, h, name)) return null;
-    return c[1].asNumber();
 }
 
 /// Parse a `(ref "file.pdf" (page N))` form into a `NoteRef`. Returns null
@@ -1451,18 +1286,6 @@ pub const Env = struct {
         return null;
     }
 };
-
-const parser_mod = @import("../sexpr/parser.zig");
-
-test "parseCheck accepts a two-child not-connected body" {
-    const alloc = std.testing.allocator;
-    // (not-connected (pin "5")) has exactly two children — the arity floor for
-    // this kind. The `< 2` guard must accept it; a `<= 2` flip returns null.
-    const nodes = try parser_mod.parse(alloc, "(check (not-connected (pin \"5\")))");
-    defer parser_mod.freeNodes(alloc, nodes);
-    const chk = parseCheck(alloc, nodes[0]).?;
-    try std.testing.expectEqualStrings("5", chk.not_connected.pin);
-}
 
 // spec: eval/env - Stores and retrieves values by name in an environment
 test "env get and put" {

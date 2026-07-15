@@ -299,6 +299,7 @@ Public functions: worldShape, pointDist, shapeGap
 - extractSection returns one ## section of the rendered reference, matching the title case-insensitively
 - SectionIterator walks every ## heading of the rendered reference in order
 - The generated reference names every category key so (category …) docs follow the classifier map
+- The generated reference has a Requirement checks section rendered from the checker's check_docs table
 
 ## eval/fmt
 
@@ -314,6 +315,11 @@ Public functions: worldShape, pointDist, shapeGap
 
 - Stores and retrieves values by name in an environment
 - Resolves names through a parent environment chain
+
+## eval/check_grammar
+
+- every check_docs row's syntax leads with the kebab-case keyword parseCheck dispatches on
+- parseCheck dispatches every documented check keyword to its Check variant via check_docs
 
 ## eval/pin_enrichment
 
@@ -909,6 +915,7 @@ Public functions: describeComponent, listRequirements, addRequirement, removeReq
 - listRequirements returns each requirement with its derived id
 - addRequirement appends a requirement form before the component close
 - addRequirement rejects a check clause the checker does not recognize
+- addRequirement rejection names the accepted check primitives and reference section
 - removeRequirement deletes a requirement by id or exact text
 - formEnd skips parens inside string literals
 - add list and remove requirement round-trip on disk

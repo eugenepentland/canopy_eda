@@ -6,7 +6,6 @@
 27 src/diagram/membership.zig|computeSubBlockAttachments
 34 src/eval/builders.zig|buildPort
 27 src/eval/builders.zig|parseSectionPort
-40 src/eval/env.zig|parseCheck
 33 src/eval/instance.zig|buildInstance
 27 src/eval/modules.zig|loadComponent
 42 src/eval/power_budget.zig|analyze

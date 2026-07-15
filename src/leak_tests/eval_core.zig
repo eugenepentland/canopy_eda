@@ -10,7 +10,7 @@
 //!                               `errdefer buf.deinit` must reclaim the partial
 //!                               buffer).
 //!   • `env.requirementIdForText` — pure owned-return, no internal scratch.
-//!   • `env.parseCheck`        — allocates a pins slice into the caller's
+//!   • `check_grammar.parseCheck` — allocates a pins slice into the caller's
 //!                               allocator (arena-contract on the serve path).
 //!   • `Env` / `Evaluator`     — init/deinit store lifecycle.
 //!
@@ -26,6 +26,7 @@
 
 const std = @import("std");
 const env = @import("../eval/env.zig");
+const check_grammar = @import("../eval/check_grammar.zig");
 const fmt = @import("../eval/fmt.zig");
 const evaluator = @import("../eval/evaluator.zig");
 const parser = @import("../sexpr/parser.zig");
@@ -85,7 +86,7 @@ test "leak: requirementIdForText owned-return is leak-clean" {
     try std.testing.expectEqualStrings(id, id2);
 }
 
-// ── env.parseCheck: caller-allocator pins slice (idiom 1) ──────────────
+// ── check_grammar.parseCheck: caller-allocator pins slice (idiom 1) ──────────────
 
 // leak-audit: parseCheck builds the pins list via the passed allocator and
 // hands back an owned slice. AST inputs are built in a separate arena so the
@@ -100,7 +101,7 @@ test "leak: parseCheck pins-on-same-net owned slice frees clean" {
     ;
     const nodes = try parser.parse(ia.allocator(), src);
 
-    const check = env.parseCheck(std.testing.allocator, nodes[0]) orelse
+    const check = check_grammar.parseCheck(std.testing.allocator, nodes[0]) orelse
         return error.TestExpectedCheck;
     try std.testing.expect(std.meta.activeTag(check) == .pins_on_same_net);
     const c = check.pins_on_same_net;
@@ -120,7 +121,7 @@ test "leak: parseCheck decoupling-per-pin owned slice frees clean" {
     ;
     const nodes = try parser.parse(ia.allocator(), src);
 
-    const check = env.parseCheck(std.testing.allocator, nodes[0]) orelse
+    const check = check_grammar.parseCheck(std.testing.allocator, nodes[0]) orelse
         return error.TestExpectedCheck;
     try std.testing.expect(std.meta.activeTag(check) == .decoupling_per_pin);
     const c = check.decoupling_per_pin;
