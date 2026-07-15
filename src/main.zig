@@ -380,6 +380,7 @@ test {
     _ = @import("docgen.zig");
     _ = @import("query.zig");
     _ = @import("eval/evaluator.zig");
+    _ = @import("eval/board_role_cases.zig");
     _ = @import("eval/ids.zig");
     _ = @import("eval/pin_enrichment.zig");
     _ = @import("eval/rails.zig");

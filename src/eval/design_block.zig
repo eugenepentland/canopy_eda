@@ -25,6 +25,7 @@ const rails_mod = @import("rails.zig");
 const test_point_mod = @import("test_point.zig");
 const pin_enrichment = @import("pin_enrichment.zig");
 const forms_mod = @import("forms.zig");
+const board_role_mod = @import("board_role.zig");
 const ScopeForm = forms_mod.ScopeForm;
 
 const Node = ast.Node;
@@ -97,7 +98,6 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var notes: std.ArrayList(Note) = .empty;
     var groups: std.ArrayList(Group) = .empty;
     var sections: std.ArrayList(env_mod.Section) = .empty;
-
     var net_ties: std.ArrayList(NetTie) = .empty;
     var sub_blocks: std.ArrayList(SubBlock) = .empty;
     var functions: std.ArrayList(env_mod.FunctionSpec) = .empty;
@@ -213,6 +213,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
             },
             .layout => layout_spec = try parseLayout(self, form_children),
             .board => board_spec = try parseBoard(self, form_children),
+            .board_role => board_spec.role = board_role_mod.parse(self, form_children),
             .revision => revision_spec = try parseRevision(self, form_children),
             .rough => rough_spec = try parseRough(self, form_children),
             .stackup => stackup_spec = try parseStackup(self, form_children),
@@ -353,7 +354,6 @@ fn parseRevision(self: *Evaluator, form_children: []const Node) EvalError!env_mo
             self.warnFmt(child.span, "unknown sub-form ({s} …) in (revision …)", .{head});
         }
     }
-
     return .{
         .id = id,
         .date = date,
@@ -749,7 +749,6 @@ fn evalSection(
             child_start = 3;
         }
     }
-
     const scope = SectionScope{
         .description = &sec_description,
         .notes = &sec_notes,
@@ -847,6 +846,7 @@ fn evalSection(
             .stub,
             .layout,
             .board,
+            .board_role,
             .revision,
             .rough,
             .stackup,

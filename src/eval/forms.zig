@@ -134,6 +134,7 @@ pub const ScopeForm = enum {
     stub,
     layout,
     board,
+    board_role,
     revision,
     rough,
     stackup,
@@ -176,6 +177,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     // block-diagram arrangement; the word "layout" alone means PCB placement.
     .{ "diagram-layout", .layout },
     .{ "board", .board },
+    .{ "board-role", .board_role },
     .{ "revision", .revision },
     .{ "rough", .rough },
     .{ "stackup", .stackup },
@@ -514,6 +516,15 @@ pub const scope_form_docs = blk: {
             "mounting hardware at the four corners (TL, TR, BR, BL in authored order). " ++
             "The force-solved interior placement is centered in the outline; the rendered " ++
             "views draw the outline rectangle.",
+    } };
+    t[@intFromEnum(ScopeForm.board_role)] = .{ .scope = tl, .doc = .{
+        .syntax = "(board-role board|subcircuit)",
+        .summary = "Explicitly declare whether this design is a fabricable BOARD or a reusable " ++
+            "SUBCIRCUIT — drives the home page's Board/Subcircuit role tag + filter. The role is " ++
+            "explicit, not auto-detected: a design with no (board-role …) form defaults to " ++
+            "subcircuit, so a fabricable board must declare (board-role board). Independent of " ++
+            "(board …) (physical outline) and (kicad-pcb …) (sync target), which keep their own " ++
+            "jobs and no longer influence the role.",
     } };
     t[@intFromEnum(ScopeForm.rough)] = .{ .scope = tl, .doc = .{
         .syntax = "(rough [(anchor \"REF\")] (group \"name\" \"REF\"…)…)",

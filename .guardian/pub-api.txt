@@ -157,6 +157,7 @@ src/erc.zig::loadPinoutMap | fn loadPinoutMap(allocator: std.mem.Allocator, path
 src/erc.zig::runErc | fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8) std.mem.Allocator.Error![]const Violation
 src/erc.zig::writeViolationsJson | fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) std.mem.Allocator.Error![]const u8
 src/escape.zig::writeXml | fn writeXml(w: anytype, s: []const u8) !void
+src/eval/board_role.zig::parse | fn parse(evaluator: anytype, children: []const Node) BoardRole
 src/eval/builders.zig::addPartToInstance | fn addPartToInstance(self: *Evaluator, instances: []Instance, ref_des: []const u8, part_name: []const u8, pins: []const env_mod.PartPin) EvalError!void
 src/eval/builders.zig::buildFunction | fn buildFunction(self: *Evaluator, args: []const Node, env: *Env) EvalError!env_mod.FunctionSpec
 src/eval/builders.zig::buildGroup | fn buildGroup(self: *Evaluator, args: []const Node, env: *Env) EvalError!Group
@@ -188,6 +189,7 @@ src/eval/env.zig::AssertionResult struct_
 src/eval/env.zig::BlockDef struct_
 src/eval/env.zig::BlockOrigin enum_
 src/eval/env.zig::BlockRole enum_
+src/eval/env.zig::BoardRole enum_
 src/eval/env.zig::BoardSpec struct_
 src/eval/env.zig::CalcBlock struct_
 src/eval/env.zig::CalcResult struct_

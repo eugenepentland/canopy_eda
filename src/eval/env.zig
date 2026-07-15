@@ -910,14 +910,14 @@ pub const PlacementSideSpec = struct {
     side: PlacementSide,
     items: []const PlacementItem = &.{},
 };
-
+/// Explicit fabrication role; absent `(board-role …)` defaults to subcircuit.
+pub const BoardRole = enum { subcircuit, board };
 /// The physical board declared by a top-level `(board …)` form: the outline
 /// rectangle plus the parts that live ON it — connectors docked to a named
 /// board edge (`(left|right|top|bottom "ref" …)` lists, same item grammar as
 /// `(placement …)` incl. `(rot N "ref")`) and mounting hardware pinned at the
-/// `(corners …)` (TL, TR, BR, BL in authored order). `(size W H)` is required
-/// for the form to take effect — a board is a physical object with a known
-/// outline; without it the optimizer ignores the form and lint reports it.
+/// `(corners …)` (TL, TR, BR, BL in authored order). `(size W H)` is required;
+/// without it the optimizer ignores the form and lint reports it.
 pub const BoardSpec = struct {
     /// Outline size in mm. 0 ⇒ `(size …)` missing → the form is inert.
     w: f64 = 0,
@@ -931,9 +931,9 @@ pub const BoardSpec = struct {
     sides: []const PlacementSideSpec = &.{},
     /// Corner-pinned parts (mounting holes/standoffs): TL, TR, BR, BL.
     corners: []const PlacementItem = &.{},
+    role: BoardRole = .subcircuit,
     present: bool = false,
 };
-
 /// One `(plane IDX "NET")` entry of a `(stackup …)` form: copper layer IDX
 /// (1-based, 1 = top/F.Cu, `layers` = bottom/B.Cu) is a solid plane carrying
 /// NET instead of a routed signal layer.

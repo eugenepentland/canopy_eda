@@ -720,6 +720,8 @@ Public functions: analyze
 - layout edge form parses left/right edge-pinned block keys
 - hosts form records the sub-block instance names a section owns
 - board form parses outline size, corner radius, edge lists, and corners
+- board-role form sets the explicit board/subcircuit role
+- board-role defaults to subcircuit when the form is absent
 - revision form captures id, date, and newest-first changelog
 - revision form with only an id is present with empty date/changelog
 - a design with no (revision …) form is unversioned (present=false)
