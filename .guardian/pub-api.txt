@@ -510,6 +510,7 @@ src/import_kicad.zig::ImportSummary struct_
 src/import_kicad.zig::Pad struct_
 src/import_kicad.zig::Part struct_
 src/import_kicad.zig::importBoard | fn importBoard(arena: std.mem.Allocator, opts: ImportOptions) ImportError!ImportSummary
+src/import_kicad.zig::parseNetlist | fn parseNetlist(arena: std.mem.Allocator, project_dir: []const u8, source: []const u8) ImportError![]Part
 src/import_kicad.zig::sanitizeName | fn sanitizeName(arena: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]const u8
 src/import_kicad.zig::sanitizeNetName | fn sanitizeNetName(arena: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]const u8
 src/import_kicad.zig::unconnected_prefix value
@@ -917,6 +918,7 @@ src/serve/bom_html.zig::writeJsonEscaped value
 src/serve/bom_html.zig::writeNetsJson | fn writeNetsJson(allocator: std.mem.Allocator, w: anytype, block: *const env_mod.DesignBlock, prefix: []const u8) BomError!bool
 src/serve/bom_html.zig::writeSchematicBomHtml | fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *const env_mod.DesignBlock) BomError!void
 src/serve/component_info.zig::DescribeError value
+src/serve/component_info.zig::ReqError value
 src/serve/component_info.zig::addRequirement | fn addRequirement( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, text: []const u8, ref_pdf: ?[]const u8, ref_page: ?u32, ref_quote: ?[]const u8, check_src: ?[]const u8, out: *std.ArrayList(u8), ) ReqError!bool
 src/serve/component_info.zig::describeComponent | fn describeComponent( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, out: *std.ArrayList(u8), ) DescribeError!bool
 src/serve/component_info.zig::listRequirements | fn listRequirements( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, out: *std.ArrayList(u8), ) ReqError!bool
@@ -1072,6 +1074,10 @@ src/serve/mcp_flatten.zig::getNetFlat | fn getNetFlat( allocator: std.mem.Alloca
 src/serve/mcp_flatten.zig::instancePinCount | fn instancePinCount( eval: *Evaluator, component: []const u8, symbol: []const u8, parts: []const env_mod.Part, ) usize
 src/serve/mcp_flatten.zig::listFreePinsFlat | fn listFreePinsFlat( allocator: std.mem.Allocator, eval: *Evaluator, block: *const env_mod.DesignBlock, ref_des: []const u8, filter: ?[]const u8, w: anytype, ) !bool
 src/serve/mcp_flatten.zig::listInstancesFlat | fn listInstancesFlat( allocator: std.mem.Allocator, eval: *Evaluator, block: *const env_mod.DesignBlock, w: anytype, ) !bool
+src/serve/mcp_import_tools.zig::toolImportKicad | fn toolImportKicad( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
+src/serve/mcp_import_tools.zig::toolParseKicadNetlist | fn toolParseKicadNetlist( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
+src/serve/mcp_notes_tools.zig::dispatchNotes | fn dispatchNotes( allocator: std.mem.Allocator, project_dir: []const u8, tool_name: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!?bool
+src/serve/mcp_notes_tools.zig::dispatchRequirements | fn dispatchRequirements( allocator: std.mem.Allocator, project_dir: []const u8, tool_name: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) component_info.ReqError!?bool
 src/serve/mcp_parts_tools.zig::toolCheckStock | fn toolCheckStock( allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/mcp_parts_tools.zig::toolDownloadDatasheet | fn toolDownloadDatasheet( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/mcp_parts_tools.zig::toolDownloadFootprint | fn toolDownloadFootprint( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
@@ -1096,6 +1102,7 @@ src/serve/mcp_tools.zig::listFreePins | fn listFreePins( allocator: std.mem.Allo
 src/serve/mcp_tools.zig::listInstances | fn listInstances( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, scope: Scope, w: anytype, ) !bool
 src/serve/mcp_tools.zig::listLibrarySubdir | fn listLibrarySubdir( allocator: std.mem.Allocator, project_dir: []const u8, sub: []const u8, query: ?[]const u8, w: anytype, ) !void
 src/serve/mcp_tools.zig::missingArg | fn missingArg(out: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!bool
+src/serve/mcp_tools.zig::optionalBool | fn optionalBool(args_val: ?std.json.Value, key: []const u8) ?bool
 src/serve/mcp_tools.zig::optionalString | fn optionalString(args_val: ?std.json.Value, key: []const u8) ?[]const u8
 src/serve/mcp_tools.zig::optionalU64 | fn optionalU64(args_val: ?std.json.Value, key: []const u8) ?u64
 src/serve/mcp_tools.zig::renderSceneGraph | fn renderSceneGraph( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ToolError![]const u8

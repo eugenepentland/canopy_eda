@@ -93,7 +93,7 @@
 7 src/serve/library.zig
 2 src/serve/library_3d.zig
 2 src/serve/mcp.zig
-73 src/serve/mcp_tools.zig
+62 src/serve/mcp_tools.zig
 4 src/serve/modules.zig
 6 src/serve/notes.zig
 1 src/serve/page_cache.zig

@@ -117,20 +117,9 @@ pub fn importBoard(arena: std.mem.Allocator, opts: ImportOptions) ImportError!Im
         error.FileNotFound => return error.FileNotFound,
         else => return error.InvalidBoard,
     };
-    const nodes = try parser_mod.parse(arena, source);
-    if (nodes.len == 0 or !nodes[0].isForm("kicad_pcb")) return error.InvalidBoard;
-
-    const parts = try parseParts(arena, nodes[0]);
-    if (parts.len == 0) return error.InvalidBoard;
-
+    const parts = try parseNetlist(arena, opts.project_dir, source);
     var summary = ImportSummary{ .parts = parts.len };
-
-    for (parts) |*part| {
-        if (try familyFor(arena, opts.project_dir, part.*)) |fam| {
-            part.family = fam;
-            summary.family_mapped += 1;
-        }
-    }
+    for (parts) |p| summary.family_mapped += @intFromBool(p.family != null);
 
     const comps = try collectCustomComps(arena, opts.project_dir, parts);
     summary.custom_parts = comps.len;
@@ -161,6 +150,17 @@ pub fn importBoard(arena: std.mem.Allocator, opts: ImportOptions) ImportError!Im
         writeFileMakePath(opts.project_dir, design_path, design_text) catch return error.WriteFailed;
     }
     return summary;
+}
+
+/// Parse a `.kicad_pcb` source into family-classified parts (parse → guard the
+/// `kicad_pcb` head → lift footprints → map passives). Shared by `importBoard`.
+pub fn parseNetlist(arena: std.mem.Allocator, project_dir: []const u8, source: []const u8) ImportError![]Part {
+    const nodes = try parser_mod.parse(arena, source);
+    if (nodes.len == 0 or !nodes[0].isForm("kicad_pcb")) return error.InvalidBoard;
+    const parts = try parseParts(arena, nodes[0]);
+    if (parts.len == 0) return error.InvalidBoard;
+    for (parts) |*part| part.family = try familyFor(arena, project_dir, part.*);
+    return parts;
 }
 
 // ── Board parsing ─────────────────────────────────────────────────────
