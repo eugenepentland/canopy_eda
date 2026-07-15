@@ -972,18 +972,17 @@ Public functions: validateSourceApi, libIndexApi, saveDiagramLayoutApi
 
 ## serve/component_search
 
-Public functions: downloadFootprint, errorMessage, searchComponents, searchErrorMessage, login, loginErrorMessage
+Public functions: downloadFootprint, errorMessage, searchComponents, searchErrorMessage
 
 - percentEncode escapes spaces and reserved chars
 - looksLikeZip detects the ZIP magic bytes
+- modelUrl targets the ga/model.php endpoint by part id
 - safeFilename builds a path-safe LIB_<part>.zip
 - searchVariants relaxes the part number
 - parses part id and datasheet url from a suggestion
 - collectHits maps suggestions to search hits
-- deriveCsrfToken derives the salted CSRF token
-- collectCookies folds Set-Cookie into a cookie jar
-- headerValue extracts a response header value
-- mergeCookies overlays a session onto the mint jar
+- containsHit dedups aggregated hits by part name
+- hoistExact moves the exact query match to the front
 
 ## serve/digikey
 
@@ -1019,7 +1018,7 @@ Public functions: read
 
 ## serve/mcp_tools
 
-Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesignSummaries, renderSceneGraph
+Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesignSummaries, renderSceneGraph, requireString, optionalString, optionalU64, missingArg
 
 - fuzzyScore returns 0 when the needle does not match the haystack as a substring or subsequence
 - fuzzyScore ranks a contiguous substring hit above a scattered subsequence hit
@@ -1033,10 +1032,11 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 - flatten makes get_net return the merged rail and resolve a sub-scoped net spelling
 - flatten makes list_free_pins match a flattened child by name and read merged assignments
 - flatten merges a sub-block stitch written against a port name whose module net differs
+- finishDatasheet returns false when the store rejects the bytes
 
 ## config
 
-Public functions: cseConnectSid, cseEmail, csePassword, digikeyClientId, digikeyClientSecret, digikeyApiBase, cseMinIntervalMs, cseMaxInFlight, digikeyMinIntervalMs, digikeyMaxInFlight
+Public functions: cseEmail, csePassword, digikeyClientId, digikeyClientSecret, digikeyApiBase, cseMinIntervalMs, cseMaxInFlight, digikeyMinIntervalMs, digikeyMaxInFlight
 
 - stripQuotes removes one layer of matching quotes
 - The ward cache ttl maps a zero or out-of-range value to the default and keeps valid values

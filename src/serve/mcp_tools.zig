@@ -2,7 +2,9 @@
 //! `tools/call` name out to one `tool*` handler that writes a JSON result into
 //! the caller's buffer; the registration table and the embedded
 //! `tools_list_result.json` are kept in lockstep (a test enforces it).
-//! Part-sourcing tools resolve their CSE session via `cse_session`.
+//! Part-sourcing handlers (CSE/DigiKey downloads, search, stock, datasheet
+//! reads) live in `mcp_parts_tools.zig`; PCB layout mutations in
+//! `pcb_layout_page.zig`.
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
@@ -26,18 +28,13 @@ const req_checks = @import("../req_checks.zig");
 const component_info = @import("component_info.zig");
 const notes = @import("notes.zig");
 const symbol_conv = @import("../convert/symbol.zig");
-const config = @import("../config.zig");
-const component_search = @import("component_search.zig");
-const cse_session = @import("cse_session.zig");
-const digikey = @import("digikey.zig");
-const upload = @import("upload.zig");
+const mcp_parts_tools = @import("mcp_parts_tools.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const pcb_describe = @import("pcb_describe.zig");
 const layout_match = @import("layout_match.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
 const docgen = @import("../docgen.zig");
 const page_cache = @import("page_cache.zig");
-const datasheet = @import("datasheet.zig");
 const mcp_flatten = @import("mcp_flatten.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -53,20 +50,8 @@ const version_snapshot_template = "{{\"ok\":true,\"version\":{d},\"snapshot\":";
 const json_net_key = ",\"net\":";
 const json_component_key = ",\"component\":";
 const json_value_key = ",\"value\":";
-const json_manufacturer_key = ",\"manufacturer\":";
-const json_description_key = ",\"description\":";
-const json_err_open = "{\"ok\":false,\"error\":";
-// Shared opening of the part-search envelopes (search_components / resolve_mpn /
-// check_stock): `{"ok":true,"query":<q>` then `,"count":N,"results":[`.
-const json_ok_query_open = "{\"ok\":true,\"query\":";
-const json_count_results_open = ",\"count\":{d},\"results\":[";
-const key_part_number = "part_number";
-// search_components `limit` arg: default and hard cap.
-const search_limit_default: usize = 10;
-const search_limit_max: u64 = 50;
-// check_stock default is smaller — each result carries full per-packaging price
-// ladders, so a handful of exact-ish matches is the useful payload (cap shared).
-const stock_limit_default: usize = 5;
+/// Shared with `mcp_parts_tools` (resolve_mpn / check_stock envelopes).
+pub const json_description_key = ",\"description\":";
 
 const EvalError = @import("../eval/evaluator.zig").EvalError;
 const RenderError = render_json.RenderError;
@@ -281,7 +266,7 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "compare_layout_to_starred")) return try toolCompareLayoutToStarred(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_version")) return try toolGetVersion(args_val, out, allocator);
     if (std.mem.eql(u8, tool_name, "run_checks")) return try toolRunChecks(allocator, project_dir, args_val, out, w);
-    if (std.mem.eql(u8, tool_name, "read_datasheet")) return try toolReadDatasheet(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "read_datasheet")) return try mcp_parts_tools.toolReadDatasheet(allocator, project_dir, args_val, out);
     return null;
 }
 
@@ -317,9 +302,9 @@ fn dispatchParts(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) !?bool {
-    if (std.mem.eql(u8, tool_name, "search_components")) return try toolSearchComponents(allocator, args_val, out);
-    if (std.mem.eql(u8, tool_name, "resolve_mpn")) return try toolResolveMpn(allocator, args_val, out);
-    if (std.mem.eql(u8, tool_name, "check_stock")) return try toolCheckStock(allocator, args_val, out);
+    if (std.mem.eql(u8, tool_name, "search_components")) return try mcp_parts_tools.toolSearchComponents(allocator, args_val, out);
+    if (std.mem.eql(u8, tool_name, "resolve_mpn")) return try mcp_parts_tools.toolResolveMpn(allocator, args_val, out);
+    if (std.mem.eql(u8, tool_name, "check_stock")) return try mcp_parts_tools.toolCheckStock(allocator, args_val, out);
     return null;
 }
 
@@ -928,8 +913,8 @@ fn dispatchVfs(
     if (std.mem.eql(u8, tool_name, "move_file")) return try toolMoveFile(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "build")) return try toolBuild(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "regenerate_pinout")) return try toolRegeneratePinout(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
-    if (std.mem.eql(u8, tool_name, "download_footprint")) return try toolDownloadFootprint(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
-    if (std.mem.eql(u8, tool_name, "download_datasheet")) return try toolDownloadDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "download_footprint")) return try mcp_parts_tools.toolDownloadFootprint(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "download_datasheet")) return try mcp_parts_tools.toolDownloadDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     return null;
 }
 
@@ -980,361 +965,6 @@ fn toolBuild(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?s
     const w = out.writer(allocator);
     try writeBuildReport(w, report);
     return true;
-}
-
-/// Fetch a part's ECAD model ZIP from Component Search Engine and run it
-/// through the same import pipeline as the `/api/upload-zip` route, creating
-/// `lib/{components,footprints,pinouts,models}` entries. The `connect.sid`
-/// session is resolved server-side by `cse_session.resolve` (auto-login from
-/// `CSE_EMAIL`/`CSE_PASSWORD`, or a `CSE_CONNECT_SID` override) — never passed
-/// over MCP. Returns the created library names on success, or
-/// `{ok:false,error}` if search, download, or import fails.
-fn toolDownloadFootprint(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const part_number = requireString(args_val, key_part_number) orelse return missingArg(out, allocator, key_part_number);
-    const manufacturer = optionalString(args_val, "manufacturer");
-    const w = out.writer(allocator);
-
-    const sid = (try cse_session.resolveOrWrite(w, allocator)) orelse return false;
-
-    const dl = component_search.downloadFootprint(allocator, part_number, manufacturer, sid) catch |err| {
-        try w.writeAll("{\"ok\":false,\"stage\":\"download\",\"error\":");
-        try json_writer.writeString(w, component_search.errorMessage(err));
-        try w.writeAll("}");
-        return false;
-    };
-
-    const imp = upload.importZipBytes(allocator, project_dir, dl.zip_bytes, dl.suggested_filename) catch |err| {
-        try w.writeAll("{\"ok\":false,\"stage\":\"import\",\"downloaded\":");
-        try json_writer.writeString(w, dl.suggested_filename);
-        try w.writeAll(",\"error\":");
-        try json_writer.writeString(w, upload.importErrorMessage(err));
-        try w.writeAll("}");
-        return false;
-    };
-
-    try w.writeAll("{\"ok\":true,\"part_name\":");
-    try json_writer.writeString(w, dl.part_name);
-    try w.writeAll(json_manufacturer_key);
-    try json_writer.writeString(w, dl.manufacturer);
-    try w.writeAll(",\"samac_id\":");
-    try json_writer.writeString(w, dl.samac_id);
-    try w.writeAll(",\"zip\":");
-    try json_writer.writeString(w, dl.suggested_filename);
-    try w.print(",\"zip_size\":{d},\"component\":", .{dl.zip_bytes.len});
-    try json_writer.writeString(w, imp.component_name);
-    try w.writeAll(",\"footprint\":");
-    try json_writer.writeString(w, imp.footprint_name);
-    try w.writeAll(",\"pinout\":");
-    try json_writer.writeString(w, imp.pinout_name);
-    try w.print(",\"has_3d_model\":{s}", .{if (imp.has_3d) "true" else "false"});
-    try w.writeAll(",\"component_action\":");
-    try json_writer.writeString(w, @tagName(imp.component));
-    try w.writeAll("}");
-    return true;
-}
-
-/// Fetch a part's datasheet PDF and store it under `lib/datasheets/`, where
-/// `read_datasheet` can extract its text. Tries Component Search Engine first
-/// (scraping the datasheet link via `CSE_CONNECT_SID`); if CSE has no datasheet
-/// on file (or isn't configured), falls back to DigiKey's `datasheet_url`
-/// (`DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET`), unwrapping any manufacturer
-/// interstitial and validating the `%PDF` magic. All credentials are read
-/// server-side, never over MCP. The success envelope's `source` says which
-/// provider supplied it; when both fail, `{ok:false,error,cse_error,digikey_error}`.
-fn toolDownloadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const part_number = requireString(args_val, key_part_number) orelse return missingArg(out, allocator, key_part_number);
-    const manufacturer = optionalString(args_val, "manufacturer");
-    const w = out.writer(allocator);
-
-    var cse_msg: []const u8 = "";
-    switch (try tryCseDatasheet(w, allocator, project_dir, part_number, manufacturer)) {
-        .ok => return true,
-        .store_failed => return false,
-        .unavailable => |m| cse_msg = m,
-    }
-
-    var dk_msg: []const u8 = "";
-    switch (try tryDigikeyDatasheet(w, allocator, project_dir, part_number, manufacturer)) {
-        .ok => return true,
-        .store_failed => return false,
-        .unavailable => |m| dk_msg = m,
-    }
-
-    try w.writeAll(json_err_open);
-    try json_writer.writeString(w, "no datasheet found via Component Search Engine or DigiKey");
-    try w.writeAll(",\"cse_error\":");
-    try json_writer.writeString(w, cse_msg);
-    try w.writeAll(",\"digikey_error\":");
-    try json_writer.writeString(w, dk_msg);
-    try w.writeAll("}");
-    return false;
-}
-
-/// Outcome of one datasheet provider: `ok`/`store_failed` mean the envelope is
-/// already written (success / a terminal store error); `unavailable` carries a
-/// reason and means "try the next provider".
-const DatasheetOutcome = union(enum) {
-    ok,
-    store_failed,
-    unavailable: []const u8,
-};
-
-/// Try Component Search Engine. `unavailable` when `CSE_CONNECT_SID` is unset or
-/// CSE has no datasheet for the part.
-fn tryCseDatasheet(
-    w: anytype,
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    part_number: []const u8,
-    manufacturer: ?[]const u8,
-) !DatasheetOutcome {
-    const sid = cse_session.resolve(allocator) catch |e|
-        return .{ .unavailable = cse_session.resolveErrorMessage(e) };
-    const ds = component_search.downloadDatasheet(allocator, part_number, manufacturer, sid) catch |err|
-        return .{ .unavailable = component_search.datasheetErrorMessage(err) };
-    const ok = try finishDatasheet(w, allocator, project_dir, "componentsearchengine", ds.filename, ds.pdf_bytes, ds.part_name, ds.manufacturer, ds.source_url);
-    return if (ok) .ok else .store_failed;
-}
-
-/// Try DigiKey's `datasheet_url`. `unavailable` when DigiKey credentials are
-/// unset or it has no resolvable datasheet PDF for the part.
-fn tryDigikeyDatasheet(
-    w: anytype,
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    part_number: []const u8,
-    manufacturer: ?[]const u8,
-) !DatasheetOutcome {
-    const client_id = config.digikeyClientId(allocator) orelse return .{ .unavailable = "DIGIKEY_CLIENT_ID not set" };
-    const client_secret = config.digikeyClientSecret(allocator) orelse return .{ .unavailable = "DIGIKEY_CLIENT_SECRET not set" };
-    const base: []const u8 = config.digikeyApiBase(allocator) orelse digikey.default_base;
-    const ds = digikey.downloadDatasheet(allocator, base, client_id, client_secret, part_number, manufacturer) catch |err|
-        return .{ .unavailable = digikey.datasheetErrorMessage(err) };
-    const ok = try finishDatasheet(w, allocator, project_dir, "digikey", ds.mpn, ds.pdf_bytes, ds.mpn, ds.manufacturer, ds.source_url);
-    return if (ok) .ok else .store_failed;
-}
-
-/// Store a fetched datasheet PDF and emit the success envelope.
-fn finishDatasheet(
-    w: anytype,
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    source: []const u8,
-    filename: []const u8,
-    pdf_bytes: []const u8,
-    part: []const u8,
-    manufacturer: []const u8,
-    url: []const u8,
-) !bool {
-    const upload_datasheet = @import("upload_datasheet.zig");
-    const stored = upload_datasheet.storeDatasheet(allocator, project_dir, filename, pdf_bytes) catch |err| {
-        // Reuse the HTTP route's error→JSON mapping; null means OutOfMemory.
-        try w.writeAll(upload_datasheet.storeErrorBody(err) orelse return err);
-        return false;
-    };
-    try w.writeAll("{\"ok\":true,\"source\":");
-    try json_writer.writeString(w, source);
-    try w.writeAll(",\"file\":");
-    try json_writer.writeString(w, stored.name);
-    try w.print(",\"size\":{d},\"part\":", .{stored.size});
-    try json_writer.writeString(w, part);
-    try w.writeAll(json_manufacturer_key);
-    try json_writer.writeString(w, manufacturer);
-    try w.writeAll(",\"datasheet_url\":");
-    try json_writer.writeString(w, url);
-    try w.writeAll("}");
-    return true;
-}
-
-/// Search Component Search Engine and return candidate parts without importing
-/// anything — the read-only counterpart to `download_footprint`. The agent
-/// searches here, then passes a chosen `part_number` (with the reported
-/// `manufacturer` to disambiguate) to download_footprint/download_datasheet.
-/// `CSE_CONNECT_SID` is read server-side (never over MCP). Returns
-/// `{ok:true,query,count,results:[{part_number,manufacturer,has_model,has_datasheet}]}`,
-/// or `{ok:false,error}` on a network/auth failure.
-fn toolSearchComponents(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const query = requireString(args_val, "query") orelse return missingArg(out, allocator, "query");
-    const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, search_limit_max)) else search_limit_default;
-    const w = out.writer(allocator);
-
-    const sid = (try cse_session.resolveOrWrite(w, allocator)) orelse return false;
-
-    const hits = component_search.searchComponents(allocator, query, sid, limit) catch |err| {
-        try w.writeAll(json_err_open);
-        try json_writer.writeString(w, component_search.searchErrorMessage(err));
-        try w.writeAll("}");
-        return false;
-    };
-
-    try w.writeAll(json_ok_query_open);
-    try json_writer.writeString(w, query);
-    try w.print(json_count_results_open, .{hits.len});
-    for (hits, 0..) |h, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"part_number\":");
-        try json_writer.writeString(w, h.part_name);
-        try w.writeAll(json_manufacturer_key);
-        try json_writer.writeString(w, h.manufacturer);
-        try w.print(",\"has_model\":{s},\"has_datasheet\":{s}}}", .{
-            if (h.samac_id != null) "true" else "false",
-            if (h.datasheet_url != null) "true" else "false",
-        });
-    }
-    try w.writeAll("]}");
-    return true;
-}
-
-/// Resolve a fuzzy query (vague description or partial part number) to real
-/// manufacturer part numbers via the DigiKey Product Information API v4 —
-/// read-only, imports nothing. Pairs with `search_components` /
-/// `download_footprint` / `download_datasheet`: take a returned `mpn` and pass
-/// it on. Credentials (`DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET`, optional
-/// `DIGIKEY_API_BASE` for the sandbox) are read server-side, never over MCP.
-/// Returns `{ok:true,query,count,results:[{mpn,manufacturer,description,
-/// datasheet_url,product_url,digikey_part_number}]}` or `{ok:false,error}`.
-fn toolResolveMpn(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const query = requireString(args_val, "query") orelse return missingArg(out, allocator, "query");
-    const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, search_limit_max)) else search_limit_default;
-    const w = out.writer(allocator);
-
-    const creds = (try digikeyCreds(allocator, w)) orelse return false;
-    const products = digikey.resolveMpn(allocator, creds.base, creds.client_id, creds.client_secret, query, limit) catch |err| {
-        try w.writeAll(json_err_open);
-        try json_writer.writeString(w, digikey.searchErrorMessage(err));
-        try w.writeAll("}");
-        return false;
-    };
-
-    try w.writeAll(json_ok_query_open);
-    try json_writer.writeString(w, query);
-    try w.print(json_count_results_open, .{products.len});
-    for (products, 0..) |p, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"mpn\":");
-        try json_writer.writeString(w, p.mpn);
-        try w.writeAll(json_manufacturer_key);
-        try json_writer.writeString(w, p.manufacturer);
-        try w.writeAll(json_description_key);
-        try json_writer.writeString(w, p.description);
-        try w.writeAll(",\"datasheet_url\":");
-        try writeOptString(w, p.datasheet_url);
-        try w.writeAll(",\"product_url\":");
-        try writeOptString(w, p.product_url);
-        try w.writeAll(",\"digikey_part_number\":");
-        try writeOptString(w, p.digikey_part_number);
-        // At-a-glance stock + price + lifecycle (full ladders via check_stock).
-        try w.print(",\"quantity_available\":{d},\"unit_price\":", .{p.quantity_available});
-        try writeOptNum(w, p.unit_price);
-        try w.writeAll(",\"product_status\":");
-        try writeOptString(w, p.product_status);
-        try w.writeAll("}");
-    }
-    try w.writeAll("]}");
-    return true;
-}
-
-/// Live DigiKey stock + pricing for a known MPN/orderable number. Resolves the
-/// query through the same keyword search as `resolve_mpn`, then emits the full
-/// per-packaging inventory and quantity price-break ladder for each match — the
-/// "is it actually on the shelf, and what does qty-N cost" step. Read-only.
-/// Returns `{ok:true,query,count,results:[{mpn,manufacturer,description,
-/// product_status,quantity_available,unit_price,product_url,digikey_part_number,
-/// variations:[{digikey_part_number,package_type,quantity_available,
-/// minimum_order_quantity,price_breaks:[{break_quantity,unit_price,
-/// total_price}]}]}]}` or `{ok:false,error}`.
-fn toolCheckStock(allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const query = requireString(args_val, "query") orelse return missingArg(out, allocator, "query");
-    const limit: usize = if (optionalU64(args_val, "limit")) |l| @intCast(@min(l, search_limit_max)) else stock_limit_default;
-    const w = out.writer(allocator);
-
-    const creds = (try digikeyCreds(allocator, w)) orelse return false;
-    const products = digikey.resolveMpn(allocator, creds.base, creds.client_id, creds.client_secret, query, limit) catch |err| {
-        try w.writeAll(json_err_open);
-        try json_writer.writeString(w, digikey.searchErrorMessage(err));
-        try w.writeAll("}");
-        return false;
-    };
-
-    try w.writeAll(json_ok_query_open);
-    try json_writer.writeString(w, query);
-    try w.print(json_count_results_open, .{products.len});
-    for (products, 0..) |p, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"mpn\":");
-        try json_writer.writeString(w, p.mpn);
-        try w.writeAll(json_manufacturer_key);
-        try json_writer.writeString(w, p.manufacturer);
-        try w.writeAll(json_description_key);
-        try json_writer.writeString(w, p.description);
-        try w.writeAll(",\"product_status\":");
-        try writeOptString(w, p.product_status);
-        try w.print(",\"quantity_available\":{d},\"unit_price\":", .{p.quantity_available});
-        try writeOptNum(w, p.unit_price);
-        try w.writeAll(",\"product_url\":");
-        try writeOptString(w, p.product_url);
-        try w.writeAll(",\"digikey_part_number\":");
-        try writeOptString(w, p.digikey_part_number);
-        try w.writeAll(",\"variations\":[");
-        for (p.variations, 0..) |v, vi| {
-            if (vi > 0) try w.writeAll(",");
-            try w.writeAll("{\"digikey_part_number\":");
-            try writeOptString(w, v.digikey_part_number);
-            try w.writeAll(",\"package_type\":");
-            try writeOptString(w, v.package_type);
-            try w.print(",\"quantity_available\":{d},\"minimum_order_quantity\":{d},\"price_breaks\":[", .{
-                v.quantity_available, v.minimum_order_quantity,
-            });
-            for (v.price_breaks, 0..) |b, bi| {
-                if (bi > 0) try w.writeAll(",");
-                try w.print("{{\"break_quantity\":{d},\"unit_price\":{d},\"total_price\":{d}}}", .{
-                    b.break_quantity, b.unit_price, b.total_price,
-                });
-            }
-            try w.writeAll("]}");
-        }
-        try w.writeAll("]}");
-    }
-    try w.writeAll("]}");
-    return true;
-}
-
-/// DigiKey OAuth credentials + API base, read server-side. On a missing
-/// credential this writes the `{ok:false,error}` envelope into `w` and returns
-/// null, so a caller does `(try digikeyCreds(a, w)) orelse return false;`.
-const DigiKeyCreds = struct { client_id: []u8, client_secret: []u8, base: []const u8 };
-fn digikeyCreds(allocator: std.mem.Allocator, w: anytype) !?DigiKeyCreds {
-    const client_id = config.digikeyClientId(allocator) orelse {
-        try w.writeAll("{\"ok\":false,\"error\":\"DIGIKEY_CLIENT_ID is not set on the server; add it to .env\"}");
-        return null;
-    };
-    const client_secret = config.digikeyClientSecret(allocator) orelse {
-        try w.writeAll("{\"ok\":false,\"error\":\"DIGIKEY_CLIENT_SECRET is not set on the server; add it to .env\"}");
-        return null;
-    };
-    return .{
-        .client_id = client_id,
-        .client_secret = client_secret,
-        .base = config.digikeyApiBase(allocator) orelse digikey.default_base,
-    };
-}
-
-/// Emit a JSON string, or `null` when the optional is absent.
-fn writeOptString(w: anytype, s: ?[]const u8) !void {
-    if (s) |v| {
-        try json_writer.writeString(w, v);
-    } else {
-        try w.writeAll("null");
-    }
-}
-
-/// Emit a JSON number (decimal, never scientific), or `null` when absent.
-fn writeOptNum(w: anytype, n: ?f64) !void {
-    if (n) |v| {
-        try w.print("{d}", .{v});
-    } else {
-        try w.writeAll("null");
-    }
 }
 
 /// Regenerate `lib/pinouts/<name>.sexp` from `<source>` (a `.kicad_sym`
@@ -2026,7 +1656,9 @@ pub fn getNet(
     return true;
 }
 
-fn missingArg(out: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8) !bool {
+/// Write the standard missing-argument error line and return false. Shared
+/// with `mcp_parts_tools` so its handlers reject bad args identically.
+pub fn missingArg(out: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!bool {
     const w = out.writer(allocator);
     try w.print("error: missing argument \"{s}\"", .{key});
     return false;
@@ -2038,18 +1670,24 @@ fn editErrorMsg(out: *std.ArrayList(u8), allocator: std.mem.Allocator, err: edit
     return false;
 }
 
-fn requireString(args_val: ?std.json.Value, key: []const u8) ?[]const u8 {
+/// A required string tool argument — same lookup as `optionalString`; callers
+/// treat null as "reject the call" via `missingArg`. Shared with `mcp_parts_tools`.
+pub fn requireString(args_val: ?std.json.Value, key: []const u8) ?[]const u8 {
     return optionalString(args_val, key);
 }
 
-fn optionalString(args_val: ?std.json.Value, key: []const u8) ?[]const u8 {
+/// An optional string tool argument, null when absent or not a string.
+/// Shared with `mcp_parts_tools`.
+pub fn optionalString(args_val: ?std.json.Value, key: []const u8) ?[]const u8 {
     const av = args_val orelse return null;
     if (av != .object) return null;
     const v = av.object.get(key) orelse return null;
     return if (v == .string) v.string else null;
 }
 
-fn optionalU64(args_val: ?std.json.Value, key: []const u8) ?u64 {
+/// An optional non-negative integer tool argument (integer or whole float),
+/// null when absent or malformed. Shared with `mcp_parts_tools`.
+pub fn optionalU64(args_val: ?std.json.Value, key: []const u8) ?u64 {
     const av = args_val orelse return null;
     if (av != .object) return null;
     const v = av.object.get(key) orelse return null;
@@ -2558,13 +2196,6 @@ pub fn renderSceneGraph(
     return render_json.renderSceneGraph(allocator, nb.block, project_dir);
 }
 
-fn toolReadDatasheet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const raw_name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const offset = optionalU64(args_val, "offset");
-    const limit = optionalU64(args_val, "limit");
-    return datasheet.read(allocator, project_dir, raw_name, offset, limit, out);
-}
-
 // ── Tests ─────────────────────────────────────────────────────────
 
 test "fuzzyScore returns 0 for a non-match" {
@@ -2679,16 +2310,4 @@ fn jsonMatchesToolTable(alloc: std.mem.Allocator) !bool {
 // spec: serve/mcp_tools - The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
 test "tools table matches tools_list_result.json" {
     try std.testing.expect(try jsonMatchesToolTable(std.testing.allocator));
-}
-
-test "finishDatasheet returns false when the store rejects the bytes" {
-    // The `return false` after a store failure must signal failure; a
-    // `false`->`true` flip would report success on a rejected datasheet.
-    // Non-PDF bytes make storeDatasheet fail with NotPdf before any write.
-    const alloc = std.testing.allocator;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(alloc);
-    const w = out.writer(alloc);
-    const ok = try finishDatasheet(w, alloc, "/proj", "digikey", "x.pdf", "not a pdf", "PART", "MFR", "url");
-    try std.testing.expect(!ok);
 }
