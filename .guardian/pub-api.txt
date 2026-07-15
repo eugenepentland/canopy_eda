@@ -1096,6 +1096,9 @@ src/serve/mcp_parts_tools.zig::toolReadDatasheet | fn toolReadDatasheet( allocat
 src/serve/mcp_parts_tools.zig::toolResolveMpn | fn toolResolveMpn( allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/mcp_parts_tools.zig::toolSearchComponents | fn toolSearchComponents( allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/mcp_read_opts.zig::describePcbOpts | fn describePcbOpts(args_val: ?std.json.Value) pcb_layout_page.PngRequest
+src/serve/mcp_schematic_view.zig::Ident struct_
+src/serve/mcp_schematic_view.zig::renderNamedSummary | fn renderNamedSummary( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, out: *std.ArrayList(u8), ) mcp_tools.ToolError!bool
+src/serve/mcp_schematic_view.zig::writeBlockSummary | fn writeBlockSummary( allocator: std.mem.Allocator, w: anytype, project_dir: []const u8, ident: Ident, block: *const env_mod.DesignBlock, assertions: []const env_mod.AssertionResult, ) !void
 src/serve/mcp_tools.zig::CallResult struct_
 src/serve/mcp_tools.zig::DesignSummary struct_
 src/serve/mcp_tools.zig::FreePinOpts struct_
