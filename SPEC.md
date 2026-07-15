@@ -905,6 +905,10 @@ Public functions: readFile, writeFile, editFile, listDir, glob, deleteFile, move
 - denialHint redirects PDF writes to the disk/browser route
 - libraryEntityFor classifies library subdirs
 - denies write_file on lib/datasheets (PDFs are read-only via MCP)
+- readFile reports an error when a non-zero offset is at or beyond the end of the file
+- writeFile append mode concatenates content onto the existing file
+- writeFile append composes with expected_sha256 CAS checked against the pre-append file
+- dirtyDesignsForPath maps a nested src/**/<name>.sexp path to the design basename
 
 ## serve/component_info
 
@@ -1026,7 +1030,12 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 - fuzzyScore ranks a prefix hit above a mid-token hit for the same needle
 - libEntryScore ranks a name match above a description-only match
 - list_library with a query returns only fuzzily-matching entries ranked best-first
-- list_library without a query (or a blank one) lists every entry
+- list_library without a query returns a names-only {count,names} listing per category
+- list_library caps the ranked query results per category at the limit argument
+- list_library category argument scopes the response to a single library subdir
+- severityPasses passes all violations when the filter is null, else only that severity
+- build tool severity arg filters the erc[] array to the named severity
+- build response carries eval warnings in a warnings[] array separate from erc[]
 - The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
 - flatten makes list_instances include sub-block children with prefixed refs and origins
 - list_instances counts pins from the component pinout when the part declares no symbol

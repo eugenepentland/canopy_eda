@@ -227,9 +227,9 @@ test "leak: vfs dirtyDesignsForPath src branch owns slice + elements" {
     try std.testing.expectEqualStrings("stm32n6", out[0]);
 }
 
-// leak-audit: the .bom variant and the sub-path-rejection variant both take
-// early `toOwnedSlice` returns; exercising them confirms no scratch escapes
-// before the return.
+// leak-audit: the .bom variant and the nested-path variant both take early
+// `toOwnedSlice` returns after a dupe; exercising them confirms no scratch
+// escapes before the return.
 test "leak: vfs dirtyDesignsForPath bom + nested-path early returns" {
     const a = std.testing.allocator;
     const bom = try vfs.dirtyDesignsForPath(a, "/unused", "src/stm32n6.bom");
@@ -239,10 +239,15 @@ test "leak: vfs dirtyDesignsForPath bom + nested-path early returns" {
     }
     try std.testing.expectEqual(@as(usize, 1), bom.len);
 
-    // A nested src path (basename contains '/') returns empty.
+    // A nested src path resolves to the design BASENAME (designs are
+    // discovered by file basename regardless of nesting).
     const nested = try vfs.dirtyDesignsForPath(a, "/unused", "src/sub/dir.sexp");
-    defer a.free(nested);
-    try std.testing.expectEqual(@as(usize, 0), nested.len);
+    defer {
+        for (nested) |d| a.free(d);
+        a.free(nested);
+    }
+    try std.testing.expectEqual(@as(usize, 1), nested.len);
+    try std.testing.expectEqualStrings("dir", nested[0]);
 }
 
 // ── modules (ARENA-CONTRACT, hermetic tmpDir) ──────────────────────────────

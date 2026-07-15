@@ -178,13 +178,13 @@ pub fn cmdLibrary(allocator: std.mem.Allocator, args: []const []const u8) QueryE
     var buf: std.ArrayList(u8) = .empty;
     const w = buf.writer(allocator);
     try w.writeAll("{\"components\":");
-    try mcp_tools.listLibrarySubdir(allocator, pdir, "components", query, w);
+    try mcp_tools.listLibrarySubdir(allocator, pdir, "components", query, null, w);
     try w.writeAll(",\"modules\":");
-    try mcp_tools.listLibrarySubdir(allocator, pdir, "modules", query, w);
+    try mcp_tools.listLibrarySubdir(allocator, pdir, "modules", query, null, w);
     try w.writeAll(",\"parts\":");
-    try mcp_tools.listLibrarySubdir(allocator, pdir, "parts", query, w);
+    try mcp_tools.listLibrarySubdir(allocator, pdir, "parts", query, null, w);
     try w.writeAll(",\"footprints\":");
-    try mcp_tools.listLibrarySubdir(allocator, pdir, "footprints", query, w);
+    try mcp_tools.listLibrarySubdir(allocator, pdir, "footprints", query, null, w);
     try w.writeAll("}");
     try emit(buf.items);
 }

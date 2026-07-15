@@ -1,3 +1,8 @@
+//! Design-file mutation for the server: snapshot → write → re-evaluate → bump
+//! the live version. Backs the MCP `build` tool (`rebuildDesign` →
+//! `BuildReport`), the value/edit HTTP routes (`writeAndRebuild` and the
+//! granular edits), BOM resolution, and version restore — the write half of
+//! the schematic viewer, paired with the read-only handlers in `mcp_tools`.
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
@@ -2045,6 +2050,17 @@ pub const AssertionFailure = struct {
     is_warning: bool,
 };
 
+/// One non-fatal eval/lint warning surfaced from the evaluator (a
+/// silently-ignored sub-form / enum word — the same list the CLI prints as
+/// `file:line:col: warning: …`). `line`/`col` are the source span; `message`
+/// is the already-formatted text. Distinct from `AssertionFailure` and from
+/// ERC: the design still built, this is authoring lint.
+pub const BuildWarning = struct {
+    line: u32,
+    col: u32,
+    message: []const u8,
+};
+
 /// Result of a `build` MCP call. The `version` and `snapshot` mirror the
 /// existing MutationResult shape; `eval_ok` is false iff the .sexp failed
 /// to parse/evaluate (in which case the JSON viewer state is unchanged).
@@ -2062,6 +2078,11 @@ pub const BuildReport = struct {
     diagnostic: ?diag_format.Diagnostic = null,
     assertion_failures: []const AssertionFailure = &.{},
     erc: []const erc_mod.Violation = &.{},
+    /// Non-fatal eval/lint warnings collected during the build (unknown
+    /// sub-forms etc.). Empty on a clean build. Message slices are owned by
+    /// the evaluator's allocator (the same one passed to `rebuildDesign`) and
+    /// are never freed — see the project memory convention.
+    warnings: []const BuildWarning = &.{},
 };
 
 fn designFilePath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]u8 {
@@ -2150,6 +2171,15 @@ pub fn rebuildDesign(
         failures.append(allocator, .{ .message = a.message, .is_warning = a.is_warning }) catch break;
     }
 
+    // Copy the evaluator's non-fatal warnings out before `eval.deinit()` frees
+    // the backing ArrayList. The message slices themselves are allocated from
+    // `allocator` (== eval.allocator) and never freed, so the copied span/ptr
+    // pairs stay valid after the report escapes — same convention as `failures`.
+    var warnings: std.ArrayList(BuildWarning) = .empty;
+    for (eval.warnings.items) |wn| {
+        warnings.append(allocator, .{ .line = wn.span.line, .col = wn.span.col, .message = wn.message }) catch break;
+    }
+
     const bom_path = paths.designSiblingPath(allocator, project_dir, name, ".bom") catch {
         return .{
             .ok = false,
@@ -2158,6 +2188,7 @@ pub fn rebuildDesign(
             .eval_ok = true,
             .error_message = "out of memory (bom path)",
             .assertion_failures = failures.items,
+            .warnings = warnings.items,
         };
     };
     defer allocator.free(bom_path);
@@ -2176,6 +2207,7 @@ pub fn rebuildDesign(
         .eval_ok = true,
         .assertion_failures = failures.items,
         .erc = erc_violations,
+        .warnings = warnings.items,
     };
 }
 
