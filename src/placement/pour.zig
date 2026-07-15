@@ -190,7 +190,7 @@ pub fn compute(
     initInset(grid, placement, r, inset + half);
 
     const nets = try padNets(arena, placement);
-    stampForeign(grid, placement, copper, spec, nets, pc + half);
+    stampForeign(grid, placement, copper, spec, nets);
 
     const k = labelComponents(arena, grid) catch return emptyFill(r, pitch, coarsened);
     const kept = try arena.alloc(bool, k);
@@ -298,12 +298,22 @@ fn padOnLayer(part: optimizer.Part, pad: geometry.Pad, spec: LayerSpec) bool {
 /// BLOCK every cell within `reach` of a FOREIGN copper feature on this layer
 /// (a pad/track/via whose net the plane does not carry). Same-net features are
 /// left fillable — they are the pour, and seed it.
-fn stampForeign(g: Grid, placement: optimizer.Placement, copper: Copper, spec: LayerSpec, nets: std.StringHashMapUnmanaged([]const u8), reach: f64) void {
+fn stampForeign(
+    g: Grid,
+    placement: optimizer.Placement,
+    copper: Copper,
+    spec: LayerSpec,
+    nets: std.StringHashMapUnmanaged([]const u8),
+) void {
     const inner = spec.side == null;
+    const base = placement.rules.design.pour_clearance;
+    const half = g.pitch * 0.7071068;
     for (placement.parts) |p| {
         for (p.pads) |pad| {
             if (!padOnLayer(p, pad, spec)) continue;
-            if (planeCarries(spec.net, netOfPad(nets, p.ref_des, pad.number))) continue;
+            const net_name = netOfPad(nets, p.ref_des, pad.number);
+            if (planeCarries(spec.net, net_name)) continue;
+            const reach = classPourClearance(placement, net_name, base) + half;
             const c = optimizer.worldPadCenter(p, pad.x, pad.y);
             if (inner) {
                 if (pad.drill > 0) stampDisc(g, c[0], c[1], pad.drill / 2 + reach);
@@ -316,13 +326,24 @@ fn stampForeign(g: Grid, placement: optimizer.Placement, copper: Copper, spec: L
         for (copper.tracks) |t| {
             if (t.layer != tl) continue;
             if (planeCarries(spec.net, netName(placement, t.net))) continue;
+            const reach = placement.rules.clearanceForNet(t.net, base) + half;
             stampSeg(g, t.x1, t.y1, t.x2, t.y2, t.width / 2 + reach);
         }
     }
     for (copper.vias) |v| {
         if (planeCarries(spec.net, netName(placement, v.net))) continue;
+        const reach = placement.rules.clearanceForNet(v.net, base) + half;
         stampDisc(g, v.x, v.y, v.dia / 2 + reach);
     }
+}
+
+fn classPourClearance(placement: optimizer.Placement, name: []const u8, base: f64) f64 {
+    for (placement.nets, 0..) |net, i| {
+        if (std.ascii.eqlIgnoreCase(net.name, name)) {
+            return placement.rules.clearanceForNet(@intCast(i), base);
+        }
+    }
+    return base;
 }
 
 /// Mark the component under each same-net SEED (a carried pad/via present on
@@ -926,6 +947,58 @@ test "island removal keeps seeded components and drops orphans" {
     try testing.expect(fill.contours.len == 1);
     try testing.expect(fill.componentAt(3, 10) == 0); // seed side kept
     try testing.expect(fill.componentAt(17, 10) < 0); // orphan side dropped
+}
+
+// spec: placement/pour - a foreign net-class clearance widens the ground-pour gap around its track
+test "net-class clearance controls the foreign track pour gap" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "C1",
+        .kind = .passive,
+        .hw = 0.5,
+        .hh = 0.5,
+        .pads = &pad,
+        .fallback = false,
+        .x = 3,
+        .y = 3,
+        .side = .bottom,
+    }};
+    const gnd_pins = [_]@import("../export_kicad.zig").FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]@import("../export_kicad.zig").FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "RF", .pins = &.{} },
+    };
+    const net_rules = [_]optimizer.NetRule{ .{}, .{ .class = .{ .name = "rf-cpwg-50" }, .clearance = 0.8 } };
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    const placement = testPlacement(&parts, &nets, .{
+        .copper_layers = 2,
+        .planes = &planes,
+        .net = &net_rules,
+    });
+    const rf = [_]router.Track{.{
+        .x1 = 5,
+        .y1 = 10,
+        .x2 = 15,
+        .y2 = 10,
+        .layer = 1,
+        .width = 0.4,
+        .net = 1,
+    }};
+    const fill = try compute(
+        arena,
+        placement,
+        .{ .tracks = &rf },
+        .{ .net = .{ .named = "GND" }, .side = .bottom, .track_layer = 1 },
+    );
+
+    // One millimetre from the centreline is the 0.2 mm copper radius plus the
+    // 0.8 mm class gap, so it is outside the pour. A farther point is copper.
+    try testing.expect(fill.componentAt(10, 11.0) < 0);
+    try testing.expect(fill.componentAt(10, 11.5) >= 0);
 }
 
 // spec: placement/pour - a foreign trace that splits a plane leaves its same-net pads in separate components

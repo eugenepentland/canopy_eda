@@ -17,11 +17,11 @@
 4 src/emit.zig
 27 src/erc.zig
 29 src/eval/builders.zig
-27 src/eval/design_block.zig
+26 src/eval/design_block.zig
 2 src/eval/electrical.zig
 23 src/eval/evaluator.zig
 1 src/eval/fmt.zig
-8 src/eval/forms.zig
+7 src/eval/forms.zig
 16 src/eval/ids.zig
 16 src/eval/instance.zig
 13 src/eval/modules.zig
@@ -34,7 +34,7 @@
 3 src/eval/test_point.zig
 1 src/eval/validate.zig
 10 src/export_fab.zig
-28 src/export_gerber.zig
+27 src/export_gerber.zig
 7 src/export_kicad.zig
 8 src/export_kicad_footprint.zig
 5 src/export_kicad_model.zig
@@ -58,10 +58,10 @@
 1 src/placement/geometry.zig
 12 src/placement/layout_lint.zig
 3 src/placement/module_policy.zig
-96 src/placement/optimizer.zig
+93 src/placement/optimizer.zig
 1 src/placement/outline.zig
 2 src/placement/pad_shape.zig
-31 src/placement/pour.zig
+30 src/placement/pour.zig
 65 src/placement/router.zig
 2 src/render_block_types.zig
 14 src/render_html.zig

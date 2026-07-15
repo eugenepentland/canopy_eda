@@ -17,7 +17,6 @@
 266 src/eval/power_budget.zig|analyze
 145 src/export_kicad.zig|exportKicad
 135 src/export_kicad_footprint.zig|emitKicadPad
-139 src/export_kicad_netlist.zig|applyNetTies
 171 src/fab_readiness.zig|check
 190 src/kicad_pcb/writer.zig|applyOpsCounted
 121 src/placement/drc.zig|check

@@ -266,19 +266,22 @@ fn writeCopper(g: *Gx, placement: optimizer.Placement, copper: Copper, side: opt
         for (placement.parts) |p| {
             for (p.pads) |pad| {
                 if (isSmd(pad) and p.side != side) continue;
-                if (planeCarries(net, netOfPad(nets, placement, p.ref_des, pad.number))) continue;
-                try flashPadBox(g, p, pad, pc);
+                const pad_net = netOfPad(nets, placement, p.ref_des, pad.number);
+                if (planeCarries(net, pad_net)) continue;
+                try flashPadBox(g, p, pad, pourClearanceNamed(placement, pad_net, pc));
             }
         }
         for (copper.tracks) |t| {
             if (t.layer != li) continue;
             if (planeCarries(net, netName(placement, t.net))) continue;
-            try g.use(.c, t.width + 2 * pc, 0);
+            const gap = placement.rules.clearanceForNet(t.net, pc);
+            try g.use(.c, t.width + 2 * gap, 0);
             try g.line(t.x1, t.y1, t.x2, t.y2);
         }
         for (copper.vias) |v| {
             if (planeCarries(net, netName(placement, v.net))) continue;
-            try g.use(.c, v.dia + 2 * pc, 0);
+            const gap = placement.rules.clearanceForNet(v.net, pc);
+            try g.use(.c, v.dia + 2 * gap, 0);
             try g.flash(v.x, v.y);
         }
         try g.polarity(true);
@@ -340,9 +343,11 @@ fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneL
     for (placement.parts) |p| {
         for (p.pads) |pad| {
             if (pad.drill <= 0) continue;
-            const foreign = pad.npth or !planeCarries(pl.net, netOfPad(nets, placement, p.ref_des, pad.number));
+            const pad_net = netOfPad(nets, placement, p.ref_des, pad.number);
+            const foreign = pad.npth or !planeCarries(pl.net, pad_net);
             if (!foreign) continue;
-            try g.use(.c, pad.drill + 2 * pc, 0);
+            const gap = pourClearanceNamed(placement, pad_net, pc);
+            try g.use(.c, pad.drill + 2 * gap, 0);
             if (pad.isSlot()) {
                 // An oval hole's antipad is the capsule swept by the cleared
                 // tool: a round-cap stroke between the two arc centres.
@@ -357,11 +362,21 @@ fn writePlane(g: *Gx, placement: optimizer.Placement, copper: Copper, pl: PlaneL
     }
     for (copper.vias) |v| {
         if (planeCarries(pl.net, netName(placement, v.net))) continue;
-        try g.use(.c, v.dia + 2 * pc, 0);
+        const gap = placement.rules.clearanceForNet(v.net, pc);
+        try g.use(.c, v.dia + 2 * gap, 0);
         try g.flash(v.x, v.y);
     }
     try g.polarity(true);
     try thermalReliefs(g, placement, nets, pl.net);
+}
+
+fn pourClearanceNamed(placement: optimizer.Placement, name: []const u8, base: f64) f64 {
+    for (placement.nets, 0..) |net, i| {
+        if (std.ascii.eqlIgnoreCase(net.name, name)) {
+            return placement.rules.clearanceForNet(@intCast(i), base);
+        }
+    }
+    return base;
 }
 
 /// Spoke width (mm) bridging a plane-tied through-hole pad's thermal-relief gap
@@ -1190,6 +1205,7 @@ test "plane layer clears foreign holes and connects same-net barrels" {
 }
 
 // spec: export_gerber - an outer-layer pour paints the copper file solid and isolates only foreign same-face features
+// spec: export_gerber - an outer-layer pour clears a foreign track by its net-class gap in the Gerber
 test "outer pour fills bottom copper and antipads foreign features" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -1208,15 +1224,44 @@ test "outer pour fills bottom copper and antipads foreign features" {
     const nets = [_]export_kicad.FlatNet{
         .{ .name = "GND", .pins = &gnd_pins },
         .{ .name = "VIN", .pins = &sig_pins },
+        .{ .name = "RF", .pins = &.{} },
     };
     var placement = testPlacement(&parts, &nets);
     // (stackup 2 (pour bottom "GND")) — index 2 IS the bottom outer face.
     const gnd_names = [_][]const u8{"GND"};
     const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
-    placement.rules = .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = &planes };
+    const net_rules = [_]optimizer.NetRule{
+        .{},
+        .{},
+        .{ .class = .{ .name = "rf-cpwg-50" }, .clearance = 0.8 },
+    };
+    placement.rules = .{
+        .plane_nets = &gnd_names,
+        .copper_layers = 2,
+        .planes = &planes,
+        .net = &net_rules,
+    };
+    const rf_track = [_]router.Track{.{
+        .x1 = 7,
+        .y1 = 12,
+        .x2 = 13,
+        .y2 = 12,
+        .layer = 1,
+        .width = 0.38,
+        .net = 2,
+    }};
 
     var bw: std.Io.Writer.Allocating = .init(arena);
-    try writeLayer(&bw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .bottom }, "Copper,L2,Bot");
+    try writeLayer(
+        &bw.writer,
+        arena,
+        placement,
+        .{ .tracks = &rf_track },
+        &.{},
+        export_fab.frameFor(placement),
+        .{ .copper = .bottom },
+        "Copper,L2,Bot",
+    );
     const bot = bw.written();
     // The solid pour region + a clear-polarity pass, then back to dark.
     try testing.expect(std.mem.indexOf(u8, bot, "G36*") != null);
@@ -1228,6 +1273,8 @@ test "outer pour fills bottom copper and antipads foreign features" {
     // 0.6 aperture never appears grown (0.6+0.6=1.2 would be its antipad).
     try testing.expect(std.mem.indexOf(u8, bot, "R,0.600000X0.600000*%") != null);
     try testing.expect(std.mem.indexOf(u8, bot, "R,1.200000X1.200000*%") == null);
+    // RF track clear corridor = 0.38 mm copper + 2 × 0.8 mm class gap.
+    try testing.expect(std.mem.indexOf(u8, bot, "C,1.980000*%") != null);
 
     // The un-poured top face keeps plain pads-only copper: no pour region.
     var tw: std.Io.Writer.Allocating = .init(arena);

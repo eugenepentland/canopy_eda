@@ -965,9 +965,12 @@ pub const StackupSpec = struct {
 
 /// One routing rule from a top-level `(net-class "name" (width MM)
 /// (clearance MM) (via DIA DRILL) (priority 0-7) (nets "A" "B" …))` form:
-/// trace geometry + routing order for the named nets. A zero field keeps the
-/// router's default; `nets` entries match flattened net names exactly
-/// (case-insensitive). `priority` is the routing-order tier — the router
+/// trace geometry + routing order for the named nets. A declaration may be a
+/// profile only (`nets` empty), membership only (all numeric fields zero), or
+/// both. This lets a reusable subcircuit assign a semantic class while its
+/// destination board supplies that class's geometry. A zero field keeps the
+/// inherited/router default; `nets` entries match local net names
+/// case-insensitively. `priority` is the routing-order tier — the router
 /// routes higher tiers first, so a critical net (crystal, flash bus, SMPS
 /// loop) claims its short path before a bulk rail can block it (the maze
 /// router has no rip-up; first-routed wins).

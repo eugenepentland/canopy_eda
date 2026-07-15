@@ -265,6 +265,12 @@ pub const FlatTie = struct {
     b: []const u8,
 };
 
+/// Every pre-merge net/tie name mapped to the final canonical flattened net
+/// name selected by `applyNetTiesMapped`. Consumers that attach metadata to a
+/// module-local net (for example inherited net-class membership) use this map
+/// to follow that metadata through `(bridge (rename ...))` / `(net ...)` ties.
+pub const CanonicalNetMap = std.StringHashMapUnmanaged([]const u8);
+
 /// Gather (net "A" "B" ...) ties from the block tree, prefixing each side with
 /// the sub-block path so they can be matched against names in the flat net
 /// list produced by `collectNets`.
@@ -294,6 +300,56 @@ fn preferName(candidate: []const u8, incumbent: []const u8) bool {
     return std.mem.lessThan(u8, candidate, incumbent);
 }
 
+const NetTieSets = struct {
+    allocator: std.mem.Allocator,
+    index: std.StringHashMapUnmanaged(u32) = .empty,
+    names: std.ArrayList([]const u8) = .empty,
+    parent: std.ArrayList(u32) = .empty,
+
+    fn deinit(self: *NetTieSets) void {
+        self.index.deinit(self.allocator);
+        self.names.deinit(self.allocator);
+        self.parent.deinit(self.allocator);
+    }
+
+    fn getOrAdd(self: *NetTieSets, name: []const u8) std.mem.Allocator.Error!u32 {
+        const gop = try self.index.getOrPut(self.allocator, name);
+        if (gop.found_existing) return gop.value_ptr.*;
+        const i: u32 = @intCast(self.names.items.len);
+        try self.names.append(self.allocator, name);
+        try self.parent.append(self.allocator, i);
+        gop.value_ptr.* = i;
+        return i;
+    }
+
+    fn find(self: *NetTieSets, idx: u32) u32 {
+        var i = idx;
+        while (self.parent.items[i] != i) : (i = self.parent.items[i]) {}
+        var j = idx;
+        while (self.parent.items[j] != i) {
+            const next = self.parent.items[j];
+            self.parent.items[j] = i;
+            j = next;
+        }
+        return i;
+    }
+};
+
+fn writeCanonicalAliases(
+    allocator: std.mem.Allocator,
+    out: *CanonicalNetMap,
+    sets: *NetTieSets,
+    canonical: *const std.AutoHashMapUnmanaged(u32, u32),
+    nets: []const FlatNet,
+    per_pin: *const std.StringHashMapUnmanaged([]const u8),
+) std.mem.Allocator.Error!void {
+    for (sets.names.items, 0..) |name, i| {
+        const canon_i = canonical.get(sets.find(@intCast(i))) orelse continue;
+        try out.put(allocator, name, sets.names.items[canon_i]);
+    }
+    for (nets) |net| if (per_pin.get(net.name)) |name| try out.put(allocator, net.name, name);
+}
+
 /// Merge nets in `nets` according to `ties`. A tie `(a, b)` means the two net
 /// names refer to the same electrical net. Per-pin split nets of the form
 /// `<base>.<ref>.<pin>` get renamed alongside their base when the base is
@@ -305,46 +361,23 @@ pub fn applyNetTies(
     nets: *std.ArrayList(FlatNet),
     ties: []const FlatTie,
 ) std.mem.Allocator.Error!void {
+    return applyNetTiesMapped(allocator, nets, ties, null);
+}
+
+/// `applyNetTies` plus an optional old-name → canonical-name result. The map is
+/// arena-friendly and owned by the caller; when supplied it receives entries
+/// for unchanged names too, so a private module net and a bridged port share one
+/// lookup contract.
+pub fn applyNetTiesMapped(
+    allocator: std.mem.Allocator,
+    nets: *std.ArrayList(FlatNet),
+    ties: []const FlatTie,
+    aliases: ?*CanonicalNetMap,
+) std.mem.Allocator.Error!void {
     if (ties.len == 0 and nets.items.len == 0) return;
 
-    var name_to_idx: std.StringHashMapUnmanaged(u32) = .empty;
-    defer name_to_idx.deinit(allocator);
-    var names: std.ArrayList([]const u8) = .empty;
-    defer names.deinit(allocator);
-    var parent: std.ArrayList(u32) = .empty;
-    defer parent.deinit(allocator);
-
-    const getOrAdd = struct {
-        fn f(
-            al: std.mem.Allocator,
-            n: []const u8,
-            idx_map: *std.StringHashMapUnmanaged(u32),
-            all_names: *std.ArrayList([]const u8),
-            par: *std.ArrayList(u32),
-        ) !u32 {
-            const gop = try idx_map.getOrPut(al, n);
-            if (gop.found_existing) return gop.value_ptr.*;
-            const i: u32 = @intCast(all_names.items.len);
-            try all_names.append(al, n);
-            try par.append(al, i);
-            gop.value_ptr.* = i;
-            return i;
-        }
-    }.f;
-
-    const find = struct {
-        fn f(par: *std.ArrayList(u32), idx: u32) u32 {
-            var i = idx;
-            while (par.items[i] != i) : (i = par.items[i]) {}
-            var j = idx;
-            while (par.items[j] != i) {
-                const next = par.items[j];
-                par.items[j] = i;
-                j = next;
-            }
-            return i;
-        }
-    }.f;
+    var sets = NetTieSets{ .allocator = allocator };
+    defer sets.deinit();
 
     // A name is "live" (eligible to be the canonical net name) if either it
     // has pins, or it's on the LHS of a tie — i.e., the user wrote it as the
@@ -357,27 +390,27 @@ pub fn applyNetTies(
     var live_names: std.StringHashMapUnmanaged(void) = .empty;
     defer live_names.deinit(allocator);
     for (nets.items) |net| {
-        _ = try getOrAdd(allocator, net.name, &name_to_idx, &names, &parent);
+        _ = try sets.getOrAdd(net.name);
         try live_names.put(allocator, net.name, {});
     }
     for (ties) |t| {
-        const ai = try getOrAdd(allocator, t.a, &name_to_idx, &names, &parent);
-        const bi = try getOrAdd(allocator, t.b, &name_to_idx, &names, &parent);
+        const ai = try sets.getOrAdd(t.a);
+        const bi = try sets.getOrAdd(t.b);
         try live_names.put(allocator, t.a, {});
-        const ra = find(&parent, ai);
-        const rb = find(&parent, bi);
-        if (ra != rb) parent.items[rb] = ra;
+        const ra = sets.find(ai);
+        const rb = sets.find(bi);
+        if (ra != rb) sets.parent.items[rb] = ra;
     }
 
     // Canonical name per root — only among names that actually have pins.
     var canonical: std.AutoHashMapUnmanaged(u32, u32) = .empty;
     defer canonical.deinit(allocator);
-    for (names.items, 0..) |nm, i| {
+    for (sets.names.items, 0..) |nm, i| {
         if (!live_names.contains(nm)) continue;
-        const root = find(&parent, @intCast(i));
+        const root = sets.find(@intCast(i));
         const existing = canonical.get(root);
         if (existing) |best_i| {
-            if (preferName(nm, names.items[best_i])) {
+            if (preferName(nm, sets.names.items[best_i])) {
                 try canonical.put(allocator, root, @intCast(i));
             }
         } else {
@@ -389,10 +422,10 @@ pub fn applyNetTies(
     // live name (all tie-only), skip — nothing to rename.
     var rename_map: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer rename_map.deinit(allocator);
-    for (names.items, 0..) |nm, i| {
-        const root = find(&parent, @intCast(i));
+    for (sets.names.items, 0..) |nm, i| {
+        const root = sets.find(@intCast(i));
         const canon_i = canonical.get(root) orelse continue;
-        const canon_name = names.items[canon_i];
+        const canon_name = sets.names.items[canon_i];
         if (!std.mem.eql(u8, nm, canon_name)) {
             try rename_map.put(allocator, nm, canon_name);
         }
@@ -409,6 +442,8 @@ pub fn applyNetTies(
         const new_name = try std.fmt.allocPrint(allocator, "{s}{s}", .{ canon_base, suffix });
         try per_pin_renames.put(allocator, net.name, new_name);
     }
+
+    if (aliases) |out| try writeCanonicalAliases(allocator, out, &sets, &canonical, nets.items, &per_pin_renames);
 
     // Rebuild nets list, merging pins by canonical name.
     var merged: std.StringArrayHashMapUnmanaged(std.ArrayList(FlatPin)) = .empty;

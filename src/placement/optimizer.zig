@@ -566,6 +566,23 @@ pub const BoardRules = struct {
         return null;
     }
 
+    /// Clearance demanded by flattened net index `net`, raised to at least
+    /// `base`. Negative/out-of-range indices are unclassed and keep `base`.
+    /// Shared by DRC, routing obstacles, and copper-pour antipads so all
+    /// consumers interpret a class gap identically.
+    pub fn clearanceForNet(self: BoardRules, net: i32, base: f64) f64 {
+        if (net < 0) return base;
+        const i: usize = @intCast(net);
+        if (i >= self.net.len or self.net[i].clearance <= 0) return base;
+        return @max(base, self.net[i].clearance);
+    }
+
+    /// Pairwise copper clearance: the maximum of the board base and both nets'
+    /// class requirements.
+    pub fn clearanceBetween(self: BoardRules, a: i32, b: i32, base: f64) f64 {
+        return @max(self.clearanceForNet(a, base), self.clearanceForNet(b, base));
+    }
+
     /// Is copper stack index `idx` (1-based) claimed by a declared
     /// `(plane …)`/`(pour …)` entry?
     fn planeAtIndex(self: BoardRules, idx: u8) bool {
@@ -717,9 +734,24 @@ pub const DesignRules = struct {
 /// One declared copper plane: 1-based stack index + the net it carries.
 pub const PlaneAt = struct { index: u8, net: []const u8 };
 
-/// One net's routing geometry override (mm) resolved from `(net-class …)`.
-/// Zero = keep the router default for that quantity.
-pub const NetRule = struct { width: f64 = 0, clearance: f64 = 0, via_dia: f64 = 0, via_drill: f64 = 0, priority: u32 = 0 };
+/// One flattened net's effective class identity and routing geometry in mm.
+/// Zero-valued geometry keeps the corresponding router default.
+pub const NetRule = struct {
+    class: struct {
+        /// Semantic identity after hierarchy/net-tie resolution. Empty means
+        /// the net is not assigned to an authored class.
+        name: []const u8 = "",
+        /// Hierarchy path supplying membership ("" = board root).
+        source: []const u8 = "",
+        /// Equal-precedence child memberships named different classes.
+        conflict: bool = false,
+    } = .{},
+    width: f64 = 0,
+    clearance: f64 = 0,
+    via_dia: f64 = 0,
+    via_drill: f64 = 0,
+    priority: u32 = 0,
+};
 
 /// A `(board …)` outline rectangle in world mm (top-left + size).
 pub const BoardRect = struct { minx: f64, miny: f64, w: f64, h: f64 };
@@ -5741,27 +5773,280 @@ fn designRulesOf(block: *const DesignBlock) DesignRules {
     return d;
 }
 
-/// Per-net routing geometry from the design's `(net-class …)` forms, aligned
-/// with `nets` (see `Placement.net_rules`). Names match case-insensitively on
-/// the full flattened net name or its leaf after the last `/`; the first class
-/// naming a net wins. Empty when the design declares no classes.
-fn netRulesOf(arena: std.mem.Allocator, block: *const DesignBlock, nets: []const FlatNet) std.mem.Allocator.Error![]const NetRule {
-    if (block.net_classes.len == 0) return &.{};
-    const out = try arena.alloc(NetRule, nets.len);
-    for (nets, 0..) |net, i| {
-        out[i] = .{};
-        outer: for (block.net_classes) |nc| {
-            for (nc.nets) |cn| {
-                const hit = std.ascii.eqlIgnoreCase(cn, net.name) or
-                    std.ascii.eqlIgnoreCase(cn, shortName(net.name));
-                if (hit) {
-                    out[i] = .{ .width = nc.width, .clearance = nc.clearance, .via_dia = nc.via_dia, .via_drill = nc.via_drill, .priority = nc.priority };
-                    break :outer;
-                }
-            }
+const ClassMemberDecl = struct {
+    class_name: []const u8,
+    net_name: []const u8,
+    source: []const u8,
+    depth: u16,
+    order: u32,
+};
+
+const ClassProfileDecl = struct {
+    spec: env.NetClassSpec,
+    source: []const u8,
+    depth: u16,
+    order: u32,
+};
+
+const WinningClass = struct {
+    class_name: []const u8,
+    source: []const u8,
+    depth: u16,
+    order: u32,
+};
+
+const ClassCollectCtx = struct {
+    arena: std.mem.Allocator,
+    members: *std.ArrayList(ClassMemberDecl),
+    profiles: *std.ArrayList(ClassProfileDecl),
+    order: u32 = 0,
+};
+
+fn classNetName(arena: std.mem.Allocator, prefix: []const u8, name: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (prefix.len == 0) return arena.dupe(u8, name);
+    if (name.len == 0) return arena.dupe(u8, prefix);
+    return std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, name });
+}
+
+fn collectNetClassDecls(
+    ctx: *ClassCollectCtx,
+    block: *const DesignBlock,
+    prefix: []const u8,
+    depth: u16,
+) std.mem.Allocator.Error!void {
+    for (block.net_classes) |nc| {
+        const decl_order = ctx.order;
+        ctx.order += 1;
+        try ctx.profiles.append(ctx.arena, .{ .spec = nc, .source = prefix, .depth = depth, .order = decl_order });
+        for (nc.nets) |name| try ctx.members.append(ctx.arena, .{
+            .class_name = nc.name,
+            .net_name = try classNetName(ctx.arena, prefix, name),
+            .source = prefix,
+            .depth = depth,
+            .order = decl_order,
+        });
+    }
+    for (block.sub_blocks) |sb| {
+        const child = try classNetName(ctx.arena, prefix, sb.name);
+        try collectNetClassDecls(ctx, sb.block, child, depth + 1);
+    }
+}
+
+fn canonicalAlias(aliases: *const netlist_mod.CanonicalNetMap, name: []const u8) ?[]const u8 {
+    if (aliases.get(name)) |n| return n;
+    var it = aliases.iterator();
+    while (it.next()) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, name)) return entry.value_ptr.*;
+    }
+    return null;
+}
+
+fn netIndexNamed(nets: []const FlatNet, name: []const u8) ?usize {
+    for (nets, 0..) |net, i| if (std.ascii.eqlIgnoreCase(net.name, name)) return i;
+    return null;
+}
+
+fn isAncestorPath(ancestor: []const u8, child: []const u8) bool {
+    if (ancestor.len == 0) return true;
+    if (std.mem.eql(u8, ancestor, child)) return true;
+    return child.len > ancestor.len and child[ancestor.len] == '/' and std.mem.startsWith(u8, child, ancestor);
+}
+
+fn betterProfile(p: ClassProfileDecl, best_depth: u16, best_order: u32) bool {
+    return p.depth < best_depth or (p.depth == best_depth and p.order < best_order);
+}
+
+fn profileRule(profiles: []const ClassProfileDecl, win: WinningClass, conflict: bool) NetRule {
+    var out = NetRule{ .class = .{ .name = win.class_name, .source = win.source, .conflict = conflict } };
+    var wd: u16 = std.math.maxInt(u16);
+    var wo: u32 = std.math.maxInt(u32);
+    var cd = wd;
+    var co = wo;
+    var vdd = wd;
+    var vdo = wo;
+    var vrd = wd;
+    var vro = wo;
+    var pd = wd;
+    var po = wo;
+    for (profiles) |p| {
+        if (!std.ascii.eqlIgnoreCase(p.spec.name, win.class_name)) continue;
+        if (!isAncestorPath(p.source, win.source)) continue;
+        if (p.spec.width > 0 and betterProfile(p, wd, wo)) {
+            out.width = p.spec.width;
+            wd = p.depth;
+            wo = p.order;
+        }
+        if (p.spec.clearance > 0 and betterProfile(p, cd, co)) {
+            out.clearance = p.spec.clearance;
+            cd = p.depth;
+            co = p.order;
+        }
+        if (p.spec.via_dia > 0 and betterProfile(p, vdd, vdo)) {
+            out.via_dia = p.spec.via_dia;
+            vdd = p.depth;
+            vdo = p.order;
+        }
+        if (p.spec.via_drill > 0 and betterProfile(p, vrd, vro)) {
+            out.via_drill = p.spec.via_drill;
+            vrd = p.depth;
+            vro = p.order;
+        }
+        if (p.spec.priority > 0 and betterProfile(p, pd, po)) {
+            out.priority = p.spec.priority;
+            pd = p.depth;
+            po = p.order;
         }
     }
     return out;
+}
+
+/// Resolve hierarchy-aware net-class membership and destination profiles into
+/// index-aligned effective rules. Membership is attached to module-local aliases
+/// before net ties are canonicalized; root profile fields then override module
+/// fallbacks one field at a time. Public so KiCad sync uses the exact same
+/// result as placement/route/DRC.
+pub fn resolvedNetRules(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    nets: []const FlatNet,
+) std.mem.Allocator.Error![]const NetRule {
+    var members: std.ArrayList(ClassMemberDecl) = .empty;
+    var profiles: std.ArrayList(ClassProfileDecl) = .empty;
+    var collect = ClassCollectCtx{ .arena = arena, .members = &members, .profiles = &profiles };
+    try collectNetClassDecls(&collect, block, "", 0);
+    if (members.items.len == 0) return &.{};
+
+    // Recreate the canonical alias map through the authoritative flattener.
+    // This deliberately avoids any second, class-specific interpretation of
+    // bridge/net-tie semantics.
+    var ignored_nets: std.ArrayList(FlatNet) = .empty;
+    var aliases: netlist_mod.CanonicalNetMap = .empty;
+    try export_kicad.flattenAndMergeNetsMapped(arena, block, &ignored_nets, &aliases);
+
+    const wins = try arena.alloc(?WinningClass, nets.len);
+    const conflicts = try arena.alloc(bool, nets.len);
+    @memset(wins, null);
+    @memset(conflicts, false);
+
+    for (members.items) |m| {
+        const target = canonicalAlias(&aliases, m.net_name);
+        // Preserve the existing root-form convenience: `(nets "SW")` also
+        // matches a unique/repeated flattened `child/SW` leaf.
+        if (target == null and m.depth == 0) {
+            for (nets, 0..) |net, ni| {
+                if (!std.ascii.eqlIgnoreCase(m.net_name, net.name) and
+                    !std.ascii.eqlIgnoreCase(m.net_name, shortName(net.name))) continue;
+                const cand = WinningClass{
+                    .class_name = m.class_name,
+                    .source = m.source,
+                    .depth = m.depth,
+                    .order = m.order,
+                };
+                if (wins[ni]) |old| {
+                    const class_conflict = old.depth == cand.depth and
+                        !std.ascii.eqlIgnoreCase(old.class_name, cand.class_name);
+                    if (class_conflict) conflicts[ni] = true;
+                    if (cand.depth < old.depth or (cand.depth == old.depth and cand.order < old.order)) wins[ni] = cand;
+                } else wins[ni] = cand;
+            }
+            continue;
+        }
+        const canon = target orelse continue;
+        const ni = netIndexNamed(nets, canon) orelse continue;
+        const cand = WinningClass{
+            .class_name = m.class_name,
+            .source = m.source,
+            .depth = m.depth,
+            .order = m.order,
+        };
+        if (wins[ni]) |old| {
+            const class_conflict = old.depth == cand.depth and
+                !std.ascii.eqlIgnoreCase(old.class_name, cand.class_name);
+            if (class_conflict) conflicts[ni] = true;
+            if (cand.depth < old.depth or (cand.depth == old.depth and cand.order < old.order)) wins[ni] = cand;
+        } else wins[ni] = cand;
+    }
+
+    const out = try arena.alloc(NetRule, nets.len);
+    var any = false;
+    for (out, 0..) |*r, i| {
+        if (wins[i]) |win| {
+            r.* = profileRule(profiles.items, win, conflicts[i]);
+            any = true;
+        } else r.* = .{};
+    }
+    return if (any) out else &.{};
+}
+
+fn netRulesOf(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    nets: []const FlatNet,
+) std.mem.Allocator.Error![]const NetRule {
+    return resolvedNetRules(arena, block, nets);
+}
+
+// spec: placement/optimizer - a bridged subcircuit keeps its class and adopts destination profile fields
+test "inherited net class resolves through canonical bridge names" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const child_pins = [_]env.PinRef{.{ .ref_des = "U1", .pin = "1" }};
+    const child_nets = [_]env.Net{.{ .name = "RFIN", .pins = &child_pins }};
+    const child_classes = [_]env.NetClassSpec{.{
+        .name = "rf-cpwg-50",
+        .width = 0.20,
+        .clearance = 0.15,
+        .via_dia = 0.45,
+        .nets = &.{"RFIN"},
+    }};
+    var child = DesignBlock{
+        .name = "amp",
+        .instances = &.{},
+        .nets = &child_nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .net_classes = &child_classes,
+    };
+
+    const root_pins = [_]env.PinRef{.{ .ref_des = "J1", .pin = "1" }};
+    const root_nets = [_]env.Net{.{ .name = "ANT_IN", .pins = &root_pins }};
+    const root_classes = [_]env.NetClassSpec{.{
+        .name = "rf-cpwg-50",
+        .width = 0.38,
+        .clearance = 0.20,
+        .via_drill = 0.30,
+    }};
+    const subs = [_]env.SubBlock{.{ .name = "lna1", .block = &child }};
+    const ties = [_]env.NetTie{.{ .a = "ANT_IN", .b = "lna1/RFIN" }};
+    const root = DesignBlock{
+        .name = "board",
+        .instances = &.{},
+        .nets = &root_nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &subs,
+        .net_ties = &ties,
+        .net_classes = &root_classes,
+    };
+
+    var flat: std.ArrayList(FlatNet) = .empty;
+    try export_kicad.flattenAndMergeNets(arena, &root, &flat);
+    try std.testing.expectEqual(@as(usize, 1), flat.items.len);
+    try std.testing.expectEqualStrings("ANT_IN", flat.items[0].name);
+
+    const rules = try resolvedNetRules(arena, &root, flat.items);
+    try std.testing.expectEqual(@as(usize, 1), rules.len);
+    try std.testing.expectEqualStrings("rf-cpwg-50", rules[0].class.name);
+    try std.testing.expectEqualStrings("lna1", rules[0].class.source);
+    try std.testing.expectEqual(@as(f64, 0.38), rules[0].width);
+    try std.testing.expectEqual(@as(f64, 0.20), rules[0].clearance);
+    try std.testing.expectEqual(@as(f64, 0.45), rules[0].via_dia);
+    try std.testing.expectEqual(@as(f64, 0.30), rules[0].via_drill);
 }
 
 /// Build a placement for `block`. When `cached` covers every part, its poses

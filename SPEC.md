@@ -150,6 +150,7 @@ Public functions: solve
 - port directions are the flow compass: in enters left, out leaves right
 - differential twins mirror the P lane onto the N lane at the pads' pitch
 - design-rules resolve authored values over built-in defaults, absent form keeps every default
+- a bridged subcircuit keeps its class and adopts destination profile fields
 
 ## placement/router
 
@@ -232,6 +233,7 @@ Public functions: contains, distToEdge, signedInset, bboxRect, segCrossesEdge, r
 Public functions: compute, planeConnect
 
 - a seeded pour keeps its component and drops an unseeded orphan island
+- a foreign net-class clearance widens the ground-pour gap around its track
 - a foreign trace that splits a plane leaves its same-net pads in separate components
 - the fill respects a non-rectangular board outline
 - an isolated same-net pad reports no pour component
@@ -468,6 +470,7 @@ Public functions: planLayers, writeLayer
 - an inner plane pours solid copper and antipads only foreign holes
 - an inner signal layer emits its routed tracks, via lands, and through-pad barrels; other layers' tracks stay off it
 - an outer-layer pour paints the copper file solid and isolates only foreign same-face features
+- an outer-layer pour clears a foreign track by its net-class gap in the Gerber
 - the edge layer closes the board outline; silk strokes footprint art and ref-des text
 - the mask margin comes from (design-rules …), defaulting byte-identically to 0.05 mm
 - a non-rectangular board emits its exact outline polygon on the edge layer
@@ -709,7 +712,7 @@ Public functions: analyze
 - stackup form captures layer count and plane assignments on the design block
 - (pour top|bottom "NET") is stackup sugar for a plane on the matching outer layer
 - a bare 2-layer stackup declares no planes so ground routes as copper
-- net-class forms capture width/clearance/via geometry and routing priority for their listed nets
+- net-class profiles and memberships can be declared independently
 - design-rules form captures the board-level default rules on the design block
 - a design with no design-rules form leaves every rule at its zero (default) sentinel
 - layout form parses (anchor "name") roots and (place "name" (rel "ref")) directives
@@ -883,6 +886,7 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - computeGroupAnchors matches a group's anchor to the board through the same relink tiers the differ uses
 - placeOneSelected keys an on-board anchor by origin_key to centre its module's seeded passives
 - seeded sub-circuit copper lands on the board with bridged nets and the group offset
+- seeded sub-circuit copper adopts the destination net-class track and via geometry
 - buildSubCircuitsJson reports each seedable group's module track and via counts
 - kicadRotToNetlisp inverts netlispRotToKicad for top and bottom parts
 - groupTransform is a pure translation for a same-side unrotated anchor
@@ -1072,6 +1076,7 @@ Public functions: designSourcePath, designSiblingPath
 - Inner-layer copper (l ≥ 2) round-trips the sidecar; legacy entries without an l stay top copper
 - Stamped module copper keeps its group tag through the sidecar so rigid-group moves carry it
 - Stamped module copper maps its net names onto the parent design via the origin-key bridge, slug-prefixing private nets
+- Stamped copper adopts destination net-class geometry
 - The layout sidecar is snapshotted into history and listed newest-first
 - Layout snapshots are pruned to the newest retention cap
 - Source-snapshot listing skips the reserved layouts subdir

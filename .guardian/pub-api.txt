@@ -434,6 +434,7 @@ src/export_kicad.zig::exportKicadZip | fn exportKicadZip( allocator: std.mem.All
 src/export_kicad.zig::exportNetlistOnly | fn exportNetlistOnly( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, ) ExportError![]const u8
 src/export_kicad.zig::exportSectionLayout value
 src/export_kicad.zig::flattenAndMergeNets | fn flattenAndMergeNets( allocator: std.mem.Allocator, block: *const DesignBlock, nets: *std.ArrayList(FlatNet), ) std.mem.Allocator.Error!void
+src/export_kicad.zig::flattenAndMergeNetsMapped | fn flattenAndMergeNetsMapped( allocator: std.mem.Allocator, block: *const DesignBlock, nets: *std.ArrayList(FlatNet), aliases: ?*netlist_mod.CanonicalNetMap, ) std.mem.Allocator.Error!void
 src/export_kicad.zig::loadModelConfig value
 src/export_kicad.zig::parseFloat3 value
 src/export_kicad.zig::uuidFromId | fn uuidFromId(allocator: std.mem.Allocator, id: []const u8) std.mem.Allocator.Error![]const u8
@@ -453,9 +454,11 @@ src/export_kicad_model.zig::exportFootprints | fn exportFootprints( allocator: s
 src/export_kicad_model.zig::exportSectionLayout | fn exportSectionLayout( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const u8
 src/export_kicad_model.zig::loadModelConfig | fn loadModelConfig(allocator: std.mem.Allocator, project_dir: []const u8) ModelConfigMap
 src/export_kicad_model.zig::parseFloat3 | fn parseFloat3(s: []const u8) [3]f64
+src/export_kicad_netlist.zig::CanonicalNetMap value
 src/export_kicad_netlist.zig::FlatTie struct_
 src/export_kicad_netlist.zig::NetlistError value
 src/export_kicad_netlist.zig::applyNetTies | fn applyNetTies( allocator: std.mem.Allocator, nets: *std.ArrayList(FlatNet), ties: []const FlatTie, ) std.mem.Allocator.Error!void
+src/export_kicad_netlist.zig::applyNetTiesMapped | fn applyNetTiesMapped( allocator: std.mem.Allocator, nets: *std.ArrayList(FlatNet), ties: []const FlatTie, aliases: ?*CanonicalNetMap, ) std.mem.Allocator.Error!void
 src/export_kicad_netlist.zig::collectInstances | fn collectInstances( allocator: std.mem.Allocator, block: *const DesignBlock, prefix: []const u8, list: *std.ArrayList(FlatInstance), ref_style: env_mod.RefStyle, ) std.mem.Allocator.Error!void
 src/export_kicad_netlist.zig::collectNetTies | fn collectNetTies( allocator: std.mem.Allocator, block: *const DesignBlock, prefix: []const u8, list: *std.ArrayList(FlatTie), ) std.mem.Allocator.Error!void
 src/export_kicad_netlist.zig::collectNets | fn collectNets( allocator: std.mem.Allocator, block: *const DesignBlock, prefix: []const u8, list: *std.ArrayList(FlatNet), ref_style: env_mod.RefStyle, ) std.mem.Allocator.Error!void
@@ -614,6 +617,8 @@ src/placement/optimizer.zig::SeedMode enum_
 src/placement/optimizer.zig::Side enum_
 src/placement/optimizer.zig::Stub struct_
 src/placement/optimizer.zig::carriesPlane | fn carriesPlane(self: BoardRules, name: []const u8) bool
+src/placement/optimizer.zig::clearanceBetween | fn clearanceBetween(self: BoardRules, a: i32, b: i32, base: f64) f64
+src/placement/optimizer.zig::clearanceForNet | fn clearanceForNet(self: BoardRules, net: i32, base: f64) f64
 src/placement/optimizer.zig::edgeClearance | fn edgeClearance(self: DesignRules) f64
 src/placement/optimizer.zig::effAlignW | fn effAlignW(params: Params) f64
 src/placement/optimizer.zig::faceRotation | fn faceRotation(pwr: PadRect, edge: Edge) f64
@@ -633,6 +638,7 @@ src/placement/optimizer.zig::placeFromPoses | fn placeFromPoses( arena: std.mem.
 src/placement/optimizer.zig::placementDiag | fn placementDiag() PlacementDiag
 src/placement/optimizer.zig::pourEdge | fn pourEdge(self: DesignRules) f64
 src/placement/optimizer.zig::pourNetOnSide | fn pourNetOnSide(self: BoardRules, side: Side) ?[]const u8
+src/placement/optimizer.zig::resolvedNetRules | fn resolvedNetRules( arena: std.mem.Allocator, block: *const DesignBlock, nets: []const FlatNet, ) std.mem.Allocator.Error![]const NetRule
 src/placement/optimizer.zig::routeParams | fn routeParams(self: DesignRules) router.RouteParams
 src/placement/optimizer.zig::routedScorePoses | fn routedScorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!f64
 src/placement/optimizer.zig::scorePoses | fn scorePoses( arena: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, poses: []const RefPose, params: Params, ) std.mem.Allocator.Error!Breakdown

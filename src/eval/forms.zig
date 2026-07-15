@@ -551,14 +551,18 @@ pub const scope_form_docs = blk: {
             "legacy implicit model (4 layers with assumed GND+PWR inner planes).",
     } };
     t[@intFromEnum(ScopeForm.net_class)] = .{ .scope = tl, .doc = .{
-        .syntax = "(net-class \"name\" [(width MM)] [(clearance MM)] [(via DIA DRILL)] [(priority 0-7)] (nets \"A\" \"B\"…))",
-        .summary = "Routing geometry + routing order for the named nets: trace width, copper clearance, " ++
+        .syntax = "(net-class \"name\" [(width MM)] [(clearance MM)] " ++
+            "[(via DIA DRILL)] [(priority 0-7)] [(nets \"A\" \"B\"…)])",
+        .summary = "Routing geometry + routing order profile and/or membership for named nets: " ++
+            "trace width, copper clearance, " ++
             "and via size (diameter + drill) in mm, plus a routing-priority tier — the autorouter " ++
             "routes higher tiers first, so a critical net (crystal, flash bus, a switcher's hot loop) " ++
             "claims its short path before a bulk rail can wall it off (the maze router has no rip-up; " ++
             "first-routed wins). Omitted numbers keep the router defaults (priority 0 = baseline); net " ++
-            "names match the flattened netlist case-insensitively. The first class naming a net wins. " ++
-            "Repeat the form for more classes (e.g. a wide \"power\" class and a tight \"rf\" class).",
+            "names match the flattened netlist case-insensitively. A reusable subcircuit may assign " ++
+            "membership with (nets …), while a destination board declares the same class name with " ++
+            "geometry but no nets; destination fields override module fallbacks. The first class naming " ++
+            "a net at the same hierarchy depth wins. Repeat the form for more classes.",
     } };
     t[@intFromEnum(ScopeForm.design_rules)] = .{ .scope = tl, .doc = .{
         .syntax = "(design-rules [(clearance MM)] [(min-drill MM)] [(mask-margin MM)] [(copper-edge MM)] " ++

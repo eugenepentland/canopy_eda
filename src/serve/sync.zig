@@ -25,6 +25,7 @@ const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const pcb_layout = @import("pcb_layout_page.zig");
 const board_backup = @import("board_backup.zig");
+const optimizer = @import("../placement/optimizer.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
@@ -851,9 +852,9 @@ pub fn runSyncPlan(
     try netlist_mod.collectInstances(arena, block, "", &instances, block.refStyle());
     var nets: std.ArrayList(export_kicad.FlatNet) = .empty;
     try export_kicad.flattenAndMergeNets(arena, block, &nets);
+    const net_rules = try optimizer.resolvedNetRules(arena, block, nets.items);
 
-    // Pin→net maps used by the diff loop, the passive `canopy_net` field,
-    // and the stale-pad heuristic. Built in one pass — see `populatePadNetMaps`.
+    // Pin→net maps shared by the diff loop, passive fields, and stale-pad heuristic.
     var pad_net_map = std.StringHashMapUnmanaged([]const u8).empty;
     var net_pad_count = std.StringHashMapUnmanaged(u32).empty;
     var pad_full_net = std.StringHashMapUnmanaged([]const u8).empty;
@@ -869,8 +870,6 @@ pub fn runSyncPlan(
         if (sec.name.len == 0) continue;
         for (sec.instances) |si| try ref_to_section.put(arena, si.ref_des, sec.name);
     }
-    // Fixed staging seats for every part, computed once from the full roster so
-    // a part's staging coordinate doesn't shift with the push's composition.
     const staging_layout = try buildStagingLayout(arena, instances.items, &ref_to_section);
     // The design's premade placement-tool layout, if any. First-insert parts it
     // names land at that exact pose (below) so a fresh import reproduces the
@@ -952,6 +951,8 @@ pub fn runSyncPlan(
         .reserved_kicad_uuids = &reserved_kicad_uuids,
         .pad_net_map = &pad_net_map,
         .pad_full_net = &pad_full_net,
+        .nets = nets.items,
+        .net_rules = net_rules,
         .net_hub_pins = &net_hub_pins,
         .ref_to_section = &ref_to_section,
         .staging_layout = &staging_layout,
@@ -1777,6 +1778,11 @@ const DiffContext = struct {
     /// on it. Together they let a passive's `canopy_net` field name the device
     /// pin each pad routes to (`U8.C3.VDD33USB / GND`). Passives only.
     pad_full_net: *std.StringHashMapUnmanaged([]const u8),
+    /// Canonical flattened nets and their destination-resolved class rules.
+    /// Seeded module copper uses these to replace saved module geometry only
+    /// after its local net has been bridged onto the board.
+    nets: []const export_kicad.FlatNet = &.{},
+    net_rules: []const optimizer.NetRule = &.{},
     net_hub_pins: *std.StringHashMapUnmanaged(std.ArrayList(export_kicad.FlatPin)),
     /// ref-des → the design `(section …)` it was declared in, for the
     /// `canopy_section` field and the section-grouped staging layout. Built
@@ -3444,6 +3450,21 @@ fn copperLayerSided(l: u8, mirror: bool) u8 {
     };
 }
 
+fn seedNetRule(d: *const DiffContext, display_name: []const u8) optimizer.NetRule {
+    for (d.nets, 0..) |net, i| {
+        if (i >= d.net_rules.len) break;
+        if (std.ascii.eqlIgnoreCase(net.name, display_name)) return d.net_rules[i];
+    }
+    // `populatePadNetMaps` strips a hierarchy prefix only when the resulting
+    // display name is globally unique, so this fallback cannot select an
+    // ambiguous sibling net.
+    for (d.nets, 0..) |net, i| {
+        if (i >= d.net_rules.len) break;
+        if (std.ascii.eqlIgnoreCase(bareNetName(net.name), display_name)) return d.net_rules[i];
+    }
+    return .{};
+}
+
 /// Emit `add_track` / `add_via` ops for each seeded sub-circuit's module copper
 /// (`jobs`), applying the job's rigid `xform` to every endpoint/centre — the same
 /// transform its footprints got, so a flipped group's copper mirrors and swaps
@@ -3455,6 +3476,8 @@ fn emitSeedCopper(d: *DiffContext, w: anytype, first: *bool, jobs: []const SeedC
         for (job.routes.tracks) |t| {
             const net = bridgedCopperNet(arena, job.net_map, job.slug, t.net);
             if (net.len == 0) continue;
+            const rule = seedNetRule(d, net);
+            const width = if (rule.width > 0) rule.width else t.w;
             const layer = try kicadCopperLayer(arena, copperLayerSided(t.l, job.xform.mirror));
             const p1 = job.xform.apply(t.x1, t.y1);
             const p2 = job.xform.apply(t.x2, t.y2);
@@ -3465,7 +3488,7 @@ fn emitSeedCopper(d: *DiffContext, w: anytype, first: *bool, jobs: []const SeedC
             try w.*.print(",\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"width\":{d},\"layer\":", .{
                 mmToNm(p1[0]), mmToNm(p1[1]),
                 mmToNm(p2[0]), mmToNm(p2[1]),
-                mmToNm(t.w),
+                mmToNm(width),
             });
             try json_writer.writeString(w.*, layer);
             try w.*.writeAll("}");
@@ -3474,13 +3497,16 @@ fn emitSeedCopper(d: *DiffContext, w: anytype, first: *bool, jobs: []const SeedC
         for (job.routes.vias) |v| {
             const net = bridgedCopperNet(arena, job.net_map, job.slug, v.net);
             if (net.len == 0) continue;
+            const rule = seedNetRule(d, net);
+            const dia = if (rule.via_dia > 0) rule.via_dia else v.d;
+            const drill = if (rule.via_drill > 0) rule.via_drill else v.drill;
             const c = job.xform.apply(v.x, v.y);
             if (!first.*) try w.*.writeAll(",");
             first.* = false;
             try w.*.writeAll(add_via_op_open);
             try json_writer.writeString(w.*, net);
             try w.*.print(via_coords_fmt, .{
-                mmToNm(c[0]), mmToNm(c[1]), mmToNm(v.d), mmToNm(v.drill),
+                mmToNm(c[0]), mmToNm(c[1]), mmToNm(dia), mmToNm(drill),
             });
             d.summary.vias += 1;
         }
@@ -4707,6 +4733,7 @@ test "placeOneSelected centres a module sub-circuit on an on-board anchor absent
 }
 
 // spec: serve/sync - seeded sub-circuit copper lands on the board with bridged nets and the group offset
+// spec: serve/sync - seeded sub-circuit copper adopts the destination net-class track and via geometry
 test "emitSeedCopper lays a seeded sub-circuit's module copper with bridged nets and the group offset" {
     var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer aa.deinit();
@@ -4720,6 +4747,18 @@ test "emitSeedCopper lays a seeded sub-circuit's module copper with bridged nets
     try state.pad_net_map.put(arena, "lna2/C1|1", "VBUS");
     try state.pad_net_map.put(arena, "lna2/C1|2", "lna2/GNDA");
     var d = state.ctx(&spc, .auto);
+    const parent_nets = [_]export_kicad.FlatNet{
+        .{ .name = "VBUS", .pins = &.{} },
+        .{ .name = "lna2/GNDA", .pins = &.{} },
+        .{ .name = "lna2/PRIV_M", .pins = &.{} },
+    };
+    const parent_rules = [_]optimizer.NetRule{
+        .{ .class = .{ .name = "rf-cpwg-50" }, .width = 0.38, .via_dia = 0.6, .via_drill = 0.3 },
+        .{},
+        .{},
+    };
+    d.nets = &parent_nets;
+    d.net_rules = &parent_rules;
 
     // Module ★ layout (origin_key-keyed) + its routed copper and pin→net bridge.
     var src_map = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
@@ -4798,6 +4837,7 @@ test "emitSeedCopper lays a seeded sub-circuit's module copper with bridged nets
     try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"VBUS\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"x1\":52000000,\"y1\":40000000") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"layer\":\"F.Cu\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"width\":380000") != null);
     // Bridged channel-private ground keeps its collision spelling, routed on B.Cu.
     try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"lna2/GNDA\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"layer\":\"B.Cu\"") != null);
@@ -4806,6 +4846,7 @@ test "emitSeedCopper lays a seeded sub-circuit's module copper with bridged nets
     // The via rides the same rail + offset.
     try std.testing.expect(std.mem.indexOf(u8, out, "\"op\":\"add_via\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"x\":52000000,\"y\":40000000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"dia\":600000,\"drill\":300000") != null);
 }
 
 // spec: serve/sync - buildSubCircuitsJson reports each seedable group's module track and via counts

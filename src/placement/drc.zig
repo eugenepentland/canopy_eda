@@ -129,20 +129,11 @@ const eps: f64 = 1e-6;
 /// the pre-net-class scalar behaviour.
 const ClearanceResolver = struct {
     base: f64,
-    net: []const optimizer.NetRule,
-
-    /// The clearance net index `n` demands: its class override raised to at
-    /// least the board base, or the base for an unruled / no-net feature.
-    fn ofNet(self: ClearanceResolver, n: i32) f64 {
-        if (n < 0) return self.base;
-        const i: usize = @intCast(n);
-        if (i < self.net.len and self.net[i].clearance > 0) return @max(self.net[i].clearance, self.base);
-        return self.base;
-    }
+    rules: optimizer.BoardRules,
 
     /// The clearance a pair of features on nets `a` and `b` must satisfy.
     fn between(self: ClearanceResolver, a: i32, b: i32) f64 {
-        return @max(self.ofNet(a), self.ofNet(b));
+        return self.rules.clearanceBetween(a, b, self.base);
     }
 };
 
@@ -176,7 +167,7 @@ pub fn check(
     const rules = placement.rules.design;
     // Per-net clearance overrides layered on the board-default `clearance`: each
     // pair below is judged against max(its two nets' clearances, base).
-    const clr = ClearanceResolver{ .base = clearance, .net = placement.rules.net };
+    const clr = ClearanceResolver{ .base = clearance, .rules = placement.rules };
 
     // via ↔ pad
     for (vias) |v| {

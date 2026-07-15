@@ -1806,18 +1806,23 @@ fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_m
     };
     var spec = env_mod.NetClassSpec{ .name = name };
     var nets: std.ArrayList([]const u8) = .empty;
+    var has_profile = false;
     for (form_children[2..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len < 1) continue;
         const head = c[0].asAtom() orelse continue;
         if (std.mem.eql(u8, head, "width")) {
+            has_profile = true;
             if (c.len >= 2) spec.width = c[1].asNumber() orelse 0;
         } else if (std.mem.eql(u8, head, "clearance")) {
+            has_profile = true;
             if (c.len >= 2) spec.clearance = c[1].asNumber() orelse 0;
         } else if (std.mem.eql(u8, head, "via")) {
+            has_profile = true;
             if (c.len >= 2) spec.via_dia = c[1].asNumber() orelse 0;
             if (c.len >= 3) spec.via_drill = c[2].asNumber() orelse 0;
         } else if (std.mem.eql(u8, head, "priority")) {
+            has_profile = true;
             if (c.len >= 2) {
                 const n = c[1].asNumber() orelse 0;
                 if (n < 0 or n > 7) self.warnFmt(c[1].span, "(net-class …) (priority …) is 0-7; clamping {d}", .{n});
@@ -1832,8 +1837,12 @@ fn parseNetClass(self: *Evaluator, form_children: []const Node) EvalError!?env_m
             self.warnFmt(c[0].span, "unknown (net-class …) sub-form ({s} …)", .{head});
         }
     }
-    if (nets.items.len == 0) {
-        self.warnFmt(form_children[0].span, "(net-class \"{s}\" …) names no nets — add (nets \"A\" …)", .{name});
+    if (nets.items.len == 0 and !has_profile) {
+        self.warnFmt(
+            form_children[0].span,
+            "(net-class \"{s}\" …) is empty — add routing fields and/or (nets \"A\" …)",
+            .{name},
+        );
         return null;
     }
     spec.nets = nets.toOwnedSlice(self.allocator) catch &.{};
@@ -1992,7 +2001,7 @@ test "design-block captures a plane-less (stackup 2)" {
     try testing.expect(!block.stackup.hasPlanes());
 }
 
-// spec: eval/design_block - net-class forms capture width/clearance/via geometry and routing priority for their listed nets
+// spec: eval/design_block - net-class profiles and memberships can be declared independently
 test "design-block captures (net-class …) rules" {
     const a = std.heap.page_allocator;
     const src =
@@ -2000,7 +2009,7 @@ test "design-block captures (net-class …) rules" {
         \\  (net-class "power" (width 0.3) (clearance 0.2) (via 0.5 0.3) (nets "VBUS" "+5V"))
         \\  (net-class "hot" (priority 3) (nets "SW"))
         \\  (net-class "over" (priority 99) (nets "CLK"))
-        \\  (net-class "broken-no-nets" (width 1.0)))
+        \\  (net-class "profile-only" (width 1.0)))
     ;
     const nodes = try sexpr_parser.parse(a, src);
     const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
@@ -2013,8 +2022,7 @@ test "design-block captures (net-class …) rules" {
         .design_block => |b| b,
         else => return error.TestUnexpectedResult,
     };
-    // The nets-less class is dropped (warned), the valid ones are kept intact.
-    try testing.expectEqual(@as(usize, 3), block.net_classes.len);
+    try testing.expectEqual(@as(usize, 4), block.net_classes.len);
     const nc = block.net_classes[0];
     try testing.expectEqualStrings("power", nc.name);
     try testing.expectEqual(@as(f64, 0.3), nc.width);
@@ -2027,6 +2035,9 @@ test "design-block captures (net-class …) rules" {
     // Routing-order tier is captured, and an out-of-range value clamps to 7.
     try testing.expectEqual(@as(u32, 3), block.net_classes[1].priority);
     try testing.expectEqual(@as(u32, 7), block.net_classes[2].priority);
+    try testing.expectEqualStrings("profile-only", block.net_classes[3].name);
+    try testing.expectEqual(@as(f64, 1.0), block.net_classes[3].width);
+    try testing.expectEqual(@as(usize, 0), block.net_classes[3].nets.len);
 }
 
 // spec: eval/design_block - design-rules form captures the board-level default rules on the design block

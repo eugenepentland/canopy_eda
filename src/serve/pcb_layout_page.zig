@@ -719,7 +719,14 @@ fn buildSubSeedsJson(
             rfirst = false;
             writeJsonStr(rw, sb.name) catch return .{};
             rw.writeByte(':') catch return .{};
-            writeSubRoutesJson(rw, alloc, sb.name, sr, s.pin_nets, &ok_ref, dm) catch return .{};
+            const route_map = SubRouteMap{
+                .pin_nets = s.pin_nets,
+                .ok_ref = &ok_ref,
+                .dpin_net = dm,
+                .parent_nets = p.nets,
+                .parent_rules = p.rules.net,
+            };
+            writeSubRoutesJson(rw, alloc, sb.name, sr, route_map) catch return .{};
         }
     }
     w.writeByte('}') catch return .{};
@@ -751,38 +758,63 @@ fn designPinNetMap(alloc: std.mem.Allocator, p: optimizer.Placement) ?std.String
 /// translates by the stamp offset), net names are mapped module → parent via
 /// the origin-key bridge, falling back to the "slug/NET" spelling a
 /// module-private net flattens to in the parent anyway.
+const SubRouteMap = struct {
+    pin_nets: []const SubPinNet,
+    ok_ref: *const std.StringHashMapUnmanaged([]const u8),
+    dpin_net: *const std.StringHashMapUnmanaged([]const u8),
+    parent_nets: []const export_kicad.FlatNet,
+    parent_rules: []const optimizer.NetRule,
+};
+
 fn writeSubRoutesJson(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
     slug: []const u8,
     sr: SavedRoutes,
-    pin_nets: []const SubPinNet,
-    ok_ref: *const std.StringHashMapUnmanaged([]const u8),
-    dpin_net: *const std.StringHashMapUnmanaged([]const u8),
+    map: SubRouteMap,
 ) std.Io.Writer.Error!void {
     var net_map = std.StringHashMapUnmanaged([]const u8).empty;
-    for (pin_nets) |ps| {
+    for (map.pin_nets) |ps| {
         if (net_map.contains(ps.net)) continue;
-        const dref = ok_ref.get(ps.origin_key) orelse continue;
+        const dref = map.ok_ref.get(ps.origin_key) orelse continue;
         const key = std.fmt.allocPrint(alloc, pin_key_fmt, .{ dref, ps.pad }) catch continue;
-        const dn = dpin_net.get(key) orelse continue;
+        const dn = map.dpin_net.get(key) orelse continue;
         net_map.put(alloc, ps.net, dn) catch break;
     }
     try w.writeAll("{\"tracks\":[");
     for (sr.tracks, 0..) |t, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print(track_json_fmt, .{ t.x1, t.y1, t.x2, t.y2, t.l, t.w });
-        try writeJsonStr(w, mappedNet(alloc, &net_map, slug, t.net));
+        const net = mappedNet(alloc, &net_map, slug, t.net);
+        const rule = netRuleNamed(map.parent_nets, map.parent_rules, net);
+        const width = if (rule.width > 0) rule.width else t.w;
+        try w.print(track_json_fmt, .{ t.x1, t.y1, t.x2, t.y2, t.l, width });
+        try writeJsonStr(w, net);
         try w.writeAll("}");
     }
     try w.writeAll(vias_arr_open);
     for (sr.vias, 0..) |vi, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print(via_json_fmt, .{ vi.x, vi.y, vi.d, vi.drill });
-        try writeJsonStr(w, mappedNet(alloc, &net_map, slug, vi.net));
+        const net = mappedNet(alloc, &net_map, slug, vi.net);
+        const rule = netRuleNamed(map.parent_nets, map.parent_rules, net);
+        const dia = if (rule.via_dia > 0) rule.via_dia else vi.d;
+        const drill = if (rule.via_drill > 0) rule.via_drill else vi.drill;
+        try w.print(via_json_fmt, .{ vi.x, vi.y, dia, drill });
+        try writeJsonStr(w, net);
         try w.writeAll("}");
     }
     try w.writeAll("]}");
+}
+
+fn netRuleNamed(
+    nets: []const export_kicad.FlatNet,
+    rules: []const optimizer.NetRule,
+    name: []const u8,
+) optimizer.NetRule {
+    for (nets, 0..) |net, i| {
+        if (i >= rules.len) break;
+        if (std.ascii.eqlIgnoreCase(net.name, name)) return rules[i];
+    }
+    return .{};
 }
 
 /// A stamped-copper net name in the parent design's namespace: the bridged
@@ -5666,8 +5698,7 @@ fn writeBlobHead(
     // Per-net clearance overrides (collapsed net key → mm) for the client's
     // live hand-routing DRC preview, so a drawn segment on a wider-clearance
     // net class is judged against that class, not the board default (`clr`).
-    // Only nets whose `(net-class …)` sets a positive clearance appear; the
-    // rest fall back to `clr`. Keyed the same collapsed way pad `net` tags are.
+    // Positive overrides only; other nets fall back to `clr`.
     try w.writeAll(",\"netclr\":{");
     var nc_first = true;
     for (p.nets, 0..) |net, i| {
@@ -5680,10 +5711,40 @@ fn writeBlobHead(
         try w.print(":{d}", .{c});
     }
     try w.writeAll("}");
+    try writeResolvedNetClasses(w, p);
     // Board-level silkscreen texts the shown layout carries (Text tool state).
     try w.writeAll(texts_open);
     try writeSavedTextsJson(w, opts.texts);
     try w.writeAll(",");
+}
+
+fn writeResolvedNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!void {
+    try w.writeAll(",\"netclasses\":[");
+    var class_first = true;
+    for (p.nets, 0..) |net, i| {
+        if (i >= p.rules.net.len) break;
+        const rule = p.rules.net[i];
+        if (rule.class.name.len == 0) continue;
+        if (!class_first) try w.writeByte(',');
+        class_first = false;
+        try w.writeAll("{\"net\":");
+        try writeJsonStr(w, net.name);
+        try w.writeAll(",\"class\":");
+        try writeJsonStr(w, rule.class.name);
+        try w.writeAll(",\"source\":");
+        try writeJsonStr(w, rule.class.source);
+        try w.print(
+            ",\"width\":{d},\"clearance\":{d},\"via_dia\":{d},\"via_drill\":{d},\"conflict\":{s}}}",
+            .{
+                rule.width,
+                rule.clearance,
+                rule.via_dia,
+                rule.via_drill,
+                if (rule.class.conflict) "true" else "false",
+            },
+        );
+    }
+    try w.writeByte(']');
 }
 
 /// A routed feature's net NAME for the persistable route JSON ("" for −1).
@@ -7700,6 +7761,7 @@ test "layouts sidecar round-trips the copper stamp group tag" {
 }
 
 // spec: Web Server - Stamped module copper maps its net names onto the parent design via the origin-key bridge, slug-prefixing private nets
+// spec: Web Server - Stamped copper adopts destination net-class geometry
 test "stamped copper nets map to parent nets with slug fallback" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -7719,14 +7781,29 @@ test "stamped copper nets map to parent nets with slug fallback" {
         .{ .x1 = 0, .y1 = 1, .x2 = 3, .y2 = 1, .w = 0.2, .net = "FB" },
     };
     const sr = SavedRoutes{ .tracks = &tracks, .vias = &.{} };
+    const parent_nets = [_]export_kicad.FlatNet{
+        .{ .name = "5V0", .pins = &.{} },
+        .{ .name = "buck/FB", .pins = &.{} },
+    };
+    const parent_rules = [_]optimizer.NetRule{
+        .{ .class = .{ .name = "power" }, .width = 0.55 },
+        .{},
+    };
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
-    try writeSubRoutesJson(&aw.writer, alloc, "buck", sr, &pin_nets, &ok_ref, &dpin);
+    try writeSubRoutesJson(&aw.writer, alloc, "buck", sr, .{
+        .pin_nets = &pin_nets,
+        .ok_ref = &ok_ref,
+        .dpin_net = &dpin,
+        .parent_nets = &parent_nets,
+        .parent_rules = &parent_rules,
+    });
     const out = aw.written();
     // Bridged net → the parent's name; unbridged private net → slug-prefixed.
     try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"5V0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"buck/FB\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"VOUT\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"w\":0.55") != null);
 }
 
 // spec: Web Server - A saved layout round-trips each part's board side and lock flag through the sidecar

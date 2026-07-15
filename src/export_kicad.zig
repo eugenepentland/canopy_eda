@@ -476,7 +476,6 @@ pub fn exportKicadZip(
 const collectInstances = netlist_mod.collectInstances;
 const collectNets = netlist_mod.collectNets;
 const collectNetTies = netlist_mod.collectNetTies;
-const applyNetTies = netlist_mod.applyNetTies;
 const FlatTie = netlist_mod.FlatTie;
 
 pub fn flattenAndMergeNets(
@@ -484,11 +483,23 @@ pub fn flattenAndMergeNets(
     block: *const DesignBlock,
     nets: *std.ArrayList(FlatNet),
 ) std.mem.Allocator.Error!void {
+    return flattenAndMergeNetsMapped(allocator, block, nets, null);
+}
+
+/// Flatten/merge a design while optionally returning every hierarchy-local net
+/// alias mapped to its final canonical name. This is the metadata bridge used by
+/// inherited net classes; ordinary exporters keep calling the wrapper above.
+pub fn flattenAndMergeNetsMapped(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    nets: *std.ArrayList(FlatNet),
+    aliases: ?*netlist_mod.CanonicalNetMap,
+) std.mem.Allocator.Error!void {
     try collectNets(allocator, block, "", nets, block.refStyle());
     var ties: std.ArrayList(FlatTie) = .empty;
     defer ties.deinit(allocator);
     try collectNetTies(allocator, block, "", &ties);
-    try applyNetTies(allocator, nets, ties.items);
+    try netlist_mod.applyNetTiesMapped(allocator, nets, ties.items, aliases);
 }
 
 const ConvertError = error{

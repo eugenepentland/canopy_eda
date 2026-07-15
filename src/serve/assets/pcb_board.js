@@ -2564,6 +2564,8 @@ function inspHitForPart(m,pi){var d=inspHitDrc(m);if(d)return {t:"drc",o:d};
  var t=inspHitTrack(m);if(t)return {t:"track",o:t};return null;}
 function anyDrawTool(){return drawMode||textMode||polyMode||outlineMode||!!PCB.rulerOn;}
 function n2(v){return (+v).toFixed(2);}
+function netClassInfo(net){var hit=null;(PCB.netclasses||[]).some(function(c){
+ if(c.net===net){hit=c;return true;}return false;});return hit;}
 function inspReport(){if(!insp)return "";var o=insp.o;
  if(insp.t=="track")return "track net="+(o.net||"?")+" "+layerName(o.l||0)+
   " w="+n2(o.w||0.25)+"mm ("+n2(o.x1)+","+n2(o.y1)+")→("+n2(o.x2)+","+n2(o.y2)+
@@ -2581,18 +2583,22 @@ function inspClear(){if(!insp)return;insp=null;inspPopClose();renderProps();pain
 function inspSet(hit){insp=hit;inspPopClose();renderProps();paintSoon();}
 function renderInspProps(body){var o=insp.o,h="",hint='<div class="prop-lock">';
  if(insp.t=="track"){
+  var tc=netClassInfo(o.net||"");
   h='<div class="prop-head"><span class="prop-ref">Track</span>'+
    (o.net?'<span class="prop-val">'+pEsc(nLeaf(o.net))+'</span>':'')+'</div>'+
    '<div class="prop-rows">'+pRow("Net",o.net||"?")+pRow("Layer",layerName(o.l||0))+
-   pRow("Width",n2(o.w||0.25)+" mm")+
+   pRow("Width",n2(o.w||0.25)+" mm")+(tc?pRow("Net class",tc.class)+
+   pRow("Class gap",n2(tc.clearance||PCB.clr||0)+" mm")+(tc.conflict?pRow("Class status","conflict — assign on board"):""):"")+
    pRow("From","("+n2(o.x1)+", "+n2(o.y1)+")")+pRow("To","("+n2(o.x2)+", "+n2(o.y2)+")")+
    pRow("Length",n2(Math.hypot(o.x2-o.x1,o.y2-o.y1))+" mm")+(o.g?pRow("Stamp",o.g):"")+'</div>';
   if(!RO)h+=hint+'Drag slides the segment (Shift = free move) · <kbd>Del</kbd> deletes · <kbd>Esc</kbd> deselects</div>';
  }else if(insp.t=="via"){
+  var vc=netClassInfo(o.net||"");
   h='<div class="prop-head"><span class="prop-ref">Via</span>'+
    (o.net?'<span class="prop-val">'+pEsc(nLeaf(o.net))+'</span>':'')+'</div>'+
    '<div class="prop-rows">'+pRow("Net",o.net||"?")+pRow("Position","("+n2(o.x)+", "+n2(o.y)+")")+
    pRow("Diameter",n2(o.d||0.4)+" mm")+pRow("Drill",n2((o.drill>0)?o.drill:viaGeo().drill)+" mm")+
+   (vc?pRow("Net class",vc.class)+pRow("Class gap",n2(vc.clearance||PCB.clr||0)+" mm"):"")+
    (o.g?pRow("Stamp",o.g):"")+'</div>';
   if(!RO)h+=hint+'<kbd>Del</kbd> deletes · <kbd>Esc</kbd> deselects</div>';
  }else{
