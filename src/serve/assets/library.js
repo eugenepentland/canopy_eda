@@ -53,6 +53,9 @@
   // "show preview" chip (standalone footprint cards) to expand an inline SVG.
   // /api/footprint/:name returns a JSON description (lib/footprints/<fp>.sexp);
   // the shared FP engine draws it. Fetched once per tag, cached in the panel.
+  function formatMm(value){
+    return Number(value).toFixed(3).replace(/\.0+$/,'').replace(/(\.\d*?)0+$/,'$1');
+  }
   function loadFootprint(box,fp){
     if(box.dataset.loaded==='1')return;
     box.dataset.loaded='1';
@@ -65,7 +68,15 @@
       var s=FP.el('svg',{});
       FP.drawFootprint(s,data);
       s.style.width='100%';s.style.height='auto';s.style.maxHeight='240px';s.style.display='block';s.style.borderRadius='4px';
-      box.innerHTML='';box.appendChild(s);
+      box.innerHTML='';
+      var b=data.bounds;
+      if(b&&Number.isFinite(Number(b.w))&&Number.isFinite(Number(b.h))){
+        var size=document.createElement('div');
+        size.className='fp-size';
+        size.textContent='Bounding box: X '+formatMm(b.w)+' mm × Y '+formatMm(b.h)+' mm';
+        box.appendChild(size);
+      }
+      box.appendChild(s);
     }).catch(function(){
       box.innerHTML='<span class="fp-empty">No footprint preview available.</span>';
     });

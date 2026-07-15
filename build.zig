@@ -150,7 +150,7 @@ pub fn build(b: *std.Build) void {
     // turned on without fixing the back-catalogue first.
     const guardian = @import("guardian");
     // Build guardian-check optimized regardless of the design's build mode. It's
-    // a tool we *run* (54 single-pass checks over the whole src/ tree), not code
+    // a tool we *run* (67 single-pass checks over the whole src/ tree), not code
     // we ship, so a Debug guardian-check would run ~11s every build vs ~1s here.
     // ReleaseSafe (not ReleaseFast) keeps bounds/overflow checks in guardian's
     // parser for ~0.4s more — worth it for a build gate we trust to be correct.
