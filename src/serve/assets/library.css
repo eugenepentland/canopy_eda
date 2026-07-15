@@ -57,6 +57,7 @@ td { font-family: monospace; font-size: 0.9rem; }
 .fp-preview { display:none; margin:0.5rem 0 0.25rem; max-width:320px; padding:0.5rem; background:#0d1117; border:1px solid #21262d; border-radius:6px; }
 .fp-preview.open { display:block; }
 .fp-preview .fp-empty { color:#666; font-size:0.8rem; }
+.fp-preview .fp-size { color:#8b949e; font-family:monospace; font-size:0.78rem; margin:0 0 0.45rem; }
 /* Card grid */
 .card-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:1rem; margin:1rem 0; align-items:start; }
 .comp-card { position:relative; background:#161b22; border:1px solid #21262d; border-radius:8px; padding:0.85rem 1rem; display:flex; flex-direction:column; gap:0.5rem; }
