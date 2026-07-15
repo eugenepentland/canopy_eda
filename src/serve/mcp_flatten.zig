@@ -160,6 +160,78 @@ fn findFlatByRefOrLeaf(insts: []const FlatInstance, ref: []const u8) ?FlatInstan
     return null;
 }
 
+// ── Port-alias-aware net flattening ─────────────────────────────────────
+
+/// Sub-block path join ("ldo" + "VOUT" → "ldo/VOUT"), mirroring the
+/// prefixing convention of the export_kicad flattener.
+fn joinPath(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (prefix.len == 0) return allocator.dupe(u8, name);
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, name });
+}
+
+/// Map "path/PORT" → "path/NET" for every sub-block port whose declared net
+/// differs from the port name (the `(port "VOUT" vout-str out)` long form).
+/// A parent stitch `(net "V3P3" "ldo/VOUT")` references the PORT name, but
+/// the flattened net is spelled by the port's internal NET ("ldo/3.3V") —
+/// without this aliasing the tie names a net that doesn't exist and the rail
+/// never merges.
+fn collectPortAliases(
+    allocator: std.mem.Allocator,
+    block: *const env_mod.DesignBlock,
+    prefix: []const u8,
+    map: *std.StringHashMapUnmanaged([]const u8),
+) std.mem.Allocator.Error!void {
+    for (block.sub_blocks) |sb| {
+        const sub_prefix = try joinPath(allocator, prefix, sb.name);
+        for (sb.block.ports) |p| {
+            if (p.net.len == 0 or std.mem.eql(u8, p.net, p.name)) continue;
+            const from = try joinPath(allocator, sub_prefix, p.name);
+            const to = try joinPath(allocator, sub_prefix, p.net);
+            try map.put(allocator, from, to);
+        }
+        try collectPortAliases(allocator, sb.block, sub_prefix, map);
+    }
+}
+
+/// A tie side that names no real flattened net but matches a sub-block port
+/// maps onto that port's internal net; a real net name always wins.
+fn resolvePortAlias(
+    name: []const u8,
+    real: *const std.StringHashMapUnmanaged(void),
+    aliases: *const std.StringHashMapUnmanaged([]const u8),
+) []const u8 {
+    if (real.contains(name)) return name;
+    return aliases.get(name) orelse name;
+}
+
+/// Flatten + merge nets like `export_kicad.flattenAndMergeNets`, but first
+/// rewrite net-tie sides through the port aliases above so the importer's
+/// stitch convention (`(net "CHK_X" "chK/X")` naming a module PORT) merges
+/// even when the module's internal net name differs from the port name.
+/// Fills `aliases` as a side effect so callers can resolve queries too.
+fn flattenNetsPortAware(
+    allocator: std.mem.Allocator,
+    block: *const env_mod.DesignBlock,
+    nets: *std.ArrayList(FlatNet),
+    aliases: *std.StringHashMapUnmanaged([]const u8),
+) std.mem.Allocator.Error!void {
+    try netlist_mod.collectNets(allocator, block, "", nets, block.refStyle());
+    var ties: std.ArrayList(netlist_mod.FlatTie) = .empty;
+    defer ties.deinit(allocator);
+    try netlist_mod.collectNetTies(allocator, block, "", &ties);
+    try collectPortAliases(allocator, block, "", aliases);
+    if (aliases.count() > 0) {
+        var real: std.StringHashMapUnmanaged(void) = .empty;
+        defer real.deinit(allocator);
+        for (nets.items) |n| try real.put(allocator, n.name, {});
+        for (ties.items) |*t| {
+            t.a = resolvePortAlias(t.a, &real, aliases);
+            t.b = resolvePortAlias(t.b, &real, aliases);
+        }
+    }
+    try netlist_mod.applyNetTies(allocator, nets, ties.items);
+}
+
 // ── Flattened tools ─────────────────────────────────────────────────────
 
 /// Flattened `list_instances`: every instance in the whole design tree with
@@ -194,22 +266,25 @@ pub fn listInstancesFlat(
 }
 
 /// Resolve a net query to an index into the merged net list: exact canonical
-/// name first, then a sub-scoped spelling ("ldo/VOUT") — locate the raw
-/// pre-merge net of that name and follow one of its pins into the merged net
-/// it was folded into.
+/// name first, then a sub-scoped spelling — a port-name spelling ("ldo/VOUT")
+/// maps through the port aliases onto its internal net ("ldo/3.3V"), then the
+/// raw pre-merge net of that name is located and one of its pins followed
+/// into the merged net it was folded into.
 fn resolveMergedNet(
     allocator: std.mem.Allocator,
     block: *const env_mod.DesignBlock,
     merged: []const FlatNet,
     query: []const u8,
+    aliases: *const std.StringHashMapUnmanaged([]const u8),
 ) std.mem.Allocator.Error!?usize {
     for (merged, 0..) |n, i| {
         if (std.mem.eql(u8, n.name, query)) return i;
     }
+    const spelled = aliases.get(query) orelse query;
     var raw: std.ArrayList(FlatNet) = .empty;
     try netlist_mod.collectNets(allocator, block, "", &raw, block.refStyle());
     for (raw.items) |rn| {
-        if (!std.mem.eql(u8, rn.name, query)) continue;
+        if (!std.mem.eql(u8, rn.name, spelled)) continue;
         if (rn.pins.len == 0) continue;
         const p0 = rn.pins[0];
         for (merged, 0..) |mn, i| {
@@ -232,9 +307,11 @@ pub fn getNetFlat(
     w: anytype,
 ) !bool {
     var nets: std.ArrayList(FlatNet) = .empty;
-    try export_kicad.flattenAndMergeNets(allocator, block, &nets);
+    var aliases: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer aliases.deinit(allocator);
+    try flattenNetsPortAware(allocator, block, &nets, &aliases);
 
-    const idx = (try resolveMergedNet(allocator, block, nets.items, query)) orelse {
+    const idx = (try resolveMergedNet(allocator, block, nets.items, query, &aliases)) orelse {
         try w.writeAll("error: net not found");
         return false;
     };
@@ -331,7 +408,9 @@ pub fn listFreePinsFlat(
     };
 
     var nets: std.ArrayList(FlatNet) = .empty;
-    try export_kicad.flattenAndMergeNets(allocator, block, &nets);
+    var aliases: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer aliases.deinit(allocator);
+    try flattenNetsPortAware(allocator, block, &nets, &aliases);
     var assigned: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer assigned.deinit(allocator);
     for (nets.items) |net| {
@@ -436,6 +515,37 @@ const board_src =
     \\  (net "GND" "ldo/GND"))
 ;
 
+// A module whose VOUT port's internal NET differs from the port name (the
+// lt3045 `(port "VOUT" vout-str out)` pattern — vout-str is fmt-generated,
+// here a literal). The parent stitches it BY PORT NAME ("ldo/VOUT"), so the
+// merge must map the port onto its net ("ldo/3.3V") to find the rail.
+const ldoport_src =
+    \\(defmodule ldoport ()
+    \\  (design-block "LDO Port"
+    \\    (instance "U1" ldochip
+    \\      (pin 1 "VIN")
+    \\      (pin 2 "3.3V")
+    \\      (pin 3 "GND"))
+    \\    (instance "C1" (cap-0402 "10uF")
+    \\      (pin 1 "3.3V")
+    \\      (pin 2 "GND"))
+    \\    (port "VIN" in)
+    \\    (port "VOUT" "3.3V" out)
+    \\    (port "GND" bidi)))
+;
+const board2_src =
+    \\(import ldochip)
+    \\(import ldoport)
+    \\(design-block "Port Stitch Board"
+    \\  (instance "D1" (led-0402 "green")
+    \\    (pin 1 "V3P3")
+    \\    (pin 2 "GND"))
+    \\  (sub-block "ldo" (ldoport))
+    \\  (net "VIN_5V" "ldo/VIN")
+    \\  (net "V3P3" "ldo/VOUT")
+    \\  (net "GND" "ldo/GND"))
+;
+
 const cap_family =
     \\(component-family "cap-0402" (symbol generic-cap) (parameter "value" capacitance))
 ;
@@ -461,14 +571,16 @@ fn writeFlattenFixture(dir: std.fs.Dir) !void {
     try dir.writeFile(.{ .sub_path = "lib/components/hdr4.sexp", .data = hdr4_comp });
     try dir.writeFile(.{ .sub_path = "lib/pinouts/hdr4.sexp", .data = hdr4_pinout });
     try dir.writeFile(.{ .sub_path = "lib/modules/ldomod.sexp", .data = ldomod_src });
+    try dir.writeFile(.{ .sub_path = "lib/modules/ldoport.sexp", .data = ldoport_src });
     try dir.writeFile(.{ .sub_path = "src/board.sexp", .data = board_src });
+    try dir.writeFile(.{ .sub_path = "src/board2.sexp", .data = board2_src });
 }
 
-/// Eval `src/board.sexp` under `project` and return the design block. The
-/// evaluator (which owns the block's memory) is returned so the caller keeps
-/// it alive; project uses page_allocator because eval AST memory is never freed.
-fn evalBoard(alloc: std.mem.Allocator, project: []const u8, eval: *Evaluator) !*env_mod.DesignBlock {
-    const path = try std.fmt.allocPrint(alloc, "{s}/src/board.sexp", .{project});
+/// Eval `src/<name>.sexp` under `project` and return the design block. The
+/// evaluator (which owns the block's memory) is caller-owned so the block
+/// stays alive; tests use page_allocator because eval AST memory is never freed.
+fn evalBoard(alloc: std.mem.Allocator, project: []const u8, eval: *Evaluator, name: []const u8) !*env_mod.DesignBlock {
+    const path = try std.fmt.allocPrint(alloc, "{s}/src/{s}.sexp", .{ project, name });
     const result = try eval.evalFile(path);
     return switch (result) {
         .design_block => |b| b,
@@ -486,7 +598,7 @@ test "flatten list_instances surfaces sub-block children with prefixed refs and 
 
     var eval = Evaluator.init(alloc, project);
     defer eval.deinit();
-    const block = try evalBoard(alloc, project, &eval);
+    const block = try evalBoard(alloc, project, &eval, "board");
 
     var out: std.ArrayList(u8) = .empty;
     try std.testing.expect(try listInstancesFlat(alloc, &eval, block, out.writer(alloc)));
@@ -514,7 +626,7 @@ test "instancePinCount counts a connector's pads from its pinout when it has no 
 
     var eval = Evaluator.init(alloc, project);
     defer eval.deinit();
-    const block = try evalBoard(alloc, project, &eval);
+    const block = try evalBoard(alloc, project, &eval, "board");
 
     // J1 is a pin header: it declares (pinout hdr4) but no (symbol …), so its
     // instance symbol is empty. The old symbol-only lookup returned 0.
@@ -537,7 +649,7 @@ test "flatten get_net returns the merged rail and resolves a sub-scoped spelling
 
     var eval = Evaluator.init(alloc, project);
     defer eval.deinit();
-    const block = try evalBoard(alloc, project, &eval);
+    const block = try evalBoard(alloc, project, &eval, "board");
 
     // Canonical name: V3P3 merges the top-level LED pin with the module's VOUT
     // pins (LDO output + output cap) — flattened refs, sub-block pins included.
@@ -565,7 +677,7 @@ test "flatten list_free_pins matches a child by name and reads assignments from 
 
     var eval = Evaluator.init(alloc, project);
     defer eval.deinit();
-    const block = try evalBoard(alloc, project, &eval);
+    const block = try evalBoard(alloc, project, &eval, "board");
 
     // The module IC renumbers to ldo/U2, but its module-local origin "U1" still
     // finds it. Pins EN/NC are unwired; the wired VOUT pad reports the merged
@@ -575,4 +687,44 @@ test "flatten list_free_pins matches a child by name and reads assignments from 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"function\":\"EN\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"function\":\"NC\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"function\":\"VOUT\",\"net\":\"V3P3\"") != null);
+}
+
+test "flatten merges a stitch that names a module port whose internal net differs" {
+    // spec: serve/mcp_tools - flatten merges a sub-block stitch written against a port name whose module net differs
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFlattenFixture(tmp.dir);
+    const project = try tmp.dir.realpathAlloc(alloc, ".");
+
+    var eval = Evaluator.init(alloc, project);
+    defer eval.deinit();
+    const block = try evalBoard(alloc, project, &eval, "board2");
+
+    // The lt3045 pattern: the module's VOUT port carries the internal net
+    // "3.3V", the parent stitches `(net "V3P3" "ldo/VOUT")` by PORT name.
+    // The merged rail must contain the top-level LED, the module's output
+    // pin (function VOUT), and the module's 10uF output cap.
+    var out: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try getNetFlat(alloc, &eval, block, "V3P3", out.writer(alloc)));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"name\":\"V3P3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"ref_des\":\"D1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"ref_des\":\"ldo/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"function\":\"VOUT\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"value\":\"10uF\"") != null);
+
+    // Both sub-scoped spellings — the port name and the internal net name —
+    // resolve to the same canonical merged rail.
+    var out2: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try getNetFlat(alloc, &eval, block, "ldo/VOUT", out2.writer(alloc)));
+    try std.testing.expect(std.mem.indexOf(u8, out2.items, "\"name\":\"V3P3\"") != null);
+    var out3: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try getNetFlat(alloc, &eval, block, "ldo/3.3V", out3.writer(alloc)));
+    try std.testing.expect(std.mem.indexOf(u8, out3.items, "\"name\":\"V3P3\"") != null);
+
+    // list_free_pins shares the aliasing: the module IC's wired output pad
+    // reports the canonical merged rail name, not the internal spelling.
+    var out4: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try listFreePinsFlat(alloc, &eval, block, "U1", null, out4.writer(alloc)));
+    try std.testing.expect(std.mem.indexOf(u8, out4.items, "\"function\":\"VOUT\",\"net\":\"V3P3\"") != null);
 }
