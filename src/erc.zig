@@ -116,14 +116,14 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
 
 /// Flag active ICs whose library component declares no `(requirement …)` rules.
 /// Component requirements are the design's record that a part was reviewed
-/// against its datasheet, so an undocumented functional IC is the most common
-/// review gap — a `warning` the schematic page and review doc surface so the
-/// author can fill it in. Scope is the hub class the schematic renders as boxes
-/// (ICs, connectors, transistors — `isActiveIcRefDes`); passive spokes
-/// (R/C/L/F/D), `(ignore-requirements)` support parts, test points, and
+/// against its datasheet, so every active component must carry at least one —
+/// this is an `error` (fails `netlisp check`, reddens the home-page health chip),
+/// which the schematic page and review doc surface so the author fills it in (or
+/// opts the part out with `(ignore-requirements)`). Scope is the hub class the
+/// schematic renders as boxes (ICs, transistors — `isActiveIcRefDes`); passive
+/// spokes (R/C/L/F/D), `(ignore-requirements)` parts, test points, and
 /// passive-class components (ESD arrays, EMI filters) are exempt. Recurses
-/// sub-blocks so a module's ICs are judged too, and deduplicates by component
-/// so a part used N times warns once.
+/// sub-blocks so a module's ICs are judged too, deduped by component.
 fn checkMissingRequirements(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
@@ -157,7 +157,7 @@ fn collectMissingRequirements(
         ) catch continue;
         try violations.append(allocator, .{
             .kind = .missing_requirements,
-            .severity = .warning,
+            .severity = .@"error",
             .message = msg,
             .ref_des = inst.ref_des,
         });
@@ -3474,7 +3474,7 @@ test "sequencing cycle detected" {
     try std.testing.expect(hit);
 }
 
-// spec: erc - Exempts connectors, ignore-requirements support parts, and passive-class components from the requirements warning
+// spec: erc - Exempts connectors, ignore-requirements support parts, and passive-class components from the requirements error
 test "missing requirements exempts connectors, support parts, and passive-class components" {
     const instances = [_]Instance{
         // Connector — exempt purely by ref-des prefix (J), no opt-out needed.
@@ -3598,8 +3598,8 @@ test "passive ref on an MPN-identified fixed component is not missing a value" {
     try std.testing.expectEqualStrings("R2", violations.items[0].ref_des);
 }
 
-// spec: erc - Warns when an active IC's library component declares no requirements
-test "missing requirements warns for an undocumented IC" {
+// spec: erc - Errors when an active IC's library component declares no requirements
+test "missing requirements errors for an undocumented IC" {
     const instances = [_]Instance{.{
         .ref_des = "U9",
         .component = "pcal6416ahf,128",
@@ -3625,11 +3625,11 @@ test "missing requirements warns for an undocumented IC" {
     }
     try std.testing.expectEqual(@as(usize, 1), violations.items.len);
     try std.testing.expectEqual(ViolationKind.missing_requirements, violations.items[0].kind);
-    try std.testing.expectEqual(Severity.warning, violations.items[0].severity);
+    try std.testing.expectEqual(Severity.@"error", violations.items[0].severity);
     try std.testing.expectEqualStrings("U9", violations.items[0].ref_des);
 }
 
-// spec: erc - Does not warn for an IC that declares at least one requirement, nor for passives
+// spec: erc - Does not flag an IC that declares at least one requirement, nor for passives
 test "missing requirements skips documented ICs and passives" {
     const reqs = [_]env_mod.Requirement{.{ .text = "VDD 3V3", .id = "abc12345" }};
     const instances = [_]Instance{
@@ -3655,7 +3655,7 @@ test "missing requirements skips documented ICs and passives" {
     try std.testing.expectEqual(@as(usize, 0), violations.items.len);
 }
 
-// spec: erc - Recurses sub-blocks and warns once per undocumented component
+// spec: erc - Recurses sub-blocks and flags once per undocumented component
 test "missing requirements recurses sub-blocks and dedups by component" {
     const sub_instances = [_]Instance{
         .{ .ref_des = "U1", .component = "txb0104rutr", .value = "", .footprint = "qfn-12", .symbol = "", .requirements = &.{} },
