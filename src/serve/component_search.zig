@@ -7,7 +7,10 @@
 //! challenged. One suggestion carries everything we need — `part_name`,
 //! `manufacturer`, the SamacSys `partID` (inside the `3D View` URL, used for the
 //! model ZIP download) and `Current Datasheet Url`. The suggestion API also
-//! fuzzy-matches on its own (e.g. `W25Q128FVPIP` → `W25Q128FVPIG`).
+//! fuzzy-matches on its own (e.g. `W25Q128FVPIP` → `W25Q128FVPIG`) — but it
+//! can fuzzy-MISS the exact part on a full-string query while a relaxed
+//! variant lists it, so resolution tries every `searchVariants` term for an
+//! exact part-number match before settling for a fuzzy pick.
 //!
 //! HTTP transport is the system `curl` (same shell-out pattern as
 //! `read_datasheet` / the zip upload path), so TLS, redirects, and cookies are
@@ -253,11 +256,14 @@ pub fn searchErrorMessage(err: SearchError) []const u8 {
 }
 
 /// Search CSE via `partApi/suggestion` and return up to `limit` candidates.
-/// The exact query is tried first; if it yields no suggestions (but the request
-/// succeeded) the relaxed `searchVariants` are tried in turn until one returns
-/// hits. An empty slice means the API responded but matched nothing;
-/// `error.SearchFailed` means no request succeeded at all (network failure,
-/// rejected cookie, or Cloudflare block).
+/// Hits are AGGREGATED across the exact query and every relaxed
+/// `searchVariants` term (de-duplicated by part name) — not first-variant-wins:
+/// the suggestion API sometimes fuzzy-misses the exact part on the full-string
+/// query while a relaxed term lists it (e.g. `DAT-31A-SP+` returns only the
+/// PP+/PN+ siblings, but `DAT-31A` surfaces the exact SP+). A hit whose name
+/// exactly matches `query` is hoisted to the front. An empty slice means the
+/// API responded but matched nothing; `error.SearchFailed` means no request
+/// succeeded at all (network failure, rejected cookie, or Cloudflare block).
 pub fn searchComponents(
     allocator: std.mem.Allocator,
     query: []const u8,
@@ -265,12 +271,38 @@ pub fn searchComponents(
     limit: usize,
 ) SearchError![]SearchHit {
     var any_ok = false;
+    var list: std.ArrayList(SearchHit) = .empty;
     for (try searchVariants(allocator, query)) |term| {
-        const hits = try suggestList(allocator, term, cookie, limit, &any_ok);
-        if (hits.len > 0) return hits;
+        if (list.items.len >= limit) break;
+        for (try suggestList(allocator, term, cookie, limit, &any_ok)) |hit| {
+            if (list.items.len >= limit) break;
+            if (containsHit(list.items, hit.part_name)) continue;
+            try list.append(allocator, hit);
+        }
     }
-    if (!any_ok) return error.SearchFailed;
-    return &.{};
+    if (list.items.len == 0 and !any_ok) return error.SearchFailed;
+    hoistExact(list.items, query);
+    return list.toOwnedSlice(allocator);
+}
+
+/// True when `hits` already carries `part_name` (ASCII case-insensitive) —
+/// the aggregation dedup, since relaxed variants re-list earlier hits.
+fn containsHit(hits: []const SearchHit, part_name: []const u8) bool {
+    for (hits) |h| {
+        if (std.ascii.eqlIgnoreCase(h.part_name, part_name)) return true;
+    }
+    return false;
+}
+
+/// Move the first hit whose part name equals `query` (ASCII case-insensitive)
+/// to the front, preserving the order of everything else — so callers that
+/// take the first hit resolve the queried part, not a more popular sibling.
+fn hoistExact(hits: []SearchHit, query: []const u8) void {
+    for (hits, 0..) |h, i| {
+        if (!std.ascii.eqlIgnoreCase(h.part_name, query)) continue;
+        std.mem.rotate(SearchHit, hits[0 .. i + 1], i);
+        return;
+    }
 }
 
 // ── Resolution via the suggestion API ─────────────────────────────
@@ -288,36 +320,51 @@ const ResolvedPart = struct {
 };
 
 /// Resolve a part via `partApi/suggestion` (JSON; not Cloudflare-challenged).
-/// The API fuzzy-matches on its own; we additionally retry with relaxed
-/// `searchVariants` when a term yields nothing. The session cookie is sent on
-/// every request so an authenticated session is served real data.
+/// Every relaxed `searchVariants` term is tried until one yields an EXACT
+/// part-number match — a fuzzy pick from an early variant must not shadow an
+/// exact hit from a later one, because the API sometimes fuzzy-misses the
+/// exact part on the full-string query while a relaxed term lists it (e.g.
+/// `DAT-31A-SP+` returns only the PP+/PN+ siblings, but `DAT-31A` surfaces
+/// the exact SP+). The first fuzzy pick is kept as the fallback when no
+/// variant matches exactly. The session cookie is sent on every request so an
+/// authenticated session is served real data.
 fn resolvePart(
     allocator: std.mem.Allocator,
     part_number: []const u8,
     manufacturer: ?[]const u8,
     cookie: []const u8,
 ) std.mem.Allocator.Error!?ResolvedPart {
+    var fallback: ?ResolvedPart = null;
     for (try searchVariants(allocator, part_number)) |term| {
-        if (try suggestQuery(allocator, term, manufacturer, cookie)) |rp| return rp;
+        const got = (try suggestQuery(allocator, term, part_number, manufacturer, cookie)) orelse continue;
+        if (got.exact) return got.part;
+        if (fallback == null) fallback = got.part;
     }
-    return null;
+    return fallback;
 }
 
-/// Query the suggestion API for one term and build a `ResolvedPart` from the
+/// One variant query's pick, flagged with whether its part name exactly
+/// matched the original part number (the resolvePart early-exit signal).
+const SuggestPick = struct { part: ResolvedPart, exact: bool };
+
+/// Query the suggestion API for one `term` and build a `SuggestPick` from the
 /// chosen suggestion, or null when the request fails / has no usable result.
+/// `part_number` is the caller's ORIGINAL query — exactness is judged against
+/// it, not the (possibly relaxed) `term`.
 fn suggestQuery(
     allocator: std.mem.Allocator,
     term: []const u8,
+    part_number: []const u8,
     manufacturer: ?[]const u8,
     cookie: []const u8,
-) std.mem.Allocator.Error!?ResolvedPart {
+) std.mem.Allocator.Error!?SuggestPick {
     const enc = try percentEncode(allocator, term);
     const url = try std.fmt.allocPrint(allocator, suggestion_url_fmt, .{ host_name, enc });
     const body = httpGet(allocator, url, cookie, max_page_bytes, page_timeout_secs) orelse return null;
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return null;
     defer parsed.deinit();
-    const chosen = pickSuggestion(parsed.value, term, manufacturer) orelse return null;
+    const chosen = pickSuggestion(parsed.value, part_number, manufacturer) orelse return null;
 
     const pn = strField(chosen, field_part_name) orelse return null;
     const mfg = strField(chosen, field_manufacturer) orelse "";
@@ -326,11 +373,14 @@ fn suggestQuery(
     const samac = extractPartId(chosen);
     const ds_url = suggestionDatasheetUrl(chosen);
     return .{
-        .part_name = try allocator.dupe(u8, pn),
-        .manufacturer = try allocator.dupe(u8, mfg),
-        .detail_path = try std.fmt.allocPrint(allocator, "{s}{s}/{s}", .{ part_view_prefix, enc_name, enc_mfg }),
-        .samac_id = if (samac) |s| try allocator.dupe(u8, s) else null,
-        .datasheet_url = if (ds_url) |u| try allocator.dupe(u8, u) else null,
+        .part = .{
+            .part_name = try allocator.dupe(u8, pn),
+            .manufacturer = try allocator.dupe(u8, mfg),
+            .detail_path = try std.fmt.allocPrint(allocator, "{s}{s}/{s}", .{ part_view_prefix, enc_name, enc_mfg }),
+            .samac_id = if (samac) |s| try allocator.dupe(u8, s) else null,
+            .datasheet_url = if (ds_url) |u| try allocator.dupe(u8, u) else null,
+        },
+        .exact = std.ascii.eqlIgnoreCase(pn, part_number),
     };
 }
 
@@ -345,9 +395,11 @@ fn suggestionsArray(root: std.json.Value) ?[]std.json.Value {
     return suggestions.array.items;
 }
 
-/// Choose a suggestion from `data.suggestions`: the first whose manufacturer
-/// matches `manufacturer` (case-insensitive substring) when given, else the
-/// first. Returns the chosen `Value` (a slice into the parsed tree).
+/// Choose a suggestion from `data.suggestions`: an exact `term` match first
+/// (callers pass the ORIGINAL part number here, even when the query used a
+/// relaxed variant), then the manufacturer filter (case-insensitive
+/// substring), else the first. Returns the chosen `Value` (a slice into the
+/// parsed tree).
 fn pickSuggestion(root: std.json.Value, term: []const u8, manufacturer: ?[]const u8) ?std.json.Value {
     const items = suggestionsArray(root) orelse return null;
     // Prefer a suggestion whose part_name exactly matches the query so a search
@@ -852,6 +904,35 @@ test "collectHits maps suggestions to search hits" {
     const one = try collectHits(a, parsed.value, 1);
     defer freeHits(a, one);
     try std.testing.expectEqual(@as(usize, 1), one.len);
+}
+
+test "containsHit dedups aggregated hits by part name" {
+    // spec: serve/component_search - containsHit dedups aggregated hits by part name
+    const hits = [_]SearchHit{
+        .{ .part_name = "DAT-31A-PP+", .manufacturer = "Mini-Circuits", .samac_id = null, .datasheet_url = null },
+        .{ .part_name = "DAT-31A-SP+", .manufacturer = "Mini-Circuits", .samac_id = null, .datasheet_url = null },
+    };
+    try std.testing.expect(containsHit(&hits, "DAT-31A-SP+"));
+    try std.testing.expect(containsHit(&hits, "dat-31a-pp+"));
+    try std.testing.expect(!containsHit(&hits, "DAT-31A-PN+"));
+    try std.testing.expect(!containsHit(hits[0..0], "DAT-31A-SP+"));
+}
+
+test "hoistExact moves the exact query match to the front" {
+    // spec: serve/component_search - hoistExact moves the exact query match to the front
+    var hits = [_]SearchHit{
+        .{ .part_name = "DAT-31A-PP+", .manufacturer = "", .samac_id = null, .datasheet_url = null },
+        .{ .part_name = "DAT-31A-PN+", .manufacturer = "", .samac_id = null, .datasheet_url = null },
+        .{ .part_name = "DAT-31A-SP+", .manufacturer = "", .samac_id = null, .datasheet_url = null },
+    };
+    hoistExact(&hits, "dat-31a-sp+");
+    try std.testing.expectEqualStrings("DAT-31A-SP+", hits[0].part_name);
+    // The others keep their relative order.
+    try std.testing.expectEqualStrings("DAT-31A-PP+", hits[1].part_name);
+    try std.testing.expectEqualStrings("DAT-31A-PN+", hits[2].part_name);
+    // No exact match → order untouched.
+    hoistExact(&hits, "LMX2595");
+    try std.testing.expectEqualStrings("DAT-31A-SP+", hits[0].part_name);
 }
 
 /// Test-only: free the owned strings + backing slice of a `SearchHit` list.

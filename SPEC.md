@@ -975,6 +975,8 @@ Public functions: downloadFootprint, errorMessage, searchComponents, searchError
 - collectCookies folds Set-Cookie into a cookie jar
 - headerValue extracts a response header value
 - mergeCookies overlays a session onto the mint jar
+- containsHit dedups aggregated hits by part name
+- hoistExact moves the exact query match to the front
 
 ## serve/digikey
 
