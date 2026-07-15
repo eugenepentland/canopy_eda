@@ -3,14 +3,13 @@ spec_file = "SPEC.md"
 # Baseline mode: every check records its current violations into
 # .guardian/baselines/<check>.txt on the first build and only fails
 # when NEW violations are introduced. This lets us turn on Guardian's
-# full ~50-check suite without a wall of pre-existing failures.
+# full 67-check suite without a wall of pre-existing failures.
 #
 # Workflow:
 #   - First build:    baselines are written, all checks pass.
-#   - Later builds:   new violations fail; resolved violations print
-#                     "M resolved — re-run with GUARDIAN_UPDATE_SNAPSHOT=1
-#                     to prune".
-#   - Refresh:        GUARDIAN_UPDATE_SNAPSHOT=1 zig build && git add .guardian/
+#   - Later builds:   new violations fail; resolved violations auto-prune.
+#   - Reviewed drift: zig build guardian-accept -Dguardian-checks=<check>
+#                     then inspect and commit the .guardian/ diff.
 #
 # Baseline files are plain text and sorted, designed to diff cleanly
 # in code review.
@@ -18,6 +17,21 @@ spec_file = "SPEC.md"
 enabled = true
 # A refresh may never grow the spec baseline (fix the debt, or remove "spec" to override).
 deny_growth = ["spec", "completeness"]
+
+# The local Zig cache is intentionally large for this dependency-heavy design;
+# keep doctor advisory below 8 GiB while retaining the tighter Guardian-owned
+# cache threshold. Set either value to zero to disable that warning class.
+[doctor]
+zig_cache_warn_mib = 8192
+guardian_cache_warn_mib = 1024
+
+# Guardian otherwise scans only Zig/spec/config inputs. Run the browser PCB
+# editor through Node's parser on every real input change and declare that file
+# to the green-run digest so an unchanged Zig tree cannot hide broken JS.
+[[external]]
+name = "pcb-board-js-syntax"
+command = ["node", "--check", "src/serve/assets/pcb_board.js"]
+inputs = ["src/serve/assets/pcb_board.js"]
 
 # Completeness checklist (opt-in). Every SPEC.md `## ` feature section must
 # ADDRESS or explicitly WAIVE all 8 scenario categories (empty inputs, large
