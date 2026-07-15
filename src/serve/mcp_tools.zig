@@ -29,6 +29,8 @@ const component_info = @import("component_info.zig");
 const notes = @import("notes.zig");
 const symbol_conv = @import("../convert/symbol.zig");
 const mcp_parts_tools = @import("mcp_parts_tools.zig");
+const mcp_notes_tools = @import("mcp_notes_tools.zig");
+const mcp_import_tools = @import("mcp_import_tools.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const pcb_describe = @import("pcb_describe.zig");
 const mcp_read_opts = @import("mcp_read_opts.zig");
@@ -122,6 +124,10 @@ const tools = [_]ToolEntry{
     .{ .name = "build", .is_mutation = true },
     // KiCad-source-driven regeneration of an auto-generated pinout file.
     .{ .name = "regenerate_pinout", .is_mutation = true },
+    // KiCad board importer over MCP: parse a .kicad_pcb into a netlist preview
+    // (read-only), or run the full import that writes lib/ + src/ files.
+    .{ .name = "parse_kicad_netlist", .is_mutation = false },
+    .{ .name = "import_kicad", .is_mutation = true },
     // Fetch a part's ECAD model ZIP from Component Search Engine and import
     // it into the library (component + footprint + pinout + 3D model).
     .{ .name = "download_footprint", .is_mutation = true },
@@ -223,8 +229,9 @@ fn callInner(
     if (try dispatchParts(allocator, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchLanguage(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchReview(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
-    if (try dispatchNotes(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
-    if (try dispatchRequirements(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
+    if (try mcp_notes_tools.dispatchNotes(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
+    if (try mcp_notes_tools.dispatchRequirements(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
+    if (try dispatchImport(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
 
     const w = out.writer(allocator);
     try w.print("error: unknown tool \"{s}\"", .{tool_name});
@@ -337,152 +344,20 @@ fn dispatchReview(
     return null;
 }
 
-/// Per-design TODO notes — sidecar markdown file edited via structured
-/// tools so the agent can record follow-ups and stamp completion dates.
-fn dispatchNotes(
+/// KiCad board importer tools: `parse_kicad_netlist` (read-only netlist preview
+/// off a `.kicad_pcb` path) and `import_kicad` (the full importer that writes
+/// lib/ + src/ files). Handlers live in `mcp_import_tools.zig`. Returns null
+/// when the tool name matches neither.
+fn dispatchImport(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     tool_name: []const u8,
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) !?bool {
-    if (std.mem.eql(u8, tool_name, "list_design_notes")) return try toolListDesignNotes(allocator, project_dir, args_val, out);
-    if (std.mem.eql(u8, tool_name, "add_design_note")) return try toolAddDesignNote(allocator, project_dir, args_val, out);
-    if (std.mem.eql(u8, tool_name, "complete_design_note")) return try toolMutateDesignNote(allocator, project_dir, args_val, out, notes.TaskMutation.complete);
-    if (std.mem.eql(u8, tool_name, "reopen_design_note")) return try toolMutateDesignNote(allocator, project_dir, args_val, out, notes.TaskMutation.reopen);
-    if (std.mem.eql(u8, tool_name, "remove_design_note")) return try toolMutateDesignNote(allocator, project_dir, args_val, out, notes.TaskMutation.remove);
+    if (std.mem.eql(u8, tool_name, "parse_kicad_netlist")) return try mcp_import_tools.toolParseKicadNetlist(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "import_kicad")) return try mcp_import_tools.toolImportKicad(allocator, project_dir, args_val, out);
     return null;
-}
-
-/// Library component `(requirement ...)` editing — list/add/remove the
-/// datasheet-derived rules attached to a part. Backed by `component_info`,
-/// which splices the component `.sexp` source directly to preserve formatting.
-fn dispatchRequirements(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    tool_name: []const u8,
-    args_val: ?std.json.Value,
-    out: *std.ArrayList(u8),
-) !?bool {
-    if (std.mem.eql(u8, tool_name, "list_component_requirements")) return try toolListComponentRequirements(allocator, project_dir, args_val, out);
-    if (std.mem.eql(u8, tool_name, "add_component_requirement")) return try toolAddComponentRequirement(allocator, project_dir, args_val, out);
-    if (std.mem.eql(u8, tool_name, "remove_component_requirement")) return try toolRemoveComponentRequirement(allocator, project_dir, args_val, out);
-    return null;
-}
-
-fn toolListComponentRequirements(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    return component_info.listRequirements(allocator, project_dir, name, out);
-}
-
-fn toolAddComponentRequirement(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const text = requireString(args_val, "text") orelse return missingArg(out, allocator, "text");
-    const ref_page: ?u32 = if (optionalU64(args_val, "ref_page")) |p| @intCast(p) else null;
-    return component_info.addRequirement(
-        allocator,
-        project_dir,
-        name,
-        text,
-        optionalString(args_val, "ref_pdf"),
-        ref_page,
-        optionalString(args_val, "ref_quote"),
-        optionalString(args_val, "check"),
-        out,
-    );
-}
-
-fn toolRemoveComponentRequirement(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    return component_info.removeRequirement(
-        allocator,
-        project_dir,
-        name,
-        optionalString(args_val, "id"),
-        optionalString(args_val, "text"),
-        out,
-    );
-}
-
-fn toolListDesignNotes(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    var raw: ?[]u8 = null;
-    const parsed = notes.loadNotes(allocator, project_dir, name, &raw) catch |e| {
-        const w = out.writer(allocator);
-        try w.print("error: cannot read notes: {s}", .{@errorName(e)});
-        return false;
-    };
-    defer if (raw) |d| allocator.free(d);
-    const w = out.writer(allocator);
-    try w.writeAll("{\"tasks\":[");
-    for (parsed.tasks, 0..) |t, i| {
-        if (i > 0) try w.writeAll(",");
-        try writeNoteJsonMcp(w, t);
-    }
-    try w.writeAll("],\"scratchpad\":");
-    try json_writer.writeString(w, parsed.scratchpad);
-    try w.writeAll("}");
-    return true;
-}
-
-fn toolAddDesignNote(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const text = requireString(args_val, "text") orelse return missingArg(out, allocator, "text");
-    if (text.len == 0) {
-        const w = out.writer(allocator);
-        try w.writeAll("error: text must be a non-empty string");
-        return false;
-    }
-    const new_task = notes.addTaskCore(allocator, project_dir, name, text) catch |e| {
-        const w = out.writer(allocator);
-        try w.print("error: add failed: {s}", .{@errorName(e)});
-        return false;
-    };
-    const w = out.writer(allocator);
-    try w.writeAll("{\"ok\":true,\"task\":");
-    try writeNoteJsonMcp(w, new_task);
-    try w.writeAll("}");
-    return true;
-}
-
-fn toolMutateDesignNote(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    args_val: ?std.json.Value,
-    out: *std.ArrayList(u8),
-    mode: notes.TaskMutation,
-) !bool {
-    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const id = requireString(args_val, "id") orelse return missingArg(out, allocator, "id");
-    const result = notes.mutateTaskCore(allocator, project_dir, name, id, mode) catch |e| {
-        const w = out.writer(allocator);
-        try w.print("error: mutate failed: {s}", .{@errorName(e)});
-        return false;
-    };
-    if (result == null) {
-        const w = out.writer(allocator);
-        try w.print("error: task id \"{s}\" not found", .{id});
-        return false;
-    }
-    const w = out.writer(allocator);
-    try w.writeAll("{\"ok\":true}");
-    return true;
-}
-
-fn writeNoteJsonMcp(w: anytype, t: notes.Note) !void {
-    try w.writeAll("{\"id\":");
-    try json_writer.writeString(w, t.id);
-    try w.writeAll(",\"text\":");
-    try json_writer.writeString(w, t.text);
-    try w.writeAll(",\"created\":");
-    try json_writer.writeString(w, t.created);
-    if (t.completed) |c| {
-        try w.writeAll(",\"completed\":");
-        try json_writer.writeString(w, c);
-    } else {
-        try w.writeAll(",\"completed\":null");
-    }
-    try w.writeAll("}");
 }
 
 fn toolListDesigns(allocator: std.mem.Allocator, project_dir: []const u8, w: anytype) !bool {
@@ -1701,7 +1576,9 @@ pub fn optionalU64(args_val: ?std.json.Value, key: []const u8) ?u64 {
     return null;
 }
 
-fn optionalBool(args_val: ?std.json.Value, key: []const u8) ?bool {
+/// An optional boolean tool argument, null when absent or not a bool. Shared
+/// with `mcp_import_tools`.
+pub fn optionalBool(args_val: ?std.json.Value, key: []const u8) ?bool {
     const av = args_val orelse return null;
     if (av != .object) return null;
     const v = av.object.get(key) orelse return null;

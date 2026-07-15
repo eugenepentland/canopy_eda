@@ -516,9 +516,9 @@ fn writeJsonError(allocator: std.mem.Allocator, out: *std.ArrayList(u8), msg: []
 // hand-authored formatting and comments in the component file survive.
 
 /// Error set for the requirement editors. Superset of the read-only
-/// `DescribeError` plus the file-write errors the mutators incur. Kept
-/// unexported — callers (mcp_tools) only ever propagate it via `!bool`.
-const ReqError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+/// `DescribeError` plus the file-write errors the mutators incur. Exported so
+/// the requirement-tool dispatcher (`mcp_notes_tools`) can name it explicitly.
+pub const ReqError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     std.fs.File.OpenError || std.fs.File.ReadError || std.fs.File.WriteError ||
     std.fs.Dir.StatFileError || error{ FileTooBig, StreamTooLong };
 

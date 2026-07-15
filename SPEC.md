@@ -1018,7 +1018,7 @@ Public functions: read
 
 ## serve/mcp_tools
 
-Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesignSummaries, renderSceneGraph, requireString, optionalString, optionalU64, missingArg
+Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesignSummaries, renderSceneGraph, requireString, optionalString, optionalU64, optionalBool, missingArg
 
 - fuzzyScore returns 0 when the needle does not match the haystack as a substring or subsequence
 - fuzzyScore ranks a contiguous substring hit above a scattered subsequence hit
@@ -1033,6 +1033,9 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 - flatten makes list_free_pins match a flattened child by name and read merged assignments
 - flatten merges a sub-block stitch written against a port name whose module net differs
 - finishDatasheet returns false when the store rejects the bytes
+- parse_kicad_netlist returns components, pads, and a connected-net count
+- parse_kicad_netlist rejects a board_path that does not end in .kicad_pcb
+- import_kicad with dry_run reports importer counts without writing files
 
 ## config
 
