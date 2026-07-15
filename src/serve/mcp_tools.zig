@@ -31,6 +31,7 @@ const symbol_conv = @import("../convert/symbol.zig");
 const mcp_parts_tools = @import("mcp_parts_tools.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const pcb_describe = @import("pcb_describe.zig");
+const mcp_read_opts = @import("mcp_read_opts.zig");
 const layout_match = @import("layout_match.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
 const docgen = @import("../docgen.zig");
@@ -776,13 +777,7 @@ fn writeModuleSummary(
 /// always describe the board the image shows.
 fn toolDescribePcbLayout(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const opts = pcb_layout_page.PngRequest{
-        .route = optionalBool(args_val, "route") orelse false,
-        .layout = optionalString(args_val, "layout"),
-        .regen = optionalBool(args_val, "regen") orelse false,
-        .rough = optionalBool(args_val, "rough") orelse true,
-        .sub = optionalString(args_val, "sub"),
-    };
+    const opts = mcp_read_opts.describePcbOpts(args_val);
     const body = pcb_describe.describeDesign(allocator, project_dir, name, opts) catch |e| {
         try out.writer(allocator).print("error describing pcb layout: {s}", .{@errorName(e)});
         return false;
@@ -829,7 +824,9 @@ fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_v
         .crop = optionalString(args_val, "crop"),
         .sheet = optionalBool(args_val, "sheet") orelse false,
         .critique = optionalBool(args_val, "critique") orelse false,
-        .rough = optionalBool(args_val, "rough") orelse true,
+        // rough OFF by default — see describePcbOpts: a no-arg image renders the
+        // starred (★) layout verbatim, not a cache re-solve that drifts.
+        .rough = optionalBool(args_val, "rough") orelse false,
     };
     if (optionalU64(args_val, "width")) |w| opts.width = @intCast(@min(w, @as(u64, 4000)));
     if (optionalU64(args_val, "r")) |r| opts.crop_r = @floatFromInt(r);

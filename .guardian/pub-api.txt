@@ -1078,6 +1078,7 @@ src/serve/mcp_parts_tools.zig::toolDownloadFootprint | fn toolDownloadFootprint(
 src/serve/mcp_parts_tools.zig::toolReadDatasheet | fn toolReadDatasheet( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/mcp_parts_tools.zig::toolResolveMpn | fn toolResolveMpn( allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/mcp_parts_tools.zig::toolSearchComponents | fn toolSearchComponents( allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
+src/serve/mcp_read_opts.zig::describePcbOpts | fn describePcbOpts(args_val: ?std.json.Value) pcb_layout_page.PngRequest
 src/serve/mcp_tools.zig::CallResult struct_
 src/serve/mcp_tools.zig::DesignSummary struct_
 src/serve/mcp_tools.zig::FreePinOpts struct_
