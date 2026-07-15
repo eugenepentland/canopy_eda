@@ -1028,6 +1028,10 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 - list_library with a query returns only fuzzily-matching entries ranked best-first
 - list_library without a query (or a blank one) lists every entry
 - The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
+- flatten makes list_instances include sub-block children with prefixed refs and origins
+- list_instances counts pins from the component pinout when the part declares no symbol
+- flatten makes get_net return the merged rail and resolve a sub-scoped net spelling
+- flatten makes list_free_pins match a flattened child by name and read merged assignments
 
 ## config
 
