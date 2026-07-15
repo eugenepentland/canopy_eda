@@ -906,6 +906,8 @@ Public functions: describeComponent, listRequirements, addRequirement, removeReq
 - kebab-cases every Check variant tag
 - findSourceComment finds the source-of-truth path
 - parsePinoutBody normalises pin ID shapes
+- describeComponent resolves the pinout via the symbol ref and reports it
+- describeComponent attaches the electrical type to each matching pin
 - listRequirements returns each requirement with its derived id
 - addRequirement appends a requirement form before the component close
 - addRequirement rejects a check clause the checker does not recognize
