@@ -310,7 +310,7 @@ pub templ DesignCard(s: DesignSummary, search: []const u8, has_starred: bool, no
         }
         <div class="design-card-links">
             <a class="design-card-link" href="{schematic_prefix}{s.name}">Schematic</a>
-            <a class="design-card-link" href="/editor/{s.name}">Editor</a>
+            <a class="design-card-link" href="/pcb-layout/{s.name}">PCB layout</a>
         </div>
     </div>
 }
@@ -345,7 +345,6 @@ pub templ ModuleCard(m: ModuleHomeEntry, search: []const u8) {
         <div class="design-card-links">
             <a class="design-card-link" href="{schematic_prefix}{m.name}">Schematic</a>
             <a class="design-card-link" href="/pcb-layout/{m.name}">PCB layout</a>
-            <a class="design-card-link" href="/editor/{m.name}">Editor</a>
         </div>
     </div>
 }
