@@ -579,3 +579,14 @@ test "linkCseDatasheet splices the downloaded datasheet into the component" {
     // A failed footprint download links nothing.
     try std.testing.expect(!linkCseDatasheet(aa, proj, "{\"ok\":false}", "{\"ok\":true,\"file\":\"foo.pdf\"}"));
 }
+
+// spec: Web Server - Library previews edit footprint courtyards with PCB-style controls
+test "library footprint preview exposes courtyard editing controls" {
+    const library_js = @embedFile("assets/library.js");
+    const modal_html = @embedFile("assets/library_courtyard.html");
+    try std.testing.expect(std.mem.indexOf(u8, library_js, "/api/library-courtyard/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, library_js, "data-cedge") != null);
+    try std.testing.expect(std.mem.indexOf(u8, library_js, "Edit courtyard") != null);
+    try std.testing.expect(std.mem.indexOf(u8, modal_html, "id=\"lib-court-modal\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, modal_html, "value=\"offset\"") != null);
+}

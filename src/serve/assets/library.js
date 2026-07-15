@@ -56,6 +56,133 @@
   function formatMm(value){
     return Number(value).toFixed(3).replace(/\.0+$/,'').replace(/(\.\d*?)0+$/,'$1');
   }
+  var courtState=null;
+  var COURT_EDGE_IDS=['lib-court-x0','lib-court-y0','lib-court-x1','lib-court-y1'];
+  function cn3(value){return Number(value).toFixed(3);}
+  function padBBox(data){
+    if(!data.pads||!data.pads.length)return null;
+    var x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+    data.pads.forEach(function(p){
+      x0=Math.min(x0,p.x-p.w/2);x1=Math.max(x1,p.x+p.w/2);
+      y0=Math.min(y0,p.y-p.h/2);y1=Math.max(y1,p.y+p.h/2);
+    });
+    return {x0:x0,y0:y0,x1:x1,y1:y1};
+  }
+  function rawCourtyardBBox(data){
+    var ct=data.courtyard||{},x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+    (ct.rects||[]).forEach(function(r){
+      x0=Math.min(x0,r[0],r[2]);x1=Math.max(x1,r[0],r[2]);
+      y0=Math.min(y0,r[1],r[3]);y1=Math.max(y1,r[1],r[3]);
+    });
+    (ct.circles||[]).forEach(function(c){
+      x0=Math.min(x0,c[0]-c[2]);x1=Math.max(x1,c[0]+c[2]);
+      y0=Math.min(y0,c[1]-c[2]);y1=Math.max(y1,c[1]+c[2]);
+    });
+    return Number.isFinite(x0)?{x0:x0,y0:y0,x1:x1,y1:y1}:null;
+  }
+  function initialCourtBox(data,margin){
+    var ct=rawCourtyardBBox(data);
+    if(ct)return {x0:ct.x0-margin,y0:ct.y0-margin,x1:ct.x1+margin,y1:ct.y1+margin};
+    var pb=padBBox(data);
+    if(pb){
+      var hw=Math.max(Math.abs(pb.x0),Math.abs(pb.x1))+margin;
+      var hh=Math.max(Math.abs(pb.y0),Math.abs(pb.y1))+margin;
+      return {x0:-hw,y0:-hh,x1:hw,y1:hh};
+    }
+    var b=data.bounds||{x:-1,y:-1,w:2,h:2};
+    return {x0:b.x-margin,y0:b.y-margin,x1:b.x+b.w+margin,y1:b.y+b.h+margin};
+  }
+  function gceil(value){var g=courtState.grid;return Math.ceil(value/g-1e-9)*g;}
+  function gfloor(value){var g=courtState.grid;return Math.floor(value/g+1e-9)*g;}
+  function courtClampX0(value){var c=courtState,lim=c.pb?gfloor(c.pb.x0-c.margin):c.box.x1-c.grid;
+    return Math.min(Math.round(value/c.grid)*c.grid,Math.min(lim,c.box.x1-c.grid));}
+  function courtClampX1(value){var c=courtState,lim=c.pb?gceil(c.pb.x1+c.margin):c.box.x0+c.grid;
+    return Math.max(Math.round(value/c.grid)*c.grid,Math.max(lim,c.box.x0+c.grid));}
+  function courtClampY0(value){var c=courtState,lim=c.pb?gfloor(c.pb.y0-c.margin):c.box.y1-c.grid;
+    return Math.min(Math.round(value/c.grid)*c.grid,Math.min(lim,c.box.y1-c.grid));}
+  function courtClampY1(value){var c=courtState,lim=c.pb?gceil(c.pb.y1+c.margin):c.box.y0+c.grid;
+    return Math.max(Math.round(value/c.grid)*c.grid,Math.max(lim,c.box.y0+c.grid));}
+  function courtBox(){var c=courtState;
+    if(c.mode==='offset'&&c.pb)return {
+      x0:gfloor(c.pb.x0-c.offset),y0:gfloor(c.pb.y0-c.offset),
+      x1:gceil(c.pb.x1+c.offset),y1:gceil(c.pb.y1+c.offset)
+    };
+    return {x0:c.box.x0,y0:c.box.y0,x1:c.box.x1,y1:c.box.y1};
+  }
+  function courtHandles(svg,box,view){
+    var t=Math.max(view.w,view.h)/13,w=box.x1-box.x0,h=box.y1-box.y0;
+    function strip(x,y,sw,sh,cursor,edge){
+      var el=FP.el('rect',{x:cn3(x),y:cn3(y),width:cn3(Math.max(sw,0.01)),height:cn3(Math.max(sh,0.01)),
+        fill:'none','pointer-events':'all','data-cedge':edge});
+      el.style.cursor=cursor;svg.appendChild(el);
+    }
+    strip(box.x1-t/2,box.y0+t/2,t,h-t,'ew-resize','e');
+    strip(box.x0-t/2,box.y0+t/2,t,h-t,'ew-resize','w');
+    strip(box.x0+t/2,box.y1-t/2,w-t,t,'ns-resize','s');
+    strip(box.x0+t/2,box.y0-t/2,w-t,t,'ns-resize','n');
+    strip(box.x1-t/2,box.y1-t/2,t,t,'nwse-resize','se');
+    strip(box.x0-t/2,box.y0-t/2,t,t,'nwse-resize','nw');
+    strip(box.x1-t/2,box.y0-t/2,t,t,'nesw-resize','ne');
+    strip(box.x0-t/2,box.y1-t/2,t,t,'nesw-resize','sw');
+    var cx=(box.x0+box.x1)/2,cy=(box.y0+box.y1)/2;
+    [[box.x1,box.y1],[box.x1,box.y0],[box.x0,box.y1],[box.x0,box.y0],
+      [box.x1,cy],[box.x0,cy],[cx,box.y1],[cx,box.y0]].forEach(function(p){
+      svg.appendChild(FP.el('rect',{x:cn3(p[0]-t/6),y:cn3(p[1]-t/6),width:cn3(t/3),height:cn3(t/3),
+        fill:'#58a6ff','pointer-events':'none'}));
+    });
+  }
+  function courtDraw(box){
+    var c=courtState,data=c.data,svg=document.getElementById('lib-court-svg');
+    var x0=box.x0,y0=box.y0,x1=box.x1,y1=box.y1;
+    if(data.bbox){x0=Math.min(x0,data.bbox.x);y0=Math.min(y0,data.bbox.y);
+      x1=Math.max(x1,data.bbox.x+data.bbox.w);y1=Math.max(y1,data.bbox.y+data.bbox.h);}
+    var pad=Math.max(x1-x0,y1-y0)*0.09+0.3;
+    var view=c.view||{x:x0-pad,y:y0-pad,w:x1-x0+2*pad,h:y1-y0+2*pad};
+    FP.drawFootprint(svg,{bbox:view,pads:data.pads||[],silk:data.silk,fab:data.fab,courtyard:{}},{bg:false});
+    svg.appendChild(FP.el('rect',{x:cn3(box.x0),y:cn3(box.y0),width:cn3(box.x1-box.x0),height:cn3(box.y1-box.y0),
+      fill:'none',stroke:'#58a6ff','stroke-width':0.06,'stroke-dasharray':'0.25 0.15'}));
+    var tick=Math.max(view.w,view.h)/40;
+    svg.appendChild(FP.el('line',{x1:cn3(-tick),y1:0,x2:cn3(tick),y2:0,stroke:'#6e7681','stroke-width':0.04}));
+    svg.appendChild(FP.el('line',{x1:0,y1:cn3(-tick),x2:0,y2:cn3(tick),stroke:'#6e7681','stroke-width':0.04}));
+    courtHandles(svg,box,view);
+  }
+  function courtSyncInputs(){
+    if(!courtState)return;
+    var values=[courtState.box.x0,courtState.box.y0,courtState.box.x1,courtState.box.y1];
+    COURT_EDGE_IDS.forEach(function(id,index){document.getElementById(id).value=values[index].toFixed(2);});
+  }
+  function courtRefresh(){
+    if(!courtState)return;
+    var b=courtBox(),cx=(b.x0+b.x1)/2,cy=(b.y0+b.y1)/2;
+    courtDraw(b);
+    document.getElementById('lib-court-full').textContent='full '+(b.x1-b.x0).toFixed(2)+' × '+
+      (b.y1-b.y0).toFixed(2)+' mm · centre ('+cx.toFixed(2)+', '+cy.toFixed(2)+')';
+  }
+  function courtSetMode(mode){
+    if(!courtState)return;
+    courtState.mode=mode;
+    document.getElementById('lib-court-fields-size').hidden=mode!=='size';
+    document.getElementById('lib-court-fields-offset').hidden=mode!=='offset';
+    courtRefresh();
+  }
+  function openCourt(fp,data,preview){
+    var editor=data.editor||{},margin=Number(editor.margin)||0.15,grid=Number(editor.grid)||0.1;
+    courtState={fp:fp,data:data,preview:preview,margin:margin,grid:grid,mode:'size',offset:margin,
+      pb:padBBox(data),box:initialCourtBox(data,margin),view:null};
+    document.getElementById('lib-court-title').textContent=fp;
+    document.getElementById('lib-court-msg').textContent='';
+    document.getElementById('lib-court-off').value=margin.toFixed(2);
+    document.getElementById('lib-court-save').disabled=false;
+    document.querySelectorAll('input[name=lib-court-mode]').forEach(function(radio){
+      radio.checked=radio.value==='size';radio.disabled=radio.value==='offset'&&!courtState.pb;
+    });
+    document.getElementById('lib-court-note').textContent='Drag any edge or corner; edges move independently, snap to the '+
+      grid.toFixed(2)+' mm grid, and cannot cut inside the pads. Saving writes a rectangular courtyard to '+
+      'lib/footprints/'+fp+'.sexp and affects every component that uses it.';
+    courtSyncInputs();courtSetMode('size');
+    document.getElementById('lib-court-modal').hidden=false;
+  }
+  function closeCourt(){document.getElementById('lib-court-modal').hidden=true;courtState=null;}
   function loadFootprint(box,fp){
     if(box.dataset.loaded==='1')return;
     box.dataset.loaded='1';
@@ -76,6 +203,10 @@
         size.textContent='Bounding box: X '+formatMm(b.w)+' mm × Y '+formatMm(b.h)+' mm';
         box.appendChild(size);
       }
+      var edit=document.createElement('button');
+      edit.type='button';edit.className='fp-court-edit';edit.textContent='Edit courtyard';
+      edit.addEventListener('click',function(e){e.stopPropagation();openCourt(fp,data,box);});
+      box.appendChild(edit);
       box.appendChild(s);
     }).catch(function(){
       box.innerHTML='<span class="fp-empty">No footprint preview available.</span>';
@@ -93,6 +224,82 @@
       tag.classList.toggle('fp-toggle-open',open);
       if(open)loadFootprint(box,fp);
     });
+  });
+
+  document.getElementById('lib-court-x').addEventListener('click',closeCourt);
+  document.getElementById('lib-court-cancel').addEventListener('click',closeCourt);
+  document.getElementById('lib-court-modal').addEventListener('click',function(e){if(e.target===this)closeCourt();});
+  document.querySelectorAll('input[name=lib-court-mode]').forEach(function(radio){
+    radio.addEventListener('change',function(){if(radio.checked)courtSetMode(radio.value);});
+  });
+  COURT_EDGE_IDS.forEach(function(id,index){
+    document.getElementById(id).addEventListener('change',function(){
+      if(!courtState)return;
+      var value=parseFloat(this.value);
+      if(Number.isNaN(value)){courtSyncInputs();return;}
+      if(index===0)courtState.box.x0=courtClampX0(value);
+      else if(index===1)courtState.box.y0=courtClampY0(value);
+      else if(index===2)courtState.box.x1=courtClampX1(value);
+      else courtState.box.y1=courtClampY1(value);
+      courtSyncInputs();courtRefresh();
+    });
+  });
+  document.getElementById('lib-court-off').addEventListener('change',function(){
+    if(!courtState)return;
+    var value=parseFloat(this.value);
+    if(!(value>=0))value=0;
+    value=Math.round(value/0.05)*0.05;courtState.offset=value;this.value=value.toFixed(2);courtRefresh();
+  });
+  (function(){
+    var svg=document.getElementById('lib-court-svg'),drag=null;
+    function pointerMm(e){
+      var rect=svg.getBoundingClientRect(),view=svg.viewBox.baseVal;
+      if(!view||!view.width||!rect.width)return null;
+      var scale=Math.min(rect.width/view.width,rect.height/view.height);
+      var ox=(rect.width-view.width*scale)/2,oy=(rect.height-view.height*scale)/2;
+      return {x:view.x+(e.clientX-rect.left-ox)/scale,y:view.y+(e.clientY-rect.top-oy)/scale};
+    }
+    svg.addEventListener('pointerdown',function(e){
+      var edge=e.target&&e.target.getAttribute&&e.target.getAttribute('data-cedge');
+      if(!edge||!courtState)return;
+      e.preventDefault();
+      if(courtState.mode!=='size'){
+        courtState.box=courtBox();
+        document.querySelectorAll('input[name=lib-court-mode]').forEach(function(r){r.checked=r.value==='size';});
+        courtSetMode('size');courtSyncInputs();
+      }
+      var view=svg.viewBox.baseVal;
+      courtState.view={x:view.x,y:view.y,w:view.width,h:view.height};drag={edge:edge};
+      try{svg.setPointerCapture(e.pointerId);}catch(ignore){}
+    });
+    svg.addEventListener('pointermove',function(e){
+      if(!drag||!courtState)return;
+      var p=pointerMm(e);if(!p)return;
+      if(drag.edge.indexOf('e')>=0)courtState.box.x1=courtClampX1(p.x);
+      if(drag.edge.indexOf('w')>=0)courtState.box.x0=courtClampX0(p.x);
+      if(drag.edge.indexOf('n')>=0)courtState.box.y0=courtClampY0(p.y);
+      if(drag.edge.indexOf('s')>=0)courtState.box.y1=courtClampY1(p.y);
+      courtSyncInputs();courtRefresh();
+    });
+    function endDrag(){if(!drag)return;drag=null;if(courtState){courtState.view=null;courtRefresh();}}
+    svg.addEventListener('pointerup',endDrag);svg.addEventListener('pointercancel',endDrag);
+  })();
+  document.getElementById('lib-court-save').addEventListener('click',function(){
+    if(!courtState)return;
+    var state=courtState,box=courtBox(),button=this,msg=document.getElementById('lib-court-msg');
+    var body=state.mode==='offset'?{fp:state.fp,mode:'offset',offset:state.offset}:
+      {fp:state.fp,mode:'rect',x0:box.x0,y0:box.y0,x1:box.x1,y1:box.y1};
+    button.disabled=true;msg.style.color='#8b949e';msg.textContent='saving…';
+    fetch('/api/library-courtyard/'+encodeURIComponent(state.fp),{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+      .then(function(response){if(!response.ok)throw new Error('save failed');return response.json();})
+      .then(function(){
+        msg.style.color='#3fb950';msg.textContent='saved ✓';
+        state.preview.dataset.loaded='';loadFootprint(state.preview,state.fp);
+        if(typeof showToast==='function')showToast('ok','Courtyard saved for '+state.fp,3500);
+        setTimeout(closeCourt,450);
+      })
+      .catch(function(){button.disabled=false;msg.style.color='#f85149';msg.textContent='save failed';});
   });
 })();
 var symData=null,fpData=null,stepData=null,symFilename='',fpFilename='',stepFilename='';

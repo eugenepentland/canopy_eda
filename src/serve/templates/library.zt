@@ -13,6 +13,7 @@ const style_block: []const u8 = "<style>" ++
     "</style>";
 
 const upload_block: []const u8 = @embedFile("../assets/library_upload.html");
+const courtyard_modal_block: []const u8 = @embedFile("../assets/library_courtyard.html");
 
 pub templ Library(rows: []const LibraryRow) {
     <!DOCTYPE html>
@@ -42,6 +43,7 @@ pub templ Library(rows: []const LibraryRow) {
                 </div>
                 <datalist id="lib-ds-options"></datalist>
             </div>
+            {!courtyard_modal_block}
             <script src="/static/footprint_svg.js"></script>
             <script src="/static/library.js"></script>
         </body>

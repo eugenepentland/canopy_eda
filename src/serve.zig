@@ -390,6 +390,7 @@ fn registerPcbRoutes(router: anytype) void {
     router.post("/api/pcb-regen-start/:name", pcb_layout_page.pcbRegenStartApi, .{});
     router.get("/api/pcb-progress/:name", pcb_layout_page.pcbProgressApi, .{});
     router.post("/api/courtyard/:name", pcb_layout_page.savePcbCourtyardApi, .{});
+    router.post("/api/library-courtyard/:name", pcb_layout_page.savePcbCourtyardApi, .{});
 }
 
 /// Start the HTTP server: configure auth/rate limits, register every route

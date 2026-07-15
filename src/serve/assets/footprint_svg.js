@@ -8,7 +8,7 @@
  * follows.
  *
  * Data shape (from GET /api/footprint/:name):
- *   { bbox:{x,y,w,h}, bounds:{x,y,w,h},
+ *   { bbox:{x,y,w,h}, bounds:{x,y,w,h}, editor:{grid,margin},
  *     pads:[{id,x,y,w,h,shape,poly?,drill?,npth?}],
  *     silk:{lines:[[x1,y1,x2,y2]…],circles:[[cx,cy,r]…],rects:[[x0,y0,x1,y1]…],polys:[[[x,y]…]…]},
  *     fab:{ …same… },
