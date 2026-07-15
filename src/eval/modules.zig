@@ -9,6 +9,7 @@ const infra_fs = @import("../infra/fs.zig");
 const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
+const check_grammar = @import("check_grammar.zig");
 const electrical_mod = @import("electrical.zig");
 const design_block_mod = @import("design_block.zig");
 const special_forms = @import("special_forms.zig");
@@ -274,7 +275,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             for (cl[2..]) |extra| {
                 if (env_mod.parseNoteRef(extra)) |r| {
                     ref = r;
-                } else if (env_mod.parseCheck(self.allocator, extra)) |c| {
+                } else if (check_grammar.parseCheck(self.allocator, extra)) |c| {
                     chk = c;
                 } else if (extra.asList()) |sub| {
                     if (sub.len >= 2) {

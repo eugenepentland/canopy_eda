@@ -371,6 +371,7 @@ test {
     _ = @import("sexpr/parser.zig");
     _ = @import("sexpr/printer.zig");
     _ = @import("eval/env.zig");
+    _ = @import("eval/check_grammar.zig");
     _ = @import("eval/instance.zig");
     _ = @import("eval/builders.zig");
     _ = @import("eval/forms.zig");

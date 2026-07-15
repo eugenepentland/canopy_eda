@@ -176,6 +176,10 @@ src/eval/builders.zig::processPinForm | fn processPinForm( self: *Evaluator, pin
 src/eval/builders.zig::warnUnknownPinsChild | fn warnUnknownPinsChild(self: *Evaluator, node: Node) void
 src/eval/builtins.zig::BuiltinError value
 src/eval/builtins.zig::evalBuiltinOp | fn evalBuiltinOp(op: Builtin, args: []const Value) BuiltinError!Value
+src/eval/check_grammar.zig::CheckDoc struct_
+src/eval/check_grammar.zig::check_docs value
+src/eval/check_grammar.zig::check_keyword_list value
+src/eval/check_grammar.zig::parseCheck | fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check
 src/eval/design_block.zig::evalDesignBlock | fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/design_block.zig::materializeBlock | fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const Node, env: *Env) EvalError!Value
 src/eval/electrical.zig::parse | fn parse(form_children: []const Node) ?ElectricalDecl
@@ -264,7 +268,6 @@ src/eval/env.zig::init | fn init(allocator: std.mem.Allocator, parent: ?*Env) En
 src/eval/env.zig::isPowerSource | fn isPowerSource(self: Port) bool
 src/eval/env.zig::isTestPoint | fn isTestPoint(component: []const u8) bool
 src/eval/env.zig::isTruthy | fn isTruthy(self: Value) bool
-src/eval/env.zig::parseCheck | fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check
 src/eval/env.zig::parseNoteRef | fn parseNoteRef(node: ast.Node) ?NoteRef
 src/eval/env.zig::put | fn put(self: *Env, name: []const u8, value: Value) !void
 src/eval/env.zig::refStyle | fn refStyle(self: DesignBlock) RefStyle

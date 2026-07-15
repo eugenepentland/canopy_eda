@@ -17,6 +17,7 @@ const infra_fs = @import("../infra/fs.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("../eval/env.zig");
+const check_grammar = @import("../eval/check_grammar.zig");
 
 const max_component_bytes: usize = 1 * 1024 * 1024;
 
@@ -396,7 +397,7 @@ fn writeRequirementJson(allocator: std.mem.Allocator, w: anytype, cl: []const as
             ref_page = ref.page;
             if (ref.quote) |q| ref_quote = q;
         } else if (sub.isForm("check")) {
-            if (env_mod.parseCheck(allocator, sub)) |c| check = c;
+            if (check_grammar.parseCheck(allocator, sub)) |c| check = c;
         }
     }
 
@@ -545,7 +546,7 @@ fn checkClauseValid(allocator: std.mem.Allocator, cs: []const u8) bool {
     defer sexpr_parser.freeNodes(allocator, nodes);
     if (nodes.len != 1) return false;
     if (!nodes[0].isForm("check")) return false;
-    return env_mod.parseCheck(allocator, nodes[0]) != null;
+    return check_grammar.parseCheck(allocator, nodes[0]) != null;
 }
 
 /// Byte index of the `)` that closes the top-level form — the last `)` in
@@ -683,8 +684,20 @@ pub fn addRequirement(
     if (!validComponentName(name)) return writeJsonError(allocator, out, err_invalid_name);
     if (text.len == 0) return writeJsonError(allocator, out, "text must be a non-empty string");
     if (check_src) |cs| {
-        if (cs.len > 0 and !checkClauseValid(allocator, cs))
-            return writeJsonError(allocator, out, "check must be a single (check ...) form recognized by the checker");
+        if (cs.len > 0 and !checkClauseValid(allocator, cs)) {
+            // Teach the vocabulary: list the accepted primitives (drawn from the
+            // checker's own dispatch table, never a hardcoded copy) and point at
+            // the language-reference section that documents each form's grammar.
+            const msg = try std.fmt.allocPrint(
+                allocator,
+                "check must be a single (check …) form using one of the recognized primitives: {s}. " ++
+                    "See the \"Requirement checks\" section of the language reference " ++
+                    "(MCP get_language_reference, section \"Requirement checks\") for each form's syntax.",
+                .{check_grammar.check_keyword_list},
+            );
+            defer allocator.free(msg);
+            return writeJsonError(allocator, out, msg);
+        }
     }
 
     const path = try componentPath(allocator, project_dir, name);
@@ -918,6 +931,33 @@ test "checkClauseValid accepts a known check and rejects others" {
     try std.testing.expect(!checkClauseValid(alloc, "(check (no-such-rule (pin \"A\")))"));
     // Not even parseable.
     try std.testing.expect(!checkClauseValid(alloc, "(check (connected"));
+}
+
+test "addRequirement rejection lists the accepted checks and names the reference section" {
+    // spec: serve/component_info - addRequirement rejection names the accepted check primitives and reference section
+    const alloc = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    // An unrecognized check is rejected before any file is read, so the
+    // project dir need not exist. The error must teach the vocabulary.
+    const ok = try addRequirement(
+        alloc,
+        "/nonexistent-project",
+        "somepart",
+        "some requirement text",
+        null,
+        null,
+        null,
+        "(check (no-such-rule (pin \"A\")))",
+        &out,
+    );
+    try std.testing.expect(!ok);
+    // Every recognized keyword is enumerated (spot-check first and last), the
+    // list is drawn from the checker's table, and the reference section is named.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, check_grammar.check_keyword_list) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "connected") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "series-element") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "Requirement checks") != null);
 }
 
 test "removeFormSrc deletes a middle requirement and reattaches the close on the last" {

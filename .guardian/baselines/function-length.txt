@@ -5,14 +5,13 @@
 141 src/convert/symbol.zig|generatePackage
 125 src/diagram/layout.zig|computeFreeLayout
 141 src/diagram/layout.zig|powerLayout
-158 src/docgen.zig|renderTo
+132 src/docgen.zig|renderTo
 176 src/eval/builders.zig|buildPort
 196 src/eval/builders.zig|emitDecoupleItems
 136 src/eval/design_block.zig|buildNets
 170 src/eval/design_block.zig|evalSection
 147 src/eval/design_block.zig|evalSubSection
 200 src/eval/design_block.zig|materializeBlock
-132 src/eval/env.zig|parseCheck
 194 src/eval/instance.zig|buildInstance
 129 src/eval/modules.zig|loadComponent
 266 src/eval/power_budget.zig|analyze
