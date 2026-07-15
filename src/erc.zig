@@ -255,8 +255,8 @@ fn checkComponentGrouping(
         "";
     const msg = std.fmt.allocPrint(
         allocator,
-        "{d} of {d} blocks are outside any (group …) cluster: {s}{s} — split components into " ++
-            "(group …) regions (like barracuda-base) for a scannable block view",
+        "{d} of {d} blocks are outside any (group …) cluster: {s}{s} — add (group \"Label\" \"block\" …)" ++
+            " inside this design's (diagram-layout …) (like barracuda) for a scannable block view",
         .{ cov.ungrouped.len, cov.total, names.items, tail },
     ) catch return;
     try violations.append(allocator, .{

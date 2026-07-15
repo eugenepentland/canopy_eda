@@ -6,7 +6,7 @@
 27 src/diagram/membership.zig|computeSubBlockAttachments
 34 src/eval/builders.zig|buildPort
 27 src/eval/builders.zig|parseSectionPort
-33 src/eval/instance.zig|buildInstance
+30 src/eval/instance.zig|buildInstance
 27 src/eval/modules.zig|loadComponent
 42 src/eval/power_budget.zig|analyze
 29 src/export_kicad_footprint.zig|emitKicadPad

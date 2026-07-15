@@ -153,13 +153,9 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         .id = inst_id,
     };
 
-    // Resolve pinout for reverse lookup (function_name -> pin_id)
-    const reverse_pinout: ?*const std.StringHashMapUnmanaged([]const u8) = blk: {
-        const comp_data = self.component_cache.get(inst.component);
-        const pln = if (comp_data) |cd| (if (cd.pinout_name.len > 0) cd.pinout_name else cd.symbol_name) else inst.symbol;
-        if (pln.len > 0) break :blk ids.getSymbolPins(self, pln);
-        break :blk null;
-    };
+    // Resolve pinout for reverse lookup (function_name -> pin_id); null when the
+    // component has no lib/pinouts file (the pinout-less-wiring guard keys on it).
+    const reverse_pinout = resolveReversePinout(self, &inst);
 
     // Parse inline pin declarations:
     //   (pin 1 "NET")               -- single pin
@@ -269,6 +265,8 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         }
     }
 
+    warnPinoutlessMultiPad(self, form_children[0].span, &inst, reverse_pinout, pin_nets.items);
+
     var final_inst = inst;
     final_inst.dnp = dnp_flag;
     final_inst.decouple_ic = decouple_ic;
@@ -288,6 +286,46 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         .pin_nets = pin_nets.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .inline_notes = inline_notes.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
     };
+}
+
+/// The name `getSymbolPins` searches lib/pinouts/ for: a component's declared
+/// pinout, else its symbol, else the instance's own symbol field.
+fn pinoutLookupName(self: *Evaluator, inst: *const Instance) []const u8 {
+    const cd = self.component_cache.get(inst.component) orelse return inst.symbol;
+    return if (cd.pinout_name.len > 0) cd.pinout_name else cd.symbol_name;
+}
+
+/// Resolve the reverse pinout (function-name → pad id) for an instance's
+/// component, or null when the part has no lib/pinouts file. Extracted so
+/// `buildInstance` stays flat; the pinout-less-wiring guard shares the null.
+fn resolveReversePinout(self: *Evaluator, inst: *const Instance) ?*const std.StringHashMapUnmanaged([]const u8) {
+    const lookup = pinoutLookupName(self, inst);
+    return if (lookup.len > 0) ids.getSymbolPins(self, lookup) else null;
+}
+
+/// Warn once when an instance wires a component that has no pinout file. With
+/// `reverse_pinout == null` every `(pin N …)` token is taken verbatim, so
+/// nothing checks the pad numbers against the real part. Gated to genuine
+/// multi-pad ICs — fires only at ≥3 distinct pads, so 2-pin passives (covered by
+/// the generic-cap/res/ind pinouts anyway), test points, LEDs, diodes and
+/// fiducials never trip it. The hint names the pinout file to add.
+fn warnPinoutlessMultiPad(
+    self: *Evaluator,
+    span: ast.Span,
+    inst: *const Instance,
+    reverse_pinout: ?*const std.StringHashMapUnmanaged([]const u8),
+    pin_nets: []const PinNetDecl,
+) void {
+    if (reverse_pinout != null or pin_nets.len < 3) return;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(self.allocator);
+    for (pin_nets) |pn| seen.put(self.allocator, pn.pin, {}) catch continue;
+    if (seen.count() < 3) return;
+    const lookup = pinoutLookupName(self, inst);
+    const hint = if (lookup.len > 0) lookup else inst.component;
+    self.warnFmt(span, "instance \"{s}\": component \"{s}\" has no pinout — pad " ++
+        "numbers are unchecked (add lib/pinouts/{s}.sexp or regenerate_pinout " ++
+        "to validate them)", .{ inst.ref_des, inst.component, hint });
 }
 
 /// Parse a `(part "Name" (row N) (col N) (pin … "NET") …)` multi-part-symbol
@@ -918,4 +956,41 @@ test "part form wires pins and records the part" {
     try testing.expectEqualStrings("A", res.instance.parts[0].pins[0].group);
     try testing.expectEqualStrings("B", res.instance.parts[1].name);
     try testing.expectEqual(@as(usize, 1), res.instance.parts[1].pins.len);
+}
+
+// spec: eval/evaluator - a pinout-less instance wiring three or more pads warns that the pad numbers are unchecked
+test "pinout-less multi-pad wiring warns; two-pad passive stays silent" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    // A 2-pin passive family (no lib/pinouts here → reverse_pinout null) wiring
+    // exactly two pads must NOT warn: the ≥3-distinct-pad gate excludes it.
+    try eval.component_cache.put(alloc, "cap-0402", .{
+        .name = "cap-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+    const psrc = "(instance \"C1\" (cap-0402 \"100nF\") (pin 1 \"VDD\") (pin 2 \"GND\"))";
+    const pnodes = try parser_mod.parse(alloc, psrc);
+    _ = try buildInstance(&eval, pnodes[0].asList().?, &env);
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+
+    // A pinout-less IC wiring three distinct pads warns exactly once, naming the component.
+    try eval.component_cache.put(alloc, "wideband-amp", .{
+        .name = "wideband-amp",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    const usrc = "(instance \"U6\" wideband-amp (pin 1 \"A\") (pin 2 \"B\") (pin 3 \"C\"))";
+    const unodes = try parser_mod.parse(alloc, usrc);
+    _ = try buildInstance(&eval, unodes[0].asList().?, &env);
+    try testing.expectEqual(@as(usize, 1), eval.warnings.items.len);
+    try testing.expect(std.mem.indexOf(u8, eval.warnings.items[0].message, "wideband-amp") != null);
+    try testing.expect(std.mem.indexOf(u8, eval.warnings.items[0].message, "no pinout") != null);
 }

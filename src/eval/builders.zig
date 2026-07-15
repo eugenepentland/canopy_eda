@@ -964,14 +964,14 @@ pub fn buildGroup(self: *Evaluator, args: []const Node, env: *Env) EvalError!Gro
     }
     const name_val = try self.evalNode(args[0], env);
     const members_node = args[1].asList() orelse {
-        self.setError(args[1].span, "(group …) members must be a list of ref-des strings");
+        self.setError(args[1].span, "(group …) members must be a ref-des LIST; (diagram-layout …) group takes blocks");
         return EvalError.InvalidForm;
     };
 
     var members: std.ArrayList([]const u8) = .empty;
     for (members_node) |m| {
         const s = m.asString() orelse {
-            self.setError(m.span, "(group …) members must be ref-des strings");
+            self.setError(m.span, "(group …) members must be ref-des strings; (diagram-layout …) group takes blocks");
             return EvalError.TypeError;
         };
         try members.append(self.allocator, s);

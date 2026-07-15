@@ -386,6 +386,7 @@ Public functions: worldShape, pointDist, shapeGap
 - isStandardRefDes distinguishes standard from descriptive labels
 - last_error records the source span of an unknown form so callers can report file:line:col
 - last_error records the source span of an arity mismatch in a special form
+- a pinout-less instance wiring three or more pads warns that the pad numbers are unchecked
 
 ## id_insert
 

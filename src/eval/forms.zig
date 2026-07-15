@@ -455,8 +455,12 @@ pub const scope_form_docs = blk: {
     } };
 
     t[@intFromEnum(ScopeForm.group)] = .{ .scope = tl, .doc = .{
-        .syntax = "(group …)",
-        .summary = "Visual group annotation rendered in the schematic.",
+        .syntax = "(group \"name\" (\"R1\" \"R2\" …))",
+        .summary = "Bundle ref-des components for the schematic renderer's visual grouping pass. " ++
+            "Members are a LIST of ref-des strings. NOTE: a different, unrelated (group …) form " ++
+            "lives inside (diagram-layout …) — there it takes variadic block keys (section names / " ++
+            "sub-block handles), e.g. (group \"Label\" \"Block A\" \"Block B\" …), to cluster " ++
+            "diagram blocks; that one is parsed inline by the layout form, not this registry entry.",
     } };
     t[@intFromEnum(ScopeForm.function)] = .{ .scope = tl, .doc = .{
         .syntax = "(function \"name\" [\"caption\"] [(stack N)] (hosts \"Section A\" \"Section B\" …))",

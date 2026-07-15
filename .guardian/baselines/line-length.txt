@@ -23,7 +23,7 @@
 1 src/eval/fmt.zig
 8 src/eval/forms.zig
 16 src/eval/ids.zig
-17 src/eval/instance.zig
+16 src/eval/instance.zig
 13 src/eval/modules.zig
 1 src/eval/pin_enrichment.zig
 5 src/eval/power_budget.zig
