@@ -16,7 +16,6 @@ doc-comments|src/eval/evaluator.zig|pub fn initWithLibDir: has no /// doc commen
 doc-comments|src/eval/forms.zig|pub fn fromAtom: has no /// doc comment
 doc-comments|src/eval/forms.zig|pub fn fromAtom: has no /// doc comment
 doc-comments|src/eval/forms.zig|pub fn fromAtom: has no /// doc comment
-doc-comments|src/export_kicad.zig|pub fn flattenAndMergeNets: has no /// doc comment
 doc-comments|src/parts.zig|pub fn init: has no /// doc comment
 doc-comments|src/placement/optimizer.zig|pub fn label: has no /// doc comment
 doc-comments|src/placement/router.zig|pub fn init: has no /// doc comment

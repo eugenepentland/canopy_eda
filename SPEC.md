@@ -5585,7 +5585,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - a reference-guided route reports how many nets received learned topology and how many required exact-copper fallback
 - coordinate-scoped clear_routes removes one selected via without erasing the rest of a dense shared net
 - The viewer Route scope parses a group into an incremental ScopedRoute that retains submitted copper for the unselected nets
-- The viewer's route POST takes a per-run effort override, and an absent or unrecognised one keeps the block's authored tier
+- The route-body effort parser accepts both one-shot spellings and standard, while leaving each API surface to choose its missing-field default
+- Route board is bounded on the server even for an already-open legacy page that omits effort, while an explicit Deep-route standard tier wins over that default
 - One lowering builds the route options for a prepared body, so the blocking and live halves route it at the same scope and effort
 - The page blob names which rung of the layout ladder the shown board came from, so the viewer can tell a persisted layout from an unsaved solve
 - The page blob ships every single-ended controlled-impedance via's solved and minimum plane-antipad diameters, and the viewer's layer panels expose an Antipads overlay that draws both rings and prints the numbers

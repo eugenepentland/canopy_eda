@@ -4138,6 +4138,11 @@ pub const RoutePrepInputs = struct {
     sub: ?[]const u8 = null,
     /// The parsed `POST /api/pcb-route` body object.
     root: std.json.Value,
+    /// Tier to use when this surface's caller omitted `effort`. The editor's
+    /// Route board endpoints set one-shot here, which also bounds an already-
+    /// open pre-upgrade page whose script predates the explicit effort field.
+    /// Non-editor consumers keep null and therefore retain authored policy.
+    default_effort: ?route_policy.Effort = null,
 };
 
 /// The request-time half of the ONE route pipeline the blocking
@@ -4217,7 +4222,7 @@ pub fn prepareRouteFromJson(
         .scoped = scoped,
         .user_zones = userZonesFrom(alloc, placement.rules, posted_zones),
         .echo = .{ .selected = vscope.selected, .unknown = vscope.unknown },
-        .effort = bodyEffort(root),
+        .effort = resolvedBodyEffort(root, in.default_effort),
     };
 }
 
@@ -4231,6 +4236,13 @@ fn bodyEffort(root: std.json.Value) ?route_policy.Effort {
     const v = root.object.get("effort") orelse return null;
     if (v != .string) return null;
     return route_policy.Effort.fromName(v.string);
+}
+
+/// Resolve a surface's request policy without letting its fallback overwrite
+/// an explicit tier. In particular, Deep route's `standard` must beat the
+/// editor endpoints' bounded one-shot default.
+fn resolvedBodyEffort(root: std.json.Value, default: ?route_policy.Effort) ?route_policy.Effort {
+    return bodyEffort(root) orelse default;
 }
 
 /// The routed half of the shared pipeline's output: the router's run (timeline
@@ -4351,10 +4363,11 @@ pub fn routePrepFailure(e: RoutePrepError) struct { status: u16, msg: ?[]const u
 /// The current `zones` array is always submitted, so whole-board and scoped
 /// routes can use hand-drawn same-net pours as routing terminals.
 /// An optional `"effort"` (`one_shot` / `one-shot` / `standard`) picks the retry
-/// tier for THIS run only — the viewer's "Route plan" action sends `one_shot`,
-/// so previewing a fresh rough seed answers in seconds instead of climbing the
-/// rescue ladder. Absent or unrecognised keeps the block's authored
-/// `(route (effort …))`, so every client written before the field is unchanged.
+/// tier for THIS run only. `Route board` and `Route plan` are bounded one-shot
+/// actions; the handler also defaults a missing or unrecognised field to that
+/// tier so a board tab left open across a deploy cannot silently run the old
+/// multi-minute policy. `Deep route` explicitly sends `standard` and retains
+/// the full authored rescue behavior.
 /// Response `{tracks, vias, drc, routed, total, selected, scope_unknown}` is the
 /// routed-copper shape the page embeds, so the client redraws in place — no page
 /// reload, which is what used to snap the layout back to auto. The body parse,
@@ -4380,6 +4393,11 @@ pub fn pcbRouteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         .name = name,
         .sub = subSlug(req),
         .root = root,
+        // Route board is the bounded interactive action. New pages post this
+        // explicitly; keeping the same default on the server also protects an
+        // already-open page running the old client bundle. Deep route posts
+        // `standard`, which wins over this fallback in prepareRouteFromJson.
+        .default_effort = .one_shot,
     }, &eval, &module_res) catch |e| {
         const fail = routePrepFailure(e);
         res.status = fail.status;
@@ -17119,7 +17137,7 @@ test "the pcb PNG query parses the heat-zone request" {
     try std.testing.expect(parseScenario(null) == null);
 }
 
-// spec: Web Server - The viewer's route POST takes a per-run effort override, and an absent or unrecognised one keeps the block's authored tier
+// spec: Web Server - The route-body effort parser accepts both one-shot spellings and standard, while leaving each API surface to choose its missing-field default
 test "the route body's effort field overrides the tier for that run only" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -17144,6 +17162,27 @@ test "the route body's effort field overrides the tier for that run only" {
     try std.testing.expect(parse(alloc, "{\"effort\":\"turbo\"}") == null);
     // A non-object body (the parts check rejects it upstream) is not a crash.
     try std.testing.expect(bodyEffort(.{ .string = "one_shot" }) == null);
+}
+
+// spec: Web Server - Route board is bounded on the server even for an already-open legacy page that omits effort, while an explicit Deep-route standard tier wins over that default
+test "the viewer route default is one-shot and explicit standard still wins" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const missing = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"parts\":[]}", .{});
+    const deep = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"parts\":[],\"effort\":\"standard\"}", .{});
+
+    try std.testing.expectEqual(
+        route_policy.Effort.one_shot,
+        resolvedBodyEffort(missing, .one_shot) orelse return error.TestNoEffort,
+    );
+    try std.testing.expectEqual(
+        route_policy.Effort.standard,
+        resolvedBodyEffort(deep, .one_shot) orelse return error.TestNoEffort,
+    );
+    // Non-viewer consumers opt out of the fallback and preserve authored
+    // policy exactly as before.
+    try std.testing.expect(resolvedBodyEffort(missing, null) == null);
 }
 
 // spec: Web Server - The route_pcb MCP tool can select a bounded retry tier, checkpoints routed copper before optional deferred DRC, and rejects unknown tiers

@@ -10,7 +10,6 @@ allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/t
 allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
 allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
 allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
-allocator-hygiene|src/serve.zig|hardcoded std.heap.page_allocator outside main/test
 allocator-hygiene|src/serve/mcp.zig|hardcoded std.heap.page_allocator outside main/test
 allocator-hygiene|src/serve/mcp_tools.zig|hardcoded std.heap.page_allocator outside main/test
 allocator-hygiene|src/serve/modules.zig|hardcoded std.heap.page_allocator outside main/test
