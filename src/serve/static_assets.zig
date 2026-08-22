@@ -270,6 +270,8 @@ test "the parametric board-outline sketch engine is registered with its editor c
         .{ .bytes = pcb_outline_sketch_js, .marker = "root.PCBOutlineSketch = api" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "function solve(s,opts)" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "function fromSegments(segments)" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "function pointDragAxis(s,id,x,y,origin)" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "function pointDragTarget(s,id,x,y,axis)" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "filletPoint:filletPoint" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "chamferPoint:chamferPoint" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "offset:offset" },
@@ -295,6 +297,15 @@ test "the parametric board-outline sketch engine is registered with its editor c
         .{ .bytes = pcb_board_js, .marker = "polyCur=polySnap(mm(ev))" },
     };
     for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.bytes, check.marker) != null);
+}
+
+// spec: Web Server - Dragging an endpoint of a horizontal or vertical outline segment changes its length without translating the constrained line, with dominant-direction disambiguation at H/V corners
+test "axis-constrained outline endpoint drags project the cursor onto the segment" {
+    try std.testing.expect(std.mem.indexOf(u8, pcb_outline_sketch_js, "function pointDragAxis(s,id,x,y,origin)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_outline_sketch_js, "if(axis===\"horizontal\")y=p.y;else if(axis===\"vertical\")x=p.x;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_outline_sketch_js, "var target=pointDragTarget(s,id,x,y,axis)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "vdrag.axis=OS.pointDragAxis") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "OS.movePoint(PCB.outline.sketch,vdrag.id,vgx,vgy,vdrag.axis)") != null);
 }
 
 fn registryHasAsset(name: []const u8) bool {

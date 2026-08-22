@@ -4969,8 +4969,8 @@ function vtxAt(m){var pts=outlinePtsOf(outlineEditable());if(!pts)return -1;
  var bd=7/S,best=-1;
  pts.forEach(function(p,i){var d=Math.max(Math.abs(p[0]-m.x),Math.abs(p[1]-m.y));if(d<=bd){bd=d;best=i;}});
  return best;}
-function outlineVdrag(i){var o=outlineEditable(),sk=OS&&o&&o.sketch,ps=sk&&OS.physicalPoints(sk),p=ps&&ps[i];
- return {i:i,id:p&&p.id,moved:false,snap:snapAll(),x0:p&&p.x,y0:p&&p.y};}
+function outlineVdrag(i){var o=outlineEditable(),pts=outlinePtsOf(o),sk=OS&&o&&o.sketch,ps=sk&&OS.physicalPoints(sk),p=ps&&ps[i],q=pts&&pts[i];
+ return {i:i,id:p&&p.id,moved:false,snap:snapAll(),x0:p?p.x:q&&q[0],y0:p?p.y:q&&q[1],axis:undefined};}
 // Start a viewport pan from the current pointer. Shared by the empty-space
 // handler below AND the part/pad pointerdown handlers (defined earlier, this is
 // hoisted), so a middle-button or Space-held drag pans the board even when the
@@ -5277,7 +5277,8 @@ svg.addEventListener("pointermove",function(ev){
  if(vdrag){var vv=mm(ev),vgx=Math.round(vv.x/G)*G,vgy=Math.round(vv.y/G)*G,vc=outlinePtsOf(outlineEditable());
   if(vc&&vdrag.i<vc.length&&(vc[vdrag.i][0]!==vgx||vc[vdrag.i][1]!==vgy)){
    outlinePromote();if(OS&&PCB.outline.sketch){if(!vdrag.id){var vps=OS.physicalPoints(PCB.outline.sketch);vdrag.id=vps[vdrag.i]&&vps[vdrag.i].id;}
-    OS.movePoint(PCB.outline.sketch,vdrag.id,vgx,vgy);OS.syncOutline(PCB.outline);}
+    if(vdrag.axis===undefined)vdrag.axis=OS.pointDragAxis(PCB.outline.sketch,vdrag.id,vgx,vgy,{x:vdrag.x0,y:vdrag.y0});
+    OS.movePoint(PCB.outline.sketch,vdrag.id,vgx,vgy,vdrag.axis);OS.syncOutline(PCB.outline);}
    else PCB.outline.pts[vdrag.i]=[vgx,vgy];vdrag.moved=true;outlineBboxSync();drawBoardRect();}
   return;}
  if(osdrag){osegMove(mm(ev),ev.shiftKey);return;}

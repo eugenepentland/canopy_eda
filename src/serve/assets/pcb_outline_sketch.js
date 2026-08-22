@@ -197,7 +197,21 @@
     s.constraints=s.constraints||[];s.constraints.push(q);var result=solve(s);if(result.conflict){s.constraints.pop();return null;}return q;
   }
   function removeConstraint(s,id){s.constraints=(s.constraints||[]).filter(function(q){return q.id!==id;});return solve(s);}
-  function movePoint(s,id,x,y){return solve(s,{targets:[{id:id,x:x,y:y,weight:50}],iterations:10,stay:1e-4});}
+  // An endpoint drag edits the length of an axis-constrained line instead of
+  // translating the line sideways.  The constraint solver treats drag targets
+  // as soft but high-weight residuals, so feeding it the raw cursor coordinate
+  // would otherwise make both endpoints follow that coordinate while still
+  // remaining horizontal/vertical.  At a rectangular corner both constraints
+  // are incident; use the cursor's dominant direction to choose the segment
+  // whose length the user is changing rather than locking the corner entirely.
+  function pointDragAxis(s,id,x,y,origin){var p=point(s,id),horizontal=false,vertical=false;if(!p)return null;
+    (s.constraints||[]).forEach(function(q){if(q.enabled===false||q.driving===false||(q.kind!=="horizontal"&&q.kind!=="vertical"))return;var c=curve(s,q.a);if(!c||(c.a!==id&&c.b!==id))return;if(q.kind==="horizontal")horizontal=true;else vertical=true;});
+    if(horizontal&&vertical){origin=origin||p;return Math.abs(x-origin.x)>=Math.abs(y-origin.y)?"horizontal":"vertical";}
+    return horizontal?"horizontal":vertical?"vertical":null;}
+  function pointDragTarget(s,id,x,y,axis){var p=point(s,id);if(!p)return {x:x,y:y};axis=axis===undefined?pointDragAxis(s,id,x,y,p):axis;
+    if(axis==="horizontal")y=p.y;else if(axis==="vertical")x=p.x;
+    return {x:x,y:y};}
+  function movePoint(s,id,x,y,axis){var target=pointDragTarget(s,id,x,y,axis);return solve(s,{targets:[{id:id,x:target.x,y:target.y,weight:50}],iterations:10,stay:1e-4});}
   function moveCurve(s,id,dx,dy){var c=curve(s,id);if(!c)return null;var a=point(s,c.a),b=point(s,c.b);return solve(s,{targets:[{id:a.id,x:a.x+dx,y:a.y+dy,weight:50},{id:b.id,x:b.x+dx,y:b.y+dy,weight:50}],iterations:10,stay:1e-4});}
   function insertPoint(s,curveId,x,y){var idx=s.curves.findIndex(function(c){return c.id===curveId;}),c=idx>=0?s.curves[idx]:null;if(!c||c.construction)return null;
     var pid=nextId(s),cid=pid+1,oldb=c.b;c.b=pid;c.kind="line";delete c.mid;s.points.push({id:pid,x:x,y:y});s.curves.splice(idx+1,0,{id:cid,kind:"line",a:pid,b:oldb});return pid;}
@@ -262,7 +276,7 @@
 
   return {VERSION:VERSION,clone:cp,valid:validSketch,closed:isClosed,normalize:normalize,fromSegments:fromSegments,fromOutline:fromOutline,ensure:ensure,compile:compile,syncOutline:syncOutline,
     point:point,curve:curve,physicalCurves:physicalCurves,physicalPoints:physicalPoints,nextId:nextId,arcCircle:arcCircle,
-    solve:solve,state:state,addConstraint:addConstraint,removeConstraint:removeConstraint,movePoint:movePoint,moveCurve:moveCurve,
+    solve:solve,state:state,addConstraint:addConstraint,removeConstraint:removeConstraint,pointDragAxis:pointDragAxis,pointDragTarget:pointDragTarget,movePoint:movePoint,moveCurve:moveCurve,
     insertPoint:insertPoint,deletePoint:deletePoint,deleteSegment:deleteSegment,addLinePath:addLinePath,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,snapLinePoint:snapLinePoint,
     offset:offset,mirror:mirror,annotations:annotations,dimensionValue:dimensionValue};
 });
