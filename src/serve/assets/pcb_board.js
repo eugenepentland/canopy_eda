@@ -4777,10 +4777,12 @@ function osegStart(e,m){var pts=outlinePtsOf(outlineEditable()),i=e.i,j=(i+1)%pt
  return {i:i,j:j,id:c&&c.id,aid:c&&c.a,bid:c&&c.b,mid0:c&&c.mid&&c.mid.slice(),m0:m,a0:c?[ap.x,ap.y]:pts[i].slice(),b0:c?[bp.x,bp.y]:pts[j].slice(),moved:false,snap:snapAll()};}
 function osegMove(m,square){var sd=osdrag,cur=outlinePtsOf(outlineEditable());
  var dx=Math.round((m.x-sd.m0.x)/G)*G,dy=Math.round((m.y-sd.m0.y)/G)*G;
- // Shift keeps a rectangular side square by sliding it only perpendicular to
- // its current dominant axis. Horizontal edges move vertically; vertical
- // edges move horizontally. The selected segment itself remains rigid.
- if(square){var ex=sd.b0[0]-sd.a0[0],ey=sd.b0[1]-sd.a0[1];if(Math.abs(ex)>=Math.abs(ey))dx=0;else dy=0;}
+ var ex=sd.b0[0]-sd.a0[0],ey=sd.b0[1]-sd.a0[1],axisTol=1e-6;
+ // Axis-aligned sides always slide perpendicular to themselves: horizontal
+ // edges move only in Y and vertical edges only in X. Shift extends the same
+ // normal-only behavior to a non-axis-aligned edge using its dominant axis.
+ if(Math.abs(ey)<=axisTol)dx=0;else if(Math.abs(ex)<=axisTol)dy=0;
+ else if(square){if(Math.abs(ex)>=Math.abs(ey))dx=0;else dy=0;}
  var na=[sd.a0[0]+dx,sd.a0[1]+dy],nb=[sd.b0[0]+dx,sd.b0[1]+dy];
  var liveSk=OS&&outlineEditable().sketch,liveA=liveSk&&OS.point(liveSk,sd.aid),liveB=liveSk&&OS.point(liveSk,sd.bid);
  if(liveA&&liveB){if(liveA.x===na[0]&&liveA.y===na[1]&&liveB.x===nb[0]&&liveB.y===nb[1])return;}

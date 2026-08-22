@@ -5578,7 +5578,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB editor overlays source-declared fabrication backing, edits its polygon with undo, and persists per-layout geometry without changing its side or material
 - The PCB editor draws one physical heatsink base rectangle on either board face, reopens it for parameter edits, drags it to reposition, resizes it with corner handles, directly edits fin count or gap, target package, material, base/fins and thermal pad, persists the assembly with the named layout, previews its pad/base/fins in 3D, and feeds the same exact contact and derived theta-SA to built-in and Elmer thermal solves
 - The PCB editor offers a persistent display-only heatsink visibility toggle in Appearance > Objects, without changing saved geometry or thermal simulations, and entering the heatsink edit tool reveals a hidden heatsink
-- Selecting a board outline exposes editable dimensions and Shift-constrained square edge slides
+- Selecting a board outline exposes editable dimensions, slides horizontal/vertical edges only perpendicular to themselves, and uses Shift to constrain non-axis-aligned edge slides to their dominant axis
 - The PCB passive inspector offers compatible footprint families from the project library
 - PCB passive footprint edits update the exact owning schematic source
 - tangent trace bends and outline fillets remain native editable arcs in the PCB editor

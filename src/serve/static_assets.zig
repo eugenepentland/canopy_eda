@@ -349,15 +349,16 @@ test "PCB board editor shows the Board outline properties on a plain outline edg
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
-// spec: Web Server - Selecting a board outline exposes editable dimensions and Shift-constrained square edge slides
-test "PCB board editor edits board dimensions and constrains outline edges with Shift" {
+// spec: Web Server - Selecting a board outline exposes editable dimensions, slides horizontal/vertical edges only perpendicular to themselves, and uses Shift to constrain non-axis-aligned edge slides to their dominant axis
+test "PCB board editor edits dimensions and slides outline edges along their normal" {
     const markers = [_][]const u8{
         "pNumRow(\"Width (mm)\",\"prop-outline-width\",bo.w,false)",
         "pNumRow(\"Height (mm)\",\"prop-outline-height\",bo.h,false)",
         "if(!PCB.board)return null;",
         "function outlineResize(w,h)",
         "if(osdrag){osegMove(mm(ev),ev.shiftKey);return;}",
-        "if(square){var ex=sd.b0[0]-sd.a0[0],ey=sd.b0[1]-sd.a0[1];if(Math.abs(ex)>=Math.abs(ey))dx=0;else dy=0;}",
+        "if(Math.abs(ey)<=axisTol)dx=0;else if(Math.abs(ex)<=axisTol)dy=0;",
+        "else if(square){if(Math.abs(ex)>=Math.abs(ey))dx=0;else dy=0;}",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
