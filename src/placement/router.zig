@@ -2563,8 +2563,9 @@ fn stitchGroundPads(
         const pour = netPourLayers(placement, net.name);
         setNetParams(ctx, placement, net_i);
         rebuildCopperIndex(ctx, tracks.items, vias.items);
-        for (ctx.obs) |pad| {
+        for (ctx.obs, 0..) |pad, pad_i| {
             if (pad.net != ni or pad.thru) continue;
+            if (plane_stitch.optionalNcObstacle(placement, pad_i)) continue;
             const centre = [2]f64{ (pad.x0 + pad.x1) / 2, (pad.y0 + pad.y1) / 2 };
             if (groundPadHasNearbyVia(vias.items, ni, centre, max_distance)) continue;
             const in_pour = pad.layer < pour.len and pour[pad.layer];

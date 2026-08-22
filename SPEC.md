@@ -2755,6 +2755,7 @@ question each caller answers honestly through `Zone.component`.
 ## placement/drc
 
 - an authored ground-via maximum warns on an SMD ground pad until a same-net plane via falls within the budget
+- an optional NC land assigned to ground is excluded from the ground-via maximum because its same-package real ground return owns the required plane connection
 
 Public functions: check, checkTopology, checkWithZones, countKind, defaultSeverity, errorCount
 
@@ -3325,6 +3326,7 @@ router assumes a plane the Gerbers do not pour is a shipped short.
 Public functions: load, isGroundFn, isSupplyFn, strapPads, padRequirements
 
 - groundy function names are recognised, straps are not
+- plain NC names are optional package lands while do-not-connect and reserved names are not routing grounds
 - supply function names are recognised, grounds and signals are not
 - electrical type overrides the name heuristic; signal types demote to strap
 - config-strap function names are recognised, supplies grounds and GPIO are not
@@ -3414,7 +3416,7 @@ short surface-current path to the supply land it is meant to serve.
 
 ## placement/plane-stitch
 
-Public functions: netHasPlane, declaredPlaneContacts, netPourLayers, padInPour, bonds, viaOrder, Bond, Web, via_share_max_mm
+Public functions: netHasPlane, declaredPlaneContacts, netPourLayers, padInPour, bonds, viaOrder, optionalNcObstacle, Bond, Web, via_share_max_mm
 
 How a plane-carried net reaches its plane. Such a net is never routed by the
 maze: each of its pads drops a via and the plane joins them. That is right for
@@ -3441,8 +3443,17 @@ The cluster's one barrel then stands ON the bypass cap's own land centre when th
 land admits it, which is where the loop-inductance literature puts it and which
 leaves no stub for the walk to charge at all.
 
+A plain `NC`, `N/C`, or numbered `NC` package land that the design deliberately
+assigns to a plane net is a local package bond, not another required plane
+return. It joins by surface copper to the nearest real ground pad on that same
+package and face, with the real ground pad offered the shared via first. Pins
+marked `DNC`, `DNU`, reserved, or RFU never enter this rule.
+
 - the implicit model plants a plane on ground and the dominant rail, a declared stackup on exactly its declared nets
 - a barrel's declared plane contacts count only interior planes of its own net, and fall back to the implicit model's single plane when no stackup is declared
+- a grounded NC pad bonds to its package's real ground pad with the real return offered the shared via, while an ordinary unclassified pad does not
+- obstacle-order role lookup identifies only optional NC lands so the router's ground-via maximum cannot recreate their suppressed barrels
+- an HMC-style grounded NC ring surface-bonds to the exposed ground pad and adds no per-NC barrels while the thermal array and capacitor returns remain
 - a pad already sitting in an outer-layer pour of its own net is stitched by the pour, not by a via
 - a decoupling loop's power leg bonds the cap's rail land to the hub pad it decouples
 - a loop's ground leg bonds on the ground net by the same rule, so no plane kind is a special case

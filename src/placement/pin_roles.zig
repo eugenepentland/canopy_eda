@@ -38,6 +38,10 @@ const Node = ast.Node;
 pub const PinClass = enum {
     /// Real ground-return / exposed-pad pin.
     ground,
+    /// A datasheet no-connect pad (`NC`, `N/C`, `NC_<n>`). When the author
+    /// deliberately puts one on a ground net it may share the package's real
+    /// ground connection; it is not itself a required return terminal.
+    optional_nc,
     /// Real supply pin (declared `power-in`/`power-out`).
     power,
     /// Configuration / control strap tied to a rail (EN, ILIM, PGFB, …).
@@ -132,6 +136,7 @@ fn classify(elec_type: ?env.ElectricalType, fn_name: []const u8) PinClass {
         // passive / nc carry no placement signal — fall through to the name.
         .passive, .nc => {},
     };
+    if (isOptionalNcName(fn_name)) return .optional_nc;
     if (isGroundFn(fn_name)) return .ground;
     return .other;
 }
@@ -155,6 +160,21 @@ pub fn isGroundFn(fn_name: []const u8) bool {
     for (na.ground_fn_prefixes) |p| if (std.mem.startsWith(u8, s, p)) return true;
     const exact = [_][]const u8{ "EP", "EPAD", "PAD", "TAB", "THERMAL", "EXP", "EXPOSED", "DAP", "RTN", "RETURN" };
     for (exact) |e| if (std.mem.eql(u8, s, e)) return true;
+    return false;
+}
+
+/// True only for the ordinary no-connect spelling that may be left floating
+/// or, when the design explicitly assigns it to ground, share a nearby real
+/// package ground. Do-not-connect/reserved spellings (`DNC`, `DNU`, `RFU`, …)
+/// deliberately do not match this routing classification.
+fn isOptionalNcName(fn_name: []const u8) bool {
+    var buf: [32]u8 = undefined;
+    const s = normalizeIdent(fn_name, &buf);
+    if (std.mem.eql(u8, s, "NC") or std.mem.eql(u8, s, "NOCONNECT")) return true;
+    if (s.len > 2 and s[0] == 'N' and s[1] == 'C') {
+        for (s[2..]) |c| if (!std.ascii.isDigit(c)) return false;
+        return true;
+    }
     return false;
 }
 
@@ -317,15 +337,11 @@ fn connectionRequirement(elec_type: ?env.ElectricalType, fn_name: []const u8) Nc
 /// pad is *meant* to float, so it's never flagged. Separators are stripped and
 /// the match is case-insensitive (so "n/c" and "NC_1" both match).
 fn isExplicitNcName(fn_name: []const u8) bool {
+    if (isOptionalNcName(fn_name)) return true;
     var buf: [32]u8 = undefined;
     const s = normalizeIdent(fn_name, &buf);
-    const exact = [_][]const u8{ "NC", "DNC", "DNU", "NOCONNECT", "RESERVED", "RSVD", "RSV", "RFU" };
+    const exact = [_][]const u8{ "DNC", "DNU", "RESERVED", "RSVD", "RSV", "RFU" };
     for (exact) |e| if (std.mem.eql(u8, s, e)) return true;
-    // Numbered no-connects: "NC" followed by only digits ("NC1", "NC12").
-    if (s.len > 2 and s[0] == 'N' and s[1] == 'C') {
-        for (s[2..]) |c| if (!std.ascii.isDigit(c)) return false;
-        return true;
-    }
     return false;
 }
 
@@ -525,6 +541,18 @@ test "isGroundFn separates real grounds from config straps" {
     try testing.expect(!isGroundFn("PGFB"));
     try testing.expect(!isGroundFn("MODE"));
     try testing.expect(!isGroundFn("IN_1"));
+}
+
+// spec: placement/pin_roles - plain NC names are optional package lands while do-not-connect and reserved names are not routing grounds
+test "optional NC names stay distinct from forbidden or reserved pads" {
+    try testing.expect(isOptionalNcName("NC"));
+    try testing.expect(isOptionalNcName("N/C"));
+    try testing.expect(isOptionalNcName("NC_12"));
+    try testing.expectEqual(PinClass.optional_nc, classify(null, "NC_12"));
+    try testing.expect(!isOptionalNcName("DNC"));
+    try testing.expect(!isOptionalNcName("DNU"));
+    try testing.expect(!isOptionalNcName("RESERVED"));
+    try testing.expect(!isOptionalNcName("RFU"));
 }
 
 // spec: placement/pin_roles - supply function names are recognised, grounds and signals are not

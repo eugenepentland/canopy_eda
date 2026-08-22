@@ -490,6 +490,10 @@ pub const Placement = struct {
     stubs: []const Stub,
     instances: []const flat_netlist.FlatInstance,
     nets: []const FlatNet,
+    /// Per-part physical-pad roles, index-aligned with `parts`/`instances`.
+    /// The router uses this to distinguish a real ground return from an
+    /// optional N/C pad the author deliberately assigned to the GND net.
+    pin_roles: []const pin_roles.PartRoles = &.{},
     /// Per-part `(placement-order …)` rank (index-aligned with `parts`/
     /// `instances`): 0 = unranked, higher = earlier in the declared list. The
     /// router routes higher-priority nets first so they claim the short path.
@@ -6666,6 +6670,7 @@ pub fn solve(
     // same lower-is-better scalar the explore frame used.
     emitBest(parts, bd.objective, .refine);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
+    pl.pin_roles = prep.roles;
     pl.rules = try boardRulesOf(arena, block, nets);
     pl.fabrication_layers = block.fabrication_layers;
     pl.diff_pairs = try diff_pairs.resolve(arena, nets, pl.rules.net);
@@ -6870,6 +6875,7 @@ pub fn placeFromPoses(
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
+    pl.pin_roles = prep.roles;
     pl.rules = try boardRulesOf(arena, block, nets);
     pl.fabrication_layers = block.fabrication_layers;
     pl.diff_pairs = try diff_pairs.resolve(arena, nets, pl.rules.net);
@@ -6936,6 +6942,7 @@ pub fn gridPlace(
     const lsum = surrogateLoops(parts, built.loops);
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
+    pl.pin_roles = prep.roles;
     pl.rules = try boardRulesOf(arena, block, nets);
     pl.fabrication_layers = block.fabrication_layers;
     pl.diff_pairs = try diff_pairs.resolve(arena, nets, pl.rules.net);
@@ -6981,6 +6988,7 @@ const Prepared = struct {
     idx_of: std.StringHashMapUnmanaged(usize),
     instances: []const flat_netlist.FlatInstance,
     nets: []const FlatNet,
+    roles: []const pin_roles.PartRoles,
     built: Built,
     /// Exact-pad ordered RF paths; empty keeps the legacy placer unchanged.
     critical: critical_rough.Result = .{ .roles = &.{}, .paths = &.{}, .islands = &.{}, .diagnostics = .{} },
@@ -7455,6 +7463,7 @@ fn prepare(
         .idx_of = idx_of,
         .instances = instances,
         .nets = nets,
+        .roles = roles,
         .built = built,
         .critical = critical,
         .priority = priority,
@@ -12459,6 +12468,7 @@ test "resolveRoughAnchor bounds-checks the instance index past the instance list
         .idx_of = undefined,
         .instances = &insts,
         .nets = undefined,
+        .roles = &.{},
         .built = undefined,
         .priority = undefined,
         .guidance = undefined,

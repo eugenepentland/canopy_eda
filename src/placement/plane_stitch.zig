@@ -51,6 +51,7 @@ const std = @import("std");
 const optimizer = @import("optimizer.zig");
 const pad_exit = @import("pad_exit.zig");
 const pad_shape = @import("pad_shape.zig");
+const pin_roles = @import("pin_roles.zig");
 const implicit_plane = @import("implicit_plane.zig");
 
 /// How far apart two pads may be for ONE via to serve both — the whole
@@ -258,6 +259,13 @@ const Candidate = struct { cap: usize, hub: usize, mm: f64 };
 /// this forms the ordinary pin -> smallest cap -> larger caps surface chain.
 /// The web's separate path-length gate still decides where another via is
 /// needed, so a chain can never share one barrel beyond the same bound.
+///
+/// A plain NC/N/C pad which the author deliberately assigned to the same net as
+/// a real ground pad on its package is another local bond. The real ground is
+/// the preferred-via (`cap`) side, so an exposed paddle's thermal field serves
+/// the optional land through surface copper instead of every NC pad drilling a
+/// duplicate barrel. A DNC/DNU/reserved pad is never tagged `optional_nc` and
+/// cannot enter this rule.
 pub fn bonds(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -282,6 +290,23 @@ pub fn bonds(
                 .mm = std.math.hypot(pts[b].x - pts[a].x, pts[b].y - pts[a].y),
             });
         }
+    }
+
+    // Optional package grounds are semantic, not proximity guesses: both roles
+    // come from this exact part's pinout. Choose the nearest real ground pad on
+    // the same face, and put that real return on the preferred-via side.
+    for (pts, 0..) |pt, optional_i| {
+        if (terminalClass(placement, pt) != .optional_nc) continue;
+        var best: ?Candidate = null;
+        for (pts, 0..) |anchor, ground_i| {
+            if (terminalClass(placement, anchor) != .ground or anchor.layer != pt.layer) continue;
+            if (!std.mem.eql(u8, anchor.ref_des, pt.ref_des)) continue;
+            const mm = std.math.hypot(anchor.x - pt.x, anchor.y - pt.y);
+            if (best != null and mm >= best.?.mm) continue;
+            best = .{ .cap = ground_i, .hub = optional_i, .mm = mm };
+        }
+        const candidate = best orelse continue;
+        if (!candidateKnown(candidates.items, candidate.cap, candidate.hub)) try candidates.append(arena, candidate);
     }
 
     var out: std.ArrayList(Bond) = .empty;
@@ -312,6 +337,34 @@ pub fn bonds(
         }
     }
     return out.items;
+}
+
+/// Look up a routed terminal's library role without widening the generic
+/// terminal or obstacle types. Missing pinout metadata preserves legacy
+/// behavior by classifying the terminal as ordinary.
+fn terminalClass(placement: optimizer.Placement, pt: pad_exit.NetPt) pin_roles.PinClass {
+    for (placement.parts, 0..) |part, i| {
+        if (!std.mem.eql(u8, part.ref_des, pt.ref_des)) continue;
+        if (i >= placement.pin_roles.len) return .other;
+        return placement.pin_roles[i].classOf(pt.pin);
+    }
+    return .other;
+}
+
+/// Whether `obstacle_i` in `router.buildObstacles` order is an optional NC
+/// land. Keeping the role lookup separate avoids inflating every obstacle with
+/// metadata needed only by the final ground-via-distance pass.
+pub fn optionalNcObstacle(placement: optimizer.Placement, obstacle_i: usize) bool {
+    var first: usize = 0;
+    for (placement.parts, 0..) |part, part_i| {
+        const past = first + part.pads.len;
+        if (obstacle_i < past) {
+            if (part_i >= placement.pin_roles.len) return false;
+            return placement.pin_roles[part_i].classOf(part.pads[obstacle_i - first].number) == .optional_nc;
+        }
+        first = past;
+    }
+    return false;
 }
 
 fn candidateKnown(list: []const Candidate, a: usize, b: usize) bool {
@@ -573,6 +626,36 @@ test "the ground leg of a loop is a bond on the ground net" {
     try testing.expectEqual(@as(usize, 1), bs.len);
     try testing.expectEqualStrings("C1", pts[bs[0].cap].ref_des);
     try testing.expectEqualStrings("U1", pts[bs[0].hub].ref_des);
+}
+
+// spec: placement/plane-stitch - a grounded NC pad bonds to its package's real ground pad with the real return offered the shared via, while an ordinary unclassified pad does not
+// spec: placement/plane-stitch - obstacle-order role lookup identifies only optional NC lands so the router's ground-via maximum cannot recreate their suppressed barrels
+test "an optional grounded NC pad shares its package real-ground stitch" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var role = pin_roles.PartRoles{};
+    try role.map.put(arena, "17", .ground);
+    try role.map.put(arena, "1", .optional_nc);
+    try role.map.put(arena, "7", .optional_nc);
+    var roles = [_]pin_roles.PartRoles{ role, .{} };
+    var placement = bondFixture();
+    placement.pin_roles = &roles;
+    try testing.expect(optionalNcObstacle(placement, 0));
+    try testing.expect(!optionalNcObstacle(placement, 1));
+    try testing.expect(!optionalNcObstacle(placement, 2));
+    try testing.expect(!optionalNcObstacle(placement, 99));
+    const pts = [_]pad_exit.NetPt{
+        .{ .x = 0, .y = 0, .layer = 0, .ref_des = "U1", .pin = "17" },
+        .{ .x = 1.4, .y = 0, .layer = 0, .ref_des = "U1", .pin = "1" },
+        .{ .x = -1.4, .y = 0, .layer = 0, .ref_des = "U1", .pin = "3" },
+    };
+    const bs = try bonds(arena, placement, &pts);
+    try testing.expectEqual(@as(usize, 1), bs.len);
+    try testing.expectEqual(@as(usize, 0), bs[0].cap); // real GND owns the via
+    try testing.expectEqual(@as(usize, 1), bs[0].hub); // optional NC shares it
+    const order = try viaOrder(arena_inst.allocator(), pts.len, bs);
+    try testing.expectEqual(@as(usize, 0), order[0]);
 }
 
 // spec: placement/plane-stitch - a lone leg whose pads are farther apart than via_share_max_mm is no bond, so no run is drawn that one via could not serve

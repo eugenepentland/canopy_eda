@@ -1099,6 +1099,7 @@ fn checkGroundPadVias(
     if (!(max_distance > 0)) return;
     for (pads) |pad| {
         if (pad.thru or pad.net < 0) continue;
+        if (pad.part < placement.pin_roles.len and placement.pin_roles[pad.part].classOf(pad.num) == .optional_nc) continue;
         const net_i: usize = @intCast(pad.net);
         if (net_i >= placement.nets.len) continue;
         const name = placement.nets[net_i].name;
@@ -3634,6 +3635,35 @@ test "ground pad via distance is a warning and accepts the exact limit" {
     const via = [_]router.Via{.{ .x = 1, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 }};
     const served = try check(arena, placement, .{ .tracks = &.{}, .vias = &via, .routed = 0, .total = 0 }, 0.127);
     try testing.expectEqual(@as(usize, 0), countKind(served, .ground_via_distance));
+}
+
+// spec: placement/drc - an optional NC land assigned to ground is excluded from the ground-via maximum because its same-package real ground return owns the required plane connection
+test "ground via maximum does not require a barrel at an optional NC land" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const PR = @import("pin_roles.zig");
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "U1",
+        .kind = .hub,
+        .hw = 0.3,
+        .hh = 0.3,
+        .pads = &pad,
+        .fallback = false,
+    }};
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const nets = [_]FlatNet{.{ .name = "GND", .pins = &pins }};
+    var role = PR.PartRoles{};
+    try role.map.put(arena, "1", .optional_nc);
+    var roles = [_]PR.PartRoles{role};
+    var placement = partsOnly(&parts);
+    placement.nets = &nets;
+    placement.pin_roles = &roles;
+    placement.rules.design.pour.ground_via_max = 1.0;
+    const found = try check(arena, placement, .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 }, 0.127);
+    try testing.expectEqual(@as(usize, 0), countKind(found, .ground_via_distance));
 }
 
 // spec: placement/drc - warns on a through-via that reaches fewer than two copper layers

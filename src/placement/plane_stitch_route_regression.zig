@@ -9,6 +9,7 @@ const flat_netlist = @import("../flat_netlist.zig");
 const geometry = @import("geometry.zig");
 const route_policy = @import("route_policy.zig");
 const bypass_open = @import("bypass_open.zig");
+const pin_roles = @import("pin_roles.zig");
 
 const testing = std.testing;
 
@@ -219,6 +220,7 @@ test "an angled bound bypass pair stays one surface-connected stitch island" {
 
 // spec: placement/plane-stitch - final fill-blind copper cleanup preserves exact-target bypass surface paths even when a rail plane makes their trace sections connectivity-redundant
 // spec: placement/plane-stitch - a same-target capacitor bank extends a far exact-target leg through bounded local cap-to-cap hops while the path-length gate still places another via when needed
+// spec: placement/plane-stitch - an HMC-style grounded NC ring surface-bonds to the exposed ground pad and adds no per-NC barrels while the thermal array and capacitor returns remain
 test "two three-cap bypass banks remain surface-connected to their exact IC pins" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -247,14 +249,18 @@ test "two three-cap bypass banks remain surface-connected to their exact IC pins
         .{ .number = "1", .x = -0.48, .y = 0, .w = 0.56, .h = 0.62, .shape = "roundrect" },
         .{ .number = "2", .x = 0.48, .y = 0, .w = 0.56, .h = 0.62, .shape = "roundrect" },
     };
+    const real_0603_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -0.78, .y = 0, .w = 0.90, .h = 0.95, .shape = "roundrect" },
+        .{ .number = "2", .x = 0.78, .y = 0, .w = 0.90, .h = 0.95, .shape = "roundrect" },
+    };
     var parts = [_]optimizer.Part{
         .{ .ref_des = "U1", .kind = .hub, .hw = 2.125, .hh = 2.125, .pads = &qfn_pads, .fallback = false },
         .{ .ref_des = "C1", .kind = .passive, .hw = 0.85, .hh = 0.35, .pads = &real_0402_pads, .fallback = false, .x = -0.70, .y = -2.80, .rot = 180 },
         .{ .ref_des = "C2", .kind = .passive, .hw = 0.85, .hh = 0.35, .pads = &real_0402_pads, .fallback = false, .x = -0.70, .y = -3.80, .rot = 180 },
-        .{ .ref_des = "C3", .kind = .passive, .hw = 0.85, .hh = 0.35, .pads = &real_0402_pads, .fallback = false, .x = -0.70, .y = -4.80, .rot = 180 },
+        .{ .ref_des = "C3", .kind = .passive, .hw = 1.25, .hh = 0.55, .pads = &real_0603_pads, .fallback = false, .x = -1.10, .y = -5.00, .rot = 180 },
         .{ .ref_des = "C4", .kind = .passive, .hw = 0.85, .hh = 0.35, .pads = &real_0402_pads, .fallback = false, .x = 1.30, .y = -2.80 },
         .{ .ref_des = "C5", .kind = .passive, .hw = 0.85, .hh = 0.35, .pads = &real_0402_pads, .fallback = false, .x = 1.30, .y = -3.80 },
-        .{ .ref_des = "C6", .kind = .passive, .hw = 0.85, .hh = 0.35, .pads = &real_0402_pads, .fallback = false, .x = 1.30, .y = -4.80 },
+        .{ .ref_des = "C6", .kind = .passive, .hw = 1.25, .hh = 0.55, .pads = &real_0603_pads, .fallback = false, .x = 1.70, .y = -5.00 },
     };
     const rail_pins_bank = [_]flat_netlist.FlatPin{
         .{ .ref_des = "U1", .pin = "15" },
@@ -293,19 +299,25 @@ test "two three-cap bypass banks remain surface-connected to their exact IC pins
     };
     const cap_power = optimizer.PadRect{ .x = -0.48, .y = 0, .w = 0.56, .h = 0.62 };
     const cap_ground = optimizer.PadRect{ .x = 0.48, .y = 0, .w = 0.56, .h = 0.62 };
+    const bulk_power = optimizer.PadRect{ .x = -0.78, .y = 0, .w = 0.90, .h = 0.95 };
+    const bulk_ground = optimizer.PadRect{ .x = 0.78, .y = 0, .w = 0.90, .h = 0.95 };
     const pin_15 = optimizer.PadRect{ .x = -0.25, .y = -1.55, .w = 0.30, .h = 0.70 };
-    const pin_16 = optimizer.PadRect{ .x = -0.75, .y = -1.55, .w = 0.30, .h = 0.70 };
     const pin_13 = optimizer.PadRect{ .x = 0.75, .y = -1.55, .w = 0.30, .h = 0.70 };
-    const pin_14 = optimizer.PadRect{ .x = 0.25, .y = -1.55, .w = 0.30, .h = 0.70 };
+    const exposed_ground = optimizer.PadRect{ .x = 0, .y = 0, .w = 1.95, .h = 1.95 };
     const loops = [_]optimizer.Loop{
-        .{ .cap = 1, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_15, .hub_gnd = &.{}, .hub_gnd_pin = pin_16, .pwr_net = 1, .explicit_pin = "15" },
-        .{ .cap = 2, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_15, .hub_gnd = &.{}, .hub_gnd_pin = pin_16, .pwr_net = 1, .explicit_pin = "15" },
-        .{ .cap = 3, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_15, .hub_gnd = &.{}, .hub_gnd_pin = pin_16, .pwr_net = 1, .explicit_pin = "15" },
-        .{ .cap = 4, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_13, .hub_gnd = &.{}, .hub_gnd_pin = pin_14, .pwr_net = 1, .explicit_pin = "13" },
-        .{ .cap = 5, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_13, .hub_gnd = &.{}, .hub_gnd_pin = pin_14, .pwr_net = 1, .explicit_pin = "13" },
-        .{ .cap = 6, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_13, .hub_gnd = &.{}, .hub_gnd_pin = pin_14, .pwr_net = 1, .explicit_pin = "13" },
+        .{ .cap = 1, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_15, .hub_gnd = &.{}, .hub_gnd_pin = exposed_ground, .pwr_net = 1, .explicit_pin = "15" },
+        .{ .cap = 2, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_15, .hub_gnd = &.{}, .hub_gnd_pin = exposed_ground, .pwr_net = 1, .explicit_pin = "15" },
+        .{ .cap = 3, .hub = 0, .cap_pwr = bulk_power, .cap_gnd = bulk_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_15, .hub_gnd = &.{}, .hub_gnd_pin = exposed_ground, .pwr_net = 1, .explicit_pin = "15" },
+        .{ .cap = 4, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_13, .hub_gnd = &.{}, .hub_gnd_pin = exposed_ground, .pwr_net = 1, .explicit_pin = "13" },
+        .{ .cap = 5, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_13, .hub_gnd = &.{}, .hub_gnd_pin = exposed_ground, .pwr_net = 1, .explicit_pin = "13" },
+        .{ .cap = 6, .hub = 0, .cap_pwr = bulk_power, .cap_gnd = bulk_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_13, .hub_gnd = &.{}, .hub_gnd_pin = exposed_ground, .pwr_net = 1, .explicit_pin = "13" },
     };
-    const placement = optimizer.Placement{
+    var ic_roles = pin_roles.PartRoles{};
+    try ic_roles.map.put(arena, "17", .ground);
+    const optional_pins = [_][]const u8{ "1", "2", "4", "5", "6", "7", "8", "9", "11", "12", "14", "16" };
+    for (optional_pins) |pin| try ic_roles.map.put(arena, pin, .optional_nc);
+    var roles = [_]pin_roles.PartRoles{ ic_roles, .{}, .{}, .{}, .{}, .{}, .{} };
+    var placement = optimizer.Placement{
         .parts = &parts,
         .links = &.{},
         .loops = &loops,
@@ -313,14 +325,15 @@ test "two three-cap bypass banks remain surface-connected to their exact IC pins
         .instances = &.{},
         .nets = &nets,
         .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
-        .minx = -2.125,
+        .minx = -2.35,
         .miny = -5.15,
-        .maxx = 2.125,
+        .maxx = 2.95,
         .maxy = 2.125,
         .generated = true,
         .rules = .{ .planes = .{ .implicit_rail = "VCC" } },
-        .board_rect = .{ .minx = -2.3, .miny = -5.3, .w = 4.6, .h = 7.6 },
+        .board_rect = .{ .minx = -2.5, .miny = -5.7, .w = 5.6, .h = 8.0 },
     };
+    placement.pin_roles = &roles;
     const selected = [_]bool{ false, true };
     const routed = try router.routeWithOptions(arena, placement, .{
         .track_width = 0.127,
@@ -334,6 +347,17 @@ test "two three-cap bypass banks remain surface-connected to their exact IC pins
     // topology prune proves and removes the two redundant ones before a routed
     // board is returned.
     try testing.expectEqual(@as(usize, 4), viasOn(routed.vias, 1));
+
+    const ground_selected = [_]bool{ true, false };
+    const grounded = try router.routeWithOptions(arena, placement, .{
+        .track_width = 0.127,
+        .clearance = 0.127,
+        .via_dia = 0.4,
+        .via_drill = 0.2,
+    }, .{ .selected_nets = &ground_selected });
+    // Nine exposed-pad thermal barrels plus one direct return for each of the
+    // six bypass capacitors; none of the twelve optional lands drills a via.
+    try testing.expectEqual(@as(usize, 15), viasOn(grounded.vias, 0));
 }
 
 // spec: placement/router - signal nets in an explicit authored route wave claim their copper before plane stitching, while the rest wave still follows the plane pass
