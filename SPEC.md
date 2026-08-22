@@ -5528,7 +5528,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - When two local candidates collide, the earlier DRC-clean net remains frozen and only the later candidate is deferred to the global route
 - Accepted local plane drops are immutable same-net sources in the single global pass, so the global plane phase does not duplicate their barrels
 - Route responses report attempted, completed, and timed-out local sub-circuits, deferred supply nets, and accepted carrier drops while the compatibility fallback flag remains false
-- Carrier-backed ground, power, and input-rail terminals receive independent local drops except that an authored exact-target bypass bank keeps its bounded cap-to-pin surface bonds; without a declared plane or retained pour, a supply net routes its passive-to-IC island locally and leaves its board-spanning remainder for the global route
+- Carrier-backed ground, power, and input-rail terminals receive independent local drops except that an authored exact-target bypass bank keeps its bounded cap-to-pin surface bonds; without a declared plane or retained pour, authored passive-to-IC bonds and validated starred module copper complete bounded local supply trees while the board-spanning remainder waits for global routing
 - A hard route deadline gives all one-shot local sub-circuit attempts at most one quarter of the initially remaining time and preserves the original absolute deadline for the global phase
 - get_schematic_image is a registered read-only CLI tool
 - get_pcb_layout_image renders the heat-zone image when thermal is set, and a different picture for each cooling scenario

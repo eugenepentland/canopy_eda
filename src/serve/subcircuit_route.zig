@@ -20,7 +20,11 @@ const drc = @import("../placement/drc.zig");
 pub const SeedTrack = struct { copper: route_policy.ExistingTrack, net: usize };
 
 /// One parent-indexed via produced by an isolated sub-circuit pass.
-pub const SeedVia = struct { copper: route_policy.ExistingVia, net: usize };
+pub const SeedVia = struct {
+    copper: route_policy.ExistingVia,
+    net: usize,
+    carrier_drop: bool = false,
+};
 
 /// Copper produced by all isolated sub-circuit passes, plus a parent-net mask
 /// identifying which nets should supersede saved module-snapshot seeds.
@@ -345,6 +349,39 @@ fn hasRetainedPour(zones: []const route_policy.ExistingZone, net: usize) bool {
     return false;
 }
 
+const saved_supply_terminal_limit: usize = 12;
+
+/// Whether a saved supply tree is a bounded local island and has no declared
+/// plane or retained same-net pour that supersedes it with carrier drops.
+pub fn savedSupplyFallbackAllowed(
+    placement: optimizer.Placement,
+    options: route_policy.Options,
+    subcircuit: []const u8,
+    net: usize,
+) bool {
+    if (net >= placement.nets.len) return false;
+    if (router.netHasPlane(placement, placement.nets[net].name) or hasRetainedPour(options.existing_zones, net)) return false;
+    var terminals: usize = 0;
+    for (placement.nets[net].pins) |pin| if (memberRef(subcircuit, pin.ref_des)) {
+        terminals += 1;
+    };
+    return terminals >= 2 and terminals <= saved_supply_terminal_limit;
+}
+
+/// Saved standalone supply vias are structural only when their trace tree
+/// changes layers. Otherwise they are disconnected carrier drops that do not
+/// belong on a destination board without that carrier.
+pub fn savedNetUsesMultipleLayers(tracks: anytype, net: []const u8) bool {
+    var first: ?u8 = null;
+    for (tracks) |track| {
+        if (!std.mem.eql(u8, track.net, net)) continue;
+        if (first) |layer| {
+            if (layer != track.l) return true;
+        } else first = track.l;
+    }
+    return false;
+}
+
 const SupplyBondContext = struct {
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -357,10 +394,9 @@ const SupplyBondContext = struct {
     routed_nets: []bool,
 };
 
-/// An uncarried supply does not need a local high-fanout rail tree, but its
-/// authored bypass bindings are local physical intent: cap land to the exact IC
-/// supply pad named by `(decouples ...)`. Route those short pairs independently
-/// and leave the shared rail trunk for the assembled-board pass.
+/// Route explicit local bypass bonds cheaply. The board seed loader can then
+/// add a validated complete starred supply tree for this module; the shared
+/// rail trunk remains for the assembled-board pass.
 fn appendUncarriedSupplyBonds(
     ctx: SupplyBondContext,
 ) std.mem.Allocator.Error!void {
@@ -635,6 +671,7 @@ pub fn routeAllClassified(
             .vias = &vias,
             .plane_ok = complete_planes,
         }, selected_supply);
+        for (vias.items[via_start..]) |*via| via.carrier_drop = true;
         for (tracks.items[track_start..]) |track| {
             if (track.net < nets.len) nets[track.net] = true;
         }
@@ -868,7 +905,7 @@ fn expectSeedTracks(tracks: []const SeedTrack, net: usize, max_x: ?f64) !void {
     }
 }
 
-// spec: Web Server - Carrier-backed ground, power, and input-rail terminals receive independent local drops except that an authored exact-target bypass bank keeps its bounded cap-to-pin surface bonds; without a declared plane or retained pour, a supply net routes its passive-to-IC island locally and leaves its board-spanning remainder for the global route
+// spec: Web Server - Carrier-backed ground, power, and input-rail terminals receive independent local drops except that an authored exact-target bypass bank keeps its bounded cap-to-pin surface bonds; without a declared plane or retained pour, authored passive-to-IC bonds and validated starred module copper complete bounded local supply trees while the board-spanning remainder waits for global routing
 test "supply nets drop to a plane and uncarried supply routes its local passive bond" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -878,12 +915,12 @@ test "supply nets drop to a plane and uncarried supply routes its local passive 
     var parts = [_]optimizer.Part{
         .{ .ref_des = "power/C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
         .{ .ref_des = "power/U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 2, .y = 0 },
-        .{ .ref_des = "power/J1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 6, .y = 0 },
+        .{ .ref_des = "other/J1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 6, .y = 0 },
     };
     const pins = [_]export_kicad.FlatPin{
         .{ .ref_des = "power/C1", .pin = "1" },
         .{ .ref_des = "power/U1", .pin = "1" },
-        .{ .ref_des = "power/J1", .pin = "1" },
+        .{ .ref_des = "other/J1", .pin = "1" },
     };
     const nets = [_]optimizer.FlatNet{.{ .name = "VCC", .pins = &pins }};
     const land = optimizer.PadRect{ .x = 0, .y = 0, .w = 0.7, .h = 0.7 };
@@ -916,6 +953,7 @@ test "supply nets drop to a plane and uncarried supply routes its local passive 
         .rules = .{ .plane_nets = &.{"VCC"}, .copper_layers = 4 },
     };
     const planed = try routeAllClassified(alloc, &board, placement, .{}, .{}, &.{true});
+    try testing.expect(!savedSupplyFallbackAllowed(placement, .{}, "power", 0));
     try testing.expect(planed.vias.len >= 1);
     try testing.expect(planed.complete_planes[0]);
     try testing.expectEqual(@as(usize, 0), planed.phase.deferred_supply_nets);
@@ -931,6 +969,7 @@ test "supply nets drop to a plane and uncarried supply routes its local passive 
     try testing.expect(thru.complete_planes[0]);
 
     placement.rules = .{ .plane_nets = &.{}, .copper_layers = 2 };
+    try testing.expect(savedSupplyFallbackAllowed(placement, .{}, "power", 0));
     const deferred = try routeAllClassified(alloc, &board, placement, .{}, .{}, &.{true});
     try testing.expect(deferred.tracks.len > 0);
     try testing.expectEqual(@as(usize, 0), deferred.vias.len);
@@ -938,6 +977,13 @@ test "supply nets drop to a plane and uncarried supply routes its local passive 
     try expectSeedTracks(deferred.tracks, 0, 3.5);
     try testing.expect(!deferred.complete_planes[0]);
     try testing.expectEqual(@as(usize, 1), deferred.phase.deferred_supply_nets);
+
+    const saved_tracks = [_]struct { net: []const u8, l: u8 }{
+        .{ .net = "VOUT", .l = 0 }, .{ .net = "VOUT", .l = 0 },
+        .{ .net = "VIN", .l = 0 },  .{ .net = "VIN", .l = 1 },
+    };
+    try testing.expect(!savedNetUsesMultipleLayers(&saved_tracks, "VOUT"));
+    try testing.expect(savedNetUsesMultipleLayers(&saved_tracks, "VIN"));
 }
 
 test "saved pour contact requires same-net copper that survives priority clipping" {

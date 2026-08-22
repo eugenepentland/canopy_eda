@@ -2351,19 +2351,21 @@ fn appendModuleSeedCopper(
         if (!mapped.sampled or mapped.parent < 0) continue;
         const ni: usize = @intCast(mapped.parent);
         if (!seedNetEnabled(ctx.options, ni)) continue;
-        if (ni < ctx.supply.len and ctx.supply[ni]) continue;
-        if (ctx.placement.rules.carriesPlane(ctx.placement.nets[ni].name)) continue;
+        const supply = ni < ctx.supply.len and ctx.supply[ni];
+        if (supply and !subcircuit_route.savedSupplyFallbackAllowed(ctx.placement, ctx.options, slug, ni)) continue;
+        if (!supply and ctx.placement.rules.carriesPlane(ctx.placement.nets[ni].name)) continue;
         // A fresh isolated route is authoritative for this net. The saved
         // module snapshot remains a fallback only when the local autorouter
         // emitted no copper for it.
-        if (ctx.acc.isolated[ni]) continue;
+        if (!supply and ctx.acc.isolated[ni]) continue;
         ctx.acc.candidate[ni] = true;
         ctx.acc.stats.copper.candidate_tracks += 1;
         if (!seedNetIsLocal(ctx.placement, slug, ni)) {
             ctx.acc.rejected[ni] = true;
             continue;
         }
-        if (!mapped.compatible) {
+        // A moved remote supply terminal does not invalidate unchanged local copper.
+        if (!mapped.compatible and !supply) {
             ctx.acc.rejected[ni] = true;
             continue;
         }
@@ -2392,16 +2394,18 @@ fn appendModuleSeedCopper(
         if (!mapped.sampled or mapped.parent < 0) continue;
         const ni: usize = @intCast(mapped.parent);
         if (!seedNetEnabled(ctx.options, ni)) continue;
-        if (ni < ctx.supply.len and ctx.supply[ni]) continue;
-        if (ctx.placement.rules.carriesPlane(ctx.placement.nets[ni].name)) continue;
-        if (ctx.acc.isolated[ni]) continue;
+        const supply = ni < ctx.supply.len and ctx.supply[ni];
+        if (supply and !subcircuit_route.savedSupplyFallbackAllowed(ctx.placement, ctx.options, slug, ni)) continue;
+        if (supply and !subcircuit_route.savedNetUsesMultipleLayers(routes.tracks, saved.net)) continue;
+        if (!supply and ctx.placement.rules.carriesPlane(ctx.placement.nets[ni].name)) continue;
+        if (!supply and ctx.acc.isolated[ni]) continue;
         ctx.acc.candidate[ni] = true;
         ctx.acc.stats.copper.candidate_vias += 1;
         if (!seedNetIsLocal(ctx.placement, slug, ni)) {
             ctx.acc.rejected[ni] = true;
             continue;
         }
-        if (!mapped.compatible) {
+        if (!mapped.compatible and !supply) {
             ctx.acc.rejected[ni] = true;
             continue;
         }
@@ -2482,7 +2486,7 @@ fn mergeAcceptedSeeds(
         try vias.append(alloc, item.copper);
         accepted_vias[item.net] +|= 1;
         acc.stats.copper.accepted_vias += 1;
-        if (item.net < acc.supply.len and acc.supply[item.net]) acc.stats.phase.accepted_carrier_drops += 1;
+        if (item.carrier_drop) acc.stats.phase.accepted_carrier_drops += 1;
     }
     const policies = try alloc.dupe(route_policy.NetPolicy, options.net);
     for (accepted_vias, 0..) |count, ni| if (count > 0 and ni < policies.len) {

@@ -3691,6 +3691,8 @@ src/serve/subcircuit_route.zig::SeedVia struct_
 src/serve/subcircuit_route.zig::regressed | fn regressed( alloc: std.mem.Allocator, placement: optimizer.Placement, params: router.RouteParams, seeded: router.RouteResult, plain: router.RouteResult, ) std.mem.Allocator.Error!bool
 src/serve/subcircuit_route.zig::routeAll | fn routeAll( alloc: std.mem.Allocator, block: *const env.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, base: route_policy.Options, ) std.mem.Allocator.Error!Result
 src/serve/subcircuit_route.zig::routeAllClassified | fn routeAllClassified( alloc: std.mem.Allocator, block: *const env.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, base: route_policy.Options, supply: []const bool, ) std.mem.Allocator.Error!Result
+src/serve/subcircuit_route.zig::savedNetUsesMultipleLayers | fn savedNetUsesMultipleLayers(tracks: anytype, net: []const u8) bool
+src/serve/subcircuit_route.zig::savedSupplyFallbackAllowed | fn savedSupplyFallbackAllowed( placement: optimizer.Placement, options: route_policy.Options, subcircuit: []const u8, net: usize, ) bool
 src/serve/subprocess.zig::Outcome enum_
 src/serve/subprocess.zig::Result struct_
 src/serve/subprocess.zig::deinit | fn deinit(self: Result, allocator: std.mem.Allocator) void
