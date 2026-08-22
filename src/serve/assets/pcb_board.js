@@ -413,13 +413,13 @@ function drawBoardRect(tmp){
  var pts=geom&&geom.points.length?geom.points:nominal;
  // A self-intersecting drawn polygon is invalid to save — draw it red so the
  // problem is obvious (Save also refuses it, see persistLayout/outlineBad).
- var bad=drawn&&pts&&pts.length>=3&&polySelfIntersects(pts);
- var SC=bad?"#f85149":EC;
- if(outlineMode&&geom&&geom.sketch){var ss=OS.state(PCB.outline.sketch);SC=ss.conflict?"#f85149":(ss.dof?"#58a6ff":"#d6d7db");}
- if(pts&&pts.length>=3){
-  var str=pts.map(function(p){return X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1);}).join(" ");
+ var open=!!(geom&&geom.sketch&&!geom.sketch.closed),bad=drawn&&pts&&pts.length>=3&&!open&&polySelfIntersects(pts);
+ var SC=bad?"#f85149":(open?"#e3b341":EC);
+ if(outlineMode&&geom&&geom.sketch){var ss=OS.state(PCB.outline.sketch);SC=ss.conflict?"#f85149":(open?"#e3b341":(ss.dof?"#58a6ff":"#d6d7db"));}
+ if((geom&&geom.sketch)||(pts&&pts.length>=3)){
+  var str=(pts||[]).map(function(p){return X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1);}).join(" ");
   if(geom&&geom.sketch){var d=outlineSketchPath(geom.sketch);
-   gB.appendChild(el("path",{d:d,fill:outlineMode?"rgba(126,231,135,.055)":"none",stroke:SC,"stroke-width":1.4,opacity:0.95}));}
+   gB.appendChild(el("path",{d:d,fill:outlineMode&&geom.sketch.closed?"rgba(126,231,135,.055)":"none",stroke:SC,"stroke-width":1.4,opacity:0.95,"stroke-dasharray":open?"5 3":"0"}));}
   else if(geom&&geom.arcs.length){var cs=geom.corners,first=cs[0]?cs[0].p1:{x:nominal[0][0],y:nominal[0][1]};
    var d="M "+X(first.x).toFixed(3)+" "+Y(first.y).toFixed(3);
    for(var pi=0;pi<cs.length;pi++){var f=cs[pi],v=nominal[pi];
@@ -450,12 +450,12 @@ function drawBoardRect(tmp){
  var bt=el("text",{x:(X(br.x)+6).toFixed(1),y:(Y(br.y)+14).toFixed(1),fill:EC,"font-size":"11",opacity:0.8});
  bt.textContent=fmtLen2(br.w)+"×"+fmtLen2(br.h)+(drawn?" (drawn)":(editing?" (edit)":"")); gB.appendChild(bt);
 }
-function outlineSketchPath(g){var cs=g.curves,d="",first=true;
+function outlineSketchPath(g){var cs=g.curves,d="",last=null;
  cs.forEach(function(c){var a=OS.point(PCB.outline.sketch,c.a),b=OS.point(PCB.outline.sketch,c.b);if(!a||!b)return;
-  if(first){d="M "+X(a.x).toFixed(3)+" "+Y(a.y).toFixed(3);first=false;}
+  if(!last||last.id!==a.id)d+=" M "+X(a.x).toFixed(3)+" "+Y(a.y).toFixed(3);
   if(c.kind==="arc"){var ag=OS.arcCircle(PCB.outline.sketch,c);if(ag)d+=" A "+(ag.r*S).toFixed(3)+" "+(ag.r*S).toFixed(3)+" 0 "+(Math.abs(ag.sweep)>Math.PI?1:0)+" "+(ag.sweep>0?1:0)+" "+X(b.x).toFixed(3)+" "+Y(b.y).toFixed(3);
    else d+=" L "+X(b.x).toFixed(3)+" "+Y(b.y).toFixed(3);}
-  else d+=" L "+X(b.x).toFixed(3)+" "+Y(b.y).toFixed(3);});return d+" Z";}
+  else d+=" L "+X(b.x).toFixed(3)+" "+Y(b.y).toFixed(3);last=b;});return d+(g.closed?" Z":"");}
 function outlineCurvePath(c){var sk=PCB.outline&&PCB.outline.sketch,a=sk&&OS.point(sk,c.a),b=sk&&OS.point(sk,c.b);if(!a||!b)return "";var d="M "+X(a.x).toFixed(3)+" "+Y(a.y).toFixed(3);
  if(c.kind!=="arc")return d+" L "+X(b.x).toFixed(3)+" "+Y(b.y).toFixed(3);var g=OS.arcCircle(sk,c);return g?d+" A "+(g.r*S).toFixed(3)+" "+(g.r*S).toFixed(3)+" 0 "+(Math.abs(g.sweep)>Math.PI?1:0)+" "+(g.sweep>0?1:0)+" "+X(b.x).toFixed(3)+" "+Y(b.y).toFixed(3):d+" L "+X(b.x).toFixed(3)+" "+Y(b.y).toFixed(3);}
 function drawOutlineSketchSelection(g){outlineResolveSelection();outlineSelection.forEach(function(s){if(s.type==="curve"){var c=OS.curve(PCB.outline.sketch,s.id);if(c)gB.appendChild(el("path",{d:outlineCurvePath(c),fill:"none",stroke:"#fff","stroke-width":3,opacity:.85}));}
@@ -3441,8 +3441,8 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Explode / re-cohere hovered sub-circuit</span><kbd>G</kbd></div>'+
   '<div class="kbd-row"><span>Move whole sub-circuit</span><kbd>drag any of its parts</kbd></div>'+
   '<div class="kbd-row"><span>Edit the current board outline; drag empty space to box-select vertices</span><kbd>▭ Outline</kbd></div>'+
-  '<div class="kbd-row"><span>Connected outline lines (corner + H/V snap &middot; Enter close &middot; Backspace undo)</span><kbd>Line, then click endpoints</kbd></div>'+
-  '<div class="kbd-row"><span>Edit outline: drag a vertex &middot; select a line + Delete removes it and heals the closed profile &middot; select a fillet + Delete restores its sharp corner</span><kbd>in outline sketch</kbd></div>'+
+  '<div class="kbd-row"><span>Connected outline lines (corner + H/V snap &middot; Enter keeps open &middot; Backspace undo)</span><kbd>Line, then click endpoints</kbd></div>'+
+  '<div class="kbd-row"><span>Edit outline: select vertices or segments + Delete leaves an open sketch &middot; Line reconnects loose endpoints &middot; Remove fillet restores a sharp corner</span><kbd>in outline sketch</kbd></div>'+
   '<div class="kbd-row"><span>Dimension selected outline geometry</span><kbd>D in outline sketch</kbd></div>'+
   '<div class="kbd-row"><span>Constrain selected outline line</span><kbd>H / V</kbd></div>'+
   '<div class="kbd-row"><span>Hand-route mode (click pad → trace; head stops at clearance obstacles)</span><kbd>X</kbd></div>'+
@@ -3482,7 +3482,7 @@ document.addEventListener("keydown",function(ev){
  if(outlineMode&&!kbTyping(ev.target)&&(ev.key==="h"||ev.key==="H")){ev.preventDefault();outlineSketchConstraint("horizontal");return;}
  if(outlineMode&&!kbTyping(ev.target)&&(ev.key==="v"||ev.key==="V")){ev.preventDefault();outlineSketchConstraint("vertical");return;}
  if(outlineDeleteKeyActive(ev.target)&&(ev.key==="Backspace"||ev.key==="Delete")){ev.preventDefault();outlineDeleteSelected();return;}
- if(polyMode&&ev.key=="Enter"){ev.preventDefault();polyClose();return;}
+ if(polyMode&&ev.key=="Enter"){ev.preventDefault();polyFinish(false);return;}
  if(polyMode&&(ev.key=="Backspace"||ev.key=="Delete")){ev.preventDefault();polyPop();return;}
  if(pourMode&&pourPts&&ev.key=="Enter"){ev.preventDefault();pourClose();return;}
  if(pourMode&&pourPts&&(ev.key=="Backspace"||ev.key=="Delete")){ev.preventDefault();pourPop();return;}
@@ -3906,8 +3906,8 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
  if(automatic&&!pcbDirty)return Promise.resolve("clean");
  // Refuse to persist a self-intersecting / degenerate outline (the server would
  // 400 it anyway); the editing state is preserved so the user can fix it.
- if(outlineBad()){if(msg){msg.style.color="#f85149";
-   msg.textContent="outline self-intersects — fix it before saving";}return Promise.resolve("invalid");}
+ if(outlineBad()){if(msg){msg.style.color="#f85149";var og=OS&&PCB.outline&&PCB.outline.sketch&&OS.compile(PCB.outline.sketch);
+   msg.textContent=og&&!og.closed?"outline is open — reconnect its loose endpoints before saving":"outline self-intersects — fix it before saving";}return Promise.resolve("invalid");}
  if(backingBad()){if(msg){msg.style.color="#f85149";
    msg.textContent="backing region self-intersects or has zero area — fix it before saving";}return Promise.resolve("invalid");}
  trackIdsEnsureAll();var saveGeneration=dirtyGeneration;
@@ -4493,15 +4493,20 @@ function outlineResolveSelection(){if(!OS||!PCB.outline||!PCB.outline.sketch)ret
  outlineSelection.forEach(function(s){var e=s.type==="point"?ps[s.index]:cs[s.index];if(e)s.id=e.id;});}
 function outlineSelected(type){outlineResolveSelection();return outlineSelection.filter(function(s){return s.type===type&&s.id;}).map(function(s){return s.id;});}
 function outlineDeleteKeyActive(target){if(polyMode||kbTyping(target))return false;if(outlineMode)return true;return outlineOnlyFilter()&&outlineSelection.length;}
-function outlineDeleteSelected(){if(!OS||!outlineSelection.length)return false;return outlineSketchMutate("selected outline geometry removed",function(sk){var cs=outlineSelected("curve"),ps=outlineSelected("point"),arcs=[],lines=[];
-  cs.forEach(function(id){var c=OS.curve(sk,id);if(c&&c.kind==="arc")arcs.push(id);else if(c&&c.kind==="line")lines.push(id);});OS.physicalCurves(sk).forEach(function(c){if(c.kind==="arc"&&ps.indexOf(c.a)>=0&&ps.indexOf(c.b)>=0&&arcs.indexOf(c.id)<0)arcs.push(c.id);});
-  var changed=false;arcs.forEach(function(id){if(OS.removeFillet(sk,id))changed=true;});lines.forEach(function(id){if(OS.deleteSegment(sk,id))changed=true;});if(!changed&&ps.length){ps.forEach(function(id){if(OS.deletePoint(sk,id))changed=true;});}
-  if(!changed){outlineMsg("outline needs at least 3 segments — select a removable line, arc, or vertex");return false;}outlineSelection=[];return true;});}
+function outlineDeleteSelected(){if(!OS||!outlineSelection.length)return false;return outlineSketchMutate("selected outline geometry deleted",function(sk){var cs=outlineSelected("curve"),ps=outlineSelected("point"),changed=false;
+  // Points go first: each selected vertex and every curve touching it disappear,
+  // just as sketch geometry does in Fusion. Explicitly selected curves then
+  // disappear on their own; neither operation heals or recloses the profile.
+  ps.forEach(function(id){if(OS.deletePoint(sk,id))changed=true;});cs.forEach(function(id){if(OS.deleteSegment(sk,id))changed=true;});
+  if(!changed){outlineMsg("select an outline segment or vertex to delete");return false;}outlineSelection=[];return true;});}
+function outlineRemoveFilletSelected(){if(!OS||!outlineSelection.length)return false;return outlineSketchMutate("fillet removed and sharp corner restored",function(sk){var cs=outlineSelected("curve"),ps=outlineSelected("point"),arcs=[];
+  cs.forEach(function(id){var c=OS.curve(sk,id);if(c&&c.kind==="arc")arcs.push(id);});OS.physicalCurves(sk).forEach(function(c){if(c.kind==="arc"&&ps.indexOf(c.a)>=0&&ps.indexOf(c.b)>=0&&arcs.indexOf(c.id)<0)arcs.push(c.id);});
+  var changed=false;arcs.forEach(function(id){if(OS.removeFillet(sk,id))changed=true;});if(!changed){outlineMsg("select a fillet arc, or both of its endpoints");return false;}outlineSelection=[];return true;});}
 function outlineSketchMutate(label,fn){if(!OS)return false;var pre=snapAll();outlinePromote();outlineResolveSelection();var ok=fn(PCB.outline.sketch);
  if(ok===false){PCB.outline=pre.outline;outlineGeomDrop();drawBoardRect();outlineSketchPanelSync();return false;}
  var solved=OS.solve(PCB.outline.sketch),compiled=!solved.conflict&&OS.syncOutline(PCB.outline);if(!compiled){PCB.outline=pre.outline;outlineGeomDrop();drawBoardRect();renderProps();outlineSketchPanelSync();outlineMsg("constraint conflict — "+label+" was not applied");return false;}
- outlineGeomDrop();recordUndo(pre);drawBoardRect();renderProps();scheduleDrc();
- outlineMsg(label+" — Save/Update to keep");outlineSketchPanelSync();return true;}
+ outlineGeomDrop();recordUndo(pre);drawBoardRect();renderProps();if(compiled.closed)scheduleDrc();
+ outlineMsg(label+(compiled.closed?" — profile closed; Save/Update to keep":" — profile open; draw lines between loose endpoints"));outlineSketchPanelSync();return true;}
 function outlineSketchNumber(label,value){var text=window.prompt(label,String(Math.round((+value||0)*1000)/1000));if(text==null)return null;var n=parseFloat(text);return isFinite(n)?n:null;}
 function outlineSketchConstraint(kind){return outlineSketchMutate(kind+" constraint",function(sk){var cs=outlineSelected("curve"),ps=outlineSelected("point"),q=null;
   if(kind==="horizontal"||kind==="vertical")q=cs.length&&OS.addConstraint(sk,kind,cs[0]);
@@ -4522,18 +4527,17 @@ function outlineSketchModify(action){return outlineSketchMutate(action,function(
   if(action==="offset"){n=outlineSketchNumber("Profile offset (mm, positive = outward)",1);return n!=null&&OS.offset(sk,n);}
   if(action==="mirror-x"||action==="mirror-y"){g=OS.compile(sk);return g&&OS.mirror(sk,action==="mirror-x"?"x":"y",action==="mirror-x"?g.rect.x+g.rect.w/2:g.rect.y+g.rect.h/2);}return false;});}
 function outlineSketchPanelSync(){var host=svg&&svg.parentNode,p=document.getElementById("outline-sketch-palette");if(!outlineMode||RO||!OS){if(p)p.remove();return;}if(!p){p=document.createElement("div");p.id="outline-sketch-palette";p.className="outline-sketch-palette";host.appendChild(p);}
- var st=PCB.outline&&PCB.outline.sketch?OS.state(PCB.outline.sketch):null;p.innerHTML='<div class="osp-head"><b>Outline sketch</b><span class="osp-dof '+(st&&st.conflict?'bad':'')+'">'+(st?(st.conflict?'conflict':st.dof+' DOF'):'start editing')+'</span></div>'+
+ var sk=PCB.outline&&PCB.outline.sketch,st=sk?OS.state(sk):null,sg=sk&&OS.compile(sk);p.innerHTML='<div class="osp-head"><b>Outline sketch</b><span class="osp-dof '+(st&&st.conflict?'bad':'')+'">'+(st?(st.conflict?'conflict':((sg&&!sg.closed?'open · ':'')+st.dof+' DOF')):'start editing')+'</span></div>'+
   '<div class="osp-group"><span>Create</span><button data-sk="new-rect"'+(outlineRectArmed?' class="on"':'')+'>Rectangle</button><button data-sk="new-poly"'+(polyMode&&polySketchOwned?' class="on"':'')+'>Line</button><button data-sk="dimension">Dimension</button></div>'+
   '<div class="osp-group"><span>Constrain</span><button data-sk="horizontal">H</button><button data-sk="vertical">V</button><button data-sk="coincident">Coincident</button><button data-sk="parallel">∥</button><button data-sk="perpendicular">⟂</button><button data-sk="tangent">Tangent</button><button data-sk="equal">Equal</button><button data-sk="midpoint">Midpoint</button><button data-sk="symmetric">Symmetry</button><button data-sk="fixed">Fix</button></div>'+
   '<div class="osp-group"><span>Modify</span><button data-sk="arc">Arc</button><button data-sk="line">Line</button><button data-sk="fillet">Fillet</button><button data-sk="remove-fillet">Remove fillet</button><button data-sk="chamfer">Chamfer</button><button data-sk="offset">Offset</button><button data-sk="mirror-x">Mirror X</button><button data-sk="mirror-y">Mirror Y</button></div>'+
   '<button class="osp-finish" data-sk="finish">Finish sketch</button>';
- p.querySelectorAll("[data-sk]").forEach(function(b){b.addEventListener("click",function(){var a=b.getAttribute("data-sk");if(a==="finish"){if(polyMode)polyArm(false);outlineArm(false);}else if(a==="new-poly")polyArm(!(polyMode&&polySketchOwned),true);else if(a==="new-rect"){if(polyMode)polyArm(false);outlineRectArmed=!outlineRectArmed;outlineSketchPanelSync();outlineMsg(outlineRectArmed?"rectangle armed: drag empty board space to replace the outline":"rectangle cancelled: empty drag box-selects sketch vertices");}else if(a==="remove-fillet")outlineDeleteSelected();else if(a==="dimension")outlineSketchDimension();else if(["horizontal","vertical","coincident","parallel","perpendicular","tangent","equal","midpoint","symmetric","fixed"].indexOf(a)>=0)outlineSketchConstraint(a);else outlineSketchModify(a);});});}
-// ⬡ Poly / in-sketch Line tool: click connected polygon-outline vertices.
+ p.querySelectorAll("[data-sk]").forEach(function(b){b.addEventListener("click",function(){var a=b.getAttribute("data-sk");if(a==="finish"){if(polyMode)polyArm(false);outlineArm(false);}else if(a==="new-poly")polyArm(!(polyMode&&polySketchOwned),true);else if(a==="new-rect"){if(polyMode)polyArm(false);outlineRectArmed=!outlineRectArmed;outlineSketchPanelSync();outlineMsg(outlineRectArmed?"rectangle armed: drag empty board space to replace the outline":"rectangle cancelled: empty drag box-selects sketch vertices");}else if(a==="remove-fillet")outlineRemoveFilletSelected();else if(a==="dimension")outlineSketchDimension();else if(["horizontal","vertical","coincident","parallel","perpendicular","tangent","equal","midpoint","symmetric","fixed"].indexOf(a)>=0)outlineSketchConstraint(a);else outlineSketchModify(a);});});}
+// ⬡ Poly / in-sketch Line tool: click connected outline segments freely.
 // Endpoints magnetize to existing corners and the chain start, infer horizontal
-// or vertical alignment, and otherwise use the grid. Click the first vertex or
-// press Enter to close; Backspace removes the last vertex and Esc cancels. The closed polygon becomes PCB.outline
-// ({x,y,w,h}=bbox + pts) — persisted by Save/Update exactly like the
-// rectangle — and its vertices stay draggable for editing afterwards.
+// or vertical alignment, and otherwise use the grid. Enter finishes an open
+// chain; clicking its first point closes it. Inside Outline sketch, finished
+// lines join the existing native sketch instead of replacing the whole board.
 var polyMode=false,polyPts=null,polyCur=null,polySketchOwned=false,vdrag=null;
 // ▩ Pour tool state (user-drawn custom copper pours): an in-progress polygon
 // (pourPts + rubber pourCur), an open net/layer dialog (pourDlg). Separate from
@@ -4556,7 +4560,7 @@ function polyArm(on,withinOutline){if(RO&&on)return;
  svg.classList.toggle("outline-mode",on||outlineMode);
  var msg=document.getElementById("pcb-savemsg");
  if(msg&&on){msg.style.color="#7ee787";
-  msg.textContent="outline line: click connected endpoints — corners and H/V alignments snap; click the first point or Enter to close";}
+  msg.textContent="outline line: click endpoints — corners and H/V snap; Enter keeps the chain open, or click its first point to close";}
  else if(msg&&!on){msg.textContent="";}
  toolSync();outlineSketchPanelSync();
  drawBoardRect();}
@@ -4705,13 +4709,14 @@ function outlineResize(w,h){var src=PCB.outline||authoredOutlineSeed()||PCB.boar
   (o.sketch.constraints||[]).forEach(function(q){if(q.value!=null&&q.kind!=="angle")q.value=OS.dimensionValue(o.sketch,q);});OS.syncOutline(o);}
  else if(o.pts&&o.pts.length)o.pts=o.pts.map(function(p){return [src.x+(p[0]-src.x)*sx,src.y+(p[1]-src.y)*sy];});
  o.x=src.x;o.y=src.y;o.w=w;o.h=h;if(o.pts)outlineBboxSync();else outlineGeomDrop();
- recordUndo(pre);drawBoardRect();scheduleDrc();outlineMsg("board resized to "+fmtLen(w)+" × "+fmtLen(h)+" — Save/Update to keep");return true;}
+ recordUndo(pre);drawBoardRect();outlineDrc();outlineMsg("board resized to "+fmtLen(w)+" × "+fmtLen(h)+" — Save/Update to keep");return true;}
 // The outline edge (segment vtx i → i+1) whose nearest point is within a handle
 // of board point m, or null. `px,py` is that (unsnapped) closest point.
 function edgeAt(m){var pts=outlinePtsOf(outlineEditable());if(!pts||pts.length<2)return null;
  var eo=outlineEditable(),sk=OS&&eo&&eo.sketch,ecs=sk&&OS.physicalCurves(sk);
  var bd=7/S,best=null,n=pts.length;
- for(var i=0;i<n;i++){var a=pts[i],b=pts[(i+1)%n],samples=[a];
+ var count=ecs?ecs.length:n;
+ for(var i=0;i<count;i++){var c=ecs&&ecs[i],ap=c&&OS.point(sk,c.a),bp=c&&OS.point(sk,c.b),a=c?[ap.x,ap.y]:pts[i],b=c?[bp.x,bp.y]:pts[(i+1)%n],samples=[a];
   if(ecs&&ecs[i]&&ecs[i].kind==="arc"){var ag=OS.arcCircle(sk,ecs[i]);if(ag)for(var ak=1;ak<20;ak++){var aa=ag.start+ag.sweep*ak/20;samples.push([ag.cx+ag.r*Math.cos(aa),ag.cy+ag.r*Math.sin(aa)]);}}samples.push(b);
   for(var si=0;si+1<samples.length;si++){a=samples[si];b=samples[si+1];
   var dx=b[0]-a[0],dy=b[1]-a[1],L2=dx*dx+dy*dy;if(L2<1e-12)continue;
@@ -4738,17 +4743,13 @@ function polySelfIntersects(pts){if(!pts||pts.length<4)return false;var n=pts.le
 // the viewer flags it (drawn red) and Save refuses it before the round-trip.
 function outlineBad(){var o=PCB.outline;if(!o)return false;
  if(!(o.w>=2&&o.h>=2))return true;
- if(OS&&o.sketch){var g=OS.compile(o.sketch);return !g||polySelfIntersects(g.points)||OS.state(o.sketch).conflict;}
+ if(OS&&o.sketch){var g=OS.compile(o.sketch);return !g||!g.closed||polySelfIntersects(g.points)||OS.state(o.sketch).conflict;}
  return !!(o.pts&&o.pts.length>=3&&polySelfIntersects(o.pts));}
-// Delete a vertex (right-click a handle), keeping ≥3; a rect promotes first
-// (→ triangle). One undo step; re-DRCs so the board edge tracks the new shape.
+function outlineDrc(){var o=PCB.outline,g=OS&&o&&o.sketch&&OS.compile(o.sketch);if(!g||g.closed)scheduleDrc();}
+// Delete a vertex (right-click a handle) and every incident curve. The sketch
+// may remain open; no replacement edge is synthesized behind the user's back.
 function outlineVertexDelete(i){var o=outlineEditable();if(!o)return;
- var cur=outlinePtsOf(o);if(!cur||cur.length<=3){outlineMsg("outline needs at least 3 vertices");return;}
- var pre=snapAll();outlinePromote();
- if(OS&&PCB.outline.sketch){var ps=OS.physicalPoints(PCB.outline.sketch);if(!ps[i]||!OS.deletePoint(PCB.outline.sketch,ps[i].id)){outlineMsg("outline needs at least 3 vertices");return;}OS.syncOutline(PCB.outline);}
- else PCB.outline.pts.splice(i,1);
- if(PCB.outline.radii)PCB.outline.radii.splice(i,1);outlineBboxSync();recordUndo(pre);drawBoardRect();scheduleDrc();
- outlineMsg("vertex removed — Save/Update to keep");}
+ if(!OS)return;outlineSketchMutate("outline vertex deleted",function(sk){var ps=OS.physicalPoints(sk);return !!(ps[i]&&OS.deletePoint(sk,ps[i].id));});}
 // Insert a vertex splitting edge `e.i` at its grid-snapped projection point
 // (double-click an edge); the new vertex is immediately draggable.
 function outlineInsertVertex(e){var pre=snapAll();outlinePromote();
@@ -4756,14 +4757,14 @@ function outlineInsertVertex(e){var pre=snapAll();outlinePromote();
  if(OS&&PCB.outline.sketch){var cs=OS.physicalCurves(PCB.outline.sketch),c=cs[e.i];if(!c||!OS.insertPoint(PCB.outline.sketch,c.id,gx,gy))return;OS.syncOutline(PCB.outline);}
  else PCB.outline.pts.splice(e.i+1,0,[gx,gy]);
  if(PCB.outline.radii)PCB.outline.radii.splice(e.i+1,0,0);
- outlineBboxSync();recordUndo(pre);drawBoardRect();scheduleDrc();
+ outlineBboxSync();recordUndo(pre);drawBoardRect();outlineDrc();
  outlineMsg("vertex added — Save/Update to keep");}
 // Begin sliding outline edge `e.i`: both endpoints translate by one snapped
 // delta. Captures the pre-drag snapshot (a rect is promoted lazily on the first
 // actual move, so a bare click never rewrites a rect into a polygon).
 function osegStart(e,m){var pts=outlinePtsOf(outlineEditable()),i=e.i,j=(i+1)%pts.length;
- var sk=OS&&outlineEditable().sketch,cs=sk&&OS.physicalCurves(sk),c=cs&&cs[i];
- return {i:i,j:j,id:c&&c.id,aid:c&&c.a,bid:c&&c.b,mid0:c&&c.mid&&c.mid.slice(),m0:m,a0:pts[i].slice(),b0:pts[j].slice(),moved:false,snap:snapAll()};}
+ var sk=OS&&outlineEditable().sketch,cs=sk&&OS.physicalCurves(sk),c=cs&&cs[i],ap=c&&OS.point(sk,c.a),bp=c&&OS.point(sk,c.b);
+ return {i:i,j:j,id:c&&c.id,aid:c&&c.a,bid:c&&c.b,mid0:c&&c.mid&&c.mid.slice(),m0:m,a0:c?[ap.x,ap.y]:pts[i].slice(),b0:c?[bp.x,bp.y]:pts[j].slice(),moved:false,snap:snapAll()};}
 function osegMove(m,square){var sd=osdrag,cur=outlinePtsOf(outlineEditable());
  var dx=Math.round((m.x-sd.m0.x)/G)*G,dy=Math.round((m.y-sd.m0.y)/G)*G;
  // Shift keeps a rectangular side square by sliding it only perpendicular to
@@ -4771,23 +4772,26 @@ function osegMove(m,square){var sd=osdrag,cur=outlinePtsOf(outlineEditable());
  // edges move horizontally. The selected segment itself remains rigid.
  if(square){var ex=sd.b0[0]-sd.a0[0],ey=sd.b0[1]-sd.a0[1];if(Math.abs(ex)>=Math.abs(ey))dx=0;else dy=0;}
  var na=[sd.a0[0]+dx,sd.a0[1]+dy],nb=[sd.b0[0]+dx,sd.b0[1]+dy];
- if(cur[sd.i][0]===na[0]&&cur[sd.i][1]===na[1]&&cur[sd.j][0]===nb[0]&&cur[sd.j][1]===nb[1])return;
+ var liveSk=OS&&outlineEditable().sketch,liveA=liveSk&&OS.point(liveSk,sd.aid),liveB=liveSk&&OS.point(liveSk,sd.bid);
+ if(liveA&&liveB){if(liveA.x===na[0]&&liveA.y===na[1]&&liveB.x===nb[0]&&liveB.y===nb[1])return;}
+ else if(cur[sd.i][0]===na[0]&&cur[sd.i][1]===na[1]&&cur[sd.j][0]===nb[0]&&cur[sd.j][1]===nb[1])return;
  outlinePromote();
  if(OS&&PCB.outline.sketch){if(!sd.id){var sc=OS.physicalCurves(PCB.outline.sketch)[sd.i];sd.id=sc&&sc.id;sd.aid=sc&&sc.a;sd.bid=sc&&sc.b;}
   var ap=OS.point(PCB.outline.sketch,sd.aid),bp=OS.point(PCB.outline.sketch,sd.bid),scur=OS.curve(PCB.outline.sketch,sd.id);ap.x=sd.a0[0];ap.y=sd.a0[1];bp.x=sd.b0[0];bp.y=sd.b0[1];if(scur&&sd.mid0)scur.mid=[sd.mid0[0]+dx,sd.mid0[1]+dy];OS.moveCurve(PCB.outline.sketch,sd.id,dx,dy);OS.syncOutline(PCB.outline);}
  else{var pts=PCB.outline.pts;pts[sd.i]=na;pts[sd.j]=nb;}
  sd.moved=true;outlineBboxSync();drawBoardRect();}
-function polyClose(){
- if(!polyPts||polyPts.length<3){polyArm(false);drawBoardRect();return;}
- // Snapshot the pre-close outline so a committed polygon is one undo step.
- var pre=snapAll();
- var prev=PCB.outline,pts=polyPts.slice();polyPts=null;polyCur=null;
- PCB.outline={x:0,y:0,w:0,h:0,pts:pts};outlineBboxSync();
- var ok=PCB.outline.w>=2&&PCB.outline.h>=2&&!polySelfIntersects(pts);
- if(!ok)PCB.outline=prev;
- else{if(OS)OS.ensure(PCB.outline);recordUndo(pre);}
- polyArm(false);drawBoardRect();
- outlineMsg(ok?"connected outline profile closed — Save/Update to keep":"profile is too small or crosses itself — outline unchanged");}
+function polyFinish(closeChain){
+ if(!polyPts||polyPts.length<2){polyPts=null;polyCur=null;drawBoardRect();return false;}
+ var pts=polyPts.slice();if(closeChain&&pts.length>=3){var a=pts[0],b=pts[pts.length-1];if(a[0]!==b[0]||a[1]!==b[1])pts.push(a.slice());}
+ if(polySketchOwned){var wasClosed=false,ok=outlineSketchMutate("line chain added",function(sk){if(!OS.addLinePath(sk,pts))return false;wasClosed=OS.closed(sk);if(wasClosed)OS.normalize(sk);return true;});
+  polyPts=null;polyCur=null;drawBoardRect();if(ok)outlineMsg(wasClosed?"line chain joined — outline profile closed; Save/Update to keep":"line chain added — profile remains open; continue drawing freely");return ok;}
+ // The standalone Poly outline command still replaces the board with a full
+ // closed contour. Open sketch editing is provided by Line inside Outline.
+ if(!closeChain||pts.length<4){outlineMsg("use Outline > Line to keep open geometry; this Poly outline command requires a closed loop");return false;}
+ var pre=snapAll(),prev=PCB.outline;pts.pop();polyPts=null;polyCur=null;PCB.outline={x:0,y:0,w:0,h:0,pts:pts};outlineBboxSync();
+ var valid=PCB.outline.w>=2&&PCB.outline.h>=2&&!polySelfIntersects(pts);if(!valid)PCB.outline=prev;else{if(OS)OS.ensure(PCB.outline);recordUndo(pre);}polyArm(false);drawBoardRect();
+ outlineMsg(valid?"connected outline profile closed — Save/Update to keep":"profile is too small or crosses itself — outline unchanged");return valid;}
+function polyClose(){return polyFinish(true);}
 function polyPop(){if(polyPts&&polyPts.length){polyPts.pop();if(!polyPts.length)polyPts=null;drawBoardRect();}}
 // ── ▩ Custom copper pours ────────────────────────────────────────────────
 // Draw a polygon (grid-snapped clicks, Shift = free), close it, then a small
@@ -5157,7 +5161,11 @@ svg.addEventListener("pointerdown",function(ev){
   polyPts=polyPts||[];
   var np=[sn.x,sn.y],lp2=polyPts[polyPts.length-1];
   if(!lp2||lp2[0]!==np[0]||lp2[1]!==np[1])polyPts.push(np);
-  polyCur=null;drawBoardRect();return;}
+  polyCur=null;
+  // Reaching any pre-existing sketch endpoint commits this chain immediately;
+  // the kernel reuses that exact point ID, producing a real joined corner.
+  if(polySketchOwned&&sn.kind==="vertex"&&polyPts.length>=2){polyFinish(false);return;}
+  drawBoardRect();return;}
  if(pourMode){if(ev.button!==0||pourDlg)return; // the net/layer dialog owns clicks while open
   var qm=mm(ev);
   if(pourPts&&pourPts.length>=3){var qf=pourPts[0];
@@ -5228,7 +5236,7 @@ svg.addEventListener("pointerdown",function(ev){
   // above wins — this is reached only for empty perimeter space).
   if(!RO&&!anyDrawTool()&&viewSt.filt.outline){var oe=edgeAt(m);
    if(oe){osdrag=osegStart(oe,m);pcap(ev);svg.style.cursor="grabbing";return;}}
-  marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false};pcap(ev);
+  marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false,outline:outlineOnlyFilter()};pcap(ev);
   marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);return;}
  // Part gesture (hit-tested — parts are canvas-painted, not DOM).
  pcap(ev);
@@ -5346,13 +5354,13 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
   // one undo step (Ctrl+Z reverts the whole vertex move) and re-run the DRC so
   // the board-edge geometry the mid-drag session probes tracks the new shape.
   // A stationary press is a plain click: select the board outline itself.
-  if(vd.moved){if(vd.snap)recordUndo(vd.snap);else markDirty();scheduleDrc();outlineMsg("outline edited — Save/Update to keep");}
+  if(vd.moved){if(vd.snap)recordUndo(vd.snap);else markDirty();outlineDrc();outlineMsg("outline edited — Save/Update to keep");}
   else outlineSelect("point",vd.i,vd.id,ev);
   return;}
  if(osdrag){var od=osdrag;osdrag=null;svg.style.cursor="";
   // A whole-edge slide is one undo step; re-DRC so the board edge follows it.
   // A stationary press is a plain click: select the board outline itself.
-  if(od.moved){recordUndo(od.snap);scheduleDrc();outlineMsg("outline edited — Save/Update to keep");}
+  if(od.moved){recordUndo(od.snap);outlineDrc();outlineMsg("outline edited — Save/Update to keep");}
   else outlineSelect("curve",od.i,od.id,ev);
   return;}
  if(segdrag){var sgd=segdrag;segdrag=null;svg.style.cursor="";
@@ -5420,7 +5428,7 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
   if(box.outline){if(mv&&OS){var oax=Math.min(box.x0,box.x1),oay=Math.min(box.y0,box.y1),obx=Math.max(box.x0,box.x1),oby=Math.max(box.y0,box.y1);outlinePromote();var ops=OS.physicalPoints(PCB.outline.sketch),picked=[];
     ops.forEach(function(p,i){if(p.x>=oax&&p.x<=obx&&p.y>=oay&&p.y<=oby)picked.push({type:"point",index:i,id:p.id,key:"point:"+p.id});});
     if(!ev.shiftKey)outlineSelection=[];picked.forEach(function(s){if(!outlineSelection.some(function(q){return q.key===s.key;}))outlineSelection.push(s);});
-    outlineSketchPanelSync();showOutlineProps();drawBoardRect();outlineMsg(outlineSelection.length+" sketch "+(outlineSelection.length===1?"vertex":"vertices")+" selected — press Delete to remove and heal the corner");}
+    outlineSketchPanelSync();showOutlineProps();drawBoardRect();outlineMsg(outlineSelection.length+" sketch "+(outlineSelection.length===1?"vertex":"vertices")+" selected — Delete leaves loose endpoints; Line reconnects them");}
    else{outlineSelection=[];showOutlineProps();drawBoardRect();}return;}
   if(mv){var ax=Math.min(box.x0,box.x1),ay=Math.min(box.y0,box.y1),bx=Math.max(box.x0,box.x1),by=Math.max(box.y0,box.y1);
    // Intersection test: a part is caught when its courtyard box overlaps the
