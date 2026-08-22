@@ -1,4 +1,4 @@
-//! Resolves Component Search Engine HTTP Basic-auth credentials for the MCP
+//! Resolves Component Search Engine HTTP Basic-auth credentials for the CLI
 //! part-sourcing tools. The model-download endpoint (`ga/model.php`) takes
 //! plain HTTP Basic auth — the `CSE_EMAIL`/`CSE_PASSWORD` account, no session
 //! cookie / CSRF / Cloudflare dance. The suggestion API (search / part
@@ -18,7 +18,7 @@ const ResolveError = error{
 const no_auth_msg = "set CSE_EMAIL + CSE_PASSWORD in .env for part sourcing";
 const no_password_msg = "CSE_EMAIL is set but CSE_PASSWORD is empty; provide the account password";
 
-/// Stable, user-facing message for a `ResolveError`, for the MCP envelope.
+/// Stable, user-facing message for a `ResolveError`, for the CLI envelope.
 fn resolveErrorMessage(err: ResolveError) []const u8 {
     return switch (err) {
         error.NoAuthConfigured => no_auth_msg,

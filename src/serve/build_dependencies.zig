@@ -1,4 +1,4 @@
-//! Adds deterministic reusable-module dependency digests to the MCP build
+//! Adds deterministic reusable-module dependency digests to the CLI build
 //! response without coupling the core BuildReport to a persisted lock format.
 
 const std = @import("std");

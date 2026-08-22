@@ -308,7 +308,6 @@ pub templ Navbar(active: []const u8) {
         <a href="/" class="brand">Netlisp</a>
         <a href="/library" class={if (std.mem.eql(u8, active, "library")) "active" else null}>Library</a>
         <a href="/route-review" class={if (std.mem.eql(u8, active, "route-review")) "active" else null}>Route Review</a>
-        <a href="/mcp-tools" class={if (std.mem.eql(u8, active, "mcp")) "active" else null}>MCP</a>
         <a href="https://ward.eugenepentland.dev/admin" style="margin-left:auto">Account</a>
     </div>
 }

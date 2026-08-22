@@ -1,5 +1,5 @@
 //! Design-file mutation for the server: snapshot → write → re-evaluate → bump
-//! the live version. Backs the MCP `build` tool (`rebuildDesign` →
+//! the live version. Backs the CLI `build` tool (`rebuildDesign` →
 //! `BuildReport`), the value/edit HTTP routes (`writeAndRebuild` and the
 //! granular edits), BOM resolution, and version restore — the write half of
 //! the schematic viewer, paired with the read-only handlers in `mcp_tools`.
@@ -2052,13 +2052,13 @@ fn hasImport(source: []const u8, name: []const u8) bool {
     return false;
 }
 
-// ── Core mutation API (shared between HTTP handlers and MCP tools) ───────
+// ── Core mutation API (shared between HTTP handlers and CLI tools) ───────
 //
 // The `…Core` functions are pure-logic entry points: they take an allocator,
 // project dir, design name, and edit args, and return a MutationResult with
 // the post-edit live_version. HTTP handlers above still do their own parsing
-// and response-shaping; these cores are called by the MCP tool dispatcher
-// (see src/serve/mcp.zig). Later, the HTTP handlers can be converted to
+// and response-shaping; these cores are called by the CLI tool dispatcher
+// (see src/tool_cli.zig). Later, the HTTP handlers can be converted to
 // delegate here to remove duplication.
 
 pub const EditError = error{
@@ -2222,7 +2222,7 @@ pub const MpnEditError = std.mem.Allocator.Error ||
 /// Empty string for either field leaves that field untouched (so callers
 /// can patch one or both in a single call). Bumps the live version so the
 /// browser's poll picks up the change. Shared between the HTTP
-/// `editMpnApi` and the MCP `edit_mpn` tool.
+/// `editMpnApi` and the CLI `edit_mpn` tool.
 pub fn editMpnCore(
     allocator: std.mem.Allocator,
     project_dir: []const u8,

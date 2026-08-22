@@ -199,7 +199,7 @@ test "a via layer span round-trips through the saved layout and add_tracks" {
     try std.testing.expectEqual([2]u8{ 0, 2 }, resolveSpan(six, names).?);
     try std.testing.expect(resolveSpan(.{}, names) == null);
 
-    // The published MCP schema advertises the field, so a strict client may
+    // The published CLI schema advertises the field, so a strict client may
     // send the very argument this parser accepts.
     try std.testing.expect(std.mem.indexOf(u8, @import("mcp_tools.zig").tools_list_result, "\"span\":{\"type\":\"array\"") != null);
 }

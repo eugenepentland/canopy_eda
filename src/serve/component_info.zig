@@ -1,4 +1,4 @@
-//! Component introspection for the MCP `describe_component` tool. Parses a
+//! Component introspection for the CLI `describe_component` tool. Parses a
 //! `lib/components/<name>.sexp` plus its referenced `lib/pinouts/<ref>.sexp`
 //! and emits a single JSON document covering: kind (component vs family),
 //! footprint, datasheets, pins (with optional alt-functions), and every
@@ -559,7 +559,7 @@ fn writeJsonError(allocator: std.mem.Allocator, out: *std.ArrayList(u8), msg: []
 //
 // `(requirement ...)` forms live on the library component, not the design,
 // so a rule added here is inherited by every design that instantiates the
-// part. These three functions back the MCP tools of the same name. Writes
+// part. These three functions back the CLI tools of the same name. Writes
 // splice the source text directly — rather than re-emitting the AST — so the
 // hand-authored formatting and comments in the component file survive.
 
@@ -806,7 +806,7 @@ pub fn addRequirement(
                 allocator,
                 "check must be a single (check …) form using one of the recognized primitives: {s}. " ++
                     "See the \"Requirement checks\" section of the language reference " ++
-                    "(MCP get_language_reference, section \"Requirement checks\") for each form's syntax.",
+                    "(CLI get_language_reference, section \"Requirement checks\") for each form's syntax.",
                 .{check_grammar.check_keyword_list},
             );
             defer allocator.free(msg);

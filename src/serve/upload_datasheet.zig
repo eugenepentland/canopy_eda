@@ -77,12 +77,12 @@ pub fn sanitizeFilename(allocator: std.mem.Allocator, raw: []const u8) SanitizeE
 }
 
 /// Errors from `storeDatasheet`. `NotPdf` and `InvalidName` map to HTTP 400;
-/// `WriteFailed` to 500. The MCP tool maps them to `{"ok":false,"error":…}`.
+/// `WriteFailed` to 500. The CLI tool maps them to `{"ok":false,"error":…}`.
 pub const StoreError = error{ NotPdf, InvalidName, WriteFailed, OutOfMemory };
 
 /// JSON body for a store error, ready to embed in a response. `null` for
 /// `OutOfMemory` — the caller must propagate that one. Centralises the
-/// error → message mapping so HTTP and MCP transports stay in sync.
+/// error → message mapping so HTTP and structured CLI callers stay in sync.
 pub fn storeErrorBody(e: StoreError) ?[]const u8 {
     return switch (e) {
         error.NotPdf => "{\"ok\":false,\"error\":\"not a PDF (missing %PDF header)\"}",

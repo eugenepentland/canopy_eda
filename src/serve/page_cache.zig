@@ -11,7 +11,7 @@
 //! siblings the renderer consumes. A cached entry is valid only while every
 //! recorded file still has its recorded mtime and presence; any edit, add, or
 //! delete flips it, so a live design edit (via `/api/push`, the surgical edit
-//! endpoints, the MCP `write_file`/`edit_file` tools, or a bare `vim` save) is
+//! endpoints, the CLI `write_file`/`edit_file` tools, or a bare `vim` save) is
 //! picked up on the next load. The capture is keyed off the evaluator's
 //! `loaded_files` read-set, so it tracks exactly the files that fed the result.
 

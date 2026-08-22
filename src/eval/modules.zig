@@ -714,7 +714,7 @@ fn checkMissingParams(self: *Evaluator, mod: BlockDef, bound: []const ?Value, ca
 /// missing or needs required args it has no defaults for. The returned
 /// block borrows `self`'s arena — keep the evaluator alive while using it.
 /// This is the single source of the "render a module standalone" logic
-/// shared by the MCP `evalNamedBlock` resolver and the CLI build/check/
+/// shared by the CLI `evalNamedBlock` resolver and the CLI build/check/
 /// export paths.
 pub fn instantiateStandalone(self: *Evaluator, name: []const u8) EvalError!Value {
     var env = Env.init(self.allocator, null);

@@ -195,9 +195,9 @@ its **containing block** (a sub-block's check sees the sub-block's
 nets, not the parent's). Pin references use the pinout **function
 name** (`"VDD"`, `"EP"`) or a physical pad id. A rule is inherited by
 every design instantiating the part; outcomes surface in `netlisp
-check`, the review doc, and the MCP `run_checks` /
+check`, the review doc, and the CLI `run_checks` /
 `list_component_requirements` tools. Author them with the
-`add_component_requirement` MCP tool, whose `check` argument is one
+`add_component_requirement` CLI tool, whose `check` argument is one
 `(check …)` form using one of the primitives below.
 
 | Check form | Asserts (against the containing block) |
@@ -235,7 +235,7 @@ makes the review stale. A complete record has this shape:
 ```
 
 Every component requirement must cite that PDF with a 1-based page
-and a short source quote. `netlisp check --profile preflight` and MCP
+and a short source quote. `netlisp check --profile preflight` and CLI
 `run_checks {profile:"preflight"}` gate incomplete reviews and
 unverified manual requirements. Authoring mode reports those legacy
 gaps as warnings. Required review categories are: `supply`, `decoupling`, `pin-straps`, `sequencing`, `thermal`, `layout`. Each must use `(category KEY)` or a `(category-na KEY "rationale")`.

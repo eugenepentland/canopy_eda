@@ -118,7 +118,6 @@ pub fn build(b: *std.Build) void {
         b.path("src/serve/templates/pages.zt"),
         b.path("src/serve/templates/pdf_viewer.zt"),
         b.path("src/serve/templates/library.zt"),
-        b.path("src/serve/templates/mcp_docs.zt"),
     });
 
     // Template generation writes source files, so it must finish formatting

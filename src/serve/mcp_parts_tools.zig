@@ -1,4 +1,4 @@
-//! Parts-sourcing MCP tool handlers, extracted from `mcp_tools.zig` (which
+//! Parts-sourcing CLI tool handlers, extracted from `mcp_tools.zig` (which
 //! stays the dispatcher): Component Search Engine footprint import + keyword
 //! search (`download_footprint` / `search_components`), the two-provider
 //! datasheet fetch (`download_datasheet` — CSE first, DigiKey fallback), the
@@ -7,7 +7,7 @@
 //! downloads authenticate via `cse_auth` (HTTP Basic, `CSE_EMAIL` /
 //! `CSE_PASSWORD`); the CSE suggestion API and datasheet fetches need no auth;
 //! DigiKey uses `DIGIKEY_CLIENT_ID`/`DIGIKEY_CLIENT_SECRET`. All credentials
-//! are read server-side, never over MCP.
+//! are read server-side, never over CLI.
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const config = @import("../config.zig");
@@ -50,7 +50,7 @@ const stock_limit_default: usize = 5;
 /// through the same import pipeline as the `/api/upload-zip` route, creating
 /// `lib/{components,footprints,pinouts,models}` entries. The model download uses
 /// HTTP Basic auth resolved server-side by `cse_auth` (the `CSE_EMAIL` /
-/// `CSE_PASSWORD` account) — credentials are never passed over MCP. Returns the
+/// `CSE_PASSWORD` account) — credentials are never passed over CLI. Returns the
 /// created library names on success, or `{ok:false,error}` if search, download,
 /// or import fails.
 pub fn toolDownloadFootprint(
@@ -111,7 +111,7 @@ pub fn toolDownloadFootprint(
 /// unauthenticated); if CSE has no datasheet on file, falls back to DigiKey's
 /// `datasheet_url` (`DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET`), unwrapping
 /// any manufacturer interstitial and validating the `%PDF` magic. DigiKey
-/// credentials are read server-side, never over MCP. The success envelope's
+/// credentials are read server-side, never over CLI. The success envelope's
 /// `source` says which provider supplied it; when both fail,
 /// `{ok:false,error,cse_error,digikey_error}`.
 pub fn toolDownloadDatasheet(
@@ -306,7 +306,7 @@ pub fn toolSearchComponents(
 /// read-only, imports nothing. Pairs with `search_components` /
 /// `download_footprint` / `download_datasheet`: take a returned `mpn` and pass
 /// it on. Credentials (`DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET`, optional
-/// `DIGIKEY_API_BASE` for the sandbox) are read server-side, never over MCP.
+/// `DIGIKEY_API_BASE` for the sandbox) are read server-side, never over CLI.
 /// Returns `{ok:true,query,count,results:[{mpn,manufacturer,description,
 /// datasheet_url,product_url,digikey_part_number}]}` or `{ok:false,error}`.
 pub fn toolResolveMpn(

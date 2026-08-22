@@ -94,7 +94,7 @@ fn openNoteCount(allocator: std.mem.Allocator, project_dir: []const u8, name: []
 
 /// Compose the review PDF for `name`, resolving it as a design or (failing
 /// that) as a standalone module — the same `evalNamedBlock` resolution the
-/// read-only MCP tools and the export-review package use. The caller owns the
+/// read-only CLI tools and the export-review package use. The caller owns the
 /// returned slice; on any failure the error is returned for the handler to map
 /// onto a status.
 fn composeFor(

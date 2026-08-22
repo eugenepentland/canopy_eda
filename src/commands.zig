@@ -756,7 +756,7 @@ pub fn cmdSyncKicadSch(allocator: std.mem.Allocator, args: []const []const u8) C
 }
 
 /// One sentence per failure mode, so the CLI names the rule rather than an
-/// error tag. Shared shape with the HTTP/MCP surfaces' own explanations.
+/// error tag. Shared shape with the HTTP/CLI surfaces' own explanations.
 fn syncSchReason(err: kicad_sch_push.PushError) []const u8 {
     return switch (err) {
         error.PcbPathUnset => "this design declares no (kicad-pcb \"<path>\") form, " ++
@@ -902,7 +902,7 @@ fn parseExportSchematicPngArgs(args: []const []const u8) ExportSchematicPngArgs 
 }
 
 /// Native, deterministic schematic-block image export. It evaluates the same
-/// design/module and invokes the same renderer as HTTP/MCP, then writes only
+/// design/module and invokes the same renderer as HTTP/CLI, then writes only
 /// the requested output file; Playwright/Chromium are not involved.
 pub fn cmdExportSchematicPng(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
     const parsed = parseExportSchematicPngArgs(args);

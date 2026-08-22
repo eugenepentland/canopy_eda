@@ -1,5 +1,5 @@
 //! Renders the assembled `review.ReviewDoc` to JSON — the machine-readable
-//! twin of `review_html.zig`, for API and MCP consumers of the design review.
+//! twin of `review_html.zig`, for API and CLI consumers of the design review.
 
 const std = @import("std");
 const json_writer = @import("json_writer.zig");
@@ -16,7 +16,7 @@ const status_fmt: []const u8 = ",\"status\":\"{s}\"";
 const ref_des_open: []const u8 = "{\"ref_des\":";
 
 /// Serialize a ReviewDoc to JSON. Field names are snake_case. Consumers
-/// (the web UI and the `generate_review` MCP tool) rely on the schema being
+/// (the web UI and the `generate_review` CLI tool) rely on the schema being
 /// stable, so changes should be strictly additive.
 pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
     var buf: std.Io.Writer.Allocating = .init(allocator);
@@ -90,7 +90,7 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) (std.me
     }
     try w.writeAll("]");
 
-    // The same object `GET /api/thermal/:name` and the `describe_thermal` MCP
+    // The same object `GET /api/thermal/:name` and the `describe_thermal` CLI
     // tool return, written by the one shared body so the three cannot disagree.
     try w.writeAll(",\"thermal\":");
     try review_thermal.writeFactsJson(w, doc.power.thermal, doc.power.scenarios);

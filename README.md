@@ -39,6 +39,21 @@ zig build run -- serve --project-dir projects/designs
 `zig build` runs the [Guardian](https://github.com/eugenepentland/guardian-zig)
 checks (formatting, file size, boundaries, …) alongside the test suite.
 
+Every structured automation operation is available locally through the CLI;
+no server connection is required:
+
+```bash
+zig build run -- tool list
+zig build run -- tool run_checks --project-dir projects/designs \
+  --args '{"name":"my-board","profile":"preflight"}'
+zig build run -- tool get_pcb_layout_image --project-dir projects/designs \
+  --args '{"name":"my-board"}' --output my-board.png
+```
+
+Use `--args-file request.json` for larger JSON requests. Text results are
+written directly to stdout; image tools return base64 JSON unless `--output`
+is supplied, in which case the decoded image is written there.
+
 ### Build-mode policy
 
 Use the self-hosted **Debug** build for every internal workflow: application

@@ -1,6 +1,6 @@
-//! Best-effort per-mutation git auto-commit for the MCP mutation surface.
+//! Best-effort per-mutation git auto-commit for the structured CLI surface.
 //!
-//! Every authenticated MCP mutation tool (write_file, edit_file, delete_file,
+//! Every structured mutation tool (write_file, edit_file, delete_file,
 //! move_file, build, restore_version, download_*, import_kicad, the design-note
 //! / requirement / pcb-layout tools, …) writes files under `--project-dir`,
 //! which in production is its own git checkout. Left alone, each mutation lands
@@ -10,9 +10,9 @@
 //!
 //! ## The seam
 //!
-//! `mcp.zig`'s tool dispatcher is the single choke point every mutation flows
-//! through, so the whole feature hangs off two calls there and needs no edits
-//! to the (frozen) `mcp_tools.zig` handlers:
+//! `tool_cli.zig` is the single choke point every CLI mutation flows through,
+//! so the whole feature hangs off two calls there and needs no edits to the
+//! underlying structured handlers:
 //!
 //!   1. `begin` — run BEFORE the mutation. Snapshots the repo's already-dirty
 //!      paths (the loose human work to protect) and returns a `Session`. Returns
@@ -39,7 +39,7 @@
 //!   path authors as the dev-admin identity.
 //! * **Fail-open.** git missing, not a repo, a lost commit race, or any non-zero
 //!   git exit is logged to stderr and swallowed — the mutation already succeeded,
-//!   so no error ever propagates to the MCP client.
+//!   so no error ever replaces the CLI result.
 //! * **Serialized.** A single module mutex serializes the git index operations,
 //!   since the httpz server is multi-threaded.
 
@@ -117,7 +117,7 @@ pub fn begin(allocator: std.mem.Allocator, project_dir: []const u8) ?Session {
 /// Commit the paths this mutation touched (`after − before`), authored as
 /// `username` (null → the dev-admin identity), with `tool_name` in the subject.
 /// A no-op when `session` is null. Fail-open: every git failure is logged and
-/// swallowed so it can never surface to the MCP client.
+/// swallowed so it can never replace the CLI result.
 pub fn commit(session: ?Session, username: ?[]const u8, tool_name: []const u8) void {
     const s = session orelse return;
     // Hold the index lock across the after-snapshot AND the stage/commit so no
@@ -282,7 +282,7 @@ fn authorArg(allocator: std.mem.Allocator, username: ?[]const u8) std.mem.Alloca
     return std.fmt.allocPrint(allocator, "{s} <{s}@{s}>", .{ name, name, author_domain });
 }
 
-/// A one-line, greppable commit subject: `mcp: <tool> <paths…>`, listing up to
+/// A one-line, greppable commit subject: `cli: <tool> <paths…>`, listing up to
 /// `msg_path_cap` paths and summarizing any remainder as `(+N more)`.
 fn commitMessage(
     allocator: std.mem.Allocator,
@@ -291,7 +291,7 @@ fn commitMessage(
 ) std.mem.Allocator.Error![]const u8 {
     var buf: std.Io.Writer.Allocating = .init(allocator);
     const w = &buf.writer;
-    w.print("mcp: {s}", .{tool_name}) catch return error.OutOfMemory;
+    w.print("cli: {s}", .{tool_name}) catch return error.OutOfMemory;
     const shown = @min(paths.len, msg_path_cap);
     for (paths[0..shown]) |p| w.print(" {s}", .{p}) catch return error.OutOfMemory;
     if (paths.len > shown) w.print(" (+{d} more)", .{paths.len - shown}) catch return error.OutOfMemory;
@@ -371,7 +371,7 @@ test "commitMessage is a one-line greppable subject with a path cap" {
     // spec: Web Server - The auto-commit message names the tool and touched paths on one greppable line
     const few = try commitMessage(testing.allocator, "edit_file", &.{ "a.sexp", "b.sexp" });
     defer testing.allocator.free(few);
-    try testing.expectEqualStrings("mcp: edit_file a.sexp b.sexp", few);
+    try testing.expectEqualStrings("cli: edit_file a.sexp b.sexp", few);
     // Never spans multiple lines (greppable).
     try testing.expect(std.mem.indexOfScalar(u8, few, '\n') == null);
 
@@ -380,7 +380,7 @@ test "commitMessage is a one-line greppable subject with a path cap" {
         "p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9",
     });
     defer testing.allocator.free(many);
-    try testing.expect(std.mem.startsWith(u8, many, "mcp: import_kicad p0 p1"));
+    try testing.expect(std.mem.startsWith(u8, many, "cli: import_kicad p0 p1"));
     try testing.expect(std.mem.endsWith(u8, many, "(+2 more)"));
 }
 
@@ -454,7 +454,7 @@ test "commit stages only the mutation's paths and leaves loose work dirty" {
     defer a.free(fmt.stdout);
     defer a.free(fmt.stderr);
     try testing.expect(std.mem.indexOf(u8, fmt.stdout, "ada|ada@ward|netlisp|netlisp@server|") != null);
-    try testing.expect(std.mem.indexOf(u8, fmt.stdout, "mcp: write_file mutated.sexp") != null);
+    try testing.expect(std.mem.indexOf(u8, fmt.stdout, "cli: write_file mutated.sexp") != null);
 
     const files = try std.process.run(a, infra_fs.currentIo(), .{
         .argv = &.{ "git", "-C", dir, "show", "--name-only", "--pretty=format:", "HEAD" },

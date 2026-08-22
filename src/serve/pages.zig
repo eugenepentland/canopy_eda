@@ -206,7 +206,7 @@ test "navbar brand links home and no Designs tab remains" {
     // The remaining destinations are untouched.
     try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/library\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/route-review\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/mcp-tools\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, ">MCP</a>") == null);
 
     // The brand must still read as a link once the generic `.navbar a` colour
     // rule applies to it.

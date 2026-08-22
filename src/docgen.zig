@@ -266,9 +266,9 @@ fn renderRequirementChecks(writer: anytype) !void {
         \\nets, not the parent's). Pin references use the pinout **function
         \\name** (`"VDD"`, `"EP"`) or a physical pad id. A rule is inherited by
         \\every design instantiating the part; outcomes surface in `netlisp
-        \\check`, the review doc, and the MCP `run_checks` /
+        \\check`, the review doc, and the CLI `run_checks` /
         \\`list_component_requirements` tools. Author them with the
-        \\`add_component_requirement` MCP tool, whose `check` argument is one
+        \\`add_component_requirement` CLI tool, whose `check` argument is one
         \\`(check …)` form using one of the primitives below.
         \\
         \\| Check form | Asserts (against the containing block) |
@@ -306,7 +306,7 @@ fn renderDatasheetReview(writer: anytype) !void {
         \\```
         \\
         \\Every component requirement must cite that PDF with a 1-based page
-        \\and a short source quote. `netlisp check --profile preflight` and MCP
+        \\and a short source quote. `netlisp check --profile preflight` and CLI
         \\`run_checks {profile:"preflight"}` gate incomplete reviews and
         \\unverified manual requirements. Authoring mode reports those legacy
         \\gaps as warnings. Required review categories are:
@@ -321,7 +321,7 @@ fn renderDatasheetReview(writer: anytype) !void {
 
 /// Slice one `## `-headed section out of a rendered reference (heading
 /// line through the byte before the next `## ` heading, or EOF). Matching
-/// is case-insensitive on the heading title so MCP callers can ask for
+/// is case-insensitive on the heading title so CLI callers can ask for
 /// "numeric literals". Returns null when no heading matches — derive the
 /// valid titles with `SectionIterator`, never from a hardcoded list.
 pub fn extractSection(doc: []const u8, title: []const u8) ?[]const u8 {
@@ -472,6 +472,6 @@ test "requirement checks section covers every check form" {
     for (check_grammar.check_docs) |d| {
         try std.testing.expect(std.mem.indexOf(u8, sec, d.summary) != null);
     }
-    // And the section is addressable by the MCP get_language_reference tool.
+    // And the section is addressable by the CLI get_language_reference tool.
     try std.testing.expect(extractSection(doc, "requirement checks") != null);
 }

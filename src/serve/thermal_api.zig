@@ -1,5 +1,5 @@
 //! `GET /api/thermal/:name` — the lumped thermal screening as read-only facts
-//! JSON, and the `describe_thermal` MCP tool that answers with the same bytes.
+//! JSON, and the `describe_thermal` CLI tool that answers with the same bytes.
 //!
 //! The analysis itself lives in `eval/thermal.zig` and its serialization in
 //! `review_thermal.zig`; this module is only the resolve-and-answer seam. Both
@@ -55,7 +55,7 @@ pub const ThermalError = mcp_tools.ToolError || std.mem.Allocator.Error || std.I
 /// null), and return the facts object as JSON bytes owned by `alloc`.
 ///
 /// This is the WHOLE body both surfaces share — the HTTP endpoint below and the
-/// `describe_thermal` MCP tool — so neither can describe a different board, or
+/// `describe_thermal` CLI tool — so neither can describe a different board, or
 /// a different ambient, than the other for the same request.
 pub fn thermalJson(
     alloc: std.mem.Allocator,
@@ -440,7 +440,7 @@ fn layoutFromQuery(req: *httpz.Request) ?[]const u8 {
     return if (raw.len == 0) null else raw;
 }
 
-/// `describe_thermal` — the MCP twin of `GET /api/thermal/:name`. Args `name`
+/// `describe_thermal` — the CLI twin of `GET /api/thermal/:name`. Args `name`
 /// (design or module), an optional numeric `ambient`, and an optional `layout`
 /// naming a saved layout to screen instead of the default board. Read-only: it
 /// writes nothing and touches no sidecar.
@@ -493,7 +493,7 @@ fn argNumber(args_val: ?std.json.Value, key: []const u8) error{BadAmbient}!?f64 
     };
 }
 
-/// Write an `{"error":<msg>}` envelope and return false — the MCP layer flags
+/// Write an `{"error":<msg>}` envelope and return false — the CLI layer flags
 /// the result `isError`. One error spelling for this tool.
 fn toolError(out: *std.ArrayList(u8), alloc: std.mem.Allocator, msg: []const u8) std.mem.Allocator.Error!bool {
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -736,7 +736,7 @@ test "the thermal endpoint 404s a name that is neither design nor module" {
     try testing.expect(std.mem.indexOf(u8, got.body, "No design or module") != null);
 }
 
-// spec: serve/thermal - describe_thermal is a registered read-only MCP tool answering with the endpoint's own bytes
+// spec: serve/thermal - describe_thermal is a registered read-only CLI tool answering with the endpoint's own bytes
 test "describe_thermal is registered read-only and shares the endpoint body" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

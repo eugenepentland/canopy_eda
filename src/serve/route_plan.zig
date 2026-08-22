@@ -1,5 +1,5 @@
 //! The ONE `(pcb-plan (route …))` lowering seam every routing surface shares:
-//! the `route_pcb` MCP commit path, `POST /api/pcb-route` (the viewer's Route
+//! the `route_pcb` CLI commit path, `POST /api/pcb-route` (the viewer's Route
 //! preview), the `/pcb-layout` page's `?route=1`, the PNG endpoint, and
 //! `/api/pcb-describe`. Lowering in one place is what keeps preview == commit —
 //! a wave's priority order and layer masks steer every fresh route identically,
@@ -256,7 +256,7 @@ pub fn routePlannedZonesTimed(
 
 /// Route with options a caller already lowered, then gate the result. The
 /// spelling for a surface that builds its own `route_policy.Options` (the
-/// `route_pcb` MCP commit path scopes and seeds copper before routing) but must
+/// `route_pcb` CLI commit path scopes and seeds copper before routing) but must
 /// still report the same `routed` count as every other surface.
 pub fn routeLowered(
     alloc: std.mem.Allocator,
@@ -6437,7 +6437,7 @@ fn logDrcVictim(
 /// `module_policy` + authored-net-class `Context` the plan resolver uses, so
 /// "route the RF group" here selects the identical nets a
 /// `(route (wave … (net-classes "RF")))` wave would. Shared by the `route_pcb`
-/// MCP commit path and the viewer's Route button. Returns a whole-board sentinel
+/// CLI commit path and the viewer's Route button. Returns a whole-board sentinel
 /// (`selectors == 0`) when the scope names nothing.
 pub fn resolveScope(
     alloc: std.mem.Allocator,

@@ -1280,7 +1280,7 @@ fn instanceNonGroundNet(block: *const DesignBlock, ref_des: []const u8) ?[]const
 /// IC pin it serves — the netlist-level twin of the `decouple-unbound` layout
 /// lint (`src/placement/layout_lint.zig`), as an ERC **error** so the requirement
 /// gates `build`/`check`, the home-page health chips, the review doc, and the
-/// `run_checks` MCP tool.
+/// `run_checks` CLI tool.
 ///
 /// A cap is flagged when it is an unbound HF bypass cap (prefix `C`, < 4.7 µF,
 /// with a ground leg + a single non-ground "power-leg" net) whose power-leg rail

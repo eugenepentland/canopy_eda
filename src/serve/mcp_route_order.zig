@@ -1,4 +1,4 @@
-//! `route_order_search` MCP tool — search the ROUTING ORDER of a contended net
+//! `route_order_search` CLI tool — search the ROUTING ORDER of a contended net
 //! cluster and report the best one it found, as a paste-ready DSL edit.
 //!
 //! The lever it turns is the one `(pcb-plan (route (wave …)))` already exposes:
@@ -1198,11 +1198,11 @@ const testing = std.testing;
 const mcp_tools = @import("mcp_tools.zig");
 const export_kicad = @import("../export_kicad.zig");
 
-// spec: Web Server - route_order_search is a registered mutation MCP tool because it records the trials it ran
+// spec: Web Server - route_order_search is a registered mutation CLI tool because it records the trials it ran
 test "route_order_search is registered as a mutation" {
     try testing.expect(mcp_tools.isKnownTool("route_order_search"));
     // It writes the trial-memory sidecar, so the write has to be role-gated and
-    // git-autocommitted like every other MCP mutation — a read-only flag here
+    // git-autocommitted like every other CLI mutation — a read-only flag here
     // would let a reader-role client write a file and skip the commit seam.
     try testing.expect(mcp_tools.isMutationTool("route_order_search"));
 }

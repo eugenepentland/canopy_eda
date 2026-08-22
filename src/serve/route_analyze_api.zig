@@ -15,7 +15,7 @@
 //! an agent interrogate a net the board otherwise routed fine, or one buried
 //! past the diagnostic cap.
 //!
-//! The same analysis is the `diagnose_net` MCP tool. Both surfaces run through
+//! The same analysis is the `diagnose_net` CLI tool. Both surfaces run through
 //! `analyzeNetJson` — one resolve-route-answer body, so the tool and the
 //! endpoint can never diagnose different boards for the same request.
 
@@ -100,7 +100,7 @@ pub const AnalyzeOpts = struct {
 };
 
 /// Failures of one `analyzeNetJson` call. `NetNotFound` is the caller naming a
-/// net this placement does not carry (404 / an MCP error line); `RouteFailed` is
+/// net this placement does not carry (404 / a CLI error line); `RouteFailed` is
 /// the diagnostic route itself giving up. The rest are `solveForRequest`'s own.
 pub const AnalyzeError = error{ NetNotFound, RouteFailed } ||
     pcb_layout_page.PngError || std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -109,7 +109,7 @@ pub const AnalyzeError = error{ NetNotFound, RouteFailed } ||
 /// and return `net`'s analysis object as JSON bytes owned by `alloc`.
 ///
 /// This is the WHOLE body both surfaces share — the HTTP endpoint above and the
-/// `diagnose_net` MCP tool below — so neither can drift into diagnosing a
+/// `diagnose_net` CLI tool below — so neither can drift into diagnosing a
 /// different board than the other for the same design/layout/net.
 pub fn analyzeNetJson(
     alloc: std.mem.Allocator,
@@ -151,7 +151,7 @@ pub fn analyzeNetJson(
     return aw.written();
 }
 
-/// `diagnose_net` — the MCP twin of `POST /api/pcb-route-analyze/:name`. Args
+/// `diagnose_net` — the CLI twin of `POST /api/pcb-route-analyze/:name`. Args
 /// `name` (design or module) + `net`, with the read tools' `layout` / `sub`
 /// board selectors. Read-only: it persists no copper and touches no sidecar.
 ///
@@ -187,7 +187,7 @@ fn argStr(args_val: ?std.json.Value, key: []const u8) ?[]const u8 {
     return if (v == .string and v.string.len > 0) v.string else null;
 }
 
-/// Write an `{"error":<msg>}` envelope and return false — the MCP layer flags
+/// Write an `{"error":<msg>}` envelope and return false — the CLI layer flags
 /// the result `isError`. One error spelling for this tool.
 fn toolError(out: *std.ArrayList(u8), alloc: std.mem.Allocator, msg: []const u8) std.mem.Allocator.Error!bool {
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -312,7 +312,7 @@ fn parseNet(arena: std.mem.Allocator, body: []const u8) ?[]const u8 {
 const testing = std.testing;
 const mcp_tools = @import("mcp_tools.zig");
 
-// spec: serve/route-analyze - diagnose_net is a registered read-only MCP tool
+// spec: serve/route-analyze - diagnose_net is a registered read-only CLI tool
 test "diagnose_net is registered read-only" {
     try testing.expect(mcp_tools.isKnownTool("diagnose_net"));
     try testing.expect(!mcp_tools.isMutationTool("diagnose_net"));

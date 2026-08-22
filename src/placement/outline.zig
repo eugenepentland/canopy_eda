@@ -331,7 +331,7 @@ const area_eps: f64 = 1e-9;
 /// Fab-legal outline predicate for WRITE paths: ≥3 vertices, a non-degenerate
 /// (non-zero) enclosed area, and no self-crossing edges. READ paths stay lenient
 /// (a malformed polygon degrades to the bbox rectangle); this is the gate the
-/// layout-save endpoint and the MCP `set_board_outline` arg parse use to reject
+/// layout-save endpoint and the CLI `set_board_outline` arg parse use to reject
 /// a bow-tie / zero-area shape before it can become the board profile.
 pub fn valid(poly: []const [2]f64) bool {
     if (poly.len < 3) return false;

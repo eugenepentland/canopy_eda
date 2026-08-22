@@ -1,8 +1,8 @@
-//! KiCad board-importer MCP tool handlers, split out of `mcp_tools.zig` (which
+//! KiCad board-importer CLI tool handlers, split out of `mcp_tools.zig` (which
 //! stays the dispatcher). `parse_kicad_netlist` is the read-only preview — it
 //! parses a `.kicad_pcb` off disk into a family-classified netlist without
 //! writing anything; `import_kicad` runs the full importer (`import_kicad.zig`)
-//! that materializes `lib/` + `src/` files, the MCP twin of the
+//! that materializes `lib/` + `src/` files, the CLI twin of the
 //! `netlisp import-kicad` CLI. Board paths are read via `infra_fs`, the
 //! whitelisted filesystem seam, so an absolute NAS path is the expected form
 //! (same trust model as the `(kicad-pcb …)` sync path). Arg parsing + the JSON

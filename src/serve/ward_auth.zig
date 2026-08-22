@@ -1,13 +1,12 @@
 //! Ward auth adapter — the single seam between netlisp's serve layer and the
 //! `ward` library. netlisp is now a pure resource server: wardd
 //! (ward.eugenepentland.dev) owns every passkey, session, and OAuth grant, and
-//! this module verifies the `ward_session` cookie and OAuth bearer tokens
+//! this module verifies the `ward_session` cookie and sync bearer tokens
 //! against it via the ward middleware.
 //!
 //! `authMiddleware` is the chokepoint the request dispatcher calls before every
-//! route: the local-dev bypass and the plugin-token sync path are preserved
-//! from the pre-migration middleware, `/mcp` runs the ward bearer path, and
-//! everything else runs the ward session path. Long-lived verdict caches and
+//! route: the local-dev bypass and the plugin-token sync path are preserved,
+//! and everything else runs the ward session path. Long-lived verdict caches and
 //! HTTP clients live on `WardState` (one per server, on `ServerState`). The
 //! session and bearer paths each own a {cache + client} pair guarded by its own
 //! mutex — ward's `Cache` is not internally synchronized, and `std.http.Client`
@@ -53,7 +52,6 @@ const url_template = "{s}://{s}";
 const concat_template = "{s}{s}";
 const login_path_suffix = "/login";
 
-const mcp_path_prefix = "/mcp";
 const sync_path_prefix = "/api/sync-kicad-pcb/";
 
 const body_forbidden_write = "{\"error\":\"forbidden\",\"error_description\":\"writer role required\"}";
@@ -95,7 +93,7 @@ const read_only_posts = [_][]const u8{
 
 // ── Types ──────────────────────────────────────────────────────────────
 
-/// Permission tier the auth middleware and MCP dispatcher gate writes/admin on.
+/// Permission tier the auth middleware uses to gate writes/admin.
 /// Ward roles map onto it (see `mapWardRole`); the local-dev bypass acts as
 /// admin. Formerly lived in the (now-deleted) homegrown `users.zig` store.
 pub const Role = enum {
@@ -113,21 +111,10 @@ pub const Role = enum {
         };
     }
 
-    /// Can this role mutate designs via MCP / HTTP edit endpoints?
+    /// Can this role mutate designs via HTTP edit endpoints?
     pub fn canWrite(self: Role) bool {
         return self == .admin or self == .writer;
     }
-};
-
-/// The ward-resolved identity a `/mcp` request carries into the MCP handler so
-/// role-gating reads it directly instead of re-introspecting the token.
-pub const Identity = struct {
-    /// The authenticated username the bearer token maps to.
-    username: []const u8,
-    /// The netlisp role the ward role maps to (member→writer, admin→admin).
-    role: Role,
-    /// The space-separated scope the grant was issued for.
-    scope: []const u8,
 };
 
 /// Startup-resolved ward settings, owned by the process allocator. An empty URL
@@ -245,7 +232,7 @@ fn warnIfUnconfigured(cfg: WardConfig) void {
     if (!sessionConfigured(cfg))
         log.warn("ward: WARD_VERIFY_URL/WARD_LOGIN_URL unset — session requests fail closed (503)", .{});
     if (!bearerConfigured(cfg))
-        log.warn("ward: WARD_INTROSPECT_URL unset — /mcp bearer requests fail closed (503)", .{});
+        log.warn("ward: WARD_INTROSPECT_URL unset — sync bearer requests fail closed (503)", .{});
 }
 
 // ── Pure policy helpers ────────────────────────────────────────────────
@@ -257,18 +244,6 @@ pub fn mapWardRole(role: ward.verdict.Role) Role {
         .admin => .admin,
         .unknown => .reader,
     };
-}
-
-/// Whether the local-dev auth bypass applies (loopback + NETLISP_DEV, not
-/// proxied) — the two-state input the MCP role resolver takes instead of a bool.
-pub const DevBypass = enum { off, on };
-
-/// Resolve the MCP role: the ward identity's role when present, else admin when
-/// the local-dev bypass applies, else the least-privileged reader.
-pub fn mcpRoleFromIdentity(identity: ?Identity, dev_bypass: DevBypass) Role {
-    if (identity) |id| return id.role;
-    if (dev_bypass == .on) return .admin;
-    return .reader;
 }
 
 /// Derive the ward authorization-server base URL by stripping the trailing
@@ -298,7 +273,7 @@ pub fn authServerUrl(ctx: *Server) []const u8 {
 const header_cors_allow_origin = "access-control-allow-origin";
 
 /// GET /.well-known/oauth-protected-resource — RFC 9728 metadata that tells an
-/// MCP client which authorization server protects this resource (wardd) and
+/// OAuth client which authorization server protects this resource (wardd) and
 /// which bearer mechanism (header) it expects. Built by the ward library so the
 /// resource identifier is this request's host and the authorization server is
 /// wardd, discovered from this document alone. (netlisp is a pure resource
@@ -321,7 +296,7 @@ fn bearerConfigured(cfg: WardConfig) bool {
 }
 
 /// Whether a bearer grant's `scope` authorizes this service (whole-entry match).
-fn mcpScopeOk(scope: []const u8, service: []const u8) bool {
+fn serviceScopeOk(scope: []const u8, service: []const u8) bool {
     return ward.bearer.hasScope(scope, service);
 }
 
@@ -352,32 +327,8 @@ fn requiresWriteFor(method: httpz.Method, path: []const u8) bool {
 pub fn authMiddleware(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!bool {
     if (auth.isLocalhostRequest(ctx, req)) return true;
     const path = req.url.path;
-    if (std.mem.startsWith(u8, path, mcp_path_prefix)) return mcpGate(ctx, req, res);
     if (std.mem.startsWith(u8, path, sync_path_prefix) and syncBearerOk(ctx, req)) return true;
     return sessionGateMiddleware(ctx, req, res);
-}
-
-/// The `/mcp` bearer gate: verify the token via ward introspection and stash the
-/// resolved identity on `ctx` for the MCP handler. Any valid ward token is
-/// admitted — this is a personal-fleet posture where every ward user is trusted,
-/// and MCP mutation tools are gated by role (not scope). The eda-scope match is
-/// kept only on the sensitive sync-write path (see `wardBearerAllows`).
-fn mcpGate(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!bool {
-    const state = &ctx.state.ward;
-    if (!bearerConfigured(state.cfg)) return failClosed(res);
-    const challenge = try ward.resource.bearerChallenge(req.arena, try requestBaseUrl(req));
-    const action = try bearerDecision(state, req, challenge);
-    switch (action) {
-        // Unreachable: this gate builds its BearerGate with an EMPTY allowlist
-        // (`.patterns = &.{}`), so ward never classifies a path as public here.
-        .public => unreachable,
-        .allow => |id| {
-            ctx.mcp_identity = .{ .username = id.username, .role = mapWardRole(id.role), .scope = id.scope };
-            return true;
-        },
-        .unauthorized => |ch| return unauthorizedBearer(res, ch),
-        .fail_closed => return failClosed(res),
-    }
 }
 
 /// The plugin-or-bearer check for `/api/sync-kicad-pcb/`: a plugin token wins
@@ -392,17 +343,15 @@ fn syncBearerOk(ctx: *Server, req: *httpz.Request) bool {
 /// conditions, both required:
 ///
 ///   * **scope** — wardd is a shared auth server, so a bearer minted for another
-///     service must not reach this one (mirroring `mcpGate`'s eda-scope match).
+///     service must not reach this one.
 ///   * **role** — `POST /api/sync-kicad-pcb/:name` rewrites the KiCad board file
 ///     in place. It is the most destructive write the server offers, and the
 ///     bearer leg of `authMiddleware` returns `true` straight past the session
 ///     gate's `requiresWrite` check — so without this, a ward READER holding an
-///     eda-scoped token could drive it. The role mapping is the same one the MCP
-///     mutation tools gate on (`mapWardRole`: member→writer, admin→admin,
-///     unknown→reader), so "may write over MCP" and "may write the board" are
-///     one rule rather than two that can drift.
+///     eda-scoped token could drive it. The role mapping is
+///     `mapWardRole`: member→writer, admin→admin, unknown→reader.
 fn wardSyncGrantOk(scope: []const u8, role: ward.verdict.Role, service: []const u8) bool {
-    return mcpScopeOk(scope, service) and mapWardRole(role).canWrite();
+    return serviceScopeOk(scope, service) and mapWardRole(role).canWrite();
 }
 
 /// Whether `req` carries a live ward bearer token *scoped for this service* and
@@ -735,16 +684,16 @@ test "session and bearer config predicates require their urls" {
     try std.testing.expect(!sessionConfigured(login_only));
 }
 
-// spec: serve - The MCP scope check accepts a scope containing the service name and rejects one without it
-test "mcpScopeOk requires a whole-entry service scope" {
-    try std.testing.expect(mcpScopeOk("eda", "eda"));
-    try std.testing.expect(mcpScopeOk("files eda", "eda"));
-    try std.testing.expect(mcpScopeOk("eda files", "eda"));
-    try std.testing.expect(!mcpScopeOk("files", "eda"));
-    try std.testing.expect(!mcpScopeOk("", "eda"));
+// spec: serve - The service scope check accepts a scope containing the service name and rejects one without it
+test "serviceScopeOk requires a whole-entry service scope" {
+    try std.testing.expect(serviceScopeOk("eda", "eda"));
+    try std.testing.expect(serviceScopeOk("files eda", "eda"));
+    try std.testing.expect(serviceScopeOk("eda files", "eda"));
+    try std.testing.expect(!serviceScopeOk("files", "eda"));
+    try std.testing.expect(!serviceScopeOk("", "eda"));
     // A prefix lookalike is not a whole-entry match — "edax" must not authorize "eda".
-    try std.testing.expect(!mcpScopeOk("edax", "eda"));
-    try std.testing.expect(!mcpScopeOk("files edax", "eda"));
+    try std.testing.expect(!serviceScopeOk("edax", "eda"));
+    try std.testing.expect(!serviceScopeOk("files edax", "eda"));
 }
 
 // spec: serve - The sync bearer grant requires both a service scope and a writer-capable role
@@ -823,20 +772,11 @@ test "the session allowlist admits exactly its public routes" {
         .{ .path = "/", .public = false },
         .{ .path = "/api/scene-graph/x", .public = false },
         .{ .path = "/auth/login", .public = false },
-        .{ .path = "/mcp", .public = false },
     };
     for (rows) |r| try std.testing.expectEqual(r.public, sessionAllowlist().isPublic(r.path));
     // The rows above enumerate BOTH entries by hand; a third one added without
     // its own rows here fails rather than landing unpinned.
     try std.testing.expectEqual(@as(usize, 2), public_routes.len);
-}
-
-// spec: serve - The MCP role resolver returns the ward identity role, else admin on the dev bypass, else reader
-test "mcpRoleFromIdentity honours identity then dev bypass then reader" {
-    const id = Identity{ .username = "ada", .role = .writer, .scope = "eda" };
-    try std.testing.expectEqual(Role.writer, mcpRoleFromIdentity(id, .off));
-    try std.testing.expectEqual(Role.admin, mcpRoleFromIdentity(null, .on));
-    try std.testing.expectEqual(Role.reader, mcpRoleFromIdentity(null, .off));
 }
 
 // spec: serve - The ward auth-server url is derived by stripping the login path from the configured login url

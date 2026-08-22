@@ -1,4 +1,4 @@
-//! ERC / build-report MCP handlers, extracted from `mcp_tools.zig` (which
+//! ERC / build-report CLI handlers, extracted from `mcp_tools.zig` (which
 //! stays the dispatcher): the `run_checks` tool (`toolRunChecks` → `runChecks`,
 //! with the optional `severity` / `changed_since` filters), the shared
 //! `severityPasses` predicate, and the JSON writers for a single ERC violation
@@ -365,7 +365,7 @@ fn diffSets(
     while (it4.next()) |e| if (!old_nets.contains(e.key_ptr.*)) try changed_nets.put(allocator, e.key_ptr.*, {});
 }
 
-/// Render a `BuildReport` from `edit.rebuildDesign` as the JSON the MCP
+/// Render a `BuildReport` from `edit.rebuildDesign` as the JSON the CLI
 /// `build` tool returns. Failures keep the live_version unchanged but still
 /// report the error message and any partial assertion results. `severity`
 /// filters the `erc[]` array only (same enum as `run_checks`); the separate

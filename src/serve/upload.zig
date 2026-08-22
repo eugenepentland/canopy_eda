@@ -78,7 +78,7 @@ pub const ImportError = error{
 } || std.mem.Allocator.Error;
 
 /// Short user-facing message for an `ImportError`. Shared by the HTTP route
-/// and the MCP `download_footprint` tool so the two transports stay in sync.
+/// and the CLI `download_footprint` tool so the two transports stay in sync.
 pub fn importErrorMessage(e: ImportError) []const u8 {
     return switch (e) {
         error.WriteFailed => "could not write temp/library files",
@@ -101,7 +101,7 @@ pub fn importErrorStatus(e: ImportError) u16 {
 /// write the bytes to a temp file, extract via the system `unzip`, locate
 /// the `.kicad_sym` / `.kicad_mod` / optional STEP, convert them, and write
 /// `lib/{components,footprints,pinouts,models}`. Shared by the `/api/upload-zip`
-/// route and the MCP `download_footprint` tool. `filename` is advisory only
+/// route and the CLI `download_footprint` tool. `filename` is advisory only
 /// (kept for call-site compatibility / future logging) — it is NEVER used to
 /// build a filesystem path, since it is client-controlled (see the temp-name
 /// SECURITY note above).
@@ -292,7 +292,7 @@ fn cleanupExtractDir(allocator: std.mem.Allocator, tmp_dir: []const u8) void {
 /// `.kicad_sym` plus a `.kicad_mod`, optionally a STEP), unpack via the
 /// system `unzip`, convert each part, and write `lib/components`,
 /// `lib/footprints`, `lib/pinouts`, and `lib/models` entries for it.
-/// The heavy lifting lives in `importZipBytes`, shared with the MCP path.
+/// The heavy lifting lives in `importZipBytes`, shared with the CLI path.
 pub fn uploadZipApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const body = req.body() orelse {
         res.status = http_bad_request;
@@ -509,7 +509,7 @@ fn renderComponentSexp(
 /// skip-if-exists guard left a stale (often dangling) definition in place and
 /// silently dropped the new one, which read as "footprint + 3D but no
 /// component". The return value tells the caller whether it created a new file
-/// or replaced one so the HTTP/MCP responses can say so instead of staying
+/// or replaced one so the HTTP/CLI responses can say so instead of staying
 /// silent.
 pub fn writeComponentFile(
     allocator: std.mem.Allocator,

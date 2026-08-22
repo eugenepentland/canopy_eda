@@ -208,7 +208,7 @@ pub const Options = struct {
     critique: bool = false,
     /// Board-level silkscreen text labels (from the shown layout's sidecar).
     /// Drawn in a silk colour at their world anchor + nominal size, so the PNG
-    /// and MCP screenshots show the same legend the Gerber emits.
+    /// and CLI screenshots show the same legend the Gerber emits.
     texts: []const font.BoardText = &.{},
     /// Saved/imported no-silkscreen polygons. Generated sub-circuit names and
     /// corner strokes are suppressed wherever their ink would enter one.

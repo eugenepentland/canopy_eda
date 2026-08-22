@@ -1,4 +1,4 @@
-//! `export_kicad_sch` MCP tool — the agent-facing twin of `netlisp
+//! `export_kicad_sch` CLI tool — the agent-facing twin of `netlisp
 //! export-kicad-sch` and `GET /api/kicad-sch/:name`.
 //!
 //! Two shapes, chosen by whether the caller names an `output_dir`:
@@ -12,7 +12,7 @@
 //!    directory, which is the point of the tool: an agent hands a KiCad user a
 //!    directory to open.
 //!
-//! `output_dir` is the only path in the MCP surface that writes outside the
+//! `output_dir` is the only path in the CLI surface that writes outside the
 //! project tree, so it is fenced deliberately (`validateOutputDir`): absolute
 //! only, no `..` segment, no NUL, and **refused when it points inside the
 //! project directory**. That last rule is the important one — this is an

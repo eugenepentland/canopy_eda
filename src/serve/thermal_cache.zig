@@ -30,7 +30,7 @@
 //!
 //! The running server publishes its store through `publish`/`active` rather
 //! than reaching it off a `Server` context, because one of the surfaces that
-//! wants it — the `describe_thermal` MCP tool — is dispatched with nothing but
+//! wants it — the `describe_thermal` CLI tool — is dispatched with nothing but
 //! an allocator and a project directory. Entries are keyed by project dir AND
 //! design name so two projects in one process can never read each other's
 //! board, and `Store` stays an ordinary value a test can own outright.
@@ -302,7 +302,7 @@ pub const Store = struct {
 // ── The running server's store ────────────────────────────────────────────
 //
 // A `Server` context reaches its own `state.caches.thermal_solves` directly, but the
-// `describe_thermal` MCP tool is dispatched through `mcp_tools.zig` with only
+// `describe_thermal` CLI tool is dispatched through `mcp_tools.zig` with only
 // an allocator and a project dir — no context to hang a store off. Publishing
 // the live server's store here lets every surface share one cache without
 // threading a pointer through the whole tool-dispatch chain. Unpublished (every

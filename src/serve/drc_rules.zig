@@ -550,7 +550,7 @@ test "viewer sends custom copper pours with the whole-board route" {
     try std.testing.expect(std.mem.indexOf(u8, payload, "zones:PCB.zones||[]") != null);
 }
 
-// spec: Web Server - The route_pcb MCP tool counts DRC against the shown custom pours through the direct pour-aware checker result
+// spec: Web Server - The route_pcb CLI tool counts DRC against the shown custom pours through the direct pour-aware checker result
 test "route_pcb uses the direct pour-aware DRC result" {
     const page = @embedFile("pcb_layout_page.zig");
     const fn_start = std.mem.indexOf(u8, page, "pub fn mcpRoutePcb(") orelse

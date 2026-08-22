@@ -242,7 +242,7 @@ pub const Mode = enum {
     legal,
 
     /// The mode named `s`, or null when `s` is neither spelling. The one parser
-    /// both the HTTP endpoint and the MCP tool call, so an unknown mode is
+    /// both the HTTP endpoint and the CLI tool call, so an unknown mode is
     /// rejected identically on both.
     pub fn fromStr(s: []const u8) ?Mode {
         if (std.mem.eql(u8, s, "all")) return .all;
@@ -373,7 +373,7 @@ pub const Input = struct {
 };
 
 /// Error text for a class whose pitch cannot be resolved. Surfaced verbatim by
-/// the MCP/HTTP layer, so it names the two ways to fix it.
+/// the CLI/HTTP layer, so it names the two ways to fix it.
 pub const err_unresolvable_pitch: []const u8 =
     "fence pitch is unresolvable — the class declares neither (fence (pitch MM)) nor (max-freq HZ)";
 

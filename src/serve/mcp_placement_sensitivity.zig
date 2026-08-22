@@ -1,4 +1,4 @@
-//! `placement_sensitivity` MCP tool — which parts are load-bearing?
+//! `placement_sensitivity` CLI tool — which parts are load-bearing?
 //!
 //! The board that motivated this: three sub-millimetre edits inside barracuda's
 //! `lmx2595` group (R42 moved 0.2 mm in x, C91 de-rotated in place, C100 moved

@@ -1,4 +1,4 @@
-//! `close_open_nets` MCP tool — finish the nets the autorouter gave up on.
+//! `close_open_nets` CLI tool — finish the nets the autorouter gave up on.
 //!
 //! `route_pcb` re-runs the whole-board autorouter, which answers "route this
 //! board from scratch"; on a nearly-finished board that is both destructive and

@@ -94,7 +94,7 @@ pub const SchFile = struct {
 };
 
 /// What the export drew, for a caller reporting on it rather than reading the
-/// log line — the MCP tool's summary is built from exactly these counters.
+/// log line — the CLI tool's summary is built from exactly these counters.
 pub const Stats = struct {
     /// Distinct library symbols synthesised: one per component, per `(part …)`
     /// breakdown.

@@ -4,7 +4,7 @@
 //!
 //! Six surfaces render this analysis: the review panels embedded in the
 //! schematic page, the markdown report, the review PDF, the review JSON,
-//! `GET /api/thermal/:name` and the `describe_thermal` MCP tool. They differ
+//! `GET /api/thermal/:name` and the `describe_thermal` CLI tool. They differ
 //! only in markup, so the wording, the rounding and the JSON key names live
 //! here instead of being restated — and drifting — five times over.
 //!
@@ -451,7 +451,7 @@ const no_layout_note: []const u8 =
 // ── JSON ──────────────────────────────────────────────────────────────
 
 /// Serialize `bt` as one JSON object — the WHOLE body `GET /api/thermal/:name`
-/// returns, the `describe_thermal` MCP tool returns, and the review JSON nests
+/// returns, the `describe_thermal` CLI tool returns, and the review JSON nests
 /// under its `thermal` key. One writer for all three, so a caller reading the
 /// endpoint and an agent reading the tool can never be told different numbers
 /// about the same board.

@@ -1,5 +1,5 @@
 //! Stuck-net diagnostics JSON — the single serialization every routing surface
-//! shares (`/api/pcb-describe`'s `routed.stuck`, the MCP `describe_pcb_layout`
+//! shares (`/api/pcb-describe`'s `routed.stuck`, the CLI `describe_pcb_layout`
 //! tool, and `POST /api/pcb-route` which feeds the viewer's Stuck-nets panel),
 //! so a net's inferred failure mode, its blockers, and its ranked dsl/code
 //! remedies can never drift in shape between the agent-facing facts and the

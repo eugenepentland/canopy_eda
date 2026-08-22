@@ -1,4 +1,4 @@
-//! `preview_escape_assignment` MCP tool — read-only view of the joint escape
+//! `preview_escape_assignment` CLI tool — read-only view of the joint escape
 //! assignment for a contended net set.
 //!
 //! `(assign-escapes …)` on a route wave hands its nets to
@@ -237,7 +237,7 @@ fn failFmt(out: *std.ArrayList(u8), alloc: std.mem.Allocator, comptime fmt: []co
 const testing = std.testing;
 const mcp_tools = @import("mcp_tools.zig");
 
-// spec: Web Server - preview_escape_assignment is a registered read-only MCP tool
+// spec: Web Server - preview_escape_assignment is a registered read-only CLI tool
 test "preview_escape_assignment is registered read-only" {
     try testing.expect(mcp_tools.isKnownTool("preview_escape_assignment"));
     try testing.expect(!mcp_tools.isMutationTool("preview_escape_assignment"));
@@ -245,7 +245,7 @@ test "preview_escape_assignment is registered read-only" {
 
 // spec: Web Server - preview_escape_assignment rejects a request naming fewer than two nets
 test "preview_escape_assignment needs at least two contended nets" {
-    // Request-local arena, exactly as the MCP dispatcher hands the handler.
+    // Request-local arena, exactly as the CLI dispatcher hands the handler.
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_i.deinit();
     const arena = arena_i.allocator();

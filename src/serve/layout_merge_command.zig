@@ -2,7 +2,7 @@
 //!
 //! Git cannot merge two independent rows in the same generated JSON document
 //! reliably.  This command reads one named row from a source sidecar and
-//! upserts it through the same protected write path as the editor/MCP tools,
+//! upserts it through the same protected write path as the editor/CLI tools,
 //! preserving every unrelated target layout, its cache, its current star, and
 //! the revision/history safeguards.
 

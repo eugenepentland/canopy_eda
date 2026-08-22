@@ -1,4 +1,4 @@
-//! MCP tool dispatch and read/introspection handlers. `call` fans a
+//! CLI tool dispatch and read/introspection handlers. `call` fans a
 //! `tools/call` name out to one `tool*` handler that writes a JSON result into
 //! the caller's buffer; the registration table and the embedded
 //! `tools_list_result.json` are kept in lockstep (a test enforces it).
@@ -94,7 +94,7 @@ pub fn warnResolveIdentities(name: []const u8, err: anyerror) void {
     log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });
 }
 
-/// One entry per MCP tool. Keep in sync with `tools_list_result` below and
+/// One entry per CLI tool. Keep in sync with `tools_list_result` below and
 /// with the dispatch arms in `callInner`. Adding a new tool should start here,
 /// not with a scatter across three separate sites.
 const ToolEntry = struct {
@@ -117,7 +117,7 @@ const tools = [_]ToolEntry{
     .{ .name = "describe_pcb_layout", .is_mutation = false },
     // Lumped steady-state thermal screening (Tj = Ta + P*thetaJA) of a design
     // or a bare module: per-part junction temperatures, the board verdict and
-    // the ambient window. The MCP twin of GET /api/thermal/:name, sharing its
+    // the ambient window. The CLI twin of GET /api/thermal/:name, sharing its
     // whole body so the two can never report different temperatures.
     .{ .name = "describe_thermal", .is_mutation = false },
     // The completion-progress ladder (schematic → sub-circuits → board-setup →
@@ -146,7 +146,7 @@ const tools = [_]ToolEntry{
     .{ .name = "route_order_search", .is_mutation = true },
     // Diagnose ONE named net on the shown board: the per-net answer neither
     // route_experiment's capped, failure-only stuck[] nor a whole-board describe
-    // can give on demand. The MCP twin of POST /api/pcb-route-analyze/:name.
+    // can give on demand. The CLI twin of POST /api/pcb-route-analyze/:name.
     .{ .name = "diagnose_net", .is_mutation = false },
     // Joint multi-net escape assignment preview: which parallel lanes a
     // contended net set would take out of its shared hub (read-only, no route).
@@ -216,7 +216,7 @@ const tools = [_]ToolEntry{
     // when it is netlisp's own or an empty eeschema stub, a KiCad lock refuses
     // outright, and `dry_run` reports the per-file plan without writing.
     .{ .name = "sync_kicad_sch", .is_mutation = true },
-    // KiCad board importer over MCP: parse a .kicad_pcb into a netlist preview
+    // KiCad board importer over CLI: parse a .kicad_pcb into a netlist preview
     // (read-only), or run the full import that writes lib/ + src/ files.
     .{ .name = "parse_kicad_netlist", .is_mutation = false },
     .{ .name = "inspect_kicad_layout", .is_mutation = false },
@@ -266,18 +266,18 @@ pub fn isMutationTool(name: []const u8) bool {
 
 pub const tools_list_result = @embedFile("assets/tools_list_result.json");
 
-/// Result of a tool call for the MCP envelope writer. `ok=false` flips the
+/// Result of a tool call for the CLI envelope writer. `ok=false` flips the
 /// `isError` flag on the response. `out` always holds plain text that the
 /// caller wraps in a single `{"type":"text","text":...}` block.
 pub const CallResult = struct {
     ok: bool,
     /// When set, `out` holds base64-encoded image bytes and the caller emits an
-    /// MCP image content block with this MIME type instead of a text block.
+    /// CLI image content block with this MIME type instead of a text block.
     image_mime: ?[]const u8 = null,
 };
 
 /// Dispatch a tool call. Writes the result into `out` and returns how the
-/// caller should frame it in the MCP envelope.
+/// caller should frame it in the CLI envelope.
 pub fn call(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -287,7 +287,7 @@ pub fn call(
 ) CallResult {
     // The image tool returns binary content, so it's handled here (not in
     // `callInner`, which only ever produces text) and tagged with its MIME type
-    // so the MCP layer frames it as an image content block.
+    // so the CLI layer frames it as an image content block.
     if (std.mem.eql(u8, tool_name, "get_pcb_layout_image") or
         std.mem.eql(u8, tool_name, "get_schematic_image"))
     {
@@ -847,7 +847,7 @@ fn toolCompareLayoutToStarred(allocator: std.mem.Allocator, project_dir: []const
 }
 
 /// Render a design's PCB layout to a PNG and write it base64-encoded into `out`
-/// (the caller emits it as an MCP image content block). Optional `nets`/`refs`
+/// (the caller emits it as a CLI image content block). Optional `nets`/`refs`
 /// (arrays or comma-separated strings) spotlight a subsystem; `route` overlays
 /// copper; `width`/`layout`/`sub`/`regen` mirror the HTTP endpoint. Diagnostic
 /// overlays: `blame` (cost heatmap + worst-offenders), `loops` (per-loop nH
@@ -897,7 +897,7 @@ fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_v
     return true;
 }
 
-/// Render the web schematic's SVG display list natively and return it as an MCP
+/// Render the web schematic's SVG display list natively and return it as a CLI
 /// PNG image block. `sub` selects a schematic card, `ref` one hub, and `view`
 /// accepts the UI names sequential|functional. This is the visual review path
 /// for agents after a schematic edit; it deliberately has no browser runtime.
@@ -1264,7 +1264,7 @@ fn libEntryScore(query: []const u8, name: []const u8, description: ?[]const u8) 
 /// With a non-null `query`, only entries whose name or description fuzzily
 /// match are emitted, ranked best-first, and truncated to `limit` entries
 /// (null `limit` = unbounded); with null `query`, every entry is emitted in
-/// directory order (the CLI `netlisp library` path — the MCP tool uses the
+/// directory order (the CLI `netlisp library` path — the CLI tool uses the
 /// leaner `writeLibraryNames` for its no-query mode instead).
 pub fn listLibrarySubdir(
     allocator: std.mem.Allocator,
@@ -1664,7 +1664,7 @@ pub fn optionalBool(args_val: ?std.json.Value, key: []const u8) ?bool {
 
 /// Write `s` as a JSON string literal (with escapes) to `w`.
 /// Scan `{project_dir}/src/` recursively and return the basename of every
-/// file whose top-level form is a `(design-block …)`. Helper for the MCP
+/// file whose top-level form is a `(design-block …)`. Helper for the CLI
 /// `list_designs` tool and the index page's design list. Sibling
 /// `<name>.checks.sexp` files (autoloaded verifications) are skipped.
 pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) ToolError![][]const u8 {
@@ -1690,7 +1690,7 @@ pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) To
     return names.toOwnedSlice(allocator);
 }
 
-/// Summary of a single design used by both the index page and the MCP
+/// Summary of a single design used by both the index page and the CLI
 /// `list_designs` tool. All owned slices are duped into `allocator`.
 pub const DesignSummary = struct {
     /// File basename without extension.
@@ -1750,7 +1750,7 @@ fn countNets(block: *const env_mod.DesignBlock) usize {
 
 // ── Design-summary cache ───────────────────────────────────────────────
 //
-// The home page (GET /), /api/designs, and the MCP list_designs tool all call
+// The home page (GET /), /api/designs, and the CLI list_designs tool all call
 // listDesignSummaries, which fully evaluates every design and runs ERC +
 // BOM resolution + the notes scan — ~60 ms
 // for the current design set, recomputed identically on every load. We cache
@@ -2220,7 +2220,7 @@ pub fn runErcForNamedBlock(
 }
 
 /// Evaluate a design (or module) and return the schematic scene-graph JSON
-/// the MCP `get_schematic` tool ships back to Claude Code. Same renderer
+/// the CLI `get_schematic` tool ships back to Claude Code. Same renderer
 /// the browser viewer consumes via `/api/scene-graph/:name`.
 pub fn renderSceneGraph(
     allocator: std.mem.Allocator,
@@ -2447,13 +2447,13 @@ test "get_pcb_layout_image declares its thermal arguments" {
     inline for (words, offered) |word, v| try std.testing.expectEqualStrings(word, v.string);
 }
 
-// spec: Web Server - get_schematic_image is a registered read-only MCP tool
+// spec: Web Server - get_schematic_image is a registered read-only CLI tool
 test "get_schematic_image is registered read-only" {
     try std.testing.expect(isKnownTool("get_schematic_image"));
     try std.testing.expect(!isMutationTool("get_schematic_image"));
 }
 
-// spec: Web Server - get_layout_progress is a registered read-only MCP tool
+// spec: Web Server - get_layout_progress is a registered read-only CLI tool
 test "get_layout_progress is registered read-only" {
     try std.testing.expect(isKnownTool("get_layout_progress"));
     try std.testing.expect(!isMutationTool("get_layout_progress"));

@@ -2977,7 +2977,6 @@ src/serve.zig::PcbJobView struct_
 src/serve.zig::ServeError value
 src/serve.zig::Server struct_
 src/serve.zig::ServerState struct_
-src/serve.zig::WebsocketHandler value
 src/serve.zig::bumpLiveVersion | fn bumpLiveVersion(name: []const u8) u32
 src/serve.zig::deinit | fn deinit(self: *Caches) void
 src/serve.zig::dispatch | fn dispatch( self: *Server, action: *const fn (*Server, *httpz.Request, *httpz.Response) anyerror!void, req: *httpz.Request, res: *httpz.Response, ) !void
@@ -3248,14 +3247,6 @@ src/serve/library_3d.zig::saveTransformApi | fn saveTransformApi(ctx: *Server, r
 src/serve/library_3d.zig::viewerPage | fn viewerPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/library_search_metadata.zig::extract | fn extract(allocator: std.mem.Allocator, path: []const u8, sub: []const u8) ?[]const u8
 src/serve/matlab_rf_export.zig::pcbMatlabRfApi | fn pcbMatlabRfApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/mcp.zig::Client struct_
-src/serve/mcp.zig::Context struct_
-src/serve/mcp.zig::HandlerError value
-src/serve/mcp.zig::clientMessage | fn clientMessage(self: *Client, data: []const u8) !void
-src/serve/mcp.zig::dispatchFrame | fn dispatchFrame( allocator: std.mem.Allocator, project_dir: []const u8, data: []const u8, role: ward_auth.Role, username: ?[]const u8, ) HandlerError!?[]const u8
-src/serve/mcp.zig::init | fn init(conn: *websocket.Conn, ctx: *const Context) !Client
-src/serve/mcp.zig::postApi | fn postApi(ctx: *server_mod.Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/mcp.zig::upgrade | fn upgrade(ctx: *server_mod.Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/mcp_build.zig::run | fn run( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, profile: preflight.Profile, severity: ?[]const u8, out: *std.ArrayList(u8), ) RunError!void
 src/serve/mcp_checks.zig::severityPasses | fn severityPasses(v: erc_mod.Violation, filter: ?[]const u8) bool
 src/serve/mcp_checks.zig::toolRunChecks | fn toolRunChecks( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), w: anytype, ) !bool
@@ -3264,9 +3255,6 @@ src/serve/mcp_checks.zig::writeErcViolationJson | fn writeErcViolationJson(w: an
 src/serve/mcp_checks.zig::writePreflightFindingJson | fn writePreflightFindingJson(w: anytype, finding: preflight.Finding) !void
 src/serve/mcp_close_gaps.zig::mcpCloseOpenNets | fn mcpCloseOpenNets( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/mcp_connector_pinout.zig::mcpOptimizeConnectorPinout | fn mcpOptimizeConnectorPinout( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) pcb_layout_page.HandlerError!bool
-src/serve/mcp_docs.zig::ParamDoc struct_
-src/serve/mcp_docs.zig::ToolDoc struct_
-src/serve/mcp_docs.zig::mcpDocsPage | fn mcpDocsPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/mcp_escape_assign.zig::mcpPreviewEscapeAssignment | fn mcpPreviewEscapeAssignment( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) pcb_layout_page.HandlerError!bool
 src/serve/mcp_flatten.zig::PinCategory enum_
 src/serve/mcp_flatten.zig::categoryName | fn categoryName(c: PinCategory) []const u8
@@ -3710,18 +3698,6 @@ src/serve/templates/library.zig::bind | fn bind(args: *const Args) zt.Component
 src/serve/templates/library.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
 src/serve/templates/library.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
 src/serve/templates/library.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
-src/serve/templates/mcp_docs.zig::Args value
-src/serve/templates/mcp_docs.zig::Args value
-src/serve/templates/mcp_docs.zig::Args value
-src/serve/templates/mcp_docs.zig::Mcp struct_
-src/serve/templates/mcp_docs.zig::ParamRow struct_
-src/serve/templates/mcp_docs.zig::ToolCard struct_
-src/serve/templates/mcp_docs.zig::bind | fn bind(args: *const Args) zt.Component
-src/serve/templates/mcp_docs.zig::bind | fn bind(args: *const Args) zt.Component
-src/serve/templates/mcp_docs.zig::bind | fn bind(args: *const Args) zt.Component
-src/serve/templates/mcp_docs.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
-src/serve/templates/mcp_docs.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
-src/serve/templates/mcp_docs.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
 src/serve/templates/pages.zig::Args value
 src/serve/templates/pages.zig::Args value
 src/serve/templates/pages.zig::Args value
@@ -3809,8 +3785,6 @@ src/serve/vfs.zig::moveFile | fn moveFile( allocator: std.mem.Allocator, project
 src/serve/vfs.zig::readFile | fn readFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, offset: ?u64, limit: ?u64, out: *std.ArrayList(u8), ) VfsError!bool
 src/serve/vfs.zig::writeFile | fn writeFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, content: []const u8, opts: WriteOpts, out: *std.ArrayList(u8), ) VfsError!bool
 src/serve/ward_auth.zig::AuthError value
-src/serve/ward_auth.zig::DevBypass enum_
-src/serve/ward_auth.zig::Identity struct_
 src/serve/ward_auth.zig::Role enum_
 src/serve/ward_auth.zig::WardState struct_
 src/serve/ward_auth.zig::authMiddleware | fn authMiddleware(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!bool
@@ -3819,7 +3793,6 @@ src/serve/ward_auth.zig::canWrite | fn canWrite(self: Role) bool
 src/serve/ward_auth.zig::deriveAuthServer | fn deriveAuthServer(login_url: []const u8) []const u8
 src/serve/ward_auth.zig::init | fn init(self: *WardState, allocator: std.mem.Allocator) void
 src/serve/ward_auth.zig::mapWardRole | fn mapWardRole(role: ward.verdict.Role) Role
-src/serve/ward_auth.zig::mcpRoleFromIdentity | fn mcpRoleFromIdentity(identity: ?Identity, dev_bypass: DevBypass) Role
 src/serve/ward_auth.zig::metadataProtectedResource | fn metadataProtectedResource(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!void
 src/serve/ward_auth.zig::toString | fn toString(self: Role) []const u8
 src/serve/ward_auth.zig::verify | fn verify( self: *FakeVerifier, allocator: std.mem.Allocator, token: []const u8, ) std.mem.Allocator.Error!ward.verdict.Verdict
@@ -3987,5 +3960,6 @@ src/thermal_scenarios.zig::solveAt | fn solveAt( allocator: std.mem.Allocator, b
 src/thermal_scenarios.zig::solveFields | fn solveFields( allocator: std.mem.Allocator, bt: thermal.BoardThermal, p: optimizer.Placement, copper: Copper, ) std.mem.Allocator.Error![]ScenarioResult
 src/thermal_scenarios.zig::solveFieldsWithHeatsink | fn solveFieldsWithHeatsink( allocator: std.mem.Allocator, bt: thermal.BoardThermal, p: optimizer.Placement, copper: Copper, heatsink: ?Heatsink, ) std.mem.Allocator.Error![]ScenarioResult
 src/thermal_scenarios.zig::spreaderLayersOf | fn spreaderLayersOf(rules: optimizer.BoardRules) u8
+src/tool_cli.zig::run | fn run(allocator: std.mem.Allocator, args: []const []const u8) RunError!void
 src/zipfile.zig::Entry struct_
 src/zipfile.zig::write | fn write(w: *std.Io.Writer, entries: []const Entry) std.Io.Writer.Error!void

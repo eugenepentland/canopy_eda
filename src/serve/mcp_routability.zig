@@ -1,4 +1,4 @@
-//! `routability_preflight` MCP tool — the full structured output of the static
+//! `routability_preflight` CLI tool — the full structured output of the static
 //! routability gates in `placement/routability_lint.zig`.
 //!
 //! `describe_pcb_layout` already mirrors these findings into its `lint[]`

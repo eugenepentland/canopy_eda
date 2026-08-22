@@ -1,4 +1,4 @@
-//! Extract the text indexed by `list_library` without making the main MCP
+//! Extract the text indexed by `list_library` without making the main CLI
 //! dispatcher own component/module file parsing details.
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");

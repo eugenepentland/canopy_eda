@@ -69,14 +69,12 @@ const modules_page = @import("serve/modules.zig");
 const auth = @import("serve/auth.zig");
 const ward_auth = @import("serve/ward_auth.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
-const mcp = @import("serve/mcp.zig");
 const static_assets = @import("serve/static_assets.zig");
 const sync = @import("serve/sync.zig");
 const notes = @import("serve/notes.zig");
 const design_diff = @import("serve/design_diff.zig");
 const datasheet_attach = @import("serve/datasheet_attach.zig");
 const rate_limiter = @import("serve/rate_limiter.zig");
-const mcp_docs = @import("serve/mcp_docs.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
 
@@ -96,7 +94,7 @@ const LiveLayout = struct {
 var live_layout: ?LiveLayout = null;
 
 /// Replace the cached live schematic scene-graph JSON for design `name`. Both
-/// slices may come from a request-scoped arena (e.g. MCP tool dispatch) so they
+/// slices may come from a request-scoped arena (e.g. CLI tool dispatch) so they
 /// are duplicated into page_allocator memory that outlives the caller. The
 /// previous pair, if any, is freed — which is why readers must copy the bytes
 /// out under `live_mutex` (see `liveLayoutFor`) rather than borrow them.
@@ -362,9 +360,8 @@ pub const ServerState = struct {
 // ── Server ─────────────────────────────────────────────────────────────
 
 /// httpz request handler shared across every route and worker thread. Owns
-/// the long-lived allocator and project directory, runs the auth middleware
-/// before dispatch, and exposes the MCP WebSocket client type so the server
-/// can upgrade `GET /mcp` connections.
+/// the long-lived allocator and project directory and runs the auth middleware
+/// before dispatch.
 pub const Server = struct {
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -391,13 +388,6 @@ pub const Server = struct {
     /// `serve()` and shared, by pointer, with every per-request `Server` copy.
     state: *ServerState,
 
-    /// The ward bearer identity the auth middleware resolved for a `/mcp`
-    /// request, so the MCP handler role-gates from it without re-introspecting
-    /// the token. Null for every non-`/mcp` request (and the dev-bypass path).
-    mcp_identity: ?ward_auth.Identity = null,
-
-    pub const WebsocketHandler = mcp.Client;
-
     pub fn dispatch(
         self: *Server,
         action: *const fn (*Server, *httpz.Request, *httpz.Response) anyerror!void,
@@ -415,7 +405,7 @@ pub const Server = struct {
         // accumulating in the process allocator for the life of the server
         // (the old behaviour leaked MBs per page view until OOM). Anything
         // that must outlive the request (live versions, regen-job frames,
-        // auth/oauth stores, the MCP websocket client) dupes into
+        // auth/oauth stores and other long-lived state dupes into
         // page_allocator internally and was audited to do so.
         var req_handler = Server{
             .allocator = res.arena,
@@ -451,8 +441,8 @@ const gzip_min_bytes: usize = 1400;
 /// in the per-request arena (`res.arena`), so it dies with the request; the
 /// deflate work behind it is memoised across requests by `gzip_cache`, keyed on
 /// the body bytes, so there is still nothing to invalidate. No-op for small bodies,
-/// non-text content types, already-written/chunked responses (e.g. the MCP
-/// WebSocket upgrade, event streams), or clients that don't send gzip.
+/// non-text content types, already-written/chunked responses (for example event
+/// streams), or clients that don't send gzip.
 fn maybeCompress(gzip_store: *gzip_cache.Store, req: *httpz.Request, res: *httpz.Response) void {
     if (res.written or res.chunked or res.status != 200) return;
     const ct = res.content_type orelse return;
@@ -552,7 +542,7 @@ test "a live scene-graph read survives the push that replaces the slot" {
 }
 
 /// Bring up the EDA web server on `port`: registers every page, JSON API,
-/// auth, OAuth, and MCP route against an httpz instance, then blocks on
+/// auth, and OAuth-support route against an httpz instance, then blocks on
 /// `server.listen()`. Project files are served out of `project_dir`; auth
 /// state lives in `auth_dir` (or `<project_dir>/auth` when null).
 /// The PCB-layout surface: the viewer page plus its JSON/PNG/facts APIs,
@@ -636,7 +626,7 @@ fn registerLibraryRoutes(router: anytype) void {
 }
 
 /// Start the HTTP server: configure auth/rate limits, register every route
-/// (pages, APIs, MCP, OAuth), and block serving requests until shutdown.
+/// (pages, APIs, auth, OAuth support), and block serving requests until shutdown.
 pub fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -687,7 +677,6 @@ pub fn serve(
     registerPcbRoutes(router);
     router.get("/modules", modules_page.modulesListPage, .{});
     router.get("/modules/:name", modules_page.moduleViewPage, .{});
-    router.get("/mcp-tools", mcp_docs.mcpDocsPage, .{});
     // API
     router.post("/api/push/:name", api.pushApi, .{});
     router.get("/api/module-source", modules_page.moduleSourceApi, .{});
@@ -702,7 +691,7 @@ pub fn serve(
     router.get("/api/export-bom/:name", api.exportBomCsvApi, .{});
     router.get("/api/export-review/:name", api.exportReviewPackageApi, .{});
     // Native schematic-block raster; unlike a browser screenshot this route
-    // is deterministic, headless, and directly shared with MCP/CLI export.
+    // is deterministic, headless, and directly shared with CLI export.
     router.get("/api/schematic-png/:name", schematic_png.schematicPngApi, .{});
     // Review-document PDF (`?theme=dark` for the screen palette) — the HTTP
     // twin of `netlisp export-pdf`, served as a `<name>.pdf` attachment.
@@ -717,7 +706,7 @@ pub fn serve(
     // the project answers 409 and writes nothing.
     router.post("/api/sync-kicad-sch/:name", sync_kicad_sch.syncKicadSchApi, .{});
     // Lumped steady-state thermal screening as read-only facts JSON — the
-    // HTTP twin of the `describe_thermal` MCP tool, sharing its whole body.
+    // HTTP twin of the `describe_thermal` CLI tool, sharing its whole body.
     // `?ambient=NN` screens at the caller's ambient instead of bench 25 °C.
     router.get("/api/thermal/:name", thermal_api.thermalApi, .{});
     // The solved rise FIELD of one cooling scenario, in board millimetres —
@@ -791,12 +780,6 @@ pub fn serve(
     router.post("/api/notes/:name/tasks/remove", notes.removeTaskApi, .{});
 
     registerLibraryRoutes(router);
-
-    // MCP — POST /mcp is the streamable-HTTP transport Claude Code connects
-    // to via its remote-MCP connector. GET /mcp upgrades to WebSocket, used
-    // by local testing and the stdio bridge.
-    router.post("/mcp", mcp.postApi, .{});
-    router.get("/mcp", mcp.upgrade, .{});
 
     // RFC 9728 protected-resource metadata only (wardd is the auth server now).
     router.get("/.well-known/oauth-protected-resource", ward_auth.metadataProtectedResource, .{});

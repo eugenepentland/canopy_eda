@@ -1,5 +1,5 @@
 //! Leak-regression tests for the serve request-handler area
-//! (api/edit/sync/vfs/mcp/misc).
+//! (api/edit/sync/vfs/misc).
 //!
 //! Background: HTTP route handlers receive `ctx.allocator = res.arena`, an
 //! httpz per-request arena that is reset after the response is written. The

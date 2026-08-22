@@ -6,7 +6,7 @@
 //! Like `src/fab_readiness.zig` (its architectural template) this is a PURE
 //! function of a caller-assembled `Inputs` struct — no disk, no server, no
 //! re-solve — so it is unit-testable in isolation and every read surface
-//! (home-page chip, `/pcb-layout` scorebar, an MCP tool) computes the same
+//! (home-page chip, `/pcb-layout` scorebar, a CLI tool) computes the same
 //! `Report` from the same facts. The serve layer gathers the inputs (ERC count,
 //! per-net connectivity via `fab_readiness.netConnectivity`, the blessed
 //! placement, an optional fab report) and calls `compute`.

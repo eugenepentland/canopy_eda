@@ -1,4 +1,4 @@
-//! `route_experiment` MCP tool — a request-local "try a routing DSL change"
+//! `route_experiment` CLI tool — a request-local "try a routing DSL change"
 //! surface for the constraint-DSL routing loop. It resolves the design's
 //! blessed placement exactly like `describe_pcb_layout` / `route_pcb` do, then
 //! routes it fresh through the shared plan-lowering seam (`route_plan`), and
@@ -352,7 +352,7 @@ fn argBool(args_val: ?std.json.Value, key: []const u8) ?bool {
     return if (v == .bool) v.bool else null;
 }
 
-/// Write an `{"error":<msg>}` envelope into `out` and return false (the MCP
+/// Write an `{"error":<msg>}` envelope into `out` and return false (the CLI
 /// layer flags the result `isError`). One error spelling for this tool.
 fn fail(out: *std.ArrayList(u8), alloc: std.mem.Allocator, msg: []const u8) pcb_layout_page.HandlerError!bool {
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -391,7 +391,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const geometry = @import("../placement/geometry.zig");
 const export_kicad = @import("../export_kicad.zig");
 
-// spec: Web Server - route_experiment is a registered read-only MCP tool
+// spec: Web Server - route_experiment is a registered read-only CLI tool
 test "route_experiment is registered read-only" {
     try testing.expect(mcp_tools.isKnownTool("route_experiment"));
     try testing.expect(!mcp_tools.isMutationTool("route_experiment"));

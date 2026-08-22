@@ -309,6 +309,7 @@ test {
     _ = @import("review_html.zig");
     _ = @import("review_thermal.zig");
     _ = @import("thermal_scenarios.zig");
+    _ = @import("tool_cli.zig");
     _ = @import("render_thermal_png.zig");
     _ = @import("serve.zig");
     _ = @import("serve/assembly_debug.zig");
@@ -347,7 +348,6 @@ test {
     _ = @import("serve/mcp_checks.zig");
     _ = @import("serve/mcp_close_gaps.zig");
     _ = @import("serve/mcp_connector_pinout.zig");
-    _ = @import("serve/mcp_docs.zig");
     _ = @import("serve/mcp_escape_assign.zig");
     _ = @import("serve/mcp_flatten.zig");
     _ = @import("serve/mcp_import_tools.zig");

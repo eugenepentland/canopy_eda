@@ -12,7 +12,7 @@
 //! `(pcb-plan …)` (reusing the caller's one `module_policy` analysis). It is a
 //! pure function of `(project_dir, block, placement, opts, policy)` — the only
 //! disk it touches is read-only (ERC's lib/ lookups, the layout sidecar), so a
-//! describe request and the `get_layout_progress` MCP tool compute the
+//! describe request and the `get_layout_progress` CLI tool compute the
 //! identical `progress.Report`.
 
 const std = @import("std");

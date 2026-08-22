@@ -126,7 +126,7 @@ pub fn wardLoginUrl(allocator: std.mem.Allocator) ?[]u8 {
     return lookup(allocator, "WARD_LOGIN_URL");
 }
 
-/// Ward token-introspection endpoint (`WARD_INTROSPECT_URL`) the MCP bearer
+/// Ward token-introspection endpoint (`WARD_INTROSPECT_URL`) the CLI bearer
 /// path POSTs `token=…` to. Null when unset — the bearer path then fails
 /// closed rather than admit an unverifiable token.
 pub fn wardIntrospectUrl(allocator: std.mem.Allocator) ?[]u8 {

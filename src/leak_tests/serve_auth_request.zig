@@ -2,8 +2,8 @@
 //! (`ward_auth.authMiddleware`, `ward_auth.metadataProtectedResource`) through
 //! faked httpz request/response pairs (`httpz.testing`), asserting the exact
 //! status codes, headers, and routing the ward migration must preserve — the
-//! dev-bypass composition, the 401-vs-302 split, the RFC 9728 bearer challenge,
-//! scope/role gating, fail-closed behaviour, and the plugin-vs-ward sync
+//! dev-bypass composition, session redirects, scope/role gating,
+//! fail-closed behaviour, and the plugin-vs-ward sync
 //! precedence. Network-free: the verdict caches are pre-seeded so the ward HTTP
 //! verifier is never reached (a cache hit short-circuits the network call), and
 //! the fail-closed paths return before any verifier is built.
@@ -204,78 +204,6 @@ test "auth-request: an unauthenticated page request gets a 302 to the ward login
     try expectContains(loc, "rd="); // the percent-encoded return target
     try expectContains(loc, "localhost"); // this request's host
     try expectContains(loc, "schematics"); // this request's path
-}
-
-// ── Bearer gate: RFC 9728 challenge and fail-closed ─────────────────────────
-
-// spec: serve - A bearer-less mcp request is answered 401 with a resource-metadata www-authenticate challenge
-test "auth-request: a bearer-less mcp request gets a 401 resource-metadata challenge" {
-    var env = TestEnv{ .a = std.testing.allocator };
-    defer env.deinit();
-    env.initWard("http" ++ "://v", login_url, "http" ++ "://i");
-    var ht = httpz.testing.init(.{});
-    defer ht.deinit();
-    ht.url("/mcp"); // no Authorization header
-    var srv = env.server(false);
-    try std.testing.expect(!try ward_auth.authMiddleware(&srv, ht.req, ht.res));
-    try std.testing.expectEqual(@as(u16, 401), ht.res.status);
-    const resp = try ht.parseResponse();
-    const wa = resp.headers.get("www-authenticate") orelse return error.NoChallengeHeader;
-    try expectContains(wa, "resource_metadata");
-    try expectContains(wa, "/.well-known/oauth-protected-resource");
-}
-
-// spec: serve - An mcp request fails closed with 503 when the bearer introspection url is unconfigured
-test "auth-request: an mcp request fails closed when introspection is unconfigured" {
-    var env = TestEnv{ .a = std.testing.allocator };
-    defer env.deinit();
-    env.initWard("http" ++ "://v", login_url, ""); // introspect url empty
-    var ht = httpz.testing.init(.{});
-    defer ht.deinit();
-    ht.url("/mcp");
-    ht.header("authorization", "Bearer " ++ bearer_token);
-    var srv = env.server(false);
-    try std.testing.expect(!try ward_auth.authMiddleware(&srv, ht.req, ht.res));
-    try std.testing.expectEqual(@as(u16, 503), ht.res.status);
-}
-
-// ── Bearer gate: scope enforcement + role mapping (cache-seeded, no network) ─
-
-// spec: serve - An mcp bearer is admitted for any valid ward token regardless of scope with its mapped role
-test "auth-request: mcp admits any valid ward token regardless of scope" {
-    var env = TestEnv{ .a = std.testing.allocator };
-    defer env.deinit();
-    env.initWard("http" ++ "://v", login_url, "http" ++ "://i");
-    const now = clock.timestamp();
-
-    // Case A — a scope WITHOUT the service name is still admitted (writes are
-    // role-gated, not scope-gated, on the /mcp read path).
-    {
-        try env.state.ward.bearer.?.cache.put(bearer_token, "ada", .member, "files", now);
-        var ht = httpz.testing.init(.{});
-        defer ht.deinit();
-        ht.url("/mcp");
-        ht.header("authorization", "Bearer " ++ bearer_token);
-        var srv = env.server(false);
-        try std.testing.expect(try ward_auth.authMiddleware(&srv, ht.req, ht.res));
-        try std.testing.expect(srv.mcp_identity != null);
-        try std.testing.expectEqualStrings("files", srv.mcp_identity.?.scope);
-        try std.testing.expectEqual(ward_auth.Role.writer, srv.mcp_identity.?.role); // member → writer
-    }
-    // Case B — a multi-entry scope is likewise admitted with the mapped role.
-    {
-        try env.state.ward.bearer.?.cache.put(bearer_token, "ada", .member, "files eda", now);
-        var ht = httpz.testing.init(.{});
-        defer ht.deinit();
-        ht.url("/mcp");
-        ht.header("authorization", "Bearer " ++ bearer_token);
-        var srv = env.server(false);
-        try std.testing.expect(try ward_auth.authMiddleware(&srv, ht.req, ht.res));
-        try std.testing.expect(srv.mcp_identity != null);
-        try std.testing.expectEqualStrings("files eda", srv.mcp_identity.?.scope);
-        try std.testing.expectEqualStrings("ada", srv.mcp_identity.?.username);
-        try std.testing.expectEqual(ward_auth.Role.writer, srv.mcp_identity.?.role);
-    }
 }
 
 // ── Session gate: write-gating a mutation by role/method ─────────────────────

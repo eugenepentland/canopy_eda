@@ -1,4 +1,4 @@
-//! Per-design note and library-component `(requirement …)` MCP tool handlers,
+//! Per-design note and library-component `(requirement …)` CLI tool handlers,
 //! extracted from `mcp_tools.zig` (which stays the top-level dispatcher). The
 //! two `dispatch*` fns are the public entry points; the note handlers edit the
 //! `<design>.notes.md` sidecar via `notes.zig` and the requirement handlers

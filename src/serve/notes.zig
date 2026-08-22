@@ -2,7 +2,7 @@
 //! `<design>.notes.md` next to the source `.sexp`. Each TODO becomes a
 //! markdown checkbox line so the file stays human-readable; the parser
 //! is tolerant — any non-task line is preserved as free-form scratchpad
-//! content. The same file backs both the web UI and the MCP tools, so
+//! content. The same file backs both the web UI and the CLI tools, so
 //! agents can `add_design_note`, `complete_design_note`, etc.
 //!
 //! Canonical line format:
@@ -415,7 +415,7 @@ fn mutateTaskByIdApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response, mo
     res.body = ok_json;
 }
 
-// ── Core mutation helpers (shared with MCP) ──────────────────────────
+// ── Core mutation helpers (shared with CLI) ──────────────────────────
 
 /// Add a task with today's date. Caller owns the returned `Note`'s
 /// slices via the design's notes file (which becomes the source of

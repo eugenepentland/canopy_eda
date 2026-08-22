@@ -2,7 +2,7 @@
 //!
 //! The server snapshots a design's `.sexp` into
 //! `<project>/history/<name>/<timestamp>/<name>.sexp` before every mutation
-//! (source save, MCP build, restore). `GET /api/diff/:name?from=<id>&to=<id|current>`
+//! (source save, CLI build, restore). `GET /api/diff/:name?from=<id>&to=<id|current>`
 //! evaluates both revisions request-locally (nothing live is touched) and
 //! diffs the resulting DesignBlocks: instances added/removed, value and
 //! footprint changes, and per-net pin membership changes. `GET

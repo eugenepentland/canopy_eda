@@ -49,7 +49,7 @@ const field_part_name = "part_name";
 const oom_msg = "out of memory";
 
 /// Outcome of a successful footprint fetch. All slices are owned by the
-/// allocator passed to `downloadFootprint` (a request arena in the MCP path).
+/// allocator passed to `downloadFootprint` (a request arena in the CLI path).
 pub const DownloadResult = struct {
     zip_bytes: []u8,
     part_name: []const u8,
@@ -68,7 +68,7 @@ pub const DownloadError = error{
     InvalidCredentials,
 } || std.mem.Allocator.Error;
 
-/// Stable, user-facing message for a `DownloadError`, for the MCP envelope.
+/// Stable, user-facing message for a `DownloadError`, for the CLI envelope.
 pub fn errorMessage(err: DownloadError) []const u8 {
     return switch (err) {
         error.SearchFailed => "search request failed (curl/network error)",

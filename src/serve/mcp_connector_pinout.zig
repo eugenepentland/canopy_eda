@@ -1,4 +1,4 @@
-//! `optimize_connector_pinout` MCP tool.
+//! `optimize_connector_pinout` CLI tool.
 //!
 //! Connector pad assignments are remapped only in a request-local copy of the
 //! flattened netlist. The geometric search is the default; `route_trials > 0`

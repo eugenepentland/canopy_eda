@@ -4,7 +4,7 @@
 //! the parts have positions).
 //!
 //! Four surfaces need this projection: the `?thermal=1` heat-zone PNG, the
-//! `scenarios` block of `GET /api/thermal/:name`, the `describe_thermal` MCP
+//! `scenarios` block of `GET /api/thermal/:name`, the `describe_thermal` CLI
 //! tool that shares those bytes, and the review document's cooling-scenario
 //! table. Every one of them must be talking about the SAME board — the same
 //! outline, the same layer count, the same part boxes — or a reader comparing

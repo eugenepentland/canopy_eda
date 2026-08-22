@@ -270,7 +270,7 @@ pub fn describeDesign(
 /// ladder JSON, prefixed with the design name:
 /// `{"name":…,"current":…,"stages":[…]}` (+ `current_wave` / `warnings` when a
 /// `(pcb-plan …)` splits the placement/routing rungs). Backs the read-only
-/// `get_layout_progress` MCP tool. Bytes are owned by `alloc`.
+/// `get_layout_progress` CLI tool. Bytes are owned by `alloc`.
 /// `deps`, when non-null, receives the file dependency set of this computation
 /// (both evaluators' read-sets plus the ladder's sidecars) so the caller can
 /// cache the body against it. The capture happens while the evaluators are

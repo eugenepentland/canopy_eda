@@ -1,4 +1,4 @@
-//! Read-request options for the no-view-mode MCP PCB read tools
+//! Read-request options for the no-view-mode CLI PCB read tools
 //! (`describe_pcb_layout`, `get_layout_progress`, `routability_preflight`, and
 //! the shared `rough` default of `get_pcb_layout_image`), plus the guards that
 //! keep the advertised `tools/list` schema honest about them. Split out of
@@ -79,7 +79,7 @@ pub fn placementSelectOpts(args_val: ?std.json.Value) pcb_layout_page.PngRequest
     };
 }
 
-/// One MCP tool paired with the request keys the options builder its handler
+/// One CLI tool paired with the request keys the options builder its handler
 /// calls reads out of the arguments object.
 const SchemaReader = struct { tool: []const u8, keys: []const []const u8 };
 
@@ -94,8 +94,8 @@ const schema_readers = [_]SchemaReader{
     .{ .tool = "routability_preflight", .keys = &select_keys },
 };
 
-// spec: Web Server - A no-arg MCP PCB read defaults rough off to render the starred layout verbatim, not a re-solve
-test "no-arg MCP PCB read defaults rough off (starred-verbatim path)" {
+// spec: Web Server - A no-arg CLI PCB read defaults rough off to render the starred layout verbatim, not a re-solve
+test "no-arg CLI PCB read defaults rough off (starred-verbatim path)" {
     // A no-arg describe/image read must leave rough OFF and everything else in
     // the default-read state: solveForRequest's want_default (the starred ★
     // layout rendered verbatim) is gated on `!rough` plus no layout/regen/

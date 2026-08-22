@@ -222,14 +222,14 @@ pub fn renderToHtml(
     // The task list + add form drive /api/notes/:name/tasks/*; the
     // scratchpad textarea round-trips through the raw /api/notes/:name
     // endpoint and holds anything that isn't a checkbox-format task.
-    // Same file backs the MCP `add_design_note`/`complete_design_note`
+    // Same file backs the CLI `add_design_note`/`complete_design_note`
     // tools so agents and humans share state.
     try w.writeAll(
         \\<details id="page-notes" class="sch-notes-card page-anchor">
         \\<summary>Design Notes <span class="sch-card-sub muted" id="sch-notes-count"></span></summary>
         \\<div class="sch-notes-body">
         \\<p class="sch-notes-hint muted">Log ERC errors and follow-ups for the next revision. Saved to
-        \\<code>&lt;design&gt;.notes.md</code>; same store as the MCP <code>add_design_note</code> tool.</p>
+        \\<code>&lt;design&gt;.notes.md</code>; same store as the CLI <code>add_design_note</code> tool.</p>
         \\<div class="sch-notes-tasks" id="sch-notes-tasks"></div>
         \\<form class="sch-notes-add" id="sch-notes-add">
         \\<input type="text" id="sch-notes-add-text" class="sch-notes-add-text"

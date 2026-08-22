@@ -1,4 +1,4 @@
-//! Per-design routing trial-memory sidecar (`<design>.trials.json`) + its MCP
+//! Per-design routing trial-memory sidecar (`<design>.trials.json`) + its CLI
 //! tool handlers — the loop-hygiene half of the constraint-DSL routing loop.
 //!
 //! The loop is: an agent calls the read-only `route_experiment` tool with a
@@ -24,7 +24,7 @@
 //! design source, monotonic integer ids (`max+1`, never reused), capped at
 //! `max_trials` entries — recording past the cap drops the OLDEST entry so the
 //! newest 100 always survive. No timestamps: Guardian bans wall-clock reads, and
-//! every MCP mutation is git-autocommitted with author attribution by the
+//! every CLI mutation is git-autocommitted with author attribution by the
 //! existing seam, so ordering + history come from git for free.
 
 const std = @import("std");
@@ -70,7 +70,7 @@ const Trial = struct {
     source: []const u8 = source_agent,
 };
 
-/// `Trial.source` for a row a caller recorded by hand through the MCP tool.
+/// `Trial.source` for a row a caller recorded by hand through the CLI tool.
 const source_agent = "agent";
 /// `Trial.source` for a row `route_order_search` recorded from its own run.
 const source_order_search = "order_search";
@@ -334,7 +334,7 @@ fn removeTrialCore(
     return true;
 }
 
-// ── MCP dispatch + handlers ───────────────────────────────────────────
+// ── CLI dispatch + handlers ───────────────────────────────────────────
 
 /// Route-trial memory tools (sidecar `<design>.trials.json`): record a routing
 /// experiment's result, list what was already tried before the next DSL edit,
@@ -469,7 +469,7 @@ fn argF64(args_val: ?std.json.Value, key: []const u8) ?f64 {
 }
 
 /// Plain-text "unknown design" error line (notes-tool error style). Returns
-/// false so the MCP layer flags the result `isError`.
+/// false so the CLI layer flags the result `isError`.
 fn notFound(out: *std.ArrayList(u8), allocator: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!bool {
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
     defer out.* = aw.toArrayList();
@@ -689,19 +689,19 @@ test "a sidecar without the source field loads as agent-recorded" {
     try testing.expectEqual(@as(u64, 8), rec.id);
 }
 
-// spec: Web Server - record_route_trial is a registered mutation MCP tool
+// spec: Web Server - record_route_trial is a registered mutation CLI tool
 test "record_route_trial is a registered mutation tool" {
     try testing.expect(mcp_tools.isKnownTool("record_route_trial"));
     try testing.expect(mcp_tools.isMutationTool("record_route_trial"));
 }
 
-// spec: Web Server - list_route_trials is a registered read-only MCP tool
+// spec: Web Server - list_route_trials is a registered read-only CLI tool
 test "list_route_trials is a registered read-only tool" {
     try testing.expect(mcp_tools.isKnownTool("list_route_trials"));
     try testing.expect(!mcp_tools.isMutationTool("list_route_trials"));
 }
 
-// spec: Web Server - remove_route_trial is a registered mutation MCP tool
+// spec: Web Server - remove_route_trial is a registered mutation CLI tool
 test "remove_route_trial is a registered mutation tool" {
     try testing.expect(mcp_tools.isKnownTool("remove_route_trial"));
     try testing.expect(mcp_tools.isMutationTool("remove_route_trial"));

@@ -3,7 +3,8 @@
 > Moved verbatim from CLAUDE.md (2026-08-19); linked from its Reference Docs section.
 
 The production EDA server runs at **https://co-circuit.eugenepentland.dev** —
-that's the canonical URL for the KiCad-sync agent and any remote MCP client.
+that's the canonical URL for the KiCad-sync agent and browser clients. The
+structured tool surface is local-only through `netlisp tool`.
 Local dev still uses `http://localhost:7050`.
 
 `netlisp serve` starts an HTTP server with the schematic viewer:
@@ -28,7 +29,7 @@ Local dev still uses `http://localhost:7050`.
   checked before it is served. No cache: the vendor `.kicad_sym` index it
   rebuilds per call is ~0.36 s of a 0.95 s *Debug* export of the largest board
   here, and caching it would need an invalidation signal `lib/` does not have
-  (`lib/sources/` is writable through the MCP VFS and the library page). The
+  (`lib/sources/` is writable through the CLI VFS and the library page). The
   schematic page's `⤓ KiCad` toolbar button points here (module pages too).
   Footprint links resolve only when `footprints.pretty/` sits beside the sheets
   — `GET /api/export-kicad/:name` carries both and opens with 0 ERC warnings.
@@ -204,15 +205,15 @@ Local dev still uses `http://localhost:7050`.
   non-plated mounting holes). Formatters in `src/export_fab.zig`. Every fab
   output — `/api/fab-readiness` included — accepts `?layout=<row>` to build
   against that named saved layout instead of the ★ selection (the same row
-  the MCP tools' `layout` arg picks); an unknown name 404s naming the rows
+  the CLI tools' `layout` arg picks); an unknown name 404s naming the rows
   that do exist, like `/pcb-layout`'s direct link. **All fab
   outputs share one coordinate frame** (`export_fab.Frame`: y-UP, origin at
   the board outline's bottom-left, centroid rotation CCW-positive — the
   Gerber/KiCad-pos convention; the placement model itself stays y-down), so
   the package stacks exactly in CAM — never mix files from different
   requests/frames.
-- **PCB layout facts**: `GET /api/pcb-describe/:name` — structured spatial facts about the solved placement (`src/serve/pcb_describe.zig`), the textual twin of the PNG: built from the identical placement-selection logic and accepting the same query parameters, so the facts always describe the board the image shows. Returns JSON with the axes convention (y grows down; "top" = −y), the anchor (largest hub IC), per-part `ref`/`origin`/side-of-anchor/`gap_mm`/nets/`unplaced`, per-decoupling-loop net + power-leg mm + nH + side, each hub's net→package-edge pad map, spec coverage (incl. `unresolved` spec names), per-part `want_side` (the part sits OPPOSITE the hub edge its net's pads are on), a `module_policy` block (Phase 0 of the module-placement ruleset — `src/placement/module_policy.zig`: the detected `ModuleClass` per hub IC (buck/ldo/mcu/rf_amp/generic, best-effort — integrated power modules with no discrete inductor read `generic`), the criticality `net_classes` (input_rail/switch_node/clock/rf/feedback/analog — the routing-order taxonomy), and the inferred passive `roles` (input_cap/decoupling_cap/bulk_cap/feedback_divider/matching_element)), a `lint` array (fell-back-to-auto / unresolved-name / unplaced errors; wrong-side / long-loop / outside-outline warns; plus the Phase-1 layout gates in `src/placement/layout_lint.zig` — `decap-far` (HF decap power-leg to its nearest supply pad >6 mm; bulk caps exempt), `hot-loop-not-tightest` (the switcher input loop is looser than a less-critical decoupling loop), `feedback-near-aggressor` (an FB/comp part within ~2 mm of a switch-node/clock/RF passive)), `board.outline` (the authored `(board (size W H) …)` rectangle when one exists), and (with `?route=1`) `routed:{trace_mm,tracks,vias,drc}`. Every DRC record (here, on `/api/pcb-drc`, `/api/pcb-route`, and the viewer blob) also names WHO it is between: `a`/`b` party objects carrying `net` / `ref` / `pad`, so a `track↔pad` reads "GND ↔ VDD3V3 on U7 pad 12" and a `net open` names its net plus a pad from each island it failed to join. A side the rule has no party for (a courtyard clash has no net; a `net open` has one) is simply absent. The same facts flow through the MCP `describe_pcb_layout` tool. Agents should read measurements here and use the PNG for gestalt.
-- **Rough-vs-starred match**: `GET /api/layout-match/:name` — score how hand-like the `?rough=1` seed is versus the design's *starred* layout (the saved layout flagged `"default"`/★ in `/pcb-layout`, the user's blessed hand-finished reference; `src/serve/layout_match.zig`). The metric is per interchangeable class (kind+value+footprint+net set), per IC edge, COUNT agreement — credit `min(rough, starred)` parts per edge — so swapping which fungible 100 nF cap sits on an edge isn't penalized and looseness is tolerated (only the wrong edge/proportion costs). Returns `{name, starred, n, area_match_pct, classes[]}` (each class's rough/starred per-edge tallies show which subsystem the rough scattered differently), else `{starred:null, message}` when nothing is starred yet. Measures placement hand-likeness / how little dragging remains to finish — NOT the electrical score. MCP twin: `compare_layout_to_starred`.
+- **PCB layout facts**: `GET /api/pcb-describe/:name` — structured spatial facts about the solved placement (`src/serve/pcb_describe.zig`), the textual twin of the PNG: built from the identical placement-selection logic and accepting the same query parameters, so the facts always describe the board the image shows. Returns JSON with the axes convention (y grows down; "top" = −y), the anchor (largest hub IC), per-part `ref`/`origin`/side-of-anchor/`gap_mm`/nets/`unplaced`, per-decoupling-loop net + power-leg mm + nH + side, each hub's net→package-edge pad map, spec coverage (incl. `unresolved` spec names), per-part `want_side` (the part sits OPPOSITE the hub edge its net's pads are on), a `module_policy` block (Phase 0 of the module-placement ruleset — `src/placement/module_policy.zig`: the detected `ModuleClass` per hub IC (buck/ldo/mcu/rf_amp/generic, best-effort — integrated power modules with no discrete inductor read `generic`), the criticality `net_classes` (input_rail/switch_node/clock/rf/feedback/analog — the routing-order taxonomy), and the inferred passive `roles` (input_cap/decoupling_cap/bulk_cap/feedback_divider/matching_element)), a `lint` array (fell-back-to-auto / unresolved-name / unplaced errors; wrong-side / long-loop / outside-outline warns; plus the Phase-1 layout gates in `src/placement/layout_lint.zig` — `decap-far` (HF decap power-leg to its nearest supply pad >6 mm; bulk caps exempt), `hot-loop-not-tightest` (the switcher input loop is looser than a less-critical decoupling loop), `feedback-near-aggressor` (an FB/comp part within ~2 mm of a switch-node/clock/RF passive)), `board.outline` (the authored `(board (size W H) …)` rectangle when one exists), and (with `?route=1`) `routed:{trace_mm,tracks,vias,drc}`. Every DRC record (here, on `/api/pcb-drc`, `/api/pcb-route`, and the viewer blob) also names WHO it is between: `a`/`b` party objects carrying `net` / `ref` / `pad`, so a `track↔pad` reads "GND ↔ VDD3V3 on U7 pad 12" and a `net open` names its net plus a pad from each island it failed to join. A side the rule has no party for (a courtyard clash has no net; a `net open` has one) is simply absent. The same facts flow through the CLI `describe_pcb_layout` tool. Agents should read measurements here and use the PNG for gestalt.
+- **Rough-vs-starred match**: `GET /api/layout-match/:name` — score how hand-like the `?rough=1` seed is versus the design's *starred* layout (the saved layout flagged `"default"`/★ in `/pcb-layout`, the user's blessed hand-finished reference; `src/serve/layout_match.zig`). The metric is per interchangeable class (kind+value+footprint+net set), per IC edge, COUNT agreement — credit `min(rough, starred)` parts per edge — so swapping which fungible 100 nF cap sits on an edge isn't penalized and looseness is tolerated (only the wrong edge/proportion costs). Returns `{name, starred, n, area_match_pct, classes[]}` (each class's rough/starred per-edge tallies show which subsystem the rough scattered differently), else `{starred:null, message}` when nothing is starred yet. Measures placement hand-likeness / how little dragging remains to finish — NOT the electrical score. CLI twin: `compare_layout_to_starred`.
 - **Layout state**: one sidecar per design — `<design>.layouts.json` `{default, cache, layouts[]}`. `layouts[]` = named snapshots (manual saves + auto-recorded optimizer runs), `default` = the starred (★) / KiCad-sync seed, `cache` = the single-slot optimizer cache (tuning params + poses, overwritten each solve). Precedence the `/pcb-layout` viewer shows as a scorebar chip: explicit `?refine=<snapshot>` > starred (★) default > cache > fresh solve > plain grid. (The old source-authored `(placement …)` spec once sat at the top of this chain; that DSL form is retired — layout is seeded from saved snapshots / the `?rough=1` seed now, not from a spec form in the `.sexp`.) Legacy standalone `<design>.autolayout.json` is still read as a fallback and deleted on the next solve; `.placement.json` migration was dropped (all designs migrated).
   A named layout may also carry one physical finned heatsink assembly. In the
   PCB editor choose the ♨ tool, drag its base/contact rectangle, then select
@@ -224,7 +225,7 @@ Local dev still uses `http://localhost:7050`.
   package-direction mapping when the `heatsink` scenario is selected. The
   estimate assumes open straight fins and a 10 W/m²K still-air film; it is a
   comparative screening model, not enclosure or fan-curve CFD.
-- **Live push**: `POST /api/push/:name` — rebuild and push update. On eval failure the JSON (and the schematic page, and the MCP `build` tool) carries a structured `diagnostic` `{file,line,col,message,source_line}` rendered compiler-style with a caret (`src/serve/diag_format.zig`).
+- **Live push**: `POST /api/push/:name` — rebuild and push update. On eval failure the JSON (and the schematic page, and the CLI `build` tool) carries a structured `diagnostic` `{file,line,col,message,source_line}` rendered compiler-style with a caret (`src/serve/diag_format.zig`).
 - **Version history + diff**: `GET /api/history/:name` — stored snapshot ids (file copies under `<project>/history/<name>/<timestamp>/`, written before every mutation); `GET /api/diff/:name?from=<id>&to=<id|current>` — request-local netlist diff (instances added/removed, value/footprint changes, net membership changes; `src/serve/design_diff.zig`). Schematic header's History panel renders it. Caveat: snapshots capture the design file only, so an old revision re-evaluates against today's lib/ modules.
 - **Datasheet attach**: `POST /api/attach-datasheet` `{component,file}` — splices the datasheet link into `lib/components/<name>.sexp` (idempotent, traversal-safe); library page has a per-card attach control. `GET /api/datasheets` lists candidates.
 - **Cross-probing**: `/pcb-layout/:name?focus=REF` (or `#REF`) zooms/flashes a part (leaf-matching like `?refs=`); PCB sidebar rows link "Show in schematic →" (`#comp-REF` scroll+flash), schematic component detail links "Locate on PCB →". **Two-window live sync**: with `/pcb-layout/<name>` and `/schematics/<name>` open in separate tabs/windows of the same browser (the KiCad two-monitor workflow), clicking a part on one page highlights it on the other through the `BroadcastChannel("netlisp-xprobe")` bridge in `pcb_board.js` and `schematic_viewer.js` (messages carry the design and ref; receivers ignore other designs; no server round-trip).
@@ -252,7 +253,7 @@ Local dev still uses `http://localhost:7050`.
   with the sentence saying so instead of the default board's numbers, and naming
   the starred layout folds to the default board so both spellings share one
   cached solve. `GET /api/thermal-field/:name` (the board overlay's heat field)
-  takes the same argument. MCP twin: `describe_thermal`, sharing this
+  takes the same argument. CLI twin: `describe_thermal`, sharing this
   endpoint's whole body (`src/serve/thermal_api.zig`).
 - **KiCad sync**: `POST /api/sync-kicad-pcb/:name` — file-based sync. Reads the `.kicad_pcb` declared by the design's `(kicad-pcb "<path>")` form, diffs it against the flattened netlist, and writes the updated board in place so footprint placements and routing are preserved. Driven by the schematic viewer's "Push to KiCad PCB" button, which dry-runs first and shows a categorized preview modal (board changes up top, metadata collapsed) before the real write, with a result toast. The heuristic relink (parent-path + value + net signature) is ON by default, so a refdes drift (e.g. FB→L) renames the placed part instead of staging a duplicate; a placement guard aborts the write with HTTP 409 if it would move, rotate, or side-flip any existing footprint; every write rolls a timestamped backup into a `backups/` subdirectory beside the board (`backups/<name>.bak-<stamp>`, newest 10 kept — the KiCad project dir stays free of `.bak-*` siblings). (`?dry_run=1` / `?prune=1` / `?no_migrate=1` / `?no_swap=1` modifiers — `no_swap` suppresses all `swap_footprint` geometry re-bakes so hand-tuned board lands survive; the withheld count is reported as `swaps_suppressed`.)
 
@@ -335,26 +336,20 @@ is open elsewhere, KiCad's lock file holds `{"hostname": …, "username": …}` 
 concurrent saves corrupt the board, so only touch it when no other session
 is live.
 
-### MCP server (Claude Code integration)
+### Structured CLI tools
 
-`netlisp serve` exposes an MCP server so Claude Code can pull schematics, edit
-the underlying `.sexp` files, and have the browser viewer update live. Two
-transports:
+Every structured operation is available locally without starting `netlisp
+serve`. Run `netlisp tool list` for the authoritative JSON schemas, then invoke
+one with `netlisp tool <name> --args '<json object>'`. Use `--args-file` for a
+larger request and `--output` for text or decoded image output.
 
-- **`POST /mcp`** — streamable HTTP, the transport Claude Code's remote MCP
-  connector uses. Auth is delegated to ward (see **Auth (ward)** below): Claude
-  Code discovers the authorization server via RFC 9728/8414, registers
-  dynamically (RFC 7591), and walks the user through ward's consent — nothing
-  to configure client-side.
-- **`GET /mcp`** — WebSocket upgrade, for local testing and any stdio bridge.
-
-Tools exposed (defined in `src/serve/mcp_tools.zig`):
+Tools include:
 
 - **Project / introspection (read-only)**: `list_designs`, `list_library`,
   `list_history`, `list_instances`, `list_free_pins`, `get_net`,
   `describe_component`, `get_schematic`, `get_pcb_layout_image`, `get_version`,
   `run_checks`. `get_pcb_layout_image` returns the PCB layout
-  as a PNG **image content block** (same renderer as `GET /api/pcb-png/:name`) so
+  as a PNG (same renderer as `GET /api/pcb-png/:name`) so
   an agent can visually inspect placement; args: `name`, optional `nets`/`refs`
   (arrays or comma-strings) to spotlight a subsystem, `route`, `width`, `layout`,
   `sub`, `regen`, `names` (ref|origin|both part labels), `pins` (label pad net
@@ -368,7 +363,7 @@ Tools exposed (defined in `src/serve/mcp_tools.zig`):
   right general area to finish by hand" check (args: `name`). The image tool
   also accepts `crop`/`r`/`sheet`/`critique` view modes.
   **`diagnose_net`** (args: `name`, `net`, optional `layout`/`sub`) diagnoses ONE
-  named net on the shown board — the MCP twin of `POST
+  named net on the shown board — the CLI twin of `POST
   /api/pcb-route-analyze/:name`, sharing one `analyzeNetJson` body so the two can
   never answer about different boards. A failed net comes back
   `{net,status:"failed",failure_mode,why,blockers[],remedies[],drc_related[]}`, a
@@ -407,7 +402,7 @@ Tools exposed (defined in `src/serve/mcp_tools.zig`):
   `GET /api/kicad-sch/<name>` when you actually need them. **With `output_dir`
   it writes** the files there; the directory must be ABSOLUTE, free of `..`,
   and **outside the project directory** — this is an export, not a design edit,
-  and a write into `projects/designs` would be swept up by the MCP auto-commit
+  and a write into `projects/designs` would be swept up by the CLI auto-commit
   seam as if the agent had authored it. Registered as a mutation so the write
   path is gated to writer roles; an existing sidecar is kept, never overwritten.
   `sync_kicad_sch` is the push twin: it writes the schematic into the KiCad
@@ -484,7 +479,7 @@ roughly doubles the payload. Without it a caller can dodge tracks and vias but
 not foreign pads, and a straight bridge between two pads of an IC silently cuts
 through the pads in between. (`pads` is declared in `describe_pcb_layout`'s
 input schema as of 2026-08-04 — the handler always read it, but the schema is
-`additionalProperties:false`, so a strict MCP client refused the very argument
+`additionalProperties:false`, so a strict CLI client refused the very argument
 the `close_open_nets` remedy string tells you to pass.)
 
 **`route_experiment` names its own failures.** It carries `unrouted[]` (the
@@ -525,7 +520,7 @@ is actually open.
 a live working directory and batches persistence through
 `netlisp-designs-checkpoint.timer`. Once per minute it checks the exact content
 fingerprint of all dirty, non-ignored paths; after five unchanged minutes it
-creates one checkpoint commit. Browser, MCP, and direct filesystem edits thus
+creates one checkpoint commit. Browser, CLI, and direct filesystem edits thus
 share the same backup path, the checkout becomes clean between stable edit
 batches, and a long editing session is not committed mid-write. The production
 service sets `NETLISP_GIT_AUTOCOMMIT=0`; the checkpoint runs only on the live
@@ -535,18 +530,16 @@ running `.githooks/install.sh --deploy`.
 
 The optional per-request auto-commit seam (`src/serve/autocommit.zig`) remains
 available for other deployments. When enabled and `--project-dir` is a git
-checkout, every **successful** MCP mutation is committed with user attribution.
-The seam is one choke point in `src/serve/mcp.zig`'s tool dispatcher (so the
-frozen `mcp_tools.zig` handlers are untouched): it snapshots the repo's
+checkout, every **successful** CLI mutation is committed under the local CLI
+identity. The seam is one choke point in `src/tool_cli.zig`: it snapshots the repo's
 dirty paths *before* the mutation and commits exactly the paths that became
 newly dirty *after* it (`after − before`). This means it is **path-scoped**
 — never `git add .`/`-A`, so loose uncommitted human work already in the tree
 is never swept in — and `history/` snapshots plus `*.bak-*`/`backups/`
-artifacts are always excluded. The commit is **authored** as the acting ward
-user (`--author="<username> <username@ward>"`; the dev-bypass path authors as
-`netlisp-dev`) with the committer left as the server
+artifacts are always excluded. The commit is authored as `netlisp-dev`, with
+the committer left as the tool
 (`netlisp <netlisp@server>`); the one-line message is
-`mcp: <tool> <paths…>`. It is **fail-open** — git missing, not a repo, a
+`cli: <tool> <paths…>`. It is **fail-open** — git missing, not a repo, a
 commit race, or any non-zero git exit is logged to stderr and swallowed, so
 the mutation result never fails because of git — and git index operations are
 serialized by a mutex. Enabled by default; set **`NETLISP_GIT_AUTOCOMMIT=0`**
@@ -555,8 +548,9 @@ saves, uploads, attach-datasheet) do **not** yet share this seam — they are a
 follow-up.
 
 ```bash
-# Connect from Claude Code — no --client-id/--client-secret: ward is the
-# authorization server, discovered (RFC 9728/8414) and registered dynamically
-# (RFC 7591) by Claude Code, which then walks you through ward's consent page.
-claude mcp add --transport http netlisp https://co-circuit.eugenepentland.dev/mcp
+netlisp tool list
+netlisp tool run_checks --project-dir projects/designs \
+  --args '{"name":"barracuda","profile":"preflight"}'
+netlisp tool get_pcb_layout_image --project-dir projects/designs \
+  --args '{"name":"barracuda"}' --output barracuda.png
 ```

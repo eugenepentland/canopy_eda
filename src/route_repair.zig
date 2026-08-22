@@ -25,7 +25,7 @@
 //!
 //! It sits at the source root rather than under `serve/` for the same reason
 //! `fab_readiness` does: it is a cross-layer ANALYSIS that needs the placement
-//! model and the routing seam at once, not web plumbing. The MCP handler above
+//! model and the routing seam at once, not web plumbing. The CLI handler above
 //! it gains no new placement dependency at all.
 //!
 //! Two properties are load-bearing. It is **off by default and byte-identical

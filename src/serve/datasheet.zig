@@ -1,4 +1,4 @@
-//! Datasheet text extraction for the `read_datasheet` MCP tool.
+//! Datasheet text extraction for the `read_datasheet` CLI tool.
 //!
 //! ps2ascii is a `/bin/sh` wrapper around `gs`, which streams the extracted
 //! text straight to stdout. On a real (multi-hundred-KB) datasheet that output

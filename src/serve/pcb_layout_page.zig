@@ -137,7 +137,7 @@ const net_json_key = ",\"net\":";
 /// per-layout Load records (board-level silkscreen text array).
 const texts_open = ",\"texts\":";
 /// JSON `,"outline":` key shared by the sidecar writer, the page blob, and the
-/// MCP `set_board_outline` response.
+/// CLI `set_board_outline` response.
 const outline_open = ",\"outline\":";
 const fabrication_layers_open = ",\"fabrication_layers\":";
 /// Error bodies shared across the layout handlers.
@@ -2802,7 +2802,7 @@ pub fn writePerNetJson(w: *std.Io.Writer, per_net: []const router.NetRouted) std
 
 const png_default_width: u32 = 1200;
 
-/// Inputs for `renderDesignPng` — the union of what the HTTP query and the MCP
+/// Inputs for `renderDesignPng` — the union of what the HTTP query and the CLI
 /// `get_pcb_layout_image` tool can specify. Empty `highlight_*` → plain board;
 /// any value → focus mode (spotlight + dim).
 pub const PngRequest = struct {
@@ -2893,7 +2893,7 @@ pub fn parseScenario(s: ?[]const u8) ?thermal_scenarios.Scenario {
 }
 
 /// Failures `renderDesignPng` surfaces; callers map these to an HTTP status or
-/// MCP error message.
+/// CLI error message.
 pub const PngError = error{ BlockNotFound, SubNotFound, BuildFailed } || png_mod.Error;
 
 /// One classification of a failed solve, worded for both endpoints: `msg` is
@@ -3014,7 +3014,7 @@ pub fn thermalHeatsink(solved: SolvedRequest) ?thermal_scenarios.Heatsink {
 /// Resolve `name` and apply the request's placement-selection rules: a named
 /// `?layout=` renders verbatim, `?regen` forces a fresh solve, `?rough` re-seeds
 /// the rough engine, otherwise the design's starred (★) saved layout is shown if
-/// it has one (so the PNG / describe / MCP views match the /pcb-layout page),
+/// it has one (so the PNG / describe / CLI views match the /pcb-layout page),
 /// else the auto cache — falling back to a plain grid when nothing is cached so
 /// an agent's first call stays cheap. A fresh solve uses the rough engine (the
 /// default top-level placer); the `?rough` flag is now redundant with that.
@@ -3047,7 +3047,7 @@ pub fn solveForRequest(
     // With nothing more specific asked for (no ?layout=, no ?regen, no ?rough,
     // not sub-scoped), default to the design's starred (★) saved layout — the
     // same blessed board the /pcb-layout page and its JSON twin show — so the
-    // PNG / describe / MCP views describe what the user sees, not a stale auto
+    // PNG / describe / CLI views describe what the user sees, not a stale auto
     // cache. The layout_match rough/starred probes pass ?rough / ?layout and so
     // skip this, keeping their own seeds.
     const want_default = opts.sub == null and opts.layout == null and !opts.regen and !opts.rough and !opts.remaining;
@@ -3095,7 +3095,7 @@ pub fn solveForRequest(
     else
         optimizer.solve(alloc, eff_block, project_dir, cached, params, .place)) catch return error.BuildFailed;
     // Fold the user-drawn board outline (rectangle or polygon) onto the
-    // placement so the PNG / describe / MCP / route views share the same board
+    // placement so the PNG / describe / CLI / route views share the same board
     // edge the viewer and fab outputs use. The named ?layout= / starred view
     // takes its own outline; a FRESH regen/rough/route solve (no named or
     // starred layout) falls back to the design's blessed outline — otherwise it
@@ -4036,7 +4036,7 @@ const ViewerScope = struct {
 };
 
 /// Parse the viewer Route request's optional `groups`/`nets` scope (the same
-/// generic tokens the `route_pcb` MCP tool accepts) plus the client's current
+/// generic tokens the `route_pcb` CLI tool accepts) plus the client's current
 /// on-screen copper into an incremental `ScopedRoute`. With a scope named, only
 /// the scoped nets route and every OTHER net's submitted copper is retained as
 /// an obstacle (and echoed back), so the viewer's Route button becomes a true
@@ -4622,7 +4622,7 @@ fn blessedLayout(layouts: []const SavedLayout) ?*const SavedLayout {
 }
 
 /// The `?layout=<row>` fab view: the named saved row, resolved through the
-/// same `fabViewFor` selection the MCP tools' `layout` arg makes, so the
+/// same `fabViewFor` selection the CLI tools' `layout` arg makes, so the
 /// permalink, the report, and the package all describe that one board. A name
 /// matching nothing 404s like /pcb-layout's direct link does — naming the
 /// rows that DO exist — rather than silently answering about the ★ board.
@@ -4718,7 +4718,7 @@ fn fabReadinessFor(ctx: *Server, req: *httpz.Request, fv: FabView) HandlerError!
 /// blessed layout (audit item 0.1): `{ok,errors:[…],warnings:[…],stats:{…}}`,
 /// computed against the SAME blessed-layout selection the Gerber export uses.
 /// `?layout=<row>` pins the report to that named saved layout — the row its
-/// /pcb-layout permalink shows and the MCP `run_fab_readiness` `layout` arg
+/// /pcb-layout permalink shows and the CLI `run_fab_readiness` `layout` arg
 /// selects — and 404s an unknown name instead of silently reporting the ★
 /// board. The viewer fetches this before download and gates on it;
 /// `pcbGerbersApi` enforces it server-side (409 on errors unless `?force=1`).
@@ -4824,7 +4824,7 @@ pub fn pcbGerbersApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
 /// Body: `{"name","parts":[{ref,x,y,rot,origin?}, …]}`; the score is computed on the
 /// server (no client-side metric). Upserts by name (re-save overwrites in
 /// place); a new name is prepended so the newest sits at the top of the list.
-/// Score a hand/MCP-saved layout on the server with the optimizer's own
+/// Score a hand/CLI-saved layout on the server with the optimizer's own
 /// objective — the same code the live `/api/pcb-score` endpoint uses — so a
 /// saved layout is directly comparable to the auto baseline (HPWL + real
 /// routed-trace loop). For a `?sub` circuit the score is against the scoped
@@ -5061,7 +5061,7 @@ pub fn restoreLayoutHistoryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Re
     res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rev\":{d}}}", .{disk_rev + 1});
 }
 
-/// MCP twin of the HTTP layout-history restore. It snapshots the current
+/// CLI twin of the HTTP layout-history restore. It snapshots the current
 /// sidecar first and advances the optimistic-concurrency revision, so agent
 /// recovery is undoable and cannot be silently overwritten by an older tab.
 pub fn mcpRestoreLayoutSnapshot(
@@ -10517,7 +10517,7 @@ const pcb_3d_toggle_js =
     \\})();</script>
 ;
 
-// ── MCP layout-mutation tools ──────────────────────────────────────────
+// ── CLI layout-mutation tools ──────────────────────────────────────────
 //
 // The read-only PCB tools (get_pcb_layout_image / describe_pcb_layout /
 // compare_layout_to_starred) let an agent SEE a placement; these six let it
@@ -10527,7 +10527,7 @@ const pcb_3d_toggle_js =
 // sidecar the viewer writes, through the same save/route/fab helpers above, so
 // a layout the agent builds loads unchanged in `/pcb-layout`.
 //
-// Each takes the MCP arg object + the response buffer and returns `ok`.
+// Each takes the CLI arg object + the response buffer and returns `ok`.
 // Mutations write `<design>.layouts.json` and report the design's current
 // `live_version` (the sidecar isn't the design source, so the counter is
 // informational — the viewer picks up layout changes on its next load).
@@ -10616,7 +10616,7 @@ fn mcpArgStrList(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []con
 }
 
 /// Write an `{"ok":false,"error":<msg>}` envelope into `out` and return false
-/// (the MCP layer flags the result `isError`). The single error spelling for
+/// (the CLI layer flags the result `isError`). The single error spelling for
 /// every layout tool.
 fn mcpFail(out: *std.ArrayList(u8), alloc: std.mem.Allocator, msg: []const u8) !bool {
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -10730,17 +10730,17 @@ pub fn mcpPersistWorking(
     mcpProtectedWrite(alloc, project_dir, name, out.items);
 }
 
-/// Write a sidecar mutated over MCP the way the viewer's Save does: snapshot
+/// Write a sidecar mutated over CLI the way the viewer's Save does: snapshot
 /// the previous design-level sidecar into `history/` first (best-effort), then
 /// stamp `disk rev + 1` — so an agent's mutation is (a) recoverable and (b)
 /// visible to an open editor tab's optimistic-concurrency guard (the tab's now
-/// stale rev 409s on its next save instead of silently clobbering). MCP tools
+/// stale rev 409s on its next save instead of silently clobbering). CLI tools
 /// are design-level only, so there is no `sub` variant.
 fn mcpProtectedWrite(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) void {
     if (layoutsSidecar(alloc, project_dir, name, null, layouts_ext)) |scp| {
         _ = history.snapshotLayouts(alloc, project_dir, name, scp) catch null;
     }
-    // Refresh the optimizer-cache poses to the blessed layout so a default MCP
+    // Refresh the optimizer-cache poses to the blessed layout so a default CLI
     // read (rough → readAutoPoses, the cache slot — not the starred layout)
     // reflects this write, not the pre-mutation scene (read-after-write bug #2;
     // the solver applies a clean full cache verbatim). Tuning params survive.
@@ -11738,7 +11738,7 @@ pub fn mcpRoutePcb(
     var route_options = lowered_plan.options;
     if (!mcpApplyRouteEffort(&route_options, args_val))
         return mcpFail(out, alloc, "effort must be \"one_shot\" or \"standard\"");
-    // Hand-authored pours are retained physical copper. Every MCP route sees
+    // Hand-authored pours are retained physical copper. Every CLI route sees
     // them as same-net maze sources just like the browser Route button does,
     // including an excluded In2.Cu pour that terminals reach through vias.
     route_options.existing_zones = solved.shown_zones.sources;
@@ -12887,7 +12887,7 @@ pub fn mcpNormalizeJunctions(
 
 /// HTTP twin of `normalize_junctions`. The path supplies the design name; the
 /// JSON body accepts the same optional layout, dry_run, and nets fields as the
-/// MCP action so browser tooling and agents exercise one implementation.
+/// CLI action so browser tooling and agents exercise one implementation.
 pub fn normalizeJunctionsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = nameParam(req, res) orelse return;
     var root = parseJsonObject(req, res) orelse return;
@@ -13238,7 +13238,7 @@ pub const FabViewError = error{
 };
 
 /// Resolve a design's fab view without an HTTP request — the shared selection
-/// behind `blessedFabView`'s `?layout=` path and the MCP tools' `layout` arg:
+/// behind `blessedFabView`'s `?layout=` path and the CLI tools' `layout` arg:
 /// the placement at the chosen layout's poses (the named `layout_arg`, else
 /// the blessed ★/newest/any snapshot) with that layout's outline + routes
 /// applied, in the shared y-up fab frame.
@@ -13597,8 +13597,8 @@ test "layoutTextsIn picks the named row, else the starred default" {
     try std.testing.expectEqual(@as(usize, 0), layoutTextsIn(&layouts, "deleted").len);
 }
 
-// spec: Web Server - An MCP layout mutation snapshots the sidecar to history and bumps the rev like a viewer Save
-test "MCP persist bumps the sidecar rev and snapshots history" {
+// spec: Web Server - A CLI layout mutation snapshots the sidecar to history and bumps the rev like a viewer Save
+test "CLI persist bumps the sidecar rev and snapshots history" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
@@ -13609,7 +13609,7 @@ test "MCP persist bumps the sidecar rev and snapshots history" {
     try tmp.dir.createDirPath(std.testing.io, "src");
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/foo.layouts.json", .data = "{\"layouts\":[]}" });
 
-    // Two MCP persists: each stamps disk rev + 1 (0→1→2), so an open editor
+    // Two CLI persists: each stamps disk rev + 1 (0→1→2), so an open editor
     // tab holding the old rev 409s on its next save instead of clobbering.
     const parts = [_]PartPose{.{ .ref = "U1", .x = 1, .y = 2, .rot = 0 }};
     const entry = SavedLayout{ .name = "layout", .kind = kind_manual, .ts = 1, .score = null, .parts = &parts, .default = true };
@@ -13623,8 +13623,8 @@ test "MCP persist bumps the sidecar rev and snapshots history" {
     try std.testing.expect(snaps.len >= 1);
 }
 
-// spec: Web Server - An MCP layout mutation refreshes the auto-layout cache poses so a default read reflects the write
-test "MCP persist refreshes the auto cache poses so a default read sees the mutation" {
+// spec: Web Server - A CLI layout mutation refreshes the auto-layout cache poses so a default read reflects the write
+test "CLI persist refreshes the auto cache poses so a default read sees the mutation" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
@@ -13635,7 +13635,7 @@ test "MCP persist refreshes the auto cache poses so a default read sees the muta
     try tmp.dir.createDirPath(std.testing.io, "src");
 
     // A sidecar whose optimizer-cache slot holds a STALE pose (an earlier solve)
-    // and a tuning weight. This cache is the scene a default MCP read renders —
+    // and a tuning weight. This cache is the scene a default CLI read renders —
     // `get_pcb_layout_image` / `describe_pcb_layout` default `rough`, so
     // `solveForRequest` seeds from `readAutoPoses` (the cache), not the starred
     // layout.
@@ -13646,7 +13646,7 @@ test "MCP persist refreshes the auto cache poses so a default read sees the muta
     try std.testing.expectEqual(@as(usize, 1), before.len);
     try std.testing.expectEqual(@as(f64, 0), before[0].x);
 
-    // An MCP mutation persists U1 at a distinctive new pose (as set_part_poses does).
+    // A CLI mutation persists U1 at a distinctive new pose (as set_part_poses does).
     const parts = [_]PartPose{.{ .ref = "U1", .x = 42, .y = 7, .rot = 90 }};
     const entry = SavedLayout{ .name = "layout", .kind = kind_manual, .ts = 1, .score = null, .parts = &parts, .default = true };
     mcpPersistWorking(alloc, project, "foo", entry, true);
@@ -14040,7 +14040,7 @@ test "route topology cleanup includes newly exposed stubs and honors net scope" 
     try std.testing.expectEqual(@as(usize, 1), applied.stub_tracks_removed);
 }
 
-// spec: serve/mcp_tools - normalize_junctions MCP/HTTP actions explicitly repair saved implicit joins, support dry-run/net scope, and persist only a connectivity- and DRC-safe candidate
+// spec: serve/mcp_tools - normalize_junctions CLI/HTTP actions explicitly repair saved implicit joins, support dry-run/net scope, and persist only a connectivity- and DRC-safe candidate
 test "normalize_junctions dry-runs and repairs saved copper" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -15229,7 +15229,7 @@ test "outline write-path gate rejects a self-intersecting polygon, accepts a con
 
     // A bow-tie polygon still parses (the reader is deliberately lenient), but
     // the shared write-path gate — outline_mod.valid, called by
-    // saveNamedLayoutApi (→ HTTP 400) and mcpSetBoardOutline (→ MCP error) —
+    // saveNamedLayoutApi (→ HTTP 400) and mcpSetBoardOutline (→ CLI error) —
     // rejects it.
     const bowtie = try std.json.parseFromSliceLeaky(std.json.Value, alloc,
         \\{"pts":[[0,0],[10,10],[10,0],[0,10]]}
@@ -16149,7 +16149,7 @@ test "mcp route_pcb overlays saved reference topology on authored policy" {
     try std.testing.expectEqual(@as(usize, 2), options.guides.reserved.len);
 }
 
-// spec: Web Server - The route_pcb MCP tool preserves custom copper pours and passes them to the autorouter for whole-board and scoped routes
+// spec: Web Server - The route_pcb CLI tool preserves custom copper pours and passes them to the autorouter for whole-board and scoped routes
 test "mcp route_pcb scoped copper preserves custom pours while dropping and merging by net" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -17116,7 +17116,7 @@ test "the pcb PNG query parses the heat-zone request" {
     try std.testing.expectEqual(@as(u32, 800), heat.width);
 
     // Every scenario word the renderer accepts round-trips through the one
-    // parser both the query and the MCP tool use.
+    // parser both the query and the CLI tool use.
     inline for (@typeInfo(thermal_scenarios.Scenario).@"enum".field_names) |word| {
         try std.testing.expectEqual(@field(thermal_scenarios.Scenario, word), parseScenario(word).?);
     }
@@ -17173,7 +17173,7 @@ test "the viewer route default is one-shot and explicit standard still wins" {
     try std.testing.expect(resolvedBodyEffort(missing, null) == null);
 }
 
-// spec: Web Server - The route_pcb MCP tool can select a bounded retry tier, checkpoints routed copper before optional deferred DRC, and rejects unknown tiers
+// spec: Web Server - The route_pcb CLI tool can select a bounded retry tier, checkpoints routed copper before optional deferred DRC, and rejects unknown tiers
 test "route_pcb applies and validates its effort override" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

@@ -1,4 +1,4 @@
-//! Flattened introspection for the MCP read tools. `list_instances`,
+//! Flattened introspection for the CLI read tools. `list_instances`,
 //! `get_net`, and `list_free_pins` answer top-level-only by default, which
 //! is misleading on a hierarchical design: sub-block children are invisible
 //! and a rail merged across a `(net …)` tie shows only its top-level pins.

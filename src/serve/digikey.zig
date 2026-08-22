@@ -10,7 +10,7 @@
 //!   2. POST `…/products/v4/search/keyword` with the token → a `Products` array.
 //!
 //! Credentials (`DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET`) are read
-//! server-side by the caller (via `config`) and never travel over MCP.
+//! server-side by the caller (via `config`) and never travel over CLI.
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
 const json_writer = @import("../json_writer.zig");
@@ -54,7 +54,7 @@ pub const Variation = struct {
 };
 
 /// One resolved catalog match. All slices are owned by the allocator passed to
-/// `resolveMpn` (a request arena on the MCP path). `datasheet_url`,
+/// `resolveMpn` (a request arena on the CLI path). `datasheet_url`,
 /// `product_url`, `digikey_part_number`, `unit_price`, and `product_status` are
 /// null when DigiKey omits them or returns them empty.
 pub const Product = struct {
@@ -110,7 +110,7 @@ pub fn datasheetErrorMessage(err: DatasheetError) []const u8 {
     };
 }
 
-/// Stable, user-facing message for a `SearchError`, for the MCP envelope.
+/// Stable, user-facing message for a `SearchError`, for the CLI envelope.
 pub fn searchErrorMessage(err: SearchError) []const u8 {
     return switch (err) {
         error.TokenFailed => "DigiKey OAuth token request failed — check DIGIKEY_CLIENT_ID / DIGIKEY_CLIENT_SECRET (or network)",

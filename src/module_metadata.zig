@@ -154,7 +154,7 @@ pub const Match = struct {
 };
 
 /// Collect every module with explicit implementation metadata, sorted by
-/// module name for stable MCP/ERC output.
+/// module name for stable CLI/ERC output.
 pub fn collect(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]Match {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/modules", .{project_dir});
     defer allocator.free(dir_path);

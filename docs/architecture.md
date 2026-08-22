@@ -11,7 +11,7 @@ A high-level map of what this tool does today. Capability-focused, language-agno
 - **Browser-rendered HTML schematic** with inline SVG (hub-and-spoke layout, live-updating).
 - **Design-review report** — a structured HTML/JSON document with power-budget, BOM, ERC, and assertion roll-ups.
 - **KiCad handoff** — netlist + footprints + STEP models for PCB layout.
-- **MCP surface** — every read/write the schematic exposes to Claude Code.
+- **CLI surface** — every read/write the schematic exposes to Claude Code.
 
 The intended workflow is text-first and live: edit a `.sexp` file → run `netlisp build --push <design>` → the open browser tab refreshes within ~500 ms. There is no GUI editor; the browser is read-only with narrow value-edit affordances.
 
@@ -119,7 +119,7 @@ If no keyword matches and the section's first instance has a ref-des starting wi
 
 ### Design notes
 
-A structured per-design TODO log, stored as `<design>.notes.md` next to the design source. Each note carries an 8-char hex ID, body text, UTC `created_at` / `completed_at` timestamps, and an open/done state. Surfaced in the schematic viewer's notes panel and through MCP tools (`list_design_notes`, `add_design_note`, `complete_design_note`, `reopen_design_note`, `remove_design_note`). Distinct from `(note …)` forms inside `.sexp` source — design notes are a workflow scratchpad outside the netlist, meant for "follow up before tape-out" items that wouldn't make sense as ref-des-attached annotations.
+A structured per-design TODO log, stored as `<design>.notes.md` next to the design source. Each note carries an 8-char hex ID, body text, UTC `created_at` / `completed_at` timestamps, and an open/done state. Surfaced in the schematic viewer's notes panel and through CLI tools (`list_design_notes`, `add_design_note`, `complete_design_note`, `reopen_design_note`, `remove_design_note`). Distinct from `(note …)` forms inside `.sexp` source — design notes are a workflow scratchpad outside the netlist, meant for "follow up before tape-out" items that wouldn't make sense as ref-des-attached annotations.
 
 ### Electrical-rule checks (ERC)
 
@@ -181,22 +181,30 @@ Default port 7050. Dev URL: `http://localhost:7050`. Production URL: `https://co
 
 **KiCad sync orchestration.** `POST /api/sync-kicad-pcb/:name` — file-based sync: reads the `.kicad_pcb` at the design's `(kicad-pcb "<path>")` form, diffs it against the flattened netlist, and writes the updated board in place. See the [KiCad sync](#kicad-sync-file-based) section below.
 
-**MCP transport.** `POST /mcp` (streamable HTTP, the transport Claude Code's remote MCP connector uses), `GET /mcp` (WebSocket, for local testing). Bearer tokens are issued by ward (the authorization server); netlisp only advertises it via `GET /.well-known/oauth-protected-resource` (RFC 9728) and introspects tokens against wardd. See **Authentication & authorisation** below.
+**Structured CLI tools.** The former remote tool transport is local-only now:
+`netlisp tool list` prints every tool and JSON schema, while
+`netlisp tool <name> --args '<json>'` invokes one against `--project-dir`.
 
 ### Authentication & authorisation
 
 netlisp is a **pure resource server** — it runs no auth of its own. Everything (passkeys/WebAuthn, sessions, invites, roles, OAuth) is delegated to **ward** (the `wardd` auth server, repo `~/ai/ward`, public `https://ward.eugenepentland.dev`, local `http://127.0.0.1:9000`). The adapter is `src/serve/ward_auth.zig` (HTTP seam in `src/infra/net.zig`).
 
 - **Browser sessions.** The `ward_session` cookie (domain `.eugenepentland.dev`) is verified against wardd `GET /verify`. No cookie → `302` to `https://ward.eugenepentland.dev/login?rd=<url>`; wardd unreachable → `503` (fail-closed).
-- **MCP / API bearers.** Verified against wardd's LAN-only `POST /oauth/introspect`; the token scope must contain the service name (`eda`). A `401` returns an RFC 9728 `WWW-Authenticate` pointing at `GET /.well-known/oauth-protected-resource`, which names ward as the authorization server.
-- **Roles.** ward member → `writer`, ward admin → `admin`, unknown → `reader` (write access gates the MCP mutation tools). Registration is invite-only through wardd; user/invite/client management lives in ward's admin portal (`/admin`).
+- **Sync API bearers.** The KiCad sync endpoint accepts its dedicated plugin
+  token first, then a ward token verified through `POST /oauth/introspect`; the
+  ward token must carry the `eda` service scope and a writer-capable role.
+- **Roles.** ward member → `writer`, ward admin → `admin`, unknown → `reader`
+  for browser/API writes. Local CLI tools run with the invoking user's
+  filesystem authority. Registration and account management live in ward's
+  admin portal (`/admin`).
 - **Plugin tokens (bearer).** For KiCad sync API clients — minted via `netlisp mint-plugin-token`, stored in `plugin_tokens.json` under the auth dir, checked *before* the ward bearer on `/api/sync-kicad-pcb/*`.
 - **Config (env / `.env`).** `WARD_VERIFY_URL`, `WARD_LOGIN_URL`, `WARD_INTROSPECT_URL`, `WARD_SERVICE_NAME` (default `eda`), `WARD_CACHE_TTL_SECS` (default `30`, the revocation-lag bound). Unset → fail closed (`503`) outside the dev bypass.
 - **Dev bypass.** `NETLISP_DEV` grants a local admin identity to a loopback, unproxied request (env opt-in) — no wardd needed for local development.
 
-### MCP server
+### Structured CLI tools
 
-Exposes the project to Claude Code as a tool surface. Tools fall into five buckets:
+Exposes the project to local agents and scripts without a running server. Tools
+fall into five buckets:
 
 | Bucket | Tools |
 | --- | --- |
@@ -291,7 +299,9 @@ has the board open:
 | `netlisp parse <file>` | Parse and pretty-print a `.sexp` file. Round-trip sanity check. |
 | `netlisp build [--project-dir P] [--push] <name>` | Evaluate a design; emit JSON scene-graph + build metadata. `--push` notifies a running server. |
 | `netlisp check [--project-dir P] <name>` | Run ERC and emit violations as JSON. |
-| `netlisp serve [--project-dir P] [--port 7050] [--auth-dir D]` | Start the web/MCP server. |
+| `netlisp tool list` | Print every structured tool and its JSON input schema. |
+| `netlisp tool <name> [--project-dir P] [--args JSON\|--args-file F] [--output F]` | Invoke any structured tool locally. |
+| `netlisp serve [--project-dir P] [--port 7050] [--auth-dir D]` | Start the web server. |
 | `netlisp export-kicad [--project-dir P] --output-dir D <name>` | Export KiCad netlist + footprints + STEP models. |
 | `netlisp export-review [--project-dir P] --output-dir D <name>` | Export design-review markdown + BOM CSV. |
 | `netlisp convert-footprint <f.kicad_mod>` | Convert a KiCad footprint to `.sexp`. |
@@ -304,7 +314,7 @@ has the board open:
 
 (User/invite/password management is no longer a netlisp CLI — it moved to wardd's admin portal. The old `mint-invite` and `set-password` commands are gone.)
 
-## 7. Appendix: HTTP & MCP surface
+## 7. Appendix: HTTP and structured CLI surfaces
 
 ### HTTP routes
 
@@ -322,7 +332,7 @@ has the board open:
 
 #### Auth
 
-netlisp serves no login/account/authorization-server routes — those all live in wardd (`https://ward.eugenepentland.dev`). The only auth-related route netlisp exposes is the RFC 9728 protected-resource metadata (see MCP transport below); browser sessions are verified against wardd `GET /verify` and bearers against wardd `POST /oauth/introspect`. See **Authentication & authorisation**.
+netlisp serves no login/account/authorization-server routes — those all live in wardd (`https://ward.eugenepentland.dev`). Browser sessions are verified against wardd `GET /verify`; the KiCad sync API also accepts its dedicated plugin token or a service-scoped ward bearer. See **Authentication & authorisation**.
 
 #### Read APIs
 | Method | Path | Purpose |
@@ -361,14 +371,10 @@ netlisp serves no login/account/authorization-server routes — those all live i
 | POST | `/api/notes/:name/tasks/reopen` | Re-open a completed entry. |
 | POST | `/api/notes/:name/tasks/remove` | Delete a TODO entry. |
 
-#### MCP transport
-| Method | Path | Purpose |
-| --- | --- | --- |
-| POST | `/mcp` | Streamable HTTP MCP transport. |
-| GET | `/mcp` | WebSocket MCP transport. |
-| GET | `/.well-known/oauth-protected-resource` | Protected-resource metadata (RFC 9728) — names ward as the authorization server. |
+### Structured CLI tools
 
-### MCP tools
+Invoke these with `netlisp tool <name> --args '<json object>'`. Run
+`netlisp tool list` for the authoritative schemas.
 
 | Tool | Purpose |
 | --- | --- |

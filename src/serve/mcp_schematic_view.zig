@@ -1,7 +1,7 @@
 //! Compact "summary" projection of an evaluated design/module block, shared by
-//! the `get_schematic` and `preview_module` MCP tools so both surfaces emit an
+//! the `get_schematic` and `preview_module` CLI tools so both surfaces emit an
 //! identical shape. The full scene-graph JSON (`src/render_json.zig`) overflows
-//! MCP tool-result token limits on real boards, so `summary` is the default and
+//! CLI tool-result token limits on real boards, so `summary` is the default and
 //! agents opt into the scene graph explicitly.
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");
@@ -22,7 +22,7 @@ pub const Ident = struct {
 /// Evaluate a design (or standalone module) by name and write the compact
 /// summary the `get_schematic` default view returns — the design-facing twin
 /// of preview_module's summary, through the same `writeBlockSummary`
-/// serializer. The full scene graph overflows MCP token limits on real boards,
+/// serializer. The full scene graph overflows CLI token limits on real boards,
 /// so agents opt into it with `view=scene_graph`.
 pub fn renderNamedSummary(
     allocator: std.mem.Allocator,
@@ -45,7 +45,7 @@ pub fn renderNamedSummary(
 /// title, ports, instances (ref_des + component + value, no per-pin detail),
 /// nets (name + pin_count), nested sub-block names, ERC violations, and the
 /// assertions recorded during evaluation (a block's `(assert / assert-range)`
-/// design math surfaces here). Reused verbatim by both MCP tools so their
+/// design math surfaces here). Reused verbatim by both CLI tools so their
 /// summaries stay shape-identical. Boundary `(port …)` nets look floating when
 /// a module is evaluated in isolation — the tool descriptions warn agents.
 pub fn writeBlockSummary(

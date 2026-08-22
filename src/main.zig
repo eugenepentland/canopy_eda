@@ -17,6 +17,7 @@ const serve_mod = @import("serve.zig");
 const commands = @import("commands.zig");
 const elmer_thermal_command = @import("elmer_thermal_command.zig");
 const query = @import("query.zig");
+const tool_cli = @import("tool_cli.zig");
 const bench_route = @import("bench_route.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 const build_id = @import("build_id.zig");
@@ -94,8 +95,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const command = args[1];
-    if (try dispatchKicadCommand(allocator, command, args[2..])) return;
-    if (try dispatchQueryCommand(allocator, command, args[2..])) return;
+    if (try dispatchEarlyCommand(allocator, arena, command, args[2..])) return;
 
     if (std.mem.eql(u8, command, "parse")) {
         if (args.len < 3) {
@@ -169,6 +169,20 @@ pub fn main(init: std.process.Init) !void {
         try printUsage();
         std.process.exit(1);
     }
+}
+
+fn dispatchEarlyCommand(
+    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    command: []const u8,
+    args: []const []const u8,
+) !bool {
+    if (std.mem.eql(u8, command, "tool")) {
+        try tool_cli.run(arena, args);
+        return true;
+    }
+    if (try dispatchKicadCommand(allocator, command, args)) return true;
+    return dispatchQueryCommand(allocator, command, args);
 }
 
 /// Handle the related KiCad-source ingest/inspection commands outside the
@@ -294,7 +308,7 @@ fn cmdGenLanguageDocs(allocator: std.mem.Allocator, out_path: []const u8, check_
     std.debug.print("Wrote {s} ({d} bytes)\n", .{ out_path, rendered.len });
 }
 
-/// Resolve and start the web/MCP server (`serve` command). Extracted from
+/// Resolve and start the web server (`serve` command). Extracted from
 /// `main`'s dispatch chain to keep that chain's cognitive complexity under the
 /// Guardian cap.
 fn dispatchServe(io: std.Io, allocator: std.mem.Allocator, args: []const []const u8, arena: std.mem.Allocator, environ: *const std.process.Environ.Map) !void {
@@ -459,6 +473,8 @@ fn printUsage() !void {
         \\  netlisp describe [--project-dir <d>] <component>  Component definition + datasheet requirements as JSON
         \\  netlisp library [--project-dir <d>] [query]  Fuzzy-search components/modules/parts/footprints
         \\  netlisp reference [section]             Print the DSL grammar reference (docs/language-forms.md)
+        \\  netlisp tool list                       List every structured CLI tool and its JSON schema
+        \\  netlisp tool <name> [--project-dir <d>] [--args <json> | --args-file <path>] [--output <path|->]  Invoke any structured tool
         \\  netlisp serve [--project-dir <d>] [--port <n>]  Start web server (default port 7050)
         \\  netlisp mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
         \\  netlisp import-kicad <board.kicad_pcb> [--project-dir <d>] [--name <n>] [--title <t>] [--dry-run]  Migrate a KiCad board into a netlisp design
@@ -501,6 +517,7 @@ test {
     _ = @import("eval/fmt.zig");
     _ = @import("docgen.zig");
     _ = @import("query.zig");
+    _ = @import("tool_cli.zig");
     _ = @import("eval/evaluator.zig");
     _ = @import("eval/board_role_cases.zig");
     _ = @import("eval/section_maturity.zig");
@@ -569,7 +586,6 @@ test {
     // collected by nobody. Bridge them the same way the rest of this list does.
     _ = @import("serve/pages.zig");
     _ = @import("serve/edit.zig");
-    _ = @import("serve/mcp_docs.zig");
     _ = @import("serve/assembly_debug.zig");
     _ = @import("serve/assembly_page_cache.zig");
     _ = @import("serve/rework_guide.zig");

@@ -4,7 +4,7 @@
 //! message in `Evaluator.last_error`. This module turns that into something a
 //! human can act on: `file:line:col`, the message, the offending source line,
 //! and a caret under the column — rendered as plain text, JSON (`/api/push`,
-//! the MCP `build` tool), or a standalone HTML error page (schematic GET).
+//! the CLI `build` tool), or a standalone HTML error page (schematic GET).
 
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");

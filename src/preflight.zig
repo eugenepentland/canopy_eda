@@ -1,6 +1,6 @@
 //! Unified schematic preflight: turns executable component requirements,
 //! design-side verifications, and digest-bound datasheet reviews into one
-//! structured finding model. CLI `check`, MCP `run_checks`, and MCP `build`
+//! structured finding model. CLI `check`, CLI `run_checks`, and CLI `build`
 //! all consume this module so they cannot disagree about requirement status.
 
 const std = @import("std");
@@ -19,7 +19,7 @@ const Instance = env_mod.Instance;
 /// findings to errors; automated check failures are errors in both profiles.
 pub const Profile = enum { authoring, preflight };
 
-/// Parse an optional MCP/CLI profile word, defaulting to backward-compatible
+/// Parse an optional CLI/CLI profile word, defaulting to backward-compatible
 /// authoring behavior. Unknown words are rejected.
 pub fn parseProfile(word: ?[]const u8) ?Profile {
     const value = word orelse return .authoring;
@@ -51,7 +51,7 @@ const RequirementDetails = struct {
 };
 
 /// One normalized requirement or datasheet-review outcome returned by every
-/// CLI/MCP validation surface.
+/// CLI/CLI validation surface.
 pub const Finding = struct {
     kind: FindingKind,
     status: FindingStatus,

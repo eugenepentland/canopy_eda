@@ -316,13 +316,13 @@ pub fn libraryCardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
 
 /// POST /api/cse-fetch — body `{part_number, manufacturer?}`. Fetches the
 /// part's footprint (ECAD model → library entries) and datasheet from
-/// Component Search Engine in one shot by proxying the MCP `download_footprint`
+/// Component Search Engine in one shot by proxying the CLI `download_footprint`
 /// and `download_datasheet` tools (footprint download reads CSE_EMAIL /
 /// CSE_PASSWORD from env/.env; the datasheet path needs no CSE auth).
 /// Returns `{"footprint":<tool result>,"datasheet":<tool result>}`,
 /// each the tool's own JSON (or null on a non-JSON internal error). The heavy
 /// allocations (zip + PDF, several MB) go through a dedicated arena freed at
-/// return, mirroring the `/mcp` POST handler.
+/// return, mirroring the structured CLI dispatcher.
 pub fn cseFetchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const mcp_tools = @import("mcp_tools.zig");
     res.content_type = .JSON;
@@ -343,7 +343,7 @@ pub fn cseFetchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     };
     const args = parsed.value;
 
-    // The MCP dispatcher wraps download_footprint/download_datasheet in the
+    // The CLI dispatcher wraps download_footprint/download_datasheet in the
     // per-mutation auto-commit seam, but this browser convenience endpoint
     // calls the shared handlers directly. Snapshot once around the combined
     // import so its component, pinout, footprint, model, source archive,

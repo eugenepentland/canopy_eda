@@ -7,11 +7,12 @@
 //!
 //! Single source of truth: the structural emitters (`instances`, `net`,
 //! `free-pins`, `schematic`, `library`, `describe`) call the very same `pub`
-//! functions the MCP server's tools call (`serve/mcp_tools.zig`,
-//! `serve/component_info.zig`), so the CLI and MCP outputs never diverge.
+//! functions the structured tool dispatcher calls (`serve/mcp_tools.zig`,
+//! `serve/component_info.zig`), so the dedicated and generic CLI outputs never
+//! diverge.
 //! `designs` and `reference` are CLI-only conveniences built here.
 //!
-//! Output is the JSON the MCP tools already emit (agents parse it directly);
+//! Output is the JSON the structured tools emit (agents parse it directly);
 //! `reference` prints Markdown. Every command resolves designs relative to
 //! `--project-dir` (default `.`), so an agent rooted in `projects/designs/`
 //! omits it.
@@ -103,7 +104,7 @@ fn emit(bytes: []const u8) infra_fs.File.WriteError!void {
     try stdout.writeStreamingAll(infra_fs.currentIo(), "\n");
 }
 
-// ── Structural queries (delegate to the shared MCP emitters) ─────────
+// ── Structural queries (delegate to the shared emitters) ─────────────
 
 /// `netlisp instances <design>` — every placed part as JSON.
 pub fn cmdInstances(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {

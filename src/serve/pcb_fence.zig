@@ -1,4 +1,4 @@
-//! `generate_fence` MCP tool + `POST /api/pcb-fence/:name` — lay the RF ground
+//! `generate_fence` CLI tool + `POST /api/pcb-fence/:name` — lay the RF ground
 //! via fence a `(net-class … (fence …))` asked for onto a saved layout.
 //!
 //! A net is a fence target when its resolved class DECLARES a fence or carries
@@ -42,7 +42,7 @@
 //! the debug view for judging ring geometry — `mode=legal`, the default, is what
 //! puts manufacturable copper on a board.
 //!
-//! The MCP tool and the HTTP endpoint share one `run`, so the viewer's Fence
+//! The CLI tool and the HTTP endpoint share one `run`, so the viewer's Fence
 //! button and an agent's `generate_fence` call can never diverge.
 
 const std = @import("std");
@@ -76,7 +76,7 @@ const cull_radius_mm: f64 = 1.0;
 const max_cull_rounds: usize = 3;
 
 /// Why a fence run produced nothing — each maps to one HTTP status + body and
-/// one MCP failure message, so the two surfaces explain themselves identically.
+/// one CLI failure message, so the two surfaces explain themselves identically.
 pub const FenceError = error{
     /// The design/module name resolves to no block.
     BlockNotFound,
@@ -126,7 +126,7 @@ pub const Options = struct {
     dry_run: bool = false,
 };
 
-/// One fence run's result, before it is serialized for MCP or HTTP.
+/// One fence run's result, before it is serialized for CLI or HTTP.
 pub const Outcome = struct {
     /// The saved layout that was fenced (and written back to).
     layout: []const u8,
@@ -318,7 +318,7 @@ fn ratchet(
 }
 
 /// Generate (and unless `dry_run`, persist) the fence for `name`'s saved layout.
-/// The one implementation behind both the MCP tool and the HTTP endpoint.
+/// The one implementation behind both the CLI tool and the HTTP endpoint.
 pub fn run(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
@@ -448,7 +448,7 @@ pub fn errorStatus(e: FenceError) u16 {
     };
 }
 
-/// Serialize an `Outcome` as the shared result JSON — the same body the MCP tool
+/// Serialize an `Outcome` as the shared result JSON — the same body the CLI tool
 /// returns and the viewer's Fence button reads, so what an agent sees and what
 /// the browser toasts can never drift.
 fn writeOutcome(w: *std.Io.Writer, o: Outcome, version: u64) std.Io.Writer.Error!void {
@@ -565,7 +565,7 @@ fn csvQuery(arena: std.mem.Allocator, req: *httpz.Request, key: []const u8) []co
     return list.toOwnedSlice(arena) catch &.{};
 }
 
-/// `generate_fence` — the MCP mutation twin of `POST /api/pcb-fence/:name`.
+/// `generate_fence` — the CLI mutation twin of `POST /api/pcb-fence/:name`.
 pub fn mcpGenerateFence(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
@@ -626,7 +626,7 @@ fn argNames(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8
     return list.toOwnedSlice(alloc) catch &.{};
 }
 
-/// Write an `{"ok":false,"error":…}` envelope and return false (the MCP layer
+/// Write an `{"ok":false,"error":…}` envelope and return false (the CLI layer
 /// flags the result `isError`).
 fn fail(out: *std.ArrayList(u8), alloc: std.mem.Allocator, msg: []const u8) HandlerError!bool {
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -925,7 +925,7 @@ test "an unknown fence mode is rejected on both surfaces" {
     // A rejected mode writes nothing.
     try testing.expectEqual(@as(usize, 0), savedFenceVias(alloc, project).len);
 
-    // The MCP tool answers the same way, as a tool failure rather than a crash.
+    // The CLI tool answers the same way, as a tool failure rather than a crash.
     const args = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"name\":\"fencefx\",\"mode\":\"loose\"}", .{});
     var out: std.ArrayList(u8) = .empty;
     try testing.expect(!try mcpGenerateFence(alloc, project, args, &out));
@@ -989,7 +989,7 @@ test "the fence endpoint explains a dead layout link and a fence-free board" {
     try testing.expect(std.mem.indexOf(u8, bare.body, "nothing to fence") != null);
 }
 
-// spec: Web Server - The generate_fence MCP tool and the fence HTTP endpoint share one implementation, so they report the same board
+// spec: Web Server - The generate_fence CLI tool and the fence HTTP endpoint share one implementation, so they report the same board
 test "generate_fence returns the same body as the fence endpoint" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

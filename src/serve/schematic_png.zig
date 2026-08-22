@@ -1,6 +1,6 @@
 //! `GET /api/schematic-png/:name` — browser-free PNG export of one schematic
 //! block. The HTTP handler is a thin name/query adapter over
-//! `render_schematic_png`, shared in behavior with the MCP image tool and CLI.
+//! `render_schematic_png`, shared in behavior with the CLI image tool and CLI.
 
 const std = @import("std");
 const httpz = @import("httpz");

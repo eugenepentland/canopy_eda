@@ -1,4 +1,4 @@
-//! MCP build orchestration: evaluate a design, render its diagnostics, then
+//! CLI build orchestration: evaluate a design, render its diagnostics, then
 //! attach the content-addressed module dependency list used for that build.
 const std = @import("std");
 const edit = @import("edit.zig");

@@ -1,6 +1,6 @@
 //! The heat-zone image: one solved cooling scenario painted over the board it
 //! was solved on, served as `GET /api/pcb-png/:name?thermal=1` and returned by
-//! the `get_pcb_layout_image` MCP tool with `thermal:true`.
+//! the `get_pcb_layout_image` CLI tool with `thermal:true`.
 //!
 //! `/api/thermal/:name` already answers the same question in numbers, and the
 //! numbers are the authority. What they cannot do is show WHERE the heat is: a

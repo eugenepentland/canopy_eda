@@ -139,7 +139,7 @@ fn writeBuildErrorJson(
 
 /// GET /api/version/:name — return `{"version":N}`. The schematic viewer
 /// polls this every ~500 ms and reloads the scene graph when N changes.
-/// Bumped by `pushApi` and the MCP mutation tools.
+/// Bumped by `pushApi` and the CLI mutation tools.
 pub fn versionApi(_: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
@@ -740,7 +740,7 @@ pub fn ercApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerEr
 }
 
 /// Return all designs in the project as a JSON array. Same shape as the
-/// MCP `list_designs` tool: `[{name, title, sections, instance_count,
+/// CLI `list_designs` tool: `[{name, title, sections, instance_count,
 /// net_count, mtime, build_ok}, ...]`.
 pub fn designsApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
@@ -773,9 +773,9 @@ pub fn designsApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) Handler
     res.body = buf.written();
 }
 
-/// List free (unassigned) pins on an instance. Thin wrapper over the MCP
+/// List free (unassigned) pins on an instance. Thin wrapper over the CLI
 /// tool implementation so the browser sidebar can populate the "move pin"
-/// dropdown without going through the MCP transport.
+/// dropdown without invoking the local CLI.
 pub fn freePinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");

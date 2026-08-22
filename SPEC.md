@@ -1720,7 +1720,7 @@ trial comes back as the exact pose list a caller feeds to `set_part_poses` and
 - a repair JSON block always names its verdict and its four lists, so a channel probed and found clear is legible rather than silently absent
 - completeness-waiver: empty inputs (a board with no declared pair and no open net has nothing to probe and says so)
 - completeness-waiver: large inputs (aims are capped at `max_aims`, moves at the plan's own limit, and exactly one trial route runs)
-- completeness-waiver: unauthorized access (it rides a read-only MCP tool and writes nothing; write access is gated on the mutation tools it hands its poses to)
+- completeness-waiver: unauthorized access (it rides a read-only CLI tool and writes nothing; write access is gated on the mutation tools it hands its poses to)
 - completeness-waiver: i/o failure (no I/O of its own — the routing and DRC seams it calls own their own failure handling)
 - completeness-waiver: concurrent access (request-local: the trial routes over a private copy of the poses and the caller's placement is never written)
 - completeness-waiver: malformed encoding (its inputs are the typed route result and placement the caller already holds)
@@ -1940,7 +1940,7 @@ current outline and declaration, not accumulated as hand-authored copper.
 - Gerber opens the authored-width solder-mask band around the exact board outline on both faces
 - completeness-waiver: empty inputs (no effective board outline, incomplete dimensions, or an unresolved net produce an empty site set)
 - completeness-waiver: large inputs (work is linear in outline vertices plus generated sites; site count is perimeter divided by a positive authored spacing)
-- completeness-waiver: unauthorized access (pure placement geometry; HTTP and MCP authorization remains at the existing serve boundary)
+- completeness-waiver: unauthorized access (pure placement geometry; HTTP and CLI authorization remains at the existing serve boundary)
 - completeness-waiver: i/o failure (generation is in-memory; persistence, Gerber, drill, and KiCad writers retain their own error contracts)
 - completeness-waiver: concurrent access (stateless derivation into caller-owned allocator memory; no shared mutable generator state)
 - completeness-waiver: malformed encoding (the evaluator clamps negative dimensions inert and typed placement geometry is validated before offsetting)
@@ -3943,7 +3943,7 @@ Public functions: classify, commit, findLock, isLockName, planFor, run, targetFo
 - The sync-kicad-sch CLI reads --project-dir, --dry-run and --force in any order and takes the lone positional as the design
 - completeness-waiver: empty inputs (a design with no board declaration is the empty case and is rejected by name on every surface; an empty target directory is the ordinary first push, covered by the create path)
 - completeness-waiver: large inputs (every read is capped — an existing sheet at max_sheet_bytes, a lock body at max_lock_bytes — and the emitted bytes are the exporter's, already self-checked before they reach here)
-- completeness-waiver: unauthorized access (the CLI runs as the invoking user over paths that user already owns; the HTTP and MCP surfaces sit behind the existing ward middleware and the tool is registered as a mutation)
+- completeness-waiver: unauthorized access (the CLI runs as the invoking user over paths that user already owns; the HTTP and CLI surfaces sit behind the existing ward middleware and the tool is registered as a mutation)
 - completeness-waiver: i/o failure (a target that cannot be read classifies as foreign and refuses rather than being overwritten; a staging failure removes its temps and leaves the directory byte-identical)
 - completeness-waiver: concurrent access (a KiCad lock in the project directory refuses the push outright — that is the concurrency guard — and the writes themselves are rename-into-place)
 - completeness-waiver: malformed encoding (an unparseable existing sheet is foreign, so malformed input refuses instead of being replaced; parsing itself belongs to sexpr/parser, which is fuzzed)
@@ -4531,7 +4531,7 @@ Public functions: summaryLines, headlineVerdict, cells, scenarioCells, scenarioN
 Presentation and serialization for `eval/thermal.zig`'s lumped screening — the
 one place a `BoardThermal` becomes the sentences, the table cells and the JSON
 that the schematic page's review panel, the markdown report, the review PDF,
-the review JSON, `GET /api/thermal/:name` and the `describe_thermal` MCP tool
+the review JSON, `GET /api/thermal/:name` and the `describe_thermal` CLI tool
 all show. Sharing the formatted CELLS (not merely the numbers) is what keeps
 the three tables reading alike: the rounding, the power-source marker and the
 `est.` flag on a package-derived theta are decided once. Every shared string is
@@ -4569,7 +4569,7 @@ The one seam between `eval/thermal.zig` (what each part burns, and what it is
 rated for) and `placement/thermal_field.zig` (where that heat goes once the
 parts have positions). Four surfaces need the projection — the `?thermal=1`
 heat-zone image, the `scenarios` block of `GET /api/thermal/:name`, the
-`describe_thermal` MCP tool sharing those bytes, and the review document's
+`describe_thermal` CLI tool sharing those bytes, and the review document's
 cooling-scenario table — and a reader comparing the picture against the table is
 entitled to assume they are the same simulation, so it is written once here.
 
@@ -4613,7 +4613,7 @@ Public functions: render, rampColor, View, Options
 
 The heat-zone image: one solved cooling scenario painted over the board it was
 solved on, served as `GET /api/pcb-png/:name?thermal=1` and returned by the
-`get_pcb_layout_image` MCP tool with `thermal:true`. `GET /api/thermal/:name`
+`get_pcb_layout_image` CLI tool with `thermal:true`. `GET /api/thermal/:name`
 already answers the same question in numbers and the numbers are the authority;
 what they cannot do is show WHERE the heat is, and that is a picture. The caller
 hands over a solved scenario plus the absolute-°C rows derived from it, so the
@@ -4687,7 +4687,7 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 - rail-name fallback decodes common voltage conventions used by flat designs
 - completeness-waiver: empty inputs (missing pins, nets, or programming resistors produce a failed check result rather than indexing absent data)
 - completeness-waiver: large inputs (the checks scan the already-allocated instance and net slices linearly and allocate only their diagnostic message)
-- completeness-waiver: unauthorized access (a pure design-analysis layer with no access surface; authorization is enforced before MCP dispatch)
+- completeness-waiver: unauthorized access (a pure design-analysis layer with no access surface; authorization is enforced before CLI dispatch)
 - completeness-waiver: i/o failure (pinout lookup failure is represented as an unresolved-pin check result; project loading is owned by the evaluator)
 - completeness-waiver: concurrent access (checks read an immutable design snapshot and request-local evaluator state, with no shared mutable data)
 - completeness-waiver: malformed encoding (typed design data comes from the S-expression parser, while malformed resistor and rail spellings return null)
@@ -4703,7 +4703,7 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 - replacing a reviewed PDF makes a completed digest-bound review stale
 - completeness-waiver: empty inputs (a design with no instances produces an empty report, while missing review fields become explicit findings)
 - completeness-waiver: large inputs (recursive traversal is proportional to the allocated design tree and propagates allocator failure)
-- completeness-waiver: unauthorized access (preflight only validates an already-loaded design; CLI and MCP authorization live at their entry points)
+- completeness-waiver: unauthorized access (preflight only validates an already-loaded design; CLI and CLI authorization live at their entry points)
 - completeness-waiver: i/o failure (an unreadable reviewed PDF becomes an incomplete-review finding instead of aborting validation)
 - completeness-waiver: concurrent access (each run owns its result map and findings while reading an immutable design snapshot)
 - completeness-waiver: malformed encoding (library parsing is upstream; malformed review metadata is rejected through structured incomplete findings)
@@ -4720,6 +4720,20 @@ embed reads nothing but the design's own `.sexp`. Thermal is served by
 `serve/thermal_page.zig` at `/thermal/:name` and by `serve/thermal_api.zig` at
 `/api/thermal/:name`, both of which opt into the layout read deliberately.
 
+## tool_cli
+
+Public functions: run
+
+- A structured tool invocation accepts one JSON source and the common project and output flags
+- completeness-waiver: empty inputs (a missing tool name or flag value exits with a usage diagnostic)
+- completeness-waiver: large inputs (argument files are capped at 16 MiB and tool handlers retain their own bounds)
+- completeness-waiver: unauthorized access (the CLI runs with the invoking user's filesystem authority)
+- completeness-waiver: i/o failure (input and output failures are reported through the CLI error path)
+- completeness-waiver: concurrent access (each process owns its parser and output buffers; optional git commits retain the existing index mutex)
+- completeness-waiver: malformed encoding (arguments must parse as a JSON object and image base64 must decode before it is written)
+- completeness-waiver: integer overflow (argument sizing and base64 sizing use checked standard-library operations)
+- completeness-waiver: panic-free (invalid CLI input exits with a diagnostic; fallible allocation and I/O propagate)
+
 ## serve
 
 Public functions: notFound, serve
@@ -4727,8 +4741,7 @@ Public functions: notFound, serve
 - Ward member maps to the writer role, admin to admin, and an unknown role to reader
 - A configured browsable url is reported to ward while an unset one omits the header
 - An unconfigured ward adapter reports session and bearer paths unconfigured so requests fail closed
-- The MCP scope check accepts a scope containing the service name and rejects one without it
-- The MCP role resolver returns the ward identity role, else admin on the dev bypass, else reader
+- The service scope check accepts a scope containing the service name and rejects one without it
 - The ward auth-server url is derived by stripping the login path from the configured login url
 - The auth-server url prefers explicit config over the login-path strip
 - A cookieless session request is decided as a redirect to the ward login url carrying the return target
@@ -4744,9 +4757,6 @@ Public functions: notFound, serve
 - An ipv6 loopback peer receives the dev bypass while a non-loopback ipv6 peer does not
 - An unauthenticated api request is answered 401 json rather than a login redirect
 - An unauthenticated page request is redirected 302 to the ward login carrying the return url
-- A bearer-less mcp request is answered 401 with a resource-metadata www-authenticate challenge
-- An mcp request fails closed with 503 when the bearer introspection url is unconfigured
-- An mcp bearer is admitted for any valid ward token regardless of scope with its mapped role
 - A reader's mutating request is forbidden while a writer, a safe method, or a read-only post passes
 - A valid plugin token admits a sync request without a ward call while an invalid one falls through
 - A live ward bearer admits a sync request as the fallback when no plugin token matches
@@ -4820,7 +4830,7 @@ Public functions: runSyncPlan, syncKicadPcbApi
 Public functions: lower, lowerOrEmpty, lowerWithWaves, routeLoweredCandidate, finishLoweredCandidate, routeLoweredDiagnosticCandidate, finishLoweredDiagnosticCandidate, routeLoweredDiagnostic, pruneTopologyArtifacts, includeDiffPartners
 
 The one `(pcb-plan (route …))` lowering seam shared by every routing surface —
-the `route_pcb` MCP commit path, `POST /api/pcb-route`, the `/pcb-layout`
+the `route_pcb` CLI commit path, `POST /api/pcb-route`, the `/pcb-layout`
 page's `?route=1` preview, the PNG endpoint, and `/api/pcb-describe` — so a
 fresh preview route always equals what a commit would produce (wave priority
 order, preferred/allowed layer masks, waypoints, via budgets).
@@ -4966,7 +4976,7 @@ is a 404. Net names resolve through the shared exact-or-leaf case-insensitive
 `(nets …)` lookup (`plan_resolve.netIndexByName`). Read-only POST — access
 control lives in serve/ward_auth (listed in read_only_posts).
 
-The same analysis is the read-only `diagnose_net` MCP tool (args `name`, `net`,
+The same analysis is the read-only `diagnose_net` CLI tool (args `name`, `net`,
 optional `layout` / `sub`), so an agent can interrogate one net without routing
 the whole board to read a capped, failure-only `stuck[]`. Both surfaces run
 through one `analyzeNetJson` body — resolve the shown board, route it, answer —
@@ -4977,7 +4987,7 @@ request.
 - a routed net is answered with status routed and its trace length via count and layers
 - an unknown net name yields no answer so the endpoint replies not found
 - a failed net past the diagnostic cap still answers status failed
-- diagnose_net is a registered read-only MCP tool
+- diagnose_net is a registered read-only CLI tool
 - diagnose_net names the argument a caller left out instead of diagnosing nothing
 - an unresolvable design reaches diagnose_net's caller as an error line, never as a partial answer
 - the analyze failure mapping keeps the shared PCB read status codes and adds this module's own two
@@ -5093,7 +5103,7 @@ naming the starred layout is folded to the default board so both spellings share
 one solve. `/api/thermal-field/:name` takes the same argument, because the
 picture the board overlay paints and the numbers beside it must be of one board.
 
-The same analysis is the read-only `describe_thermal` MCP tool (args `name`,
+The same analysis is the read-only `describe_thermal` CLI tool (args `name`,
 optional numeric `ambient`, optional `layout`). Both surfaces run through one `thermalJson` body —
 resolve, screen, serialize — so the tool and the endpoint can never report
 different junction temperatures for the same design and ambient. Read-only:
@@ -5106,7 +5116,7 @@ nothing here writes to the project dir.
 - the cooling ladder is read at the caller's ambient, so every temperature on it shifts one for one with ?ambient while each ambient ceiling stays put
 - a design with nothing to dissipate answers with a null ladder beside a sentence naming what is missing, and keeps every lumped field
 - GET /api/thermal/:name answers an unknown design or module name with a 404 whose body is not JSON
-- describe_thermal is a registered read-only MCP tool answering with the endpoint's own bytes
+- describe_thermal is a registered read-only CLI tool answering with the endpoint's own bytes
 - describe_thermal names the argument a caller left out or mis-typed instead of screening a default
 - a solved cooling ladder is retained between requests and re-solved only once the design, its libraries, its layout sidecars or its live-edit version change
 - a cached solve is reused across ambients, so changing ?ambient re-screens without relaxing a single field again
@@ -5299,7 +5309,7 @@ Public functions: readFile, writeFile, editFile, listDir, glob, deleteFile, move
 - denialHint redirects bare lib listing to list_library
 - denialHint redirects PDF writes to the disk/browser route
 - libraryEntityFor classifies library subdirs
-- denies write_file on lib/datasheets (PDFs are read-only via MCP)
+- denies write_file on lib/datasheets (PDFs are read-only via CLI)
 - readFile reports an error when a non-zero offset is at or beyond the end of the file
 - writeFile append mode concatenates content onto the existing file
 - writeFile append composes with expected_sha256 CAS checked against the pre-append file
@@ -5323,15 +5333,6 @@ Public functions: describeComponent, listRequirements, addRequirement, removeReq
 - add list and remove requirement round-trip on disk
 - describeComponent reverse-maps explicit module implementations
 - describeComponent exposes digest-bound datasheet review evidence
-
-## serve/mcp_docs
-
-Public functions: mcpDocsPage
-
-- buildToolDocs projects each tool from the embedded schema
-- buildToolDocs marks mutating tools and required params
-- buildExample renders an example invocation
-- union-typed params render joined type names in the docs table
 
 ## serve/notes
 
@@ -5430,7 +5431,7 @@ Public functions: read
 - build preflight_ok includes non-warning assertion failures
 - completeness-waiver: empty inputs (missing names and invalid profiles return explicit tool errors; designs with no findings serialize empty arrays)
 - completeness-waiver: large inputs (the handler streams JSON and keeps only request-local change sets and validation results proportional to the design)
-- completeness-waiver: unauthorized access (MCP authorization is enforced before this post-authentication tool dispatcher runs)
+- completeness-waiver: unauthorized access (the CLI runs with the invoking user's filesystem authority)
 - completeness-waiver: i/o failure (design and history snapshot load failures return explicit false tool results with error text)
 - completeness-waiver: concurrent access (every invocation owns its evaluator, maps, and output buffer without shared mutable state)
 - completeness-waiver: malformed encoding (the JSON layer validates arguments upstream, and this handler rejects invalid profile and snapshot-id text)
@@ -5442,9 +5443,9 @@ Public functions: read
 - get_pcb_layout_image declares its heat-zone thermal flag and the scenario enum, so a strict client may send the arguments the renderer reads
 - clean_route_topology removes deletion-invariant saved trace sections and recursively exposed loose stubs transactionally without rerouting the board
 - clean_route_topology supports a non-persisting dry run and an optional net-name scope
-- normalize_junctions MCP/HTTP actions explicitly repair saved implicit joins, support dry-run/net scope, and persist only a connectivity- and DRC-safe candidate
+- normalize_junctions CLI/HTTP actions explicitly repair saved implicit joins, support dry-run/net scope, and persist only a connectivity- and DRC-safe candidate
 - Saved-copper rewrites preserve stamp-group, fence-provenance, and via-span tags on unchanged geometry
-- MCP virtual-file mutations refuse .layouts.json sidecars and direct callers to protected PCB layout tools
+- CLI virtual-file mutations refuse .layouts.json sidecars and direct callers to protected PCB layout tools
 - restore_layout_snapshot restores protected PCB layout history after snapshotting the current sidecar and bumping its revision
 - stitch_ground_pads applies the autorouter's final ground-reference pass transactionally to a saved layout
 
@@ -5518,7 +5519,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 
 - A PCB design with PDN intents resolves selected BOM electrical model properties before placement
 - A hard route deadline runs one plain global candidate instead of spending the same wall-clock budget on a sequential hierarchical A/B comparison
-- get_schematic_image is a registered read-only MCP tool
+- get_schematic_image is a registered read-only CLI tool
 - get_pcb_layout_image renders the heat-zone image when thermal is set, and a different picture for each cooling scenario
 - The board PNG query turns ?thermal=1 into a heat-zone request carrying its scenario and ambient, and an unknown scenario word falls back to still air rather than refusing the image
 - export-schematic-png parses native image focus, view, theme, width, and output options
@@ -5580,7 +5581,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The route_pcb scope resolver selects a group token's concrete nets and reports a whole-board route when no selector is given
 - The route_pcb scope resolver rejects an unknown group or net token with an error and no scope
 - An unscoped route_pcb call immediately after clear_routes routes the whole board and echoes scope "all"
-- The route_pcb MCP tool can select a bounded retry tier, checkpoints routed copper before optional deferred DRC, and rejects unknown tiers
+- The route_pcb CLI tool can select a bounded retry tier, checkpoints routed copper before optional deferred DRC, and rejects unknown tiers
 - route_pcb can learn hard path topology and reserve its proven transition sites from a completed saved reference layout while preserving authored wave/layer policy
 - a reference-guided route reports how many nets received learned topology and how many required exact-copper fallback
 - coordinate-scoped clear_routes removes one selected via without erasing the rest of a dense shared net
@@ -5671,7 +5672,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - A refused close_open_nets joint transaction restores the board byte-for-byte, dead-end memo included
 - The close_open_nets joint tier's cluster and attempt caps bound the whole call, not each cluster separately
 - Both rip-and-re-route tiers nominate through one shared seam, so the post-route tier sees exactly what the in-route tier's corridor sweep sees
-- route_order_search is a registered mutation MCP tool because it records the trials it ran
+- route_order_search is a registered mutation CLI tool because it records the trials it ran
 - a recorded route_order_search trial names the ordering it tried, its score, and the scope it was measured under
 - a small route_order_search cluster is searched exhaustively, the authored order first
 - a route_order_search cluster too big to enumerate is seeded from the blocker diagnoses and the pours
@@ -5725,9 +5726,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The layout sidecar carries an optimistic-concurrency rev, emitted only when non-zero
 - readLayoutRev reads the sidecar rev (0 for a legacy file), and a save stamps disk_rev+1
 - A page render whose layout sidecar was saved mid-render is not cached
-- An MCP layout mutation snapshots the sidecar to history and bumps the rev like a viewer Save
-- An MCP layout mutation refreshes the auto-layout cache poses so a default read reflects the write
-- A no-arg MCP PCB read defaults rough off to render the starred layout verbatim, not a re-solve
+- A CLI layout mutation snapshots the sidecar to history and bumps the rev like a viewer Save
+- A CLI layout mutation refreshes the auto-layout cache poses so a default read reflects the write
+- A no-arg CLI PCB read defaults rough off to render the starred layout verbatim, not a re-solve
 - pcb-describe answers an unknown design or sub-block distinctly from an internal failure
 - describeDesign reports facts for a design composed only of sub-blocks and rejects an unknown name
 - pcb-describe stuck diagnostics name the rippable equal-priority net boxing a congested net
@@ -5843,8 +5844,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - the toolbar pour button flags a stale indicator after board edits and disables during replay
 - the /pcb-layout toolbar carries a custom copper-pour tool that draws a polygon zone, picks its net and layer, persists it with the layout, and refills its fill
 - The PCB Route request always carries the current custom copper pours so the autorouter can terminate pour nets through vias
-- The route_pcb MCP tool preserves custom copper pours and passes them to the autorouter for whole-board and scoped routes
-- The route_pcb MCP tool counts DRC against the shown custom pours through the direct pour-aware checker result
+- The route_pcb CLI tool preserves custom copper pours and passes them to the autorouter for whole-board and scoped routes
+- The route_pcb CLI tool counts DRC against the shown custom pours through the direct pour-aware checker result
 - a pour with an interior foreign feature ships its antipad holes and the viewer fills them even-odd
 - assembly copper pours retain even-odd antipad holes around foreign traces, vias, and pads
 - assembly review uses a fixed translucent copper wash so the PCB editor's persisted pour-opacity slider cannot obscure soldermask
@@ -5920,9 +5921,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - the placement-guide power line is dashed for a defaulted decoupling target and solid for an authored one
 - home design cards lazily show the same six-stage PCB completion tracker as the layout editor
 - home design cards put issue counts only in stage one and omit legacy issue/section chips
-- get_layout_progress is a registered read-only MCP tool
-- route_experiment is a registered read-only MCP tool
-- preview_escape_assignment is a registered read-only MCP tool
+- get_layout_progress is a registered read-only CLI tool
+- route_experiment is a registered read-only CLI tool
+- preview_escape_assignment is a registered read-only CLI tool
 - preview_escape_assignment rejects a request naming fewer than two nets
 - preview_escape_assignment renders its assignment as a pasteable per-net waypoint plan
 - preview_escape_assignment reports the nets its assignment refused and why
@@ -5939,9 +5940,9 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - a batch of search trials appends in one write, continuing the same id sequence and cap
 - an empty search batch writes nothing at all
 - a trial sidecar written before the source field existed still loads, as agent-recorded rows
-- record_route_trial is a registered mutation MCP tool
-- list_route_trials is a registered read-only MCP tool
-- remove_route_trial is a registered mutation MCP tool
+- record_route_trial is a registered mutation CLI tool
+- list_route_trials is a registered read-only CLI tool
+- remove_route_trial is a registered mutation CLI tool
 - a sub-block needs a layout when the placement carries parts under its slug prefix
 - a module counts as starred when its saved layouts include a default snapshot with parts
 - the progress ladder maps the fab-gate net connectivity in placement-net order
@@ -5959,7 +5960,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The fence endpoint and the generate_fence tool reject an unknown mode naming the two spellings that exist
 - Re-running the fence on a layout replaces the previous fence rather than stacking a second row beside the same trace
 - The fence endpoint 404s an unknown layout naming the rows that exist, and refuses a board that declares no fence
-- The generate_fence MCP tool and the fence HTTP endpoint share one implementation, so they report the same board
+- The generate_fence CLI tool and the fence HTTP endpoint share one implementation, so they report the same board
 - Generated RF fence sites render, select, and edit as ordinary vias; provenance remains internal for safe regeneration
 - The PCB page blob carries both the authored keepout halo and the full RF fence corridor through the far edge of its vias
 - The PCB page blob carries each net class's resolved mask relief and fence untent reach so the assembly view shows the shipped mask
@@ -5989,8 +5990,8 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - POST /api/sync-kicad-sch/:name?dry_run=1 reports the per-file plan and writes nothing, and the same call without it writes the sheets into the board's directory
 - POST /api/sync-kicad-sch/:name answers 409 and writes nothing when an existing schematic is not netlisp's, and 404 for an unknown name
 - POST /api/sync-kicad-sch/:name answers 400 naming the missing (kicad-pcb ...) form for a design that declares no board
-- The sync_kicad_sch MCP tool is registered as a mutation and rejects a call with no name
-- The sync_kicad_sch MCP tool reports a refusal as an ok:false result carrying the reason, rather than as a tool error
+- The sync_kicad_sch CLI tool is registered as a mutation and rejects a call with no name
+- The sync_kicad_sch CLI tool reports a refusal as an ok:false result carrying the reason, rather than as a tool error
 - The export_kicad_sch tool refuses an output_dir that is relative, escapes through '..', or points inside the project directory
 - The export_kicad_sch tool is registered as a mutation, so writing an export is gated to writer roles
 - The export_kicad_sch summary reports the file list with byte counts and the export's coverage tallies, never the sheet text

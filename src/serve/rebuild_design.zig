@@ -1,4 +1,4 @@
-//! MCP build worker: evaluate one design/module, collect unified validation,
+//! CLI build worker: evaluate one design/module, collect unified validation,
 //! and publish the rendered scene only after strict preflight succeeds.
 
 const std = @import("std");
@@ -43,7 +43,7 @@ const BuildFailure = struct {
     diagnostic: ?diag_format.Diagnostic = null,
 };
 
-/// Result of a `build` MCP call, including the unified validation payload.
+/// Result of a `build` CLI call, including the unified validation payload.
 pub const BuildReport = struct {
     ok: bool,
     version: u32,

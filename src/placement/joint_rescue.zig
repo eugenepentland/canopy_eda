@@ -13,7 +13,7 @@
 //! `vacate_policy.zig`) proved the mechanism: take a small, CHEAP-TO-RESTORE
 //! subset of the copper in the way off the board, re-route the cluster, and
 //! keep the result only if the board strictly improved. It took barracuda 85 →
-//! 91 nets. But it runs only from MCP, on a saved layout, after the fact — a
+//! 91 nets. But it runs only from CLI, on a saved layout, after the fact — a
 //! from-zero `bench-route` never sees it. This module brings the same mechanism
 //! INSIDE the route, generalized along the axis the vacate tier lacks: the
 //! cluster is re-routed under SEVERAL orders and the best outcome wins.

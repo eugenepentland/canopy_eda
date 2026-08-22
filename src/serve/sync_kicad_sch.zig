@@ -1,4 +1,4 @@
-//! `POST /api/sync-kicad-sch/:name` and the `sync_kicad_sch` MCP tool — the
+//! `POST /api/sync-kicad-sch/:name` and the `sync_kicad_sch` CLI tool — the
 //! network surfaces of the guarded schematic push (`kicad_sch_push.zig`).
 //!
 //! The board twin is `POST /api/sync-kicad-pcb/:name` in `sync.zig`, and this
@@ -226,7 +226,7 @@ fn urlDecodeAlloc(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocat
     return std.Uri.percentDecodeInPlace(buf);
 }
 
-// ── MCP ──────────────────────────────────────────────────────────────
+// ── CLI ──────────────────────────────────────────────────────────────
 
 /// `sync_kicad_sch` — the agent-facing twin. Same JSON as the endpoint, and the
 /// same refusal semantics: a refused push returns `ok:false` with the reason
@@ -446,7 +446,7 @@ test "the sync-kicad-sch endpoint names the missing kicad-pcb form" {
     try testing.expect(std.mem.indexOf(u8, got.body, "(kicad-pcb") != null);
 }
 
-// spec: Web Server - The sync_kicad_sch MCP tool is registered as a mutation and rejects a call with no name
+// spec: Web Server - The sync_kicad_sch CLI tool is registered as a mutation and rejects a call with no name
 test "sync_kicad_sch is a registered mutation tool that requires a name" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -461,7 +461,7 @@ test "sync_kicad_sch is a registered mutation tool that requires a name" {
     try testing.expect(std.mem.indexOf(u8, out.items, "missing required arg: name") != null);
 }
 
-// spec: Web Server - The sync_kicad_sch MCP tool reports a refusal as an ok:false result carrying the reason, rather than as a tool error
+// spec: Web Server - The sync_kicad_sch CLI tool reports a refusal as an ok:false result carrying the reason, rather than as a tool error
 test "sync_kicad_sch reports a refusal as a result, not an error" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

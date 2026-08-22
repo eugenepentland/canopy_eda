@@ -55,7 +55,7 @@ const err_export = "KiCad schematic export failed\n";
 pub const ExportZipError = mcp_tools.ToolError || export_kicad_sch.SchError;
 
 /// Resolve `name` as a design or a bare `lib/modules` module — the same
-/// resolution the read-only MCP tools and the review PDF use — and export its
+/// resolution the read-only CLI tools and the review PDF use — and export its
 /// schematic. The caller owns the result and calls `deinit`.
 ///
 /// No cache. The vendor `.kicad_sym` index this rebuilds per call measures
@@ -64,7 +64,7 @@ pub const ExportZipError = mcp_tools.ToolError || export_kicad_sch.SchError;
 /// a human triggers by clicking. Caching it would mean a second long-lived
 /// arena (the index's symbols borrow the export's) plus an invalidation
 /// signal `lib/` does not have — and `lib/sources/` is writable through the
-/// MCP VFS and the library upload page, so a stale entry would silently serve
+/// CLI VFS and the library upload page, so a stale entry would silently serve
 /// a superseded symbol body.
 pub fn exportFor(
     allocator: std.mem.Allocator,

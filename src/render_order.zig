@@ -3,7 +3,7 @@
 //!
 //! Three surfaces draw the same board: the `/pcb-layout` viewer's Canvas2D
 //! scene (`serve/assets/pcb_board.js`), the WebGPU under-layer beneath it
-//! (`serve/assets/pcb_gpu.js`), and the server-side PNG an MCP agent looks at
+//! (`serve/assets/pcb_gpu.js`), and the server-side PNG a CLI agent looks at
 //! (`render_pcb_png.zig`). They used to hold three hand-maintained call
 //! sequences, and they had drifted: silk under copper on two of them and above
 //! it on the third, an outline painted first here and last there, whole classes

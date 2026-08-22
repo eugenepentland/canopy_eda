@@ -179,7 +179,6 @@ pub const shards: []const []const []const u8 = &.{
         "serve.footprint_preview.test.",
         "serve.mcp_checks.test.",
         "serve.mcp_connector_pinout.test.",
-        "serve.mcp_docs.test.",
         "serve.route_live.test.",
         "serve.route_review.test.",
         "serve.test.",
@@ -391,6 +390,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.placement_outline.test.",
         "test_root.test.",
         "testpoint_silkscreen.test.",
+        "tool_cli.test.",
     },
     // shard 6
     &.{

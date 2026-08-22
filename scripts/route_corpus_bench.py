@@ -20,14 +20,12 @@ router changes underneath a fixed corpus. Run it before and after a change and
 diff the tables; that is the whole workflow.
 
 Usage:
-    # start a server against a SCRATCH COPY of the project (routing mutates):
-    netlisp serve --project-dir /tmp/bench-designs --port 7099
-
-    python3 scripts/route_corpus_bench.py --base http://localhost:7099
+    # Always point at a SCRATCH COPY of the project (routing mutates):
+    python3 scripts/route_corpus_bench.py --project-dir /tmp/bench-designs
     python3 scripts/route_corpus_bench.py --json out.json          # machine-readable
     python3 scripts/route_corpus_bench.py --record .               # write the ledger
 
-NEVER point --base at a server running on projects/designs itself: `route` and
+NEVER point --project-dir at projects/designs itself: `route_pcb` and
 `close_open_nets` write layout sidecars, and a benchmark must not edit the boards
 it measures.
 """
@@ -38,57 +36,45 @@ import math
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 
-DEFAULT_BASE = "http://localhost:7099"
+DEFAULT_NETLISP = "netlisp"
+DEFAULT_PROJECT_DIR = "/tmp/bench-designs"
 # Wall-clock ceiling for one board's route. A board that needs longer is a
 # finding in itself, recorded as a timeout rather than hanging the run.
 BOARD_TIMEOUT_S = 900
 
 
-def mcp(base, tool, args, timeout=BOARD_TIMEOUT_S):
-    """Call one MCP tool, returning its parsed JSON payload (or {} on failure)."""
-    body = json.dumps(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": tool, "arguments": args},
-        }
-    ).encode()
-    req = urllib.request.Request(
-        base.rstrip("/") + "/mcp",
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        },
-    )
+def tool(binary, project_dir, name, arguments, timeout=BOARD_TIMEOUT_S):
+    """Call one structured CLI tool, returning its parsed JSON payload."""
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            payload = json.loads(r.read().decode())
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-        return {"_error": str(e)}
+        proc = subprocess.run(
+            [binary, "tool", name, "--project-dir", project_dir,
+             "--args", json.dumps(arguments)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"_error": str(exc)}
     try:
-        return json.loads(payload["result"]["content"][0]["text"])
-    except (KeyError, IndexError, json.JSONDecodeError):
-        return payload.get("result", {})
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        payload = {"_error": proc.stderr.strip() or proc.stdout.strip()}
+    if proc.returncode and "_error" not in payload:
+        payload["_error"] = proc.stderr.strip() or f"exit {proc.returncode}"
+    return payload
 
 
-def describe(base, name):
+def describe(binary, project_dir, name):
     """The connectivity + DRC facts for a board, from the shared oracle."""
-    url = f"{base.rstrip('/')}/api/pcb-describe/{name}"
-    try:
-        with urllib.request.urlopen(url, timeout=300) as r:
-            return json.load(r)
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return {}
+    return tool(binary, project_dir, "describe_pcb_layout",
+                {"name": name}, timeout=300)
 
 
-def board_names(base):
-    """Every design the server knows, in a stable order."""
-    listed = mcp(base, "list_designs", {}, timeout=60)
+def board_names(binary, project_dir):
+    """Every design in the project, in a stable order."""
+    listed = tool(binary, project_dir, "list_designs", {}, timeout=60)
     # The tool returns a bare list on some builds and a wrapper object on others.
     if isinstance(listed, dict):
         names = listed.get("designs") or listed.get("names") or []
@@ -109,16 +95,16 @@ def errors_of(desc):
     return routed.get("drc", len(lst)), sum(1 for v in lst if v.get("sev") == "err")
 
 
-def measure(base, name, route):
+def measure(binary, project_dir, name, route):
     """One board's row: route it (optionally), then read the oracle."""
     t0 = time.monotonic()
     err = None
     if route:
-        res = mcp(base, "route_pcb", {"name": name})
+        res = tool(binary, project_dir, "route_pcb", {"name": name})
         if "_error" in res:
             err = res["_error"]
     elapsed = time.monotonic() - t0
-    desc = describe(base, name)
+    desc = describe(binary, project_dir, name)
     r = desc.get("routed") or {}
     total, errs = errors_of(desc)
     return {
@@ -168,8 +154,10 @@ def record(rows, gm, project_dir, binary):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--base", default=DEFAULT_BASE,
-                    help="server base URL (must NOT be serving projects/designs)")
+    ap.add_argument("--project-dir", default=DEFAULT_PROJECT_DIR,
+                    help="scratch design project to benchmark")
+    ap.add_argument("--netlisp", default=DEFAULT_NETLISP,
+                    help="netlisp executable")
     ap.add_argument("--boards", help="comma-separated subset; default is every design")
     ap.add_argument("--no-route", action="store_true",
                     help="measure the saved copper without re-routing (fast baseline)")
@@ -181,14 +169,14 @@ def main():
     args = ap.parse_args()
 
     names = ([b.strip() for b in args.boards.split(",") if b.strip()]
-             if args.boards else board_names(args.base))
+             if args.boards else board_names(args.netlisp, args.project_dir))
     if not names:
-        print("no designs found — is the server up?", file=sys.stderr)
+        print("no designs found — check --project-dir and --netlisp", file=sys.stderr)
         return 1
 
     rows = []
     for n in names:
-        row = measure(args.base, n, route=not args.no_route)
+        row = measure(args.netlisp, args.project_dir, n, route=not args.no_route)
         rows.append(row)
         print(
             f"{row['board']:<22} {row['routed']:>3}/{row['total']:<3} "

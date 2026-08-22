@@ -1,5 +1,5 @@
 //! File-backed inspection and metric reporting for normalized KiCad board
-//! snapshots. This is the non-destructive seam used by the CLI and MCP tool:
+//! snapshots. This is the non-destructive seam used by the CLI and CLI tool:
 //! it reads `.kicad_pcb` plus the adjacent `.kicad_pro`, then emits compact,
 //! deterministic JSON suitable for an agent, scorer, or benchmark harness.
 
