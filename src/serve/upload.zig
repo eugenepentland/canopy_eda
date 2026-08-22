@@ -35,12 +35,14 @@ fn nextTmpSeq() u64 {
 }
 const max_kicad_file_bytes: usize = 10 * 1024 * 1024;
 const max_step_file_bytes: usize = 50 * 1024 * 1024;
+// Preserve the former 50 KiB capture cap for unzip/find/cleanup.
+const process_output_bytes: usize = 50 * 1024;
 const sexp_path_template = "{s}/{s}.sexp";
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
-    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
-    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    infra_fs.File.WriteError || infra_fs.File.OpenError || infra_fs.File.ReadError ||
+    infra_fs.Dir.MakeError || infra_fs.Dir.StatFileError ||
     error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, ReadOnlyFileSystem, LinkQuotaExceeded };
 
 /// Outcome of `writeComponentFile`: whether the import minted a new
@@ -118,16 +120,20 @@ pub fn importZipBytes(
     }
 
     const tmp_dir = try std.fmt.allocPrint(allocator, tmp_extract_template, .{ clock.milliTimestamp(), nextTmpSeq() });
-    const unzip_result = std.process.Child.run(.{
-        .allocator = allocator,
+    const unzip_result = std.process.run(allocator, infra_fs.currentIo(), .{
         .argv = &.{ "unzip", "-o", "-q", tmp_zip, "-d", tmp_dir },
+        .stdout_limit = .limited(process_output_bytes),
+        .stderr_limit = .limited(process_output_bytes),
     }) catch return error.ExtractFailed;
-    if (unzip_result.term != .Exited or unzip_result.term.Exited != 0) return error.ExtractFailed;
+    defer deinitProcessResult(allocator, unzip_result);
+    if (!unzip_result.term.success()) return error.ExtractFailed;
 
-    const find_result = std.process.Child.run(.{
-        .allocator = allocator,
+    const find_result = std.process.run(allocator, infra_fs.currentIo(), .{
         .argv = &.{ "find", tmp_dir, "-type", "f" },
+        .stdout_limit = .limited(process_output_bytes),
+        .stderr_limit = .limited(process_output_bytes),
     }) catch return error.ScanFailed;
+    defer deinitProcessResult(allocator, find_result);
 
     var sym_path: ?[]const u8 = null;
     var fp_path: ?[]const u8 = null;
@@ -178,10 +184,7 @@ pub fn importZipBytes(
         error.FileNotFound => {},
         else => log.warn("deleting {s}: {s}", .{ tmp_zip, @errorName(e) }),
     };
-    _ = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ "rm", "-rf", tmp_dir },
-    }) catch |e| log.warn("cleanup {s}: {s}", .{ tmp_dir, @errorName(e) });
+    cleanupExtractDir(allocator, tmp_dir);
 
     return .{
         .package_name = pkg_name,
@@ -241,21 +244,22 @@ pub fn extractStepBytes(allocator: std.mem.Allocator, zip_bytes: []const u8, fil
     defer infra_fs.cwd().deleteFile(tmp_zip) catch |e| log.warn("rm {s}: {s}", .{ tmp_zip, @errorName(e) });
 
     const tmp_dir = std.fmt.allocPrint(allocator, tmp_extract_template, .{ clock.milliTimestamp(), nextTmpSeq() }) catch return null;
-    defer {
-        _ = std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "rm", "-rf", tmp_dir } }) catch |e|
-            log.warn("cleanup {s}: {s}", .{ tmp_dir, @errorName(e) });
-    }
+    defer cleanupExtractDir(allocator, tmp_dir);
 
-    const unzip_result = std.process.Child.run(.{
-        .allocator = allocator,
+    const unzip_result = std.process.run(allocator, infra_fs.currentIo(), .{
         .argv = &.{ "unzip", "-o", "-q", tmp_zip, "-d", tmp_dir },
+        .stdout_limit = .limited(process_output_bytes),
+        .stderr_limit = .limited(process_output_bytes),
     }) catch return null;
-    if (unzip_result.term != .Exited or unzip_result.term.Exited != 0) return null;
+    defer deinitProcessResult(allocator, unzip_result);
+    if (!unzip_result.term.success()) return null;
 
-    const find_result = std.process.Child.run(.{
-        .allocator = allocator,
+    const find_result = std.process.run(allocator, infra_fs.currentIo(), .{
         .argv = &.{ "find", tmp_dir, "-type", "f" },
+        .stdout_limit = .limited(process_output_bytes),
+        .stderr_limit = .limited(process_output_bytes),
     }) catch return null;
+    defer deinitProcessResult(allocator, find_result);
 
     var it = std.mem.splitScalar(u8, find_result.stdout, '\n');
     while (it.next()) |line| {
@@ -265,6 +269,23 @@ pub fn extractStepBytes(allocator: std.mem.Allocator, zip_bytes: []const u8, fil
         }
     }
     return null;
+}
+
+fn deinitProcessResult(allocator: std.mem.Allocator, result: std.process.RunResult) void {
+    allocator.free(result.stdout);
+    allocator.free(result.stderr);
+}
+
+fn cleanupExtractDir(allocator: std.mem.Allocator, tmp_dir: []const u8) void {
+    const result = std.process.run(allocator, infra_fs.currentIo(), .{
+        .argv = &.{ "rm", "-rf", tmp_dir },
+        .stdout_limit = .limited(process_output_bytes),
+        .stderr_limit = .limited(process_output_bytes),
+    }) catch |e| {
+        log.warn("cleanup {s}: {s}", .{ tmp_dir, @errorName(e) });
+        return;
+    };
+    deinitProcessResult(allocator, result);
 }
 
 /// POST /api/upload-zip — accept a KiCad library zip (must contain a
@@ -460,14 +481,14 @@ fn renderComponentSexp(
     pinout_name: []const u8,
     footprint_name: []const u8,
     sym_data: []const u8,
-) std.mem.Allocator.Error![]const u8 {
+) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
     const raw_desc = extractFirstProperty(sym_data, &.{ "ki_description", "Description", "Value" }) orelse safe_name;
     const description = try cleanDescription(allocator, raw_desc);
     const manufacturer = extractFirstProperty(sym_data, &.{ "Manufacturer_Name", "Manufacturer", "MANUFACTURER", "MF" });
     const mpn = extractFirstProperty(sym_data, &.{ "Manufacturer_Part_Number", "MPN", "MP" });
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     try w.print("(component \"{s}\"\n", .{safe_name});
     try w.print("  (description \"{s}\")\n", .{description});
     // Names are always quoted: purely-numeric names (e.g. "2049280301") would
@@ -477,7 +498,7 @@ fn renderComponentSexp(
     if (manufacturer) |m| try w.print("\n  (manufacturer \"{s}\")", .{m});
     if (mpn) |m| try w.print("\n  (mpn \"{s}\")", .{m});
     try w.writeAll(")\n");
-    return buf.items;
+    return buf.written();
 }
 
 /// Write a `(component ...)` definition to lib/components/<safe_name>.sexp,

@@ -173,7 +173,7 @@ test "leak: history listSnapshots empty-history path frees dir_path" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const project = try tmp.dir.realpathAlloc(a, ".");
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
     defer a.free(project);
 
     const snaps = try history.listSnapshots(a, project, "nope");
@@ -189,12 +189,12 @@ test "leak: history listSnapshots dupes ids + notes, caller frees each" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("history/widget/2026-06-16T10-00-00");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "history/widget/2026-06-16T10-00-00");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "history/widget/2026-06-16T10-00-00/.note",
         .data = "manual save",
     });
-    const project = try tmp.dir.realpathAlloc(a, ".");
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
     defer a.free(project);
 
     const snaps = try history.listSnapshots(a, project, "widget");
@@ -265,8 +265,8 @@ test "leak: modules collectModules under arena contract" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/modules");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/modules/buck.sexp",
         .data =
         \\(defmodule buck (rfbt rfbb)
@@ -274,7 +274,7 @@ test "leak: modules collectModules under arena contract" {
         \\  (design-block "Buck"))
         ,
     });
-    const project = try tmp.dir.realpathAlloc(a, ".");
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
 
     const entries = try modules.collectModules(a, project);
     try std.testing.expectEqual(@as(usize, 1), entries.len);
@@ -290,7 +290,7 @@ test "leak: modules collectModules missing-dir returns empty" {
     const a = arena.allocator();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const project = try tmp.dir.realpathAlloc(a, ".");
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
     const entries = try modules.collectModules(a, project);
     try std.testing.expectEqual(@as(usize, 0), entries.len);
 }
@@ -312,9 +312,9 @@ test "leak: design_diff diffBlocks scratch reclaimed by arena" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0402.sexp", .data = test_cap_family });
-    const project = try tmp.dir.realpathAlloc(a, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/cap-0402.sexp", .data = test_cap_family });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
 
     var old_eval = Evaluator.init(a, project);
     defer old_eval.deinit();

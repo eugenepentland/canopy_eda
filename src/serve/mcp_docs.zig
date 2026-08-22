@@ -79,6 +79,18 @@ fn objStr(o: std.json.ObjectMap, key: []const u8) []const u8 {
     return if (o.get(key)) |v| asStr(v) else "";
 }
 
+/// A parameter's JSON Schema `type`, rendered for the docs table: a plain
+/// string type as-is, a union (`"type":["array","string"]`) as its member
+/// names joined with `|` ("array|string"). Members project through `asStr`,
+/// so a malformed entry degrades to "" rather than failing the page.
+fn typeStr(arena: std.mem.Allocator, pobj: std.json.ObjectMap) ![]const u8 {
+    const v = pobj.get("type") orelse return "";
+    const arr = asArray(v) orelse return asStr(v);
+    var names: std.ArrayList([]const u8) = .empty;
+    for (arr.items) |x| try names.append(arena, asStr(x));
+    return std.mem.join(arena, "|", names.items);
+}
+
 /// Parse `tools_list_result.json` and project it into `[]ToolDoc`. Allocations
 /// (parse tree + model) all come from `arena`; the caller owns nothing
 /// individually and frees by dropping the arena.
@@ -135,7 +147,7 @@ fn buildParams(arena: std.mem.Allocator, tool_obj: std.json.ObjectMap) ![]ParamD
         }
         try out.append(arena, .{
             .name = pname,
-            .type_str = objStr(pobj, "type"),
+            .type_str = try typeStr(arena, pobj),
             .required = required.contains(pname),
             .description = objStr(pobj, "description"),
             .enum_values = enums,
@@ -159,11 +171,11 @@ fn buildExample(arena: std.mem.Allocator, name: []const u8, params: []const Para
     for (params) |p| {
         if (p.required) required_count += 1;
     }
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
     if (required_count == 0) {
         try w.print("{s} {{}}", .{name});
-        return buf.items;
+        return buf.written();
     }
     try w.print("{s} {{\n", .{name});
     var emitted: usize = 0;
@@ -174,7 +186,7 @@ fn buildExample(arena: std.mem.Allocator, name: []const u8, params: []const Para
         try w.print("  \"{s}\": {s}{s}\n", .{ p.name, placeholderFor(p.type_str), comma });
     }
     try w.writeAll("}");
-    return buf.items;
+    return buf.written();
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -191,6 +203,13 @@ fn hasRequiredParam(tool: ToolDoc, name: []const u8) bool {
         if (std.mem.eql(u8, p.name, name)) return p.required;
     }
     return false;
+}
+
+fn paramTypeStr(tool: ToolDoc, name: []const u8) []const u8 {
+    for (tool.params) |p| {
+        if (std.mem.eql(u8, p.name, name)) return p.type_str;
+    }
+    return "";
 }
 
 test "buildToolDocs parses every tool from the embedded schema" {
@@ -248,4 +267,25 @@ test "buildExample emits required params with placeholders" {
         "get_thing {\n  \"name\": \"...\",\n  \"page\": 0\n}",
         ex,
     );
+}
+
+test "typeStr joins union types with a pipe" {
+    // spec: serve/mcp_docs - union-typed params render joined type names in the docs table
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tools = try buildToolDocs(arena.allocator());
+
+    // route_order_search.nets declares `"type":["array","string"]`.
+    const ros = findTool(tools, "route_order_search").?;
+    try std.testing.expectEqualStrings("array|string", paramTypeStr(ros, "nets"));
+
+    // A single string type renders as-is.
+    const dc = findTool(tools, "describe_component").?;
+    try std.testing.expectEqualStrings("string", paramTypeStr(dc, "name"));
+
+    // placement_sensitivity.refs is a REQUIRED union param, so it reaches the
+    // example builder — where it keeps the quoted-string placeholder.
+    const ps = findTool(tools, "placement_sensitivity").?;
+    try std.testing.expect(hasRequiredParam(ps, "refs"));
+    try std.testing.expect(std.mem.indexOf(u8, ps.example, "\"refs\": \"...\"") != null);
 }

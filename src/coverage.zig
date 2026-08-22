@@ -21,6 +21,7 @@
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
 const req_checks = @import("req_checks.zig");
+const component_classification = @import("component_classification.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
 const Instance = env_mod.Instance;
@@ -104,7 +105,7 @@ pub fn computeInstanceCoverage(
     if (env_mod.isTestPoint(inst.component)) return null;
     if (inst.requirements_ignored) return null;
     if (inst.ref_des.len == 0) return null;
-    const class = classifyByRefDes(inst.ref_des);
+    const class: ComponentClass = if (component_classification.isActiveSemiconductor(inst)) .ic else .passive;
 
     var checks: std.ArrayList(CheckResult) = .empty;
     try checks.append(allocator, .{ .category = .value, .ok = inst.value.len > 0 });
@@ -113,7 +114,7 @@ pub fn computeInstanceCoverage(
     if (class == .ic) {
         try checks.append(allocator, .{ .category = .mpn, .ok = hasProperty(inst, "mpn") });
         try checks.append(allocator, .{ .category = .manufacturer, .ok = hasProperty(inst, "manufacturer") });
-        try checks.append(allocator, .{ .category = .datasheet, .ok = inst.datasheets.len > 0 });
+        try checks.append(allocator, .{ .category = .datasheet, .ok = inst.docs.datasheets.len > 0 });
         // Only ask about requirements_verified when the library actually
         // declared rules to verify — ICs without any `(requirement …)`
         // forms are already surfaced separately by the `missing_requirements` ERC check.
@@ -294,16 +295,9 @@ fn rollUpInstances(instances: []const InstanceCoverage) SectionCoverage {
     return sc;
 }
 
-/// Hub/passive classification by ref-des prefix (passives R/C/L/F/D versus
-/// everything else). Mirrors `render_svg.draw.isHub` and `erc.isActiveIcRefDes`;
-/// kept local so coverage.zig has no cross-module dependency.
-fn classifyByRefDes(ref_des: []const u8) ComponentClass {
-    return switch (ref_des[0]) {
-        'R', 'C', 'L', 'F', 'D' => .passive,
-        else => .ic,
-    };
-}
-
+/// True when `inst` carries `key` as a property with a non-empty value. This is
+/// the "field is filled in" test behind the `mpn` and `manufacturer` coverage
+/// categories; a property present but empty counts as missing.
 fn hasProperty(inst: Instance, key: []const u8) bool {
     for (inst.properties) |p| {
         if (std.mem.eql(u8, p.key, key) and p.value.len > 0) return true;
@@ -386,7 +380,7 @@ test "computeInstanceCoverage IC needs MPN/manufacturer/datasheet/requirements" 
         .footprint = "tfbga-225",
         .symbol = "",
         .properties = &props_full,
-        .datasheets = &datasheets,
+        .docs = .{ .datasheets = &datasheets },
         .requirements = &reqs,
     };
     const cov_full = (try computeInstanceCoverage(alloc, u1_inst, &results_pass)) orelse return error.TestUnexpectedResult;
@@ -403,7 +397,7 @@ test "computeInstanceCoverage IC needs MPN/manufacturer/datasheet/requirements" 
         .footprint = "tfbga-225",
         .symbol = "",
         .properties = &props_no_mpn,
-        .datasheets = &datasheets,
+        .docs = .{ .datasheets = &datasheets },
         .requirements = &reqs,
     };
     const cov_no_mpn = (try computeInstanceCoverage(alloc, u1_no_mpn, &results_pass)) orelse return error.TestUnexpectedResult;
@@ -419,7 +413,7 @@ test "computeInstanceCoverage IC needs MPN/manufacturer/datasheet/requirements" 
         .footprint = "tfbga-225",
         .symbol = "",
         .properties = &props_full,
-        .datasheets = &.{},
+        .docs = .{},
         .requirements = &reqs,
     };
     const cov_no_ds = (try computeInstanceCoverage(alloc, u1_no_ds, &results_pass)) orelse return error.TestUnexpectedResult;
@@ -543,7 +537,7 @@ test "computeOverallCoverage walks sub-blocks" {
         .footprint = "fp",
         .symbol = "",
         .properties = &props_full,
-        .datasheets = &datasheets,
+        .docs = .{ .datasheets = &datasheets },
     };
     // Sub-block: U2 is missing manufacturer.
     const u2_inst = Instance{
@@ -553,7 +547,7 @@ test "computeOverallCoverage walks sub-blocks" {
         .footprint = "fp",
         .symbol = "",
         .properties = &props_no_mfr,
-        .datasheets = &datasheets,
+        .docs = .{ .datasheets = &datasheets },
     };
     const top_insts = [_]Instance{u1_inst};
     const sub_insts = [_]Instance{u2_inst};

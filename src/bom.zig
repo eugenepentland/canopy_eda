@@ -36,8 +36,8 @@ const uuid_byte_15: usize = 15;
 /// Error set for BOM loading and application. Covers parser-side errors,
 /// the file IO surface infra_fs.cwd() exposes, and `OutOfMemory`.
 pub const BomError = std.mem.Allocator.Error ||
-    std.fs.File.OpenError ||
-    std.fs.File.ReadError ||
+    infra_fs.File.OpenError ||
+    infra_fs.File.ReadError ||
     error{ FileTooBig, StreamTooLong, EndOfStream };
 
 /// A single BOM entry: ref_des → UUID + component + properties.
@@ -171,7 +171,6 @@ pub fn collectFlatInstances(
     block: *const DesignBlock,
     prefix: []const u8,
     list: *std.ArrayList(FlatInfo),
-    ref_style: env_mod.RefStyle,
 ) std.mem.Allocator.Error!void {
     var net_map = std.StringHashMapUnmanaged(std.ArrayList([]const u8)).empty;
     defer {
@@ -190,9 +189,7 @@ pub fn collectFlatInstances(
     }
 
     for (block.instances) |inst| {
-        // Grouped-refdes makes ref-deses globally unique → drop the redundant
-        // sub-block path prefix so the BOM key is the bare `R1_1`, not `a/R1_1`.
-        const ref = if (prefix.len > 0 and ref_style == .hierarchical)
+        const ref = if (prefix.len > 0)
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, inst.ref_des })
         else
             try allocator.dupe(u8, inst.ref_des);
@@ -220,14 +217,14 @@ pub fn collectFlatInstances(
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name })
         else
             try allocator.dupe(u8, sb.name);
-        try collectFlatInstances(allocator, sb.block, sub_prefix, list, ref_style);
+        try collectFlatInstances(allocator, sb.block, sub_prefix, list);
     }
 }
 
 /// Generate a v4 UUID string (lowercase hex with dashes).
-pub fn generateUuid(allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+pub fn generateUuid(allocator: std.mem.Allocator) (std.mem.Allocator.Error || std.Io.RandomSecureError)![]const u8 {
     var bytes: [16]u8 = undefined;
-    infra_random.bytes(&bytes);
+    try infra_random.bytes(&bytes);
     bytes[uuid_version_byte] = (bytes[uuid_version_byte] & 0x0f) | 0x40;
     bytes[uuid_variant_byte] = (bytes[uuid_variant_byte] & 0x3f) | 0x80;
 

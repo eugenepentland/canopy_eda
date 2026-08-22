@@ -1,0 +1,4 @@
+toolchain	commit	tests	cache_state	test_wall_seconds	command_wall_seconds	test_compile_seconds	max_rss_kib	exit	note
+0.15.1	414c359e	2527	prior_final	154.54				0	pre-port Debug execution reported by Guardian timing table
+0.17.0-dev.1683+5ceec001b	80bfbd85+seed-meta-fix	2538	fresh_local_and_global	65.44	172.84	10	1017388	0	outside network sandbox; machine-wide gate lock; seed 1
+0.17.0-dev.1683+5ceec001b	80bfbd85+seed-meta-fix	2538	unchanged_warm	cached	2.62	cached	387680	0	test run step cache hit; seed 1

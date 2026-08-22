@@ -48,16 +48,43 @@ const HtmlCacheEntry = struct {
     live_version: u32,
 };
 
-var html_cache_mutex: std.Thread.Mutex = .{};
+var html_cache_mutex: infra_fs.Mutex = .{};
 var html_cache: std.StringHashMapUnmanaged(HtmlCacheEntry) = .empty;
+
+const CacheIdent = struct {
+    name: []const u8,
+    view: render_html.SchematicView,
+    /// `?embed=1` changes the emitted body class, so it is a different
+    /// document and must not share a cache slot with the full page.
+    embed: bool = false,
+};
 
 /// Return a request-arena copy of the cached HTML for `name` when a valid entry
 /// exists (read-set unchanged and live version matches), else null. Validation
 /// and the dup happen under the lock so a concurrent put can't free the body.
-fn htmlCacheGet(arena: std.mem.Allocator, name: []const u8, live_version: u32) ?[]const u8 {
+fn htmlCacheKey(
+    allocator: std.mem.Allocator,
+    ident: CacheIdent,
+) std.mem.Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}?view={s}{s}", .{
+        ident.name,
+        @tagName(ident.view),
+        if (ident.embed) "&embed=1" else "",
+    });
+}
+
+fn htmlCacheGet(
+    arena: std.mem.Allocator,
+    name: []const u8,
+    schematic_view: render_html.SchematicView,
+    embed: bool,
+    live_version: u32,
+) ?[]const u8 {
+    const key = htmlCacheKey(arena, .{ .name = name, .view = schematic_view, .embed = embed }) catch return null;
+    defer arena.free(key);
     html_cache_mutex.lock();
     defer html_cache_mutex.unlock();
-    const e = html_cache.getPtr(name) orelse return null;
+    const e = html_cache.getPtr(key) orelse return null;
     if (e.live_version != live_version or !e.files.isValid()) return null;
     return arena.dupe(u8, e.html) catch null;
 }
@@ -68,16 +95,22 @@ fn htmlCachePut(
     scratch: std.mem.Allocator,
     eval: *const Evaluator,
     project_dir: []const u8,
-    name: []const u8,
+    ident: CacheIdent,
     html: []const u8,
     live_version: u32,
 ) void {
-    const files = page_cache.capture(scratch, eval, project_dir, name) catch return;
+    const files = page_cache.capture(scratch, eval, project_dir, ident.name) catch return;
     const body = page.dupe(u8, html) catch {
         files.deinit();
         return;
     };
-    const key = page.dupe(u8, name) catch {
+    const scratch_key = htmlCacheKey(scratch, ident) catch {
+        files.deinit();
+        page.free(body);
+        return;
+    };
+    defer scratch.free(scratch_key);
+    const key = page.dupe(u8, scratch_key) catch {
         files.deinit();
         page.free(body);
         return;
@@ -142,16 +175,29 @@ pub fn schematicPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
     const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(board_path);
 
+    const schematic_view = if (req.query()) |query|
+        render_html.parseSchematicView(query.get("view"))
+    else |_|
+        .functional;
+
+    // `?embed=1` drops the page chrome so the document reads as a pane inside
+    // another surface (the assembly workspace's schematic split). Content is
+    // otherwise identical, so it is only a body class away from the full page.
+    const embed = if (req.query()) |query| blk: {
+        const raw = query.get("embed") orelse break :blk false;
+        break :blk !(raw.len == 0 or std.mem.eql(u8, raw, "0"));
+    } else |_| false;
+
     // A module name typed into a design URL: render the module in place via the
     // module renderer, so designs and modules open from the same address shape
     // with no redirect hop. (The module chrome's own links stay at /modules/.)
-    if (isModuleOnly(ctx, name, board_path)) return modules_page.renderModulePage(ctx, res, name);
+    if (isModuleOnly(ctx, name, board_path)) return modules_page.renderModulePage(ctx, res, name, schematic_view);
 
     // Serve the cached render when the design's source files are unchanged.
     // Capture the live version *before* evaluating so a bump mid-eval is
     // correctly treated as a miss on the next load rather than baked in.
     const live_version = serve_root.getLiveVersion(name);
-    if (htmlCacheGet(ctx.allocator, name, live_version)) |cached| {
+    if (htmlCacheGet(ctx.allocator, name, schematic_view, embed, live_version)) |cached| {
         res.content_type = .HTML;
         res.body = cached;
         return;
@@ -206,8 +252,13 @@ pub fn schematicPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
     // (summary, power budget/sequencing, test points, ERC, assertions) below
     // the section cards so a single URL covers both "what it is" and
     // "whether it's correct."
+    //
+    // `buildReview` is a pure read of the block, which is the whole point: this
+    // page renders the design's `.sexp` and nothing else. The thermal panel used
+    // to be attached here from the saved layouts, and that one call made a cold
+    // barracuda render parse 6.7 MB of routed copper to read a few kilobytes of
+    // part poses. Thermal lives at `/thermal/:name` now — a nav tab away.
     const review_doc: ?review.ReviewDoc = review.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results) catch null;
-
     const html = render_html.renderToHtml(
         ctx.allocator,
         block,
@@ -217,14 +268,14 @@ pub fn schematicPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         status,
         review_doc,
         &check_results,
-        "/schematics/",
+        .{ .path = "/schematics/", .view = schematic_view, .embed = embed },
     ) catch |err| {
         res.status = 500;
         res.body = try std.fmt.allocPrint(ctx.allocator, "Render error: {s}", .{@errorName(err)});
         return;
     };
 
-    htmlCachePut(ctx.allocator, &eval, ctx.project_dir, name, html, live_version);
+    htmlCachePut(ctx.allocator, &eval, ctx.project_dir, .{ .name = name, .view = schematic_view, .embed = embed }, html, live_version);
 
     res.content_type = .HTML;
     res.body = html;
@@ -245,4 +296,30 @@ fn computeStatus(violations: []const erc_mod.Violation, assertions: []const env_
     if (has_err) return .fail;
     if (has_warn) return .warn;
     return .pass;
+}
+
+// spec: Web Server - the schematic page HTML cache keys the embedded pane apart from the full page
+test "schematic HTML cache separates the embedded pane from the full page" {
+    const testing = std.testing;
+    const full = try htmlCacheKey(testing.allocator, .{ .name = "demo", .view = .functional });
+    defer testing.allocator.free(full);
+    const embedded = try htmlCacheKey(testing.allocator, .{ .name = "demo", .view = .functional, .embed = true });
+    defer testing.allocator.free(embedded);
+    // Same design, same view, different document — the body class differs, so
+    // sharing a slot would serve full-page chrome into the assembly pane (or
+    // strip it from the full page, depending on which request landed first).
+    try testing.expectEqualStrings("demo?view=functional", full);
+    try testing.expectEqualStrings("demo?view=functional&embed=1", embedded);
+}
+
+test "schematic HTML cache separates original and functional views" {
+    const testing = std.testing;
+    const original = try htmlCacheKey(testing.allocator, .{ .name = "demo", .view = .original });
+    defer testing.allocator.free(original);
+    const functional = try htmlCacheKey(testing.allocator, .{ .name = "demo", .view = .functional });
+    defer testing.allocator.free(functional);
+
+    try testing.expectEqualStrings("demo?view=original", original);
+    try testing.expectEqualStrings("demo?view=functional", functional);
+    try testing.expect(!std.mem.eql(u8, original, functional));
 }

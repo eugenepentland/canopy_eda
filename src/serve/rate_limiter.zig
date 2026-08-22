@@ -9,13 +9,14 @@
 
 const std = @import("std");
 const clock = @import("../infra/clock.zig");
+const infra_fs = @import("../infra/fs.zig");
 const config = @import("../config.zig");
 
 /// A minimum-interval + max-in-flight gate. Conservative compile-time defaults
 /// apply until `configureFromEnv` overrides them at server startup.
 pub const RateLimiter = struct {
-    mutex: std.Thread.Mutex = .{},
-    cond: std.Thread.Condition = .{},
+    mutex: infra_fs.Mutex = .{},
+    cond: infra_fs.Condition = .{},
     /// Minimum spacing between successive call *starts*.
     min_interval_ns: u64,
     /// Maximum number of calls allowed in flight at once.
@@ -35,7 +36,11 @@ pub const RateLimiter = struct {
 
     /// Block until a slot is free and the minimum interval since the last start
     /// has elapsed, then claim the slot. Always paired with `release()`.
-    pub fn acquire(self: *RateLimiter) void {
+    pub fn acquire(self: *RateLimiter) std.Io.Cancelable!void {
+        return self.acquireWithSleeper(clock.sleep);
+    }
+
+    fn acquireWithSleeper(self: *RateLimiter, sleeper: anytype) std.Io.Cancelable!void {
         self.mutex.lock();
         while (self.in_flight >= self.max_in_flight) self.cond.wait(&self.mutex);
         self.in_flight += 1;
@@ -47,7 +52,10 @@ pub const RateLimiter = struct {
         const wait_ns: u64 = if (start_at > now) @intCast(start_at - now) else 0;
         self.mutex.unlock();
         // Wait off-lock so other callers can queue / release while we wait.
-        if (wait_ns > 0) clock.sleep(wait_ns);
+        if (wait_ns > 0) sleeper(wait_ns) catch {
+            self.release();
+            return error.Canceled;
+        };
     }
 
     /// Free the slot claimed by `acquire()` and wake one waiter.
@@ -82,8 +90,8 @@ const testing = std.testing;
 // spec: serve/rate_limiter - acquire/release pair leaves no slots held
 test "RateLimiter acquire/release balance to zero in flight" {
     var rl = RateLimiter.init(0, 2);
-    rl.acquire();
-    rl.acquire();
+    try rl.acquire();
+    try rl.acquire();
     rl.release();
     rl.release();
     try testing.expectEqual(@as(u32, 0), rl.in_flight);
@@ -93,9 +101,9 @@ test "RateLimiter acquire/release balance to zero in flight" {
 test "RateLimiter spaces sequential starts by the min interval" {
     var rl = RateLimiter.init(40, 1);
     const t0 = clock.nanoTimestamp();
-    rl.acquire(); // first start: immediate
+    try rl.acquire(); // first start: immediate
     rl.release();
-    rl.acquire(); // second start: waits ~one interval
+    try rl.acquire(); // second start: waits ~one interval
     rl.release();
     const elapsed_ms = @divTrunc(clock.nanoTimestamp() - t0, clock.ns_per_ms);
     try testing.expect(elapsed_ms >= 30); // generous lower bound (interval is 40ms)
@@ -104,20 +112,32 @@ test "RateLimiter spaces sequential starts by the min interval" {
 // spec: serve/rate_limiter - acquire blocks a caller once max_in_flight is reached until a release
 test "RateLimiter blocks when at capacity until a slot frees" {
     var rl = RateLimiter.init(0, 1);
-    rl.acquire(); // hold the only slot
+    try rl.acquire(); // hold the only slot
     var acquired_at: i128 = 0;
     const Worker = struct {
         fn run(limiter: *RateLimiter, out: *i128) void {
-            limiter.acquire();
+            limiter.acquire() catch return;
             out.* = clock.nanoTimestamp();
             limiter.release();
         }
     };
     const t = try std.Thread.spawn(.{}, Worker.run, .{ &rl, &acquired_at });
-    clock.sleep(25 * clock.ns_per_ms);
+    try clock.sleep(25 * clock.ns_per_ms);
     const released_at = clock.nanoTimestamp();
     rl.release(); // let the worker through
     t.join();
     // The worker could only acquire after we released the held slot.
     try testing.expect(acquired_at >= released_at);
+}
+
+test "RateLimiter releases its claimed slot when interval sleep is canceled" {
+    var rl = RateLimiter.init(1, 1);
+    rl.next_allowed_ns = clock.nanoTimestamp() + clock.ns_per_s;
+    const CancelingSleeper = struct {
+        fn sleep(_: u64) error{Canceled}!void {
+            return error.Canceled;
+        }
+    };
+    try testing.expectError(error.Canceled, rl.acquireWithSleeper(CancelingSleeper.sleep));
+    try testing.expectEqual(@as(u32, 0), rl.in_flight);
 }

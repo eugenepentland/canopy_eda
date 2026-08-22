@@ -11,6 +11,8 @@ const parser_mod = @import("../sexpr/parser.zig");
 const json_writer = @import("../json_writer.zig");
 const escape = @import("../escape.zig");
 const numeric = @import("../numeric.zig");
+const lib_limits = @import("../lib_limits.zig");
+
 /// A datasheet href is safe to emit as a link only if it is a same-origin
 /// path or an http(s) URL. Anything else (`javascript:`, `data:`, …) is
 /// rendered as inert text by the caller.
@@ -30,7 +32,7 @@ const step_ext_len: usize = ".step".len;
 /// (Writer.Error) depending on the call site. Also covers directory
 /// iteration errors surfaced by helpers that scan `lib/`.
 pub const BomError = std.mem.Allocator.Error || std.Io.Writer.Error ||
-    std.fs.Dir.Iterator.Error;
+    infra_fs.Iterator.Error;
 
 /// Check if a ref-des is a standard format (1-2 uppercase letters + digits), e.g. U10, R5.
 fn isStdRefDes(ref: []const u8) bool {
@@ -583,7 +585,7 @@ pub fn footprintHasPads(allocator: std.mem.Allocator, project_dir: []const u8, f
     if (footprint.len == 0) return false;
     const fp_path = std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, footprint }) catch return false;
     defer allocator.free(fp_path);
-    const content = infra_fs.cwd().readFileAlloc(allocator, fp_path, 256 * 1024) catch return false;
+    const content = infra_fs.cwd().readFileAlloc(allocator, fp_path, lib_limits.max_footprint_bytes) catch return false;
     defer allocator.free(content);
     return std.mem.indexOf(u8, content, "(pad ") != null;
 }

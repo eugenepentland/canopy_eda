@@ -18,6 +18,7 @@ const env_mod = @import("../eval/env.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const printer_mod = @import("../sexpr/printer.zig");
 const sexpr_ast = @import("../sexpr/ast.zig");
+const module_metadata = @import("../module_metadata.zig");
 const render_html = @import("../render_html.zig");
 const assets_css = @import("assets_css.zig");
 const mcp_tools = @import("mcp_tools.zig");
@@ -190,6 +191,10 @@ pub const ModuleEntry = struct {
     name: []const u8,
     params: []const u8,
     doc: []const u8,
+    implementation: ?module_metadata.Implementation = null,
+    /// SHA-256 of the complete module source. Consumers can retain it in a
+    /// review/build lock and detect a later implementation drift.
+    source_sha256: [64]u8 = @splat('0'),
     /// True when the defmodule body declares placement-cohesion `(group …)`
     /// forms (the form the rough seed coheres). Drives the home page's
     /// "grouping" tag. Source-derived, so it rides the inventory cache.
@@ -203,12 +208,16 @@ const ModuleMeta = struct {
     params: []const u8 = "",
     doc: []const u8 = "",
     has_groups: bool = false,
+    implementation: ?module_metadata.Implementation = null,
+    source_sha256: [64]u8 = @splat('0'),
 };
 
 /// Parse `(defmodule <name> (<params…>) "<doc>"? …)` out of a module file.
 fn moduleMeta(allocator: std.mem.Allocator, content: []const u8) ModuleMeta {
     const empty: ModuleMeta = .{};
+    const source_meta = module_metadata.parse(allocator, content);
     const nodes = parser_mod.parse(allocator, content) catch return empty;
+    defer parser_mod.freeNodes(allocator, nodes);
     for (nodes) |node| {
         if (!node.isForm("defmodule")) continue;
         const children = node.asList() orelse return empty;
@@ -218,7 +227,14 @@ fn moduleMeta(allocator: std.mem.Allocator, content: []const u8) ModuleMeta {
         if (children.len > 3) {
             if (children[3].asString()) |d| doc = d;
         }
-        return .{ .params = params, .doc = doc, .has_groups = nodeHasCohesionGroup(node) };
+        const implementation = source_meta.implementation;
+        return .{
+            .params = params,
+            .doc = doc,
+            .has_groups = nodeHasCohesionGroup(node),
+            .implementation = implementation,
+            .source_sha256 = source_meta.source_sha256,
+        };
     }
     return empty;
 }
@@ -296,7 +312,7 @@ const ModuleDirStamp = struct {
     valid: bool = false,
 };
 
-var module_cache_mutex: std.Thread.Mutex = .{};
+var module_cache_mutex: infra_fs.Mutex = .{};
 var module_cache_entries: []ModuleEntry = &.{};
 var module_cache_stamp: ModuleDirStamp = .{};
 
@@ -314,7 +330,7 @@ fn moduleDirStamp(scratch: std.mem.Allocator, project_dir: []const u8) ModuleDir
         if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
         stamp.count += 1;
         if (dir.statFile(entry.name)) |st| {
-            if (st.mtime > stamp.max_mtime_ns) stamp.max_mtime_ns = st.mtime;
+            if (st.mtime.nanoseconds > stamp.max_mtime_ns) stamp.max_mtime_ns = st.mtime.nanoseconds;
         } else |_| {}
     }
     return stamp;
@@ -327,6 +343,12 @@ fn dupeModuleEntries(alloc: std.mem.Allocator, src: []const ModuleEntry) std.mem
         .name = try alloc.dupe(u8, e.name),
         .params = try alloc.dupe(u8, e.params),
         .doc = try alloc.dupe(u8, e.doc),
+        .implementation = if (e.implementation) |implementation| .{
+            .component = try alloc.dupe(u8, implementation.component),
+            .policy = implementation.policy,
+            .role = try alloc.dupe(u8, implementation.role),
+        } else null,
+        .source_sha256 = e.source_sha256,
         .has_groups = e.has_groups,
     };
     return out;
@@ -366,6 +388,10 @@ fn cacheModules(entries: []const ModuleEntry, stamp: ModuleDirStamp) void {
         page.free(e.name);
         page.free(e.params);
         page.free(e.doc);
+        if (e.implementation) |implementation| {
+            page.free(implementation.component);
+            page.free(implementation.role);
+        }
     }
     page.free(module_cache_entries);
     module_cache_entries = stored;
@@ -390,7 +416,14 @@ fn collectModulesUncached(allocator: std.mem.Allocator, project_dir: []const u8)
             continue;
         };
         const meta = moduleMeta(allocator, content);
-        try entries.append(allocator, .{ .name = base, .params = meta.params, .doc = meta.doc, .has_groups = meta.has_groups });
+        try entries.append(allocator, .{
+            .name = base,
+            .params = meta.params,
+            .doc = meta.doc,
+            .implementation = meta.implementation,
+            .source_sha256 = meta.source_sha256,
+            .has_groups = meta.has_groups,
+        });
     }
 
     std.mem.sort(ModuleEntry, entries.items, {}, struct {
@@ -449,7 +482,11 @@ pub fn moduleViewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
         res.status = 404;
         return;
     };
-    return renderModulePage(ctx, res, name);
+    const schematic_view = if (req.query()) |query|
+        render_html.parseSchematicView(query.get("view"))
+    else |_|
+        .functional;
+    return renderModulePage(ctx, res, name, schematic_view);
 }
 
 /// Render module `name` as a standalone schematic page (the body of
@@ -459,7 +496,12 @@ pub fn moduleViewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
 /// `/modules/` chrome — falling back to the raw-source view when the module
 /// can't be instantiated or the renderer errors. The `sourceIsSafe` guard is
 /// kept here so both entry points are protected.
-pub fn renderModulePage(ctx: *Server, res: *httpz.Response, name: []const u8) HandlerError!void {
+pub fn renderModulePage(
+    ctx: *Server,
+    res: *httpz.Response,
+    name: []const u8,
+    schematic_view: render_html.SchematicView,
+) HandlerError!void {
     if (!sourceIsSafe(name)) {
         res.status = 400;
         res.body = "bad module name";
@@ -486,7 +528,7 @@ pub fn renderModulePage(ctx: *Server, res: *httpz.Response, name: []const u8) Ha
             .pass,
             null,
             &empty_checks,
-            "/modules/",
+            .{ .path = "/modules/", .view = schematic_view },
         ) catch {
             // Fall through to the source view on a render failure.
             try writeSourceOnlyPage(ctx, res, name, src_path, true);
@@ -573,6 +615,19 @@ test "nodeHasCohesionGroup distinguishes cohesion groups from pin and diagram gr
     // Diagram-layout group: bare-string members, no list → does not count.
     const diagram = try parser_mod.parse(a, "(defmodule m () (design-block \"t\" (diagram-layout (group \"Front\" \"a\" \"b\"))))");
     try std.testing.expect(!nodeHasCohesionGroup(diagram[0]));
+}
+
+test "moduleMeta exposes implementation policy role and digest" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const source = "(defmodule buck () \"Power stage\" " ++
+        "(implements chip (policy canonical) (role regulator)) (design-block \"buck\"))";
+    const meta = moduleMeta(arena_state.allocator(), source);
+    try std.testing.expectEqualStrings("Power stage", meta.doc);
+    try std.testing.expectEqualStrings("chip", meta.implementation.?.component);
+    try std.testing.expectEqual(module_metadata.ImplementationPolicy.canonical, meta.implementation.?.policy);
+    try std.testing.expectEqualStrings("regulator", meta.implementation.?.role);
+    try std.testing.expectEqual(@as(usize, 64), meta.source_sha256.len);
 }
 
 // A hostile module `source` must never reach the `<title>`/`<h1>`/`data-src`

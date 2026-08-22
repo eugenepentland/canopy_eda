@@ -9,17 +9,22 @@ const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const na = @import("eval/net_analysis.zig");
+const rails_mod = @import("eval/rails.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const json_writer = @import("json_writer.zig");
 const numeric = @import("numeric.zig");
+const decouple_key = @import("decouple_key.zig");
 const checks = @import("checks.zig");
 const module_policy = @import("placement/module_policy.zig");
 const pin_roles = @import("placement/pin_roles.zig");
 const collect = @import("diagram/collect.zig");
 const lod = @import("diagram/lod.zig");
 const membership = @import("diagram/membership.zig");
+const component_classification = @import("component_classification.zig");
+const canonical_module_check = @import("canonical_module_check.zig");
+const lib_limits = @import("lib_limits.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Net = env_mod.Net;
@@ -50,6 +55,9 @@ pub const ViolationKind = enum {
     voltage_mismatch,
     missing_decoupling,
     decoupling_unbound,
+    invalid_decoupling_binding,
+    invalid_near_binding,
+    invalid_emi_coupling,
     strap_tied_to_rail,
     power_no_cap,
     concept_remaining,
@@ -63,6 +71,7 @@ pub const ViolationKind = enum {
     sequence_cycle,
     voltage_domain_incompatible,
     missing_requirements,
+    direct_component_implementation,
     layout_class_inferred,
     components_not_grouped,
     verification_orphaned,
@@ -94,6 +103,9 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkMissingValues(allocator, block, &violations);
     try checkMissingFootprints(allocator, block, &violations);
     try checkMissingDecoupling(allocator, block, &violations);
+    try checkDecouplingBindingValidity(allocator, block, &violations);
+    try checkNearBindingValidity(allocator, block, &violations);
+    try checkEmiCouplingValidity(allocator, block, &violations);
     if (project_dir.len > 0) try checkDecouplingBinding(allocator, block, project_dir, &violations);
     if (project_dir.len > 0) try checkStrapTies(allocator, block, project_dir, &violations);
     if (project_dir.len > 0) try checkNoConnects(allocator, block, project_dir, &violations);
@@ -106,6 +118,16 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkSequencingCycles(allocator, block, &violations);
     try checkVoltageDomainCompat(allocator, block, &violations);
     try checkMissingRequirements(allocator, block, &violations);
+    if (project_dir.len > 0) {
+        const module_findings = try canonical_module_check.run(allocator, block, project_dir);
+        defer if (module_findings.len > 0) allocator.free(module_findings);
+        for (module_findings) |finding| try violations.append(allocator, .{
+            .kind = .direct_component_implementation,
+            .severity = finding.severity,
+            .message = finding.message,
+            .ref_des = finding.ref_des,
+        });
+    }
     try checkLayoutClasses(allocator, block, &violations);
     try checkComponentGrouping(allocator, block, &violations);
     try checkOrphanedVerifications(allocator, block, &violations);
@@ -116,10 +138,11 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
 
 /// Flag active ICs whose library component declares no `(requirement …)` rules.
 /// Component requirements are the design's record that a part was reviewed
-/// against its datasheet, so every active component must carry at least one —
-/// this is an `error` (fails `netlisp check`, reddens the home-page health chip),
-/// which the schematic page and review doc surface so the author fills it in (or
-/// opts the part out with `(ignore-requirements)`). Scope is the hub class the
+/// against its datasheet, so every active component should carry at least one.
+/// Missing documentation is a coverage `warning`, not an electrical design
+/// error: `netlisp check` still surfaces it without failing an otherwise valid
+/// board. The author can fill it in or explicitly opt the part out with
+/// `(ignore-requirements)`. Scope is the hub class the
 /// schematic renders as boxes (ICs, transistors — `isActiveIcRefDes`); passive
 /// spokes (R/C/L/F/D), `(ignore-requirements)` parts, test points, and
 /// passive-class components (ESD arrays, EMI filters) are exempt. Recurses
@@ -141,11 +164,11 @@ fn collectMissingRequirements(
     violations: *std.ArrayList(Violation),
 ) std.mem.Allocator.Error!void {
     for (block.instances) |inst| {
-        if (!isActiveIcRefDes(inst.ref_des)) continue;
         if (inst.component.len == 0) continue;
         if (inst.requirements_ignored) continue;
         if (isPassiveComponent(inst.component)) continue;
         if (env_mod.isTestPoint(inst.component)) continue;
+        if (!component_classification.isActiveSemiconductor(inst)) continue;
         if (inst.requirements.len > 0) continue;
         const gop = try seen.getOrPut(allocator, inst.component);
         if (gop.found_existing) continue;
@@ -157,25 +180,12 @@ fn collectMissingRequirements(
         ) catch continue;
         try violations.append(allocator, .{
             .kind = .missing_requirements,
-            .severity = .@"error",
+            .severity = .warning,
             .message = msg,
             .ref_des = inst.ref_des,
         });
     }
     for (block.sub_blocks) |sb| try collectMissingRequirements(allocator, sb.block, seen, violations);
-}
-
-/// The requirements-warning scope: ICs (`U`) and discrete transistors (`Q`).
-/// Connectors (`J`/`P`/`X`), passives (`R`/`C`/`L`/`F`/`D`), and other
-/// electromechanical / mechanical parts (switches, encoders, crystals, relays,
-/// …) carry no datasheet requirement rules, so they are exempt — only active
-/// semiconductors are nagged to declare requirements.
-fn isActiveIcRefDes(ref_des: []const u8) bool {
-    if (ref_des.len == 0) return false;
-    return switch (ref_des[0]) {
-        'U', 'Q' => true,
-        else => false,
-    };
 }
 
 /// Surface the heuristic net-criticality classification the PCB placer will use,
@@ -947,6 +957,15 @@ fn hasNonEmptyProperty(inst: Instance, key: []const u8) bool {
     return false;
 }
 
+fn propertyValue(inst: Instance, key: []const u8) ?[]const u8 {
+    for (inst.properties) |prop| {
+        if (std.mem.eql(u8, prop.key, key)) return prop.value;
+    }
+    return null;
+}
+
+const emi_couples_property = "emi-couples";
+
 /// Check for instances missing a footprint. Recurses sub-blocks so a
 /// module-internal footprint-less part is flagged too.
 fn checkMissingFootprints(
@@ -991,10 +1010,271 @@ fn checkMissingDecoupling(
 }
 
 /// Bulk-reservoir threshold: caps ≥ 4.7 µF serve the whole rail, not one pin, so
-/// they're exempt from the per-pin binding requirement. Mirrors
-/// `module_policy.BULK_FARADS` (kept local to avoid an eval→placement pub-API
-/// dependency; both are stable physical constants).
-const decouple_bulk_farads: f64 = 4.7e-6;
+/// they're exempt from the per-pin binding requirement. One shared constant with
+/// the module-policy role detector (`decouple_key.bulk_farads`).
+const decouple_bulk_farads: f64 = decouple_key.bulk_farads;
+
+/// Validate the structure of explicit `(decouples …)` declarations. This runs
+/// without library metadata: a binding must name an existing local instance
+/// pad, place the cap's power leg on that pad's rail, and give the cap a return
+/// leg. Previously any non-empty bound pin suppressed the ambiguity rule,
+/// so a typo silently disabled enforcement.
+fn checkDecouplingBindingValidity(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+) !void {
+    for (block.instances) |cap| {
+        if (cap.bind.decouple.pin.len == 0 and !cap.bind.decouple.rail) continue;
+
+        if (na.refDesLocalPrefix(cap.ref_des) != 'C') {
+            try appendInvalidDecouplingBinding(allocator, violations, cap, "only capacitors may use (decouples …)", "");
+            continue;
+        }
+
+        const cap_has_ground = instanceTouchesGround(block, cap.ref_des);
+        if (cap.bind.decouple.rail) {
+            if (!cap_has_ground or instanceNonGroundNet(block, cap.ref_des) == null) {
+                try appendInvalidDecouplingBinding(allocator, violations, cap, "(decouples rail) requires a capacitor between a rail and ground", "");
+            }
+            continue;
+        }
+
+        const host = findLocalInstance(block, cap.bind.decouple.ic) orelse {
+            try appendInvalidDecouplingBinding(allocator, violations, cap, "decoupling target instance does not exist in this block", "");
+            continue;
+        };
+        const target_net = exactNetForPin(block, host.ref_des, cap.bind.decouple.pin) orelse {
+            try appendInvalidDecouplingBinding(allocator, violations, cap, "decoupling target pin is not connected in this block", "");
+            continue;
+        };
+        if (!instanceTouchesAlias(block, cap.ref_des, target_net)) {
+            try appendInvalidDecouplingBinding(allocator, violations, cap, "capacitor is not connected to the target pin's rail", target_net);
+            continue;
+        }
+        if (!cap_has_ground) {
+            try appendInvalidDecouplingBinding(allocator, violations, cap, "capacitor bound to a power pin has no ground return leg", target_net);
+        }
+    }
+
+    for (block.sub_blocks) |sb| {
+        try checkDecouplingBindingValidity(allocator, sb.block, violations);
+    }
+}
+
+fn appendInvalidDecouplingBinding(
+    allocator: std.mem.Allocator,
+    violations: *std.ArrayList(Violation),
+    cap: Instance,
+    reason: []const u8,
+    net: []const u8,
+) !void {
+    const msg = std.fmt.allocPrint(
+        allocator,
+        "Invalid decoupling binding on \"{s}\": {s} (target \"{s}\" pin \"{s}\")",
+        .{ cap.ref_des, reason, cap.bind.decouple.ic, cap.bind.decouple.pin },
+    ) catch return;
+    try violations.append(allocator, .{
+        .kind = .invalid_decoupling_binding,
+        .severity = .@"error",
+        .message = msg,
+        .ref_des = cap.ref_des,
+        .net = na.baseNetName(net),
+    });
+}
+
+/// Ref-des prefixes of the two-terminal passive classes `(near …)` is for:
+/// resistor, capacitor, inductor, ferrite, diode. Anything else declaring an
+/// adjacency is an authoring mistake — the form places ONE leg against ONE pad,
+/// which only means something for a part with legs.
+const near_passive_prefixes = "RCLFD";
+
+/// Validate the structure of explicit `(near "REF" PIN [(own PAD)])`
+/// declarations, the adjacency twin of `checkDecouplingBindingValidity`.
+///
+/// Like that check this runs on the netlist alone, per block and recursing
+/// sub-blocks, so a module's adjacency is judged against its OWN namespace: the
+/// named ref must be a local instance, must not itself be a passive (a part
+/// cannot be placed against a part that is itself being placed against
+/// something), the named pin must carry a net, and the declaring part must
+/// actually sit on that net — an adjacency with no electrical reason is a
+/// placement constraint the router cannot repay.
+///
+/// `(near …)` and `(decouples …)` on one part is an error rather than a merge:
+/// they are different intents (bare adjacency vs. a measured decoupling loop
+/// with a ground return), and the placer would otherwise have two authored
+/// targets for one part with no rule for which wins.
+fn checkNearBindingValidity(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+) !void {
+    for (block.instances) |part| {
+        const nb = part.bind.near;
+        if (nb.ref.len == 0 and nb.pin.len == 0) continue;
+        if (nb.ref.len == 0 or nb.pin.len == 0) {
+            try appendInvalidNearBinding(allocator, violations, part, "(near …) needs both a target ref and a pin", "");
+            continue;
+        }
+        if (std.mem.indexOfScalar(u8, near_passive_prefixes, na.refDesLocalPrefix(part.ref_des)) == null) {
+            try appendInvalidNearBinding(allocator, violations, part, "only two-terminal passives (R/C/L/F/D) may use (near …)", "");
+            continue;
+        }
+        if (part.bind.decouple.pin.len > 0 or part.bind.decouple.rail) {
+            try appendInvalidNearBinding(allocator, violations, part, "(near …) and (decouples …) are mutually exclusive intents", "");
+            continue;
+        }
+        const target = findLocalInstance(block, nb.ref) orelse {
+            try appendInvalidNearBinding(allocator, violations, part, "adjacency target instance does not exist in this block", "");
+            continue;
+        };
+        if (std.mem.indexOfScalar(u8, near_passive_prefixes, na.refDesLocalPrefix(target.ref_des)) != null) {
+            try appendInvalidNearBinding(allocator, violations, part, "adjacency target must not itself be a two-terminal passive", "");
+            continue;
+        }
+        const target_net = exactNetForPin(block, target.ref_des, nb.pin) orelse {
+            try appendInvalidNearBinding(allocator, violations, part, "adjacency target pin is not connected in this block", "");
+            continue;
+        };
+        try checkNearOwnLeg(allocator, block, violations, part, target_net);
+    }
+
+    for (block.sub_blocks) |sb| {
+        try checkNearBindingValidity(allocator, sb.block, violations);
+    }
+}
+
+/// The declaring part's own leg must land on the target pin's net — inferred, or
+/// spelled with `(own PAD)`, in which case that exact pad is what must land there.
+fn checkNearOwnLeg(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+    part: Instance,
+    target_net: []const u8,
+) !void {
+    const own = part.bind.near.own;
+    if (own.len == 0) {
+        if (!instanceTouchesAlias(block, part.ref_des, target_net)) {
+            try appendInvalidNearBinding(allocator, violations, part, "part shares no net with the target pin", target_net);
+        }
+        return;
+    }
+    const own_net = exactNetForPin(block, part.ref_des, own) orelse {
+        try appendInvalidNearBinding(allocator, violations, part, "(own PAD) names a pad that is not connected on this part", target_net);
+        return;
+    };
+    if (!std.mem.eql(u8, na.baseNetName(own_net), na.baseNetName(target_net))) {
+        try appendInvalidNearBinding(allocator, violations, part, "(own PAD) is not on the target pin's net", target_net);
+    }
+}
+
+fn appendInvalidNearBinding(
+    allocator: std.mem.Allocator,
+    violations: *std.ArrayList(Violation),
+    part: Instance,
+    reason: []const u8,
+    net: []const u8,
+) !void {
+    const msg = std.fmt.allocPrint(
+        allocator,
+        "Invalid (near …) binding on \"{s}\": {s} (target \"{s}\" pin \"{s}\")",
+        .{ part.ref_des, reason, part.bind.near.ref, part.bind.near.pin },
+    ) catch return;
+    try violations.append(allocator, .{
+        .kind = .invalid_near_binding,
+        .severity = .@"error",
+        .message = msg,
+        .ref_des = part.ref_des,
+        .net = na.baseNetName(net),
+    });
+}
+
+/// Validate `(emi-couples "CHASSIS_GND")` as a distinct, non-decoupling
+/// capacitor intent. The named domain and a recognised ground return must both
+/// land on the capacitor; mixing it with `(decouples …)` is contradictory.
+fn checkEmiCouplingValidity(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+) !void {
+    for (block.instances) |cap| {
+        const coupled_net = propertyValue(cap, emi_couples_property) orelse continue;
+        var reason: ?[]const u8 = null;
+        if (na.refDesLocalPrefix(cap.ref_des) != 'C') {
+            reason = "only capacitors may use (emi-couples …)";
+        } else if (coupled_net.len == 0) {
+            reason = "a named non-ground coupling domain is required";
+        } else if (cap.bind.decouple.pin.len > 0 or cap.bind.decouple.rail) {
+            reason = "EMI coupling and supply decoupling intents are mutually exclusive";
+        } else if (!instanceTouchesAlias(block, cap.ref_des, coupled_net) or
+            !instanceTouchesGround(block, cap.ref_des))
+        {
+            reason = "capacitor must connect the declared domain to a ground return";
+        }
+        if (reason) |why| {
+            const msg = std.fmt.allocPrint(
+                allocator,
+                "Invalid EMI coupling on \"{s}\": {s} (declared domain \"{s}\")",
+                .{ cap.ref_des, why, coupled_net },
+            ) catch continue;
+            try violations.append(allocator, .{
+                .kind = .invalid_emi_coupling,
+                .severity = .@"error",
+                .message = msg,
+                .ref_des = cap.ref_des,
+            });
+        }
+    }
+    for (block.sub_blocks) |sb| try checkEmiCouplingValidity(allocator, sb.block, violations);
+}
+
+fn findLocalInstance(block: *const DesignBlock, ref_des: []const u8) ?Instance {
+    for (block.instances) |inst| {
+        if (std.mem.eql(u8, inst.ref_des, ref_des)) return inst;
+    }
+    return null;
+}
+
+fn exactNetForPin(block: *const DesignBlock, ref_des: []const u8, pin: []const u8) ?[]const u8 {
+    for (block.nets) |net| {
+        for (net.pins) |pn| {
+            if (std.mem.eql(u8, pn.ref_des, ref_des) and std.mem.eql(u8, pn.pin, pin)) return net.name;
+        }
+    }
+    return null;
+}
+
+fn instanceTouchesAlias(block: *const DesignBlock, ref_des: []const u8, target_net: []const u8) bool {
+    const target_base = na.baseNetName(target_net);
+    for (block.nets) |net| {
+        if (!std.mem.eql(u8, na.baseNetName(net.name), target_base)) continue;
+        for (net.pins) |pn| {
+            if (std.mem.eql(u8, pn.ref_des, ref_des)) return true;
+        }
+    }
+    return false;
+}
+
+fn instanceTouchesGround(block: *const DesignBlock, ref_des: []const u8) bool {
+    for (block.nets) |net| {
+        if (!pin_roles.isGroundFn(na.baseNetName(net.name))) continue;
+        for (net.pins) |pn| {
+            if (std.mem.eql(u8, pn.ref_des, ref_des)) return true;
+        }
+    }
+    return false;
+}
+
+fn instanceNonGroundNet(block: *const DesignBlock, ref_des: []const u8) ?[]const u8 {
+    for (block.nets) |net| {
+        if (pin_roles.isGroundFn(na.baseNetName(net.name))) continue;
+        for (net.pins) |pn| {
+            if (std.mem.eql(u8, pn.ref_des, ref_des)) return net.name;
+        }
+    }
+    return null;
+}
 
 /// Require every HF decoupling cap on a *multi-supply-pad* rail to declare which
 /// IC pin it serves — the netlist-level twin of the `decouple-unbound` layout
@@ -1019,7 +1299,7 @@ const decouple_bulk_farads: f64 = 4.7e-6;
 ///
 /// Exemptions (no error): bulk reservoirs (≥ 4.7 µF), single-supply-pad rails
 /// (the target is unambiguous), caps already bound via `(decouples …)` /
-/// `decouple_pin`, caps with a per-pin shorthand pad in their `origin_key`, and
+/// a bound pin, caps with a per-pin shorthand pad in their `origin_key`, and
 /// `(decouples rail)` opt-outs. Needs `project_dir` to read `lib/pinouts` +
 /// `lib/components` for the strap classification; skipped when the project
 /// layout is unavailable (caller guards `project_dir.len > 0`).
@@ -1046,9 +1326,12 @@ fn checkBlockDecouplingBinding(
 ) !void {
     for (block.instances) |cap| {
         if (na.refDesLocalPrefix(cap.ref_des) != 'C') continue; // capacitors only
-        // Already bound? (decouples "IC" PIN) → decouple_pin; (decouples rail) →
+        // EMI/chassis coupling is an explicitly different role from supply
+        // bypassing, so it must not inherit the per-supply-pad binding rule.
+        if (propertyValue(cap, emi_couples_property) != null) continue;
+        // Already bound? (decouples "IC" PIN) → bind.decouple.pin; (decouples rail) →
         // rail opt-out; a (decouple … per-pin) cap carries its pad in origin_key.
-        if (cap.decouple_pin.len > 0 or cap.decouple_rail) continue;
+        if (cap.bind.decouple.pin.len > 0 or cap.bind.decouple.rail) continue;
         if (decouplePinFromOrigin(cap.origin_key) != null) continue;
         // Bulk reservoirs serve the whole rail by nature → exempt.
         if (capFarads(cap.value) >= decouple_bulk_farads) continue;
@@ -1172,39 +1455,16 @@ fn rolesFor(
 }
 
 /// The per-pin pad encoded in a `(decouple … per-pin)` child's structural
-/// `origin_key` (`value@PAD#index`); null when there is none. Copy of
-/// `optimizer.decouplePinFromOrigin` (kept local to avoid pulling the optimizer
-/// into the ERC pass).
-fn decouplePinFromOrigin(origin_key: []const u8) ?[]const u8 {
-    const at = std.mem.indexOfScalar(u8, origin_key, '@') orelse return null;
-    const hash = std.mem.indexOfScalarPos(u8, origin_key, at + 1, '#') orelse return null;
-    const pin = origin_key[at + 1 .. hash];
-    return if (pin.len > 0) pin else null;
-}
+/// `origin_key`. Shared with the optimizer and the schematic exporter via
+/// `decouple_key`, which imports nothing but `std` — so reading the key here
+/// still costs the ERC pass no dependency on `src/placement/`.
+const decouplePinFromOrigin = decouple_key.pinFromOrigin;
 
-/// Parse a capacitance string ("100nF", "4.7uF", "10µF") to farads; 0 if
-/// unrecognised. Copy of `module_policy.capValueFarads` (kept local to avoid an
-/// eval→placement pub-API dependency). Accepts the UTF-8 micro sign `µ`
-/// (0xC2 0xB5) as a `u`-equivalent so a hand-typed/imported "10µF" bulk cap
-/// keeps its `decoupling_unbound` bulk-reservoir exemption instead of reading
-/// 0 F (an HF cap) and producing a build-failing false positive.
-fn capFarads(s: []const u8) f64 {
-    var i: usize = 0;
-    while (i < s.len and (std.ascii.isDigit(s[i]) or s[i] == '.')) i += 1;
-    if (i == 0) return 0;
-    const num = std.fmt.parseFloat(f64, s[0..i]) catch return 0;
-    if (i >= s.len) return 0;
-    // UTF-8 `µ` (U+00B5, bytes 0xC2 0xB5) — the micro sign — reads as `u`.
-    if (s[i] == 0xC2 and i + 1 < s.len and s[i + 1] == 0xB5) return num * 1e-6;
-    const mult: f64 = switch (s[i]) {
-        'p', 'P' => 1e-12,
-        'n', 'N' => 1e-9,
-        'u', 'U' => 1e-6,
-        'm' => 1e-3,
-        else => return 0,
-    };
-    return num * mult;
-}
+/// Parse a capacitance string to farads; 0 if unrecognised. Shared with the
+/// module-policy role detector and the schematic bank builder via
+/// `decouple_key`, so the µF/nF reading and the bulk threshold below can no
+/// longer differ between the lint, the exporter and the solver.
+const capFarads = decouple_key.capFarads;
 
 // ── config-strap direct-tie requirement ──────────────────────────────
 
@@ -1518,11 +1778,11 @@ test "config strap tied directly to a rail requires a pull resistor or a blessin
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/pinouts");
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/ic1.sexp", .data = ic1_comp });
-    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/ic1.sexp", .data = ic1_pinout });
-    const path = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/ic1.sexp", .data = ic1_comp });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/ic1.sexp", .data = ic1_pinout });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     const insts = try alloc.alloc(Instance, 3);
     insts[0] = dcInst("U1", "ic1", ""); // EN→VDD unblessed (FLAG); A0→GND blessed (ok)
@@ -1611,11 +1871,11 @@ test "no-connect check tiers floating pads and honours (nc-ok …)" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/pinouts");
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/mcu.sexp", .data = comp });
-    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/mcu.sexp", .data = pinout });
-    const path = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/mcu.sexp", .data = comp });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/mcu.sexp", .data = pinout });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     const insts = try alloc.alloc(Instance, 1);
     insts[0] = dcInst("U1", "mcu", "");
@@ -1665,6 +1925,39 @@ test "no-connect check tiers floating pads and honours (nc-ok …)" {
 
 // ── decoupling-binding requirement tests ─────────────────────────────
 
+// spec: erc - an explicitly signal-typed rated input is not a supply rail and does not require decoupling
+test "rated signal input does not require decoupling" {
+    const allocator = std.testing.allocator;
+    const instances = [_]Instance{.{
+        .ref_des = "U1",
+        .component = "ic",
+        .value = "ic",
+        .footprint = "x",
+        .symbol = "ic",
+    }};
+    const nets = [_]env_mod.Net{.{ .name = "EN", .pins = &.{.{ .ref_des = "U1", .pin = "1" }} }};
+    const ports = [_]env_mod.Port{.{
+        .name = "EN",
+        .net = "EN",
+        .direction = "in",
+        .kind = "signal",
+        .rated_min = 0.0,
+        .rated_max = 5.5,
+    }};
+    const block: DesignBlock = .{
+        .name = "rated control",
+        .instances = &instances,
+        .nets = &nets,
+        .ports = &ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const missing = try na.findMissingDecouplingNets(allocator, &block);
+    defer allocator.free(missing);
+    try std.testing.expectEqual(@as(usize, 0), missing.len);
+}
+
 const test_cap = "cap-0402";
 
 fn dcInst(ref: []const u8, comp: []const u8, value: []const u8) Instance {
@@ -1684,18 +1977,20 @@ fn countKind(violations: []const Violation, kind: ViolationKind) usize {
 // dummy project dir the test uses, so pin_roles is empty (every pad `.other`,
 // i.e. non-strap) ⇒ VDD lands on two supply pads and the binding is ambiguous.
 fn makeDecoupleTestBlock(alloc: std.mem.Allocator) !DesignBlock {
-    const insts = try alloc.alloc(Instance, 6);
+    const insts = try alloc.alloc(Instance, 7);
     insts[0] = dcInst("U1", "somechip", "");
     insts[1] = dcInst("C1", test_cap, "100nF"); // unbound → FLAG
     insts[2] = dcInst("C2", test_cap, "100nF"); // bound via (decouples "U1" 1)
-    insts[2].decouple_pin = "1";
+    insts[2].bind.decouple.pin = "1";
     insts[3] = dcInst("C3", test_cap, "10uF"); // bulk reservoir → exempt
     insts[4] = dcInst("C4", test_cap, "100nF"); // (decouples rail) → exempt
-    insts[4].decouple_rail = true;
+    insts[4].bind.decouple.rail = true;
     insts[5] = dcInst("C5", test_cap, "100nF"); // per-pin shorthand pad in origin_key → exempt
     insts[5].origin_key = "100nF@2#0";
+    insts[6] = dcInst("C6", test_cap, "1nF"); // explicit EMI coupling → exempt
+    insts[6].properties = &.{.{ .key = emi_couples_property, .value = "VDD" }};
 
-    const caps = [_][]const u8{ "C1", "C2", "C3", "C4", "C5" };
+    const caps = [_][]const u8{ "C1", "C2", "C3", "C4", "C5", "C6" };
     var vdd: std.ArrayList(env_mod.PinRef) = .empty;
     var gnd: std.ArrayList(env_mod.PinRef) = .empty;
     try vdd.append(alloc, .{ .ref_des = "U1", .pin = "1" });
@@ -1721,7 +2016,7 @@ fn makeDecoupleTestBlock(alloc: std.mem.Allocator) !DesignBlock {
     };
 }
 
-// spec: erc - an unbound HF decoupling cap on a multi-supply-pad rail is an error, with bound/bulk/rail-optout/per-pin caps exempt
+// spec: erc - an unbound HF decoupling cap on a multi-supply-pad rail is an error, with bound/bulk/rail-optout/per-pin/EMI-coupling caps exempt
 test "decoupling cap on a multi-supply-pad rail requires a pin binding" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1740,6 +2035,195 @@ test "decoupling cap on a multi-supply-pad rail requires a pin binding" {
     }
 }
 
+// spec: erc - explicit decoupling bindings must resolve to the cap's actual rail and return
+test "invalid explicit decoupling bindings are errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const insts = try alloc.alloc(Instance, 5);
+    insts[0] = dcInst("U1", "somechip", "");
+    insts[1] = dcInst("C1", test_cap, "100nF"); // valid
+    insts[1].bind.decouple.ic = "U1";
+    insts[1].bind.decouple.pin = "1";
+    insts[2] = dcInst("C2", test_cap, "100nF"); // host typo
+    insts[2].bind.decouple.ic = "UX";
+    insts[2].bind.decouple.pin = "1";
+    insts[3] = dcInst("C3", test_cap, "100nF"); // pin typo
+    insts[3].bind.decouple.ic = "U1";
+    insts[3].bind.decouple.pin = "99";
+    insts[4] = dcInst("C4", test_cap, "100nF"); // wrong rail
+    insts[4].bind.decouple.ic = "U1";
+    insts[4].bind.decouple.pin = "1";
+
+    const nets = [_]env_mod.Net{
+        .{ .name = "VDD", .pins = &.{
+            .{ .ref_des = "U1", .pin = "1" },
+            .{ .ref_des = "C1", .pin = "1" },
+            .{ .ref_des = "C2", .pin = "1" },
+            .{ .ref_des = "C3", .pin = "1" },
+        } },
+        .{ .name = "AUX", .pins = &.{.{ .ref_des = "C4", .pin = "1" }} },
+        .{ .name = "GND", .pins = &.{
+            .{ .ref_des = "U1", .pin = "2" },
+            .{ .ref_des = "C1", .pin = "2" },
+            .{ .ref_des = "C2", .pin = "2" },
+            .{ .ref_des = "C3", .pin = "2" },
+            .{ .ref_des = "C4", .pin = "2" },
+        } },
+    };
+    const block: DesignBlock = .{
+        .name = "binding validation",
+        .instances = insts,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkDecouplingBindingValidity(alloc, &block, &violations);
+
+    try std.testing.expectEqual(@as(usize, 3), countKind(violations.items, .invalid_decoupling_binding));
+    for (violations.items) |violation| {
+        try std.testing.expectEqual(Severity.@"error", violation.severity);
+        try std.testing.expect(!std.mem.eql(u8, violation.ref_des, "C1"));
+    }
+}
+
+/// A `(near "REF" PIN [(own PAD)])` binding on a fresh fixture instance.
+fn nearInst(ref: []const u8, target: []const u8, pin: []const u8, own: []const u8) Instance {
+    var inst = dcInst(ref, "res-0402", "10k");
+    inst.bind.near = .{ .ref = target, .pin = pin, .own = own };
+    return inst;
+}
+
+// spec: erc - an adjacency binding must name a local non-passive target whose pin shares a net with the declaring passive
+test "invalid adjacency bindings are errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const insts = try alloc.alloc(Instance, 7);
+    insts[0] = dcInst("U1", "somechip", "");
+    insts[1] = nearInst("R1", "U1", "1", ""); // valid: R1 pad 1 is on VDD with U1 pad 1
+    insts[2] = nearInst("R2", "UX", "1", ""); // target does not exist
+    insts[3] = nearInst("R3", "U1", "99", ""); // target pin carries no net
+    insts[4] = nearInst("R4", "U1", "1", ""); // shares no net with the target pin
+    insts[5] = nearInst("R5", "U1", "1", "2"); // (own 2) sits on AUX, not VDD
+    insts[6] = nearInst("R6", "R1", "1", ""); // target is itself a passive
+
+    const nets = [_]env_mod.Net{
+        .{ .name = "VDD", .pins = &.{
+            .{ .ref_des = "U1", .pin = "1" },
+            .{ .ref_des = "R1", .pin = "1" },
+            .{ .ref_des = "R5", .pin = "1" },
+            .{ .ref_des = "R6", .pin = "1" },
+        } },
+        .{ .name = "AUX", .pins = &.{
+            .{ .ref_des = "R4", .pin = "1" },
+            .{ .ref_des = "R5", .pin = "2" },
+        } },
+    };
+    const block: DesignBlock = .{
+        .name = "adjacency validation",
+        .instances = insts,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkNearBindingValidity(alloc, &block, &violations);
+
+    // Five bad bindings; R1 — the only sound one — is never named.
+    try std.testing.expectEqual(@as(usize, 5), countKind(violations.items, .invalid_near_binding));
+    for (violations.items) |violation| {
+        try std.testing.expectEqual(Severity.@"error", violation.severity);
+        try std.testing.expect(!std.mem.eql(u8, violation.ref_des, "R1"));
+    }
+}
+
+// spec: erc - adjacency and decoupling intents are mutually exclusive on one part, and only two-terminal passives may declare adjacency
+test "adjacency conflicts with decoupling and is refused on a non-passive" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const insts = try alloc.alloc(Instance, 3);
+    insts[0] = dcInst("U1", "somechip", "");
+    // A cap carrying BOTH intents: adjacency is bare proximity, decoupling is a
+    // measured loop with a ground return, and the placer has no rule for which
+    // authored target wins.
+    insts[1] = nearInst("C1", "U1", "1", "");
+    insts[1].bind.decouple = .{ .ic = "U1", .pin = "1" };
+    // A second IC declaring adjacency: the form places ONE leg against ONE pad,
+    // which means nothing for a part that is not two-terminal.
+    insts[2] = dcInst("U2", "somechip", "");
+    insts[2].bind.near = .{ .ref = "U1", .pin = "1" };
+
+    const nets = [_]env_mod.Net{.{ .name = "VDD", .pins = &.{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "C1", .pin = "1" },
+        .{ .ref_des = "U2", .pin = "1" },
+    } }};
+    const block: DesignBlock = .{
+        .name = "adjacency exclusivity",
+        .instances = insts,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkNearBindingValidity(alloc, &block, &violations);
+
+    try std.testing.expectEqual(@as(usize, 2), countKind(violations.items, .invalid_near_binding));
+    for (violations.items) |violation| try std.testing.expectEqual(Severity.@"error", violation.severity);
+}
+
+// spec: erc - EMI coupling intent must bridge its declared domain to ground and cannot also claim supply decoupling
+test "invalid EMI coupling declarations are errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const insts = try alloc.alloc(Instance, 3);
+    insts[0] = dcInst("C1", test_cap, "1nF"); // valid
+    insts[0].properties = &.{.{ .key = "emi-couples", .value = "CHASSIS_GND" }};
+    insts[1] = dcInst("C2", test_cap, "1nF"); // wrong endpoint
+    insts[1].properties = &.{.{ .key = "emi-couples", .value = "SHIELD" }};
+    insts[2] = dcInst("C3", test_cap, "1nF"); // contradictory intent
+    insts[2].properties = &.{.{ .key = "emi-couples", .value = "CHASSIS_GND" }};
+    insts[2].bind.decouple.rail = true;
+    const nets = [_]env_mod.Net{
+        .{ .name = "CHASSIS_GND", .pins = &.{
+            .{ .ref_des = "C1", .pin = "1" },
+            .{ .ref_des = "C2", .pin = "1" },
+            .{ .ref_des = "C3", .pin = "1" },
+        } },
+        .{ .name = "GND", .pins = &.{
+            .{ .ref_des = "C1", .pin = "2" },
+            .{ .ref_des = "C2", .pin = "2" },
+            .{ .ref_des = "C3", .pin = "2" },
+        } },
+    };
+    const block: DesignBlock = .{
+        .name = "emi",
+        .instances = insts,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkEmiCouplingValidity(alloc, &block, &violations);
+    try std.testing.expectEqual(@as(usize, 2), countKind(violations.items, .invalid_emi_coupling));
+}
+
 // spec: erc - config straps tied to the rail are excluded from the supply-pad count, like the placer's hubTargets
 test "decoupling-binding excludes config straps from the supply-pad count" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1754,11 +2238,11 @@ test "decoupling-binding excludes config straps from the supply-pad count" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/pinouts");
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/reg1.sexp", .data = reg1_comp });
-    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/reg1.sexp", .data = reg1_pinout });
-    const path = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/reg1.sexp", .data = reg1_comp });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/reg1.sexp", .data = reg1_pinout });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     const insts = try alloc.alloc(Instance, 3);
     insts[0] = dcInst("U1", "reg1", "");
@@ -1919,13 +2403,14 @@ fn partPowerPins(
 /// Read `<project_dir>/lib/pinouts/<lookup>.sexp` and report whether any pin's
 /// function name reads as a supply / as a ground. Only the function name (the
 /// third element of each `(pin <id> "<fn>" …)`) is inspected — the pad id is
-/// ignored, so the bare-integer form `(pin 1 "VCC")` works the same as the
-/// alphanumeric `(pin A1 "VDD")` form (unlike `loadPinoutMap`, which keys on the
-/// pad id and drops integer pads). Null on any read/parse failure so the caller
-/// falls back to the strict "expect both" default.
+/// deliberately not read at all, since this answers "does the part have a supply
+/// pad anywhere", not "which pad". So the bare-integer form `(pin 1 "VCC")` and
+/// the alphanumeric `(pin A1 "VDD")` form work the same here, as they now also
+/// do in `loadPinoutMap`. Null on any read/parse failure so the caller falls
+/// back to the strict "expect both" default.
 fn loadPinoutFunctionFlags(allocator: std.mem.Allocator, project_dir: []const u8, lookup: []const u8) ?PartPowerPins {
     const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, lookup }) catch return null;
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 256) catch return null;
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, lib_limits.max_lib_file_bytes) catch return null;
     const nodes = parser_mod.parse(allocator, content) catch return null;
     if (nodes.len == 0) return null;
     const top = nodes[0].asList() orelse return null;
@@ -1992,9 +2477,11 @@ fn checkBlockPowerPins(
 
     for (block.nets) |net| {
         const base = na.baseNetName(net.name);
+        // `AGND`/`DGND`/`PGND`/`EP` are NOT respelled here: `isGroundFn` below
+        // already accepts all four (the first three by prefix, `EP` as an
+        // exposed-pad name), so a copy of the list would only be a second
+        // place to forget one.
         const is_gnd = std.mem.eql(u8, base, "GND") or std.mem.eql(u8, base, "VSS") or
-            std.mem.eql(u8, base, "AGND") or std.mem.eql(u8, base, "DGND") or
-            std.mem.eql(u8, base, "PGND") or std.mem.eql(u8, base, "EP") or
             std.mem.startsWith(u8, base, "GND") or
             std.mem.endsWith(u8, base, "GND") or std.mem.endsWith(u8, base, "VSS") or
             pin_roles.isGroundFn(base);
@@ -2016,14 +2503,21 @@ fn checkBlockPowerPins(
             // 5V `V5P0` feeding the NeoPixel level shifter.
             isVoltagePointRail(base) or
             std.mem.startsWith(u8, base, "VBUS") or std.mem.startsWith(u8, base, "VIN") or
-            std.mem.startsWith(u8, base, "VOUT") or std.mem.startsWith(u8, base, "AVDD") or
-            std.mem.startsWith(u8, base, "DVDD") or std.mem.startsWith(u8, base, "V+") or
+            std.mem.startsWith(u8, base, "VOUT") or
+            // The analog/digital supply domains, spelled from the shared
+            // rail vocabulary. Kept as their own term rather than folded
+            // into `isSupplyFn` below: that predicate rejects a
+            // supply-NAMED strap (`AVDD_EN`), and this check wants the
+            // rail recognised even so.
+            std.mem.startsWith(u8, base, rails_mod.analog_supply) or
+            std.mem.startsWith(u8, base, rails_mod.digital_supply) or
+            std.mem.startsWith(u8, base, "V+") or
             // VREF: auto-direction level translators (LSF0108, TXS0108, …) have no
             // VDD/VCC pin — they are supplied through their VREF_A / VREF_B rails.
             std.mem.startsWith(u8, base, "VREF") or
-            // System rail `VSYS` (+ derivatives) is a real supply — kept
+            // The system rail (+ derivatives) is a real supply — kept
             // explicitly because `isSupplyFn` doesn't list it.
-            std.mem.startsWith(u8, base, "VSYS") or
+            std.mem.startsWith(u8, base, rails_mod.system_rail) or
             // Real supply names (VS, VBUS, VIN, …) by `pin_roles.isSupplyFn`,
             // which rejects ground first so VSS/VSSA never read as a supply —
             // replacing the old `startsWith("VS")` that swallowed
@@ -2245,8 +2739,16 @@ pub const PinoutEntry = struct {
 
 /// Load a pinout file and return pin_id -> {primary, alts}. Returns null if the file is missing
 /// or malformed. Allocator is used both for the parse tree (kept until end of ERC) and the map.
+///
+/// Pad ids go through `Node.tokenText` — the same helper `kicad_sch/shape.zig`'s
+/// `readPinout` uses — so the bare-integer form `(pin 1 "VCC")` keys the map as
+/// "1", exactly as the evaluator's `ids.pinId` spells the `PinRef.pin` this map
+/// is looked up by. Before that, an int pad resolved to null and was `continue`d
+/// past, which silently dropped every numeric pin: 243 of the 265 pinout files
+/// in projects/designs use bare-integer pads, so `checkPinFunctions` and
+/// `eval/pin_enrichment.enrichPinFunctions` were structural no-ops for them.
 pub fn loadPinoutMap(allocator: std.mem.Allocator, path: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry) {
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 256) catch return null;
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, lib_limits.max_lib_file_bytes) catch return null;
     const nodes = parser_mod.parse(allocator, content) catch return null;
     if (nodes.len == 0) return null;
     const top = nodes[0].asList() orelse return null;
@@ -2260,7 +2762,7 @@ pub fn loadPinoutMap(allocator: std.mem.Allocator, path: []const u8) ?std.String
         if (cl.len < 3) continue;
         const ch = cl[0].asAtom() orelse continue;
         if (!std.mem.eql(u8, ch, "pin")) continue;
-        const pin_id = atomOrString(cl[1]) orelse continue;
+        const pin_id = cl[1].tokenText(allocator) orelse continue;
         const primary = cl[2].asString() orelse (cl[2].asAtom() orelse continue);
 
         var alts: std.ArrayList([]const u8) = .empty;
@@ -2287,12 +2789,6 @@ pub fn loadPinoutMap(allocator: std.mem.Allocator, path: []const u8) ?std.String
         }
     }
     return map;
-}
-
-fn atomOrString(node: @import("sexpr/ast.zig").Node) ?[]const u8 {
-    if (node.asAtom()) |a| return a;
-    if (node.asString()) |s| return s;
-    return null;
 }
 
 /// Validate `(as "FN")` assertions against the pinout file:
@@ -2412,8 +2908,8 @@ fn formatFunctionMsg(
     net: []const u8,
     entry: PinoutEntry,
 ) ?[]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     w.print(
         "{s} pin {s} (net \"{s}\") does not support function \"{s}\". Allowed: {s}",
         .{ ref_des, pin_id, net, asserted, entry.primary },
@@ -2422,12 +2918,12 @@ fn formatFunctionMsg(
         w.print(", {s}", .{alt}) catch return null;
     }
     w.writeByte('.') catch return null;
-    return buf.toOwnedSlice(allocator) catch null;
+    return buf.toOwnedSlice() catch null;
 }
 
 fn formatRequiredMsg(allocator: std.mem.Allocator, ref_des: []const u8, pin_id: []const u8, net: []const u8, entry: PinoutEntry) ?[]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     w.print(
         "{s} pin {s} (net \"{s}\") has alternate functions but no `(as \"FN\")` was specified. Pick one of: {s}",
         .{ ref_des, pin_id, net, entry.primary },
@@ -2436,7 +2932,7 @@ fn formatRequiredMsg(allocator: std.mem.Allocator, ref_des: []const u8, pin_id: 
         w.print(", {s}", .{alt}) catch return null;
     }
     w.writeByte('.') catch return null;
-    return buf.toOwnedSlice(allocator) catch null;
+    return buf.toOwnedSlice() catch null;
 }
 
 /// Flatten this block and all nested sub-blocks into one instance slice. The
@@ -2460,9 +2956,9 @@ fn appendInstances(
 }
 
 /// Serialize violations to JSON.
-pub fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+pub fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     try w.writeAll("[");
     for (violations, 0..) |v, i| {
         if (i > 0) try w.writeAll(",");
@@ -2486,7 +2982,7 @@ pub fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Vio
         try w.writeAll("}");
     }
     try w.writeAll("]");
-    return buf.items;
+    return buf.toOwnedSlice();
 }
 
 const writeJsonEscaped = json_writer.writeEscaped;
@@ -2650,13 +3146,49 @@ const pinout_fixture =
     \\)
 ;
 
+// The same pinout written the way 243 of the 265 files in projects/designs
+// write theirs: bare-integer pad ids. Pad "B1" rides along quoted, so one
+// fixture proves int, string and (via `pinout_fixture`) atom pads all load.
+const int_pad_pinout_fixture =
+    \\(pinout "testchip"
+    \\  (pin 1 "PA1"
+    \\    (alt "SPI1_MOSI" io)
+    \\    (alt "TIM1_CH1" io))
+    \\  (pin 2 "PA2"
+    \\    (alt "USART2_TX" io))
+    \\  (pin 3 "VDD")
+    \\  (pin "B1" "PB1"
+    \\    (alt "I2C1_SDA" io)
+    \\    (alt "I2C1_SCL" io))
+    \\)
+;
+
+// True when some violation of `kind` names `needle` in its message — the
+// message is what proves the pinout row was read whole rather than defaulted.
+fn hasKindMentioning(violations: []const Violation, kind: ViolationKind, needle: []const u8) bool {
+    for (violations) |v| {
+        if (v.kind == kind and std.mem.indexOf(u8, v.message, needle) != null) return true;
+    }
+    return false;
+}
+
+// A pinout fixture on disk: the TmpDir (caller must cleanup) and its project
+// path. Named rather than anonymous so the two builders below share one type.
+const PinoutFixture = struct { tmp: std.testing.TmpDir, path: []const u8 };
+
 // Create a temp directory with lib/pinouts/testchip.sexp so checkPinFunctions
-// can resolve the fixture. Returns a TmpDir (caller must cleanup) and its path.
-fn makePinoutTmp(alloc: std.mem.Allocator) !struct { tmp: std.testing.TmpDir, path: []const u8 } {
+// can resolve the fixture.
+fn makePinoutTmp(alloc: std.mem.Allocator) !PinoutFixture {
+    return makePinoutTmpFrom(alloc, pinout_fixture);
+}
+
+// Same, for a caller-chosen pinout body. The lookup key stays "testchip" so
+// `makePinFunctionBlock`'s instance resolves either fixture unchanged.
+fn makePinoutTmpFrom(alloc: std.mem.Allocator, data: []const u8) !PinoutFixture {
     var tmp = std.testing.tmpDir(.{});
-    try tmp.dir.makePath("lib/pinouts");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/testchip.sexp", .data = pinout_fixture });
-    const path = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/testchip.sexp", .data = data });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     return .{ .tmp = tmp, .path = path };
 }
 
@@ -2783,6 +3315,70 @@ test "pin function unsupported across slice" {
         if (v.kind == .pin_function_unsupported and std.mem.indexOf(u8, v.message, "UART9_TX") != null) hit = true;
     }
     try std.testing.expect(hit);
+}
+
+// spec: erc - a bare-integer pinout pad id is checked for its alternates like an alphanumeric one
+test "pin function required on a bare-integer pad" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var fx = try makePinoutTmpFrom(alloc, int_pad_pinout_fixture);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+
+    // Pad 1 has two alts and no `(as …)`. The loader used to resolve an `.int`
+    // node to null and skip the row, so the map had no "1" key and the whole
+    // check silently passed — the assertion is that it now fires.
+    const block = try makePinFunctionBlock(alloc, "1", &.{});
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkPinFunctions(alloc, &block, fx.path, &violations);
+
+    try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .pin_function_required));
+    // The message names the pin's real options, so the row was loaded whole
+    // rather than the check firing off some defaulted entry.
+    try std.testing.expect(hasKindMentioning(violations.items, .pin_function_required, "SPI1_MOSI"));
+    try std.testing.expect(hasKindMentioning(violations.items, .pin_function_required, "TIM1_CH1"));
+}
+
+// spec: erc - an asserted function absent from a bare-integer pad's pinout row is rejected
+test "pin function unsupported on a bare-integer pad" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var fx = try makePinoutTmpFrom(alloc, int_pad_pinout_fixture);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+
+    const block = try makePinFunctionBlock(alloc, "1", &.{"UART9_TX"});
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkPinFunctions(alloc, &block, fx.path, &violations);
+    try std.testing.expect(hasKindMentioning(violations.items, .pin_function_unsupported, "UART9_TX"));
+
+    // Pad 3 is a bare-integer power pad with no alts: still nothing to assert.
+    const power = try makePinFunctionBlock(alloc, "3", &.{});
+    var power_violations: std.ArrayList(Violation) = .empty;
+    try checkPinFunctions(alloc, &power, fx.path, &power_violations);
+    try std.testing.expectEqual(@as(usize, 0), countKind(power_violations.items, .pin_function_required));
+}
+
+// spec: erc - a quoted-string pinout pad id keeps loading beside bare-integer pads
+test "pin function required on a quoted-string pad" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var fx = try makePinoutTmpFrom(alloc, int_pad_pinout_fixture);
+    defer fx.tmp.cleanup();
+    defer alloc.free(fx.path);
+
+    // Regression guard on the pad spellings that already worked: "B1" is
+    // quoted in the fixture, and the dual-key put must still index its
+    // logical name too, in a file whose other pads are integers.
+    for ([_][]const u8{ "B1", "PB1" }) |pad| {
+        const block = try makePinFunctionBlock(alloc, pad, &.{});
+        var violations: std.ArrayList(Violation) = .empty;
+        try checkPinFunctions(alloc, &block, fx.path, &violations);
+        try std.testing.expectEqual(@as(usize, 1), countKind(violations.items, .pin_function_required));
+    }
 }
 
 // Build a minimal DesignBlock carrying a single PowerRail and optional
@@ -3087,10 +3683,10 @@ test "power pins missing supply still flagged" {
 // power-pin check can read a part's function names. Caller cleans up + frees path.
 fn makePowerPinoutTmp(alloc: std.mem.Allocator, name: []const u8, body: []const u8) !struct { tmp: std.testing.TmpDir, path: []const u8 } {
     var tmp = std.testing.tmpDir(.{});
-    try tmp.dir.makePath("lib/pinouts");
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
     const sub = try std.fmt.allocPrint(alloc, "lib/pinouts/{s}.sexp", .{name});
-    try tmp.dir.writeFile(.{ .sub_path = sub, .data = body });
-    const path = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub, .data = body });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     return .{ .tmp = tmp, .path = path };
 }
 
@@ -3474,7 +4070,7 @@ test "sequencing cycle detected" {
     try std.testing.expect(hit);
 }
 
-// spec: erc - Exempts connectors, ignore-requirements support parts, and passive-class components from the requirements error
+// spec: erc - Exempts connectors, ignore-requirements support parts, and passive-class components from the requirements warning
 test "missing requirements exempts connectors, support parts, and passive-class components" {
     const instances = [_]Instance{
         // Connector — exempt purely by ref-des prefix (J), no opt-out needed.
@@ -3598,10 +4194,10 @@ test "passive ref on an MPN-identified fixed component is not missing a value" {
     try std.testing.expectEqualStrings("R2", violations.items[0].ref_des);
 }
 
-// spec: erc - Errors when an active IC's library component declares no requirements
-test "missing requirements errors for an undocumented IC" {
+// spec: erc - Warns when an active IC's library component declares no requirements
+test "missing requirements warn for an undocumented IC" {
     const instances = [_]Instance{.{
-        .ref_des = "U9",
+        .ref_des = "IC9",
         .component = "pcal6416ahf,128",
         .value = "",
         .footprint = "hwqfn-24",
@@ -3625,8 +4221,8 @@ test "missing requirements errors for an undocumented IC" {
     }
     try std.testing.expectEqual(@as(usize, 1), violations.items.len);
     try std.testing.expectEqual(ViolationKind.missing_requirements, violations.items[0].kind);
-    try std.testing.expectEqual(Severity.@"error", violations.items[0].severity);
-    try std.testing.expectEqualStrings("U9", violations.items[0].ref_des);
+    try std.testing.expectEqual(Severity.warning, violations.items[0].severity);
+    try std.testing.expectEqualStrings("IC9", violations.items[0].ref_des);
 }
 
 // spec: erc - Does not flag an IC that declares at least one requirement, nor for passives

@@ -1,2 +1,3 @@
-# guardian-snapshot v1
-score_pct=32
+# guardian-snapshot v2
+cohort=413ee38bcd526065
+score_pct=45

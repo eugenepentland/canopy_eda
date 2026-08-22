@@ -1,110 +1,104 @@
-# guardian-snapshot v1
-unlinked tag: Web Server - A rough-seeded saved layout round-trips its rough flag through the sidecar in ./src/serve/pcb_layout_page.zig
-unlinked tag: Web Server - A saved layout round-trips each part's board side and lock flag through the sidecar in ./src/serve/pcb_layout_page.zig
-unlinked tag: Web Server - A saved layout round-trips each part's renumber-stable origin key through the sidecar in ./src/serve/pcb_layout_page.zig
-unlinked tag: Web Server - A saved layout round-trips its board-level silkscreen texts through the sidecar in ./src/serve/pcb_layout_page.zig
-unlinked tag: Web Server - A saved layout round-trips its routed copper (tracks + vias, net-name keyed) through the sidecar in ./src/serve/pcb_layout_page.zig
-unlinked tag: Web Server - A saved layout round-trips its user-drawn board outline through the sidecar in ./src/serve/pcb_layout_page.zig
-unlinked tag: Web Server - Module grouping tag detects placement-cohesion groups but not pin or diagram groups in ./src/serve/modules.zig
-unlinked tag: Web Server - Module-layout status of a missing sidecar is all-false in ./src/layout_status.zig
-unlinked tag: Web Server - Module-layout status reads rough and starred flags from the layouts sidecar in ./src/layout_status.zig
-unlinked tag: Web Server - Module-layout status reports neither rough nor starred when none recorded in ./src/layout_status.zig
-unlinked tag: Web Server - The /pcb-layout page defaults to the design's starred (★) saved layout, below an explicit ?refine= snapshot and a (placement …) spec in ./src/serve/pcb_layout_page.zig
-unlinked tag: Web Server - The layouts sidecar round-trips snapshots and the optimizer cache slot through one file in ./src/serve/pcb_layout_page.zig
-unlinked tag: Web Server - The route_pcb MCP tool serializes routed net indices back to net names, round-tripping through restoreRoutes in ./src/serve/pcb_layout_page.zig
-unlinked tag: Web Server - The route_pcb MCP tool's net-scoped copper drops the requested nets from prior copper and merges in the fresh copper for them in ./src/serve/pcb_layout_page.zig
-unlinked tag: Web Server - The set_board_outline MCP tool accepts a rect and a polygon pts, deriving the rect fields from the polygon bbox in ./src/serve/pcb_layout_page.zig
-unlinked tag: Web Server - The set_part_poses MCP tool parses each pose's ref, mm centre, and optional rot/side/locked (absent optionals stay unset) in ./src/serve/pcb_layout_page.zig
-unlinked tag: Web Server - The set_part_poses MCP tool resolves a part by module-local origin key when the ref-des is not an exact match in ./src/serve/pcb_layout_page.zig
-unlinked tag: Web Server - hybrid score ranks the reference layout at exactly 1.0 and penalizes stylistic deviation in ./src/serve/style_score.zig
-unlinked tag: Web Server - layout-match counts a wrong-edge proportion as a partial area mismatch in ./src/serve/layout_match.zig
-unlinked tag: Web Server - layout-match credits interchangeable parts by per-edge count, ignoring which fungible part is where in ./src/serve/layout_match.zig
-unlinked tag: Web Server - rough-best rotatePoses rigidly rotates a placement about the anchor in ./src/serve/rough_best.zig
-unlinked tag: Web Server - style score credits interchangeable parts by per-edge count and rewards matching tightness in ./src/serve/style_score.zig
-unlinked tag: Web Server - style score gap term penalizes correct-edge but wrong-tightness placement in ./src/serve/style_score.zig
-unlinked tag: Web Server - style score is invariant to a whole-module 90-degree rotation in ./src/serve/style_score.zig
-unlinked tag: bom-resolve - A property value containing a quote/backslash round-trips through the .bom without corrupting it in ./src/bom_resolve.zig
-unlinked tag: commands - --output-dir writes a file without a network push in ./src/commands.zig
-unlinked tag: commands - --push with an explicit name pushes that design in ./src/commands.zig
-unlinked tag: commands - a bare --push flag pushes the positional design in ./src/commands.zig
-unlinked tag: commands - a lone positional design name builds without pushing in ./src/commands.zig
-unlinked tag: convert/footprint - Bare-integer pad numbers survive the conversion (no dangling num_buf slice) in ./src/convert/footprint.zig
-unlinked tag: diagram/layout - two same-side (edge …) directives stack in distinct cells instead of overlapping in ./src/diagram/layout.zig
-unlinked tag: diagram/lod - Glance chips resolve nodes by id not label, so duplicate-labelled blocks stay distinct in ./src/diagram/lod.zig
-unlinked tag: erc - A value-less passive inside a sub-block is flagged (recursion) in ./src/erc.zig
-unlinked tag: erc - Duplicate ref-des inside a sub-block collides with a top-level part (flattened scope) in ./src/erc.zig
-unlinked tag: erc - a "10µF" bulk cap on a multi-supply-pad rail is exempt from decoupling_unbound in ./src/erc.zig
-unlinked tag: erc - a VSS-only IC is not counted as powered (the VS-prefix false positive) in ./src/erc.zig
-unlinked tag: erc - a VSYS rail still counts as a power connection (no VS regression) in ./src/erc.zig
-unlinked tag: erc - a dangling (verifies …) sign-off whose target no longer exists is surfaced as a warning in ./src/erc.zig
-unlinked tag: erc - a stale req_id on an existing target still counts as an orphaned verification in ./src/erc.zig
-unlinked tag: erc - capFarads accepts the UTF-8 micro sign so a "10µF" bulk cap keeps its decoupling exemption in ./src/erc.zig
-unlinked tag: erc - surfaces layout-critical net classes as info rows, staying silent on ground/power/plain-signal nets in ./src/erc.zig
-unlinked tag: eval/builtins - E-series snapping terminates on non-finite input instead of looping forever in ./src/eval/builtins.zig
-unlinked tag: eval/builtins - Modulo rejects a non-positive divisor instead of triggering UB in ./src/eval/builtins.zig
-unlinked tag: eval/design_block - a reverse-order chained tie also collapses all nets onto the canonical root in ./src/eval/design_block.zig
-unlinked tag: eval/design_block - a self-tie is a harmless no-op, never deleting the net in ./src/eval/design_block.zig
-unlinked tag: eval/design_block - a tie renames per-pin bypass stubs onto the canonical root prefix in ./src/eval/design_block.zig
-unlinked tag: eval/design_block - net ties merge transitively so a chained tie collapses all three nets into one in ./src/eval/design_block.zig
-unlinked tag: eval/forms - diagram-layout is the sole name for the schematic layout form; the legacy layout/module aliases are gone in ./src/eval/forms.zig
-unlinked tag: eval/instance - (decouples "IC" PIN) binds a cap to a specific hub pad in ./src/eval/instance.zig
-unlinked tag: eval/instance - (decouples rail) opts a cap out of the per-pin-decoupling requirement in ./src/eval/instance.zig
-unlinked tag: eval/instance - (nc-ok PIN "reason") records a blessed no-connect pad in ./src/eval/instance.zig
-unlinked tag: eval/instance - (part …) on an instance wires its pins like top-level pins and records the part group in ./src/eval/instance.zig
-unlinked tag: eval/instance - (strap-ok PIN "reason") records a blessed direct strap tie in ./src/eval/instance.zig
-unlinked tag: eval/modules - A later parameter's default may reference an earlier parameter in ./src/eval/modules.zig
-unlinked tag: eval/modules - A supplied argument overrides the parameter's declared default in ./src/eval/modules.zig
-unlinked tag: eval/modules - Omitted parameters fall back to their declared (param default) value in ./src/eval/modules.zig
-unlinked tag: eval/modules - Required parameters are still diagnosed when only defaulted ones are unbound in ./src/eval/modules.zig
-unlinked tag: export_gerber - the .gbrjob job file lists board size, layer count, and each file's function in ./src/export_gerber.zig
-unlinked tag: export_kicad - Sanitizes a declared footprint name so a path-traversal component can't escape the output directory in ./src/export_kicad.zig
-unlinked tag: export_kicad_netlist - extractPadNames reads bare-integer pad numbers so numerically-padded footprints appear in the NC inventory in ./src/export_kicad_netlist.zig
-unlinked tag: gerber_verify - a pad flashed at the wrong coordinate is reported as a miss in ./src/gerber_verify.zig
-unlinked tag: gerber_verify - a written copper layer reads back matching the placement model in ./src/gerber_verify.zig
-unlinked tag: gerber_verify - the reader parses our own aperture/flash/segment/region output in ./src/gerber_verify.zig
-unlinked tag: gerber_verify - top and bottom copper both read back correctly (frame/side conventions) in ./src/gerber_verify.zig
-unlinked tag: import_fold - A channel with a passive rewired between two same-template internal nets deviates instead of folding silently in ./src/import_fold.zig
-unlinked tag: kicad_pcb/writer - Escapes JSON-supplied op values so a raw quote/backslash cannot corrupt the board file in ./src/kicad_pcb/writer.zig
-unlinked tag: kicad_pcb/writer - swap_footprint preserves the board footprint's (attr …) assembly flags in ./src/kicad_pcb/writer.zig
-unlinked tag: paths - Rejects design names that are not bare basenames (traversal defense) in ./src/paths.zig
-unlinked tag: placement/layout_lint - flags an HF decoupling cap on a multi-supply-pad rail with no pin binding, exempting (decouples rail) opt-outs in ./src/placement/layout_lint.zig
-unlinked tag: placement/module_policy - parses capacitance with ASCII and UTF-8 micro prefixes in ./src/placement/module_policy.zig
-unlinked tag: placement/optimizer - (rough …) anchor/group tokens match by ref-des or origin name in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - (rough …) priority is the fill order; lower tiers spill to outer lanes in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - an explicit (decouples …) binding still loops to its hub on a rail shared by >=2 ICs in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - auto-fill pulls staged (unplaced) parts out of the band beside their net in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - cohereGroups pins a subsystem with an anchored member to one side, leaves an anchorless bypass group spread in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - composed macros overlapping each other move the later one as a unit in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - composed module macros push free parts away and stay rigid in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - decouplePinFromOrigin reads the decoupled pad from a per-pin cap's structural key in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - finishMacro turns the whole macro in quarter steps about its centroid in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - importantCrossings counts crossing signal airwires but ignores rails, ground, and shared pads in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - orientPadsToIC flips a 2-pad part so its important pad faces the IC in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - overlapCount reports overlapping courtyard pairs and a clean layout scores zero in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - pavPack keeps order and leaves uncrowded parts exactly on their pads in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - pinTargetFromPad buckets a pad onto its package edge with its along coordinate in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - posSide buckets a point into the anchor quadrant it lies in in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - refineSidesByPull moves a part to the IC side its real connections pull toward in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - segsCross flags interior airwire crossings, not shared endpoints in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - servedPadLocal resolves a decoupling cap's bound hub pad on-net and rejects a cross-hub binding in ./src/placement/optimizer.zig
-unlinked tag: placement/optimizer - the crossing polish never swaps a part onto its wrong anchor side in ./src/placement/optimizer.zig
-unlinked tag: render_svg - Design name is JSON-escaped in the scene graph output in ./src/render_json.zig
-unlinked tag: render_svg - Net names are XML-escaped in the emitted SVG markup in ./src/render_svg/draw.zig
-unlinked tag: req_checks - parseOhms reads a milliohm suffix and R-notation, not 1000x high in ./src/req_checks.zig
-unlinked tag: serve/datasheet_attach - spliceDatasheet dedupes on the normalised stem (re-download counters ignored) in ./src/serve/datasheet_attach.zig
-unlinked tag: serve/datasheet_attach - spliceDatasheet inserts the (datasheet …) form before the component's closing paren with matching indent in ./src/serve/datasheet_attach.zig
-unlinked tag: serve/datasheet_attach - spliceDatasheet rejects sources without a component form in ./src/serve/datasheet_attach.zig
-unlinked tag: serve/design_diff - diffBlocks reports added/removed instances, value changes, and net pin changes between two revisions in ./src/serve/design_diff.zig
-unlinked tag: serve/design_diff - identical revisions produce an empty diff in ./src/serve/design_diff.zig
-unlinked tag: serve/diag_format - build blanks the source line when the span doesn't match the buffer (module-file spans) in ./src/serve/diag_format.zig
-unlinked tag: serve/diag_format - build extracts the offending source line from the buffer at the span in ./src/serve/diag_format.zig
-unlinked tag: serve/diag_format - caretLine pads to the 1-based column (preserving tabs) and ends with a caret in ./src/serve/diag_format.zig
-unlinked tag: sexpr/parser - Rejects input nested past MAX_PARSE_DEPTH with TooDeep instead of overflowing the stack in ./src/sexpr/parser.zig
-unverified: placement/module_policy - applies (module-policy …) author overrides over the heuristic detection
-unverified: placement/module_policy - exports the detected policy as an editable (module-policy …) block
-unverified: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
-unverified: serve/notes - Rejects bodies larger than 1 MiB
-unverified: serve/notes - Returns an empty string when no notes file exists yet
-unverified: serve/sync - runSyncPlan diffs a parsed board state against the design and returns a JSON envelope with version, summary, and the ops list
-unverified: serve/sync - runSyncPlan errors with BuildFailed when the source file fails to evaluate
-unverified: serve/sync - runSyncPlan errors with NotADesign when the source file does not evaluate to a design-block
+# guardian-snapshot v3
+spec|unlinked tag: Web Server - A rough-seeded saved layout round-trips its rough flag through the sidecar in ./src/serve/pcb_layout_page.zig
+spec|unlinked tag: Web Server - A saved layout round-trips each part's board side and lock flag through the sidecar in ./src/serve/pcb_layout_page.zig
+spec|unlinked tag: Web Server - A saved layout round-trips each part's renumber-stable origin key through the sidecar in ./src/serve/pcb_layout_page.zig
+spec|unlinked tag: Web Server - A saved layout round-trips its board-level silkscreen texts through the sidecar in ./src/serve/pcb_layout_page.zig
+spec|unlinked tag: Web Server - A saved layout round-trips its routed copper (tracks + vias, net-name keyed) through the sidecar in ./src/serve/pcb_layout_page.zig
+spec|unlinked tag: Web Server - A saved layout round-trips its user-drawn board outline through the sidecar in ./src/serve/pcb_layout_page.zig
+spec|unlinked tag: Web Server - Module grouping tag detects placement-cohesion groups but not pin or diagram groups in ./src/serve/modules.zig
+spec|unlinked tag: Web Server - Module-layout status of a missing sidecar is all-false in ./src/layout_status.zig
+spec|unlinked tag: Web Server - Module-layout status reads rough and starred flags from the layouts sidecar in ./src/layout_status.zig
+spec|unlinked tag: Web Server - Module-layout status reports neither rough nor starred when none recorded in ./src/layout_status.zig
+spec|unlinked tag: Web Server - The /pcb-layout page defaults to the design's starred (★) saved layout, below an explicit ?refine= snapshot and a (placement …) spec in ./src/serve/pcb_layout_page.zig
+spec|unlinked tag: Web Server - The layouts sidecar round-trips snapshots and the optimizer cache slot through one file in ./src/serve/pcb_layout_page.zig
+spec|unlinked tag: Web Server - The route_pcb MCP tool serializes routed net indices back to net names, round-tripping through restoreRoutes in ./src/serve/pcb_layout_page.zig
+spec|unlinked tag: Web Server - The set_board_outline MCP tool accepts a rect and a polygon pts, deriving the rect fields from the polygon bbox in ./src/serve/pcb_layout_page.zig
+spec|unlinked tag: Web Server - The set_part_poses MCP tool parses each pose's ref, mm centre, and optional rot/side/locked (absent optionals stay unset) in ./src/serve/pcb_layout_page.zig
+spec|unlinked tag: Web Server - The set_part_poses MCP tool resolves a part by module-local origin key when the ref-des is not an exact match in ./src/serve/pcb_layout_page.zig
+spec|unlinked tag: Web Server - hybrid score ranks the reference layout at exactly #.# and penalizes stylistic deviation in ./src/serve/style_score.zig
+spec|unlinked tag: Web Server - layout-match counts a wrong-edge proportion as a partial area mismatch in ./src/serve/layout_match.zig
+spec|unlinked tag: Web Server - layout-match credits interchangeable parts by per-edge count, ignoring which fungible part is where in ./src/serve/layout_match.zig
+spec|unlinked tag: Web Server - rough-best rotatePoses rigidly rotates a placement about the anchor in ./src/serve/rough_best.zig
+spec|unlinked tag: Web Server - style score credits interchangeable parts by per-edge count and rewards matching tightness in ./src/serve/style_score.zig
+spec|unlinked tag: Web Server - style score gap term penalizes correct-edge but wrong-tightness placement in ./src/serve/style_score.zig
+spec|unlinked tag: Web Server - style score is invariant to a whole-module #-degree rotation in ./src/serve/style_score.zig
+spec|unlinked tag: bom-resolve - A property value containing a quote/backslash round-trips through the .bom without corrupting it in ./src/bom_resolve.zig
+spec|unlinked tag: commands - --output-dir writes a file without a network push in ./src/commands.zig
+spec|unlinked tag: commands - --push with an explicit name pushes that design in ./src/commands.zig
+spec|unlinked tag: commands - a bare --push flag pushes the positional design in ./src/commands.zig
+spec|unlinked tag: commands - a lone positional design name builds without pushing in ./src/commands.zig
+spec|unlinked tag: convert/footprint - Bare-integer pad numbers survive the conversion (no dangling num_buf slice) in ./src/convert/footprint.zig
+spec|unlinked tag: diagram/layout - two same-side (edge …) directives stack in distinct cells instead of overlapping in ./src/diagram/layout.zig
+spec|unlinked tag: diagram/lod - Glance chips resolve nodes by id not label, so duplicate-labelled blocks stay distinct in ./src/diagram/lod.zig
+spec|unlinked tag: erc - A value-less passive inside a sub-block is flagged (recursion) in ./src/erc.zig
+spec|unlinked tag: erc - Duplicate ref-des inside a sub-block collides with a top-level part (flattened scope) in ./src/erc.zig
+spec|unlinked tag: erc - a "#µF" bulk cap on a multi-supply-pad rail is exempt from decoupling_unbound in ./src/erc.zig
+spec|unlinked tag: erc - a VSS-only IC is not counted as powered (the VS-prefix false positive) in ./src/erc.zig
+spec|unlinked tag: erc - a VSYS rail still counts as a power connection (no VS regression) in ./src/erc.zig
+spec|unlinked tag: erc - a dangling (verifies …) sign-off whose target no longer exists is surfaced as a warning in ./src/erc.zig
+spec|unlinked tag: erc - a stale req_id on an existing target still counts as an orphaned verification in ./src/erc.zig
+spec|unlinked tag: erc - capFarads accepts the UTF-# micro sign so a "#µF" bulk cap keeps its decoupling exemption in ./src/erc.zig
+spec|unlinked tag: erc - surfaces layout-critical net classes as info rows, staying silent on ground/power/plain-signal nets in ./src/erc.zig
+spec|unlinked tag: eval/builtins - E-series snapping terminates on non-finite input instead of looping forever in ./src/eval/builtins.zig
+spec|unlinked tag: eval/builtins - Modulo rejects a non-positive divisor instead of triggering UB in ./src/eval/builtins.zig
+spec|unlinked tag: eval/design_block - a reverse-order chained tie also collapses all nets onto the canonical root in ./src/eval/design_block.zig
+spec|unlinked tag: eval/design_block - a self-tie is a harmless no-op, never deleting the net in ./src/eval/design_block.zig
+spec|unlinked tag: eval/design_block - a tie renames per-pin bypass stubs onto the canonical root prefix in ./src/eval/design_block.zig
+spec|unlinked tag: eval/design_block - net ties merge transitively so a chained tie collapses all three nets into one in ./src/eval/design_block.zig
+spec|unlinked tag: eval/forms - diagram-layout is the sole name for the schematic layout form; the legacy layout/module aliases are gone in ./src/eval/forms.zig
+spec|unlinked tag: eval/instance - (decouples "IC" PIN) binds a cap to a specific hub pad in ./src/eval/instance.zig
+spec|unlinked tag: eval/instance - (decouples rail) opts a cap out of the per-pin-decoupling requirement in ./src/eval/instance.zig
+spec|unlinked tag: eval/instance - (nc-ok PIN "reason") records a blessed no-connect pad in ./src/eval/instance.zig
+spec|unlinked tag: eval/instance - (part …) on an instance wires its pins like top-level pins and records the part group in ./src/eval/instance.zig
+spec|unlinked tag: eval/instance - (strap-ok PIN "reason") records a blessed direct strap tie in ./src/eval/instance.zig
+spec|unlinked tag: eval/modules - A later parameter's default may reference an earlier parameter in ./src/eval/modules.zig
+spec|unlinked tag: eval/modules - A supplied argument overrides the parameter's declared default in ./src/eval/modules.zig
+spec|unlinked tag: eval/modules - Omitted parameters fall back to their declared (param default) value in ./src/eval/modules.zig
+spec|unlinked tag: eval/modules - Required parameters are still diagnosed when only defaulted ones are unbound in ./src/eval/modules.zig
+spec|unlinked tag: export_gerber - the .gbrjob job file lists board size, layer count, and each file's function in ./src/export_gerber.zig
+spec|unlinked tag: export_kicad - Sanitizes a declared footprint name so a path-traversal component can't escape the output directory in ./src/export_kicad.zig
+spec|unlinked tag: export_kicad_netlist - extractPadNames reads bare-integer pad numbers so numerically-padded footprints appear in the NC inventory in ./src/export_kicad_netlist.zig
+spec|unlinked tag: gerber_verify - a pad flashed at the wrong coordinate is reported as a miss in ./src/gerber_verify.zig
+spec|unlinked tag: gerber_verify - a written copper layer reads back matching the placement model in ./src/gerber_verify.zig
+spec|unlinked tag: gerber_verify - the reader parses our own aperture/flash/segment/region output in ./src/gerber_verify.zig
+spec|unlinked tag: gerber_verify - top and bottom copper both read back correctly (frame/side conventions) in ./src/gerber_verify.zig
+spec|unlinked tag: import_fold - A channel with a passive rewired between two same-template internal nets deviates instead of folding silently in ./src/import_fold.zig
+spec|unlinked tag: kicad_pcb/writer - Escapes JSON-supplied op values so a raw quote/backslash cannot corrupt the board file in ./src/kicad_pcb/writer.zig
+spec|unlinked tag: kicad_pcb/writer - swap_footprint preserves the board footprint's (attr …) assembly flags in ./src/kicad_pcb/writer.zig
+spec|unlinked tag: paths - Rejects design names that are not bare basenames (traversal defense) in ./src/paths.zig
+spec|unlinked tag: placement/layout_lint - flags an HF decoupling cap on a multi-supply-pad rail with no pin binding, exempting (decouples rail) opt-outs in ./src/placement/layout_lint.zig
+spec|unlinked tag: placement/module_policy - parses capacitance with ASCII and UTF-# micro prefixes in ./src/placement/module_policy.zig
+spec|unlinked tag: placement/optimizer - (rough …) priority is the fill order; lower tiers spill to outer lanes in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - an explicit (decouples …) binding still loops to its hub on a rail shared by >=# ICs in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - auto-fill pulls staged (unplaced) parts out of the band beside their net in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - cohereGroups pins a subsystem with an anchored member to one side, leaves an anchorless bypass group spread in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - composed macros overlapping each other move the later one as a unit in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - composed module macros push free parts away and stay rigid in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - finishMacro turns the whole macro in quarter steps about its centroid in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - importantCrossings counts crossing signal airwires but ignores rails, ground, and shared pads in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - orientPadsToIC flips a #-pad part so its important pad faces the IC in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - overlapCount reports overlapping courtyard pairs and a clean layout scores zero in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - pavPack keeps order and leaves uncrowded parts exactly on their pads in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - pinTargetFromPad buckets a pad onto its package edge with its along coordinate in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - posSide buckets a point into the anchor quadrant it lies in in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - refineSidesByPull moves a part to the IC side its real connections pull toward in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - servedPadLocal resolves a decoupling cap's bound hub pad on-net and rejects a cross-hub binding in ./src/placement/optimizer.zig
+spec|unlinked tag: placement/optimizer - the crossing polish never swaps a part onto its wrong anchor side in ./src/placement/optimizer.zig
+spec|unlinked tag: render_svg - Design name is JSON-escaped in the scene graph output in ./src/render_json.zig
+spec|unlinked tag: serve/datasheet_attach - spliceDatasheet dedupes on the normalised stem (re-download counters ignored) in ./src/serve/datasheet_attach.zig
+spec|unlinked tag: serve/datasheet_attach - spliceDatasheet inserts the (datasheet …) form before the component's closing paren with matching indent in ./src/serve/datasheet_attach.zig
+spec|unlinked tag: serve/datasheet_attach - spliceDatasheet rejects sources without a component form in ./src/serve/datasheet_attach.zig
+spec|unlinked tag: serve/design_diff - diffBlocks reports added/removed instances, value changes, and net pin changes between two revisions in ./src/serve/design_diff.zig
+spec|unlinked tag: serve/design_diff - identical revisions produce an empty diff in ./src/serve/design_diff.zig
+spec|unlinked tag: serve/diag_format - build blanks the source line when the span doesn't match the buffer (module-file spans) in ./src/serve/diag_format.zig
+spec|unlinked tag: serve/diag_format - build extracts the offending source line from the buffer at the span in ./src/serve/diag_format.zig
+spec|unlinked tag: serve/diag_format - caretLine pads to the #-based column (preserving tabs) and ends with a caret in ./src/serve/diag_format.zig
+spec|unlinked tag: sexpr/parser - Rejects input nested past MAX_PARSE_DEPTH with TooDeep instead of overflowing the stack in ./src/sexpr/parser.zig
+spec|unverified: placement/module_policy - applies (module-policy …) author overrides over the heuristic detection
+spec|unverified: placement/module_policy - exports the detected policy as an editable (module-policy …) block
+spec|unverified: serve/notes - Reads and writes `<design>.notes.md` next to the design source file
+spec|unverified: serve/notes - Rejects bodies larger than # MiB
+spec|unverified: serve/notes - Returns an empty string when no notes file exists yet
+spec|unverified: serve/sync - runSyncPlan diffs a parsed board state against the design and returns a JSON envelope with version, summary, and the ops list
+spec|unverified: serve/sync - runSyncPlan errors with BuildFailed when the source file fails to evaluate
+spec|unverified: serve/sync - runSyncPlan errors with NotADesign when the source file does not evaluate to a design-block

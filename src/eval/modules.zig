@@ -11,6 +11,7 @@ const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
 const check_grammar = @import("check_grammar.zig");
 const electrical_mod = @import("electrical.zig");
+const thermal = @import("thermal.zig");
 const design_block_mod = @import("design_block.zig");
 const special_forms = @import("special_forms.zig");
 const forms_mod = @import("forms.zig");
@@ -26,6 +27,8 @@ const BlockDef = env_mod.BlockDef;
 
 // ── Constants ─────────────────────────────────────────────────────
 const footprint_form = "footprint";
+const datasheet_form = "datasheet";
+const thermal_form = "thermal";
 
 /// Maximum module call nesting. A self-recursive module — an authoring typo
 /// like `(defmodule m () (m))`, or two modules calling each other — would
@@ -218,20 +221,23 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
 
     // Known structural fields (not properties)
     const skip_fields = [_][]const u8{
-        "symbol",              footprint_form,
-        "pinout",              "component",
-        "parameter",           "component-family",
-        "bus",                 "note",
-        "datasheet",           "requirement",
-        "ignore-requirements", "electrical",
-        "refdes",
+        "symbol",       footprint_form,
+        "pinout",       "component",
+        "parameter",    "component-family",
+        "bus",          "note",
+        datasheet_form, "datasheet-review",
+        "requirement",  "ignore-requirements",
+        "electrical",   "refdes",
+        thermal_form,
     };
 
     var props: std.ArrayList(env_mod.Property) = .empty;
     var buses: std.ArrayList(BusDef) = .empty;
     var datasheets: std.ArrayList([]const u8) = .empty;
+    var datasheet_review: ?env_mod.DatasheetReview = null;
     var requirements: std.ArrayList(env_mod.Requirement) = .empty;
     var electrical: std.ArrayList(env_mod.ElectricalDecl) = .empty;
+    var thermal_decl: ?env_mod.ThermalDecl = null;
     var requirements_ignored = false;
     // Explicit ref-des class: `(refdes "Y")` declares the single-letter prefix
     // this part's instances get, overriding the name heuristic. 0 = unset.
@@ -264,39 +270,27 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             footprint_name = cl[1].asText() orelse "";
         } else if (std.mem.eql(u8, field, "pinout")) {
             pinout_name = cl[1].asText() orelse "";
-        } else if (std.mem.eql(u8, field, "datasheet")) {
+        } else if (std.mem.eql(u8, field, datasheet_form)) {
             const ds = cl[1].asText() orelse continue;
             try datasheets.append(self.allocator, ds);
+        } else if (std.mem.eql(u8, field, "datasheet-review")) {
+            datasheet_review = parseDatasheetReview(self.allocator, cl);
         } else if (std.mem.eql(u8, field, "requirement")) {
-            const text = cl[1].asString() orelse continue;
-            var ref: ?env_mod.NoteRef = null;
-            var chk: ?env_mod.Check = null;
-            var explicit_id: []const u8 = "";
-            for (cl[2..]) |extra| {
-                if (env_mod.parseNoteRef(extra)) |r| {
-                    ref = r;
-                } else if (check_grammar.parseCheck(self.allocator, extra)) |c| {
-                    chk = c;
-                } else if (extra.asList()) |sub| {
-                    if (sub.len >= 2) {
-                        if (sub[0].asAtom()) |sub_head| {
-                            if (std.mem.eql(u8, sub_head, "id")) {
-                                if (sub[1].asText()) |id_str| {
-                                    explicit_id = id_str;
-                                }
-                            }
-                        }
-                    }
-                }
+            if (parseComponentRequirement(self, cl)) |req| {
+                try requirements.append(self.allocator, req);
+            } else {
+                self.warnFmt(child.span, "malformed (requirement …) in component \"{s}\" — expected quoted rule text", .{name});
             }
-            const rid: []const u8 = if (explicit_id.len > 0)
-                explicit_id
-            else
-                env_mod.requirementIdForText(self.allocator, text) catch "";
-            try requirements.append(self.allocator, .{ .text = text, .ref = ref, .check = chk, .id = rid });
+        } else if (std.mem.eql(u8, field, thermal_form)) {
+            thermal_decl = thermal.parseThermal(cl) orelse {
+                self.warnFmt(child.span, "malformed (thermal …) in component \"{s}\" — ignored", .{name});
+                continue;
+            };
         } else if (std.mem.eql(u8, field, "electrical")) {
             if (electrical_mod.parse(cl)) |d| {
                 try electrical.append(self.allocator, d);
+            } else {
+                self.warnFmt(child.span, "malformed (electrical …) declaration in component \"{s}\" — ignored", .{name});
             }
         } else if (std.mem.eql(u8, field, "bus")) {
             // (bus "name" pin1 pin2 pin3 ...)
@@ -332,12 +326,95 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
         .buses = buses.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .is_family = false,
         .param_type = "",
-        .datasheets = datasheets.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+        .docs = .{
+            .datasheets = datasheets.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+            .review = datasheet_review,
+        },
+        .thermal = thermal_decl,
         .requirements = requirements.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .requirements_ignored = requirements_ignored,
         .electrical = electrical.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .refdes_prefix = refdes_prefix,
     });
+}
+
+fn parseComponentRequirement(self: *Evaluator, children: []const Node) ?env_mod.Requirement {
+    const text = children[1].asString() orelse return null;
+    var ref: ?env_mod.NoteRef = null;
+    var check: ?env_mod.Check = null;
+    var explicit_id: []const u8 = "";
+    for (children[2..]) |extra| {
+        if (env_mod.parseNoteRef(extra)) |parsed_ref| {
+            ref = parsed_ref;
+        } else if (check_grammar.parseCheck(self.allocator, extra)) |parsed_check| {
+            check = parsed_check;
+        } else if (extra.isForm("check")) {
+            self.warnFmt(
+                extra.span,
+                "malformed or unknown requirement (check …); recognised checks: {s}",
+                .{check_grammar.check_keyword_list},
+            );
+        } else if (extra.asList()) |sub| {
+            if (sub.len >= 2 and std.mem.eql(u8, sub[0].asAtom() orelse "", "id")) {
+                explicit_id = sub[1].asText() orelse explicit_id;
+            }
+        }
+    }
+    const id = if (explicit_id.len > 0)
+        explicit_id
+    else
+        env_mod.requirementIdForText(self.allocator, text) catch "";
+    return .{ .text = text, .ref = ref, .check = check, .id = id };
+}
+
+/// Parse the provenance/completeness form attached to a component datasheet.
+/// Unknown fields are ignored for forwards compatibility; strict preflight
+/// owns the semantic completeness checks and reports malformed/missing data.
+fn parseDatasheetReview(allocator: std.mem.Allocator, children: []const Node) ?env_mod.DatasheetReview {
+    var datasheet: []const u8 = "";
+    var sha256: []const u8 = "";
+    var status: env_mod.DatasheetReviewStatus = .draft;
+    var reviewed_by: []const u8 = "";
+    var date: []const u8 = "";
+    var categories: std.ArrayList([]const u8) = .empty;
+    var not_applicable: std.ArrayList(env_mod.DatasheetReviewNa) = .empty;
+
+    for (children[1..]) |child| {
+        const sub = child.asList() orelse continue;
+        if (sub.len < 2) continue;
+        const head = sub[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, datasheet_form)) {
+            datasheet = sub[1].asText() orelse "";
+        } else if (std.mem.eql(u8, head, "sha256")) {
+            sha256 = sub[1].asText() orelse "";
+        } else if (std.mem.eql(u8, head, "status")) {
+            const word = sub[1].asText() orelse continue;
+            status = std.meta.stringToEnum(env_mod.DatasheetReviewStatus, word) orelse .draft;
+        } else if (std.mem.eql(u8, head, "reviewed-by")) {
+            reviewed_by = sub[1].asText() orelse "";
+        } else if (std.mem.eql(u8, head, "date")) {
+            date = sub[1].asText() orelse "";
+        } else if (std.mem.eql(u8, head, "category")) {
+            const category = sub[1].asText() orelse continue;
+            categories.append(allocator, category) catch return null;
+        } else if (std.mem.eql(u8, head, "category-na") and sub.len >= 3) {
+            const category = sub[1].asText() orelse continue;
+            const rationale = sub[2].asText() orelse "";
+            not_applicable.append(allocator, .{
+                .category = category,
+                .rationale = rationale,
+            }) catch return null;
+        }
+    }
+    return .{
+        .datasheet = datasheet,
+        .sha256 = sha256,
+        .status = status,
+        .reviewed_by = reviewed_by,
+        .date = date,
+        .categories = categories.toOwnedSlice(allocator) catch return null,
+        .not_applicable = not_applicable.toOwnedSlice(allocator) catch return null,
+    };
 }
 
 /// Parse a `(component-family …)` library file into a `ComponentData` entry
@@ -349,6 +426,7 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
     var footprint_name: []const u8 = "";
     var param_type: []const u8 = "";
     var refdes_prefix: u8 = 0; // (refdes "X") — explicit ref-des class; 0 = unset
+    var thermal_decl: ?env_mod.ThermalDecl = null;
 
     for (children[1..]) |child| {
         if (child.isForm("symbol")) {
@@ -371,6 +449,14 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
                 }
             }
         }
+        // A family's members share one package, so its `(thermal …)` envelope
+        // is the whole family's — a `cap-0402` is a `cap-0402` at any value.
+        if (child.isForm(thermal_form)) {
+            thermal_decl = thermal.parseThermal(child.asList().?) orelse {
+                self.warnFmt(child.span, "malformed (thermal …) in component-family \"{s}\" — ignored", .{name});
+                continue;
+            };
+        }
     }
 
     try self.component_cache.put(self.allocator, name, .{
@@ -380,6 +466,7 @@ pub fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalE
         .is_family = true,
         .param_type = param_type,
         .refdes_prefix = refdes_prefix,
+        .thermal = thermal_decl,
     });
 }
 
@@ -595,7 +682,10 @@ pub fn callModule(self: *Evaluator, mod: BlockDef, call_args: []const Node, call
     // PCB placer engages role-based auto-placement for module roots only.
     // Propagates to sub-block instantiations, standalone previews, and zero-arg
     // resolves — every module root flows through here.
-    if (result == .design_block) result.design_block.origin = .embedded;
+    if (result == .design_block) {
+        result.design_block.origin = .embedded;
+        result.design_block.module_name = mod.name;
+    }
     return result;
 }
 
@@ -642,6 +732,80 @@ pub fn instantiateStandalone(self: *Evaluator, name: []const u8) EvalError!Value
 
 const testing = std.testing;
 
+// spec: eval/modules - a component's (thermal …) form is cached on the component and a component-family declares one for its whole package
+test "loadComponent and loadComponentFamily cache the thermal envelope" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(component hot-part
+        \\  (footprint "SOT-223")
+        \\  (thermal (theta-ja 60) (tj-max 150) (operating -40 125)))
+    ;
+    const nodes = try parser_mod.parse(alloc, source);
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    try loadComponent(&eval, "hot-part", nodes[0]);
+    const decl = eval.component_cache.get("hot-part").?.thermal.?;
+    try testing.expectEqual(@as(f64, 60), decl.theta_ja.?);
+    try testing.expectEqual(@as(f64, 150), decl.tj_max.?);
+    try testing.expectEqual(@as(f64, -40), decl.operating_min.?);
+    try testing.expectEqual(@as(f64, 125), decl.operating_max.?);
+
+    const family_source =
+        \\(component-family res-0402
+        \\  (parameter value "resistance")
+        \\  (thermal (theta-ja 250)))
+    ;
+    const family_nodes = try parser_mod.parse(alloc, family_source);
+    try loadComponentFamily(&eval, "res-0402", family_nodes[0]);
+    try testing.expectEqual(@as(f64, 250), eval.component_cache.get("res-0402").?.thermal.?.theta_ja.?);
+}
+
+// spec: eval/modules - component datasheet-review records preserve digest provenance, categories, and N/A rationale
+test "loadComponent parses datasheet-review evidence" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(component reviewed-part
+        \\  (datasheet "reviewed.pdf")
+        \\  (datasheet-review
+        \\    (datasheet "reviewed.pdf")
+        \\    (sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        \\    (status complete)
+        \\    (reviewed-by "eda-agent")
+        \\    (date "2026-07-16")
+        \\    (category supply)
+        \\    (category-na thermal "junction stays below rating")))
+    ;
+    const nodes = try parser_mod.parse(alloc, source);
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    try loadComponent(&eval, "reviewed-part", nodes[0]);
+    const review = eval.component_cache.get("reviewed-part").?.docs.review.?;
+    try testing.expectEqual(env_mod.DatasheetReviewStatus.complete, review.status);
+    try testing.expectEqualStrings("reviewed.pdf", review.datasheet);
+    try testing.expectEqualStrings("eda-agent", review.reviewed_by);
+    try testing.expectEqualStrings("supply", review.categories[0]);
+    try testing.expectEqualStrings("thermal", review.not_applicable[0].category);
+    try testing.expectEqualStrings("junction stays below rating", review.not_applicable[0].rationale);
+}
+
+// spec: eval/modules - malformed executable requirements and electrical declarations produce diagnostics
+test "loadComponent warns when enforceable declarations are malformed" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(component malformed-part
+        \\  (requirement "bypass it" (check (decouplng (pin "VDD") (pin "GND"))))
+        \\  (electrical "VDD" (type mystery)))
+    ;
+    const nodes = try parser_mod.parse(alloc, source);
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    try loadComponent(&eval, "malformed-part", nodes[0]);
+
+    try testing.expectEqual(@as(usize, 2), eval.warnings.items.len);
+    try testing.expect(std.mem.indexOf(u8, eval.warnings.items[0].message, "recognised checks") != null);
+    try testing.expect(std.mem.indexOf(u8, eval.warnings.items[1].message, "electrical") != null);
+}
+
 /// Evaluate `source` (defmodule + call) with a fresh evaluator, returning
 /// the final value or the error. `eval_out` receives the evaluator so the
 /// test can inspect `last_error`. Callers pass page_allocator: defmodule's
@@ -659,6 +823,25 @@ test "callModule positional arguments" {
     var eval: Evaluator = undefined;
     const v = try evalModuleSource(std.heap.page_allocator, &eval, "(defmodule m (a b) (- a b)) (m 10 4)");
     try testing.expectEqual(@as(f64, 6.0), v.asNumber().?);
+}
+
+test "implements metadata is inert when a wrapped module evaluates" {
+    // spec: eval/modules - implementation metadata is evaluable but has no runtime value
+    var eval: Evaluator = undefined;
+    const source = "(defmodule m () (implements chip (policy canonical) (role regulator)) 7) (m)";
+    const value = try evalModuleSource(std.heap.page_allocator, &eval, source);
+    try testing.expectEqual(@as(f64, 7), value.asNumber().?);
+}
+
+test "wrapped module stamps definition name separately from display title" {
+    // spec: eval/modules - wrapped module roots retain defmodule provenance independently of their design-block title
+    var eval: Evaluator = undefined;
+    const source = "(defmodule buck () (implements chip (policy canonical)) " ++
+        "(design-block \"3V3 Supply\")) (buck)";
+    const value = try evalModuleSource(std.heap.page_allocator, &eval, source);
+    try testing.expectEqualStrings("3V3 Supply", value.design_block.name);
+    try testing.expectEqualStrings("buck", value.design_block.module_name);
+    try testing.expectEqual(env_mod.BlockOrigin.embedded, value.design_block.origin);
 }
 
 // spec: eval/modules - Module calls accept named (param expr) arguments in any order
@@ -749,10 +932,10 @@ test "resolveImport reports imported file syntax error with path and location" {
     const alloc = std.heap.page_allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/modules");
+    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
     // Malformed module: a stray '@' (unexpected character) at line 2, col 3.
-    try tmp.dir.writeFile(.{ .sub_path = "lib/modules/broken.sexp", .data = "(defmodule broken ()\n  @bad)\n" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/modules/broken.sexp", .data = "(defmodule broken ()\n  @bad)\n" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     var eval = Evaluator.init(alloc, root);
     defer eval.deinit();

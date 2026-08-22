@@ -145,7 +145,7 @@ test "leak: coverage walkers over a sub-block hierarchy" {
         .footprint = "fp",
         .symbol = "",
         .properties = &props,
-        .datasheets = &ds,
+        .docs = .{ .datasheets = &ds },
     };
     const c1_inst = Instance{ .ref_des = "C1", .component = "cap", .value = "100nF", .footprint = "0402", .symbol = "" };
     const sub_insts = [_]Instance{u1_inst};
@@ -182,10 +182,10 @@ test "leak: bom_html.writeBomCsv over a sub-block hierarchy" {
     };
     const top = block("top", &top_insts, &subs);
 
-    var buf: std.ArrayList(u8) = .empty;
-    try bom_html.writeBomCsv(alloc, buf.writer(alloc), &top);
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    try bom_html.writeBomCsv(alloc, &buf.writer, &top);
     // Two 100nF caps dedup to one BOM line (count 2); test point excluded.
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "cap-0402") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "cap-0402") != null);
 }
 
 // leak-audit: writeNetsJson builds a StringHashMap rename map (from net_ties)
@@ -213,8 +213,8 @@ test "leak: bom_html.writeNetsJson with net_ties and a sub-block" {
     top.nets = &top_nets;
     top.net_ties = &ties;
 
-    var buf: std.ArrayList(u8) = .empty;
-    const written = try bom_html.writeNetsJson(alloc, buf.writer(alloc), &top, "");
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    const written = try bom_html.writeNetsJson(alloc, &buf.writer, &top, "");
     try std.testing.expect(written);
 }
 
@@ -235,16 +235,16 @@ test "correctness: bom_html.writeComponentsJson escapes double-quotes in string 
 
     // Mirror the /api/components caller: writeComponentsJson emits the object
     // body, the caller supplies the surrounding braces.
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(alloc);
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    const w = &buf.writer;
     try w.writeAll("{");
     _ = try bom_html.writeComponentsJson(w, &top, "", &sym_cache, alloc, ".");
     try w.writeAll("}");
 
     // The inch mark is escaped in the raw bytes …
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "0.1\\\" header") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "0.1\\\" header") != null);
     // … and the whole payload parses as valid JSON with J1 present.
-    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, buf.items, .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, buf.written(), .{});
     defer parsed.deinit();
     try std.testing.expect(parsed.value.object.contains("J1"));
 }
@@ -269,9 +269,9 @@ test "leak: bom_html.writeSchematicBomHtml over a sub-block hierarchy" {
     };
     const top = block("top", &top_insts, &subs);
 
-    var buf: std.ArrayList(u8) = .empty;
-    try bom_html.writeSchematicBomHtml(alloc, buf.writer(alloc), &top);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "sch-bom-table") != null);
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    try bom_html.writeSchematicBomHtml(alloc, &buf.writer, &top);
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "sch-bom-table") != null);
 }
 
 // leak-audit: renderToJson returns `buf.items` (capacity may exceed len) so it

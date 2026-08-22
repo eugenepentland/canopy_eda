@@ -11,6 +11,15 @@
 const std = @import("std");
 
 /// Fill `buf` with cryptographically-secure random bytes.
-pub fn bytes(buf: []u8) void {
-    std.crypto.random.bytes(buf);
+pub fn bytes(buf: []u8) std.Io.RandomSecureError!void {
+    return bytesWithIo(@import("fs.zig").currentIo(), buf);
+}
+
+fn bytesWithIo(io: std.Io, buf: []u8) std.Io.RandomSecureError!void {
+    return std.Io.randomSecure(io, buf);
+}
+
+test "secure entropy failure propagates without a fallback" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectError(error.EntropyUnavailable, bytesWithIo(std.Io.failing, &buf));
 }

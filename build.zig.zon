@@ -25,16 +25,21 @@
     .fingerprint = 0x706fd33d5a329eb6, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.17.0-dev.1683+5ceec001b",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
+        // Vendored from httpz's Zig-development branch at
+        // e6c23eb959e20bc8871184622fa9082ddaf5b106. This branch includes the
+        // deferred-signal and loop-thread fd-deregistration fixes previously
+        // backported into our Zig-0.15 fork, plus the later shutdown-UAF and
+        // timeout-sweep fixes. Keep the commit exact: this event loop shares a
+        // process with netlisp's fork-heavy MCP autocommit path.
         .httpz = .{
-            .url = "git+https://github.com/karlseguin/http.zig#86ec1ae5fca398a58dfb06ae7fd8395b8ab2ab76",
-            .hash = "httpz-0.0.0-PNVzrOlMBwDf2xnpIPCRXuFtO-qK6h2Vrl8n7_UjXZI1",
+            .path = "vendor/httpz",
         },
         // Guardian (code-quality gate) is an unpinned *relative-path* dep: a
         // sibling guardian-zig checkout at ~/ai/canopy/guardian-zig. The path is
@@ -50,10 +55,9 @@
         .guardian = .{
             .path = "../../canopy/guardian-zig",
         },
-        .zt = .{
-            .url = "git+https://github.com/lalinsky/zt#b40829fc06a69504f1d51db25ab5a688a3fb41c2",
-            .hash = "zt-0.0.0-oSxxLHUWAgBRX_4qFpIbURNBtGasSCYdqcnRjcnItmT0",
-        },
+        // Latest upstream main at migration time, vendored so the small Zig
+        // master compatibility delta is durable and reviewed with this tree.
+        .zt = .{ .path = "vendor/zt" },
         // Ward auth library (session-cookie + OAuth-bearer verification against
         // the wardd server at ward.eugenepentland.dev). Relative-path dep like
         // guardian: resolves to ~/ai/ward from the main checkout. Worktree
@@ -69,6 +73,10 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        // httpz, websocket, metrics, and zt are intentionally vendored at
+        // exact revisions so a clean package build never follows moving Zig
+        // master dependencies or needs network access.
+        "vendor",
         // Needed by the `gen-language-docs --check` build step (compares the
         // committed reference against the dispatch tables) and by Guardian,
         // both of which run on a packaged build — omitting them makes a fetched

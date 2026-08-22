@@ -10,25 +10,26 @@
 //! guardian.toml, so its own `std.process.exit` calls are the sanctioned ones.
 
 const std = @import("std");
+const infra_fs = @import("infra/fs.zig");
 
 /// The process exit status shared by every fatal termination: a nonzero
 /// (failure) code so CI and calling agents can gate on it.
 pub const failure_status: u8 = 1;
 
-/// Best-effort diagnostic write to stderr. Goes through `std.fs.File.stderr()`
+/// Best-effort diagnostic write to stderr. Goes through `std.Io.File.stderr()`
 /// (like `infra/log.zig`) so it sidesteps the `debug-print-ban` chain; a message
 /// longer than the 4 KiB scratch buffer is truncated rather than dropped. Void
 /// so a failed write is a deliberate early return, never a swallowed error.
 fn writeStderr(comptime fmt: []const u8, args: anytype) void {
-    const stderr = std.fs.File.stderr();
+    const stderr = std.Io.File.stderr();
     var buf: [4096]u8 = undefined;
     if (std.fmt.bufPrint(&buf, fmt, args)) |msg| {
-        stderr.writeAll(msg) catch return;
+        stderr.writeStreamingAll(infra_fs.currentIo(), msg) catch return;
     } else |err| switch (err) {
         error.NoSpaceLeft => {
             const suffix = "…\n";
             @memcpy(buf[buf.len - suffix.len ..], suffix);
-            stderr.writeAll(&buf) catch return;
+            stderr.writeStreamingAll(infra_fs.currentIo(), &buf) catch return;
         },
     }
 }

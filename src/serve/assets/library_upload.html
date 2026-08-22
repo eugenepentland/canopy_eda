@@ -3,7 +3,7 @@
 <details id="upload-section" style="margin-bottom:2rem;" open><summary style="color:#58a6ff;font-size:0.95rem;cursor:pointer;">Add a Component</summary>
 <div class="upload-box" id="cse-box" style="margin:1rem 0;">
 <p style="font-size:0.85rem;">Fetch from Component Search Engine by part number &mdash; adds the footprint (KiCad symbol + footprint + 3D model) and the datasheet to the library.</p>
-<div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;margin-top:0.5rem;">
+<div class="upload-fields" style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;margin-top:0.5rem;">
 <input type="text" id="cse-part" placeholder="Part number (e.g. LMX2595RHAT)" style="flex:2;min-width:180px;padding:0.45rem;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;">
 <input type="text" id="cse-mfr" placeholder="Manufacturer (optional)" style="flex:1;min-width:140px;padding:0.45rem;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;">
 <button id="cse-submit" class="upload-btn">Fetch from CSE</button>
@@ -17,7 +17,7 @@
 </div>
 <div id="zip-result"></div>
 <details style="margin-bottom:1rem;"><summary style="color:#666;font-size:0.85rem;cursor:pointer;">Or upload files individually</summary>
-<div style="display:flex;gap:1rem;margin:1rem 0;">
+<div class="upload-file-grid" style="display:flex;gap:1rem;margin:1rem 0;">
 <div class="upload-box" id="sym-drop" style="flex:1;">
 <p style="font-size:0.85rem;">Symbol (.kicad_sym)</p>
 <label class="upload-btn">Choose file<input type="file" id="sym-file" accept=".kicad_sym"></label>

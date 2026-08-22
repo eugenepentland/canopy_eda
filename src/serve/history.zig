@@ -32,13 +32,13 @@ pub const HistoryError = error{
     SnapshotNotFound,
 } ||
     std.mem.Allocator.Error ||
-    std.fs.Dir.AccessError ||
-    std.fs.Dir.MakeError ||
-    std.fs.Dir.CopyFileError ||
-    std.fs.Dir.OpenError ||
-    std.fs.File.OpenError ||
-    std.fs.Dir.Iterator.Error ||
-    std.fs.File.ReadError;
+    infra_fs.Dir.AccessError ||
+    infra_fs.Dir.MakeError ||
+    infra_fs.Dir.CopyFileError ||
+    infra_fs.Dir.OpenError ||
+    infra_fs.File.OpenError ||
+    infra_fs.Iterator.Error ||
+    infra_fs.File.ReadError;
 
 fn makeTimestamp(allocator: std.mem.Allocator) ![]u8 {
     const sec = clock.timestamp();
@@ -313,7 +313,7 @@ test "layout snapshot writes to history and lists back" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(project);
 
     const sidecar = try std.fmt.allocPrint(alloc, "{s}/foo.layouts.json", .{project});
@@ -350,7 +350,7 @@ test "layout snapshots prune to the newest cap" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(project);
 
     const sidecar = try std.fmt.allocPrint(alloc, "{s}/foo.layouts.json", .{project});
@@ -381,7 +381,7 @@ test "source snapshot list ignores the layouts subdir" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(project);
 
     // A layout snapshot dir plus a real source snapshot dir side by side.

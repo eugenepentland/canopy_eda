@@ -1,0 +1,309 @@
+/* /thermal/:name — the thermal review page.
+   Dark theme and topbar shared, by value, with the assembly workspace so the
+   five design-view tabs look like one bar wherever the reader lands. */
+:root {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --panel: #131922;
+  --panel-2: #1a2230;
+  --line: #2b3545;
+  --text: #e6edf3;
+  --muted: #8b98a9;
+  --accent: #58a6ff;
+  --pass: #3fb950;
+  --warn: #d29922;
+  --danger: #f85149;
+  font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body { width: 100%; height: 100%; margin: 0; background: var(--bg); color: var(--text); }
+body { overflow: hidden; }
+button, input { font: inherit; }
+button { color: inherit; }
+
+.topbar {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  background: #101620;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.brand { color: var(--accent); font-weight: 800; text-decoration: none; letter-spacing: .08em; }
+.topbar strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar nav { display: flex; align-self: stretch; gap: 2px; margin-left: auto; overflow-x: auto; }
+.topbar nav a {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  color: var(--muted);
+  text-decoration: none;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+}
+.topbar nav a:hover { color: var(--text); background: rgba(255,255,255,.035); }
+.topbar nav a.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* ---- Workspace: numbers left, live board right ----
+   Same two-column grid the assembly workspace uses (assembly_debug.css), by
+   value rather than by import: the two pages share a topbar and a shape, not a
+   stylesheet, and a change to one must not silently re-lay-out the other. */
+.tp-workspace {
+  display: grid;
+  grid-template-columns: minmax(340px, 32vw) 1fr;
+  height: calc(100% - 48px);
+}
+.tp-panel {
+  min-width: 0;
+  overflow-y: auto;
+  padding: 16px 14px 40px;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+}
+.tp-board-pane { min-width: 0; display: flex; flex-direction: column; background: #070a0f; }
+.tp-board-stage { position: relative; flex: 1; min-height: 0; }
+.tp-board-stage iframe { width: 100%; height: 100%; border: 0; display: block; }
+.tp-board-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* ---- Board controls strip ---- */
+.tp-board-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 12px;
+  color: var(--muted);
+}
+.tp-face { display:flex;align-items:center;gap:4px;white-space:nowrap; }
+.tp-face span { margin-right:2px; }
+.tp-face button {
+  min-height:28px;
+  padding:2px 10px;
+  border:1px solid var(--line);
+  background:var(--bg);
+  color:var(--muted);
+  cursor:pointer;
+}
+.tp-face button:first-of-type { border-radius:6px 0 0 6px; }
+.tp-face button:last-child { margin-left:-5px;border-radius:0 6px 6px 0; }
+.tp-face button.on { position:relative;border-color:var(--accent);background:#223049;color:var(--text); }
+.tp-legend { display: flex; align-items: center; gap: 7px; }
+/* The stops render_thermal_png.zig paints and pcb_thermal.js rebuilds — one
+   ramp, three places, so the legend describes the wash beside it. */
+.tp-ramp {
+  width: 132px;
+  height: 10px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: linear-gradient(90deg, #071438 0%, #1a5fc8 28%, #2fc4d6 52%, #f2dc5a 76%, #e8402a 100%);
+}
+.tp-legend-lo, .tp-legend-hi { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tp-hotspot { color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tp-switch { display: flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
+.tp-switch input[type="range"] { width: 92px; }
+
+/* ---- Verdict headline ---- */
+.tp-verdict { margin: 0 0 18px; }
+.tp-headline { margin: 0 0 8px; font-size: 16px; line-height: 1.5; }
+.tp-pill {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 2px 9px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  vertical-align: 2px;
+}
+.tp-pass { color: var(--pass); }
+.tp-warn { color: var(--warn); }
+.tp-fail { color: var(--danger); }
+.tp-info { color: var(--muted); }
+.tp-hint { margin: 4px 0; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+
+/* ---- Controls ---- */
+.tp-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  margin: 0 0 16px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+/* One rung per line: the panel is a column, and four abbreviated scenario
+   labels side by side are unreadable at this width. */
+.tp-seg { display: flex; flex-direction: column; width: 100%; gap: 2px; padding: 2px; background: var(--bg); border-radius: 7px; }
+.tp-seg-btn {
+  min-height: 32px;
+  padding: 4px 11px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.tp-seg-btn:hover { color: var(--text); }
+.tp-seg-btn.on { background: #223049; border-color: var(--accent); color: var(--text); }
+.tp-amb { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.tp-amb input {
+  width: 84px;
+  min-height: 32px;
+  padding: 3px 7px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+}
+.tp-status { color: var(--accent); font-size: 12.5px; }
+/* The board picker. A whole-page navigation rather than a live toggle, so it
+   sits on its own line ahead of the rungs, reading as "which board" before
+   "how cooled". */
+.tp-layout { display: flex; align-items: center; gap: 6px; width: 100%; color: var(--muted); }
+.tp-layout select {
+  flex: 1;
+  min-width: 0;
+  min-height: 32px;
+  padding: 3px 7px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+}
+/* Said out loud, never silently: the page fell back to the default board. */
+.tp-miss { width: 100%; color: var(--warn); font-size: 12.5px; overflow-wrap: anywhere; }
+.tp-tools { display: flex; gap: 8px; margin-left: auto; }
+.tp-amb { margin-right: auto; }
+.tp-tool {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.tp-tool:hover { color: var(--text); border-color: var(--accent); }
+
+/* ---- The "solving" veil over the board ---- */
+.tp-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(7,10,15,.72);
+  color: var(--accent);
+  letter-spacing: .04em;
+}
+/* Author-level `display:flex` overrides the browser's built-in `[hidden]`
+   rule. Keep the veil out of the layout once the overlay reports completion. */
+.tp-loading[hidden] { display: none; }
+
+/* ---- Tables ---- */
+.tp-sect { margin: 0 0 20px; }
+.tp-sect h2 { margin: 0 0 6px; font-size: 14px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+/* Wide tables scroll inside their own box; the PAGE never scrolls sideways. */
+.tp-scroll { overflow-x:auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--line); border-radius: 9px; }
+.tp-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tp-table th, .tp-table td { padding: 7px 10px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--line); }
+.tp-table th { position: sticky; top: 0; background: var(--panel-2); color: var(--muted); font-weight: 600; }
+.tp-table tbody tr:last-child td { border-bottom: 0; }
+.tp-table code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.tp-lrow, .tp-prow { cursor: pointer; }
+.tp-lrow:hover td, .tp-prow:hover td { background: rgba(88,166,255,.07); }
+.tp-lrow.sel td { background: #1b2942; color: var(--text); }
+.tp-over td { color: var(--danger); }
+.tp-est { color: var(--muted); font-size: 11px; }
+.tp-links { display: table-cell; }
+.tp-links a { margin-right: 10px; color: var(--accent); text-decoration: none; }
+.tp-links a:hover { text-decoration: underline; }
+.tp-coverage code { color: var(--muted); }
+
+/* ---- Comparing layouts ---- */
+.tp-compare summary { cursor: pointer; font-size: 14px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.tp-compare summary:hover { color: var(--text); }
+.tp-count { text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--muted); }
+.tp-cbar { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.tp-cgo {
+  min-height: 32px;
+  padding: 0 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.tp-cgo:hover:enabled { border-color: var(--accent); }
+.tp-cgo:disabled { color: var(--muted); cursor: default; }
+.tp-cprog { color: var(--muted); font-size: 12.5px; }
+.tp-crow { cursor: pointer; }
+.tp-crow:hover td { background: rgba(88,166,255,.07); }
+.tp-crow.sel td { background: #1b2942; color: var(--text); }
+/* Layout names are long and user-chosen: this is the one cell that wraps. */
+.tp-cname { white-space: normal; max-width: 300px; overflow-wrap: anywhere; }
+.tp-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.tp-badge-on { border-color: var(--accent); color: var(--text); }
+.tp-cshow { color: var(--accent); text-decoration: none; font-size: 12px; }
+.tp-cshow:hover { text-decoration: underline; }
+/* An unsolved row states its own price rather than showing a blank. */
+.tp-cfill { color: var(--muted); font-style: italic; }
+.tp-cfill.busy { color: var(--accent); font-style: normal; }
+.tp-cnote { color: var(--muted); white-space: normal; }
+.tp-cool { color: var(--pass); }
+.tp-hot { color: var(--danger); }
+
+@media (max-width: 620px) {
+  .topbar { height:92px;min-height:92px;flex-wrap:wrap;gap:4px 10px;padding:6px 10px 0; }
+  .topbar .brand { height:36px;display:flex;align-items:center; }
+  .topbar strong { flex:1;height:36px;display:flex;align-items:center; }
+  .topbar nav { width:100%;height:44px;order:3;margin-left:0; }
+  .topbar nav a { min-width:0;flex:1;justify-content:center;padding:0 3px;font-size:11px;touch-action:manipulation; }
+  body { overflow:auto; }
+  .tp-workspace { grid-template-columns:1fr;height:auto; }
+  .tp-panel { overflow-y:visible;border-right:0;border-bottom:1px solid var(--line);padding:14px 10px 24px; }
+  .tp-board-pane { height:70vh; }
+  .tp-face button { min-height:44px; }
+  .tp-controls { flex-direction:column;align-items:stretch;gap:10px; }
+  .tp-seg { flex-direction:column; }
+  .tp-seg-btn { min-height:44px; }
+  .tp-amb { justify-content:space-between; }
+  .tp-amb input { flex:1;min-height:44px;font-size:16px; }
+  .tp-tools { margin-left:0; }
+  .tp-tool { flex:1;justify-content:center;min-height:44px; }
+  .tp-table th, .tp-table td { padding:9px 8px; }
+  .tp-links a { display:inline-flex;align-items:center;min-height:44px; }
+  .tp-layout select { min-height:44px;font-size:16px; }
+  .tp-cgo { flex:1;min-height:44px; }
+  .tp-cname { max-width:none; }
+}

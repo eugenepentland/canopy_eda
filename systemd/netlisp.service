@@ -1,23 +1,23 @@
 [Unit]
 Description=Netlisp schematic/PCB web server
 After=network.target
+# Crash-loop guard: if the service dies >10 times in 5 min, stop retrying and
+# leave it failed. `systemctl --user reset-failed netlisp.service` clears the
+# limit; deploy-prod.sh does this before a rollback.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
 WorkingDirectory=/home/epentland/ai/canopy/eda
-# Pin the DEPLOYED binary to ReleaseSafe (see the rationale next to
-# standardOptimizeOption in build.zig). The server parses untrusted input
-# (.sexp designs, imported KiCad boards, HTTP/JSON params); in a safety-off
-# build any remaining unguarded cast/overflow is silent UB — a wrong board —
-# whereas ReleaseSafe turns it into a panic, and Restart=on-failure below makes
-# that a ~2-second blip. A plain `zig build` ships Debug; this rebuilds
-# ReleaseSafe before serving. Dev/test/mutation stay Debug (fast iteration),
-# which is why the pin lives here at the deploy point, not in build.zig's
-# default. Login shell so `zig` is on PATH (mirrors the nightly unit). The
-# guardian `all` cache + incremental link keep an unchanged-tree restart fast.
-ExecStartPre=/bin/sh -lc 'cd /home/epentland/ai/canopy/eda && zig build -Doptimize=ReleaseSafe'
+# Release candidates are built, compiler-SHA checked, tested, checksummed, and
+# installed atomically by deploy-prod.sh. The service only runs that artifact;
+# it must never rebuild an unchecked binary during restart or host boot.
+Environment=NETLISP_GIT_AUTOCOMMIT=0
 ExecStart=/home/epentland/ai/canopy/eda/zig-out/bin/netlisp serve --project-dir /home/epentland/ai/canopy/eda/projects/designs --port 7050
-Restart=on-failure
+# `always` also recovers from signals systemd classifies as clean exits, while
+# still honoring an explicit `systemctl --user stop`.
+Restart=always
 RestartSec=2
 
 [Install]

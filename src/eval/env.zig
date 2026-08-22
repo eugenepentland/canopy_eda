@@ -166,6 +166,20 @@ pub const Port = struct {
             self.current_typ != null or self.current_max != null or
             self.efficiency != null or self.efficiency_linear;
     }
+
+    /// True when an explicit `(port … KIND)` word says this port is NOT a
+    /// supply — `signal`, `rf`, `clock`, … A port declaring no kind says
+    /// nothing either way, so it stays eligible.
+    ///
+    /// "An explicit non-power kind is authoritative" is the rule the decoupling
+    /// census in `eval/net_analysis` already applies, so a rated enable input
+    /// can declare its voltage envelope without becoming a rail. Declared once
+    /// here because the power budget must apply the SAME rule: a regulator's
+    /// whole input current charged to the rail its ENABLE pin happens to sit on
+    /// is a load on a rail that never carries it.
+    pub fn isDeclaredNonPower(self: Port) bool {
+        return self.kind.len > 0 and !std.ascii.eqlIgnoreCase(self.kind, "power");
+    }
 };
 
 /// A note annotation.
@@ -188,6 +202,43 @@ pub const NoteRef = struct {
     /// visibly marked. Keep short and distinctive (one line on the PDF) so
     /// the per-span match in the viewer reliably finds it.
     quote: ?[]const u8 = null,
+};
+
+/// One datasheet-review category that was intentionally judged not
+/// applicable to a component. The rationale is mandatory in strict preflight
+/// so an omitted topic cannot be disguised as an unexplained N/A.
+pub const DatasheetReviewNa = struct {
+    category: []const u8,
+    rationale: []const u8,
+};
+
+/// Completion state of the component-library datasheet review. `draft` is
+/// useful while requirements are still being extracted; `stale` records a
+/// known superseded review without deleting its provenance.
+pub const DatasheetReviewStatus = enum { draft, complete, stale };
+
+/// Evidence that an active component's datasheet was reviewed before it was
+/// used in a schematic. Stored inside `(component ...)` as:
+///
+///   (datasheet-review
+///     (datasheet "part.pdf")
+///     (sha256 "...")
+///     (status complete)
+///     (reviewed-by "agent-or-human")
+///     (date "YYYY-MM-DD")
+///     (category supply)
+///     (category-na sequencing "not applicable: always-on device"))
+///
+/// Preflight also hashes the current PDF, so replacing a datasheet makes the
+/// record stale even if the form was not manually changed.
+pub const DatasheetReview = struct {
+    datasheet: []const u8,
+    sha256: []const u8,
+    status: DatasheetReviewStatus = .draft,
+    reviewed_by: []const u8 = "",
+    date: []const u8 = "",
+    categories: []const []const u8 = &.{},
+    not_applicable: []const DatasheetReviewNa = &.{},
 };
 
 /// A design-specific note attached to a section. Stored inline in the design's
@@ -325,7 +376,15 @@ pub const Check = union(enum) {
     /// capacitor, of value ≥ F µF, must bridge the nets carrying pin A and
     /// pin B on this instance. Implements the canonical bypass-cap rule
     /// ("VDD needs ≥4.7µF to VSS").
-    decoupling: struct { pin_a: []const u8, pin_b: []const u8, min_uf: f64 },
+    decoupling: struct {
+        pin_a: []const u8,
+        pin_b: []const u8,
+        min_uf: f64,
+        /// Optional upper bound. This distinguishes a required 100 nF
+        /// high-frequency bypass from a 10 µF bulk capacitor, while omitting
+        /// it preserves the original minimum-only check.
+        max_uf: ?f64 = null,
+    },
     /// `(pullup-range (pin "P") (net "N") (min-ohms L) (max-ohms H))` — a
     /// resistor must bridge the net seen on pin P and the named net N, with
     /// value in the given range. Covers PROG-style "charge-current set
@@ -335,7 +394,16 @@ pub const Check = union(enum) {
     /// the net wired to pin V must fall inside the range L..H. Covers
     /// "VDD input supply must be 3.75–6V" style envelope checks against
     /// the design's declared rails.
-    voltage_range: struct { pin: []const u8, min_v: f64, max_v: f64 },
+    voltage_range: struct {
+        pin: []const u8,
+        min_v: f64,
+        max_v: f64,
+        /// Non-empty only for the grammar alias `(voltage-not-above …)`.
+        /// Keeping the two voltage comparisons in one variant avoids widening
+        /// the already-large requirement-check union.
+        not_above_pin: []const u8 = "",
+        margin_v: f64 = 0,
+    },
     /// `(tied-to-net (pin "P") (net "N"))` — pin P must resolve to net N
     /// (alias-aware). Covers "PDR_ON must be tied to VDDA18_AON" style
     /// fixed-net rules where the part datasheet calls out a specific rail.
@@ -376,6 +444,27 @@ pub const Check = union(enum) {
         target_net: []const u8,
         min: f64,
         max: f64,
+    },
+    /// `(feedback-divider (pin "FB") (return-net "GND")
+    /// (reference-v 0.6) (tolerance-pct 2))` — locate the upper/lower
+    /// resistors incident to FB, calculate VOUT=VREF*(1+Rtop/Rbottom), and
+    /// compare it with the declared output rail (or voltage encoded in its
+    /// net name).
+    feedback_divider: struct {
+        pin: []const u8,
+        return_net: []const u8,
+        reference_v: f64,
+        tolerance_pct: f64,
+    },
+    /// `(set-resistor-output (pin "SET") (return-net "GND")
+    /// (output-pin "OUT") (current-ua 100) (tolerance-pct 2))` — calculate
+    /// VOUT=ISET*RSET and compare it with the output rail declaration/name.
+    set_resistor_output: struct {
+        pin: []const u8,
+        return_net: []const u8,
+        output_pin: []const u8,
+        current_ua: f64,
+        tolerance_pct: f64,
     },
 };
 
@@ -486,10 +575,9 @@ pub const Instance = struct {
     pinout: []const u8 = "",
     /// Component properties (manufacturer, mpn, etc.)
     properties: []const Property = &.{},
-    /// PDF filenames in `lib/datasheets/` declared by the component in its
-    /// library definition. Copied onto every instance so downstream renderers
-    /// don't have to re-query the evaluator's cache.
-    datasheets: []const []const u8 = &.{},
+    /// The part's library documentation — its datasheet PDFs and the
+    /// digest-bound review record. See `ComponentDocs`.
+    docs: ComponentDocs = .{},
     /// Library-declared rules for using this part. Read-only during review.
     /// Edited by modifying `lib/components/<component>.sexp`.
     requirements: []const Requirement = &.{},
@@ -522,19 +610,9 @@ pub const Instance = struct {
     /// during a rework), but it is excluded from the assembly BOM and marked DNP
     /// in the schematic, the KiCad netlist, and the .kicad_pcb footprint attrs.
     dnp: bool = false,
-    /// `(decouples "IC" PIN)` — bind this (decoupling) cap's power leg to a
-    /// specific hub pad. Pins the decoupling-loop target + ratsnest endpoint to
-    /// that pad (the per-instance twin of a `(placement-order … (near …))`), so
-    /// on a multi-pad rail each cap visibly serves its own pin. `decouple_ic` is
-    /// the named hub ref (for validation); `decouple_pin` is the pad it targets.
-    /// Empty ⇒ no binding (auto: lowest-numbered supply pad).
-    decouple_ic: []const u8 = "",
-    decouple_pin: []const u8 = "",
-    /// `(decouples rail)` — explicit opt-out: this cap serves the whole rail (a
-    /// reservoir / deliberately rail-level bypass), so the per-pin-decoupling
-    /// lint must not require a pad binding for it. Distinct from "no form at
-    /// all" (which IS flagged on a multi-supply-pad rail).
-    decouple_rail: bool = false,
+    /// Every authored *placement* binding this instance carries — which hub pad
+    /// it decouples, which pad it must sit beside. See `InstanceBinds`.
+    bind: InstanceBinds = .{},
     /// `(strap-ok PIN "reason")` blessings — explicit sign-offs that a config /
     /// enable / reset strap on this part is *deliberately* tied straight to a
     /// rail (rather than driven through a pull-up/down). Each entry pins a
@@ -549,6 +627,150 @@ pub const Instance = struct {
     /// pinout classifies as needing a connection (a declared input, a config
     /// strap) that lacks a non-empty blessing here. Empty ⇒ nothing is blessed.
     nc_oks: []const NcOk = &.{},
+    /// Everything the thermal analyzer needs about this placed part: the
+    /// library part's declared thermal envelope plus any `(power …)` the
+    /// instance itself declares. See `InstanceThermal`.
+    thermal: InstanceThermal = .{},
+};
+
+/// The library documentation attached to a part: the datasheet PDFs in
+/// `lib/datasheets/` it is documented by, and the digest-bound record proving
+/// those pages were reviewed. One value rather than two loose fields because
+/// every consumer reads them together (preflight checks the review names a PDF
+/// the part actually carries) and because the three records that hold them —
+/// the component cache entry, the resolved component, and the placed
+/// `Instance` — are wide enough already.
+pub const ComponentDocs = struct {
+    /// PDF filenames in `lib/datasheets/` declared by the component in its
+    /// library definition. Copied onto every instance so downstream renderers
+    /// don't have to re-query the evaluator's cache.
+    datasheets: []const []const u8 = &.{},
+    /// Provenance/completeness record for the datasheet requirement review.
+    /// Null for legacy components; authoring mode warns and strict preflight
+    /// gates until a complete digest-bound review is present.
+    review: ?DatasheetReview = null,
+};
+
+/// A library part's declared thermal envelope, from `(thermal …)` in its
+/// `lib/components/<name>.sexp` file. Every field is optional: a part declares
+/// what its datasheet states and nothing more, and the thermal analyzer falls
+/// back to a package estimate for a missing `theta_ja`.
+///
+/// Resistances are °C/W; temperatures are °C.
+pub const ThermalDecl = struct {
+    /// Junction-to-ambient resistance (°C/W) — the screening figure, on the
+    /// JEDEC board the datasheet used.
+    theta_ja: ?f64 = null,
+    /// Junction-to-board resistance (°C/W). The lumped Tier-0 screen has no
+    /// board to be above and does not use it; it is carried through the
+    /// screened row to `placement/thermal_field.zig`, which hangs the junction
+    /// this far above the copper under the part.
+    theta_jb: ?f64 = null,
+    /// Junction-to-case resistance through the package top (°C/W). This is the
+    /// package-side path used when a cold plate or heatsink contacts the lid;
+    /// unlike psi_jt it is a resistance suitable for a heat-flow model.
+    theta_jc: struct {
+        /// Generic junction-to-case value whose endpoint direction the source
+        /// did not identify. Recorded, never guessed into a top/bottom path.
+        generic: ?f64 = null,
+        top: ?f64 = null,
+        /// Junction-to-case resistance through the exposed pad / package
+        /// bottom (°C/W).
+        bottom: ?f64 = null,
+    } = .{},
+    /// Junction-to-top characterisation parameter (°C/W), for correlating a
+    /// case-temperature measurement back to the junction. Recorded, not yet
+    /// consumed by any analysis.
+    psi: struct {
+        jt: ?f64 = null,
+        /// Junction-to-board characterisation parameter (°C/W).
+        jb: ?f64 = null,
+    } = .{},
+    /// Absolute-maximum junction temperature (°C).
+    tj_max: ?f64 = null,
+    /// Minimum rated ambient (°C) from `(operating MIN MAX)`.
+    operating_min: ?f64 = null,
+    /// Maximum rated ambient (°C) from `(operating MIN MAX)`.
+    operating_max: ?f64 = null,
+};
+
+/// `(power …)` on an instance — the author's own statement of what this part
+/// dissipates, in watts. It outranks every derived figure, because a datasheet
+/// number beats a rail-current approximation.
+pub const PowerDecl = struct {
+    /// Typical dissipation (W). `(power 1.2)` sets this alone.
+    typ: ?f64 = null,
+    /// Worst-case dissipation (W), from `(power (typ …) (max …))`.
+    max: ?f64 = null,
+};
+
+/// The thermal facts one placed part carries: what the library says about the
+/// package, and what the design says the part dissipates. One field on
+/// `Instance` rather than two, so the thermal feature costs the record one
+/// slot and reads as one concern.
+pub const InstanceThermal = struct {
+    /// The component's `(thermal …)` declaration, copied off the library entry
+    /// so downstream analyzers need no evaluator. Null ⇒ the part declared none.
+    decl: ?ThermalDecl = null,
+    /// The instance's own `(power …)` declaration. Null ⇒ the analyzer derives
+    /// dissipation from pin-current annotations or regulator loss instead.
+    power: ?PowerDecl = null,
+};
+
+/// `(decouples "IC" PIN)` — bind a decoupling cap's power leg to a specific hub
+/// pad. Pins the decoupling-loop target + ratsnest endpoint to that pad, so on a
+/// multi-pad rail each cap visibly serves its own pin.
+///
+/// The IC and the pad are ONE value because the pad alone is ambiguous: a pad
+/// number belongs to exactly one part, but a rail shared by two ICs has two
+/// parts carrying a pad of that number, and matching on the string picks
+/// whichever the net happens to list first. Both halves are therefore carried
+/// through the flatten together.
+pub const DecoupleBind = struct {
+    /// The named hub ref, module-local as written. "" ⇒ no binding.
+    ic: []const u8 = "",
+    /// The pad it targets. "" ⇒ no binding (auto: lowest-numbered supply pad).
+    /// Resolved against the TARGET's pinout in a post-build pass
+    /// (`builders.resolveDecoupleTargets`), not the cap's — the cap has no
+    /// pinout, and the target may be declared after it.
+    pin: []const u8 = "",
+    /// `(decouples rail)` — explicit opt-out: this cap serves the whole rail (a
+    /// reservoir / deliberately rail-level bypass), so the per-pin-decoupling
+    /// lint must not require a pad binding for it. Distinct from "no form at
+    /// all" (which IS flagged on a multi-supply-pad rail).
+    rail: bool = false,
+};
+
+/// `(near "REF" PIN [(own PAD)])` — declare that this two-terminal passive must
+/// sit physically ADJACENT to one named pad of another part: a series
+/// termination at its driver pin, a feedback resistor at the FB pad, an RF
+/// matching element at the port it matches, a bulk cap at the rail's entry pin.
+///
+/// Pure adjacency, and deliberately NOT decoupling: there is no ground return
+/// and no loop, so a near binding never enters the inductance score or the
+/// plane-stitch model. `(decouples …)` stays the spelling for a bypass cap —
+/// carrying both on one part is an ERC error (`invalid_near_binding`).
+pub const NearBind = struct {
+    /// The named target ref, module-local as written. "" ⇒ no binding.
+    ref: []const u8 = "",
+    /// The target's pad. Resolved against the TARGET's pinout in the same
+    /// post-build pass the decoupling binding uses, for the same reason: the
+    /// map that gives a function name meaning belongs to the target, and the
+    /// target may be declared after this part. "" ⇒ no binding.
+    pin: []const u8 = "",
+    /// `(own PAD)` — which of this part's own legs docks against the target.
+    /// "" ⇒ infer it: the leg that shares a net with the resolved target pin.
+    /// Spell it only when BOTH legs share a net with the target pin.
+    own: []const u8 = "",
+};
+
+/// Every authored placement binding an instance carries. One field rather than
+/// five loose ones because they are read together by every consumer that cares
+/// (the flatten, the placer, ERC, the layout lint) and because `Instance` is a
+/// wide enough record already.
+pub const InstanceBinds = struct {
+    decouple: DecoupleBind = .{},
+    near: NearBind = .{},
 };
 
 /// One `(strap-ok PIN "reason")` blessing on an instance — see `Instance.strap_oks`.
@@ -781,14 +1003,16 @@ pub const TestPointTag = enum {
     signal,
 };
 
-/// A test point declared via the first-class `(test-point …)` form. Distinct
-/// from the legacy `(instance "TP1" testpoint …)` convention — both sources
-/// coexist; the Phase 2E coverage check (and the review) will merge them.
+/// A test point declared via the first-class `(test-point …)` form. The form
+/// creates a physical `testpoint` instance by default; `virtual` records the
+/// explicit marker-only opt-out. Keeping the declaration alongside a physical
+/// instance preserves its purpose / required-for metadata for review and ERC.
 pub const TestPoint = struct {
     ref_des: []const u8,
     net: []const u8,
     purpose: []const u8 = "",
     required_for: []const TestPointTag = &.{},
+    virtual: bool = false,
 };
 
 /// A first-class power rail in the design, derived in a post-eval pass by
@@ -827,6 +1051,20 @@ pub const PowerRail = struct {
     /// Net that gates this rail's bring-up (from `(enable …)` on the source
     /// port). Empty when the rail is always-on or driven by a PG signal.
     enable_net: []const u8 = "",
+};
+
+/// Board-level transient intent for one physical power domain. Unlike the DC
+/// power budget, PDN domains are not collapsed through ferrite beads: the
+/// authored `net` names the copper node whose impedance is to be screened.
+pub const PdnIntent = struct {
+    net: []const u8,
+    ripple_v: f64,
+    step_current_a: ?f64 = null,
+    rise_time_s: ?f64 = null,
+    source_resistance_ohm: ?f64 = null,
+    source_inductance_h: ?f64 = null,
+    f_min_hz: f64 = 1.0e3,
+    f_max_hz: f64 = 1.0e9,
 };
 
 /// One direction a `(place …)` constraint offsets a block in: horizontal
@@ -912,6 +1150,72 @@ pub const PlacementSideSpec = struct {
 };
 /// Explicit fabrication role; absent `(board-role …)` defaults to subcircuit.
 pub const BoardRole = enum { subcircuit, board };
+
+/// Board face receiving an external fabrication backing. Kept separate from
+/// placement.Side so the evaluator remains independent of the placement
+/// engine while still carrying an explicit, reviewable top/bottom choice.
+pub const FabricationSide = enum { top, bottom };
+
+/// Geometry source for one positive fabrication-layer region. `board` follows
+/// the exact authored or saved outline used by the manufacturing export;
+/// `polygon` is an independently authored world-mm contour.
+pub const FabricationRegion = union(enum) {
+    board,
+    polygon: []const [2]f64,
+};
+
+/// Footprints removed from a backing region. By default only components on the
+/// backing's own face are projected; `all_sides` is an explicit opt-in for a
+/// process that needs clearance through the board regardless of assembly side.
+pub const FabricationFootprintExclusion = struct {
+    enabled: bool = false,
+    all_sides: bool = false,
+    /// Empty means every footprint in the selected side scope.
+    refs: []const []const u8 = &.{},
+    clearance: f64 = 0,
+};
+
+/// An optional, separately fabricated board backing such as JLCPCB FPC tape.
+/// This is deliberately outside StackupSpec: its thickness is additional to
+/// the finished PCB thickness and its Gerber owns application geometry.
+pub const FabricationLayerSpec = struct {
+    /// Gerber basename, including `.gbr` (for example `psb_tesa8854.gbr`).
+    name: []const u8,
+    kind: []const u8 = "adhesive",
+    side: FabricationSide,
+    material: []const u8,
+    thickness: f64,
+    regions: []const FabricationRegion,
+    exclude_footprints: FabricationFootprintExclusion = .{},
+};
+/// Feature families a generic keepout may exclude.
+pub const PerimeterKeepoutBlocks = struct {
+    components: bool = false,
+    tracks: bool = false,
+    vias: bool = false,
+};
+
+/// Generic keepout policy attached to the board's perimeter fence. Clearance
+/// starts at the fence via's inward copper edge; allowed nets may cross it.
+pub const PerimeterKeepoutSpec = struct {
+    clearance: f64 = 0,
+    blocks: PerimeterKeepoutBlocks = .{},
+    allow_nets: []const []const u8 = &.{},
+};
+
+/// A plated-through via fence generated continuously around the board outline.
+/// Dimensions are millimetres. `edge_offset` is measured from the finished
+/// edge to each via centre; `mask_width` is the solder-mask-free band measured
+/// inward from that edge on both outer faces. An all-zero value is undeclared.
+pub const PerimeterFenceSpec = struct {
+    via_dia: f64 = 0,
+    via_drill: f64 = 0,
+    spacing: f64 = 0,
+    edge_offset: f64 = 0,
+    mask_width: f64 = 0,
+    net: []const u8 = "GND",
+    keepout: PerimeterKeepoutSpec = .{},
+};
 /// The physical board declared by a top-level `(board …)` form: the outline
 /// rectangle plus the parts that live ON it — connectors docked to a named
 /// board edge (`(left|right|top|bottom "ref" …)` lists, same item grammar as
@@ -931,6 +1235,8 @@ pub const BoardSpec = struct {
     sides: []const PlacementSideSpec = &.{},
     /// Corner-pinned parts (mounting holes/standoffs): TL, TR, BR, BL.
     corners: []const PlacementItem = &.{},
+    /// Optional board-edge via fence and exposed-mask band.
+    perimeter_fence: PerimeterFenceSpec = .{},
     role: BoardRole = .subcircuit,
     present: bool = false,
 };
@@ -942,16 +1248,50 @@ pub const StackupPlane = struct {
     net: []const u8,
 };
 
+/// Physical foil details for one numbered copper layer. Electrical role stays
+/// in `StackupPlane`; construction and routing semantics are deliberately
+/// independent so a routed outer pour can still carry ordinary signal tracks.
+pub const StackupCopper = struct {
+    index: u8,
+    thickness: f64,
+    material: []const u8 = "Copper",
+};
+
+/// Physical dielectric construction category from the fab stackup table.
+pub const StackupDielectricKind = enum { prepreg, core };
+
+/// The dielectric interval immediately below copper layer `after_layer` and
+/// above `after_layer + 1`. A four-layer stack therefore has intervals 1–3.
+pub const StackupDielectric = struct {
+    after_layer: u8,
+    kind: StackupDielectricKind,
+    material: []const u8 = "",
+    thickness: f64,
+    /// Relative permittivity (εr) from `(er X)`. 0 = undeclared, and the
+    /// impedance model's generic FR-4 default (`impedance.default_er`, 4.4)
+    /// applies. This is the one stackup number that is purely electrical:
+    /// nothing about construction or routing reads it, but a
+    /// `(net-class … (impedance …))` width cannot be solved without it.
+    er: f64 = 0,
+};
+
 /// The board's copper stack from a top-level `(stackup N (plane IDX "NET")…)`
 /// form. `layers` is the total copper count; layers not named in `planes` are
 /// signal layers. `present=false` ⇒ no form authored — the router keeps its
-/// legacy implicit model (4 layers, GND+PWR planes assumed) so existing
-/// designs are unchanged. `(stackup 2)` declares a plain 2-layer board with
-/// NO planes: ground/power become routed copper like any other net.
+/// legacy implicit model (4 layers; In1 ground, In2 the dominant supply rail
+/// or ground again — see `placement/implicit_plane.zig`). `(stackup 2)`
+/// declares a plain 2-layer board with NO planes: ground/power become routed
+/// copper like any other net.
 pub const StackupSpec = struct {
     layers: u8 = 0,
     planes: []const StackupPlane = &.{},
+    /// Optional physical foil declarations, one per numbered copper layer.
+    copper: []const StackupCopper = &.{},
+    /// Optional physical dielectric declarations, one per adjacent-layer gap.
+    dielectrics: []const StackupDielectric = &.{},
     present: bool = false,
+    /// Canonical fabricator preset name, or empty for a custom construction.
+    preset: []const u8 = "",
     /// Finished board thickness (mm) from `(thickness MM)`; 0 ⇒ unset (the
     /// Gerber job file's fab-standard 1.6 mm default applies).
     thickness: f64 = 0,
@@ -960,6 +1300,17 @@ pub const StackupSpec = struct {
     /// the router: true when ANY plane is declared (used per-net at routing).
     pub fn hasPlanes(self: StackupSpec) bool {
         return self.planes.len > 0;
+    }
+
+    /// Sum of every authored copper foil and dielectric thickness. This is the
+    /// complete construction total when all layers and gaps are declared;
+    /// `thickness` remains the nominal finished-board value reported to
+    /// fabrication (often 1.6 mm for a 1.5862 mm buildup).
+    pub fn constructionThickness(self: StackupSpec) f64 {
+        var total: f64 = 0;
+        for (self.copper) |layer| total += layer.thickness;
+        for (self.dielectrics) |layer| total += layer.thickness;
+        return total;
     }
 };
 
@@ -982,26 +1333,501 @@ pub const NetClassSpec = struct {
     via_drill: f64 = 0,
     priority: u32 = 0,
     nets: []const []const u8 = &.{},
+    /// `(diff-pair [GAP])` marker: <0 = not a differential pair (the default);
+    /// 0 = a pair coupling at the class clearance; >0 = an explicit target
+    /// edge-to-edge gap (mm). The router routes the pair's N net right after its
+    /// P net and biases it into a corridor hugging the twin.
+    diff_gap: f64 = -1,
+    /// RF discipline this class declares (see `ClassRf`); bend radius, escape,
+    /// via fencing and the keepout halo all live there because each is only
+    /// meaningful alongside — or defaults off — the class's `(max-freq …)`.
+    rf: ClassRf = .{},
+    /// `(resolution MM)` — how finely this class's nets are rastered when the
+    /// router falls back to a bounded rescue window (0 = the adaptive default).
+    /// The maze must place a centerline on a lattice, so a net whose only legal
+    /// path clears its obstacles by less than the grid pitch cannot route at any
+    /// ordering or priority; declaring a finer pitch buys that net a window it
+    /// can be represented in, and only the declaring nets pay for it.
+    resolution_mm: f64 = 0,
+    /// `(match-group …)` length matching this class declares (see `ClassMatch`).
+    /// Grouped into one field the way `rf` is: the two members only mean
+    /// anything together — a tolerance with no group names no constraint.
+    match: ClassMatch = .{},
+    /// Return-current continuity policy declared by `(return-path …)`. Fast
+    /// classes (frequency / impedance declared) receive the geometric plane
+    /// audit automatically; this block supplies explicit reference, stitching,
+    /// and loop-area budgets for any class, including switching nodes.
+    return_path: ClassReturnPath = .{},
 };
 
+/// Return-path integrity policy for one net class. A bare `(return-path)` opts
+/// an otherwise ordinary class into the plane-gap and layer-transition audit.
+/// Zero-valued limits keep their documented defaults or disable that one
+/// budget, rather than inventing board-specific EMC numbers.
+pub const ClassReturnPath = struct {
+    declared: bool = false,
+    /// `(reference "NET")` pins the expected return net. Empty resolves the
+    /// nearest declared reference plane independently for each signal layer.
+    reference_net: []const u8 = "",
+    /// `(stitch-radius MM)` — maximum signal-transition to stitching-via/cap
+    /// distance. 0 uses the DRC's 2 mm default.
+    stitch_radius_mm: f64 = 0,
+    /// `(max-loop-area MM2)` — maximum estimated trace/reference loop area.
+    /// 0 leaves the estimate unbudgeted and therefore emits no area warning.
+    max_loop_area_mm2: f64 = 0,
+};
+
+/// Length matching declared by a `(net-class … (match-group "NAME"
+/// [(tolerance MM)]))` sub-form: which set this class's nets must arrive with,
+/// and how far apart they may end up.
+pub const ClassMatch = struct {
+    /// The group's authored name ("" = this class declares none, the default).
+    /// The NAME is the join key, not the class: two classes carrying different
+    /// trace geometry may name the same group, which is how a bus split across
+    /// a wide and a narrow class still matches as one set.
+    group: []const u8 = "",
+    /// `(tolerance MM)` — the allowed max−min routed length spread (mm).
+    /// 0 = undeclared, and the group falls back to the measurement module's
+    /// default (`placement/match_group.default_tolerance_mm`).
+    tolerance_mm: f64 = 0,
+};
+/// Ground via fencing declared by a `(net-class … (fence …))` sub-form (see
+/// `ClassRf.fence`): the class's routed traces get a flanking row of stitching
+/// vias, generated on demand by a later tool rather than by the autorouter.
+/// Every child is optional — a bare `(fence)` means "all defaults" — so each
+/// field carries a 0/"" sentinel meaning "derive me at generation time" rather
+/// than a concrete number the author never wrote.
+pub const ClassFence = struct {
+    /// The `(fence …)` sub-form appeared at all. This is the whole opt-in: a
+    /// class without it is never fenced, whatever the other fields say (they
+    /// are all sentinels then anyway).
+    declared: bool = false,
+    /// `(pitch MM)` — via centre-to-centre spacing along the trace.
+    /// 0 = derive from the class's `(max-freq …)` as guided-wavelength/10.
+    pitch_mm: f64 = 0,
+    /// `(offset MM)` — trace centreline to fence-via centre. 0 = derive from
+    /// the class geometry (half the trace width + clearance + half the via
+    /// diameter + a margin), i.e. the tightest DRC-legal row.
+    offset_mm: f64 = 0,
+    /// `(via DIA DRILL)` copper diameter for the fence vias (mm).
+    /// 0 = inherit the class's own `(via …)`, else the board design rules.
+    via_dia: f64 = 0,
+    /// `(via DIA DRILL)` drill diameter for the fence vias (mm).
+    /// 0 = inherit the class's own `(via …)`, else the board design rules.
+    via_drill: f64 = 0,
+    /// `(net "NAME")` — the net the fence vias stitch. "" = resolve to the
+    /// board's first declared ground/plane net when the fence is generated.
+    net: []const u8 = "",
+};
+
+/// The class's ELECTRICAL declarations and the discipline each implies (see
+/// `NetClassSpec.rf`): the highest frequency it carries, its controlled-impedance
+/// target, and — following from those — bend radius, pad escape, ground via
+/// fencing and the same-layer keepout halo. Grouped because none of these is a
+/// geometry number the author picks directly the way `width` / `clearance` are:
+/// each states a physical property of the signal, from which geometry follows.
+pub const ClassRf = struct {
+    /// `(band MIN_HZ MAX_HZ)` lower edge. The upper edge shares
+    /// `max_freq_hz` with `(max-freq …)` so existing RF disciplines and the
+    /// electrical model cannot drift onto different bandwidths. 0 means use
+    /// the compatibility band `max_freq_hz / 100 .. max_freq_hz`.
+    electrical: struct {
+        band_start_hz: f64 = 0,
+        /// `(return-loss DB)` minimum worst-case return loss over the class
+        /// band. 0 is the authored sentinel; resolution supplies 20 dB.
+        return_loss_target_db: f64 = 0,
+    } = .{},
+    /// `(max-freq HZ)` — the highest signal frequency the class carries
+    /// (0 = undeclared). Declaring it opts the class into RF bend discipline:
+    /// routed corners become arcs with centerline radius >= 3x the trace
+    /// width, and corners that can't reach that radius are flagged by DRC.
+    max_freq_hz: f64 = 0,
+    /// `(escape MM)` — straight pad-escape distance: the class's traces leave
+    /// each pad straight for this length before any bend. <0 = undeclared
+    /// (a max-freq class then defaults to 1 mm); an explicit 0 disables it.
+    escape_mm: f64 = -1,
+    /// `(min-bend-radius N)` — the class's bend-radius FLOOR as a multiple of
+    /// the trace width (floor = N × width). 0 = undeclared (a max-freq class
+    /// then uses the 3× rule-of-thumb default). Only meaningful with
+    /// `(max-freq …)`: it moves both the compliance floor the sharp_bend check
+    /// enforces AND, when N exceeds the 5× aim cap, the radius the smoother
+    /// aims for.
+    min_bend_ratio: f64 = 0,
+    /// `(fence …)` — flanking ground stitching vias for this class's traces
+    /// (see `ClassFence`). Undeclared leaves `declared = false`.
+    fence: ClassFence = .{},
+    /// `(mask-relief MM)` — per-side solder-mask pullback from this class's
+    /// routed copper: the Gerber mask opens along the class's outer-layer
+    /// traces and vias, exposing bare copper (an RF microstrip convention —
+    /// mask over the trace shifts and losses the line). <0 = undeclared: a
+    /// max-freq class defaults ON at the board's mask margin, any other class
+    /// stays tented. An explicit 0 keeps a max-freq class tented; >0 sets the
+    /// pullback (and opts in a class with no `(max-freq …)`).
+    mask_relief_mm: f64 = -1,
+    /// `(keepout MM …)` — the halo (mm) foreign copper must keep from this
+    /// class's own copper, ON THE SAME LAYER only (a signal may cross freely on
+    /// another layer; a through-via barrel lands on every layer and so is still
+    /// blocked by the halo). 0 = no halo declared.
+    keepout_mm: f64 = 0,
+    /// `(keepout MM (escape MM))` — the radius around this class's own pad
+    /// terminals inside which the halo is relaxed, so a neighbouring signal may
+    /// leave its IC right beside the RF pad. <0 = undeclared (inherit the
+    /// class's resolved `escape_mm`); an explicit 0 means no exemption at all —
+    /// the same load-bearing −1 sentinel convention `escape_mm` uses.
+    keepout_escape_mm: f64 = -1,
+    /// `(impedance OHMS)` — the class's target single-ended characteristic
+    /// impedance. 0 = undeclared. Declared ALONE, the class's track width is
+    /// DERIVED from it against the `(stackup …)` buildup (see
+    /// `placement/impedance.zig`) — which is what makes `max_freq_hz` above an
+    /// electrical statement rather than a geometry convention. Declared
+    /// alongside an authored `(width …)`, the width WINS and this becomes a
+    /// CHECK: the `impedance_mismatch` lint reports the width's computed Z₀
+    /// when it misses the target by more than the fab's tolerance band.
+    impedance: struct {
+        ohms: f64 = 0,
+        /// `(diff-impedance OHMS …)` — target impedance across the two traces
+        /// of a `(diff-pair GAP)` class. 0 = undeclared.
+        diff_ohms: f64 = 0,
+        /// Optional 1-based copper layer nested in either impedance form.
+        /// 0 = resolve against the first usable signal layer.
+        layer: u8 = 0,
+        /// `(ground-gap MM)` — desired same-layer edge-to-edge gap from an outer
+        /// trace to its ground pour. Positive selects grounded-coplanar analysis;
+        /// resolution raises it to the copper-clearance floor before use.
+        ground_gap_mm: f64 = 0,
+        /// Optional `(max MM)` child of `(ground-gap MM …)`. Positive lets the
+        /// pour widen its slot per routed section to preserve the impedance
+        /// target as the trace tapers; 0 keeps the authored gap fixed.
+        ground_gap_max_mm: f64 = 0,
+    } = .{},
+};
+
+/// One `(wave "name" selector…)` entry of a `(pcb-plan …)` place or route
+/// section — the ordered unit of layout completion. A *place* wave selects
+/// parts (`refs` / `sections` / `sub_blocks` / `rest`); a *route* wave selects
+/// nets (`classes` / `net_classes` / `nets` / `rest`). Only the selectors valid
+/// for the wave's own section are populated — a cross-section selector is warned
+/// and dropped at parse time — so on a place wave the route lists are always
+/// empty and vice versa. `rest` is the catch-all flag: it names no members and
+/// means "everything not claimed by an earlier wave in this section" (resolving
+/// that into a concrete set is a later slice; parse only records the flag).
+/// `classes` atoms are stored as the raw `placement/module_policy.NetClass`
+/// enum-name strings, validated at parse time. `reason` is an optional
+/// one-string rationale. Route waves may also name preferred signal layers
+/// (a cost bias) and allowed signal layers (a hard trace-layer constraint;
+/// terminal pad layers remain reachable for breakout). All member slices
+/// reference the source AST buffers (never freed, per project convention).
+pub const PlanWaypoint = struct {
+    x: f64 = 0,
+    y: f64 = 0,
+    layer: []const u8 = "",
+    guide: ?PlanGuide = null,
+};
+
+/// One authored `(branch (at …)…)` of a route wave's `(branches …)` guide
+/// TREE: the ordered corridor from the tree's shared root terminal out to the
+/// one terminal this branch serves. Its points are ordinary waypoints — the
+/// root and the served terminal are the pads themselves and are never written
+/// here — so a branch reads exactly like a `(waypoints …)` chain that happens
+/// to be one limb of a multi-drop net.
+///
+/// Which terminal a branch serves is decided GEOMETRICALLY when the tree is
+/// matched to a net (`placement/guide_branch`), never by the order the
+/// branches were authored in: the router's terminal order comes out of
+/// flattening and a design author cannot see it.
+pub const PlanBranch = struct {
+    waypoints: []const PlanWaypoint = &.{},
+};
+
+/// A cardinal side of a placed part's courtyard.
+pub const PlanGuideSide = enum { north, south, east, west };
+
+/// A placement-relative routing instruction embedded in a `PlanWaypoint`.
+/// These keep route plans stable when a part moves: resolution lowers the
+/// named pin/part geometry onto the placement grid as ordinary router
+/// waypoints.
+pub const PlanGuide = union(enum) {
+    /// Leave a named pad toward its nearest part edge, one clearance beyond
+    /// the pad's copper boundary.
+    escape_from: struct {
+        ref: []const u8,
+        pin: []const u8,
+        layer: []const u8,
+    },
+    /// Route through the midpoint of two named pad centres.
+    between_pins: struct {
+        from_ref: []const u8,
+        from_pin: []const u8,
+        to_ref: []const u8,
+        to_pin: []const u8,
+        layer: []const u8,
+    },
+    /// Route just outside one named side of a part courtyard.
+    beside: struct {
+        ref: []const u8,
+        side: PlanGuideSide,
+        layer: []const u8,
+    },
+};
+
+/// `(assign-escapes ["LAYER"] ["HUBREF"] [(reserve)])` on a route wave: solve the wave's
+/// nets as ONE contended escape rather than routing them one at a time. The
+/// resolver hands the wave's net set to `placement/escape_assign`, which finds
+/// their shared hub, cuts a corridor cross-section at the tightest constriction
+/// they all still fit through, and assigns each net its own parallel lane —
+/// then emits the lanes as soft per-net router guides. Both strings are
+/// optional overrides: `layer` names the copper face the lanes are drawn on
+/// (default: the hub's own side), `hub` names the escape part (default: the
+/// part hosting pads of the most nets in the set).
+pub const PlanEscapeSpec = struct {
+    layer: []const u8 = "",
+    hub: []const u8 = "",
+    /// `(reserve)`: also RESERVE each assigned lane for its net rather than only
+    /// biasing the maze toward it. A soft guide is a cost bonus a later net may
+    /// ignore outright, so an assignment survives only until something else
+    /// wants the same channel; a reservation is refused to every other net for
+    /// the whole run (`placement/lane_reserve`). Off by default — the guides
+    /// stay exactly what they are — because a reservation can cost the nets it
+    /// excludes, which a guide never can.
+    reserve: bool = false,
+};
+
+/// The corridor a route wave's nets follow — authored explicitly, or solved.
+/// `waypoints` is the ordered `(waypoints (at …))` / `(guides …)` corridor every
+/// net of the wave shares; `assign_escapes` is the `(assign-escapes …)` opt-in
+/// that lets the joint escape assigner derive a DIFFERENT corridor per net (its
+/// own parallel lane) instead; `topology` is the `(topology)` opt-in that has
+/// the whole wave's topology planned up front. They compose: a wave may author a
+/// shared corridor and still have its escape fan assigned and its topology
+/// planned.
+pub const PlanWaveCorridor = struct {
+    waypoints: []const PlanWaypoint = &.{},
+    /// Ordered physical corridor tried only when a net's ordinary broad attempt
+    /// fails, and again by post-route residual repair. Unlike ordinary
+    /// waypoints, these never replace the broad attempt that runs first.
+    repair_waypoints: []const PlanWaypoint = &.{},
+    /// Authored `(branches (branch (at …)…)…)`: one hard corridor per limb of a
+    /// multi-drop net's guide TREE, all sharing one root terminal. Unlike
+    /// `waypoints` — which a multi-terminal net reuses as ONE trunk to every
+    /// later terminal — each branch here is its own path, which is what a
+    /// shared clock or bus needs and what a single linear corridor cannot say.
+    branches: []const PlanBranch = &.{},
+    assign_escapes: ?PlanEscapeSpec = null,
+    /// Authored `(topology)` on this route wave: work out a route topology for
+    /// the whole wave before the maze runs, instead of routing its nets one at a
+    /// time and letting the early ones wall in the late ones. The third steering
+    /// strategy alongside the two above, and it composes with them the same way.
+    /// The plan-level `PcbPlanSpec.topology` turns it on for every route wave at
+    /// once. Route-only — a `(topology)` in a place wave is warned and skipped
+    /// like any other route selector there.
+    topology: bool = false,
+    /// Authored `(seed-first)` for a bounded waypoint-only first claim before
+    /// the ordinary whole-board route.
+    seed_first: bool = false,
+};
+
+/// One named routing wave within a PCB plan.
+pub const PlanWave = struct {
+    name: []const u8,
+    reason: ?[]const u8 = null,
+    refs: []const []const u8 = &.{},
+    sections: []const []const u8 = &.{},
+    sub_blocks: []const []const u8 = &.{},
+    classes: []const []const u8 = &.{},
+    net_classes: []const []const u8 = &.{},
+    nets: []const []const u8 = &.{},
+    preferred_layers: []const []const u8 = &.{},
+    allowed_layers: []const []const u8 = &.{},
+    /// How this wave's nets are steered once selected (see `PlanWaveCorridor`).
+    corridor: PlanWaveCorridor = .{},
+    max_vias: ?u16 = null,
+    rest: bool = false,
+};
+
+/// The design's ordered PCB-completion plan from a top-level
+/// `(pcb-plan (place (wave …)…) (route (wave …)…))` form: `place` waves order
+/// part placement, `route` waves order net routing, both in authored order. A
+/// later resolution slice turns each wave's selector member names into concrete
+/// part/net sets — this struct is the parse-time record only, with no existence
+/// checking of the named refs/sections/nets. At most one `(pcb-plan …)` per
+/// design (a duplicate is warned and the first kept); the enclosing optional on
+/// `DesignBlock.pcb_plan` is null when no plan is authored.
+/// How hard the router retries before reporting a net failed, as authored by
+/// `(route (effort one-shot|standard) …)`. The DSL-side twin of
+/// `route_policy.Effort`; `route_plan` maps between them so the evaluator does
+/// not depend on the placement layer.
+pub const PlanEffort = enum {
+    /// One deterministic pass — a net the maze cannot route fails immediately
+    /// with its diagnosis. The mode for an agent or human iterating on the plan.
+    one_shot,
+    /// Escalate, rip up, re-route, rescue in fine windows (the historical
+    /// behaviour, and the default when no `(effort …)` is authored).
+    standard,
+};
+
+/// The design's ordered PCB-completion plan from a top-level
+/// `(pcb-plan (place (wave …)…) (route [(effort …)]
+/// [(max-route-seconds N)] (wave …)…))` form: `place` waves order part
+/// placement, `route` waves order net routing, both in authored order, and the
+/// section-level controls bound how hard and how long the router works. A later
+/// resolution slice turns each wave's selector member names into concrete
+/// part/net sets — this struct is the parse-time record only, with no existence
+/// checking of the named refs/sections/nets. At most one `(pcb-plan …)` per
+/// design (a duplicate is warned and the first kept); the enclosing optional on
+/// `DesignBlock.pcb_plan` is null when no plan is authored.
+pub const PcbPlanSpec = struct {
+    place: []const PlanWave = &.{},
+    route: []const PlanWave = &.{},
+    /// Authored `(route (effort …))`, or null to keep the router's default.
+    effort: ?PlanEffort = null,
+    /// Authored `(route (max-route-seconds N))`, or null for no wall-clock
+    /// deadline. The budget belongs to the whole route transaction, including
+    /// its bounded connectivity gate and any candidate comparison.
+    max_route_seconds: ?u32 = null,
+    /// Authored plan-level `(pcb-plan (topology) …)`: every route wave plans a
+    /// global topology, as if each had authored its own `(topology)`. False (no
+    /// form) leaves each wave's own flag alone, which is the historical
+    /// behaviour — a plan with no `(topology)` anywhere resolves unchanged.
+    topology: bool = false,
+};
+
+/// The board's solder-mask geometry as ONE rule group — the values a
+/// fabricator quotes together and the DRC/Gerber path always reads together
+/// (`margin` sets each opening's size, `web` the strip that must survive
+/// BETWEEN two openings, and `relief_corner_radius` cleans up an RF opening's
+/// termination without changing that web). Carried nested because
+/// `DesignRulesSpec` and `DesignRules` are both at their field-count ceiling:
+/// grouping these related rules makes room without a cap raise. The two fab
+/// dimensions state their defaults at the declaration sites; the optional
+/// corner radius has its explicit zero default here.
+pub const MaskRules = struct {
+    /// Solder-mask opening expansion per pad side (mm).
+    margin: f64,
+    /// Smallest mask web left between two adjacent openings (mm).
+    web: f64,
+    /// Fillet radius at an RF mask-relief run where the opening stops at a
+    /// component pad dam (mm). Zero preserves the square termination.
+    relief_corner_radius: f64 = 0,
+};
+
+/// Board-outline spacing rules (mm). Grouped because the design-rule structs
+/// intentionally stay below Guardian's field-count ceiling, and these two
+/// values describe the same physical boundary:
+///   • `copper` — copper feature to finished board edge.
+///   • `component` — component courtyard/body proxy to finished board edge.
+pub const EdgeRules = struct {
+    copper: f64,
+    component: f64,
+};
+
+/// The board's default via geometry (mm) — the two numbers the `(via DIA
+/// DRILL)` sub-form authors together and every consumer reads together.
+/// Grouped for the same reason `MaskRules` is: the design-rule structs sit at
+/// Guardian's field-count ceiling, so a pair that is already one sub-form
+/// becomes one field rather than two.
+pub const ViaRules = struct {
+    /// Via copper (land) diameter, mm.
+    dia: f64,
+    /// Via drilled-hole diameter, mm.
+    drill: f64,
+    /// Minimum finished copper thickness on each plated via wall, mm. Zero in
+    /// the authored spec keeps the tool's built-in 25 um assumption.
+    plating: f64 = 0,
+};
+
+/// Historical power-screen assumption for boards that do not state their
+/// fabricator's minimum finished via-wall copper thickness.
+pub const default_via_plating_mm: f64 = 0.025;
+
+/// The built-in copper-to-copper spacing (mm) — what
+/// `placement/optimizer.DesignRules.clearance` resolves to when no
+/// `(design-rules (clearance …))` is authored. Named here, on the layer both
+/// sides can see, so the eval layer's parse-time cross-checks compare an
+/// authored rule against the *same* number the placement layer will resolve,
+/// without the eval→placement import the one-way layering forbids.
+pub const default_clearance_mm: f64 = 0.127;
+
+/// The built-in copper-pour isolation gap (mm) for an INNER plane — what
+/// `placement/optimizer.DesignRules.pour_clearance` resolves to when no
+/// `(design-rules (pour-clearance …))` is authored. Fab-safe by design: it is
+/// deliberately looser than `default_clearance_mm`, because an inner plane's
+/// antipad is etched blind between two laminated foils, so its boundary is
+/// held far less precisely than a drawn trace. It is only the BASE gap — an RF
+/// `(net-class …)` still carves its own per-net exceptions over it (a
+/// `(ground-gap …)` opening, a solved impedance via antipad), and neither the
+/// default nor an authored override touches those.
+pub const default_pour_clearance_mm: f64 = 0.3;
+
+/// The built-in copper-pour isolation gap (mm) for a pour on an OUTER copper
+/// FACE (F.Cu / B.Cu) — what `PourRules.clearance_outer` resolves to when no
+/// `(design-rules (pour-clearance …))` is authored. Held tighter than the
+/// inner default because an outer-face pour is photo-defined against finished
+/// outer copper exactly as a trace is, not etched as an inner plane's antipad,
+/// so its boundary lands where it was drawn; 0.2 still stands well clear of
+/// the `default_clearance_mm` (0.127) copper-to-copper floor. The split is
+/// between the two DEFAULTS only: one authored `(design-rules (pour-clearance
+/// MM))` replaces both.
+pub const default_outer_pour_clearance_mm: f64 = 0.2;
+
+/// Board-level manufacturing controls specific to computed copper pours.
+pub const PourRules = struct {
+    min_width: f64 = 0,
+    corner_radius: f64 = 0,
+    /// The pour isolation gap (mm) for an OUTER copper face, the twin of
+    /// `optimizer.DesignRules.pour_clearance` (which governs inner planes).
+    /// It lives on this grouped struct rather than beside its twin because
+    /// both design-rule structs sit at Guardian's field-count ceiling — the
+    /// same reason `MaskRules` / `EdgeRules` / `ViaRules` are grouped — and a
+    /// pour control is exactly what this group holds. Authored by nothing of
+    /// its own: `(design-rules (pour-clearance MM))` sets it together with the
+    /// inner gap, so a board still tunes its pours through ONE knob.
+    clearance_outer: f64 = default_outer_pour_clearance_mm,
+    /// Largest permitted centre-to-centre distance from an SMD ground pad to
+    /// a same-net through via reaching the ground plane. The check is active
+    /// only for nets actually carried by a declared plane.
+    ground_via_max: f64 = 1.0,
+};
 /// Board-level default design rules from a top-level `(design-rules
-/// (clearance MM) (min-drill MM) (mask-margin MM) (copper-edge MM)
+/// (clearance MM) (min-drill MM) (mask-margin MM)
+/// (mask-relief-corner-radius MM) (copper-edge MM)
+/// (component-edge MM)
 /// (hole-to-hole MM) (min-annular MM))` form. Each sub-form is optional; a
 /// zero (unset) field keeps the toolchain's built-in default (see the DRC /
-/// Gerber constants), so the absent form reproduces the legacy behaviour
-/// byte-for-byte. These are GLOBAL defaults: a per-net `(net-class …)` still
-/// overrides width/clearance/via for its own nets, but the extra rules
-/// (min-drill, mask-margin, copper-edge, hole-to-hole, min-annular) have no
+/// Gerber constants). Existing routing and fabrication geometry stays at its
+/// legacy value when the form is absent; the component-edge DRC uses its new
+/// 2.5 mm assembly default. These are GLOBAL defaults: a per-net
+/// `(net-class …)` still overrides width/clearance/via for its own nets, but
+/// the extra rules
+/// (min-drill, mask-margin, copper-edge, component-edge, hole-to-hole,
+/// min-annular) have no
 /// per-class equivalent and apply board-wide.
 ///   • `clearance`   — copper-to-copper spacing (mm); the DRC + router default.
 ///   • `min_drill`   — smallest legal drilled hole (mm); a via/pad below it flags.
-///   • `mask_margin` — solder-mask opening expansion per pad side (mm; Gerber).
-///   • `copper_edge` — copper-to-board-outline clearance (mm; Gerber pullback + DRC).
+///   • `mask.margin` — solder-mask opening expansion per pad side (mm; Gerber).
+///   • `mask.relief_corner_radius` — fillet radius where an RF trace opening
+///     terminates against a component pad dam (mm; Gerber + assembly review).
+///   • `edge.copper` — copper-to-board-outline clearance (mm; Gerber pullback + DRC).
+///   • `edge.component` — component courtyard-to-board-outline clearance (mm; DRC).
 ///   • `hole_to_hole`— wall-to-wall spacing between two drilled holes (mm; DRC).
+///   • `via_to_via`  — copper spacing between two vias of the SAME net (mm; DRC).
+///     Unset ⇒ the pair's resolved copper clearance, which flags a near-stacked
+///     redundant via without policing a legitimate stitch-fence pitch.
 ///   • `min_annular` — minimum via annular ring, copper radius − drill radius (mm; DRC).
-///   • `mask_web`    — smallest solder-mask web between two adjacent openings (mm; DRC).
+///   • `mask.web`    — smallest solder-mask web between two adjacent openings (mm; DRC).
 ///   • `min_width`   — narrowest legal track (mm; DRC — a net-class width still overrides per net).
-/// `track_width`/`via_dia`/`via_drill` are the board's DEFAULT routing geometry
+///   • `pour_clearance` — the BASE copper-pour isolation gap (mm): how far a
+///     solid pour keeps from foreign copper. ONE knob for both faces of the
+///     board: an authored value governs inner planes AND outer-face pours
+///     alike. Unset ⇒ the two differ by layer class — `default_pour_clearance_mm`
+///     on an inner plane, `default_outer_pour_clearance_mm` on an outer face.
+///     RF classes still carve their own exceptions per net (a `(ground-gap …)`
+///     opening, a solved impedance via antipad); this is only the floor for
+///     everything else.
+///   • `pour.min_width` — narrowest retained copper-pour section (mm).
+///   • `pour.corner_radius` — requested copper-pour corner fillet radius (mm).
+///   • `pour.ground_via_max` — maximum SMD-ground-pad centre to same-net plane
+///     via centre distance (mm); zero leaves the optional rule disabled.
+/// `track_width`/`via.dia`/`via.drill` are the board's DEFAULT routing geometry
 /// (mm) — the seed for the autorouter's `RouteParams` when no query/panel
 /// override is given. A per-net `(net-class …)` still overrides them for its
 /// own nets, and an omitted value keeps the router default (track 0.127, via
@@ -1009,15 +1835,16 @@ pub const NetClassSpec = struct {
 pub const DesignRulesSpec = struct {
     clearance: f64 = 0,
     min_drill: f64 = 0,
-    mask_margin: f64 = 0,
-    copper_edge: f64 = 0,
+    mask: MaskRules = .{ .margin = 0, .web = 0, .relief_corner_radius = 0 },
+    edge: EdgeRules = .{ .copper = 0, .component = 0 },
     hole_to_hole: f64 = 0,
+    via_to_via: f64 = 0,
     min_annular: f64 = 0,
     track_width: f64 = 0,
-    via_dia: f64 = 0,
-    via_drill: f64 = 0,
-    mask_web: f64 = 0,
+    via: ViaRules = .{ .dia = 0, .drill = 0, .plating = 0 },
     min_width: f64 = 0,
+    pour_clearance: f64 = 0,
+    pour: PourRules = .{},
     present: bool = false,
 };
 
@@ -1045,12 +1872,6 @@ pub const Revision = struct {
     present: bool = false,
 };
 
-/// How a flattened ref-des reads: `.hierarchical` keeps the sub-block path
-/// prefix (`a/R1_1`) so sub-block-local refs stay unique; `.flat` emits the
-/// bare ref (`R1_1`). Grouped-refdes designs use `.flat` — their ref-deses are
-/// already globally unique, so the prefix is redundant.
-pub const RefStyle = enum { hierarchical, flat };
-
 /// One named priority group in a `(rough …)` form — a set of parts (by ref-des
 /// or module-local origin name) that share a placement priority. Group ORDER in
 /// the form body is the priority: the first group is placed first and packs
@@ -1077,6 +1898,8 @@ pub const RoughSpec = struct {
     anchor: []const u8 = "",
     /// Priority groups in descending priority (index 0 = placed first).
     groups: []const RoughGroup = &.{},
+    /// Closed-chain member sets whose whole-loop footprint must stay compact.
+    critical_loops: []const RoughGroup = &.{},
     present: bool = false,
 };
 
@@ -1113,6 +1936,11 @@ pub const DesignBlock = struct {
     /// solve, while each module it instantiates is laid out around its declared
     /// anchor and composed in.
     origin: BlockOrigin = .design_root,
+    /// Defmodule/block-definition name that produced this embedded root.
+    /// Unlike `name` (a user-facing design-block title that may be formatted),
+    /// this is stable source provenance for module policy and dependency checks.
+    /// Empty on top-level designs and test fixtures not evaluated via a module.
+    module_name: []const u8 = "",
     /// Net ties for cross-block connections (sub-block port wiring).
     net_ties: []const NetTie = &.{},
     /// Design-side `(verifies …)` sign-offs that answer library requirements
@@ -1122,10 +1950,13 @@ pub const DesignBlock = struct {
     /// `evalDesignBlock`. Empty for blocks with no regulator sub-blocks or
     /// board-edge power ports.
     rails: []const PowerRail = &.{},
-    /// Test points declared via the first-class `(test-point …)` form.
-    /// Legacy `(instance "TP1" testpoint …)` instances continue to be
-    /// collected through the existing review pipeline; Phase 2E merges the
-    /// two sources for the coverage check.
+    /// Explicit AC target-impedance intent. This stays separate from `rails`
+    /// because those entries intentionally union ferrite-connected nets for
+    /// DC budgeting while a ferrite is an AC element/domain boundary.
+    pdn_intents: []const PdnIntent = &.{},
+    /// Test points declared via the first-class `(test-point …)` form,
+    /// including physical declarations and explicit `(virtual)` markers.
+    /// Legacy `(instance "TP1" testpoint …)` instances remain recognised too.
     test_points: []const TestPoint = &.{},
     /// Absolute path to the `.kicad_pcb` this design pushes board updates
     /// to, declared via `(kicad-pcb "<path>")` in the design source. Null
@@ -1142,11 +1973,6 @@ pub const DesignBlock = struct {
     /// the diagram's `computeFreeLayout` resolves them into a free-floating view.
     /// Empty `placements` ⇒ no layout declared, so the category-column views stand.
     layout: LayoutSpec = .{},
-    /// Inert placement-constraints holder (always empty). The `(constraints …)`
-    /// form was removed, but the lowering infra (`resolveConstraints` →
-    /// `Lowered`) is fused into the kept force/zone solver and fast-exits when
-    /// this is empty, so the field stays as its always-default value.
-    constraints: PlacementConstraints = .{},
     /// Physical board outline + edge-docked connectors + corner mounting
     /// hardware from a top-level `(board …)` form. `present=false` ⇒ none
     /// authored — the layout stays an unbounded part cluster.
@@ -1160,8 +1986,12 @@ pub const DesignBlock = struct {
     /// honours. `present=false` ⇒ the rougher uses its heuristic defaults.
     rough: RoughSpec = .{},
     /// Copper stack from a top-level `(stackup …)` form. `present=false` ⇒
-    /// legacy implicit model (4 layers, GND+PWR planes assumed by the router).
+    /// legacy implicit model (4 layers; the router assumes a ground plane and a
+    /// dominant-supply-rail plane — see `placement/implicit_plane.zig`).
     stackup: StackupSpec = .{},
+    /// External adhesive/stiffener artwork, emitted as optional Gerbers and
+    /// intentionally excluded from the electrical PCB stackup thickness.
+    fabrication_layers: []const FabricationLayerSpec = &.{},
     /// Routing rules from top-level `(net-class …)` forms, in authored order.
     /// The first class naming a net wins when two overlap.
     net_classes: []const NetClassSpec = &.{},
@@ -1169,89 +1999,10 @@ pub const DesignBlock = struct {
     /// form. `present=false` ⇒ none authored — every rule falls back to the
     /// toolchain's built-in constant so existing designs are unchanged.
     design_rules: DesignRulesSpec = .{},
-
-    /// Ref-des flattening style for the netlist/BOM/emit flatteners: sub-block
-    /// parts keep their path prefix (`pwr/C1`). Always `.hierarchical` now that
-    /// grouped-refdes (the only `.flat` producer) has been removed; the enum and
-    /// the flattener `ref_style` params are retained for a future flat-ref mode.
-    pub fn refStyle(self: DesignBlock) RefStyle {
-        _ = self;
-        return .hierarchical;
-    }
-};
-
-/// A rail's electrical role, declared by `(power-rail <label> (role …) (net …))`.
-/// `input` is the high-dI/dt side of a switcher whose decoupling loop dominates
-/// EMI — declaring it lets the placer apply the input-loop boost even when the
-/// inductor is integrated (so no discrete inductor reveals the topology).
-pub const RailRole = enum { input, output, aux };
-
-/// Soft-constraint priority (maps to a numeric weight multiplier in the placer).
-pub const ConstraintPriority = enum { low, med, high };
-
-/// `(power-rail <label> (role input|output|aux) (net <net>))` — tags a rail's
-/// role. `net` is the symbolic net name (resolved against the flattened netlist).
-pub const PowerRailConstraint = struct {
-    label: []const u8,
-    role: RailRole,
-    net: []const u8,
-};
-
-/// `(proximity <ref> (to-pin <hub> <pin>) (max <n> mm) (priority …)?)` — pull
-/// `ref` toward `hub`'s `pin`. Lowered into a soft attraction term in the placer
-/// objective, weighted by `priority`. `max_mm` = 0 ⇒ unspecified (no hinge).
-pub const ProximityConstraint = struct {
-    ref: []const u8,
-    hub: []const u8,
-    pin: []const u8,
-    max_mm: f64 = 0,
-    priority: ConstraintPriority = .med,
-};
-
-/// `(net-length (net <net>) (minimize | max <n> mm) (priority …)?)` — raise the
-/// weight on a specific net's wirelength (e.g. a high-Z feedback tap), above its
-/// default unit HPWL contribution.
-pub const NetLengthConstraint = struct {
-    net: []const u8,
-    minimize: bool = true,
-    max_mm: f64 = 0,
-    priority: ConstraintPriority = .high,
-};
-
-/// `(keep-out (net <net>)|(part <ref>) (from <ref>) (min <n> mm) (reason …)?)` —
-/// keep the subject (a net's parts, or a part) away from `from`. Exactly one of
-/// `net`/`part` is set. Lowered into a min-distance penalty.
-pub const KeepoutConstraint = struct {
-    net: []const u8 = "",
-    part: []const u8 = "",
-    from: []const u8,
-    min_mm: f64 = 0,
-    reason: []const u8 = "",
-};
-
-/// Arrangement style for a `(group …)`: cluster (default), shared row, or column.
-pub const GroupStyle = enum { cluster, row, column };
-
-/// `(group (<ref>+) (style cluster|row|column)?)` — keep a set of parts together.
-pub const GroupConstraint = struct {
-    refs: []const []const u8,
-    style: GroupStyle = .cluster,
-};
-
-/// The full Phase-A constraint set parsed from a design's `(constraints …)` /
-/// `(module …)` forms. Held symbolically (string refs/nets/pins) on the design
-/// block; the optimizer resolves and lowers it (see docs/constraints_dsl.md).
-pub const PlacementConstraints = struct {
-    proximity: []const ProximityConstraint = &.{},
-    power_rails: []const PowerRailConstraint = &.{},
-    net_lengths: []const NetLengthConstraint = &.{},
-    /// Refs to scale *down* in the objective (config straps etc.) so they don't
-    /// steal space/effort from critical parts.
-    deprioritize: []const []const u8 = &.{},
-    keep_outs: []const KeepoutConstraint = &.{},
-    groups: []const GroupConstraint = &.{},
-    /// True when at least one `(constraints …)`/`(module …)` form was present.
-    present: bool = false,
+    /// Ordered PCB-completion plan from a top-level `(pcb-plan …)` form: the
+    /// place-then-route wave order a later resolution slice turns into concrete
+    /// part/net member sets. Null ⇒ no plan authored.
+    pcb_plan: ?PcbPlanSpec = null,
 };
 
 /// Assertion result.
@@ -1316,4 +2067,9 @@ test "env parent chain" {
     try std.testing.expectEqual(@as(f64, 1.0), child.get("x").?.asNumber().?);
     try std.testing.expectEqual(@as(f64, 2.0), child.get("y").?.asNumber().?);
     try std.testing.expect(parent.get("y") == null);
+}
+
+// spec: fab_readiness - Declared plane-carried ground nets default to a 1 mm maximum SMD-pad-to-stitch-via distance
+test "ground via distance protection is enabled by default" {
+    try std.testing.expectEqual(@as(f64, 1.0), (PourRules{}).ground_via_max);
 }

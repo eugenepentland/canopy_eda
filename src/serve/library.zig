@@ -12,18 +12,26 @@ const footprint_mod = @import("../export_kicad_footprint.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const library_template = @import("templates/library.zig");
+const autocommit = @import("autocommit.zig");
 const footprint_preview = @import("footprint_preview.zig");
 const upload = @import("upload.zig");
+const lib_limits = @import("../lib_limits.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const sexp_ext_len: usize = ".sexp".len;
 /// The `(footprint …)` field name / the `footprint` card kind — same token.
 const footprint_label = "footprint";
 const pin_form_len: usize = "(pin ".len;
-const max_lib_file_bytes: usize = 256 * 1024;
+
+/// A combined browser fetch may create the ECAD package, the datasheet, or
+/// both. Commit whenever either mutation succeeded; two failed provider calls
+/// must not create an empty/noise commit.
+fn cseFetchNeedsCommit(footprint_ok: bool, datasheet_ok: bool) bool {
+    return footprint_ok or datasheet_ok;
+}
 
 /// Error set for HTTP handlers and writers in this module.
-pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error || std.fs.Dir.Iterator.Error;
+pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error || infra_fs.Iterator.Error;
 
 /// One row in the `/library` table. Components and families share most
 /// fields; pinouts use `pin_count`; footprints are name-only. `search_text`
@@ -84,8 +92,8 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
         while (try iter.next()) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".sexp")) continue;
             const base = try allocator.dupe(u8, entry.name[0 .. entry.name.len - sexp_ext_len]);
-            const content = dir.readFileAlloc(allocator, entry.name, max_lib_file_bytes) catch continue;
-            const mtime = if (dir.statFile(entry.name)) |s| s.mtime else |_| 0;
+            const content = dir.readFileAlloc(allocator, entry.name, lib_limits.max_lib_file_bytes) catch continue;
+            const mtime = if (dir.statFile(entry.name)) |s| s.mtime.nanoseconds else |_| 0;
 
             const description = extractField(content, "description");
             const footprint = extractField(content, footprint_label);
@@ -98,12 +106,7 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
             if (footprint) |fp| try referenced_footprints.put(allocator, fp, {});
             if (pinout) |po| try referenced_pinouts.put(allocator, po, {});
 
-            const has_model = if (footprint) |fp| blk: {
-                if (model_cfg.get(fp)) |c| {
-                    if (c.model != null) break :blk true;
-                }
-                break :blk footprint_mod.findModelFile(allocator, project_dir, fp, fp) != null;
-            } else false;
+            const has_model = if (footprint) |fp| footprintHasModel(allocator, project_dir, model_cfg, fp) else false;
 
             try buf.append(allocator, .{
                 .mtime = mtime,
@@ -136,8 +139,8 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
             const lname_local = entry.name[0 .. entry.name.len - sexp_ext_len];
             if (referenced_pinouts.contains(lname_local)) continue;
             const lname = try allocator.dupe(u8, lname_local);
-            const content = dir.readFileAlloc(allocator, entry.name, max_lib_file_bytes) catch continue;
-            const mtime = if (dir.statFile(entry.name)) |s| s.mtime else |_| 0;
+            const content = dir.readFileAlloc(allocator, entry.name, lib_limits.max_lib_file_bytes) catch continue;
+            const mtime = if (dir.statFile(entry.name)) |s| s.mtime.nanoseconds else |_| 0;
             var pin_count: usize = 0;
             var pos: usize = 0;
             while (std.mem.indexOfPos(u8, content, pos, "(pin ")) |idx| {
@@ -168,13 +171,8 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
             const fname_local = entry.name[0 .. entry.name.len - sexp_ext_len];
             if (referenced_footprints.contains(fname_local)) continue;
             const fname = try allocator.dupe(u8, fname_local);
-            const mtime = if (dir.statFile(entry.name)) |s| s.mtime else |_| 0;
-            const fp_has_model = blk: {
-                if (model_cfg.get(fname_local)) |c| {
-                    if (c.model != null) break :blk true;
-                }
-                break :blk footprint_mod.findModelFile(allocator, project_dir, fname_local, fname_local) != null;
-            };
+            const mtime = if (dir.statFile(entry.name)) |s| s.mtime.nanoseconds else |_| 0;
+            const fp_has_model = footprintHasModel(allocator, project_dir, model_cfg, fname_local);
             try buf.append(allocator, .{
                 .mtime = mtime,
                 .row = .{
@@ -194,6 +192,65 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
     return rows.toOwnedSlice(allocator);
 }
 
+/// True when the footprint resolves to a STEP model: the model-config map
+/// names one explicitly (model ≠ null), else `lib/models/<fp>.step` (or a
+/// partial-name scan) finds a file.
+fn footprintHasModel(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    model_cfg: export_kicad.ModelConfigMap,
+    fp: []const u8,
+) bool {
+    if (model_cfg.get(fp)) |c| {
+        if (c.model != null) return true;
+    }
+    return footprint_mod.findModelFile(allocator, project_dir, fp, fp) != null;
+}
+
+/// Build the single library card for `name` — `lib/components/<name>.sexp`
+/// first (the richer card: description, datasheets, manufacturer, MPN,
+/// requirements), else `lib/footprints/<name>.sexp`. Returns null when
+/// neither exists. All strings are allocator-owned; `content` slices stay
+/// valid only as long as the allocator does (callers use an arena).
+fn rowForName(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?LibraryRow {
+    const model_cfg = export_kicad.loadModelConfig(allocator, project_dir);
+
+    // Component / family first.
+    const comp_path = std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name }) catch return null;
+    if (infra_fs.cwd().readFileAlloc(allocator, comp_path, lib_limits.max_lib_file_bytes)) |content| {
+        const description = extractField(content, "description");
+        const footprint = extractField(content, footprint_label);
+        const pinout = extractField(content, "pinout");
+        const manufacturer = extractField(content, "manufacturer");
+        const mpn = extractField(content, "mpn");
+        const datasheets = extractDatasheets(allocator, project_dir, content) catch return null;
+        const is_family = std.mem.indexOf(u8, content, "(component-family ") != null;
+        return .{
+            .name = name,
+            .kind = if (is_family) .family else .component,
+            .search_text = buildSearchText(allocator, name, description, footprint, pinout, manufacturer, mpn, datasheets) catch return null,
+            .description = description,
+            .footprint = footprint,
+            .has_3d_model = if (footprint) |fp| footprintHasModel(allocator, project_dir, model_cfg, fp) else false,
+            .pinout = pinout,
+            .manufacturer = manufacturer,
+            .mpn = mpn,
+            .requirements = extractRequirements(allocator, content) catch return null,
+            .datasheets = datasheets,
+        };
+    } else |_| {}
+
+    // Standalone footprint.
+    const fp_path = std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, name }) catch return null;
+    infra_fs.cwd().access(fp_path, .{}) catch return null;
+    return .{
+        .name = name,
+        .kind = .footprint,
+        .search_text = std.fmt.allocPrint(allocator, "{s} footprint", .{name}) catch return null,
+        .has_3d_model = footprintHasModel(allocator, project_dir, model_cfg, name),
+    };
+}
+
 fn buildSearchText(
     allocator: std.mem.Allocator,
     base: []const u8,
@@ -204,8 +261,8 @@ fn buildSearchText(
     mpn: ?[]const u8,
     datasheets: []const LibraryRow.Datasheet,
 ) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     try w.writeAll(base);
     if (description) |d| try w.print(" {s}", .{d});
     if (footprint) |fp| try w.print(" {s}", .{fp});
@@ -213,7 +270,7 @@ fn buildSearchText(
     if (manufacturer) |m| try w.print(" {s}", .{m});
     if (mpn) |m| try w.print(" {s}", .{m});
     for (datasheets) |ds| try w.print(" {s}", .{ds.name});
-    return buf.items;
+    return buf.written();
 }
 
 /// GET /library — render the component-library browser: a searchable
@@ -225,6 +282,35 @@ pub fn libraryPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) Handle
     var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
     try library_template.Library.render(.{rows}, &aw.writer);
     res.body = aw.written();
+    res.content_type = .HTML;
+}
+
+/// GET /api/library-card/:name — render the library page's `Card` for ONE
+/// entry (component preferred, else footprint) as an HTML fragment. The PCB
+/// editor's sidebar footprint button embeds this card, so the datasheet
+/// links, footprint editor, 3D-model drag-in and 3D alignment are reachable
+/// straight from the layout.
+pub fn libraryCardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const raw_name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    // Build the row on a short-lived arena (the template only writes); the
+    // response body is duped onto the request arena before it is freed.
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const name = urlDecode(aa, raw_name) catch return sendErr(res, 400, err_invalid_name);
+    if (!isSafeLibName(name)) return sendErr(res, 400, err_invalid_name);
+    const row = rowForName(aa, ctx.project_dir, name) orelse {
+        res.status = 404;
+        res.body = "not found";
+        return;
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(aa);
+    try library_template.Card.render(.{row}, &aw.writer);
+    res.body = try req.arena.dupe(u8, aw.written());
     res.content_type = .HTML;
 }
 
@@ -257,41 +343,55 @@ pub fn cseFetchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     };
     const args = parsed.value;
 
+    // The MCP dispatcher wraps download_footprint/download_datasheet in the
+    // per-mutation auto-commit seam, but this browser convenience endpoint
+    // calls the shared handlers directly. Snapshot once around the combined
+    // import so its component, pinout, footprint, model, source archive,
+    // datasheet, and component-link edit land in one narrow commit. Existing
+    // dirty work is protected by autocommit's before/after path-set diff.
+    var ac_session = autocommit.begin(aa, ctx.project_dir);
+    defer if (ac_session) |*s| s.deinit();
+
     var fp_buf: std.ArrayList(u8) = .empty;
-    _ = mcp_tools.call(aa, ctx.project_dir, "download_footprint", args, &fp_buf);
+    const fp_result = mcp_tools.call(aa, ctx.project_dir, "download_footprint", args, &fp_buf);
     var ds_buf: std.ArrayList(u8) = .empty;
-    _ = mcp_tools.call(aa, ctx.project_dir, "download_datasheet", args, &ds_buf);
+    const ds_result = mcp_tools.call(aa, ctx.project_dir, "download_datasheet", args, &ds_buf);
 
     // download_footprint creates the component and download_datasheet saves the
     // PDF, but neither links them — so splice the datasheet into the new
     // component's .sexp, the same link the drag-to-card flow performs.
     const linked = linkCseDatasheet(aa, ctx.project_dir, fp_buf.items, ds_buf.items);
 
-    var out: std.ArrayList(u8) = .empty;
-    const w = out.writer(aa);
+    // Browser Component Search Engine imports auto-commit exactly the library
+    // files created by the combined footprint/datasheet fetch.
+    if (cseFetchNeedsCommit(fp_result.ok, ds_result.ok)) autocommit.commit(ac_session, null, "cse_fetch");
+
+    var out: std.Io.Writer.Allocating = .init(aa);
+    const w = &out.writer;
     try w.writeAll("{\"footprint\":");
     try w.writeAll(if (fp_buf.items.len > 0 and fp_buf.items[0] == '{') fp_buf.items else "null");
     try w.writeAll(",\"datasheet\":");
     try w.writeAll(if (ds_buf.items.len > 0 and ds_buf.items[0] == '{') ds_buf.items else "null");
     try w.print(",\"linked\":{s}}}", .{if (linked) "true" else "false"});
 
-    res.body = try req.arena.dupe(u8, out.items);
+    res.body = try req.arena.dupe(u8, out.written());
 }
 
 // ── 3D-model attach + library delete ───────────────────────────────
 
 /// True when `name` is a safe single library basename — rejects path traversal
 /// and separators so the model/delete endpoints can't escape `lib/` via a
-/// crafted `:name`/`:kind` param. `,` is allowed: manufacturer part numbers
-/// embed it as a packaging suffix (e.g. `74ahct1g125gm,132`) and it's neither a
-/// path separator nor part of a `..` traversal. Names arrive percent-decoded,
-/// so `%` is still rejected (a stray `%` is never a legitimate basename char).
+/// crafted `:name`/`:kind` param. `,`, `+`, and `#` are allowed: manufacturer
+/// part numbers embed these in packaging/series suffixes (e.g.
+/// `74ahct1g125gm,132`, `yat-5a+`, and `lt3045edd#pbf`); none is a path
+/// separator nor part of a `..` traversal. Names arrive percent-decoded, so
+/// `%` is still rejected (a stray `%` is never a legitimate basename char).
 fn isSafeLibName(name: []const u8) bool {
     if (name.len == 0 or name.len > 128) return false;
     if (std.mem.indexOf(u8, name, "..") != null) return false;
     for (name) |c| {
         const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
-            (c >= '0' and c <= '9') or c == '.' or c == '-' or c == '_' or c == ',';
+            (c >= '0' and c <= '9') or c == '.' or c == '-' or c == '_' or c == ',' or c == '+' or c == '#';
         if (!ok) return false;
     }
     return true;
@@ -351,7 +451,17 @@ pub fn uploadModelApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
         log.warn("upload-model {s}: {s}", .{ fp, @errorName(e) });
         return sendErr(res, 500, "{\"ok\":false,\"error\":\"failed to write model file\"}");
     };
-    res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"footprint\":\"{s}\",\"bytes\":{d}}}", .{ fp, step.len });
+    // Return the active transform so an already-open PCB page can register the
+    // new body immediately without reloading (and losing in-progress edits).
+    const cfg = export_kicad.loadModelConfig(aa, ctx.project_dir);
+    const tf = cfg.get(fp);
+    const offset = if (tf) |t| t.offset else [3]f64{ 0, 0, 0 };
+    const rotation = if (tf) |t| t.rotation else [3]f64{ 0, 0, 0 };
+    res.body = try std.fmt.allocPrint(
+        req.arena,
+        "{{\"ok\":true,\"footprint\":\"{s}\",\"bytes\":{d},\"offset\":[{d},{d},{d}],\"rotation\":[{d},{d},{d}]}}",
+        .{ fp, step.len, offset[0], offset[1], offset[2], rotation[0], rotation[1], rotation[2] },
+    );
 }
 
 /// Resolve the footprint a model should be keyed under: if
@@ -359,7 +469,7 @@ pub fn uploadModelApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
 /// otherwise `name` is itself a footprint (the drop landed on a footprint card).
 fn resolveFootprintName(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const u8 {
     const path = std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name }) catch return name;
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, max_lib_file_bytes) catch return name;
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, lib_limits.max_lib_file_bytes) catch return name;
     return extractField(content, footprint_label) orelse name;
 }
 
@@ -544,15 +654,28 @@ fn extractField(content: []const u8, field: []const u8) ?[]const u8 {
     return null;
 }
 
-test "isSafeLibName allows part-number commas but still rejects traversal + separators" {
+test "isSafeLibName allows part-number commas and + series suffixes but still rejects traversal + separators" {
     // Manufacturer packaging suffixes embed a comma (74AHC1G125GM,132).
     try std.testing.expect(isSafeLibName("74ahct1g125gm,132"));
     try std.testing.expect(isSafeLibName("plain-name_1.0"));
+    // Mini-Circuits series suffixes embed a `+` (YAT-5A+).
+    try std.testing.expect(isSafeLibName("yat-5a+"));
+    try std.testing.expect(isSafeLibName("yat-3a+"));
+    // Analog Devices part numbers use `#` for ordering codes (LT3045EDD#PBF).
+    try std.testing.expect(isSafeLibName("lt3045edd#pbf"));
     // Separators / traversal / stray percent stay rejected.
     try std.testing.expect(!isSafeLibName("../etc/passwd"));
     try std.testing.expect(!isSafeLibName("a/b"));
     try std.testing.expect(!isSafeLibName("a%2Cb"));
     try std.testing.expect(!isSafeLibName(""));
+}
+
+test "browser CSE fetch auto-commits every successful mutation outcome" {
+    // spec: Web Server - Browser Component Search Engine imports auto-commit the combined generated library changes
+    try std.testing.expect(cseFetchNeedsCommit(true, true));
+    try std.testing.expect(cseFetchNeedsCommit(true, false));
+    try std.testing.expect(cseFetchNeedsCommit(false, true));
+    try std.testing.expect(!cseFetchNeedsCommit(false, false));
 }
 
 test "linkCseDatasheet splices the downloaded datasheet into the component" {
@@ -563,13 +686,13 @@ test "linkCseDatasheet splices the downloaded datasheet into the component" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/foo.sexp", .data = "(component \"foo\"\n  (footprint x))\n" });
-    const proj = try tmp.dir.realpathAlloc(aa, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/foo.sexp", .data = "(component \"foo\"\n  (footprint x))\n" });
+    const proj = try tmp.dir.realPathFileAlloc(std.testing.io, ".", aa);
 
     // Both downloads ok → the datasheet is spliced into the component.
     try std.testing.expect(linkCseDatasheet(aa, proj, "{\"ok\":true,\"component\":\"foo\"}", "{\"ok\":true,\"file\":\"foo.pdf\"}"));
-    const after = try tmp.dir.readFileAlloc(alloc, "lib/components/foo.sexp", 1 << 20);
+    const after = try tmp.dir.readFileAlloc(std.testing.io, "lib/components/foo.sexp", alloc, .limited64(1 << 20));
     defer alloc.free(after);
     try std.testing.expect(std.mem.indexOf(u8, after, "(datasheet \"foo.pdf\")") != null);
 
@@ -589,4 +712,55 @@ test "library footprint preview exposes courtyard editing controls" {
     try std.testing.expect(std.mem.indexOf(u8, library_js, "Edit courtyard") != null);
     try std.testing.expect(std.mem.indexOf(u8, modal_html, "id=\"lib-court-modal\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, modal_html, "value=\"offset\"") != null);
+}
+
+// spec: Web Server - The PCB editor's sidebar footprint button opens the part's library card (datasheet links, footprint editor, 3D-model drag-in and alignment) instead of only the courtyard modal
+test "library card resolves a component before a footprint and carries datasheets" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/footprints");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/dup.sexp",
+        .data = "(component \"dup\"\n  (description \"the component card\")\n  (footprint dup-fp)\n  (manufacturer \"Acme\")\n  (datasheet \"dup.pdf\"))\n",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/footprints/dup.sexp", .data = "(footprint dup)\n" });
+    const proj = try tmp.dir.realPathFileAlloc(std.testing.io, ".", aa);
+
+    // A same-named footprint exists, but the component wins — its card carries
+    // the datasheet + manufacturer the PCB editor needs.
+    const row = rowForName(aa, proj, "dup") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(LibraryRow.Kind.component, row.kind);
+    try std.testing.expectEqualStrings("dup-fp", row.footprint.?);
+    try std.testing.expectEqualStrings("Acme", row.manufacturer.?);
+    try std.testing.expectEqual(@as(usize, 1), row.datasheets.len);
+    try std.testing.expectEqualStrings("dup.pdf", row.datasheets[0].name);
+
+    // Footprint-only name still resolves to a footprint card.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/footprints/only-fp.sexp", .data = "(footprint only-fp)\n" });
+    const fp_row = rowForName(aa, proj, "only-fp") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(LibraryRow.Kind.footprint, fp_row.kind);
+
+    // Unknown names resolve to nothing.
+    try std.testing.expect(rowForName(aa, proj, "nope") == null);
+}
+
+// The PCB editor's sidebar footprint button opens the part's library card; this
+// test covers the client wiring that fetches and shows that card.
+test "pcb board js opens the library card modal from the footprint button" {
+    const board_js = @embedFile("assets/pcb_board.js");
+    const viewer_js = @embedFile("assets/pcb_3d_viewer.js");
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "openFpCard") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "/api/library-card/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "fp-card-modal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "fpCardAttachModel") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "PCB.models[fp]=tf") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "PCB3D.modelAdded(fp,tf)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, viewer_js, "modelAdded: function (fp, transform)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "loadFpCardPreview") != null);
 }

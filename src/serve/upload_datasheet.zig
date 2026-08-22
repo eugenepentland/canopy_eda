@@ -10,8 +10,8 @@ const Server = serve_root.Server;
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
-    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
-    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    infra_fs.File.WriteError || infra_fs.File.OpenError || infra_fs.File.ReadError ||
+    infra_fs.Dir.MakeError || infra_fs.Dir.StatFileError ||
     error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, ReadOnlyFileSystem, LinkQuotaExceeded };
 
 /// True iff the buffer starts with the four `%PDF` magic bytes — gates
@@ -39,7 +39,7 @@ fn stripDuplicateMarker(stem: []const u8) []const u8 {
     const inner = stem[open + 1 .. stem.len - 1];
     if (inner.len == 0) return stem;
     for (inner) |c| if (c < '0' or c > '9') return stem;
-    return std.mem.trimRight(u8, stem[0..open], " _");
+    return std.mem.trimEnd(u8, stem[0..open], " _");
 }
 
 /// Conservative filename whitelist for `lib/datasheets/`. Drops any path
@@ -153,13 +153,13 @@ pub fn uploadDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
     };
     defer ctx.allocator.free(stored.name);
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
     try w.writeAll("{\"ok\":true,\"name\":\"");
     try w.writeAll(stored.name);
     try w.print("\",\"size\":{d}}}", .{stored.size});
     res.content_type = .JSON;
-    res.body = buf.items;
+    res.body = buf.written();
 }
 
 /// GET /api/datasheets — JSON list of uploaded PDFs in `lib/datasheets/`.
@@ -170,14 +170,14 @@ pub fn listDatasheetsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
     const dir_path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/datasheets", .{ctx.project_dir});
     defer ctx.allocator.free(dir_path);
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
     try w.writeAll("{\"files\":[");
 
     var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
         try w.writeAll("]}");
         res.content_type = .JSON;
-        res.body = buf.items;
+        res.body = buf.written();
         return;
     };
     defer dir.close();
@@ -196,7 +196,7 @@ pub fn listDatasheetsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
     }
     try w.writeAll("]}");
     res.content_type = .JSON;
-    res.body = buf.items;
+    res.body = buf.written();
 }
 
 /// GET /datasheets/:filename — serve a PDF inline. Path-traversal guard

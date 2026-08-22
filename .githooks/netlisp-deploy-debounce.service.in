@@ -1,0 +1,15 @@
+[Unit]
+Description=Deploy netlisp to production after a quiet period following deferred merges
+# Cheap no-op guard: the marker only exists while a merge is waiting to deploy.
+ConditionPathExists=@TOP@/.git/deploy-pending
+
+[Service]
+Type=oneshot
+WorkingDirectory=@TOP@
+Environment=DEPLOY_DEBOUNCE_QUIET_SECONDS=@DEBOUNCE_QUIET_SECONDS@
+# The deploy prepares a release candidate when it has none: a full test suite
+# and a ReleaseSafe build, ~7 minutes, longer under gate-lock contention. The
+# default start timeout would SIGTERM it mid-build and leave prod on the old
+# binary with no record of why.
+TimeoutStartSec=infinity
+ExecStart=@TOP@/.githooks/deploy-debounce.sh

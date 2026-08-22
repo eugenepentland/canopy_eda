@@ -2,8 +2,9 @@
 //! HTTP client) can *see* the layout instead of parsing the coordinate JSON the
 //! browser viewer consumes. Mirrors the browser renderer (BOARD_JS in
 //! `serve/pcb_layout_page.zig`): same world→pixel projection, same element
-//! colours, same draw order — courtyards/silk/pads, then airwires + decoupling
-//! loops, then routed copper, then DRC markers and labels.
+//! colours, and the SAME PAINT ORDER — `board_passes` below is
+//! `render_order.stages` with this renderer's pass bound to each stage, so the
+//! image an agent reasons about is stacked exactly like the one the user sees.
 //!
 //! With `highlight_nets` / `highlight_refs` set, the render enters *focus mode*:
 //! the named nets' pads + airwires and the named components glow in an accent
@@ -11,60 +12,108 @@
 //! subsystem sees it in the context of the whole board.
 
 const std = @import("std");
+const net_name = @import("net_name.zig");
+const board_layers = @import("board_layers.zig");
+const board_theme = @import("board_theme.zig");
 const optimizer = @import("placement/optimizer.zig");
 const geometry = @import("placement/geometry.zig");
 const router = @import("placement/router.zig");
+const pour = @import("placement/pour.zig");
+const outline = @import("placement/outline.zig");
+const implicit_plane = @import("placement/implicit_plane.zig");
+const export_gerber = @import("export_gerber.zig");
 const drc = @import("placement/drc.zig");
 const raster = @import("raster.zig");
 const png = @import("png.zig");
 const numeric = @import("numeric.zig");
 const export_fab = @import("export_fab.zig");
+const env = @import("eval/env.zig");
 const font = @import("font5x7.zig");
+const silk_font = @import("silk_font.zig");
+const subcircuit_silkscreen = @import("subcircuit_silkscreen.zig");
+const testpoint_silkscreen = @import("testpoint_silkscreen.zig");
+const mask_relief = @import("placement/mask_relief.zig");
+
+/// The shown copper's mask relief for the sub-circuit silk pass — empty when
+/// nothing is routed, so an unrouted preview pays nothing.
+fn silkRelief(arena: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult) std.mem.Allocator.Error!mask_relief.Relief {
+    const r = routed orelse return .{};
+    return mask_relief.computeRouted(arena, p, .{ .tracks = r.tracks, .arcs = r.arcs }, r.vias);
+}
 
 const Rgb = raster.Rgb;
 
-// ── Theme (matches BOARD_JS — KiCad pcbnew default colours) ────────────────
-const bg = Rgb.hex("#001023"); // KiCad dark navy canvas
-const court_col = Rgb.hex("#D864FF"); // courtyard outline (KiCad magenta, drawn dim)
-const silk_rgb = Rgb.hex("#F0F0F0"); // F.Silkscreen white
-const silk_bot = Rgb.hex("#E8B2C8"); // B.Silkscreen pink
-const pad_col = Rgb.hex("#C83434"); // F.Cu SMD pad copper
-const pad_col_bot = Rgb.hex("#4D7FC4"); // B.Cu SMD pad copper
-const pad_pth = Rgb.hex("#d0a028"); // through-hole pad annulus (KiCad PTH gold)
-const pad_npth = Rgb.hex("#26323e"); // non-plated hole rim (no copper)
-const aw_prox = Rgb.hex("#ea580c"); // hot decoupling loop / proximity hug
-const aw_gnd = Rgb.hex("#22b8cf"); // ground return airwire
-const aw_sig = Rgb.hex("#ffffff"); // ratsnest airwire (KiCad white, drawn ~35% alpha)
-const loop_ret = Rgb.hex("#58a6ff"); // L2 ground-return overlay
-const track_top = Rgb.hex("#C83434"); // F.Cu trace
-const track_bot = Rgb.hex("#4D7FC4"); // B.Cu trace
-// Inner signal-layer traces, cycling (mirrors optimizer.INNER_LAYER_COLORS
-// so the PNG matches the browser viewer's palette).
-const track_inner = [_]Rgb{ Rgb.hex("#C2C200"), Rgb.hex("#C200C2"), Rgb.hex("#C2C2C2"), Rgb.hex("#00C2C2") };
+// ── Theme ──────────────────────────────────────────────────────────────────
+// Every colour below is READ from `board_theme.zig`, never re-typed here: the
+// PNG and the browser viewer paint one board, so a literal in this file is a
+// second opinion about what the image should look like. Each name is the
+// theme constant decoded to raster channels; the decode is comptime because
+// the theme values are.
 
-/// Trace colour for a routed track's signal layer (0 = top red, 1 = bottom
-/// blue, inner layers cycle KiCad's In1../In4 palette).
-fn trackColor(layer: u8) Rgb {
-    if (layer == 0) return track_top;
-    if (layer == 1) return track_bot;
-    return track_inner[(layer - 2) % track_inner.len];
-}
-const via_col = Rgb.hex("#B2B27A"); // via annulus (KiCad muted olive-gold)
-const via_hole = Rgb.hex("#001023");
-const pad_hole = Rgb.hex("#001023"); // drilled bore punched through a thru/npth pad
-const drc_col = Rgb.hex("#f4432c"); // DRC marker (KiCad red-orange)
-const accent_rgb = Rgb.hex("#f5c542"); // focus highlight
-const text_col = Rgb.hex("#c9d1d9");
-const text_dim = Rgb.hex("#7d8590");
-const good_col = Rgb.hex("#3fb950"); // improvement (compare Δ ≤ 0)
-const grid_col = Rgb.hex("#2a3a4a"); // reference grid lines
-const edge_col = Rgb.hex("#D0D2CD"); // board outline (KiCad Edge.Cuts)
+const bg = rgbOf(board_theme.background);
+const court_col = rgbOf(board_theme.courtyard);
+const silk_rgb = rgbOf(board_theme.silk_front);
+const silk_bot = rgbOf(board_theme.silk_back);
+const pad_col = rgbOf(board_theme.copper_top);
+const pad_col_bot = rgbOf(board_theme.copper_bottom);
+// A face's pads and its traces are the same copper, so they are one colour.
+const track_top = pad_col;
+const track_bot = pad_col_bot;
+const pad_pth = rgbOf(board_theme.pad_pth);
+const pad_npth = rgbOf(board_theme.pad_npth);
+const aw_prox = rgbOf(board_theme.airwire_proximity);
+const aw_gnd = rgbOf(board_theme.airwire_ground);
+const aw_sig = rgbOf(board_theme.ratsnest); // drawn at ~35% alpha
+const loop_ret = rgbOf(board_theme.loop_return);
+const via_col = rgbOf(board_theme.via);
+const via_hole = rgbOf(board_theme.via_hole);
+const pad_hole = rgbOf(board_theme.drill_bore);
+const drc_col = rgbOf(board_theme.drc);
+const accent_rgb = rgbOf(board_theme.focus_accent);
+const text_col = rgbOf(board_theme.text);
+const text_dim = rgbOf(board_theme.text_dim);
+const good_col = rgbOf(board_theme.improvement);
+const grid_col = rgbOf(board_theme.grid_dot);
+const edge_col = rgbOf(board_theme.edge_cuts);
 // Blame heatmap ramp: cheap (cool) → expensive (hot).
-const blame_lo = Rgb.hex("#15302a");
-const blame_mid = Rgb.hex("#b8860b");
-const blame_hi = Rgb.hex("#c0392b");
+const blame_lo = rgbOf(board_theme.blame_low);
+const blame_mid = rgbOf(board_theme.blame_mid);
+const blame_hi = rgbOf(board_theme.blame_high);
 
-const margin_mm: f64 = 2.0;
+/// A theme colour as raster channels. The theme owns the ONE hex parser, so
+/// this is a plain re-shape — and it works on a runtime string too, which is
+/// what lets `trackColor` read a layer-table row instead of a literal.
+fn rgbOf(hex: []const u8) Rgb {
+    const c = board_theme.channels(hex);
+    return .{ .r = c.r, .g = c.g, .b = c.b };
+}
+
+/// Trace colour for a routed track's signal layer: the colour the board's own
+/// LAYER TABLE gives the physical copper that signal draws on. Reading the row
+/// — rather than recomputing "outer face, else inner palette by depth" here —
+/// is what keeps the PNG, the blob and the page legend on one palette; the
+/// arithmetic lives in `board_layers.stackColor` alone. (KiCad semantics:
+/// In2.Cu keeps its colour whether or not In1.Cu is a plane, which is why the
+/// key is the stack position and never the signal index.)
+pub fn trackColor(rules: optimizer.BoardRules, layer: u8) Rgb {
+    const table = rules.layerTable();
+    const stack = board_layers.StackIndex.of(rules.signalStackIndex(layer));
+    if (table.rowAtStack(stack)) |row| return rgbOf(row.color());
+    return rgbOf(board_layers.stackColor(stack, table.stackCount()));
+}
+
+/// Flattening tolerance for a routed arc, in FINAL pixels: the largest gap
+/// allowed between the true curve and the polyline drawn for it.
+const arc_flatten_px: f64 = 0.5;
+/// Points one flattened arc may use. A half-pixel tolerance on a board-sized
+/// radius stays far under this; the cap bounds the stack buffer.
+const arc_max_points: usize = 256;
+
+/// Blank board margin (mm) left on every side of the parts bounding box when a
+/// board is framed for viewing. Owned here and reused by the served SVG page so
+/// the PNG and the browser viewer frame one board identically — a cross-probe
+/// that lands on different pixels in the two surfaces is a bug report.
+pub const view_margin_mm: f64 = 2.0;
 const min_w: u32 = 400;
 const max_w: u32 = 2200;
 const max_h: u32 = 2600;
@@ -78,6 +127,11 @@ const dim_a: f32 = 0.20; // alpha for de-emphasised elements in focus mode
 /// or both (`C150=C_BOOT1`). Parts without an origin name fall back to ref.
 pub const NameMode = enum { ref, origin, both };
 
+test "board PNG refdes labels use the globally unique leaf" {
+    try std.testing.expectEqualStrings("C17", net_name.leaf("buck_3v3/C17"));
+    try std.testing.expectEqualStrings("U2", net_name.leaf("U2"));
+}
+
 /// Staging status of a solved layout (from `optimizer.placementDiag()`): which
 /// parts the force / `(board …)` edge-dock path left in the band below the board,
 /// and which the pin-hug auto-fill pulled back out. Rendered as a header status +
@@ -88,6 +142,13 @@ pub const SpecStatus = struct {
     /// outline, not the red hatch).
     auto_filled: []const []const u8 = &.{},
 };
+
+/// One poured face's precomputed fill, keyed by `side`. The contact sheet
+/// computes each side's fill once (`pour.compute`) and threads the slice through
+/// every tile's `Options`, so the fill — a pure function of placement + routed
+/// copper, identical for the main view and every crop — is not recomputed per
+/// tile. Private: only `renderSheet` populates it.
+const PrecomputedPour = struct { side: optimizer.Side, fill: pour.Fill };
 
 /// Render options: output size, focus-mode highlight sets, optional routed
 /// copper / DRC overlay, and the caption.
@@ -134,15 +195,33 @@ pub const Options = struct {
     crop: ?[]const u8 = null,
     /// Crop window radius in mm around the part centre (≤0 ⇒ default 6).
     crop_r: f64 = 6,
+    /// Explicit world-space viewport override `[minx,miny,maxx,maxy]` (mm), set
+    /// by the serve layer for the `cropnet=` net-bbox zoom lens (a net set's
+    /// pads + copper + margin, computed via `cropNetBbox`). Wins over the
+    /// whole-board bbox; `crop` (a single part) still wins over this when both
+    /// are set.
+    view_bbox: ?[4]f64 = null,
     /// Skip the header band and legend — used for contact-sheet tiles.
     bare: bool = false,
     /// Callout overlay: numbered markers + a panel listing the board's worst
     /// problems (hottest loops, longest airwire, staged parts, DRC count).
     critique: bool = false,
     /// Board-level silkscreen text labels (from the shown layout's sidecar).
-    /// Drawn in a silk colour at their world anchor + cap height, so the PNG
+    /// Drawn in a silk colour at their world anchor + nominal size, so the PNG
     /// and MCP screenshots show the same legend the Gerber emits.
     texts: []const font.BoardText = &.{},
+    /// Saved/imported no-silkscreen polygons. Generated sub-circuit names and
+    /// corner strokes are suppressed wherever their ink would enter one.
+    silk_keepouts: []const subcircuit_silkscreen.Keepout = &.{},
+    /// Precomputed pour fills (one per poured side) shared across a contact
+    /// sheet's main view + tiles, so `pour.compute` runs once per side per
+    /// request instead of once per tile. Null ⇒ each face computes its own fill
+    /// (the single-view path). Must be allocated to outlive every tile paint.
+    precomputed_pours: ?[]const PrecomputedPour = null,
+    /// Hand-drawn user copper pours (filled netted outer zones) — drawn under
+    /// the parts exactly like a declared pour (translucent fill + rim + "NET
+    /// pour" label), so a screenshot shows the same copper the viewer does.
+    user_zones: []const pour.UserZone = &.{},
 };
 
 /// Render `p` to PNG bytes owned by `alloc`.
@@ -161,6 +240,8 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
     var vmaxx = p.maxx;
     var vmaxy = p.maxy;
     if (opts.crop) |cref| {
+        // `crop` (a single part window) wins over `view_bbox` (the cropnet lens)
+        // when both are set.
         if (try findPartByName(alloc, p, cref)) |pi| {
             const r = if (opts.crop_r > 0) opts.crop_r else 6;
             vminx = p.parts[pi].x - r;
@@ -168,9 +249,14 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
             vminy = p.parts[pi].y - r;
             vmaxy = p.parts[pi].y + r;
         }
+    } else if (opts.view_bbox) |vb| {
+        vminx = vb[0];
+        vminy = vb[1];
+        vmaxx = vb[2];
+        vmaxy = vb[3];
     }
-    const cw_mm = @max(vmaxx - vminx, 1.0) + 2 * margin_mm;
-    const ch_mm = @max(vmaxy - vminy, 1.0) + 2 * margin_mm;
+    const cw_mm = @max(vmaxx - vminx, 1.0) + 2 * view_margin_mm;
+    const ch_mm = @max(vmaxy - vminy, 1.0) + 2 * view_margin_mm;
 
     var board_w = std.math.clamp(opts.width, min_w, max_w);
     var scale = @as(f64, @floatFromInt(board_w)) / cw_mm;
@@ -245,6 +331,31 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
     defer cmp_idx.deinit(alloc);
     if (opts.compare) |c| for (c.parts, 0..) |cp, i| try cmp_idx.put(alloc, cp.ref_des, i);
 
+    // The generated sub-circuit silk avoids mask-relieved bare copper, so the
+    // PNG's legs/names match what the Gerber silk actually draws.
+    var relief_arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer relief_arena_state.deinit();
+    const sub_relief = try silkRelief(relief_arena_state.allocator(), p, opts.routed);
+    const sub_silk = try subcircuit_silkscreen.collectWithBoardTexts(alloc, p, stagedRefs(opts), opts.silk_keepouts, sub_relief, opts.texts);
+    defer subcircuit_silkscreen.deinitCollected(alloc, sub_silk);
+    const testpoint_silk = try testpoint_silkscreen.collectWithKeepouts(alloc, p, stagedRefs(opts), opts.silk_keepouts, sub_silk, opts.texts);
+    defer testpoint_silkscreen.deinitCollected(alloc, testpoint_silk);
+    const pin_one_reserved = try alloc.alloc(font.BoardText, opts.texts.len + testpoint_silk.len);
+    defer alloc.free(pin_one_reserved);
+    @memcpy(pin_one_reserved[0..opts.texts.len], opts.texts);
+    for (testpoint_silk, 0..) |label, i| pin_one_reserved[opts.texts.len + i] = label.text;
+    const pin_one_silk = try subcircuit_silkscreen.collectPinOneMarkers(
+        alloc,
+        p,
+        .{
+            .excluded_refs = stagedRefs(opts),
+            .keepouts = opts.silk_keepouts,
+            .relief = sub_relief,
+            .annotations = sub_silk,
+            .reserved_texts = pin_one_reserved,
+        },
+    );
+    defer subcircuit_silkscreen.deinitPinOneMarkers(alloc, pin_one_silk);
     var ctx = Ctx{
         .cv = &cv,
         .scale = scale,
@@ -263,30 +374,55 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
         .pin_set = &pin_set,
         .unplaced_set = &unplaced_set,
         .autofill_set = &autofill_set,
+        .sub_silk = sub_silk,
+        .testpoint_silk = testpoint_silk,
+        .pin_one_silk = pin_one_silk,
     };
 
-    if (opts.grid) ctx.drawGrid();
-    ctx.drawBoardOutline();
-    ctx.drawPours();
-    if (opts.compare != null) ctx.drawCompareGhost();
-    ctx.drawParts();
-    ctx.drawAirwires();
-    ctx.drawLoops();
-    if (opts.dims) ctx.drawDims();
-    if (opts.compare != null) ctx.drawCompareArrows();
-    if (opts.routed) |r| ctx.drawRouted(r);
-    ctx.drawBoardTexts(); // silkscreen text sits above copper, under DRC/labels
-    ctx.drawViolations(opts.violations);
-    ctx.drawLabels();
-    ctx.drawPinLabels();
-    if (opts.critique) ctx.drawCritique();
-    if (opts.blame) ctx.drawBlamePanel();
+    for (board_passes) |bp| {
+        if (bp.run) |run| run(&ctx);
+    }
+    // Image chrome, not board copper: the caption band and the colour legend
+    // frame the board rather than sitting on it, so they are outside the order.
     if (!opts.bare) {
         ctx.drawHeader();
         ctx.drawLegend(opts.routed != null);
     }
 
     return cv;
+}
+
+/// One canonical stage bound to this renderer's pass for it. `run` is null
+/// where the PNG has no model for a stage — an explicit hole in the table, so
+/// a gap is documented rather than silently missing from the sequence.
+const Pass = struct { stage: []const u8, run: ?*const fn (*Ctx) void };
+
+/// THE ORDER, as this renderer implements it: `render_order.stages` name for
+/// name (a test below proves it), each bound to the pass that draws it.
+///
+/// Known residual, deliberately kept: part ref-des labels ride in `overlays`
+/// here, where the viewer draws them with the part body. A still image has no
+/// zoom and no hover, so its annotations stay legible on top; the viewer can
+/// afford to bury a label under a trace because you can move the board.
+const board_passes = [_]Pass{
+    .{ .stage = "substrate", .run = Ctx.stageSubstrate },
+    .{ .stage = "plane_fills", .run = Ctx.stagePlaneFills },
+    .{ .stage = "keepouts", .run = null }, // no keepout model in the PNG
+    .{ .stage = "groups", .run = null }, // no sub-circuit boxes in the PNG
+    .{ .stage = "parts", .run = Ctx.stageParts },
+    .{ .stage = "ratsnest", .run = Ctx.stageRatsnest },
+    .{ .stage = "clearance", .run = null }, // no clearance halos in the PNG
+    .{ .stage = "copper", .run = Ctx.stageCopper },
+    .{ .stage = "pad_labels", .run = Ctx.drawPinLabels },
+    .{ .stage = "footprint_silk", .run = Ctx.drawFootprintSilk },
+    .{ .stage = "board_silk", .run = Ctx.drawBoardSilkscreen },
+    .{ .stage = "edge_cuts", .run = Ctx.drawBoardOutline },
+    .{ .stage = "overlays", .run = Ctx.stageOverlays },
+};
+
+/// Staged refs do not belong to the finished sub-circuit footprint envelope.
+fn stagedRefs(opts: Options) []const []const u8 {
+    return if (opts.spec) |spec| spec.unplaced else &.{};
 }
 
 /// Resolve a crop target the way `highlight_refs` matches parts: uppercased
@@ -304,6 +440,94 @@ fn findPartByName(alloc: std.mem.Allocator, p: optimizer.Placement, name: []cons
     return null;
 }
 
+/// Default margin (mm) grown around the `cropnet=` net-bbox lens.
+pub const cropnet_margin_mm: f64 = 1.5;
+
+/// World-space bounding box `[minx,miny,maxx,maxy]` (mm) of the copper subsystem
+/// named by `nets` — every pad on a matching net plus that net's routed copper
+/// (tracks + vias, whether restored or freshly routed) — grown by `margin`.
+/// Net names match the same way `highlight_nets` does (full name, tie-collapsed
+/// key, or leaf, case-insensitive). Powers the `cropnet=` zoom lens: the serve
+/// layer sets the result as `Options.view_bbox` after it has placement + copper.
+/// Null when no matching pad or copper exists (viewport stays the whole board).
+pub fn cropNetBbox(
+    alloc: std.mem.Allocator,
+    p: optimizer.Placement,
+    routed: ?router.RouteResult,
+    nets: []const []const u8,
+    margin: f64,
+) std.mem.Allocator.Error!?[4]f64 {
+    if (nets.len == 0) return null;
+    var tokens = try alloc.alloc([]const u8, nets.len);
+    defer {
+        for (tokens) |t| alloc.free(t);
+        alloc.free(tokens);
+    }
+    for (nets, 0..) |t, i| tokens[i] = try upper(alloc, t);
+
+    // ref_des → part index, so a net's pins resolve to a pad world position.
+    var pidx = std.StringHashMapUnmanaged(usize).empty;
+    defer pidx.deinit(alloc);
+    for (p.parts, 0..) |part, i| try pidx.put(alloc, part.ref_des, i);
+    // Matched net indices (into p.nets) — the copper filter keys off these
+    // (`Track.net`/`Via.net` carry the flattened-net index).
+    var net_hit = std.AutoHashMapUnmanaged(i32, void).empty;
+    defer net_hit.deinit(alloc);
+
+    var minx: f64 = std.math.floatMax(f64);
+    var miny: f64 = std.math.floatMax(f64);
+    var maxx: f64 = -std.math.floatMax(f64);
+    var maxy: f64 = -std.math.floatMax(f64);
+    var any = false;
+
+    for (p.nets, 0..) |net, ni| {
+        var match = false;
+        for (tokens) |tok| {
+            if (eqUpper(net.name, tok) or eqUpper(netKey(net.name), tok) or eqUpper(shortName(net.name), tok)) {
+                match = true;
+                break;
+            }
+        }
+        if (!match) continue;
+        try net_hit.put(alloc, @intCast(ni), {});
+        for (net.pins) |pin| {
+            const pi = pidx.get(pin.ref_des) orelse continue;
+            const part = p.parts[pi];
+            for (part.pads) |pad| {
+                if (!std.mem.eql(u8, pad.number, pin.pin)) continue;
+                const wp = Ctx.world(part, pad.x, pad.y);
+                const hx = @max(pad.w, pad.h) / 2;
+                minx = @min(minx, wp[0] - hx);
+                maxx = @max(maxx, wp[0] + hx);
+                miny = @min(miny, wp[1] - hx);
+                maxy = @max(maxy, wp[1] + hx);
+                any = true;
+            }
+        }
+    }
+    if (routed) |r| {
+        for (r.tracks) |t| {
+            if (!net_hit.contains(t.net)) continue;
+            minx = @min(minx, @min(t.x1, t.x2));
+            maxx = @max(maxx, @max(t.x1, t.x2));
+            miny = @min(miny, @min(t.y1, t.y2));
+            maxy = @max(maxy, @max(t.y1, t.y2));
+            any = true;
+        }
+        for (r.vias) |v| {
+            if (!net_hit.contains(v.net)) continue;
+            const rr = v.dia / 2;
+            minx = @min(minx, v.x - rr);
+            maxx = @max(maxx, v.x + rr);
+            miny = @min(miny, v.y - rr);
+            maxy = @max(maxy, v.y + rr);
+            any = true;
+        }
+    }
+    if (!any) return null;
+    return .{ minx - margin, miny - margin, maxx + margin, maxy + margin };
+}
+
 /// Hubs to tile in a contact sheet, biggest first (the parts whose pin
 /// neighbourhoods an agent actually needs to inspect).
 const sheet_max_tiles: usize = 6;
@@ -314,8 +538,16 @@ const sheet_cols: u32 = 3;
 /// labels — one image answers both "what's the arrangement" and "what sits at
 /// each IC's pins". Tile order is hub courtyard area, biggest first.
 pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) png.Error![]u8 {
+    // Compute each poured side's fill ONCE for the whole request; the main view
+    // and every tile paint the same fill instead of recomputing `pour.compute`
+    // per tile (up to 14× on a two-sided board). Its arena outlives all paints.
+    var pour_arena = std.heap.ArenaAllocator.init(alloc);
+    defer pour_arena.deinit();
+    const pre = precomputePours(pour_arena.allocator(), p, opts.routed, opts.user_zones);
+
     var main_opts = opts;
     main_opts.crop = null;
+    main_opts.precomputed_pours = pre;
     var main_cv = try renderCanvas(alloc, p, main_opts);
     defer main_cv.deinit();
 
@@ -350,6 +582,7 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
             .names = opts.names,
             .params = opts.params,
             .routed = opts.routed,
+            .precomputed_pours = pre,
         });
         // Tile caption: which hub this closeup is (ref + origin when distinct).
         var buf: [96]u8 = undefined;
@@ -389,6 +622,26 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
         y += row_h[r] + sheet_gap_px;
     }
     return master.toPng(alloc);
+}
+
+/// Compute each poured OUTER side's fill once for a sheet request (lookup is by
+/// `side`; inner planes are not cached — a contact sheet's tiles are crops of
+/// one board, and the inner fills are recomputed per tile). The fill is
+/// a pure function of `p` + `routed` copper, so every view (main + crops) shares
+/// it. Arena-owned by the caller (must outlive all tile paints); OOM on a side
+/// drops that entry, so `pourFill` falls back to a per-face compute for it.
+fn precomputePours(arena: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult, zones: []const pour.UserZone) []const PrecomputedPour {
+    var out: std.ArrayList(PrecomputedPour) = .empty;
+    const copper: pour.Copper = if (routed) |rt| .{ .tracks = rt.tracks, .vias = rt.vias } else .{};
+    for ([_]optimizer.Side{ .bottom, .top }) |side| {
+        const net = p.rules.pourNetOnSide(side) orelse continue;
+        var spec = pour.outerSpec(net, side);
+        // Ranked user pours on this face clear the declared background pour.
+        spec.higher = pour.higherThanDeclared(arena, zones, if (side == .top) 0 else 1, spec.net) catch &.{};
+        const fill = pour.compute(arena, p, copper, spec) catch continue;
+        out.append(arena, .{ .side = side, .fill = fill }) catch continue;
+    }
+    return out.toOwnedSlice(arena) catch &.{};
 }
 
 /// Gap (final px) between contact-sheet rows.
@@ -448,12 +701,18 @@ const Ctx = struct {
     unplaced_set: *std.StringHashMapUnmanaged(void),
     /// Uppercased refs the pin-hug auto-fill placed (spec-unlisted, amber).
     autofill_set: *std.StringHashMapUnmanaged(void),
+    /// Auto-generated corner/name silk for each flattened sub-circuit.
+    sub_silk: []const subcircuit_silkscreen.Annotation,
+    /// Uniform, collision-aware board-silk labels for physical test points.
+    testpoint_silk: []const testpoint_silkscreen.Label,
+    /// Uniform, collision-aware filled dots beside detected pin-one pads.
+    pin_one_silk: []const subcircuit_silkscreen.PinOneMarker,
 
     fn xpx(self: *Ctx, mm: f64) f32 {
-        return @floatCast((mm - self.minx + margin_mm) * self.scale);
+        return @floatCast((mm - self.minx + view_margin_mm) * self.scale);
     }
     fn ypx(self: *Ctx, mm: f64) f32 {
-        return self.yoff + @as(f32, @floatCast((mm - self.miny + margin_mm) * self.scale));
+        return self.yoff + @as(f32, @floatCast((mm - self.miny + view_margin_mm) * self.scale));
     }
     fn len(self: *Ctx, mm: f64) f32 {
         return @floatCast(mm * self.scale);
@@ -471,6 +730,18 @@ const Ctx = struct {
     /// Pixel point of a footprint-local offset on `part`.
     fn lp(self: *Ctx, part: optimizer.Part, lx: f64, ly: f64) [2]f32 {
         const w = world(part, lx, ly);
+        return .{ self.xpx(w[0]), self.ypx(w[1]) };
+    }
+
+    /// Rotate a pad-local offset before applying the footprint pose/mirror.
+    fn padWorld(part: optimizer.Part, pad: geometry.Pad, dx: f64, dy: f64) [2]f64 {
+        const a = pad.rot * std.math.pi / 180.0;
+        const c = @cos(a);
+        const s = @sin(a);
+        return world(part, pad.x + dx * c - dy * s, pad.y + dx * s + dy * c);
+    }
+    fn padLp(self: *Ctx, part: optimizer.Part, pad: geometry.Pad, dx: f64, dy: f64) [2]f32 {
+        const w = padWorld(part, pad, dx, dy);
         return .{ self.xpx(w[0]), self.ypx(w[1]) };
     }
 
@@ -521,15 +792,19 @@ const Ctx = struct {
         if (self.autofill_set.count() == 0) return false;
         return upperInSet(self.autofill_set, ref);
     }
+    fn isTestPoint(self: *Ctx, index: usize) bool {
+        return index < self.p.instances.len and env.isTestPoint(self.p.instances[index].component);
+    }
     /// The label `names` mode picks for part `pi`: ref-des, the spec's stable
     /// origin name (fallback ref when a part has none), or `REF=ORIGIN`.
     fn partLabel(self: *Ctx, pi: usize, buf: []u8) []const u8 {
         const ref = self.p.parts[pi].ref_des;
-        if (self.opts.names == .ref) return ref;
+        const display_ref = net_name.leaf(ref);
+        if (self.opts.names == .ref) return display_ref;
         const origin = if (pi < self.p.instances.len) self.p.instances[pi].origin_key else "";
-        if (origin.len == 0 or std.mem.eql(u8, origin, ref)) return ref;
+        if (origin.len == 0 or std.mem.eql(u8, origin, ref)) return display_ref;
         if (self.opts.names == .origin) return origin;
-        return std.fmt.bufPrint(buf, "{s}={s}", .{ ref, origin }) catch ref;
+        return std.fmt.bufPrint(buf, "{s}={s}", .{ display_ref, origin }) catch display_ref;
     }
     /// A part is active (full-strength) when not in focus mode, or when its ref
     /// is spotlighted, or it has a pad on a spotlighted net.
@@ -542,8 +817,148 @@ const Ctx = struct {
         return false;
     }
 
+    // ── Canonical stages ───────────────────────────────────────────────
+    // One method per `board_passes` entry that needs more than a single
+    // existing pass, so the table stays a plain stage→pass binding and every
+    // option gate lives with the drawing it gates.
+
+    /// `substrate` — the reference grid, when asked for.
+    fn stageSubstrate(self: *Ctx) void {
+        if (self.opts.grid) self.drawGrid();
+    }
+
+    /// `plane_fills` — every filled copper face, painted from the BOTTOM of the
+    /// physical stack upward, so a layer is covered by exactly the layers that
+    /// are physically nearer the viewer. One pass over the board's own layer
+    /// table (`board_layers`), which is what makes an INNER plane and an inner
+    /// user pour drawable at all: they used to be skipped, so a four-layer
+    /// board's ground and rail planes — most of its copper — were invisible in
+    /// the image an agent reasons about, and an inner pour was dropped rather
+    /// than painted on the wrong face.
+    fn stagePlaneFills(self: *Ctx) void {
+        var arena_state = std.heap.ArenaAllocator.init(self.cv.alloc);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const table = self.p.rules.layerTable();
+        const rows = table.rows();
+        var labels: f32 = 0;
+        var i = rows.len;
+        while (i > 0) {
+            i -= 1;
+            self.fillLayer(arena, &rows[i], @intCast(rows.len), &labels);
+        }
+    }
+
+    /// Every fill living on ONE physical copper layer: its declared pour (an
+    /// outer face's `(pour …)` or an inner `(plane …)`), then the hand-drawn
+    /// user pours that sit on it.
+    fn fillLayer(self: *Ctx, arena: std.mem.Allocator, row: *const board_layers.Row, count: u8, labels: *f32) void {
+        // The row's OWN colour — the same string `trackColor` resolves and the
+        // blob ships — so a plane on In1 and a track on In1 can never read as
+        // two different layers. `board_layers.stackColor` stays the one place
+        // the position→colour arithmetic lives.
+        const col = rgbOf(row.color());
+        const alpha: f32 = if (row.stack.int() == 1) 0.10 else 0.12;
+        if (row.isOuter(count)) {
+            const side = if (row.stack.int() == 1) optimizer.Side.top else optimizer.Side.bottom;
+            if (self.p.rules.pourNetOnSide(side)) |net| {
+                self.fillPourFace(arena, side, net, col, alpha);
+                self.labelLayerFill(net, "pour", row, labels);
+            }
+        } else if (row.kind == .plane) {
+            const net = row.plane_net orelse "GND";
+            // A DECLARED `(plane …)` is authored board content, so its copper is
+            // painted: same spec the blob and the Gerber pour it from, with a
+            // named plane carrying one net and the ground CLASS spelled by a
+            // null net. The legacy IMPLICIT model's two inner planes are an
+            // assumption rather than an authored layer — and, being unseeded
+            // full-board copper, a wash of them would cover every board that
+            // declares no stackup — so those are named in the label only. The
+            // viewer draws the same distinction with its per-plane eye, which
+            // defaults OFF for exactly this reason.
+            if (self.p.rules.declaredStackup()) {
+                const spec: pour.LayerSpec = if (row.plane_net) |named|
+                    .{ .net = .{ .named = named }, .keep_unseeded = true }
+                else
+                    .{ .net = .ground, .keep_unseeded = true };
+                if (pour.compute(arena, self.p, self.shownCopper(), spec)) |fill| {
+                    self.fillContours(arena, fill, col, alpha);
+                } else |_| {}
+                self.labelLayerFill(net, "plane", row, labels);
+            } else {
+                self.labelLayerFill(net, "plane (implicit)", row, labels);
+            }
+        }
+        self.fillUserZonesOn(arena, row, col, alpha);
+    }
+
+    /// The copper this image draws, as the pour engine's carving input: the
+    /// routed tracks/vias when the route overlay is on, nothing otherwise — an
+    /// uncarved pour is consistent with a picture showing no routed copper.
+    fn shownCopper(self: *Ctx) pour.Copper {
+        const rt = self.opts.routed orelse return .{};
+        return .{ .tracks = rt.tracks, .vias = rt.vias };
+    }
+
+    /// "NET <kind> - <layer>", stacked up from the board's bottom edge so every
+    /// filled layer gets a legible line naming what its copper is.
+    fn labelLayerFill(self: *Ctx, net: []const u8, kind: []const u8, row: *const board_layers.Row, labels: *f32) void {
+        const r = export_fab.outlineRect(self.p);
+        const col = rgbOf(row.color());
+        var buf: [96]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{s} {s} - {s}", .{ net, kind, row.name() }) catch "";
+        self.cv.text(
+            self.xpx(r.minx) + self.pw(4),
+            self.ypx(r.miny + r.h) - self.pw(12) - labels.* * self.pw(11),
+            s,
+            self.pw(8),
+            col,
+            0.95,
+            .start,
+        );
+        labels.* += 1;
+    }
+
+    /// `parts` — the compare layout's ghost outlines under the live bodies.
+    fn stageParts(self: *Ctx) void {
+        if (self.opts.compare != null) self.drawCompareGhost();
+        self.drawParts();
+    }
+
+    /// `ratsnest` — airwires, decoupling loops, their optional dimension
+    /// leaders, and the compare layout's movement arrows.
+    fn stageRatsnest(self: *Ctx) void {
+        self.drawAirwires();
+        self.drawLoops();
+        if (self.opts.dims) self.drawDims();
+        if (self.opts.compare != null) self.drawCompareArrows();
+    }
+
+    /// `copper` — the routed tracks and vias, when a route is being shown.
+    fn stageCopper(self: *Ctx) void {
+        if (self.opts.routed) |r| self.drawRouted(r);
+    }
+
+    /// `overlays` — DRC markers, part labels, and the opt-in analysis panels.
+    fn stageOverlays(self: *Ctx) void {
+        self.drawViolations(self.opts.violations);
+        self.drawLabels();
+        if (self.opts.critique) self.drawCritique();
+        if (self.opts.blame) self.drawBlamePanel();
+    }
+
+    /// Part bodies: courtyard, pad copper and drilled bores. BOTTOM-side parts
+    /// paint first, so a far-side footprint can never cover a near-side one —
+    /// the board is seen from the top. Placement order used to decide that,
+    /// which meant a bottom-side cap drawn late erased the pads of the top-side
+    /// hub it sits under.
     fn drawParts(self: *Ctx) void {
+        for ([_]optimizer.Side{ .bottom, .top }) |side| self.drawPartsOnSide(side);
+    }
+
+    fn drawPartsOnSide(self: *Ctx, side: optimizer.Side) void {
         for (self.p.parts, 0..) |part, pi| {
+            if (part.side != side) continue;
             const active = self.partActive(part);
             const base_a: f32 = if (active) 1.0 else dim_a;
             // Courtyard (rotated quad about the box centre — offset from the
@@ -574,19 +989,43 @@ const Ctx = struct {
                 // outline so the agent can tell authored from solver-chosen.
                 self.cv.strokePath(&court, .closed, self.outlineW(true), accent_rgb, 0.75);
             }
-            // Silk (footprint-local, rotates with the part) — F.Silk white on
-            // top, B.Silk pink on bottom-side parts.
-            const silk_col = if (part.side == .bottom) silk_bot else silk_rgb;
-            for (part.silk_lines) |sl| {
-                const a = self.lp(part, sl.x1, sl.y1);
-                const b = self.lp(part, sl.x2, sl.y2);
-                self.cv.line(a[0], a[1], b[0], b[1], self.pw(0.8), silk_col, base_a, .round);
-            }
-            for (part.silk_circles) |sc| {
-                const c = self.lp(part, sc.cx, sc.cy);
-                self.cv.ring(c[0], c[1], @max(self.len(sc.r), self.pw(1)), self.pw(0.8), silk_col, base_a);
-            }
+            // Footprint silk is NOT drawn here — it paints above the copper,
+            // in `drawFootprintSilk`. See that pass for why.
             self.drawPads(part, active);
+        }
+    }
+
+    /// Footprint silk (footprint-local, rotates with the part) — F.Silk white
+    /// on top, B.Silk pink on bottom-side parts — stroked ABOVE the routed
+    /// copper, as its own pass.
+    ///
+    /// Silkscreen ink is physically printed on the finished board, so a trace
+    /// never runs over the polarity mark or the body outline of the part
+    /// sitting on it. Drawing it inside `drawParts` put it under `drawRouted`,
+    /// which erased a footprint's own artwork wherever a route crossed it, and
+    /// disagreed with the viewer's WebGPU path (where every canvas adornment
+    /// composites above the GPU surface's copper). All three renderers now
+    /// paint one silk pass above copper.
+    ///
+    /// B.Silk paints before F.Silk: the board is seen from the top, so far-side
+    /// ink belongs under near-side ink wherever two footprints overlap in X/Y.
+    fn drawFootprintSilk(self: *Ctx) void {
+        for ([_]optimizer.Side{ .bottom, .top }) |side| {
+            for (self.p.parts) |part| {
+                if (part.side != side) continue;
+                const base_a: f32 = if (self.partActive(part)) 1.0 else dim_a;
+                const silk_col = if (part.side == .bottom) silk_bot else silk_rgb;
+                for (part.features.silk_lines) |sl| {
+                    const a = self.lp(part, sl.x1, sl.y1);
+                    const b = self.lp(part, sl.x2, sl.y2);
+                    self.cv.line(a[0], a[1], b[0], b[1], self.pw(0.8), silk_col, base_a, .round);
+                }
+                for (part.features.silk_circles) |sc| {
+                    if (subcircuit_silkscreen.isAuthoredPinOneIndicator(sc)) continue;
+                    const c = self.lp(part, sc.cx, sc.cy);
+                    self.cv.ring(c[0], c[1], @max(self.len(sc.r), self.pw(1)), self.pw(0.8), silk_col, base_a);
+                }
+            }
         }
     }
 
@@ -626,21 +1065,21 @@ const Ctx = struct {
                 // width = the minor axis — draws the true pill, not a sharp rect.
                 if (pad.w >= pad.h) {
                     const e = (pad.w - pad.h) / 2;
-                    const a1 = self.lp(part, pad.x - e, pad.y);
-                    const b1 = self.lp(part, pad.x + e, pad.y);
+                    const a1 = self.padLp(part, pad, -e, 0);
+                    const b1 = self.padLp(part, pad, e, 0);
                     self.cv.line(a1[0], a1[1], b1[0], b1[1], self.len(pad.h), col, a, .round);
                 } else {
                     const e = (pad.h - pad.w) / 2;
-                    const a1 = self.lp(part, pad.x, pad.y - e);
-                    const b1 = self.lp(part, pad.x, pad.y + e);
+                    const a1 = self.padLp(part, pad, 0, -e);
+                    const b1 = self.padLp(part, pad, 0, e);
                     self.cv.line(a1[0], a1[1], b1[0], b1[1], self.len(pad.w), col, a, .round);
                 }
             } else {
                 const hw = pad.w / 2;
                 const hh = pad.h / 2;
                 const quad = [_][2]f32{
-                    self.lp(part, pad.x - hw, pad.y - hh), self.lp(part, pad.x + hw, pad.y - hh),
-                    self.lp(part, pad.x + hw, pad.y + hh), self.lp(part, pad.x - hw, pad.y + hh),
+                    self.padLp(part, pad, -hw, -hh), self.padLp(part, pad, hw, -hh),
+                    self.padLp(part, pad, hw, hh),   self.padLp(part, pad, -hw, hh),
                 };
                 self.cv.fillPoly(&quad, col, a);
             }
@@ -649,8 +1088,8 @@ const Ctx = struct {
             // copper — an oval drill punches a capsule slot, not a round hole.
             if (pad.drill > 0) {
                 if (pad.isSlot()) {
-                    const e1 = self.lp(part, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
-                    const e2 = self.lp(part, pad.x - pad.slot_half[0], pad.y - pad.slot_half[1]);
+                    const e1 = self.padLp(part, pad, pad.slot_half[0], pad.slot_half[1]);
+                    const e2 = self.padLp(part, pad, -pad.slot_half[0], -pad.slot_half[1]);
                     self.cv.line(e1[0], e1[1], e2[0], e2[1], @max(self.len(pad.drill), self.pw(1.2)), pad_hole, a, .round);
                 } else {
                     const c = self.lp(part, pad.x, pad.y);
@@ -663,10 +1102,9 @@ const Ctx = struct {
 
     fn drawAirwires(self: *Ctx) void {
         for (self.p.links) |l| {
-            // A net a declared plane/pour carries is connected by the copper
-            // sheet itself — drop its airwire, matching the page blob's filter
-            // (the implicit model's grounds never spring links at all).
-            if (l.net.len > 0 and self.p.rules.carriesPlane(l.net)) continue;
+            // A declared plane/pour satisfies electrical connectivity, but a
+            // proximity link is placement intent and must remain visible.
+            if (l.kind != .proximity and l.net.len > 0 and self.p.rules.carriesPlane(l.net)) continue;
             const a_pt = self.lp(self.p.parts[l.a], l.ax, l.ay);
             const b_pt = self.lp(self.p.parts[l.b], l.bx, l.by);
             const col = awColor(l.kind);
@@ -735,17 +1173,63 @@ const Ctx = struct {
         }
     }
 
+    /// Routed copper: straight tracks, then the true arcs, then via barrels.
+    ///
+    /// An arc's copper is present TWICE in a route result — as the arc itself
+    /// and as the bounded chords the router keeps for connectivity/clearance —
+    /// so the chords an arc owns are dropped here and the arc is stroked as a
+    /// real curve. Drawing the chords instead (what this did before) showed an
+    /// RF bend as a visible polygon with a lump at every chord join, which is
+    /// not the copper the Gerber emits. `export_gerber.arcOwnsTrack` is that
+    /// same suppression rule, so the picture and the fab output agree.
     fn drawRouted(self: *Ctx, r: router.RouteResult) void {
         for (r.tracks) |t| {
-            const col = trackColor(t.layer);
+            if (export_gerber.arcOwnsTrack(r.arcs, t)) continue;
+            const col = trackColor(self.p.rules, t.layer);
             self.cv.line(self.xpx(t.x1), self.ypx(t.y1), self.xpx(t.x2), self.ypx(t.y2), @max(self.len(t.width), self.pw(0.6)), col, 0.92, .round);
         }
+        for (r.arcs) |a| self.drawArc(a);
         for (r.vias) |v| {
             const c = [_]f32{ self.xpx(v.x), self.ypx(v.y) };
             const rad = @max(self.len(v.dia / 2), self.pw(1.2));
             self.cv.disc(c[0], c[1], rad, via_col, 1.0);
             self.cv.disc(c[0], c[1], rad * 0.45, via_hole, 1.0);
         }
+    }
+
+    /// Stroke one routed arc as a polyline fine enough that its facets are
+    /// under half a pixel — the canvas has no arc primitive, so the curve is
+    /// flattened at RENDER resolution rather than at the router's much coarser
+    /// connectivity tolerance. A degenerate (collinear) arc falls back to its
+    /// chord, which is what its geometry actually is.
+    fn drawArc(self: *Ctx, a: router.Arc) void {
+        const w = @max(self.len(a.width), self.pw(0.6));
+        const col = trackColor(self.p.rules, a.layer);
+        const circle = outline.arcCircle(.{ .p1 = a.p1, .pm = a.pm, .p2 = a.p2 }) orelse {
+            self.cv.line(self.xpx(a.p1[0]), self.ypx(a.p1[1]), self.xpx(a.p2[0]), self.ypx(a.p2[1]), w, col, 0.92, .round);
+            return;
+        };
+        // Sagitta ≤ arc_flatten_px at this zoom: r(1-cos(θ/2)) ≤ tol ⇒
+        // θ ≤ 2·acos(1 - tol/r). Guarded for a radius smaller than the
+        // tolerance (the whole arc is then one step) and clamped so a huge
+        // radius still gets a few segments.
+        const r_px = @max(self.len(circle.radius), 1e-6);
+        const step = if (r_px <= arc_flatten_px)
+            std.math.pi
+        else
+            @min(std.math.pi / 2.0, 2 * std.math.acos(1 - arc_flatten_px / r_px));
+        const sweep = circle.sweep;
+        const n = @max(2, @min(arc_max_points, 1 + @as(usize, @intFromFloat(@ceil(@abs(sweep) / step)))));
+        var pts: [arc_max_points][2]f32 = undefined;
+        for (0..n) |i| {
+            const t = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n - 1));
+            const ang = circle.start_angle + sweep * t;
+            pts[i] = .{
+                self.xpx(circle.cx + circle.radius * @cos(ang)),
+                self.ypx(circle.cy + circle.radius * @sin(ang)),
+            };
+        }
+        self.cv.strokePath(pts[0..n], .open, w, col, 0.92);
     }
 
     fn drawViolations(self: *Ctx, violations: []const drc.Violation) void {
@@ -816,25 +1300,102 @@ const Ctx = struct {
         self.cv.text(x0 + self.pw(4), y0 + self.pw(3), s, self.pw(8), edge_col, 0.9, .start);
     }
 
-    /// Declared outer-layer copper pours, under the parts: a translucent
-    /// wash across the pour region (the same rect the Gerber pours — board
-    /// outline, or the parts-bbox fallback) plus a "NET pour · F.Cu/B.Cu"
-    /// label in the layer's track colour, so a poured face reads as copper
-    /// in the PNG an MCP agent inspects instead of being invisible.
-    fn drawPours(self: *Ctx) void {
-        var n: f32 = 0;
-        for ([_]optimizer.Side{ .bottom, .top }) |side| {
-            const net = self.p.rules.pourNetOnSide(side) orelse continue;
-            const r = export_fab.outlineRect(self.p);
-            const x0 = self.xpx(r.minx);
-            const y0 = self.ypx(r.miny);
-            const col = if (side == .top) track_top else track_bot;
-            self.cv.fillRect(x0, y0, self.len(r.w), self.len(r.h), col, if (side == .top) 0.10 else 0.12);
-            var buf: [96]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{s} pour - {s}", .{ net, if (side == .top) "F.Cu" else "B.Cu" }) catch "";
-            self.cv.text(x0 + self.pw(4), self.ypx(r.miny + r.h) - self.pw(12) - n * self.pw(11), s, self.pw(8), col, 0.95, .start);
-            n += 1;
+    /// The hand-drawn user copper pours living on ONE physical copper layer:
+    /// each filled netted zone's COMPUTED fill (carved by the copper this image
+    /// draws), painted like a declared pour in that layer's colour with a
+    /// "NET pour" label — so a screenshot shows the same user copper the
+    /// interactive viewer does. The fill is computed identically to the blob /
+    /// Gerber (`pour.zoneLayerSpec`), on an INNER layer as well as an outer
+    /// face: a zone's `layer` is a routable signal index, and the board's own
+    /// layer table says which physical position that is.
+    fn fillUserZonesOn(self: *Ctx, arena: std.mem.Allocator, row: *const board_layers.Row, col: Rgb, alpha: f32) void {
+        if (self.opts.user_zones.len == 0) return;
+        const sig = row.signal orelse return; // a plane-claimed layer holds no zone
+        for (self.opts.user_zones, 0..) |z, zi| {
+            if (z.layer != sig.int()) continue;
+            var spec = pour.zoneLayerSpec(z.net, pour.sideOfSignal(z.layer), z.layer, z.poly);
+            spec.higher = pour.higherPolys(arena, self.opts.user_zones, zi) catch &.{};
+            const fill = pour.compute(arena, self.p, self.shownCopper(), spec) catch continue;
+            self.fillContours(arena, fill, col, alpha);
+            self.labelUserZone(fill, z.net, col);
         }
+    }
+
+    /// Every kept contour of one computed fill, antipad holes cut out even-odd.
+    /// An OOM skips the paint (the pour label still marks the layer).
+    fn fillContours(self: *Ctx, arena: std.mem.Allocator, fill: pour.Fill, col: Rgb, alpha: f32) void {
+        for (fill.contours, 0..) |poly, ci| {
+            if (poly.len < 3) continue;
+            const rings = self.projectRings(arena, poly, fill.holes[ci]) catch return;
+            self.cv.fillRings(rings, col, alpha);
+        }
+    }
+
+    /// "NET pour" at each of a user zone's islands.
+    fn labelUserZone(self: *Ctx, fill: pour.Fill, net: []const u8, col: Rgb) void {
+        for (fill.contours) |poly| {
+            if (poly.len < 3) continue;
+            var buf: [96]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{s} pour", .{net}) catch "";
+            self.cv.text(self.xpx(poly[0][0]) + self.pw(2), self.ypx(poly[0][1]) - self.pw(2), s, self.pw(7), col, 0.95, .start);
+        }
+    }
+
+    /// Paint one poured face's computed fill: each kept contour with its
+    /// antipad holes cut out even-odd. `arena` is per-request (compute's
+    /// output is arena-owned, never individually freed); an OOM skips the
+    /// paint — the pour label still marks the face.
+    fn fillPourFace(
+        self: *Ctx,
+        arena: std.mem.Allocator,
+        side: optimizer.Side,
+        net: []const u8,
+        col: Rgb,
+        alpha: f32,
+    ) void {
+        const fill = self.pourFill(arena, side, net) orelse return;
+        for (fill.contours, 0..) |poly, ci| {
+            if (poly.len < 3) continue;
+            const rings = self.projectRings(arena, poly, fill.holes[ci]) catch return;
+            self.cv.fillRings(rings, col, alpha);
+        }
+    }
+
+    /// The poured fill for `side`: the request-precomputed one (contact sheet,
+    /// where the identical fill would otherwise be recomputed per tile) or a
+    /// fresh `pour.compute` (single view). The compute path carves the same
+    /// copper the image draws — routed tracks/vias when the overlay is on, none
+    /// otherwise. Null on OOM, which skips the paint (the label still marks the
+    /// face).
+    fn pourFill(self: *Ctx, arena: std.mem.Allocator, side: optimizer.Side, net: []const u8) ?pour.Fill {
+        if (self.opts.precomputed_pours) |pre| {
+            for (pre) |pp| if (pp.side == side) return pp.fill;
+        }
+        const copper: pour.Copper = if (self.opts.routed) |rt| .{ .tracks = rt.tracks, .vias = rt.vias } else .{};
+        var spec = pour.outerSpec(net, side);
+        // Ranked user pours on this face clear the declared background pour.
+        spec.higher = pour.higherThanDeclared(arena, self.opts.user_zones, if (side == .top) 0 else 1, spec.net) catch &.{};
+        return pour.compute(arena, self.p, copper, spec) catch null;
+    }
+
+    /// Project a pour contour + its holes from world mm to final-px rings
+    /// (ring 0 = the outer) for the canvas's even-odd fill. Arena-owned.
+    fn projectRings(
+        self: *Ctx,
+        arena: std.mem.Allocator,
+        outer: []const [2]f64,
+        holes: []const []const [2]f64,
+    ) std.mem.Allocator.Error![]const []const [2]f32 {
+        const rings = try arena.alloc([]const [2]f32, 1 + holes.len);
+        rings[0] = try self.projectRing(arena, outer);
+        for (holes, 0..) |h, i| rings[i + 1] = try self.projectRing(arena, h);
+        return rings;
+    }
+
+    fn projectRing(self: *Ctx, arena: std.mem.Allocator, poly: []const [2]f64) std.mem.Allocator.Error![]const [2]f32 {
+        const out = try arena.alloc([2]f32, poly.len);
+        for (poly, 0..) |pt, i| out[i] = .{ self.xpx(pt[0]), self.ypx(pt[1]) };
+        return out;
     }
 
     /// A faint 1/2/5 mm reference grid with axis tick labels, under everything.
@@ -842,18 +1403,18 @@ const Ctx = struct {
         const step = gridStep(self.p.maxx - self.p.minx, self.p.maxy - self.p.miny);
         const top = self.yoff;
         const bot = @as(f32, @floatFromInt(self.cv.h - legend_h_px));
-        const left = self.xpx(self.minx - margin_mm);
-        const right = self.xpx(self.p.maxx + margin_mm);
-        var gx = @ceil((self.minx - margin_mm) / step) * step;
-        while (gx <= self.p.maxx + margin_mm + 1e-6) : (gx += step) {
+        const left = self.xpx(self.minx - view_margin_mm);
+        const right = self.xpx(self.p.maxx + view_margin_mm);
+        var gx = @ceil((self.minx - view_margin_mm) / step) * step;
+        while (gx <= self.p.maxx + view_margin_mm + 1e-6) : (gx += step) {
             const px = self.xpx(gx);
             self.cv.line(px, top, px, bot, self.pw(0.4), grid_col, 0.5, .butt);
             var buf: [16]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "{d:.0}", .{gx}) catch "";
             self.cv.text(px, bot - self.pw(9), s, self.pw(7), text_dim, 0.7, .middle);
         }
-        var gy = @ceil((self.miny - margin_mm) / step) * step;
-        while (gy <= self.p.maxy + margin_mm + 1e-6) : (gy += step) {
+        var gy = @ceil((self.miny - view_margin_mm) / step) * step;
+        while (gy <= self.p.maxy + view_margin_mm + 1e-6) : (gy += step) {
             const py = self.ypx(gy);
             self.cv.line(left, py, right, py, self.pw(0.4), grid_col, 0.5, .butt);
             var buf: [16]u8 = undefined;
@@ -1019,7 +1580,7 @@ const Ctx = struct {
         for (0..3) |k| {
             if (val[k] < 0) break;
             var buf: [48]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d}. {s}  {d:.0}%", .{ k + 1, self.p.parts[idx[k]].ref_des, val[k] * 100 }) catch "";
+            const s = std.fmt.bufPrint(&buf, "{d}. {s}  {d:.0}%", .{ k + 1, net_name.leaf(self.p.parts[idx[k]].ref_des), val[k] * 100 }) catch "";
             self.cv.text(x, y, s, self.pw(8), blameColor(val[k]), 0.95, .start);
             y += self.pw(11);
         }
@@ -1028,11 +1589,12 @@ const Ctx = struct {
     fn drawLabels(self: *Ctx) void {
         const h = self.pw(9);
         for (self.p.parts, 0..) |part, pi| {
+            if (self.isTestPoint(pi)) continue; // generated board silk is the one authoritative TP label
             const active = self.partActive(part);
             if (self.focus and !active) continue;
-            const eff_hh = if (isQuarter(part.rot)) part.hw else part.hh;
-            const cx = self.xpx(part.x);
-            const top = self.ypx(part.y) - self.len(eff_hh) - h - self.pw(2);
+            const court = optimizer.worldCourtyard(&part);
+            const cx = self.xpx(court.minx + court.w / 2);
+            const top = self.ypx(court.miny) - h - self.pw(2);
             const col = if (self.isUnplaced(part.ref_des))
                 drc_col
             else if (self.focus and self.refHot(part.ref_des))
@@ -1043,57 +1605,86 @@ const Ctx = struct {
         }
     }
 
-    /// Board-level silkscreen text (the Text tool / sidecar `texts[]`): each
-    /// glyph row's lit-pixel runs become one stroked segment in mm-space, then
-    /// project to px — the same 5x7 vector font the Gerber silk emits, so the
-    /// PNG shows exactly what will be fabricated. Cap height scales the pixel
-    /// pitch; bottom-side text mirrors x; the string rotates about its anchor.
-    fn drawBoardTexts(self: *Ctx) void {
+    /// Board-level silkscreen text (the Text tool / sidecar `texts[]`) uses the
+    /// same single-line glyph geometry as the Gerber writer, so the PNG shows
+    /// the manufactured paths. Bottom-side text mirrors x and the whole string
+    /// rotates about its anchor.
+    fn drawOneBoardText(self: *Ctx, t: font.BoardText) void {
         const Pen = struct {
             ctx: *Ctx,
             cx: f64,
             cy: f64,
             gx0: f64,
-            pitch: f64,
+            scale: f64,
             mirror: bool,
             ca: f64,
             sa: f64,
             col: Rgb,
-            fn place(self2: @This(), lxpx: f64, ly: f64) [2]f32 {
-                const lx = if (self2.mirror) -lxpx else lxpx;
+            fn place(self2: @This(), lx_units: f64, ly_units: f64) [2]f32 {
+                const lx0 = lx_units * self2.scale;
+                const ly = ly_units * self2.scale;
+                const lx = if (self2.mirror) -lx0 else lx0;
                 const wx = self2.cx + lx * self2.ca - ly * self2.sa;
                 const wy = self2.cy + lx * self2.sa + ly * self2.ca;
                 return .{ self2.ctx.xpx(wx), self2.ctx.ypx(wy) };
             }
-            fn emit(self2: @This(), run: font.Run) error{}!void {
-                const ly = (@as(f64, @floatFromInt(run.r)) - 3.0) * self2.pitch;
-                const lx1 = self2.gx0 + (@as(f64, @floatFromInt(run.c0)) + 0.5) * self2.pitch;
-                const lx2 = self2.gx0 + (@as(f64, @floatFromInt(run.c1)) + 0.5) * self2.pitch;
-                const a = self2.place(lx1, ly);
-                const b = self2.place(lx2, ly);
-                // Stroke width = the ~0.15 mm silk width projected to px (min 1 px
-                // so a zoomed-out label stays legible). A 1-px run draws as a dab.
-                const w = @max(self2.ctx.len(0.15), self2.ctx.pw(1.0));
+            fn emit(self2: @This(), stroke: silk_font.Stroke) error{}!void {
+                const a = self2.place(self2.gx0 + stroke.x1, stroke.y1 - silk_font.cap_units / 2);
+                const b = self2.place(self2.gx0 + stroke.x2, stroke.y2 - silk_font.cap_units / 2);
+                // The shared aperture stays independent of cap height.
+                const w = @max(self2.ctx.len(silk_font.stroke_width_mm), self2.ctx.pw(1.0));
                 self2.ctx.cv.line(a[0], a[1], b[0], b[1], w, self2.col, 1.0, .round);
             }
         };
-        for (self.opts.texts) |t| {
-            if (t.text.len == 0) continue;
-            const pitch = if (t.size > 0) t.size / @as(f64, @floatFromInt(font.gh)) else font.default_size_mm / @as(f64, @floatFromInt(font.gh));
-            const adv = @as(f64, @floatFromInt(font.gw + 1)) * pitch;
-            const total = @as(f64, @floatFromInt(t.text.len)) * adv - pitch;
-            const a = @mod(t.rot, 360.0) * std.math.pi / 180.0;
-            const ca = @cos(a);
-            const sa = @sin(a);
-            for (t.text, 0..) |ch, k| {
-                const gx0 = -total / 2 + @as(f64, @floatFromInt(k)) * adv;
-                const tcol = if (t.bottom) silk_bot else silk_rgb;
-                const pen = Pen{ .ctx = self, .cx = t.x, .cy = t.y, .gx0 = gx0, .pitch = pitch, .mirror = t.bottom, .ca = ca, .sa = sa, .col = tcol };
-                // The emit callback is infallible (error{}); the exhaustive
-                // switch on the empty error set is a no-op, not a swallowed error.
-                font.glyphRuns(ch, error{}, pen, Pen.emit) catch |err| switch (err) {};
-            }
+        if (t.text.len == 0) return;
+        const size = if (t.size > 0) t.size else font.default_size_mm;
+        const scale = size / silk_font.em_units;
+        const a = @mod(t.rot, 360.0) * std.math.pi / 180.0;
+        const ca = @cos(a);
+        const sa = @sin(a);
+        var gx0 = -silk_font.widthUnits(t.text) / 2;
+        for (t.text) |ch| {
+            const tcol = if (t.bottom) silk_bot else silk_rgb;
+            const pen = Pen{ .ctx = self, .cx = t.x, .cy = t.y, .gx0 = gx0, .scale = scale, .mirror = t.bottom, .ca = ca, .sa = sa, .col = tcol };
+            // The emit callback is infallible (error{}); the exhaustive
+            // switch on the empty error set is a no-op, not a swallowed error.
+            silk_font.glyphStrokes(ch, error{}, pen, Pen.emit) catch |err| switch (err) {};
+            gx0 += silk_font.advanceUnits(ch);
         }
+    }
+
+    /// Generated F./B.Silkscreen artwork: sub-circuit L corners + labels,
+    /// followed by editable user text on the same physical side layers as each
+    /// footprint's authored silkscreen artwork.
+    fn drawBoardSilkscreen(self: *Ctx) void {
+        for (self.pin_one_silk) |marker| {
+            const col = if (marker.side == .bottom) silk_bot else silk_rgb;
+            self.cv.disc(
+                self.xpx(marker.x),
+                self.ypx(marker.y),
+                self.len(subcircuit_silkscreen.pin_one_marker_diameter_mm / 2),
+                col,
+                1.0,
+            );
+        }
+        for (self.sub_silk) |annotation| {
+            const col = if (annotation.side == .bottom) silk_bot else silk_rgb;
+            for (annotation.visibleSegments()) |segment| {
+                self.cv.line(
+                    self.xpx(segment.x1),
+                    self.ypx(segment.y1),
+                    self.xpx(segment.x2),
+                    self.ypx(segment.y2),
+                    @max(self.len(0.15), self.pw(1.0)),
+                    col,
+                    1.0,
+                    .round,
+                );
+            }
+            self.drawOneBoardText(annotation.label());
+        }
+        for (self.testpoint_silk) |label| self.drawOneBoardText(label.text);
+        for (self.opts.texts) |t| self.drawOneBoardText(t);
     }
 
     /// Net-name labels on the pads of every `pin_refs`-selected part, dark on
@@ -1185,7 +1776,7 @@ const Ctx = struct {
             var sig: u8 = 2;
             while (sig < n_sig) : (sig += 1) {
                 const nm = self.p.rules.signalLayerName(sig, &lname_buf);
-                x = self.legendItem(x, y, trackColor(sig), nm);
+                x = self.legendItem(x, y, trackColor(self.p.rules, sig), nm);
             }
             x = self.legendItem(x, y, via_col, "VIA");
         }
@@ -1280,10 +1871,6 @@ fn netKey(name: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, name, '.')) |i| return name[0..i];
     return name;
 }
-fn isQuarter(rot: f64) bool {
-    const q = @mod(@mod(rot, 360.0) + 360.0, 360.0);
-    return q == 90.0 or q == 270.0;
-}
 /// True if the uppercased `s` is a member of `set` (whose keys are uppercased,
 /// inserted via `upper` with no length cap). The stack buffer covers realistic
 /// refs (incl. deep sub-block paths); a pathologically long `s` falls back to a
@@ -1344,6 +1931,30 @@ test "render produces a PNG for a tiny placement" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x89, 0x50, 0x4E, 0x47 }, png_bytes[0..4]);
 }
 
+test "PNG pad transform rotates QFN side pads independently of footprint" {
+    const part = optimizer.Part{
+        .ref_des = "U14",
+        .kind = .hub,
+        .hw = 2.65,
+        .hh = 2.65,
+        .pads = &.{},
+        .fallback = false,
+        .x = 144.16,
+        .y = 108.962,
+    };
+    const pad = geometry.Pad{
+        .number = "4",
+        .x = -2,
+        .y = 0.25,
+        .w = 0.3,
+        .h = 0.8,
+        .rot = -90,
+    };
+    const end = Ctx.padWorld(part, pad, 0, pad.h / 2);
+    try std.testing.expectApproxEqAbs(@as(f64, 142.56), end[0], 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 109.212), end[1], 1e-9);
+}
+
 test "render with origin labels, pad net labels and spec status" {
     const export_kicad = @import("export_kicad.zig");
     // The renderer assumes an arena (production passes req.arena): the upper-
@@ -1393,4 +2004,422 @@ test "render with origin labels, pad net labels and spec status" {
     });
     defer alloc.free(png_bytes);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x89, 0x50, 0x4E, 0x47 }, png_bytes[0..4]);
+}
+
+// spec: Web Server - the board PNG fills inner planes from the same pour engine the fabrication outputs use
+test "PNG paints an inner plane's copper and carves a foreign via's antipad in it" {
+    const export_kicad = @import("export_kicad.zig");
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    // A 20 mm four-layer board with a declared GND plane on In1.Cu (stack 2) —
+    // an INNER layer, which the PNG used to draw nothing at all for.
+    const gnd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "C1",
+        .kind = .passive,
+        .hw = 0.5,
+        .hh = 0.5,
+        .pads = &gnd_pad,
+        .fallback = false,
+        .x = 3,
+        .y = 3,
+    }};
+    const gnd_pins = [_]export_kicad.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]export_kicad.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "VIN", .pins = &.{} },
+    };
+    const gnd_names = [_][]const u8{"GND"};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    const p = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 20,
+        .maxy = 20,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 20, .h = 20 },
+        .rules = .{ .plane_nets = &gnd_names, .copper_layers = 4, .planes = .{ .declared = &planes } },
+    };
+    const vias = [_]router.Via{.{ .x = 10, .y = 10, .dia = 0.6, .net = 1 }};
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 0, .total = 0 };
+    var cv = try renderCanvas(alloc, p, .{ .width = 600, .routed = routed, .bare = true });
+    defer cv.deinit();
+    const px_mm: usize = 50; // 600 px / 24 mm × ss=2
+    const row = (12 * px_mm) * cv.iw; // world y = 10
+    // (a) deep inside the plane: In1.Cu's yellow tint (#C2C200) lifts red and
+    // green well above the #001023 canvas, and leaves blue at the canvas value.
+    const in_plane = (row + 19 * px_mm) * 3;
+    try std.testing.expect(cv.buf[in_plane] > 0x10);
+    try std.testing.expect(cv.buf[in_plane + 1] > 0x20);
+    // (b) inside the foreign via's antipad: honestly carved bare board.
+    const in_antipad = (row + 12 * px_mm + 22) * 3;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x10, 0x23 }, cv.buf[in_antipad .. in_antipad + 3]);
+}
+
+// spec: Web Server - the board PNG strokes a routed arc as a curve and drops the chords it owns
+test "PNG draws a routed arc off its true curve, not its chords" {
+    const alloc = std.testing.allocator;
+    const p = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 20,
+        .maxy = 20,
+        .generated = false,
+    };
+    // A quarter turn of radius 6 about (10,10), from (16,10) to (10,4). Its
+    // copper is ALSO present as the two coarse chords the router keeps.
+    const leg: f64 = 6.0 / @sqrt(2.0);
+    const mid = [2]f64{ 10 + leg, 10 - leg };
+    const arcs = [_]router.Arc{.{ .p1 = .{ 16, 10 }, .pm = mid, .p2 = .{ 10, 4 }, .layer = 0, .width = 0.6, .net = 0 }};
+    const chords = [_]router.Track{
+        .{ .x1 = 16, .y1 = 10, .x2 = mid[0], .y2 = mid[1], .layer = 0, .width = 0.6, .net = 0 },
+        .{ .x1 = mid[0], .y1 = mid[1], .x2 = 10, .y2 = 4, .layer = 0, .width = 0.6, .net = 0 },
+    };
+    const routed = router.RouteResult{ .tracks = &chords, .vias = &.{}, .arcs = &arcs, .routed = 1, .total = 1 };
+    var cv = try renderCanvas(alloc, p, .{ .width = 600, .routed = routed, .bare = true });
+    defer cv.deinit();
+    const px_mm: usize = 50;
+    // 45° along the arc — ON the curve, and the point the two chords cut the
+    // corner furthest from. Copper red (#C83434) is there now.
+    const on_curve = (@as(usize, @intFromFloat(@round((mid[1] + 2) * @as(f64, px_mm)))) * cv.iw +
+        @as(usize, @intFromFloat(@round((mid[0] + 2) * @as(f64, px_mm))))) * 3;
+    try std.testing.expect(cv.buf[on_curve] > 0x80);
+    // The chord midpoint between the arc's start and its own middle sample sits
+    // INSIDE the circle; with the chords suppressed it is bare board there.
+    const inside = (@as(usize, @intFromFloat(@round(13.0 * @as(f64, px_mm)))) * cv.iw +
+        @as(usize, @intFromFloat(@round(13.0 * @as(f64, px_mm))))) * 3;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x10, 0x23 }, cv.buf[inside .. inside + 3]);
+}
+
+// spec: Web Server - the board PNG paints bottom-side parts under top-side parts
+test "PNG paints a bottom-side part under the top-side part it overlaps" {
+    const alloc = std.testing.allocator;
+    const pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 4, .h = 4 }};
+    // The bottom part is declared FIRST, so array order alone would have let it
+    // paint over the top-side one it sits directly beneath.
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 2, .hh = 2, .pads = &pad, .fallback = false, .x = 10, .y = 10, .side = .bottom },
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pad, .fallback = false, .x = 10, .y = 10 },
+    };
+    const p = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 20,
+        .maxy = 20,
+        .generated = false,
+    };
+    var cv = try renderCanvas(alloc, p, .{ .width = 600, .bare = true });
+    defer cv.deinit();
+    const px_mm: usize = 50;
+    const at = ((12 * px_mm) * cv.iw + 12 * px_mm) * 3;
+    // F.Cu pad red (#C83434) wins over the B.Cu pad blue (#4D7FC4) underneath.
+    try std.testing.expect(cv.buf[at] > 0x90);
+    try std.testing.expect(cv.buf[at + 2] < 0x60);
+}
+
+// spec: Web Server - the PCB PNG paints declared outer pours as computed fill contours with antipad holes carved by the routed copper the image draws
+test "PNG pour paints the computed fill and leaves a foreign via's antipad bare" {
+    const export_kicad = @import("export_kicad.zig");
+    // pour.compute treats its allocator as an arena and renderCanvas's pad-net
+    // keys are request-scoped — mirror production's req.arena.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    // A 20 mm board with a declared bottom GND pour (plane index 2 of a
+    // 2-layer stack), seeded by C1's bottom-side GND pad.
+    const gnd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "C1",
+        .kind = .passive,
+        .hw = 0.5,
+        .hh = 0.5,
+        .pads = &gnd_pad,
+        .fallback = false,
+        .x = 3,
+        .y = 3,
+        .side = .bottom,
+    }};
+    const gnd_pins = [_]export_kicad.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]export_kicad.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "VIN", .pins = &.{} },
+    };
+    const gnd_names = [_][]const u8{"GND"};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    const p = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 20,
+        .maxy = 20,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 20, .h = 20 },
+        .rules = .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = .{ .declared = &planes } },
+    };
+    // A FOREIGN VIN via dead centre, drawn by the route overlay — so the pour
+    // must be carved with an antipad around exactly the copper the image shows.
+    const vias = [_]router.Via{.{ .x = 10, .y = 10, .dia = 0.6, .net = 1 }};
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 0, .total = 0 };
+    var cv = try renderCanvas(alloc, p, .{ .width = 600, .routed = routed });
+    defer cv.deinit();
+    // Projection: 600 px / (20 + 2·margin) mm = 25 px/mm, ×ss → 50 internal
+    // px per mm; the header band offsets y by header_h_px·ss.
+    const px_mm: usize = 50;
+    const hdr: usize = header_h_px * ss;
+    const row = (hdr + 12 * px_mm) * cv.iw; // world y = 10
+    // (a) world (17,10) — deep inside the pour, far from via/pad/labels: the
+    // bottom-pour tint lifts blue well above the #001023 canvas.
+    const in_pour = (row + 19 * px_mm) * 3;
+    try std.testing.expect(cv.buf[in_pour + 2] > 0x30);
+    // (b) world (10.45,10) — inside the via's antipad ring but outside the
+    // drawn via copper: honestly carved bare board, exactly the canvas colour.
+    const in_antipad = (row + 12 * px_mm + 22) * 3;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x10, 0x23 }, cv.buf[in_antipad .. in_antipad + 3]);
+    // Without the route overlay the image draws no via — the pour is uncarved,
+    // consistent with the picture, so the same point carries the tint.
+    var cv2 = try renderCanvas(alloc, p, .{ .width = 600 });
+    defer cv2.deinit();
+    try std.testing.expect(cv2.buf[in_antipad + 2] > 0x30);
+}
+
+// spec: Web Server - the board PNG paints the canonical stages in order
+test "the PNG pass table is the canonical stage list, stage for stage" {
+    const order = @import("render_order.zig");
+    try std.testing.expectEqual(order.stages.len, board_passes.len);
+    for (order.stages, board_passes) |want, got| {
+        try std.testing.expectEqualStrings(want.name, got.stage);
+        // The holes are deliberate and named: this renderer has no keepout,
+        // group-box or clearance-halo model, and nothing else may be a hole.
+        const hole = std.mem.eql(u8, got.stage, "keepouts") or
+            std.mem.eql(u8, got.stage, "groups") or
+            std.mem.eql(u8, got.stage, "clearance");
+        try std.testing.expectEqual(hole, got.run == null);
+    }
+}
+
+// spec: Web Server - footprint silk paints above routed copper on the board PNG
+test "PNG footprint silk survives a track routed straight across it" {
+    const alloc = std.testing.allocator;
+    // One part carrying a single horizontal silk line at world y = 10, and a
+    // fat F.Cu track routed along exactly that line.
+    const silk = [_]geometry.SilkLine{.{ .x1 = -4, .y1 = 0, .x2 = 4, .y2 = 0 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "U1",
+        .kind = .hub,
+        .hw = 4,
+        .hh = 2,
+        .pads = &.{},
+        .fallback = false,
+        .x = 10,
+        .y = 10,
+        .features = .{ .silk_lines = &silk },
+    }};
+    const p = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 20,
+        .maxy = 20,
+        .generated = false,
+    };
+    const tracks = [_]router.Track{.{ .x1 = 6, .y1 = 10, .x2 = 14, .y2 = 10, .layer = 0, .width = 1.0, .net = 0 }};
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
+    var cv = try renderCanvas(alloc, p, .{ .width = 600, .routed = routed, .bare = true });
+    defer cv.deinit();
+    // Projection: 600 px / (20 + 2·margin) mm = 25 px/mm, ×ss → 50 internal px
+    // per mm, with the margin shifting world 0 to 2 mm; `bare` drops the header
+    // band, so world (10,10) — dead centre of both the track and the silk line
+    // — lands at internal pixel (12·50, 12·50).
+    const px_mm: usize = 50;
+    const at = ((12 * px_mm) * cv.iw + 12 * px_mm) * 3;
+    // Silk white (#F0F0F0), not the F.Cu trace red (#C83434): the ink is
+    // printed on the finished board, so it covers the copper it crosses.
+    try std.testing.expect(cv.buf[at] > 0xE0);
+    try std.testing.expect(cv.buf[at + 1] > 0xE0);
+    try std.testing.expect(cv.buf[at + 2] > 0xE0);
+}
+
+// spec: Web Server - the viewer strokes footprint silk as one pass above the copper pass, and under the assembly review's package bodies
+test "viewer JS strokes footprint silk in its own pass after the copper pass" {
+    const js = @embedFile("serve/assets/pcb_board.js");
+    const order = @import("render_order.zig");
+    // The stroke left paintParts entirely — it is one pass of its own, reached
+    // from exactly one place: its entry in the shared stage table. Its position
+    // (above copper, and under the review's package bodies) is that table's
+    // business and is asserted in render_order.zig against the canonical list.
+    try std.testing.expect(std.mem.indexOf(u8, js, "function paintFootprintSilk(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "sp:1,f:function(c,k,s){paintFootprintSilk(c,k,s.mov,s.only);}}") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, js, "paintFootprintSilk(c,k,"));
+    // …and the silk Path2D is stroked in exactly that one place, so paintParts
+    // can no longer put it under the copper.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, js, "ctx.stroke(pp.silk)"));
+    // Canonically silk is above copper; in the assembly review it sinks between
+    // the copper and the opaque package bodies drawn over it.
+    const silk = order.stages[order.indexOf("footprint_silk").?];
+    const copper = order.stages[order.indexOf("copper").?];
+    const parts = order.stages[order.indexOf("parts").?];
+    try std.testing.expect(order.indexOf("copper").? < order.indexOf("footprint_silk").?);
+    try std.testing.expect(copper.review < silk.review and silk.review < parts.review);
+}
+
+// spec: Web Server - cropnet= computes the viewport as a net set's pad + copper bbox plus a margin, case-insensitively and excluding other nets' copper
+test "cropNetBbox tightens to a net's pads and copper, dropping foreign copper" {
+    const export_kicad = @import("export_kicad.zig");
+    const alloc = std.testing.allocator;
+    // U1 hub: pad 1 = VTUNE (left), pad 2 = GND (right). C1 cap far right, on the
+    // same two nets. Rot 0, top side, so world pad = pose + local offset.
+    var hub_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -1.8, .y = 0, .w = 0.6, .h = 0.6 },
+        .{ .number = "2", .x = 1.8, .y = 0, .w = 0.6, .h = 0.6 },
+    };
+    var cap_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -0.5, .y = 0, .w = 0.5, .h = 0.5 },
+        .{ .number = "2", .x = 0.5, .y = 0, .w = 0.5, .h = 0.5 },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &hub_pads, .fallback = false, .x = 5, .y = 5 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.6, .pads = &cap_pads, .fallback = false, .x = 9, .y = 5 },
+    };
+    const vt_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const gnd_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C1", .pin = "2" } };
+    const nets = [_]export_kicad.FlatNet{
+        .{ .name = "VTUNE", .pins = &vt_pins }, // index 0
+        .{ .name = "GND", .pins = &gnd_pins }, // index 1
+    };
+    const p = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 30,
+        .maxy = 30,
+        .generated = true,
+    };
+    // VTUNE copper links the two VTUNE pads; a GND track sits far away — it must
+    // NOT stretch the lens.
+    const tracks = [_]router.Track{
+        .{ .x1 = 3.2, .y1 = 5, .x2 = 8.5, .y2 = 5, .layer = 0, .width = 0.15, .net = 0 },
+        .{ .x1 = 20, .y1 = 20, .x2 = 21, .y2 = 21, .layer = 0, .width = 0.15, .net = 1 },
+    };
+    const vias = [_]router.Via{.{ .x = 8.5, .y = 5, .dia = 0.6, .net = 0 }};
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &vias, .routed = 1, .total = 2 };
+
+    // Lower-case token → case-insensitive match; margin 1.5.
+    const bb = (try cropNetBbox(alloc, p, routed, &.{"vtune"}, cropnet_margin_mm)) orelse return error.TestNoBbox;
+    // Min x = U1|1 pad left edge: world 3.2 − 0.3 half. Max x = the VTUNE via at
+    // x=8.5, radius 0.3 (wider than C1|1's 0.25 pad half), so 8.8. Both + margin.
+    try std.testing.expectApproxEqAbs(@as(f64, 3.2 - 0.3 - cropnet_margin_mm), bb[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 8.5 + 0.3 + cropnet_margin_mm), bb[2], 1e-6);
+    // The far GND track (x up to 21) is excluded — the lens stays under 12 mm.
+    try std.testing.expect(bb[2] < 12);
+    try std.testing.expect(bb[1] > 3 and bb[3] < 7);
+    // No matching net → null (viewport stays the whole board).
+    try std.testing.expect((try cropNetBbox(alloc, p, routed, &.{"NOSUCH"}, cropnet_margin_mm)) == null);
+}
+
+/// Every object colour this renderer paints, paired with the theme constant it
+/// must equal. The list is the standing proof that the PNG re-types nothing:
+/// a literal reintroduced above would have to be added here to stay green, and
+/// then it would fail against the theme value it shadowed.
+const themed_colors = [_]struct { drawn: Rgb, theme: []const u8 }{
+    .{ .drawn = bg, .theme = board_theme.background },
+    .{ .drawn = grid_col, .theme = board_theme.grid_dot },
+    .{ .drawn = court_col, .theme = board_theme.courtyard },
+    .{ .drawn = pad_col, .theme = board_theme.copper_top },
+    .{ .drawn = pad_col_bot, .theme = board_theme.copper_bottom },
+    .{ .drawn = track_top, .theme = board_theme.copper_top },
+    .{ .drawn = track_bot, .theme = board_theme.copper_bottom },
+    .{ .drawn = pad_pth, .theme = board_theme.pad_pth },
+    .{ .drawn = pad_npth, .theme = board_theme.pad_npth },
+    .{ .drawn = pad_hole, .theme = board_theme.drill_bore },
+    .{ .drawn = silk_rgb, .theme = board_theme.silk_front },
+    .{ .drawn = silk_bot, .theme = board_theme.silk_back },
+    .{ .drawn = edge_col, .theme = board_theme.edge_cuts },
+    .{ .drawn = via_col, .theme = board_theme.via },
+    .{ .drawn = via_hole, .theme = board_theme.via_hole },
+    .{ .drawn = aw_sig, .theme = board_theme.ratsnest },
+    .{ .drawn = aw_prox, .theme = board_theme.airwire_proximity },
+    .{ .drawn = aw_gnd, .theme = board_theme.airwire_ground },
+    .{ .drawn = loop_ret, .theme = board_theme.loop_return },
+    .{ .drawn = drc_col, .theme = board_theme.drc },
+    .{ .drawn = accent_rgb, .theme = board_theme.focus_accent },
+    .{ .drawn = text_col, .theme = board_theme.text },
+    .{ .drawn = text_dim, .theme = board_theme.text_dim },
+    .{ .drawn = good_col, .theme = board_theme.improvement },
+    .{ .drawn = blame_lo, .theme = board_theme.blame_low },
+    .{ .drawn = blame_mid, .theme = board_theme.blame_mid },
+    .{ .drawn = blame_hi, .theme = board_theme.blame_high },
+};
+
+// spec: Web Server - the PCB PNG's object colours are the shared board theme's rather than re-typed literals, and a routed track takes its layer table row's colour
+test "the PNG paints the shared theme and reads track colour from the layer table" {
+    for (themed_colors) |c| {
+        const want = board_theme.channels(c.theme);
+        try std.testing.expectEqualSlices(
+            u8,
+            &[_]u8{ want.r, want.g, want.b },
+            &[_]u8{ c.drawn.r, c.drawn.g, c.drawn.b },
+        );
+    }
+
+    // A track's colour is its physical row's, not a local (stack-2)%len sum:
+    // with a plane on In1.Cu, signal 2 lives on In2.Cu (stack 3), so it takes
+    // the row's own colour and NOT the second inner-palette entry by signal.
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    const rules = optimizer.BoardRules{ .plane_nets = &.{"GND"}, .copper_layers = 4, .planes = .{ .declared = &planes } };
+    try expectTracksMatchTable(rules);
+    const in2 = rules.layerTable().rowOfSignal(board_layers.SignalIndex.of(2)).?;
+    try std.testing.expectEqualStrings("#C200C2", in2.color());
+}
+
+/// Every routable layer of `rules` paints exactly the colour its own
+/// layer-table row carries.
+fn expectTracksMatchTable(rules: optimizer.BoardRules) !void {
+    const table = rules.layerTable();
+    var sig: u8 = 0;
+    while (sig < rules.signalLayerCount()) : (sig += 1) {
+        const row = table.rowOfSignal(board_layers.SignalIndex.of(sig)).?;
+        const want = board_theme.channels(row.color());
+        const got = trackColor(rules, sig);
+        try std.testing.expectEqualSlices(u8, &[_]u8{ want.r, want.g, want.b }, &[_]u8{ got.r, got.g, got.b });
+    }
 }

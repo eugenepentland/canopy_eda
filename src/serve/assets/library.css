@@ -60,6 +60,8 @@ td { font-family: monospace; font-size: 0.9rem; }
 .fp-preview .fp-size { color:#8b949e; font-family:monospace; font-size:0.78rem; margin:0 0 0.45rem; }
 .fp-court-edit { background:#21262d; color:#bc8cff; border:1px solid #3b2d48; border-radius:4px; padding:0.25rem 0.55rem; margin:0 0 0.5rem; font:0.75rem system-ui,sans-serif; cursor:pointer; }
 .fp-court-edit:hover { background:#2e1a2e; border-color:#bc8cff; }
+.fp-full-edit { display:inline-block; background:#19324d; color:#8bc7ff; border:1px solid #285783; border-radius:4px; padding:0.25rem 0.55rem; margin:0 0 0.5rem 0.35rem; font:0.75rem system-ui,sans-serif; text-decoration:none; }
+.fp-full-edit:hover { background:#1f4265; border-color:#58a6ff; color:#c9e6ff; }
 .court-modal { position:fixed; inset:0; background:rgba(0,0,0,0.64); display:flex; align-items:center; justify-content:center; z-index:1100; }
 .court-modal[hidden] { display:none; }
 .court-dialog { background:#232428; border:1px solid #3a3b40; color:#d6d7db; border-radius:10px; padding:16px 18px; width:320px; max-width:calc(100vw - 3rem); box-shadow:0 12px 40px rgba(0,0,0,0.5); font-family:system-ui,sans-serif; }
@@ -114,3 +116,33 @@ a.badge-3d:hover { background:#1c3a24; border-color:#3fb950; }
 .ds-attach-btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
   border-radius: 4px; padding: 2px 9px; font-size: 0.76rem; cursor: pointer; }
 .ds-attach-btn:hover { background: #30363d; border-color: #e3a857; }
+
+@media (max-width: 700px) {
+  .lib-content { width:100%;padding:18px 12px 28px;box-sizing:border-box;overflow:hidden; }
+  .lib-content h1 { margin:0 0 12px;font-size:1.45rem; }
+  #upload-section { margin-bottom:1rem!important; }
+  #upload-section>summary { display:flex;align-items:center;min-height:44px; }
+  .upload-box { padding:14px 12px;margin:10px 0!important; }
+  .upload-box p { margin-top:0;line-height:1.45; }
+  .upload-fields { flex-direction:column;align-items:stretch!important; }
+  .upload-fields input { width:100%;min-width:0!important;min-height:44px;box-sizing:border-box;font-size:16px; }
+  .upload-btn { display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:.55rem 1rem;box-sizing:border-box;touch-action:manipulation; }
+  .upload-fields .upload-btn { width:100%; }
+  .upload-file-grid { flex-direction:column;gap:10px!important; }
+  .search-box { min-height:48px;margin-bottom:12px;padding:.65rem .8rem;font-size:16px; }
+  .card-grid { grid-template-columns:minmax(0,1fr);gap:10px;margin:10px 0; }
+  .comp-card { min-width:0;padding:14px 13px; }
+  .card-head { padding-right:22px; }
+  .card-del { top:7px;right:7px;display:flex;align-items:center;justify-content:center;min-width:36px;min-height:36px;opacity:1; }
+  .fp-preview { max-width:100%;box-sizing:border-box; }
+  .ds-attach-row { display:flex;margin:8px 0 0;align-items:stretch; }
+  .ds-attach-input { width:auto;min-width:0;min-height:40px;flex:1;font-size:16px;box-sizing:border-box; }
+  .ds-attach-btn { min-height:40px;padding:4px 12px; }
+  .pagination { justify-content:space-between;gap:6px; }
+  .pagination button { min-height:44px;padding:.5rem .8rem; }
+  .pagination .page-info { min-width:0; }
+  #page-drop-inner { max-width:calc(100vw - 24px);padding:2rem 1rem;box-sizing:border-box; }
+  #upload-toast { bottom:max(12px,env(safe-area-inset-bottom));width:calc(100vw - 24px);min-width:0;max-width:none;box-sizing:border-box; }
+  .court-dialog { width:calc(100vw - 24px);max-width:none;padding:14px;box-sizing:border-box; }
+  .court-svg { height:min(240px,52vw); }
+}

@@ -24,10 +24,10 @@ pub const HandlerError = std.mem.Allocator.Error;
 /// (127.0.0.0/8 or ::1). Reads `req.address` (the connected socket), NEVER a
 /// request header — a header is fully attacker-controlled.
 fn peerIsLoopback(req: *httpz.Request) bool {
-    return switch (req.address.any.family) {
-        std.posix.AF.INET => (std.mem.bigToNative(u32, req.address.in.sa.addr) >> 24) == 127,
-        std.posix.AF.INET6 => blk: {
-            const a = req.address.in6.sa.addr;
+    return switch (req.address) {
+        .ip4 => |a| a.bytes[0] == 127,
+        .ip6 => |ip6| blk: {
+            const a = ip6.bytes;
             // ::1
             var all_zero_hi = true;
             for (a[0..15]) |b| {
@@ -38,7 +38,6 @@ fn peerIsLoopback(req: *httpz.Request) bool {
             }
             break :blk all_zero_hi and a[15] == 1;
         },
-        else => false,
     };
 }
 
@@ -75,8 +74,13 @@ fn getBearerToken(req: *httpz.Request) ?[]const u8 {
 }
 
 /// True when the `Authorization: Bearer …` header matches a plugin-issued
-/// token from `plugin_tokens`. Plugin tokens are scoped to read-only
-/// schematic/PCB consumers (the KiCad sync helper) and never expire.
+/// token from `plugin_tokens`. These are NOT read-only credentials: the one
+/// route that consults them is `POST /api/sync-kicad-pcb/:name`, which rewrites
+/// the KiCad board file in place, and a match admits it outright — ahead of the
+/// ward bearer and without any role check. That is the token's whole purpose
+/// (the KiCad sync helper is a machine with no ward session), so treat an
+/// `eda_p_*` token as board-write capability that never expires; revocation
+/// means removing its hash from `plugin_tokens.json`.
 pub fn validatePluginBearerToken(ctx: *Server, req: *httpz.Request) bool {
     const raw = getBearerToken(req) orelse return false;
     return ctx.state.plugin_tokens.validate(ctx.allocator, ctx.auth_dir, raw);

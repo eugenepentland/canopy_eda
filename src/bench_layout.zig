@@ -10,7 +10,7 @@
 //! low bits of the continuous objective. A variant that prints the same
 //! checksum as the baseline provably produced the same board.
 //!
-//! Built as its own executable (`zig build bench-layout -Doptimize=ReleaseFast`)
+//! Built as its own executable (`zig build bench-layout -Doptimize=fast`)
 //! whose module pulls in only the optimizer + evaluator — not the HTTP server
 //! or the render/diagram stack — so editing the optimizer rebuilds in a
 //! fraction of the full `eda` build, and the step skips Guardian so a throwaway
@@ -28,6 +28,9 @@ const env = @import("eval/env.zig");
 const eval_modules = @import("eval/modules.zig");
 const optimizer = @import("placement/optimizer.zig");
 const clock = @import("infra/clock.zig");
+
+/// Process I/O capability installed by the standalone benchmark entry point.
+pub var process_io: std.Io = .failing;
 const infra_fs = @import("infra/fs.zig");
 const numeric = @import("numeric.zig");
 
@@ -37,12 +40,6 @@ const bench_done = "BENCH_DONE\n";
 
 const default_reps: usize = 5;
 const ns_per_ms: f64 = 1_000_000.0;
-
-/// Solve/score parameters for the quality modes (`--breakdown`, `--poses`,
-/// `--seed`), overridable from the CLI (`--margin`, `--no-grid-court`) so a
-/// denser courtyard regime can be swept. Default-shipping otherwise. The timing
-/// path (`benchOne`) always uses defaults — it measures speed, not a regime.
-var g_params: optimizer.Params = .{};
 
 const BenchResult = struct {
     parts: usize,
@@ -104,6 +101,7 @@ fn benchOne(
     name: []const u8,
     reps: usize,
     times: []u64,
+    profile_solve: bool,
 ) !BenchResult {
     const path = try paths.designSourcePath(gpa, project_dir, name);
     defer gpa.free(path);
@@ -128,9 +126,16 @@ fn benchOne(
     // metric the rerank path optimizes, not just the surrogate proxy.
     const poses = try arena.allocator().alloc(optimizer.RefPose, warm.parts.len);
     for (warm.parts, 0..) |p, i| poses[i] = .{ .ref = p.ref_des, .x = p.x, .y = p.y, .rot = p.rot };
-    const routed = try optimizer.routedScorePoses(arena.allocator(), block, project_dir, poses, .{});
-    _ = arena.reset(.retain_capacity);
+    const routed = if (profile_solve) 0 else try optimizer.routedScorePoses(arena.allocator(), block, project_dir, poses, .{});
+    // Valgrind cannot remap this large retained arena on every host/kernel;
+    // profile mode cares about the solve call graph, so start it from a clean
+    // arena. Normal timing retains capacity exactly as before.
+    _ = arena.reset(if (profile_solve) .free_all else .retain_capacity);
 
+    if (profile_solve) {
+        std.valgrind.callgrind.startInstrumentation();
+        std.valgrind.callgrind.zeroStats();
+    }
     var rep: usize = 0;
     while (rep < reps) : (rep += 1) {
         const t0 = clock.nanoTimestamp();
@@ -138,8 +143,13 @@ fn benchOne(
         const ns: u64 = @intCast(clock.nanoTimestamp() - t0);
         std.mem.doNotOptimizeAway(pl.parts.len);
         times[rep] = ns;
-        _ = arena.reset(.retain_capacity);
+        if (rep + 1 < reps) _ = arena.reset(.retain_capacity);
     }
+    if (profile_solve) {
+        std.valgrind.callgrind.dumpStats();
+        std.valgrind.callgrind.stopInstrumentation();
+    }
+    _ = arena.reset(if (profile_solve) .free_all else .retain_capacity);
     std.mem.sort(u64, times[0..reps], {}, std.sort.asc(u64));
     return .{
         .parts = parts,
@@ -188,11 +198,11 @@ fn printScore(tag: []const u8, name: []const u8, bd: optimizer.Breakdown, routed
 /// formula contains `loop_w`/`w_align`/`input_loop_boost`, so scoring a weight
 /// sweep under the swept weights would change the yardstick along with the
 /// solver — every config must be judged on the same fixed physical metric.
-fn fullEvalParams() optimizer.Params {
+fn fullEvalParams(params: optimizer.Params) optimizer.Params {
     var p = optimizer.Params{};
-    p.bbox_margin = g_params.bbox_margin;
-    p.grid_courtyards = g_params.grid_courtyards;
-    p.courtyard_overlap = g_params.courtyard_overlap;
+    p.bbox_margin = params.bbox_margin;
+    p.grid_courtyards = params.grid_courtyards;
+    p.courtyard_overlap = params.courtyard_overlap;
     return p;
 }
 
@@ -215,7 +225,7 @@ fn printFull(tag: []const u8, name: []const u8, fr: ?optimizer.FullRouted) void 
 /// both the smooth surrogate breakdown (`scorePoses`) and the routed objective
 /// (`routedScorePoses`). Lets a hand layout from a `.layouts.json` be compared
 /// apples-to-apples with a fresh `solve` from this same binary.
-fn scoreOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8, tag: []const u8, poses: []const optimizer.RefPose) !void {
+fn scoreOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8, tag: []const u8, poses: []const optimizer.RefPose, params: optimizer.Params) !void {
     const path = try paths.designSourcePath(gpa, project_dir, name);
     defer gpa.free(path);
     var eval = Evaluator.init(gpa, project_dir);
@@ -224,10 +234,10 @@ fn scoreOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8, t
     const block = try resolveBlock(&eval, result, name);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const bd = try optimizer.scorePoses(arena.allocator(), block, project_dir, poses, g_params);
-    const routed = try optimizer.routedScorePoses(arena.allocator(), block, project_dir, poses, g_params);
+    const bd = try optimizer.scorePoses(arena.allocator(), block, project_dir, poses, params);
+    const routed = try optimizer.routedScorePoses(arena.allocator(), block, project_dir, poses, params);
     printScore(tag, name, bd, routed);
-    const fr = try optimizer.fullRoutedScorePoses(arena.allocator(), block, project_dir, poses, fullEvalParams());
+    const fr = try optimizer.fullRoutedScorePoses(arena.allocator(), block, project_dir, poses, fullEvalParams(params));
     printFull(tag, name, fr);
 }
 
@@ -236,7 +246,7 @@ fn scoreOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8, t
 /// overlap-free) or rejected and re-solved (`generated=true` ⇒ those poses
 /// overlap under the optimizer's courtyards, so it can never reproduce them).
 /// Then run `.refine` (seed + local routed tuck) and report that breakdown too.
-fn seedOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8, poses: []const optimizer.RefPose) !void {
+fn seedOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8, poses: []const optimizer.RefPose, params: optimizer.Params) !void {
     const path = try paths.designSourcePath(gpa, project_dir, name);
     defer gpa.free(path);
     var eval = Evaluator.init(gpa, project_dir);
@@ -244,39 +254,19 @@ fn seedOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8, po
     const block = try resolveBlock(&eval, try eval.evalFile(path), name);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const placed = try optimizer.solve(arena.allocator(), block, project_dir, poses, g_params, .place);
+    const placed = try optimizer.solve(arena.allocator(), block, project_dir, poses, params, .place);
     std.debug.print("SEED {s} applied_verbatim={} place_obj={d:.4}\n", .{ name, !placed.generated, placed.breakdown.objective });
-    const refined = try optimizer.solve(arena.allocator(), block, project_dir, poses, g_params, .refine);
+    const refined = try optimizer.solve(arena.allocator(), block, project_dir, poses, params, .refine);
     const rposes = try arena.allocator().alloc(optimizer.RefPose, refined.parts.len);
     for (refined.parts, 0..) |p, i| rposes[i] = .{ .ref = p.ref_des, .x = p.x, .y = p.y, .rot = p.rot };
-    const routed = try optimizer.routedScorePoses(arena.allocator(), block, project_dir, rposes, g_params);
+    const routed = try optimizer.routedScorePoses(arena.allocator(), block, project_dir, rposes, params);
     printScore("refine", name, refined.breakdown, routed);
-}
-
-/// Run the deterministic constraint validator (no solve) and print each
-/// rejection, or `VALID` when every ref/net/pin resolves. The doc's load-bearing
-/// safety check — surfaced here so a hand-authored constraint set can be linted.
-fn validateOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8) !void {
-    const path = try paths.designSourcePath(gpa, project_dir, name);
-    defer gpa.free(path);
-    var eval = Evaluator.init(gpa, project_dir);
-    defer eval.deinit();
-    const result = try eval.evalFile(path);
-    const block = try resolveBlock(&eval, result, name);
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const diags = try optimizer.validateConstraints(arena.allocator(), block, project_dir, .{});
-    if (diags.len == 0) {
-        std.debug.print("VALID {s}\n", .{name});
-    } else {
-        for (diags) |d| std.debug.print("REJECT {s}: {s}\n", .{ name, d });
-    }
 }
 
 /// Fresh-solve a design and print its full breakdown on a `SCORE auto` line —
 /// the same fields `scoreOne` prints, so a constrained vs unconstrained solve
 /// can be diffed term-by-term against a hand layout.
-fn breakdownOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8) !void {
+fn breakdownOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8, params: optimizer.Params) !void {
     const path = try paths.designSourcePath(gpa, project_dir, name);
     defer gpa.free(path);
     var eval = Evaluator.init(gpa, project_dir);
@@ -285,31 +275,32 @@ fn breakdownOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u
     const block = try resolveBlock(&eval, result, name);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const pl = try optimizer.solve(arena.allocator(), block, project_dir, null, g_params, .place);
+    const pl = try optimizer.solve(arena.allocator(), block, project_dir, null, params, .place);
     const poses = try arena.allocator().alloc(optimizer.RefPose, pl.parts.len);
     for (pl.parts, 0..) |p, i| poses[i] = .{ .ref = p.ref_des, .x = p.x, .y = p.y, .rot = p.rot };
-    const routed = try optimizer.routedScorePoses(arena.allocator(), block, project_dir, poses, g_params);
+    const routed = try optimizer.routedScorePoses(arena.allocator(), block, project_dir, poses, params);
     printScore("auto", name, pl.breakdown, routed);
-    const fr = try optimizer.fullRoutedScorePoses(arena.allocator(), block, project_dir, poses, fullEvalParams());
+    const fr = try optimizer.fullRoutedScorePoses(arena.allocator(), block, project_dir, poses, fullEvalParams(params));
     printFull("auto", name, fr);
 }
 
 /// CLI entry point: parse `--project-dir`, `--reps`, and the positional design
 /// names, then time `optimizer.solve` on each and print a `BENCH …` line with
 /// median/min wall time, the grid-quantized pose checksum, and the objective.
-pub fn main() !void {
-    const gpa = std.heap.page_allocator;
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
+pub fn main(init: std.process.Init) !void {
+    process_io = init.io;
+    const gpa = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var project_dir: []const u8 = ".";
     var reps: usize = default_reps;
     var poses_file: ?[]const u8 = null;
     var tag: []const u8 = "saved";
     var want_breakdown = false;
-    var want_validate = false;
     var want_seed = false;
-    var names = std.ArrayList([]const u8){};
+    var profile_solve = false;
+    var params: optimizer.Params = .{};
+    var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(gpa);
 
     var i: usize = 1;
@@ -336,36 +327,37 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, a, "--breakdown")) {
             // Fresh-solve each design and print its full term-by-term breakdown.
             want_breakdown = true;
-        } else if (std.mem.eql(u8, a, "--validate")) {
-            // Lint each design's constraint set against its netlist (no solve).
-            want_validate = true;
         } else if (std.mem.eql(u8, a, "--seed")) {
             // Seed solve() with --poses and report verbatim-accept + refine.
             want_seed = true;
+        } else if (std.mem.eql(u8, a, "--profile-solve")) {
+            // Skip routed scoring and bracket only timed solve() calls with
+            // Callgrind client requests. Run Callgrind with --instr-atstart=no.
+            profile_solve = true;
         } else if (std.mem.eql(u8, a, "--margin") and i + 1 < args.len) {
             // Override the courtyard clearance margin (mm) for the quality modes.
-            g_params.bbox_margin = std.fmt.parseFloat(f64, args[i + 1]) catch g_params.bbox_margin;
+            params.bbox_margin = std.fmt.parseFloat(f64, args[i + 1]) catch params.bbox_margin;
             i += 1;
         } else if (std.mem.eql(u8, a, "--loop-w") and i + 1 < args.len) {
             // Objective-weight overrides for the sweep harness: solve + score
             // under these weights, judge on the FULL line's measured copper.
-            g_params.loop_w = std.fmt.parseFloat(f64, args[i + 1]) catch g_params.loop_w;
+            params.loop_w = std.fmt.parseFloat(f64, args[i + 1]) catch params.loop_w;
             i += 1;
         } else if (std.mem.eql(u8, a, "--align-w") and i + 1 < args.len) {
-            g_params.w_align = std.fmt.parseFloat(f64, args[i + 1]) catch g_params.w_align;
+            params.w_align = std.fmt.parseFloat(f64, args[i + 1]) catch params.w_align;
             i += 1;
         } else if (std.mem.eql(u8, a, "--congest-w") and i + 1 < args.len) {
-            g_params.w_congest = std.fmt.parseFloat(f64, args[i + 1]) catch g_params.w_congest;
+            params.w_congest = std.fmt.parseFloat(f64, args[i + 1]) catch params.w_congest;
             i += 1;
         } else if (std.mem.eql(u8, a, "--boost") and i + 1 < args.len) {
-            g_params.input_loop_boost = std.fmt.parseFloat(f64, args[i + 1]) catch g_params.input_loop_boost;
+            params.input_loop_boost = std.fmt.parseFloat(f64, args[i + 1]) catch params.input_loop_boost;
             i += 1;
         } else if (std.mem.eql(u8, a, "--no-grid-court")) {
             // Stop rounding courtyard half-extents up to the grid (denser pack).
-            g_params.grid_courtyards = false;
+            params.grid_courtyards = false;
         } else if (std.mem.eql(u8, a, "--court-overlap") and i + 1 < args.len) {
             // Sweep how much (mm) two courtyards may overlap in collision.
-            g_params.courtyard_overlap = std.fmt.parseFloat(f64, args[i + 1]) catch g_params.courtyard_overlap;
+            params.courtyard_overlap = std.fmt.parseFloat(f64, args[i + 1]) catch params.courtyard_overlap;
             i += 1;
         } else if (!std.mem.startsWith(u8, a, "--")) {
             try names.append(gpa, a);
@@ -389,27 +381,19 @@ pub fn main() !void {
         };
         for (names.items) |name| {
             if (want_seed) {
-                seedOne(gpa, project_dir, name, poses) catch |err|
+                seedOne(gpa, project_dir, name, poses, params) catch |err|
                     std.debug.print("SEED_ERR {s} {s}\n", .{ name, @errorName(err) });
             } else {
-                scoreOne(gpa, project_dir, name, tag, poses) catch |err|
+                scoreOne(gpa, project_dir, name, tag, poses, params) catch |err|
                     std.debug.print("SCORE_ERR {s} {s}\n", .{ name, @errorName(err) });
             }
         }
         std.debug.print(bench_done, .{});
         return;
     }
-    if (want_validate) {
-        for (names.items) |name| {
-            validateOne(gpa, project_dir, name) catch |err|
-                std.debug.print("VALIDATE_ERR {s} {s}\n", .{ name, @errorName(err) });
-        }
-        std.debug.print(bench_done, .{});
-        return;
-    }
     if (want_breakdown) {
         for (names.items) |name| {
-            breakdownOne(gpa, project_dir, name) catch |err|
+            breakdownOne(gpa, project_dir, name, params) catch |err|
                 std.debug.print("SCORE_ERR {s} {s}\n", .{ name, @errorName(err) });
         }
         std.debug.print(bench_done, .{});
@@ -421,7 +405,7 @@ pub fn main() !void {
 
     std.debug.print("# bench-layout reps={d} project_dir={s}\n", .{ reps, project_dir });
     for (names.items) |name| {
-        if (benchOne(gpa, project_dir, name, reps, times)) |r| {
+        if (benchOne(gpa, project_dir, name, reps, times, profile_solve)) |r| {
             std.debug.print(
                 "BENCH {s} parts={d} median_ms={d:.3} min_ms={d:.3} checksum={x:0>16} objective={d:.4} routed={d:.4}\n",
                 .{ name, r.parts, ms(r.median_ns), ms(r.min_ns), r.checksum, r.objective, r.routed },

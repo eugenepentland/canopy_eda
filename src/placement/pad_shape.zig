@@ -1,6 +1,6 @@
 //! Pad collision shapes for routing + DRC. A pad is either a simple axis-aligned
-//! rectangle (its bounding box) or, for a KiCad *custom* pad, its real copper
-//! outline (`poly`). The router's clearance checks and the DRC verifier both
+//! rectangle (its bounding box) or an exact polygon for custom and rounded
+//! pads. The router's clearance checks and the DRC verifier both
 //! measure distance through this module, so what the router avoids is exactly
 //! what the DRC checks — and now against the true outline, not an oversized
 //! bounding box that swallows a neighbouring pad's escape corridor (a concave
@@ -14,11 +14,10 @@
 const std = @import("std");
 const optimizer = @import("optimizer.zig");
 const geometry = @import("geometry.zig");
-const font = @import("../font5x7.zig");
 
 /// A pad's world-space collision shape: its bounding box (always) plus, for a
-/// custom pad, the real copper outline in world mm (`poly`; empty ⇒ the box is
-/// exact). The box is the broad phase; the outline is the exact phase.
+/// non-rectangular pad, the real copper outline in world mm (`poly`; empty ⇒
+/// the box is exact). The box is the broad phase; the outline is the exact phase.
 pub const Shape = struct {
     x0: f64,
     y0: f64,
@@ -27,15 +26,136 @@ pub const Shape = struct {
     poly: []const [2]f64 = &.{},
 };
 
+/// Return a deterministic point on the pad's actual copper. For rectangular
+/// lands this is the bounding-box centre. A concave custom pad may put that
+/// point in a relief notch, so use the widest copper interval on the centre
+/// scanline instead (and fall back to an edge-midpoint scanline for shapes
+/// whose centreline misses every lobe). Route targets and connectivity reports
+/// must never aim at empty space merely because it is inside the pad's box.
+pub fn copperAnchor(shape: Shape) [2]f64 {
+    const center = [2]f64{ (shape.x0 + shape.x1) / 2, (shape.y0 + shape.y1) / 2 };
+    if (shape.poly.len < 3 or pointInPoly(shape.poly, center[0], center[1])) return center;
+    if (widestScanlineInterval(shape.poly, center[1])) |span|
+        return .{ (span[0] + span[1]) / 2, center[1] };
+    for (shape.poly, 0..) |point, i| {
+        const previous = shape.poly[if (i == 0) shape.poly.len - 1 else i - 1];
+        const y = (previous[1] + point[1]) / 2;
+        if (widestScanlineInterval(shape.poly, y)) |span|
+            return .{ (span[0] + span[1]) / 2, y };
+    }
+    return center;
+}
+
+/// Widest even/odd-filled interval where a horizontal scanline crosses a
+/// simple polygon. Footprint outlines are simplified before reaching here;
+/// the generous fixed bound avoids allocator plumbing through every pad-target
+/// query while still covering raw small custom polygons.
+fn widestScanlineInterval(poly: []const [2]f64, y: f64) ?[2]f64 {
+    var intersections: [512]f64 = undefined;
+    var count: usize = 0;
+    var previous = poly[poly.len - 1];
+    for (poly) |point| {
+        if ((previous[1] > y) != (point[1] > y)) {
+            if (count == intersections.len) return null;
+            intersections[count] = previous[0] + (y - previous[1]) /
+                (point[1] - previous[1]) * (point[0] - previous[0]);
+            count += 1;
+        }
+        previous = point;
+    }
+    if (count < 2) return null;
+    std.mem.sort(f64, intersections[0..count], {}, std.sort.asc(f64));
+    var best: ?[2]f64 = null;
+    var i: usize = 0;
+    while (i + 1 < count) : (i += 2) {
+        const candidate = [2]f64{ intersections[i], intersections[i + 1] };
+        if (best == null or candidate[1] - candidate[0] > best.?[1] - best.?[0]) best = candidate;
+    }
+    return best;
+}
+
 /// Outline-simplification tolerance (mm). KiCad emits a custom pad's rounded
 /// corners as ~100-200 fine arc points; collapsing them to within this distance
 /// leaves ~10 corner points (concavities preserved), which is well under the
 /// clearance rule yet keeps the per-pad distance maths cheap.
 const simplify_tol_mm: f64 = 0.03;
+const rounded_corner_steps: usize = 8;
+
+fn shapeFromWorldPoly(poly: []const [2]f64) Shape {
+    var x0 = std.math.inf(f64);
+    var y0 = std.math.inf(f64);
+    var x1 = -std.math.inf(f64);
+    var y1 = -std.math.inf(f64);
+    for (poly) |point| {
+        x0 = @min(x0, point[0]);
+        y0 = @min(y0, point[1]);
+        x1 = @max(x1, point[0]);
+        y1 = @max(y1, point[1]);
+    }
+    return .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1, .poly = poly };
+}
+
+/// A part's keep-out courtyard as its four REAL world corners, ordered around
+/// the rectangle so consecutive pairs are its edges.
+///
+/// `optimizer.worldCourtyard` returns this polygon's axis-aligned bounding BOX,
+/// which is up to √2 wider per axis once the part leaves a quarter turn — a
+/// 4.8 × 6.0 mm courtyard at 45° boxes to 7.6 mm square, twice its own area,
+/// and its inner corner is a point the part does not occupy at all. The box is
+/// a sound cheap cull (it contains the courtyard at every pose); it is the
+/// wrong shape to enforce as the keepout itself. Corners run through
+/// `worldPadCenter`, so the bottom-side mirror lands on the body rather than on
+/// the centre alone — the same reason a custom pad's outline is transformed
+/// per vertex above.
+pub fn worldCourtyardCorners(part: optimizer.Part) [4][2]f64 {
+    const local = [4][2]f64{ .{ -part.hw, -part.hh }, .{ part.hw, -part.hh }, .{ part.hw, part.hh }, .{ -part.hw, part.hh } };
+    var out: [4][2]f64 = undefined;
+    for (local, 0..) |v, i| out[i] = optimizer.worldPadCenter(&part, part.ccx + v[0], part.ccy + v[1]);
+    return out;
+}
+
+/// Polygonize a KiCad roundrect closely enough that a 0.127 mm trace can use
+/// the legal corner corridor instead of colliding with the pad's square bbox.
+fn worldRoundrect(
+    arena: std.mem.Allocator,
+    part: optimizer.Part,
+    pad: geometry.Pad,
+) std.mem.Allocator.Error!Shape {
+    const center = optimizer.worldPadCenter(&part, pad.x, pad.y);
+    const ratio = if (pad.rratio() > 0) pad.rratio() else geometry.default_rratio;
+    const radius = @min(@max(ratio, 0) * @min(pad.w, pad.h), @min(pad.w, pad.h) / 2);
+    const hw = pad.w / 2;
+    const hh = pad.h / 2;
+    const total = (part.rot + pad.rot) * std.math.pi / 180.0;
+    const ca = @cos(total);
+    const sa = @sin(total);
+    const poly = try arena.alloc([2]f64, 4 * (rounded_corner_steps + 1));
+    const corner_centers = [4][2]f64{
+        .{ hw - radius, hh - radius },
+        .{ -hw + radius, hh - radius },
+        .{ -hw + radius, -hh + radius },
+        .{ hw - radius, -hh + radius },
+    };
+    for (corner_centers, 0..) |corner, ci| {
+        for (0..rounded_corner_steps + 1) |step| {
+            const phase = @as(f64, @floatFromInt(ci)) +
+                @as(f64, @floatFromInt(step)) / @as(f64, @floatFromInt(rounded_corner_steps));
+            const angle = phase * std.math.pi / 2;
+            const lx = corner[0] + radius * @cos(angle);
+            const ly = corner[1] + radius * @sin(angle);
+            poly[ci * (rounded_corner_steps + 1) + step] = .{
+                center[0] + lx * ca - ly * sa,
+                center[1] + lx * sa + ly * ca,
+            };
+        }
+    }
+    return shapeFromWorldPoly(poly);
+}
 
 /// World collision shape of `pad` on `part`, honouring the part's pose. A custom
 /// pad carries its outline transformed into world space and simplified (box from
-/// the full outline's bounds); a simple pad carries just the rotated bounding box.
+/// the full outline's bounds); a rectangular pad carries its four real corners
+/// once the pose leaves a quarter turn; a circle/oval keeps the bounding box.
 pub fn worldShape(arena: std.mem.Allocator, part: optimizer.Part, pad: geometry.Pad) std.mem.Allocator.Error!Shape {
     if (pad.poly.len >= 3) {
         const wp = try arena.alloc([2]f64, pad.poly.len);
@@ -44,7 +164,7 @@ pub fn worldShape(arena: std.mem.Allocator, part: optimizer.Part, pad: geometry.
         var x1: f64 = -std.math.inf(f64);
         var y1: f64 = -std.math.inf(f64);
         for (pad.poly, 0..) |v, i| {
-            const w = optimizer.worldPadCenter(part, v[0], v[1]);
+            const w = optimizer.worldPadCenter(&part, v[0], v[1]);
             wp[i] = w;
             x0 = @min(x0, w[0]);
             y0 = @min(y0, w[1]);
@@ -53,11 +173,11 @@ pub fn worldShape(arena: std.mem.Allocator, part: optimizer.Part, pad: geometry.
         }
         return .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1, .poly = try simplifyRing(arena, wp, simplify_tol_mm) };
     }
-    const c = optimizer.worldPadCenter(part, pad.x, pad.y);
+    if (std.mem.eql(u8, pad.shape, "roundrect")) return worldRoundrect(arena, part, pad);
+    const c = optimizer.worldPadCenter(&part, pad.x, pad.y);
     // Total pad orientation = part pose + the pad's own `(pos … ROT)`. A
     // quarter turn keeps the exact axis-aligned box (byte-identical to the old
-    // path); an arbitrary angle uses the conservative bbox of the rotated
-    // rectangle (`|hw·cosθ|+|hh·sinθ|` etc.) — enough for a pass/fail DRC.
+    // path).
     const tot = part.rot + pad.rot;
     const q = @mod(@round(tot), 360);
     if (@abs(tot - @round(tot / 90) * 90) < 1e-6) {
@@ -65,6 +185,51 @@ pub fn worldShape(arena: std.mem.Allocator, part: optimizer.Part, pad: geometry.
         const hw = if (swap) pad.h / 2 else pad.w / 2;
         const hh = if (swap) pad.w / 2 else pad.h / 2;
         return .{ .x0 = c[0] - hw, .y0 = c[1] - hh, .x1 = c[0] + hw, .y1 = c[1] + hh, .poly = &.{} };
+    }
+    // Off a quarter turn a rectangular pad is STILL a rectangle — just not an
+    // axis-aligned one — so it carries its four real corners. Its bounding box
+    // is `|hw·cosθ|+|hh·sinθ|` per axis, up to √2 wider than the copper in BOTH
+    // axes at once: a square land at 45° boxes to twice its own area, and every
+    // consumer that measures clearance through this shape (DRC, the router's
+    // checks, the via fence, the pour, generated silkscreen) then holds copper
+    // off a square keepout the pad does not own. Only a 90° increment hid it,
+    // which is why the same footprint reads correctly at 0/90/180/270 and
+    // oversized at 45 (the rf-switch-eval SMPM launches: J1/J6/J8 exact, the
+    // four 45° ones J2–J5 square).
+    //
+    // `pointDist`/`shapeGap`/`segmentDist` all measure the box first and only
+    // walk an outline once the box is within the caller's slack, so the exact
+    // corners cost nothing until a neighbour is close enough for them to matter.
+    //
+    // A round land is the other half of the same error: a circle is
+    // rotation-INVARIANT, so the rectangle formula below inflates it by up to √2
+    // for an angle it does not even have. Its box is its copper at every pose.
+    // (`w != h` is an ellipse the parser only ever produces as an `oval`, so it
+    // falls through rather than being claimed exact.)
+    if (std.mem.eql(u8, pad.shape, "circle") and pad.w == pad.h) {
+        const r = pad.w / 2;
+        return .{ .x0 = c[0] - r, .y0 = c[1] - r, .x1 = c[0] + r, .y1 = c[1] + r, .poly = &.{} };
+    }
+    // An `oval` is a stadium whose corners a rectangle would invent, so it keeps
+    // the conservative box: over-stating round copper is the safe direction, and
+    // this module has no arc primitive to state it exactly.
+    if (!std.mem.eql(u8, pad.shape, "circle") and !std.mem.eql(u8, pad.shape, "oval")) {
+        const pa = pad.rot * std.math.pi / 180.0;
+        const pca = @cos(pa);
+        const psa = @sin(pa);
+        const hw = pad.w / 2;
+        const hh = pad.h / 2;
+        const local = [4][2]f64{ .{ -hw, -hh }, .{ hw, -hh }, .{ hw, hh }, .{ -hw, hh } };
+        const poly = try arena.alloc([2]f64, local.len);
+        // The pad's own rotation turns it inside the FOOTPRINT frame; the part
+        // transform (rotation and the bottom-side mirror alike) is then applied
+        // per corner by `worldPadCenter`, exactly as the custom-outline path
+        // above does — so a mirrored pad's corners land on its real copper
+        // rather than on the un-mirrored rectangle's.
+        for (local, 0..) |v, i| {
+            poly[i] = optimizer.worldPadCenter(&part, pad.x + v[0] * pca - v[1] * psa, pad.y + v[0] * psa + v[1] * pca);
+        }
+        return shapeFromWorldPoly(poly);
     }
     const a = tot * std.math.pi / 180.0;
     const ca = @abs(@cos(a));
@@ -132,6 +297,48 @@ pub fn pointDist(x0: f64, y0: f64, x1: f64, y1: f64, poly: []const [2]f64, px: f
     return distPointPolyEdges(poly, px, py);
 }
 
+/// Shortest distance from segment `a`→`b` to a pad's copper, or +inf when the
+/// whole segment stays outside the pad's `window`-inflated bounding box. The
+/// slab clip makes runtime depend on the small portion near the pad instead of
+/// the full trace length; 0.05 mm samples match the DRC pass/fail geometry.
+pub fn segmentDist(shape: Shape, a: [2]f64, b: [2]f64, window: f64) f64 {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    var f0: f64 = 0;
+    var f1: f64 = 1;
+    if (@abs(dx) > 1e-12) {
+        const lo = (shape.x0 - window - a[0]) / dx;
+        const hi = (shape.x1 + window - a[0]) / dx;
+        f0 = @max(f0, @min(lo, hi));
+        f1 = @min(f1, @max(lo, hi));
+    } else if (a[0] < shape.x0 - window or a[0] > shape.x1 + window) return std.math.inf(f64);
+    if (@abs(dy) > 1e-12) {
+        const lo = (shape.y0 - window - a[1]) / dy;
+        const hi = (shape.y1 + window - a[1]) / dy;
+        f0 = @max(f0, @min(lo, hi));
+        f1 = @min(f1, @max(lo, hi));
+    } else if (a[1] < shape.y0 - window or a[1] > shape.y1 + window) return std.math.inf(f64);
+    if (f0 > f1) return std.math.inf(f64);
+    const clipped_len = std.math.hypot(dx, dy) * (f1 - f0);
+    const steps: usize = @max(1, @as(usize, @intFromFloat(@ceil(clipped_len / 0.05))));
+    var best = std.math.inf(f64);
+    var i: usize = 0;
+    while (i <= steps) : (i += 1) {
+        const f = f0 + (f1 - f0) * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps));
+        best = @min(best, pointDist(
+            shape.x0,
+            shape.y0,
+            shape.x1,
+            shape.y1,
+            shape.poly,
+            a[0] + f * dx,
+            a[1] + f * dy,
+            best,
+        ));
+    }
+    return best;
+}
+
 /// Edge-to-edge gap between two pad shapes (0 when they overlap). Both-rect uses
 /// the cheap box gap; otherwise, once the boxes are within `slack` (so a real
 /// gap below `slack` is even possible), the exact polygon gap is computed —
@@ -191,28 +398,97 @@ fn pointInPoly(poly: []const [2]f64, px: f64, py: f64) bool {
 }
 
 /// Distance from (px,py) to the nearest edge of `poly`.
+///
+/// Each edge contributes `segPointDist`'s geometry, but the scan compares the
+/// SQUARED closest-point deltas and takes a single root on the winner: `hypot`
+/// is monotonic in that square, so the argmin edge — and hence the value
+/// returned — is the same one the per-edge form picked, at one root instead of
+/// `poly.len`. `pour.polySignedInset` already runs this trade over the board
+/// outline; this is the pad-side twin, and it matters because a roundrect pad is
+/// a 36-point ring (`rounded_corner_steps`) that the pour's foreign-copper
+/// stamping walks once per raster cell in the pad's window — 36 roots per cell
+/// was the largest single cost left in a barracuda DRC.
 fn distPointPolyEdges(poly: []const [2]f64, px: f64, py: f64) f64 {
-    var m: f64 = std.math.inf(f64);
+    var best2: f64 = std.math.inf(f64);
+    var bdx: f64 = 0;
+    var bdy: f64 = 0;
     var j: usize = poly.len - 1;
     for (poly, 0..) |vi, i| {
-        m = @min(m, segPointDist(poly[j][0], poly[j][1], vi[0], vi[1], px, py));
+        const d = segPointDelta(poly[j][0], poly[j][1], vi[0], vi[1], px, py);
+        const d2 = d[0] * d[0] + d[1] * d[1];
+        if (d2 < best2) {
+            best2 = d2;
+            bdx = d[0];
+            bdy = d[1];
+        }
         j = i;
     }
-    return m;
+    return std.math.hypot(bdx, bdy);
 }
 
-/// Shortest distance from point (px,py) to segment (ax,ay)→(bx,by).
-fn segPointDist(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) f64 {
+/// The (Δx, Δy) from (px,py) to its closest point on segment (ax,ay)→(bx,by) —
+/// `segPointDist` before the root, so a scan over many edges can defer it.
+fn segPointDelta(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) [2]f64 {
     const dx = bx - ax;
     const dy = by - ay;
     const len2 = dx * dx + dy * dy;
-    if (len2 < 1e-12) return std.math.hypot(px - ax, py - ay);
+    if (len2 < 1e-12) return .{ px - ax, py - ay };
     const t = std.math.clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1);
-    return std.math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    return .{ px - (ax + t * dx), py - (ay + t * dy) };
+}
+
+/// Shortest distance from point (px,py) to segment (ax,ay)→(bx,by).
+pub fn segPointDist(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) f64 {
+    const d = segPointDelta(ax, ay, bx, by, px, py);
+    return std.math.hypot(d[0], d[1]);
+}
+
+/// The closest point on segment `(ax,ay)-(bx,by)` to `(px,py)`, plus its
+/// distance — `segPointDist`'s twin for callers that need the witness point
+/// (a weld target, a bridge endpoint) and not just the gap.
+pub const SegClosest = struct { d: f64, x: f64, y: f64 };
+
+/// Closest point on segment `(ax,ay)-(bx,by)` to `(px,py)`, plus its distance.
+pub fn closestOnSeg(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) SegClosest {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    if (len2 < 1e-12) return .{ .d = std.math.hypot(px - ax, py - ay), .x = ax, .y = ay };
+    const u = std.math.clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1);
+    const cx = ax + u * dx;
+    const cy = ay + u * dy;
+    return .{ .d = std.math.hypot(px - cx, py - cy), .x = cx, .y = cy };
+}
+
+/// Midpoint of the closest approach between segments a1→a2 and b1→b2, taken
+/// from the nearest endpoint projection (exact unless the segments cross, where
+/// any point of the overlap is equally the spot).
+///
+/// WHERE two pieces of copper come closest, as opposed to `segSegDist`'s how
+/// far. The keepout escape gate is a disc around a pad, so both engines that
+/// answer "is this halo suspended here" — `drc_keepout`'s finding and the
+/// router's own direct/dogleg probe — have to name the same place, or one
+/// forgives an approach the other refuses.
+pub fn segSegMid(a1: [2]f64, a2: [2]f64, b1: [2]f64, b2: [2]f64) [2]f64 {
+    var best = std.math.inf(f64);
+    var mid = [2]f64{ (a1[0] + a2[0] + b1[0] + b2[0]) / 4, (a1[1] + a2[1] + b1[1] + b2[1]) / 4 };
+    for ([2][2]f64{ a1, a2 }) |p| {
+        const c = closestOnSeg(b1[0], b1[1], b2[0], b2[1], p[0], p[1]);
+        if (c.d >= best) continue;
+        best = c.d;
+        mid = .{ (p[0] + c.x) / 2, (p[1] + c.y) / 2 };
+    }
+    for ([2][2]f64{ b1, b2 }) |p| {
+        const c = closestOnSeg(a1[0], a1[1], a2[0], a2[1], p[0], p[1]);
+        if (c.d >= best) continue;
+        best = c.d;
+        mid = .{ (p[0] + c.x) / 2, (p[1] + c.y) / 2 };
+    }
+    return mid;
 }
 
 /// Shortest distance between segments a1→a2 and b1→b2 (0 when they cross).
-fn segSegDist(a1: [2]f64, a2: [2]f64, b1: [2]f64, b2: [2]f64) f64 {
+pub fn segSegDist(a1: [2]f64, a2: [2]f64, b1: [2]f64, b2: [2]f64) f64 {
     if (segsIntersect(a1, a2, b1, b2)) return 0;
     return @min(
         @min(segPointDist(a1[0], a1[1], a2[0], a2[1], b1[0], b1[1]), segPointDist(a1[0], a1[1], a2[0], a2[1], b2[0], b2[1])),
@@ -249,92 +525,6 @@ fn segsIntersect(p1: [2]f64, p2: [2]f64, p3: [2]f64, p4: [2]f64) bool {
     return false;
 }
 
-// ── Ref-des silk placement (shared by export_gerber + drc) ───────────────────
-
-/// Silk ref-des stroke pitch (mm) — mirrors `export_gerber.text_px_mm`.
-const silk_px_mm: f64 = 0.15;
-/// Gap (mm) between an auto-placed ref-des box and the courtyard edge it sits
-/// off — the legacy `drawRefDes` offset.
-const label_gap_mm: f64 = 0.2;
-
-/// True for 90°/270° poses (courtyard w/h swap), matching `export_gerber`.
-fn quarterRot(rot: f64) bool {
-    const qm = @mod(@round(rot), 360);
-    return qm == 90 or qm == 270;
-}
-
-/// The foreign pad mask-openings (world boxes, grown by `margin`) that part
-/// `pi`'s silk must miss — every OTHER part's pad opening on side `s_layer` (its
-/// side, or any through-hole). One source of truth for both the Gerber ref-des
-/// auto-placement and the silk-over-pad DRC, so the drawn label and the check
-/// agree on where the pads are.
-pub fn padOpenings(
-    arena: std.mem.Allocator,
-    placement: optimizer.Placement,
-    pi: usize,
-    s_layer: u8,
-    margin: f64,
-) std.mem.Allocator.Error![]const [4]f64 {
-    var out: std.ArrayList([4]f64) = .empty;
-    for (placement.parts, 0..) |q, qi| {
-        if (qi == pi) continue;
-        const ql: u8 = if (q.side == .bottom) 1 else 0;
-        for (q.pads) |pad| {
-            if (!(pad.thru or ql == s_layer)) continue;
-            const b = try worldShape(arena, q, pad);
-            try out.append(arena, .{ b.x0 - margin, b.y0 - margin, b.x1 + margin, b.y1 + margin });
-        }
-    }
-    return out.toOwnedSlice(arena);
-}
-
-/// The world bounding box of part `pi`'s auto-placed ref-des silk, or null when
-/// it has no ref-des. The label box is tried above → below → right → left of the
-/// courtyard (a `label_gap_mm` margin off each edge); the first side clear of
-/// every `opening` wins, falling back to ABOVE (the legacy position) when the
-/// label is boxed in on all four — so a clear part keeps its byte-identical
-/// placement and a genuinely hemmed-in label is still drawn (and DRC-flagged).
-pub fn refDesBox(placement: optimizer.Placement, pi: usize, openings: []const [4]f64) ?[4]f64 {
-    const p = placement.parts[pi];
-    if (p.ref_des.len == 0) return null;
-    const adv = @as(f64, @floatFromInt(font.gw + 1)) * silk_px_mm;
-    const tw = @as(f64, @floatFromInt(p.ref_des.len)) * adv - silk_px_mm;
-    const th = @as(f64, @floatFromInt(font.gh)) * silk_px_mm;
-    const q = quarterRot(p.rot);
-    const hw = if (q) p.hh else p.hw;
-    const hh = if (q) p.hw else p.hh;
-    const cc = optimizer.worldPadCenter(p, p.ccx, p.ccy);
-    const gap = label_gap_mm;
-    const cands = [_][2]f64{
-        .{ cc[0], cc[1] - hh - th / 2 - gap }, // above (legacy)
-        .{ cc[0], cc[1] + hh + th / 2 + gap }, // below
-        .{ cc[0] + hw + tw / 2 + gap, cc[1] }, // right
-        .{ cc[0] - hw - tw / 2 - gap, cc[1] }, // left
-    };
-    var a = cands[0];
-    for (cands) |c| {
-        if (labelClear(c, tw, th, openings)) {
-            a = c;
-            break;
-        }
-    }
-    return .{ a[0] - tw / 2, a[1] - th / 2, a[0] + tw / 2, a[1] + th / 2 };
-}
-
-/// True when the label box centred at `a` (size `tw`×`th`) strictly overlaps no
-/// `opening` — edge-touching counts as clear.
-fn labelClear(a: [2]f64, tw: f64, th: f64, openings: []const [4]f64) bool {
-    const bx0 = a[0] - tw / 2;
-    const by0 = a[1] - th / 2;
-    const bx1 = a[0] + tw / 2;
-    const by1 = a[1] + th / 2;
-    const e: f64 = 1e-9;
-    for (openings) |o| {
-        if (bx1 > o[0] + e and bx0 < o[2] - e and by1 > o[1] + e and by0 < o[3] - e) return false;
-    }
-    return true;
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -366,6 +556,13 @@ test "pointDist sees the notch of a concave pad as outside the copper" {
     try testing.expect(@abs(pointDist(bx0, by0, bx1, by1, &l_poly, 5, 1, 0.5) - 2.0) < 1e-9);
 }
 
+test "copper anchor avoids a concave pad's empty bounding-box centre" {
+    const anchor = copperAnchor(.{ .x0 = 0, .y0 = 0, .x1 = 3, .y1 = 3, .poly = &l_poly });
+    try testing.expect(anchor[0] >= 2 and anchor[0] <= 3);
+    try testing.expectApproxEqAbs(@as(f64, 1.5), anchor[1], 1e-12);
+    try testing.expect(pointDist(0, 0, 3, 3, &l_poly, anchor[0], anchor[1], 5) == 0);
+}
+
 // spec: placement/pad_shape - simplifies a dense outline to a few corners within tolerance
 test "simplifyRing collapses collinear arc points but keeps real corners" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -387,6 +584,38 @@ test "simplifyRing collapses collinear arc points but keeps real corners" {
     // The simplified ring still classifies inside/outside correctly.
     try testing.expect(pointInPoly(s, 0.5, 0.5));
     try testing.expect(!pointInPoly(s, 1.5, 0.5));
+}
+
+/// The per-edge minimum-of-roots `distPointPolyEdges` replaced — the reference
+/// its single-root scan has to reproduce.
+fn minEdgeDist(poly: []const [2]f64, px: f64, py: f64) f64 {
+    var m: f64 = std.math.inf(f64);
+    var j: usize = poly.len - 1;
+    for (poly, 0..) |vi, i| {
+        m = @min(m, segPointDist(poly[j][0], poly[j][1], vi[0], vi[1], px, py));
+        j = i;
+    }
+    return m;
+}
+
+// spec: placement/pad_shape - the polygon distance scan returns the per-edge minimum with a single root
+test "distPointPolyEdges equals a per-edge minimum of segPointDist" {
+    // The scan picks its edge by SQUARED distance and roots only the winner.
+    // That is sound only while the argmin agrees with the per-edge minimum of
+    // the roots, so probe an L-ring whose edges differ in length and
+    // orientation: outside each face, off both convex and reflex corners,
+    // inside the notch (where two edges compete), and on an edge itself.
+    const ring = [_][2]f64{ .{ 0, 0 }, .{ 3, 0 }, .{ 3, 1 }, .{ 1, 1 }, .{ 1, 3 }, .{ 0, 3 } };
+    const probes = [_][2]f64{
+        .{ -0.5, 1.5 },  .{ 1.5, -0.5 }, .{ 3.5, 0.5 },  .{ 0.5, 3.5 },
+        .{ -0.4, -0.4 }, .{ 3.4, 1.4 },  .{ 1.4, 3.4 },  .{ -0.3, 3.3 },
+        .{ 2.0, 2.0 },   .{ 1.5, 1.5 },  .{ 1.05, 2.9 }, .{ 2.9, 1.05 },
+        .{ 0.5, 0.5 },   .{ 0.5, 2.5 },  .{ 2.5, 0.5 },  .{ 1.0, 1.0 },
+        .{ 3.0, 0.5 },   .{ 0.0, 1.5 },  .{ 1.5, 1.0 },  .{ 1.0, 1.5 },
+    };
+    for (probes) |p| {
+        try testing.expectEqual(minEdgeDist(&ring, p[0], p[1]), distPointPolyEdges(&ring, p[0], p[1]));
+    }
 }
 
 // spec: placement/pad_shape - shapeGap clears a pad nested in a concave neighbour's notch
@@ -418,39 +647,151 @@ test "worldShape rotated-rectangle box corners are centre minus/plus the half-ex
         .y = 20,
         .rot = 45,
     };
-    const pad = geometry.Pad{ .number = "1", .x = 0, .y = 0, .w = 2, .h = 2 };
+    const pad = geometry.Pad{ .number = "1", .x = 2, .y = 0, .w = 2, .h = 2 };
     const s = try worldShape(testing.allocator, part, pad);
-    // hw = hh = (w/2)·cos45 + (h/2)·sin45 = √2; box centre is the pose (10,20).
+    defer testing.allocator.free(s.poly);
+    // hw = hh = (w/2)·cos45 + (h/2)·sin45 = √2; the off-centre pad itself
+    // rotates by 45°, proving the footprint transform does not fall back to 0°.
     const r = @sqrt(2.0);
-    try testing.expectApproxEqAbs(@as(f64, 10) - r, s.x0, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 20) - r, s.y0, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 10) + r, s.x1, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 20) + r, s.y1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10), s.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 20), s.y0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 10) + 2 * r, s.x1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 20) + 2 * r, s.y1, 1e-9);
 }
 
-test "refDesBox keeps the above anchor when clear and nudges to the next free side" {
-    const p = optimizer.Part{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false };
-    var parts = [_]optimizer.Part{p};
-    const pl = optimizer.Placement{
-        .parts = &parts,
-        .links = &.{},
-        .loops = &.{},
-        .stubs = &.{},
-        .instances = &.{},
-        .nets = &.{},
-        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
-        .minx = -2,
-        .miny = -2,
-        .maxx = 2,
-        .maxy = 2,
-        .generated = true,
+// spec: placement/pad_shape - a rectangular pad off a quarter turn carries its four rotated corners, so its keepout is the land and not the land's square bounding box
+test "a 45-degree rectangular land measures against its corners, not its box" {
+    // The Amphenol 925-143J-51PT SMPM signal land, on a launch rotated 45° — the
+    // rf-switch-eval case. Its box is 1.293 mm square where the copper is
+    // 0.5588 × 1.27 mm, so a box test claims 2.35× the land's own area.
+    const part = optimizer.Part{
+        .ref_des = "J2",
+        .kind = .hub,
+        .hw = 2.4,
+        .hh = 3,
+        .pads = &.{},
+        .fallback = false,
+        .rot = 45,
     };
-    // No openings ⇒ the box sits ABOVE the courtyard (legacy). "U1" is 2 glyphs
-    // wide; the box centre y is -hh - th/2 - gap = -0.5 - 0.525 - 0.2 = -1.225.
-    const above = refDesBox(pl, 0, &.{}).?;
-    try testing.expectApproxEqAbs(@as(f64, -1.225), (above[1] + above[3]) / 2, 1e-9);
-    // An opening straddling the above slot pushes the label BELOW (centre +1.225).
-    const block = [_][4]f64{.{ -2, -2, 2, -0.7 }};
-    const below = refDesBox(pl, 0, &block).?;
-    try testing.expectApproxEqAbs(@as(f64, 1.225), (below[1] + below[3]) / 2, 1e-9);
+    const pad = geometry.Pad{ .number = "P$2", .x = 0, .y = 2.21, .w = 0.5588, .h = 1.27 };
+    const s = try worldShape(testing.allocator, part, pad);
+    defer testing.allocator.free(s.poly);
+    try testing.expectEqual(@as(usize, 4), s.poly.len);
+
+    // The box is unchanged — it is still the broad phase every caller filters on.
+    const half = (0.5588 / 2.0 + 1.27 / 2.0) * @cos(std.math.pi / 4.0);
+    const c = optimizer.worldPadCenter(&part, pad.x, pad.y);
+    try testing.expectApproxEqAbs(c[0] - half, s.x0, 1e-9);
+    try testing.expectApproxEqAbs(c[1] + half, s.y1, 1e-9);
+
+    // Its corner is a corner of the BOX only: the rotated land cannot reach
+    // maximum +x and minimum −y at once, so that point is 0.2794 mm (half the
+    // land's width) of clear board — where the box called it copper.
+    const gap = pointDist(s.x0, s.y0, s.x1, s.y1, s.poly, c[0] + half, c[1] - half, 5.0);
+    try testing.expectApproxEqAbs(@as(f64, 0.2794), gap, 1e-6);
+    // The land's own copper still reads as copper, so nothing has been narrowed.
+    try testing.expectEqual(@as(f64, 0), pointDist(s.x0, s.y0, s.x1, s.y1, s.poly, c[0], c[1], 5.0));
+}
+
+/// Twice the signed area of a closed ring. Its SIGN is the winding, which a
+/// mirror reverses and a rotation cannot.
+fn ringWinding(poly: []const [2]f64) f64 {
+    var sum: f64 = 0;
+    var j: usize = poly.len - 1;
+    for (poly, 0..) |p, i| {
+        sum += (poly[j][0] - p[0]) * (poly[j][1] + p[1]);
+        j = i;
+    }
+    return sum;
+}
+
+// spec: placement/pad_shape - a rotated rectangular pad on a bottom-side part carries corners mirrored with the part
+test "a rotated land on a bottom-side part mirrors its corners with the part" {
+    const front = optimizer.Part{
+        .ref_des = "J2",
+        .kind = .hub,
+        .hw = 1,
+        .hh = 1,
+        .pads = &.{},
+        .fallback = false,
+        .rot = 45,
+    };
+    var back = front;
+    back.side = .bottom;
+    // The pad carries a rotation of its OWN, so its outline is not symmetric
+    // under the mirror: this is the case that separates "mirror the footprint
+    // point, then rotate the part" from "rotate by part.rot + pad.rot about a
+    // mirrored centre", which agree for every pad whose own rotation is zero.
+    const pad = geometry.Pad{ .number = "1", .x = 2, .y = 0, .w = 2, .h = 1, .rot = 30 };
+
+    const fs = try worldShape(testing.allocator, front, pad);
+    defer testing.allocator.free(fs.poly);
+    const bs = try worldShape(testing.allocator, back, pad);
+    defer testing.allocator.free(bs.poly);
+
+    // A mirror reverses the ring's winding; a rotation never does. Equal signs
+    // would mean the bottom land was merely rotated to a mirrored centre.
+    try testing.expect(ringWinding(fs.poly) * ringWinding(bs.poly) < 0);
+    // And it flips the pad's own rotation SENSE against the part's: the land
+    // stands at 45+30 = 75° on the front face and 45−30 = 15° on the back, so
+    // the two faces do not even share a bounding box.
+    const front_half = 1.0 * @cos(75.0 * std.math.pi / 180.0) + 0.5 * @sin(75.0 * std.math.pi / 180.0);
+    const back_half = 1.0 * @cos(15.0 * std.math.pi / 180.0) + 0.5 * @sin(15.0 * std.math.pi / 180.0);
+    try testing.expectApproxEqAbs(2 * front_half, fs.x1 - fs.x0, 1e-9);
+    try testing.expectApproxEqAbs(2 * back_half, bs.x1 - bs.x0, 1e-9);
+    // Both faces share the pad's own copper, so the centre is copper on each.
+    const bc = optimizer.worldPadCenter(&back, pad.x, pad.y);
+    try testing.expectEqual(@as(f64, 0), pointDist(bs.x0, bs.y0, bs.x1, bs.y1, bs.poly, bc[0], bc[1], 5.0));
+}
+
+// spec: placement/pad_shape - a circle or oval pad off a quarter turn keeps its bounding box, which no rectangle can tighten
+test "a circle or oval land off a quarter turn keeps its bounding box" {
+    const part = optimizer.Part{
+        .ref_des = "J2",
+        .kind = .hub,
+        .hw = 1,
+        .hh = 1,
+        .pads = &.{},
+        .fallback = false,
+        .rot = 45,
+    };
+    // A circle is rotation-invariant: a rectangle through its corners would cut
+    // copper off its axis-aligned flanks.
+    const circle = geometry.Pad{ .number = "1", .x = 0, .y = 0, .w = 1, .h = 1, .shape = "circle" };
+    const cs = try worldShape(testing.allocator, part, circle);
+    try testing.expectEqual(@as(usize, 0), cs.poly.len);
+    try testing.expectApproxEqAbs(@as(f64, -0.5), cs.x0, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), cs.x1, 1e-9);
+
+    // An oval's ends are round, so its corners are the rectangle's invention.
+    const oval = geometry.Pad{ .number = "2", .x = 0, .y = 0, .w = 2, .h = 1, .shape = "oval" };
+    const os = try worldShape(testing.allocator, part, oval);
+    try testing.expectEqual(@as(usize, 0), os.poly.len);
+    try testing.expectApproxEqAbs(@as(f64, (1.0 + 0.5) * @cos(std.math.pi / 4.0)), os.x1, 1e-9);
+}
+
+test "worldShape roundrect preserves a legal corner trace corridor" {
+    const part = optimizer.Part{
+        .ref_des = "R1",
+        .kind = .passive,
+        .hw = 1,
+        .hh = 1,
+        .pads = &.{},
+        .fallback = false,
+    };
+    const pad = geometry.Pad{
+        .number = "1",
+        .x = 163.28,
+        .y = 91.5,
+        .w = 0.46,
+        .h = 0.4,
+        .shape = "roundrect",
+        .overrides = .{ .rratio = 0.25 },
+    };
+    const shape = try worldShape(testing.allocator, part, pad);
+    defer testing.allocator.free(shape.poly);
+    const a = [2]f64{ 162.7829, 91.353499 };
+    const b = [2]f64{ 163.045899, 91.0905 };
+    try testing.expect(shape.poly.len > 4);
+    try testing.expect(segmentDist(shape, a, b, 0.3) >= 0.1905 - 1e-6);
 }

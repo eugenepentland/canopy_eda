@@ -19,6 +19,8 @@ const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("../eval/env.zig");
 const check_grammar = @import("../eval/check_grammar.zig");
 const electrical_mod = @import("../eval/electrical.zig");
+const module_metadata = @import("../module_metadata.zig");
+const datasheet_review_json = @import("datasheet_review_json.zig");
 
 const max_component_bytes: usize = 1 * 1024 * 1024;
 
@@ -34,8 +36,8 @@ const form_requirement = "requirement";
 /// up to the caller, while user-facing errors (component missing, malformed
 /// component file) get JSON-encoded into `out` and the function returns false.
 pub const DescribeError = std.mem.Allocator.Error || std.Io.Writer.Error ||
-    std.fs.File.OpenError || std.fs.File.ReadError ||
-    std.fs.Dir.StatFileError || error{ FileTooBig, StreamTooLong };
+    infra_fs.File.OpenError || infra_fs.File.ReadError ||
+    infra_fs.Dir.StatFileError || error{ FileTooBig, StreamTooLong };
 
 /// Read `lib/components/<name>.sexp`, parse it, follow its `(pinout ...)`
 /// reference into `lib/pinouts/<ref>.sexp`, and emit the combined view as
@@ -117,8 +119,20 @@ pub fn describeComponent(
     // leaned on its symbol name, even though pins loaded fine.
     if (loaded.pins != null) info.pinout_ref = resolved_ref;
 
-    const w = out.writer(allocator);
-    try writeComponentJson(allocator, w, name, info, datasheets.items, loaded, root_children[2..]);
+    const implementations = try module_metadata.collect(allocator, project_dir);
+    defer module_metadata.freeMatches(allocator, implementations);
+
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
+    try writeComponentJson(allocator, w, .{
+        .requested_name = name,
+        .info = info,
+        .datasheets = datasheets.items,
+        .loaded = loaded,
+        .root_body = root_children[2..],
+        .implementations = implementations,
+    });
     return true;
 }
 
@@ -353,15 +367,22 @@ fn collectElectricalTypes(
 /// from the AST so the same `parseCheck` the evaluator uses classifies the
 /// check kind — no risk of label drift between describe_component and the
 /// build-time review.
-fn writeComponentJson(
-    allocator: std.mem.Allocator,
-    w: anytype,
+const ComponentJsonInput = struct {
     requested_name: []const u8,
     info: ComponentInfo,
     datasheets: []const []const u8,
     loaded: LoadedPinout,
     root_body: []const ast.Node,
-) !void {
+    implementations: []const module_metadata.Match,
+};
+
+fn writeComponentJson(allocator: std.mem.Allocator, w: anytype, input: ComponentJsonInput) !void {
+    const requested_name = input.requested_name;
+    const info = input.info;
+    const datasheets = input.datasheets;
+    const loaded = input.loaded;
+    const root_body = input.root_body;
+    const implementations = input.implementations;
     const pin_entries: ?[]const PinEntry = loaded.pins;
     try w.writeAll("{\"ok\":true,\"name\":");
     try json_writer.writeString(w, info.name);
@@ -392,6 +413,7 @@ fn writeComponentJson(
         try json_writer.writeString(w, d);
     }
     try w.writeAll("]");
+    try datasheet_review_json.write(w, root_body);
 
     try w.writeAll(",\"pins\":");
     if (pin_entries) |pe| {
@@ -423,6 +445,30 @@ fn writeComponentJson(
     } else {
         try w.writeAll("null");
     }
+
+    try w.writeAll(",\"implementations\":[");
+    var implementation_first = true;
+    for (implementations) |implementation| {
+        if (!std.mem.eql(u8, implementation.component, requested_name) and
+            !std.mem.eql(u8, implementation.component, info.name)) continue;
+        if (!implementation_first) try w.writeAll(",");
+        implementation_first = false;
+        try w.writeAll("{\"module\":");
+        try json_writer.writeString(w, implementation.module);
+        try w.writeAll(",\"policy\":");
+        try json_writer.writeString(w, @tagName(implementation.policy));
+        try w.writeAll(",\"role\":");
+        if (implementation.role.len > 0)
+            try json_writer.writeString(w, implementation.role)
+        else
+            try w.writeAll("null");
+        try w.writeAll(",\"description\":");
+        try json_writer.writeString(w, implementation.doc);
+        try w.writeAll(",\"source_sha256\":");
+        try json_writer.writeString(w, implementation.source_sha256[0..]);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
 
     try w.writeAll(",\"requirements\":[");
     var req_first = true;
@@ -500,7 +546,9 @@ fn writeDasherized(w: anytype, s: []const u8) !void {
 
 fn writeJsonError(allocator: std.mem.Allocator, out: *std.ArrayList(u8), msg: []const u8) !bool {
     out.clearRetainingCapacity();
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
     try w.writeAll("{\"ok\":false,\"error\":");
     try json_writer.writeString(w, msg);
     try w.writeAll("}");
@@ -519,8 +567,8 @@ fn writeJsonError(allocator: std.mem.Allocator, out: *std.ArrayList(u8), msg: []
 /// `DescribeError` plus the file-write errors the mutators incur. Exported so
 /// the requirement-tool dispatcher (`mcp_notes_tools`) can name it explicitly.
 pub const ReqError = std.mem.Allocator.Error || std.Io.Writer.Error ||
-    std.fs.File.OpenError || std.fs.File.ReadError || std.fs.File.WriteError ||
-    std.fs.Dir.StatFileError || error{ FileTooBig, StreamTooLong };
+    infra_fs.File.OpenError || infra_fs.File.ReadError || infra_fs.File.WriteError ||
+    infra_fs.Dir.StatFileError || error{ FileTooBig, StreamTooLong, DiskQuota, BrokenPipe, NotOpenForWriting };
 
 fn validComponentName(name: []const u8) bool {
     return name.len > 0 and
@@ -587,10 +635,10 @@ fn requirementIdMatches(cl: []const ast.Node, target: []const u8) bool {
 /// escaped the same way the stored value is (the AST keeps source escapes).
 fn requirementTextMatches(allocator: std.mem.Allocator, cl: []const ast.Node, plain: []const u8) bool {
     const stored = if (cl.len >= 2) (cl[1].asString() orelse cl[1].asAtom() orelse "") else "";
-    var esc: std.ArrayList(u8) = .empty;
-    defer esc.deinit(allocator);
-    writeSexprEscaped(esc.writer(allocator), plain) catch return false;
-    return std.mem.eql(u8, stored, esc.items);
+    var esc: std.Io.Writer.Allocating = .init(allocator);
+    defer esc.deinit();
+    writeSexprEscaped(&esc.writer, plain) catch return false;
+    return std.mem.eql(u8, stored, esc.written());
 }
 
 /// Write `s` escaped for an S-expression string literal (only `"` and `\`
@@ -714,7 +762,9 @@ pub fn listRequirements(
     defer sexpr_parser.freeNodes(allocator, nodes);
     const body = (try componentRootBody(nodes, allocator, out)) orelse return false;
 
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
     try w.writeAll("{\"ok\":true,\"name\":");
     try json_writer.writeString(w, name);
     try w.writeAll(",\"requirements\":[");
@@ -777,11 +827,11 @@ pub fn addRequirement(
 
     // Escaped inner text — what is stored between the quotes, and what the id
     // derives from (so it matches env.requirementIdForText downstream).
-    var esc: std.ArrayList(u8) = .empty;
-    defer esc.deinit(allocator);
-    try writeSexprEscaped(esc.writer(allocator), text);
+    var esc: std.Io.Writer.Allocating = .init(allocator);
+    defer esc.deinit();
+    try writeSexprEscaped(&esc.writer, text);
     var hasher = std.hash.Crc32.init();
-    hasher.update(esc.items);
+    hasher.update(esc.written());
     const id_hex = try std.fmt.allocPrint(allocator, "{x:0>8}", .{hasher.final()});
     defer allocator.free(id_hex);
 
@@ -795,10 +845,10 @@ pub fn addRequirement(
         return writeJsonError(allocator, out, msg);
     }
 
-    var form: std.ArrayList(u8) = .empty;
-    defer form.deinit(allocator);
-    const fw = form.writer(allocator);
-    try fw.print("(requirement \"{s}\"", .{esc.items});
+    var form: std.Io.Writer.Allocating = .init(allocator);
+    defer form.deinit();
+    const fw = &form.writer;
+    try fw.print("(requirement \"{s}\"", .{esc.written()});
     if (ref_pdf) |pdf| {
         if (pdf.len > 0) {
             try fw.writeAll(" (ref \"");
@@ -823,12 +873,14 @@ pub fn addRequirement(
     }
     try fw.writeAll(")");
 
-    const new_src = (try spliceRequirement(allocator, src, form.items)) orelse
+    const new_src = (try spliceRequirement(allocator, src, form.written())) orelse
         return writeJsonError(allocator, out, "component file has no closing paren");
     defer allocator.free(new_src);
     try writeComponentFile(path, new_src);
 
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
     try w.writeAll("{\"ok\":true,\"id\":");
     try json_writer.writeString(w, id_hex);
     try w.writeAll(",\"text\":");
@@ -887,7 +939,9 @@ pub fn removeRequirement(
     defer allocator.free(new_src);
     try writeComponentFile(path, new_src);
 
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
     try w.writeAll("{\"ok\":true,\"removed_id\":");
     try json_writer.writeString(w, removed_id);
     try w.writeAll("}");
@@ -930,15 +984,15 @@ test "describeComponent resolves pinout via symbol and reports the resolved ref"
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.makePath("lib/pinouts");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
     // Component declares only a (symbol …) — no (pinout …) form — and the
     // symbol name carries a '#', exercising the verbatim-basename path.
     const comp = "(component \"widget\"\n  (symbol \"gen#sym\")\n  (footprint fp))\n";
     const pinout = "(pinout \"gen#sym\"\n  (pin 1 \"A\")\n  (pin 2 \"B\"))\n";
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/widget.sexp", .data = comp });
-    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/gen#sym.sexp", .data = pinout });
-    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/widget.sexp", .data = comp });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/gen#sym.sexp", .data = pinout });
+    const proj = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(proj);
 
     var out: std.ArrayList(u8) = .empty;
@@ -951,13 +1005,66 @@ test "describeComponent resolves pinout via symbol and reports the resolved ref"
     try std.testing.expect(std.mem.indexOf(u8, out.items, "{\"pin\":\"1\",\"function\":\"A\"") != null);
 }
 
+test "describeComponent returns matching implementation policy and digest" {
+    // spec: serve/component_info - describeComponent reverse-maps explicit module implementations
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/chip.sexp",
+        .data = "(component \"chip\" (footprint qfn))",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/modules/buck.sexp",
+        .data = "(defmodule buck () \"Power stage\" " ++
+            "(implements chip (policy canonical) (role regulator)) (design-block \"buck\"))",
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try std.testing.expect(try describeComponent(alloc, project, "chip", &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"module\":\"buck\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"policy\":\"canonical\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"role\":\"regulator\"") != null);
+    const digest = std.mem.indexOf(u8, out.items, "\"source_sha256\":\"") orelse return error.TestExpectedDigest;
+    try std.testing.expect(out.items.len >= digest + "\"source_sha256\":\"".len + 64);
+}
+
+test "describeComponent returns the authored datasheet-review record" {
+    // spec: serve/component_info - describeComponent exposes digest-bound datasheet review evidence
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/chip.sexp",
+        .data = "(component chip (datasheet \"chip.pdf\") " ++
+            "(datasheet-review (datasheet \"chip.pdf\") " ++
+            "(sha256 \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\") " ++
+            "(status complete) (reviewed-by \"agent\") (date \"2026-07-16\") " ++
+            "(category supply) (category-na thermal \"no power dissipation\")))",
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try std.testing.expect(try describeComponent(alloc, project, "chip", &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"datasheet_review\":{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"status\":\"complete\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"categories\":[\"supply\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"category\":\"thermal\"") != null);
+}
+
 test "describeComponent attaches the electrical type to each matching pin" {
     // spec: serve/component_info - describeComponent attaches the electrical type to each matching pin
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.makePath("lib/pinouts");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
     const comp =
         "(component \"reg\"\n" ++
         "  (pinout \"reg\")\n" ++
@@ -968,9 +1075,9 @@ test "describeComponent attaches the electrical type to each matching pin" {
         "  (pin 3 \"EN/UV\")\n" ++
         "  (pin 10 \"OUT\")\n" ++
         "  (pin 1 \"VIN\"))\n";
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/reg.sexp", .data = comp });
-    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/reg.sexp", .data = pinout });
-    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/reg.sexp", .data = comp });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/reg.sexp", .data = pinout });
+    const proj = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(proj);
 
     var out: std.ArrayList(u8) = .empty;
@@ -1000,9 +1107,9 @@ test "findSourceComment extracts the regenerate_pinout source line" {
 test "writeCheckKindName dasherizes underscored variant names" {
     // spec: serve/component_info - kebab-cases every Check variant tag
     const alloc = std.testing.allocator;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(alloc);
-    const w = buf.writer(alloc);
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    defer buf.deinit();
+    const w = &buf.writer;
     const variants = [_]env_mod.Check{
         .{ .connected = .{ .pin_a = "A", .pin_b = "B" } },
         .{ .pullup_range = .{ .pin = "P", .target_net = "N", .min_ohms = 0, .max_ohms = 1 } },
@@ -1013,7 +1120,7 @@ test "writeCheckKindName dasherizes underscored variant names" {
     try writeCheckKindName(w, variants[1]);
     try w.writeByte(',');
     try writeCheckKindName(w, variants[2]);
-    try std.testing.expectEqualStrings("connected,pullup-range,pin-not-floating", buf.items);
+    try std.testing.expectEqualStrings("connected,pullup-range,pin-not-floating", buf.written());
 }
 
 test "requirementId derives the Crc32 id and honors an explicit id" {
@@ -1118,9 +1225,9 @@ test "add/list/remove requirement round-trips through the component file on disk
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/foo.sexp", .data = "(component \"foo\"\n  (footprint x))\n" });
-    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/foo.sexp", .data = "(component \"foo\"\n  (footprint x))\n" });
+    const proj = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(proj);
 
     var out: std.ArrayList(u8) = .empty;
@@ -1135,7 +1242,7 @@ test "add/list/remove requirement round-trips through the component file on disk
     try std.testing.expect(std.mem.indexOf(u8, out.items, want_id) != null);
 
     // The file gained the form, ref, and check — and still parses.
-    const after = try tmp.dir.readFileAlloc(alloc, "lib/components/foo.sexp", 1 << 20);
+    const after = try tmp.dir.readFileAlloc(std.testing.io, "lib/components/foo.sexp", alloc, .limited64(1 << 20));
     defer alloc.free(after);
     try std.testing.expect(std.mem.indexOf(u8, after, "(requirement \"Pin 1 must be tied to GND\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, after, "(check (connected (pin \"1\") (pin \"GND\")))") != null);
@@ -1168,17 +1275,16 @@ test "writeComponentJson emits the first requirement without a leading comma" {
     const z = ast.Span.zero;
     const req = [_]ast.Node{ ast.Node.atom(z, "requirement"), ast.Node.string(z, "Tie pin 1 to GND") };
     const root_body = [_]ast.Node{ast.Node.list(z, &req)};
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(alloc);
-    const w = out.writer(alloc);
-    try writeComponentJson(
-        alloc,
-        w,
-        "foo",
-        .{ .name = "foo", .is_family = false },
-        &.{},
-        .{ .pins = null, .source = null },
-        &root_body,
-    );
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"requirements\":[{") != null);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    const w = &out.writer;
+    try writeComponentJson(alloc, w, .{
+        .requested_name = "foo",
+        .info = .{ .name = "foo", .is_family = false },
+        .datasheets = &.{},
+        .loaded = .{ .pins = null, .source = null },
+        .root_body = &root_body,
+        .implementations = &.{},
+    });
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"requirements\":[{") != null);
 }

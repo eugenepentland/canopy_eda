@@ -399,7 +399,9 @@ const parser_fuzz_corpus = [_][]const u8{
 /// path — including every error path — fails the test. (The parse→print→parse
 /// round-trip is fuzzed in printer.zig, which owns the printer, to keep the
 /// import graph acyclic.)
-fn fuzzParse(allocator: std.mem.Allocator, input: []const u8) anyerror!void {
+fn fuzzParse(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
+    var generated: [64 * 1024]u8 = undefined;
+    const input = smith.in orelse generated[0..smith.slice(&generated)];
     const nodes = parse(allocator, input) catch return;
     freeNodes(allocator, nodes);
 }

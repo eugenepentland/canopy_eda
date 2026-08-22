@@ -11,6 +11,8 @@
 
 const std = @import("std");
 const env_mod = @import("../eval/env.zig");
+const rails_mod = @import("../eval/rails.zig");
+const na = @import("../eval/net_analysis.zig");
 const types = @import("types.zig");
 
 const DesignBlock = env_mod.DesignBlock;
@@ -88,17 +90,17 @@ pub fn netClass(name: []const u8, port_map: *const PortClassMap) ClassId {
 // Kept as data + small loops so each predicate stays a short boolean
 // expression instead of a long `or` chain.
 
-const ground_eq = [_][]const u8{ "GND", "AGND", "DGND", "PGND" };
+const ground_eq = na.ground_base_names;
 const ground_suf = [_][]const u8{ "_GND", "GND" };
-// Named/derived grounds keep their `GND` stem as a prefix: an isolated barrier
-// ground (`GND_ISO`), a digital/analog split (`GND_A`). Treated as ground so it
-// stays a shared reference rather than a spurious control edge. `VSS`/`VSSA` is
-// the 0 V reference in CMOS naming (not a rail), so it belongs here — otherwise a
-// VSS-named design gets a spurious dense power-edge fan the ground reference class
-// exists to suppress.
-const ground_pre = [_][]const u8{ "GND_", "AGND_", "DGND_", "PGND_", "VSS" };
+// Treated as ground so a named/derived ground stays a shared reference rather
+// than a spurious control edge; see `net_analysis.ground_stem_prefixes` for why
+// `VSS` is in that table.
+const ground_pre = na.ground_stem_prefixes;
 
-const power_pre = [_][]const u8{ "VDD", "VCC", "AVDD", "DVDD", "VBAT", "VREG", "VPOS", "VBUS", "VLX", "V_" };
+// The diagram classifier's own supply table, kept with the other supply
+// vocabularies in `eval/rails` so a rail added for the schematic is visible
+// to whoever next edits the placer's or the ERC's answer.
+const power_pre = rails_mod.diagram_supply_prefixes;
 
 const clock_pre = [_][]const u8{ "REF_", "OSC" };
 const clock_sub = [_][]const u8{ "_REF_", "REFIN", "RADAR_REF", "_OSC", "MHZ", "TCXO", "XTAL", "SWCLK" };
@@ -207,6 +209,11 @@ test "netClass classifies real Cyclops net names" {
     try testing.expectEqual(types.class_ground, netClass("VSS_1", &pm));
     // A real supply rail is still power.
     try testing.expectEqual(types.class_power, netClass("VDD", &pm));
+    try testing.expectEqual(types.class_power, netClass("AVDD", &pm));
+    try testing.expectEqual(types.class_power, netClass("DVDD", &pm));
+    // A buck's switch node reads as power on a block diagram — this
+    // classifier is the ONLY one here that says so, so it is pinned.
+    try testing.expectEqual(types.class_power, netClass("VLX", &pm));
 }
 
 // spec: diagram/classify - Honors an explicit section-port signal type over the name heuristic

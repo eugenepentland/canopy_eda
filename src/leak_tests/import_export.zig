@@ -34,7 +34,8 @@ const DesignBlock = env_mod.DesignBlock;
 const FlatInstance = export_kicad.FlatInstance;
 const FlatNet = export_kicad.FlatNet;
 const FlatPin = export_kicad.FlatPin;
-const ZipEntry = export_footprint.ZipEntry;
+const zipfile = @import("../zipfile.zig");
+const ZipEntry = zipfile.Entry;
 
 // ── Idiom 1: owned-return (frees its own scratch) ──────────────────────
 
@@ -206,16 +207,19 @@ test "leak: exportFootprintMod owned buffer frees parse scratch" {
     try std.testing.expect(std.mem.indexOf(u8, out, "(footprint \"R_0402_1005Metric\"") != null);
 }
 
-// leak-audit: buildZip allocates an `offsets` scratch slice (defer-freed) and
-// returns an owned buffer. Entry name/data are borrowed (not freed). Caller
-// frees the returned archive.
-test "leak: buildZip owned archive frees offsets scratch" {
+// leak-audit: the KiCad bundle's archive is built by streaming `zipfile.write`
+// into an Allocating writer and taking ownership of its buffer. Entry
+// name/data are borrowed (not freed); the caller frees the archive.
+test "leak: zipfile archive owned by the caller frees its writer buffer" {
     const alloc = std.testing.allocator;
     const entries = [_]ZipEntry{
         .{ .name = "a.txt", .data = "hello" },
         .{ .name = "b.txt", .data = "world" },
     };
-    const zip = try export_footprint.buildZip(alloc, &entries);
+    var zw: std.Io.Writer.Allocating = .init(alloc);
+    errdefer zw.deinit();
+    try zipfile.write(&zw.writer, &entries);
+    const zip = try zw.toOwnedSlice();
     defer alloc.free(zip);
     // Local-file-header signature "PK\x03\x04" leads the archive.
     try std.testing.expect(zip.len >= 4 and std.mem.eql(u8, zip[0..4], &[_]u8{ 'P', 'K', 3, 4 }));

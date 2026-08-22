@@ -12,14 +12,14 @@ const Evaluator = @import("eval/evaluator.zig").Evaluator;
 /// with the allocator failures that can come out of `ArrayList`/dupe, plus
 /// `IdCollision` for the duplicate-token guard.
 pub const IdInsertError = std.mem.Allocator.Error ||
-    std.fs.File.OpenError ||
-    std.fs.File.ReadError ||
-    std.fs.File.WriteError ||
-    std.fs.Dir.MakeError ||
-    std.fs.Dir.OpenError ||
-    std.fs.Dir.StatFileError ||
-    std.posix.RenameError ||
-    error{ FileTooBig, StreamTooLong, EndOfStream, IdCollision, WriteFailed };
+    infra_fs.File.OpenError ||
+    infra_fs.File.ReadError ||
+    infra_fs.File.WriteError ||
+    infra_fs.Dir.MakeError ||
+    infra_fs.Dir.OpenError ||
+    infra_fs.Dir.StatFileError ||
+    infra_fs.Dir.RenameError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, IdCollision, WriteFailed, BrokenPipe, NotOpenForWriting };
 
 /// One text insertion against the ORIGINAL source. `order` breaks ties when two
 /// edits target the same byte: lower order ends up left of higher order (we want
@@ -375,13 +375,13 @@ test "persistMintedIds pins hierarchical sub-block ids, stays idempotent, and sk
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const project_dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(project_dir);
 
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.makePath("lib/modules");
-    try tmp.dir.makePath("src");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/components/cap.sexp",
         .data =
         \\(component-family cap
@@ -389,11 +389,11 @@ test "persistMintedIds pins hierarchical sub-block ids, stays idempotent, and sk
         \\  (footprint "0402"))
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/components/0402.sexp",
         .data = "(component 0402 (footprint \"0402.kicad_mod\"))",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/modules/mymod.sexp",
         .data =
         \\(defmodule mymod ()
@@ -404,7 +404,7 @@ test "persistMintedIds pins hierarchical sub-block ids, stays idempotent, and sk
         \\      (pin 2 "GND"))))
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "src/hier.sexp",
         .data =
         \\(design-block "Hier"
@@ -446,7 +446,7 @@ test "persistMintedIds pins hierarchical sub-block ids, stays idempotent, and sk
 
     // A flat design whose instance already carries an (id …) mints nothing — the
     // trigger matches the CLI's, so an already-pinned flat/legacy file is untouched.
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "src/flat.sexp",
         .data =
         \\(design-block "Flat"

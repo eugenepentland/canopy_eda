@@ -1187,12 +1187,12 @@ fn wrapText(arena: Allocator, s: []const u8, max: usize, max_lines: usize) Alloc
         }
         if (last_line and brk < s.len) {
             // Tail won't fit — ellipsise whatever remains onto the final line.
-            try lines.append(arena, try truncate(arena, std.mem.trimRight(u8, s[i..], " "), max));
+            try lines.append(arena, try truncate(arena, std.mem.trimEnd(u8, s[i..], " "), max));
             break;
         }
         // truncate() is a no-op for a normal line; it only bites a single word
         // longer than the box (which forms its own line).
-        try lines.append(arena, try truncate(arena, std.mem.trimRight(u8, s[i..brk], " "), max));
+        try lines.append(arena, try truncate(arena, std.mem.trimEnd(u8, s[i..brk], " "), max));
         i = brk;
     }
     return lines.toOwnedSlice(arena);

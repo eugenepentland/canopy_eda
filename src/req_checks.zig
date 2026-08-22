@@ -9,16 +9,19 @@
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
 const ids = @import("eval/ids.zig");
+const derived_checks = @import("req_derived_checks.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Check = env_mod.Check;
+const DecouplingCheck = @FieldType(Check, "decoupling");
 
 // ── Constants ─────────────────────────────────────────────────────
 const current_tolerance_f: f64 = 1e-9;
 const value_tolerance_pf: f64 = 1e-12;
 const dc_equiv_resistor_ohms: f64 = 10.0;
 const pin_not_found_msg = "pin '{s}' not found in pinout";
+const pin_net_unresolved_msg = "pin '{s}' could not be resolved to a net";
 
 /// Outcome of evaluating one component requirement: `pass` / `fail` for
 /// automated checks, `na` when no check primitive ran, and `verified` once
@@ -65,6 +68,9 @@ pub fn applyVerifications(
 ) void {
     _ = instances;
     for (block.verifications) |v| applyOneVerification(map, block, v);
+    for (block.sub_blocks) |sub_block| {
+        applyVerifications(map, sub_block.block, sub_block.block.instances);
+    }
 }
 
 fn applyOneVerification(
@@ -120,6 +126,7 @@ pub fn runChecks(
     block: *const DesignBlock,
 ) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]Result) {
     var out: std.StringHashMapUnmanaged([]Result) = .empty;
+    errdefer deinit(allocator, &out);
     try walkInstances(allocator, eval, block, &out);
     return out;
 }
@@ -132,7 +139,10 @@ pub fn deinit(
     m: *std.StringHashMapUnmanaged([]Result),
 ) void {
     var it = m.iterator();
-    while (it.next()) |e| allocator.free(e.value_ptr.*);
+    while (it.next()) |e| {
+        for (e.value_ptr.*) |result| if (result.message.len > 0) allocator.free(result.message);
+        allocator.free(e.value_ptr.*);
+    }
     m.deinit(allocator);
 }
 
@@ -145,6 +155,12 @@ fn walkInstances(
     for (block.instances) |inst| {
         if (inst.requirements.len == 0) continue;
         const results = try allocator.alloc(Result, inst.requirements.len);
+        var initialized: usize = 0;
+        var inserted = false;
+        errdefer if (!inserted) {
+            for (results[0..initialized]) |result| if (result.message.len > 0) allocator.free(result.message);
+            allocator.free(results);
+        };
         for (inst.requirements, 0..) |r, i| {
             if (r.check) |chk| {
                 // Checks resolve against the instance's *containing* block —
@@ -154,8 +170,10 @@ fn walkInstances(
             } else {
                 results[i] = .{ .status = .na };
             }
+            initialized = i + 1;
         }
         try out.put(allocator, inst.ref_des, results);
+        inserted = true;
     }
     for (block.sub_blocks) |sb| try walkInstances(allocator, eval, sb.block, out);
 }
@@ -169,15 +187,39 @@ fn evalCheck(
 ) Result {
     return switch (chk) {
         .connected => |c| evalConnected(allocator, eval, block, inst, c.pin_a, c.pin_b),
-        .decoupling => |c| evalDecoupling(allocator, eval, block, inst, c.pin_a, c.pin_b, c.min_uf),
+        .decoupling => |c| evalDecoupling(allocator, eval, block, inst, c),
         .pullup_range => |c| evalPullupRange(allocator, eval, block, inst, c.pin, c.target_net, c.min_ohms, c.max_ohms),
-        .voltage_range => |c| evalVoltageRange(allocator, eval, block, inst, c.pin, c.min_v, c.max_v),
+        .voltage_range => |c| if (c.not_above_pin.len > 0)
+            evalVoltageNotAbove(allocator, eval, block, inst, .{
+                .pin_a = c.pin,
+                .pin_b = c.not_above_pin,
+                .margin_v = c.margin_v,
+            })
+        else
+            evalVoltageRange(allocator, eval, block, inst, c.pin, c.min_v, c.max_v),
         .tied_to_net => |c| evalTiedToNet(allocator, eval, block, inst, c.pin, c.target_net),
         .not_connected => |c| evalNotConnected(allocator, eval, block, inst, c.pin),
         .pin_not_floating => |c| evalPinNotFloating(allocator, eval, block, inst, c.pin),
         .pins_on_same_net => |c| evalPinsOnSameNet(allocator, eval, block, inst, c.pins),
         .decoupling_per_pin => |c| evalDecouplingPerPin(allocator, eval, block, inst, c.return_pin, c.pins, c.min_uf, c.count),
         .series_element => |c| evalSeriesElement(allocator, eval, block, inst, c.kind, c.pin, c.target_net, c.min, c.max),
+        .feedback_divider => |c| fromDerived(
+            derived_checks.evaluate(allocator, eval, block, inst, .{
+                .feedback_divider = c,
+            }),
+        ),
+        .set_resistor_output => |c| fromDerived(
+            derived_checks.evaluate(allocator, eval, block, inst, .{
+                .set_resistor_output = c,
+            }),
+        ),
+    };
+}
+
+fn fromDerived(result: derived_checks.Result) Result {
+    return .{
+        .status = if (result.passed) .pass else .fail,
+        .message = result.message,
     };
 }
 
@@ -205,28 +247,53 @@ fn evalDecoupling(
     eval: *Evaluator,
     block: *const DesignBlock,
     inst: Instance,
-    pin_a: []const u8,
-    pin_b: []const u8,
-    min_uf: f64,
+    check: DecouplingCheck,
 ) Result {
-    const net_a = netForPinFn(eval, block, inst, pin_a) orelse
-        return fail(allocator, pin_not_found_msg, .{pin_a});
-    const net_b = netForPinFn(eval, block, inst, pin_b) orelse
-        return fail(allocator, pin_not_found_msg, .{pin_b});
+    const net_a = netForPinFn(eval, block, inst, check.pin_a) orelse
+        return fail(allocator, pin_not_found_msg, .{check.pin_a});
+    const net_b = netForPinFn(eval, block, inst, check.pin_b) orelse
+        return fail(allocator, pin_not_found_msg, .{check.pin_b});
     if (std.mem.eql(u8, net_a, net_b)) {
-        return fail(allocator, "pins '{s}' and '{s}' are on the same net ({s}) — nothing to decouple", .{ pin_a, pin_b, net_a });
+        return fail(
+            allocator,
+            "pins '{s}' and '{s}' are on the same net ({s}) — nothing to decouple",
+            .{ check.pin_a, check.pin_b, net_a },
+        );
     }
 
-    var best_uf: f64 = 0;
-    var best_ref: []const u8 = "";
-    collectCapsBetween(block, net_a, net_b, &best_uf, &best_ref);
-    if (best_uf == 0) {
-        return fail(allocator, "no capacitor between {s} and {s}; need ≥{d:.3} µF", .{ net_a, net_b, min_uf });
+    var found: CapRangeResult = .{};
+    collectCapsBetweenRange(block, .{
+        .net_a = net_a,
+        .net_b = net_b,
+        .min_uf = check.min_uf,
+        .max_uf = check.max_uf,
+    }, &found);
+    if (found.best_uf == 0) {
+        return fail(
+            allocator,
+            "no capacitor between {s} and {s}; need ≥{d:.3} µF",
+            .{ net_a, net_b, check.min_uf },
+        );
     }
-    if (best_uf + current_tolerance_f < min_uf) {
-        return fail(allocator, "largest cap {s} = {d:.3} µF on {s}↔{s}; need ≥{d:.3} µF", .{ best_ref, best_uf, net_a, net_b, min_uf });
+    if (found.matched_ref.len > 0) {
+        return passMsg(
+            allocator,
+            "{s} ({d:.3} µF) bridges {s}↔{s}",
+            .{ found.matched_ref, found.matched_uf, net_a, net_b },
+        );
     }
-    return passMsg(allocator, "{s} ({d:.3} µF) bridges {s}↔{s}", .{ best_ref, best_uf, net_a, net_b });
+    if (found.best_uf + current_tolerance_f < check.min_uf) {
+        return fail(
+            allocator,
+            "largest cap {s} = {d:.3} µF on {s}↔{s}; need ≥{d:.3} µF",
+            .{ found.best_ref, found.best_uf, net_a, net_b, check.min_uf },
+        );
+    }
+    return fail(
+        allocator,
+        "capacitor(s) on {s}↔{s} are outside [{d:.3}, {d:.3}] µF; largest is {s} = {d:.3} µF",
+        .{ net_a, net_b, check.min_uf, check.max_uf.?, found.best_ref, found.best_uf },
+    );
 }
 
 fn evalPullupRange(
@@ -411,7 +478,7 @@ fn evalVoltageRange(
     max_v: f64,
 ) Result {
     const net = netForPinFn(eval, block, inst, pin) orelse
-        return fail(allocator, "pin '{s}' could not be resolved to a net", .{pin});
+        return fail(allocator, pin_net_unresolved_msg, .{pin});
 
     var visited: std.StringHashMapUnmanaged(void) = .empty;
     const vi = findVoltageForNet(allocator, block, net, &visited, 0) orelse
@@ -430,6 +497,49 @@ fn evalVoltageRange(
         return passMsg(allocator, "{s} rated [{d:.3}, {d:.3}] V ⊆ [{d:.3}, {d:.3}] V", .{ vi.label, lo, hi, min_v, max_v });
     };
     return fail(allocator, "{s} has no declared voltage — add (rated …) or a nominal", .{vi.label});
+}
+
+const VoltageNotAboveCheck = struct {
+    pin_a: []const u8,
+    pin_b: []const u8,
+    margin_v: f64,
+};
+
+fn evalVoltageNotAbove(
+    allocator: std.mem.Allocator,
+    eval: *Evaluator,
+    block: *const DesignBlock,
+    inst: Instance,
+    check: VoltageNotAboveCheck,
+) Result {
+    const net_a = netForPinFn(eval, block, inst, check.pin_a) orelse
+        return fail(allocator, pin_net_unresolved_msg, .{check.pin_a});
+    const net_b = netForPinFn(eval, block, inst, check.pin_b) orelse
+        return fail(allocator, pin_net_unresolved_msg, .{check.pin_b});
+
+    var visited_a: std.StringHashMapUnmanaged(void) = .empty;
+    const a = findVoltageForNet(allocator, block, net_a, &visited_a, 0) orelse
+        return fail(allocator, "no `(port …)` voltage declared on {s} — can't compare '{s}'", .{ net_a, check.pin_a });
+    var visited_b: std.StringHashMapUnmanaged(void) = .empty;
+    const b = findVoltageForNet(allocator, block, net_b, &visited_b, 0) orelse
+        return fail(allocator, "no `(port …)` voltage declared on {s} — can't compare '{s}'", .{ net_b, check.pin_b });
+
+    const a_max = a.rated_max orelse a.nominal orelse
+        return fail(allocator, "{s} has no declared maximum/nominal voltage", .{a.label});
+    const b_min = b.rated_min orelse b.nominal orelse
+        return fail(allocator, "{s} has no declared minimum/nominal voltage", .{b.label});
+    if (a_max <= b_min + check.margin_v + current_tolerance_f) {
+        return passMsg(
+            allocator,
+            "{s} max {d:.3} V <= {s} min {d:.3} V + {d:.3} V",
+            .{ a.label, a_max, b.label, b_min, check.margin_v },
+        );
+    }
+    return fail(
+        allocator,
+        "{s} max {d:.3} V exceeds {s} min {d:.3} V + {d:.3} V",
+        .{ a.label, a_max, b.label, b_min, check.margin_v },
+    );
 }
 
 fn evalTiedToNet(
@@ -460,16 +570,7 @@ fn evalNotConnected(
     if (pinout_key.len == 0) return fail(allocator, "instance has no pinout — can't resolve pin '{s}'", .{pin});
     const sym_pins = ids.getSymbolPins(eval, pinout_key) orelse
         return fail(allocator, "pinout '{s}' not loaded", .{pinout_key});
-
-    var phys_pin: ?[]const u8 = null;
-    var it = sym_pins.iterator();
-    while (it.next()) |e| {
-        if (std.ascii.eqlIgnoreCase(e.value_ptr.*, pin)) {
-            phys_pin = e.key_ptr.*;
-            break;
-        }
-    }
-    const phys = phys_pin orelse
+    const phys = physicalPin(sym_pins, pin) orelse
         return fail(allocator, "pin '{s}' not found in pinout '{s}'", .{ pin, pinout_key });
 
     // A "connected" pin is one that appears in any net with at least one OTHER
@@ -509,16 +610,7 @@ fn evalPinNotFloating(
     if (pinout_key.len == 0) return fail(allocator, "instance has no pinout — can't resolve pin '{s}'", .{pin});
     const sym_pins = ids.getSymbolPins(eval, pinout_key) orelse
         return fail(allocator, "pinout '{s}' not loaded", .{pinout_key});
-
-    var phys_pin: ?[]const u8 = null;
-    var it = sym_pins.iterator();
-    while (it.next()) |e| {
-        if (std.ascii.eqlIgnoreCase(e.value_ptr.*, pin)) {
-            phys_pin = e.key_ptr.*;
-            break;
-        }
-    }
-    const phys = phys_pin orelse
+    const phys = physicalPin(sym_pins, pin) orelse
         return fail(allocator, "pin '{s}' not found in pinout '{s}'", .{ pin, pinout_key });
 
     for (block.nets) |net| {
@@ -540,6 +632,15 @@ fn evalPinNotFloating(
         }
     }
     return fail(allocator, "pin '{s}' is floating — must be tied to a defined level", .{pin});
+}
+
+fn physicalPin(pins: *const std.StringHashMapUnmanaged([]const u8), pin: []const u8) ?[]const u8 {
+    if (pins.contains(pin)) return pin;
+    var iterator = pins.iterator();
+    while (iterator.next()) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.value_ptr.*, pin)) return entry.key_ptr.*;
+    }
+    return null;
 }
 
 fn evalPinsOnSameNet(
@@ -575,6 +676,11 @@ fn evalDecouplingPerPin(
     const ret_net = netForPinFn(eval, block, inst, return_pin) orelse
         return fail(allocator, "return pin '{s}' not found in pinout", .{return_pin});
 
+    // One physical capacitor can satisfy only one member of a per-pin rule.
+    // Without this consumed-ref set, a single cap on a shared VDD trunk was
+    // counted once for every listed pad, defeating "one cap per pin".
+    var used_caps: std.ArrayList([]const u8) = .empty;
+    defer used_caps.deinit(allocator);
     var matched: u32 = 0;
     var first_unmatched: []const u8 = "";
     for (pins) |pin_name| {
@@ -586,8 +692,10 @@ fn evalDecouplingPerPin(
 
         var best_uf: f64 = 0;
         var best_ref: []const u8 = "";
-        collectCapsBetween(block, pin_net, ret_net, &best_uf, &best_ref);
+        collectUnusedCapsBetween(block, pin_net, ret_net, used_caps.items, &best_uf, &best_ref);
         if (best_uf + current_tolerance_f >= min_uf) {
+            used_caps.append(allocator, best_ref) catch
+                return fail(allocator, "could not track distinct decoupling capacitors", .{});
             matched += 1;
         } else if (first_unmatched.len == 0) {
             first_unmatched = pin_name;
@@ -755,21 +863,71 @@ fn netBase(name: []const u8) []const u8 {
     return name[0..idx];
 }
 
-fn collectCapsBetween(
+fn collectUnusedCapsBetween(
     block: *const DesignBlock,
     net_a: []const u8,
     net_b: []const u8,
+    used_refs: []const []const u8,
     best_uf: *f64,
     best_ref: *[]const u8,
 ) void {
     for (block.instances) |c| {
         if (c.ref_des.len == 0 or c.ref_des[0] != 'C') continue;
+        if (containsString(used_refs, c.ref_des)) continue;
         if (!instancePinOnNet(block, c, net_a)) continue;
         if (!instancePinOnNet(block, c, net_b)) continue;
         const uf = parseMicroFarads(c.value) orelse continue;
         if (uf > best_uf.*) {
             best_uf.* = uf;
             best_ref.* = c.ref_des;
+        }
+    }
+}
+
+fn containsString(haystack: []const []const u8, needle: []const u8) bool {
+    for (haystack) |item| {
+        if (std.mem.eql(u8, item, needle)) return true;
+    }
+    return false;
+}
+
+const CapRangeQuery = struct {
+    net_a: []const u8,
+    net_b: []const u8,
+    min_uf: f64,
+    max_uf: ?f64,
+};
+
+const CapRangeResult = struct {
+    best_uf: f64 = 0,
+    best_ref: []const u8 = "",
+    matched_uf: f64 = 0,
+    matched_ref: []const u8 = "",
+};
+
+fn collectCapsBetweenRange(
+    block: *const DesignBlock,
+    query: CapRangeQuery,
+    result: *CapRangeResult,
+) void {
+    for (block.instances) |c| {
+        if (c.ref_des.len == 0 or c.ref_des[0] != 'C') continue;
+        if (!instancePinOnNet(block, c, query.net_a)) continue;
+        if (!instancePinOnNet(block, c, query.net_b)) continue;
+        const uf = parseMicroFarads(c.value) orelse continue;
+        if (uf > result.best_uf) {
+            result.best_uf = uf;
+            result.best_ref = c.ref_des;
+        }
+        const within_max = if (query.max_uf) |hi|
+            uf <= hi + value_tolerance_pf
+        else
+            true;
+        if (uf + value_tolerance_pf >= query.min_uf and
+            within_max and uf > result.matched_uf)
+        {
+            result.matched_uf = uf;
+            result.matched_ref = c.ref_des;
         }
     }
 }
@@ -872,106 +1030,4 @@ fn fail(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) R
 fn passMsg(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) Result {
     const msg = std.fmt.allocPrint(allocator, fmt, args) catch "";
     return .{ .status = .pass, .message = msg };
-}
-
-// spec: req_checks - parseMicroFarads handles SI-suffixed cap values
-test "parseMicroFarads" {
-    try std.testing.expectApproxEqAbs(@as(f64, 4.7), parseMicroFarads("4.7uF").?, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.1), parseMicroFarads("100nF").?, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.0001), parseMicroFarads("100pF").?, 1e-12);
-    try std.testing.expectApproxEqAbs(@as(f64, 10.0), parseMicroFarads("10µF").?, 1e-9);
-    try std.testing.expect(parseMicroFarads("garbage") == null);
-}
-
-// spec: req_checks - parseOhms handles SI prefixes for resistor values
-test "parseOhms" {
-    try std.testing.expectApproxEqAbs(@as(f64, 10000), parseOhms("10k").?, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f64, 2200), parseOhms("2.2k").?, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f64, 470), parseOhms("470").?, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f64, 1000000), parseOhms("1M").?, 1e-6);
-}
-
-// spec: req_checks - parseOhms reads a milliohm suffix and R-notation, not 1000x high
-test "parseOhms milliohm and R-notation" {
-    // "m" is milliohms, not mega — a current-sense shunt must not read 1000× high.
-    try std.testing.expectApproxEqAbs(@as(f64, 0.01), parseOhms("10m").?, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.05), parseOhms("50mohm").?, 1e-9);
-    // R-notation: R stands in for the decimal point.
-    try std.testing.expectApproxEqAbs(@as(f64, 4.7), parseOhms("4R7").?, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.05), parseOhms("0R05").?, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 4.0), parseOhms("4R").?, 1e-9);
-    // A bare ohm marker is ×1.
-    try std.testing.expectApproxEqAbs(@as(f64, 100), parseOhms("100R").?, 1e-9);
-    // An unrecognized suffix no longer passes as ohms ×1.0.
-    try std.testing.expect(parseOhms("100kHz") == null);
-    try std.testing.expect(parseOhms("10xyz") == null);
-}
-
-// spec: req_checks - parseMicroHenries handles SI-suffixed inductor values
-test "parseMicroHenries" {
-    try std.testing.expectApproxEqAbs(@as(f64, 1.0), parseMicroHenries("1uH").?, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 2.2), parseMicroHenries("2.2µH").?, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.1), parseMicroHenries("100nH").?, 1e-9);
-    try std.testing.expect(parseMicroHenries("garbage") == null);
-}
-
-// Build a one-instance design + a single-requirement results map for the
-// verifies-matching tests below. The instance carries ref-des "U6" and stable
-// id "b894897b"; its lone requirement has id "r1" and starts out `na`.
-fn verifyFixture(
-    a: std.mem.Allocator,
-    verifs: []const env_mod.Verification,
-) !struct { block: DesignBlock, results: []Result, map: std.StringHashMapUnmanaged([]Result) } {
-    const reqs = try a.dupe(env_mod.Requirement, &.{.{ .text = "rule", .id = "r1" }});
-    const insts = try a.dupe(Instance, &.{.{
-        .ref_des = "U6",
-        .component = "x",
-        .value = "",
-        .footprint = "",
-        .symbol = "",
-        .id = "b894897b",
-        .requirements = reqs,
-    }});
-    const results = try a.dupe(Result, &.{.{ .status = .na }});
-    var map: std.StringHashMapUnmanaged([]Result) = .empty;
-    try map.put(a, "U6", results);
-    return .{
-        .block = .{
-            .name = "t",
-            .instances = insts,
-            .nets = &.{},
-            .ports = &.{},
-            .notes = &.{},
-            .groups = &.{},
-            .sub_blocks = &.{},
-            .verifications = verifs,
-        },
-        .results = results,
-        .map = map,
-    };
-}
-
-// spec: req_checks - applyVerifications matches a verifies form to an instance by stable id when target-id is set
-test "applyVerifications matches by stable id" {
-    const a = std.heap.page_allocator;
-    // Target by id; the ref-des is deliberately left empty to prove the match
-    // does not lean on it.
-    var fx = try verifyFixture(a, &.{.{ .target_id = "b894897b", .req_id = "r1", .rationale = "checked" }});
-    applyVerifications(&fx.map, &fx.block, fx.block.instances);
-    try std.testing.expectEqual(Status.verified, fx.results[0].status);
-    try std.testing.expect(fx.results[0].verification != null);
-
-    // A non-matching id leaves the requirement untouched at `na`.
-    var fx2 = try verifyFixture(a, &.{.{ .target_id = "deadbeef", .req_id = "r1", .rationale = "x" }});
-    applyVerifications(&fx2.map, &fx2.block, fx2.block.instances);
-    try std.testing.expectEqual(Status.na, fx2.results[0].status);
-}
-
-// spec: req_checks - applyVerifications matches a verifies form to an instance by ref-des when target-id is empty
-test "applyVerifications matches by ref-des fallback" {
-    const a = std.heap.page_allocator;
-    var fx = try verifyFixture(a, &.{.{ .ref_des = "U6", .req_id = "r1", .rationale = "checked" }});
-    applyVerifications(&fx.map, &fx.block, fx.block.instances);
-    try std.testing.expectEqual(Status.verified, fx.results[0].status);
-    try std.testing.expect(fx.results[0].verification != null);
 }

@@ -6,4 +6,14 @@ set -eu
 
 common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
 local_hook="$common_dir/hooks/post-merge"
+
+# Production builds get a cache that no worktree or interactive build uses.
+# The machine-local hook and its detached deploy child inherit this setting.
+export ZIG_LOCAL_CACHE_DIR="$common_dir/deploy-zig-cache"
+
+if [ "$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "main" ]; then
+    short_head=$(git rev-parse --short HEAD 2>/dev/null || printf unknown)
+    printf '[post-merge] queued production deploy for %s\n' "$short_head" >>"$common_dir/deploy-on-merge.log"
+fi
+
 [ ! -x "$local_hook" ] || exec "$local_hook" "$@"

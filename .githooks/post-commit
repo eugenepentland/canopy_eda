@@ -6,4 +6,5 @@ set -eu
 
 common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
 local_hook="$common_dir/hooks/post-commit"
+export ZIG_LOCAL_CACHE_DIR="$common_dir/deploy-zig-cache"
 [ ! -x "$local_hook" ] || exec "$local_hook" "$@"

@@ -25,6 +25,11 @@ const optionalString = mcp_tools.optionalString;
 const optionalU64 = mcp_tools.optionalU64;
 const missingArg = mcp_tools.missingArg;
 const json_description_key = mcp_tools.json_description_key;
+const AllocatingWriter = @import("../allocating_writer.zig").AllocatingWriter;
+
+fn writeJsonString(w: anytype, value: []const u8) std.mem.Allocator.Error!void {
+    json_writer.writeString(w, value) catch return error.OutOfMemory;
+}
 
 // ── Constants ─────────────────────────────────────────────────────
 const json_manufacturer_key = ",\"manufacturer\":";
@@ -57,43 +62,45 @@ pub fn toolDownloadFootprint(
     const part_number = requireString(args_val, key_part_number) orelse
         return missingArg(out, allocator, key_part_number);
     const manufacturer = optionalString(args_val, "manufacturer");
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
 
-    const auth = (try cse_auth.resolveOrWrite(w, allocator)) orelse return false;
+    const auth = (cse_auth.resolveOrWrite(w, allocator) catch return error.OutOfMemory) orelse return false;
 
     const dl = component_search.downloadFootprint(allocator, part_number, manufacturer, auth) catch |err| {
         try w.writeAll("{\"ok\":false,\"stage\":\"download\",\"error\":");
-        try json_writer.writeString(w, component_search.errorMessage(err));
+        try writeJsonString(w, component_search.errorMessage(err));
         try w.writeAll("}");
         return false;
     };
 
     const imp = upload.importZipBytes(allocator, project_dir, dl.zip_bytes, dl.suggested_filename) catch |err| {
         try w.writeAll("{\"ok\":false,\"stage\":\"import\",\"downloaded\":");
-        try json_writer.writeString(w, dl.suggested_filename);
+        try writeJsonString(w, dl.suggested_filename);
         try w.writeAll(",\"error\":");
-        try json_writer.writeString(w, upload.importErrorMessage(err));
+        try writeJsonString(w, upload.importErrorMessage(err));
         try w.writeAll("}");
         return false;
     };
 
     try w.writeAll("{\"ok\":true,\"part_name\":");
-    try json_writer.writeString(w, dl.part_name);
+    try writeJsonString(w, dl.part_name);
     try w.writeAll(json_manufacturer_key);
-    try json_writer.writeString(w, dl.manufacturer);
+    try writeJsonString(w, dl.manufacturer);
     try w.writeAll(",\"samac_id\":");
-    try json_writer.writeString(w, dl.samac_id);
+    try writeJsonString(w, dl.samac_id);
     try w.writeAll(",\"zip\":");
-    try json_writer.writeString(w, dl.suggested_filename);
+    try writeJsonString(w, dl.suggested_filename);
     try w.print(",\"zip_size\":{d},\"component\":", .{dl.zip_bytes.len});
-    try json_writer.writeString(w, imp.component_name);
+    try writeJsonString(w, imp.component_name);
     try w.writeAll(",\"footprint\":");
-    try json_writer.writeString(w, imp.footprint_name);
+    try writeJsonString(w, imp.footprint_name);
     try w.writeAll(",\"pinout\":");
-    try json_writer.writeString(w, imp.pinout_name);
+    try writeJsonString(w, imp.pinout_name);
     try w.print(",\"has_3d_model\":{s}", .{if (imp.has_3d) "true" else "false"});
     try w.writeAll(",\"component_action\":");
-    try json_writer.writeString(w, @tagName(imp.component));
+    try writeJsonString(w, @tagName(imp.component));
     try w.writeAll("}");
     return true;
 }
@@ -116,7 +123,9 @@ pub fn toolDownloadDatasheet(
     const part_number = requireString(args_val, key_part_number) orelse
         return missingArg(out, allocator, key_part_number);
     const manufacturer = optionalString(args_val, "manufacturer");
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
 
     var cse_msg: []const u8 = "";
     switch (try tryCseDatasheet(w, allocator, project_dir, part_number, manufacturer)) {
@@ -133,11 +142,11 @@ pub fn toolDownloadDatasheet(
     }
 
     try w.writeAll(json_err_open);
-    try json_writer.writeString(w, "no datasheet found via Component Search Engine or DigiKey");
+    try writeJsonString(w, "no datasheet found via Component Search Engine or DigiKey");
     try w.writeAll(",\"cse_error\":");
-    try json_writer.writeString(w, cse_msg);
+    try writeJsonString(w, cse_msg);
     try w.writeAll(",\"digikey_error\":");
-    try json_writer.writeString(w, dk_msg);
+    try writeJsonString(w, dk_msg);
     try w.writeAll("}");
     return false;
 }
@@ -233,15 +242,15 @@ fn finishDatasheet(
         return false;
     };
     try w.writeAll("{\"ok\":true,\"source\":");
-    try json_writer.writeString(w, ds.source);
+    try writeJsonString(w, ds.source);
     try w.writeAll(",\"file\":");
-    try json_writer.writeString(w, stored.name);
+    try writeJsonString(w, stored.name);
     try w.print(",\"size\":{d},\"part\":", .{stored.size});
-    try json_writer.writeString(w, ds.part);
+    try writeJsonString(w, ds.part);
     try w.writeAll(json_manufacturer_key);
-    try json_writer.writeString(w, ds.manufacturer);
+    try writeJsonString(w, ds.manufacturer);
     try w.writeAll(",\"datasheet_url\":");
-    try json_writer.writeString(w, ds.url);
+    try writeJsonString(w, ds.url);
     try w.writeAll("}");
     return true;
 }
@@ -263,24 +272,26 @@ pub fn toolSearchComponents(
         @intCast(@min(l, search_limit_max))
     else
         search_limit_default;
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
 
     const hits = component_search.searchComponents(allocator, query, limit) catch |err| {
         try w.writeAll(json_err_open);
-        try json_writer.writeString(w, component_search.searchErrorMessage(err));
+        try writeJsonString(w, component_search.searchErrorMessage(err));
         try w.writeAll("}");
         return false;
     };
 
     try w.writeAll(json_ok_query_open);
-    try json_writer.writeString(w, query);
+    try writeJsonString(w, query);
     try w.print(json_count_results_open, .{hits.len});
     for (hits, 0..) |h, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"part_number\":");
-        try json_writer.writeString(w, h.part_name);
+        try writeJsonString(w, h.part_name);
         try w.writeAll(json_manufacturer_key);
-        try json_writer.writeString(w, h.manufacturer);
+        try writeJsonString(w, h.manufacturer);
         try w.print(",\"has_model\":{s},\"has_datasheet\":{s}}}", .{
             if (h.samac_id != null) "true" else "false",
             if (h.datasheet_url != null) "true" else "false",
@@ -308,7 +319,9 @@ pub fn toolResolveMpn(
         @intCast(@min(l, search_limit_max))
     else
         search_limit_default;
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
 
     const creds = (try digikeyCreds(allocator, w)) orelse return false;
     const products = digikey.resolveMpn(
@@ -320,22 +333,22 @@ pub fn toolResolveMpn(
         limit,
     ) catch |err| {
         try w.writeAll(json_err_open);
-        try json_writer.writeString(w, digikey.searchErrorMessage(err));
+        try writeJsonString(w, digikey.searchErrorMessage(err));
         try w.writeAll("}");
         return false;
     };
 
     try w.writeAll(json_ok_query_open);
-    try json_writer.writeString(w, query);
+    try writeJsonString(w, query);
     try w.print(json_count_results_open, .{products.len});
     for (products, 0..) |p, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"mpn\":");
-        try json_writer.writeString(w, p.mpn);
+        try writeJsonString(w, p.mpn);
         try w.writeAll(json_manufacturer_key);
-        try json_writer.writeString(w, p.manufacturer);
+        try writeJsonString(w, p.manufacturer);
         try w.writeAll(json_description_key);
-        try json_writer.writeString(w, p.description);
+        try writeJsonString(w, p.description);
         try w.writeAll(",\"datasheet_url\":");
         try writeOptString(w, p.datasheet_url);
         try w.writeAll(",\"product_url\":");
@@ -372,7 +385,9 @@ pub fn toolCheckStock(
         @intCast(@min(l, search_limit_max))
     else
         stock_limit_default;
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
 
     const creds = (try digikeyCreds(allocator, w)) orelse return false;
     const products = digikey.resolveMpn(
@@ -384,22 +399,22 @@ pub fn toolCheckStock(
         limit,
     ) catch |err| {
         try w.writeAll(json_err_open);
-        try json_writer.writeString(w, digikey.searchErrorMessage(err));
+        try writeJsonString(w, digikey.searchErrorMessage(err));
         try w.writeAll("}");
         return false;
     };
 
     try w.writeAll(json_ok_query_open);
-    try json_writer.writeString(w, query);
+    try writeJsonString(w, query);
     try w.print(json_count_results_open, .{products.len});
     for (products, 0..) |p, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"mpn\":");
-        try json_writer.writeString(w, p.mpn);
+        try writeJsonString(w, p.mpn);
         try w.writeAll(json_manufacturer_key);
-        try json_writer.writeString(w, p.manufacturer);
+        try writeJsonString(w, p.manufacturer);
         try w.writeAll(json_description_key);
-        try json_writer.writeString(w, p.description);
+        try writeJsonString(w, p.description);
         try w.writeAll(",\"product_status\":");
         try writeOptString(w, p.product_status);
         try w.print(",\"quantity_available\":{d},\"unit_price\":", .{p.quantity_available});
@@ -455,7 +470,7 @@ fn digikeyCreds(allocator: std.mem.Allocator, w: anytype) !?DigiKeyCreds {
 /// Emit a JSON string, or `null` when the optional is absent.
 fn writeOptString(w: anytype, s: ?[]const u8) !void {
     if (s) |v| {
-        try json_writer.writeString(w, v);
+        try writeJsonString(w, v);
     } else {
         try w.writeAll("null");
     }
@@ -492,9 +507,9 @@ test "finishDatasheet returns false when the store rejects the bytes" {
     // `false`->`true` flip would report success on a rejected datasheet.
     // Non-PDF bytes make storeDatasheet fail with NotPdf before any write.
     const alloc = std.testing.allocator;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(alloc);
-    const w = out.writer(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    const w: AllocatingWriter = .{ .writer = &out.writer };
     const ok = try finishDatasheet(w, alloc, "/proj", .{
         .source = "digikey",
         .filename = "x.pdf",

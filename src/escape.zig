@@ -23,20 +23,19 @@ pub fn writeXml(w: anytype, s: []const u8) !void {
 }
 
 test "writeXml escapes markup and both quote styles" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    const w = buf.writer(std.testing.allocator);
-    try writeXml(w, "a<b>&\"'c");
-    try std.testing.expectEqualStrings("a&lt;b&gt;&amp;&quot;&#39;c", buf.items);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeXml(&out.writer, "a<b>&\"'c");
+    try std.testing.expectEqualStrings("a&lt;b&gt;&amp;&quot;&#39;c", out.written());
 }
 
 test "writeXml neutralizes a script/attribute breakout" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    const w = buf.writer(std.testing.allocator);
-    try writeXml(w, "\"><script>alert(1)</script>");
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try writeXml(&out.writer, "\"><script>alert(1)</script>");
+    const written = out.written();
     // No literal '<', '>' or '"' survives, so neither an attribute nor a tag can be closed.
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, '<') == null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, '>') == null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, buf.items, '"') == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, written, '<') == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, written, '>') == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, written, '"') == null);
 }

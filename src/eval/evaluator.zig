@@ -82,6 +82,10 @@ pub const EvalError = error{
     /// number of attempts — effectively impossible at ~30 bits of entropy,
     /// but kept so the re-roll loop has a defined exit.
     IdSpaceExhausted,
+    /// The operating system could not provide secure entropy for a new ID.
+    EntropyUnavailable,
+    /// ID generation was canceled by the active process I/O capability.
+    Canceled,
 };
 
 /// One pin-to-net binding gathered while evaluating an instance or
@@ -236,9 +240,14 @@ pub const Evaluator = struct {
         buses: []const BusDef = &.{},
         is_family: bool,
         param_type: []const u8, // "resistance", "capacitance", etc.
-        /// PDF filenames in `lib/datasheets/` that document this part.
-        /// Parsed from `(datasheet "file.pdf")` in the component file.
-        datasheets: []const []const u8 = &.{},
+        /// The part's library documentation: the `(datasheet "file.pdf")` PDFs
+        /// and the digest-bound `(datasheet-review …)` record.
+        docs: env_mod.ComponentDocs = .{},
+        /// The part's `(thermal …)` declaration — θJA/θJB/ψJT, max junction
+        /// temperature, rated ambient range. Null when the library file
+        /// declares none; the thermal analyzer then estimates θJA from the
+        /// footprint's package name.
+        thermal: ?env_mod.ThermalDecl = null,
         /// Rules for using this part correctly (e.g. "VDD must be decoupled
         /// with 100nF within 3mm"). Parsed from
         /// `(requirement "text" (ref "file.pdf" (page N)))`. Shared across
@@ -293,6 +302,13 @@ pub const Evaluator = struct {
         self.warnings.deinit(self.allocator);
         self.module_stack.deinit(self.allocator);
         self.imports_in_progress.deinit(self.allocator);
+        // Every `loaded_files` key is a dup this evaluator owns (both insertion
+        // sites — `builders.loadFile` and the import path — copy the caller's
+        // path, because the read-set outlives the call that produced it). The
+        // VALUES stay: AST nodes slice into a source buffer deliberately never
+        // freed.
+        var loaded_keys = self.loaded_files.keyIterator();
+        while (loaded_keys.next()) |k| self.allocator.free(k.*);
         self.loaded_files.deinit(self.allocator);
         self.component_cache.deinit(self.allocator);
         self.symbol_pin_cache.deinit(self.allocator);
@@ -378,8 +394,9 @@ pub const Evaluator = struct {
     /// the original slice when the stack is empty or allocation fails.
     fn withModuleContext(self: *Evaluator, message: []const u8) []const u8 {
         if (self.module_stack.items.len == 0) return message;
-        var buf: std.ArrayList(u8) = .empty;
-        const w = buf.writer(self.allocator);
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        const w = &buf.writer;
         w.writeAll(message) catch return message;
         var i = self.module_stack.items.len;
         while (i > 0) {
@@ -387,7 +404,7 @@ pub const Evaluator = struct {
             const frame = self.module_stack.items[i];
             w.print("\n  in module '{s}' (called at {d}:{d})", .{ frame.name, frame.call_span.line, frame.call_span.col }) catch return message;
         }
-        return buf.toOwnedSlice(self.allocator) catch message;
+        return buf.toOwnedSlice() catch message;
     }
 
     /// Record a formatted diagnostic. The message is allocated from the
@@ -419,6 +436,7 @@ pub const Evaluator = struct {
         // Special forms (don't evaluate arguments eagerly)
         if (SpecialForm.fromAtom(head_name)) |sf| return switch (sf) {
             .let => special_forms.evalLet(self, args, env),
+            .repeat => special_forms.evalRepeat(self, args, env),
             .if_ => special_forms.evalIf(self, args, env),
             .import => modules.evalImport(self, args, env),
             .defmodule => modules.evalDefmodule(self, args, env),
@@ -435,6 +453,12 @@ pub const Evaluator = struct {
             .assert_range => special_forms.evalAssertRange(self, args, env),
             .fmt_ => special_forms.evalFmt(self, args, env),
             .id_ => .nil,
+            // Source metadata consumed by module_metadata.zig. It has no
+            // runtime value, but must be evaluable in wrapped module bodies.
+            .implements => blk: {
+                try special_forms.checkArity(self, .implements, args);
+                break :blk .nil;
+            },
         };
 
         // Builtins (evaluate arguments first). Looking the operator up
@@ -490,12 +514,6 @@ pub const Evaluator = struct {
         self.setError(head.span, suggest.unboundMessage(self, head_name, env));
         return EvalError.UnboundVariable;
     }
-
-    // Public re-exports for backward compatibility (used by external callers via Evaluator.foo)
-    pub const parseId = ids.parseId;
-    pub const isStandardRefDes = ids.isStandardRefDes;
-    pub const generateId = ids.generateId;
-    pub const deriveChildId = ids.deriveChildId;
 };
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -602,6 +620,69 @@ test "eval let bindings" {
 
     const result = try eval.evalNodes(nodes, &env);
     try std.testing.expectEqual(@as(f64, 8.0), result.asNumber().?);
+}
+
+// spec: eval/evaluator - repeat evaluates every integer in its inclusive range and composes with arithmetic and fmt
+test "eval repeat inclusive range with arithmetic and fmt" {
+    // page_allocator: each iteration's fmt/assert strings intentionally live
+    // for the evaluator lifetime (project allocation convention).
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const nodes = try parser.parse(alloc,
+        \\(repeat ch (+ 0 1) 3
+        \\  (assert (>= ch 1) (fmt "channel ~a" ch))
+        \\  (fmt "J~a" (+ ch 1)))
+    );
+    defer parser.freeNodes(alloc, nodes);
+
+    const result = try eval.evalNode(nodes[0], &env);
+    defer alloc.free(result.asString().?);
+    try std.testing.expectEqualStrings("J4", result.asString().?);
+    try std.testing.expectEqual(@as(usize, 3), eval.assertions.items.len);
+    try std.testing.expectEqualStrings("channel 1", eval.assertions.items[0].message);
+    try std.testing.expectEqualStrings("channel 3", eval.assertions.items[2].message);
+}
+
+// spec: eval/evaluator - repeat binds its index lexically without replacing an enclosing binding
+test "eval repeat index is lexical" {
+    // page_allocator: the descending repeat produces one fmt string per
+    // iteration; only the final value is returned.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const nodes = try parser.parse(alloc, "(let ch 99) (repeat ch 2 1 (fmt \"~a\" ch)) ch");
+    defer parser.freeNodes(alloc, nodes);
+
+    const result = try eval.evalNodes(nodes, &env);
+    try std.testing.expectEqual(@as(f64, 99.0), result.asNumber().?);
+}
+
+// spec: eval/evaluator - repeat rejects fractional bounds instead of silently rounding them
+test "eval repeat requires integer bounds" {
+    // page_allocator: the source-located diagnostic intentionally owns its
+    // formatted message for the evaluator lifetime.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const nodes = try parser.parse(alloc, "(repeat ch 1.5 3 ch)");
+    defer parser.freeNodes(alloc, nodes);
+
+    try std.testing.expectError(EvalError.InvalidForm, eval.evalNode(nodes[0], &env));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try std.testing.expect(std.mem.indexOf(u8, diag.message, "start bound must be a finite integer") != null);
 }
 
 // spec: eval/evaluator - SI-suffixed literals evaluate to their scaled numeric value
@@ -832,13 +913,13 @@ const passives_prelude_files = [_]struct { name: []const u8, body: []const u8 }{
 
 fn makePassivesTmp(alloc: std.mem.Allocator) !struct { tmp: std.testing.TmpDir, path: []const u8 } {
     var tmp = std.testing.tmpDir(.{});
-    try tmp.dir.makePath("lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
     for (passives_prelude_files) |f| {
         const sub_path = try std.fmt.allocPrint(alloc, "lib/components/{s}.sexp", .{f.name});
         defer alloc.free(sub_path);
-        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = f.body });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = f.body });
     }
-    const path = try tmp.dir.realpathAlloc(alloc, ".");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     return .{ .tmp = tmp, .path = path };
 }
 
@@ -870,7 +951,7 @@ test "passives prelude tolerates missing files" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try tmp.dir.realpathAlloc(alloc, ".");
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(path);
 
     // No lib/components dir at all — every prelude entry is unresolvable.
@@ -911,8 +992,8 @@ test "evalFile auto-imports passives prelude" {
 
     // Design uses cap-0402 with no explicit import. If the prelude doesn't
     // fire before user nodes evaluate, this errors with UnboundVariable.
-    try fx.tmp.dir.makePath("src/sample");
-    try fx.tmp.dir.writeFile(.{
+    try fx.tmp.dir.createDirPath(std.testing.io, "src/sample");
+    try fx.tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "src/sample/sample.sexp",
         .data =
         \\(design-block "Sample"
@@ -941,8 +1022,8 @@ test "module loading triggers passives prelude" {
 
     // Module body uses cap-0402 inside its design-block without an explicit
     // import — only succeeds if module loading runs the prelude first.
-    try fx.tmp.dir.makePath("lib/modules");
-    try fx.tmp.dir.writeFile(.{
+    try fx.tmp.dir.createDirPath(std.testing.io, "lib/modules");
+    try fx.tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/modules/sample-mod.sexp",
         .data =
         \\(defmodule sample-mod ()

@@ -230,7 +230,7 @@ fn appendNetChange(
 }
 
 /// Serialize a DesignDiff as the API's JSON object.
-pub fn writeDiffJson(w: anytype, diff: DesignDiff) std.mem.Allocator.Error!void {
+pub fn writeDiffJson(w: anytype, diff: DesignDiff) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     try w.writeAll("{\"instances_added\":[");
     for (diff.instances_added, 0..) |e, i| {
         if (i > 0) try w.writeAll(",");
@@ -271,7 +271,7 @@ pub fn writeDiffJson(w: anytype, diff: DesignDiff) std.mem.Allocator.Error!void 
     try w.writeAll("]}");
 }
 
-fn writeInstanceEntry(w: anytype, e: InstanceEntry) std.mem.Allocator.Error!void {
+fn writeInstanceEntry(w: anytype, e: InstanceEntry) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     try w.writeAll("{\"ref\":");
     try json_writer.writeString(w, e.ref);
     try w.writeAll(",\"component\":");
@@ -281,7 +281,7 @@ fn writeInstanceEntry(w: anytype, e: InstanceEntry) std.mem.Allocator.Error!void
     try w.writeAll("}");
 }
 
-fn writeFieldChange(w: anytype, c: FieldChange) std.mem.Allocator.Error!void {
+fn writeFieldChange(w: anytype, c: FieldChange) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     try w.writeAll("{\"ref\":");
     try json_writer.writeString(w, c.ref);
     try w.writeAll(",\"old\":");
@@ -307,8 +307,8 @@ pub fn historyApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
         res.body = "{\"error\":\"failed to list history\"}";
         return;
     };
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
     try w.writeAll("{\"snapshots\":[");
     for (snaps, 0..) |s, i| {
         if (i > 0) try w.writeAll(",");
@@ -319,7 +319,7 @@ pub fn historyApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
         try w.writeAll("}");
     }
     try w.writeAll("]}");
-    res.body = buf.items;
+    res.body = buf.written();
 }
 
 /// GET /api/diff/:name?from=<id>&to=<id|current> — evaluate both revisions
@@ -375,8 +375,8 @@ pub fn diffApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerE
 
     const diff = try diffBlocks(ctx.allocator, old_block, new_block);
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
     try w.writeAll("{\"name\":");
     try json_writer.writeString(w, name);
     try w.writeAll(",\"from\":");
@@ -386,7 +386,7 @@ pub fn diffApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerE
     try w.writeAll(",\"diff\":");
     try writeDiffJson(w, diff);
     try w.writeAll("}");
-    res.body = buf.items;
+    res.body = buf.written();
 }
 
 /// Resolve a version id to a source path: `current` → the working file under
@@ -447,9 +447,9 @@ test "diffBlocks on two inline revisions" {
     const alloc = std.heap.page_allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0402.sexp", .data = test_cap_family });
-    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/cap-0402.sexp", .data = test_cap_family });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     var old_eval = Evaluator.init(alloc, project);
     defer old_eval.deinit();
@@ -510,9 +510,9 @@ test "diffBlocks identical revisions is empty" {
     const alloc = std.heap.page_allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0402.sexp", .data = test_cap_family });
-    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/cap-0402.sexp", .data = test_cap_family });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     const source =
         \\(design-block "Rev"

@@ -1,41 +1,51 @@
-//! Post-route design-rule check. Given a placement and the router's output,
-//! it flags every pair of copper features on *different* nets that sit closer
-//! than the clearance rule — the common offender being a ground via dropped on
-//! a pad whose copper then crowds a neighbouring pad of another net.
-//!
-//! Scope: via↔pad, via↔via, via↔track, track↔track, track↔pad, and pad↔pad
-//! (across parts). Track↔track and track↔pad are checked geometrically
-//! because not all copper comes from the maze grid — breakout/escape stubs,
-//! hand-drawn tracks, and stamped module copper are all drawn at arbitrary
-//! points, so the grid-pitch spacing guarantee doesn't cover them. Both are
-//! layer-aware: an SMD pad only clashes with copper on its own side;
-//! through-hole pads clash on every layer. Coordinates are millimetres; gaps
-//! are edge-to-edge (0 ⇒ touching, negative ⇒ overlapping).
+//! Post-route design-rule check. Flags every pair of copper features on
+//! *different* nets closer than the clearance rule (via↔pad, via↔via, via↔track,
+//! track↔track, track↔pad, pad↔pad across parts), plus the drill/edge/courtyard/
+//! mask/silk/width and differential-pair rules. Track↔copper is geometric
+//! (off-maze stubs, hand-drawn/stamped copper aren't grid-spaced) and layer-aware
+//! (SMD pad clashes only on its own side, a through pad on every layer). Gaps are
+//! edge-to-edge mm (0 ⇒ touching, − ⇒ overlapping); pairwise loops are grid-culled.
 
 const std = @import("std");
+const bend_smooth = @import("bend_smooth.zig");
+const copper_support = @import("copper_support.zig");
+const copper_topology = @import("copper_topology.zig");
 const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
+const drc_diffpair = @import("drc_diffpair.zig");
+const drc_keepout = @import("drc_keepout.zig");
+const drc_perimeter_keepout = @import("drc_perimeter_keepout.zig");
+const drc_match = @import("drc_match.zig");
+const geometry = @import("geometry.zig");
+const keepout = @import("keepout.zig");
+const land_transit = @import("land_transit.zig");
 const pad_shape = @import("pad_shape.zig");
+const pose_math = @import("pose_math.zig");
 const outline = @import("outline.zig");
-const export_kicad = @import("../export_kicad.zig");
+const via_antipad = @import("via_antipad.zig");
+const board_layers = @import("../board_layers.zig");
+const flat_netlist = @import("../flat_netlist.zig");
 const numeric = @import("../numeric.zig");
 
-const FlatNet = export_kicad.FlatNet;
+const FlatNet = flat_netlist.FlatNet;
 
-/// What two features clash. Used for the marker label on the page.
-/// `annular` = a via's copper ring around its drill is thinner than the
-/// fab minimum; `pad_annular` = the same, for a plated through-hole PAD;
-/// `board_edge` = routed copper closer to the board outline than
-/// the copper-to-edge rule; `courtyard` = two placed parts' courtyards overlap
-/// (on the same board side); `hole_hole` = two drilled holes' walls sit closer
-/// than the hole-to-hole rule; `min_drill` = a drilled hole below the minimum
-/// drill diameter; `min_width` was replaced by `track_width` = a track thinner
-/// than its net class / the board minimum; `mask_sliver` = a solder-mask web
-/// between two adjacent openings below the minimum; `silk_over_pad` = silkscreen
-/// (footprint art or a ref-des) crossing a foreign pad's mask opening.
+/// What two features clash (the page marker label). `annular`/`pad_annular` =
+/// via / plated-thru-pad ring under the fab minimum; `board_edge` = copper (a
+/// track, a via, or a component land) near the outline; `component_edge` = a
+/// component courtyard/body proxy inside the assembly edge margin; `courtyard`/
+/// `hole_hole`/`min_drill`/`track_width`/`mask_sliver`/
+/// `silk_over_pad` as named; `diff_uncoupled`/`diff_skew` = differential-pair
+/// coupling / length-match warnings (see `drc_diffpair.zig`).
 pub const Kind = enum {
     via_pad,
     via_via,
+    /// Two vias of the SAME net crowded together — a redundant drill planted
+    /// beside copper that already reaches both layers. `via_via` skips a
+    /// same-net pair (electrically they are one node), so before this rule the
+    /// only thing left covering them was the net-blind `hole_hole` drill wall,
+    /// which a board declaring a tight `(design-rules (hole-to-hole …))` lets
+    /// through at a copper gap of microns. See `viaSpacingRule`.
+    via_spacing,
     via_track,
     track_track,
     track_pad,
@@ -43,32 +53,229 @@ pub const Kind = enum {
     annular,
     pad_annular,
     board_edge,
+    component_edge,
     courtyard,
     hole_hole,
     min_drill,
     track_width,
+    /// A routed trace endpoint that lands on no same-net pad, via, pour, or
+    /// other trace. This is disconnected artifact copper and therefore an
+    /// error, even when the net's real terminals are connected elsewhere.
+    copper_stub,
+    /// Same-net trace capsules physically touch, but the two stored
+    /// centrelines have no explicit endpoint-on-centreline junction. The board
+    /// will conduct as drawn, yet the router must not use a width-dependent
+    /// graze as its proof of connectivity. Generated routes canonicalize these
+    /// joins; saved/imported copper receives one warning per implicit contact.
+    implicit_junction,
+    /// Same-net copper separated by more than the 1 µm contact tolerance
+    /// but no more than 20 µm. It remains electrically open and fabrication
+    /// must not decide whether it happens to conduct.
+    hairline_gap,
+    /// A stored trace section whose deletion preserves the connectivity of all
+    /// pads, useful vias, and pours. One finding is emitted per section. The
+    /// copper is electrically redundant, so this is a warning; a saved board
+    /// carrying one wants a re-route or a hand delete.
+    dangling_copper,
+    /// A through-via whose barrel reaches fewer than two copper layers. It is
+    /// electrically redundant but fabrication-safe, so this is a warning.
+    single_layer_via,
+    /// A through-via that may reach several copper layers but is not an
+    /// articulation of the same-net copper graph. Deleting the jointly planned
+    /// subset leaves every pad, trace, and remaining via component connected
+    /// exactly as before. Ground is excluded; unnamed legacy fill contacts are
+    /// conservatively retained.
+    redundant_via,
+    /// SAME-net copper lying on a pad's land without being aimed at its centre
+    /// — a run that laps a flank or turns beside the land rather than
+    /// terminating on it. Electrically nothing (a track anywhere on a land is
+    /// the same node, which is why every clearance rule stays silent), but the
+    /// copper that laps a land continues into the corridor between it and its
+    /// neighbour, which on a fine-pitch part is a fifth of a millimetre wide.
+    /// A warning: the board still builds. See `land_transit.zig`.
+    land_transit,
+    /// An SMD ground pad whose nearest same-net through via is farther away
+    /// than the authored `(ground-via-max MM)` budget. This is a return-path
+    /// inductance warning, not a fabrication defect.
+    ground_via_distance,
+    /// Fast-net copper passes over a void in its exact fabricated reference
+    /// plane fill (split, slot, antipad wall, or missing plane island).
+    reference_plane_gap,
+    /// A signal via changes physical reference planes without the required
+    /// nearby reference-net stitching via or cross-reference capacitor.
+    reference_transition,
+    /// Estimated trace/reference loop area exceeds the net class's authored
+    /// `(return-path (max-loop-area …))` budget.
+    loop_area,
+    /// A decoupling capacitor's rail land has no continuous same-face copper
+    /// path to the exact IC supply land its placement loop targets. A remote
+    /// rail pour or two independent plane drops may make the NET connected,
+    /// but they do not make the local high-frequency bypass connection.
+    bypass_open,
     mask_sliver,
     silk_over_pad,
+    diff_uncoupled,
+    diff_skew,
+    /// A `(net-class … (match-group "NAME" (tolerance MM)))` group whose routed
+    /// members differ in effective length by more than the declared spread — an
+    /// electrical PREFERENCE (a timing budget), so a WARNING like the diff-pair
+    /// rules it generalizes, never a fab-blocking error. See `drc_match.zig`.
+    length_mismatch,
+    sharp_bend,
+    /// Foreign copper inside a net's declared `(net-class … (keepout MM))`
+    /// same-layer halo — an RF isolation preference, so a WARNING (see
+    /// `drc_keepout.zig`), never a fab-blocking error unless escalated per
+    /// design from the DRC policy drawer.
+    keepout_violation,
+    /// A component, track, or via inside the fixed exclusion band authored by
+    /// `(board … (perimeter-fence … (keepout …)))`. Unlike an RF isolation
+    /// preference, this is board-construction geometry and is fab-blocking.
+    perimeter_keepout,
+    /// A net whose drawn copper does not all connect — two islands that never
+    /// join (fab-fatal, invisible to clearance). Produced by `net_open.zig`,
+    /// layered on at the serve seam (`drc_rules.checkFiltered`), not in
+    /// `check` — the router/WASM hot paths never pay its per-net pour raster.
+    net_open,
 };
 
-/// Severity of a violation. `err` blocks the fab-readiness gate (a 409 on the
-/// Gerber download); `warn` flows through as an informational gate warning and
-/// a differently-counted viewer chip, but never blocks. Every `Violation`
-/// defaults to `err`; only the assembly-hygiene checks (courtyard overlap,
-/// mask slivers, silkscreen over a pad) mark themselves `warn`.
+/// Severity: `err` blocks the fab gate; `warn` is informational only. Every
+/// `Violation` defaults to `err`; the assembly-hygiene + diff-pair checks `warn`.
 pub const Severity = enum { err, warn };
 
-// The drill-station rule DEFAULTS (min-annular 0.1, min-drill 0.2,
-// hole-to-hole 0.25 mm) live on `optimizer.DesignRules` — one source of truth
-// resolved from the design's `(design-rules …)` form. This DRC reads them from
-// `placement.rules.design`; an absent form leaves each at its default. The
-// router's default via (0.4 ⌀ / 0.2 drill) sits exactly on the 0.1 mm annular
-// floor, so default routing is legal by construction and only a deliberately
-// thinner (net-class) via trips the annular check.
+/// One hand-authored copper region credited by the topology checks (see
+/// `copper_support.Zone`). Re-exported under the historical name so every
+/// caller keeps spelling it `drc.TopologyZone`; the type and every reading
+/// taken from it live in `copper_support`, which is also what the router's
+/// finish consumes, so check and cleanup cannot disagree about the board.
+pub const TopologyZone = copper_support.Zone;
 
-/// One clearance violation, located at the midpoint of the offending gap.
-/// `severity` defaults to `err` so every existing check keeps blocking the fab
-/// gate; the assembly-hygiene checks set `warn` explicitly.
+/// The ONE canonical kind → built-in severity table. Every producer stamps its
+/// violations from here (`drc.zig`'s own hygiene + bend rules, `drc_diffpair`,
+/// `drc_keepout`, `net_open`) and the serve layer's DRC-policy drawer renders
+/// the same answer through `drc_rules.defaultSeverity`, so the emitted severity
+/// and the advertised default cannot disagree.
+///
+/// It exists because they DID disagree: the table was written as a copy of the
+/// `severity = .warn` sites in this file, then `diff_uncoupled` / `diff_skew`
+/// moved out to `drc_diffpair.zig` and the copy was never updated — the checker
+/// emitted warnings while the policy drawer advertised (and, for anything
+/// reading the table rather than the violation, treated) them as fab errors.
+///
+/// Warnings are the findings a board can still be fabricated with: assembly
+/// hygiene (courtyard / mask sliver / silk over pad), RF preferences (keepout
+/// halo, sharp bend), and differential-pair coupling / skew. Everything else is
+/// a fab error and blocks the gate.
+pub fn defaultSeverity(k: Kind) Severity {
+    return switch (k) {
+        // Assembly hygiene — the board builds; a human decides whether to care.
+        .component_edge, .courtyard, .mask_sliver, .silk_over_pad, .single_layer_via, .redundant_via => .warn,
+        // Copper lying wholly on its own net's land: junk a reader should not
+        // have to explain, but it can neither short nor open a net.
+        .dangling_copper, .implicit_junction => .warn,
+        // Same-net copper lapping a land it does not terminate on: a
+        // solder-bridge risk a reader should see, not a fab rule — it can
+        // neither short (it is the pad's own net) nor open anything.
+        .land_transit => .warn,
+        // A legal board can still have a long ground return. The authored
+        // distance is an SI budget, so report it without blocking fabrication.
+        .ground_via_distance, .reference_plane_gap, .reference_transition, .loop_area => .warn,
+        // The board can still fabricate, but the authored bypass relationship
+        // is electrically ineffective at high frequency until its local
+        // surface leg reaches the intended IC land.
+        .bypass_open => .warn,
+        // RF bend discipline: a corner the smoothing pass could not round to its
+        // required radius is a signal-integrity preference, not a fab rule.
+        .sharp_bend => .warn,
+        // An RF keepout intrusion is likewise a preference: the board still
+        // builds. Error severity is what `drc.errorCount` gates — add_tracks,
+        // close_open_nets and the fence ratchet all refuse to write above zero —
+        // so this MUST stay a warning or advisory findings would block hand
+        // routing. Per-design escalation lives in the viewer's DRC policy drawer.
+        .keepout_violation => .warn,
+        .perimeter_keepout => .err,
+        // Differential-pair coupling / length match (see `drc_diffpair.zig`):
+        // both require BOTH legs routed, both are tolerance-window judgements,
+        // and neither stops a fab house — deliberately non-blocking.
+        .diff_uncoupled, .diff_skew => .warn,
+        // A `(match-group …)` spread over budget is the same shape of judgement
+        // across N nets instead of two: the board builds and the copper is
+        // legal, a timing margin is what is at risk. Warning severity is also
+        // load-bearing — `drc.errorCount` gates add_tracks / close_open_nets /
+        // the fence ratchet, so an over-budget bus must not lock hand routing
+        // out of the very edits that would fix it. Escalate per design from the
+        // viewer's DRC policy drawer.
+        .length_mismatch => .warn,
+        else => .err,
+    };
+}
+
+/// The fab-blocking subset of a violation list: every `err`-severity violation
+/// EXCEPT `net_open`. The ONE spelling of "how many errors does this copper
+/// have" — the hand-routing rollback gate, the fab-readiness gate, and the
+/// `route_score` DRC term all count through here so they cannot drift apart.
+///
+/// Warnings are excluded because a sharp-bend / diff-skew warning is not a
+/// reason to roll back hand copper, and counting them rejects good routes.
+///
+/// `net_open` is excluded because it is CONNECTIVITY, not geometry, and every
+/// surface that reports it already reports connectivity as `routed` / `total` /
+/// `open`. Counting it here as well charges the same defect twice. Two measured
+/// consequences:
+///
+///   • The hand-route rollback gate rejected the FIRST step of every run: an
+///     escape stub that leaves a sealed pad and lands on fresh copper raises the
+///     open-net count by one until the run is finished, so a geometrically
+///     perfect, DRC-silent polyline was undone and the draw/measure/adjust loop
+///     could never start. Measured on barracuda: the LMX2595 escape stub added
+///     zero clearance findings and was rolled back anyway.
+///   • `route_score` inverted its own objective. Completion is meant to
+///     dominate (`route_score.zig`: 1000·completion vs 50·drc_errors), but one
+///     open net on a 90-net board costs 11.1 through completion and 50+ through
+///     a doubled-up DRC term — so a ranking search preferred candidates that
+///     routed FEWER nets.
+pub fn errorCount(violations: []const Violation) usize {
+    var n: usize = 0;
+    for (violations) |v| {
+        if (v.severity == .err and v.kind != .net_open) n += 1;
+    }
+    return n;
+}
+
+/// WHO a violation is between — the identity a bare "track↔pad, gap 0.08 mm"
+/// otherwise leaves the reader to reverse-engineer from coordinates. `net_a` /
+/// `net_b` index `placement.nets`, `part_a` / `part_b` index `placement.parts`,
+/// `track_a` identifies the indexed stored copper member when topology cleanup
+/// needs to consume the finding: a route section normally, or a barrel for the
+/// two via-artifact kinds. `pad_a` / `pad_b` are those parts' pad numbers
+/// (borrowed from the footprint, so this stays allocation-free on the router's
+/// hot path).
+///
+/// A missing party is `-1` / `""`: a courtyard clash has parts but no net, a
+/// `board_edge` has one net and no second party, and a `net_open` names ONE net
+/// (its own) with the pads of the two islands it failed to join. Reporting only
+/// These identities never change a verdict.
+pub const Parties = struct {
+    net_a: i32 = -1,
+    net_b: i32 = -1,
+    part_a: i32 = -1,
+    part_b: i32 = -1,
+    track_a: i32 = -1,
+    pad_a: []const u8 = "",
+    pad_b: []const u8 = "",
+};
+
+/// A part index as a `Parties` field (out-of-range → "unknown" rather than a
+/// panic; the reporting path must never take the board down).
+pub fn partyIndex(i: usize) i32 {
+    return std.math.cast(i32, i) orelse -1;
+}
+
+// Drill-station rule defaults (min-annular 0.1, min-drill 0.2, hole-to-hole 0.25)
+// live on `optimizer.DesignRules` (`placement.rules.design`); the router's default
+// via sits on the annular floor, so only a thinner net-class via trips annular.
+
+/// One violation, located at the offending gap's midpoint. `severity` defaults
+/// to `err`; the assembly-hygiene checks set `warn`.
 pub const Violation = struct {
     x: f64,
     y: f64,
@@ -76,15 +283,28 @@ pub const Violation = struct {
     clearance: f64, // the rule that was broken (mm)
     kind: Kind,
     severity: Severity = .err,
+    /// The nets / parts / pads that clashed — see `Parties`. Defaulted, so a
+    /// producer that cannot name its parties still emits a valid violation.
+    who: Parties = .{},
+    /// The COPPER LAYER this violation is on, as a routable signal index. Set
+    /// by the rules that judge one layer at a time — two tracks crossing, a
+    /// track over a foreign land, two same-face SMD pads, a track's width, a
+    /// stub or dangling fragment. NULL when the finding has no single layer:
+    /// a courtyard clash, a drill/hole rule, a through-barrel pair, a board
+    /// edge. Reporting only — no check reads it back, so it can never change a
+    /// verdict — but it is folded into the violation's `id`, so two defects at
+    /// one x/y on different layers no longer collide.
+    layer: ?board_layers.SignalIndex = null,
 };
 
-/// A pad reduced to its world bounding box, its real copper outline (`poly`;
-/// empty ⇒ the box is exact), the net it carries, its part index (so two
-/// pads of the same part are never checked against each other), and the
-/// signal layer its copper lives on (0 = top, 1 = bottom — the part's side;
-/// `thru` pads exist on every layer). `drill`/`hx`,`hy` carry the pad's
-/// drilled-hole diameter (0 ⇒ no hole) and world centre, for the drill-related
-/// checks.
+/// A raw `router.Track.layer` / `PadBox.layer` as the violation field.
+fn layerOf(layer: u8) ?board_layers.SignalIndex {
+    return board_layers.SignalIndex.of(layer);
+}
+
+/// A pad as world bbox + copper outline (`poly`; empty ⇒ box is exact), net,
+/// part index (same-part pads never paired), signal layer (0 top / 1 bottom;
+/// `thru` reaches every layer), and drilled-hole `drill` / centre `hx,hy`.
 const PadBox = struct {
     x0: f64,
     y0: f64,
@@ -93,174 +313,846 @@ const PadBox = struct {
     poly: []const [2]f64 = &.{},
     net: i32,
     part: usize,
+    /// The footprint pad number, carried so a violation can name the exact pad
+    /// (`U3` pad `12`) instead of only the part it belongs to.
+    num: []const u8 = "",
     layer: u8 = 0,
     thru: bool = false,
-    /// Non-plated (mounting hole) — has no copper ring, so it's exempt from the
-    /// pad-annular check even though it carries a drill.
-    npth: bool = false,
-    /// Oval-slot drill — `drill` is only the larger axis, so a scalar annular
-    /// ring is meaningless; the pad-annular check skips these.
-    drill_oval: bool = false,
+    npth: bool = false, // non-plated (mounting hole) — no ring, exempt from pad-annular
+    drill_oval: bool = false, // `drill` is only the larger axis → pad-annular skips it
     drill: f64 = 0,
     hx: f64 = 0,
     hy: f64 = 0,
-    /// World half-vector between a slot's centre and one arc centre (`{0,0}`
-    /// for a round bore). The slot's two ends are `(hx,hy) ± (shx,shy)`.
+    // World half-vector to a slot's arc centres (`{0,0}` round); ends (hx,hy) ± (shx,shy).
     shx: f64 = 0,
     shy: f64 = 0,
 };
 
-/// One drilled hole reduced to its world centre + diameter and, for an oval
-/// slot, the half-vector to its arc centres (`{0,0}` for a round bore) — a pad
-/// hole or a via, unified so the min-drill and hole-to-hole checks treat them
-/// alike (a round hole is the zero-length capsule).
-const Hole = struct { x: f64, y: f64, drill: f64, shx: f64 = 0, shy: f64 = 0 };
+/// A drilled hole (pad hole or via) as world centre + diameter + slot half-vector
+/// (`{0,0}` round), so min-drill and hole-to-hole treat both alike. `net`/`part`/
+/// `num` carry the owner's identity so a hole↔hole finding can name both drills.
+const Hole = struct {
+    x: f64,
+    y: f64,
+    drill: f64,
+    shx: f64 = 0,
+    shy: f64 = 0,
+    net: i32 = -1,
+    part: i32 = -1,
+    num: []const u8 = "",
+};
 
-const eps: f64 = 1e-6;
+/// Floating-point slack on every threshold here: a rule is reported broken only
+/// when the measured gap sits `eps` BELOW it, so copper resting exactly on a rule
+/// is legal. Public because a pass that PRE-FILTERS its own candidates against
+/// these checks (`via_fence`'s legality prefilter) has to use the identical
+/// slack — a filter that is stricter by even a rounding step drops geometry this
+/// checker would have passed.
+pub const eps: f64 = 1e-6;
 
-/// Resolves the effective copper-to-copper clearance between two features,
-/// honouring per-net `(net-class (clearance …))` overrides. The clearance
-/// between two objects is the MAX of the board-default clearance and each
-/// object's own net-class clearance — a net that asks for wider spacing gets it
-/// against everything it neighbours, while a net with no override just uses the
-/// board default. Net index −1 ("no net" / not-connected) contributes nothing
-/// beyond the board default. `net` is `placement.rules.net` (index-aligned with
-/// the flattened nets); empty ⇒ every pair resolves to `base`, byte-identical to
-/// the pre-net-class scalar behaviour.
+/// Effective copper clearance for a pair: MAX of the board default and each net's
+/// `(net-class (clearance …))` override. Empty `rules.net` ⇒ every pair is `base`.
 const ClearanceResolver = struct {
     base: f64,
     rules: optimizer.BoardRules,
 
-    /// The clearance a pair of features on nets `a` and `b` must satisfy.
     fn between(self: ClearanceResolver, a: i32, b: i32) f64 {
         return self.rules.clearanceBetween(a, b, self.base);
     }
 };
 
-/// Largest copper min-dimension (mm) a plated through-hole pad may have and
-/// still be treated as a VIA-scale feature (via-in-pad stitch, thermal via, or
-/// castellated edge pad) exempt from the component-lead `pad_annular` check.
-/// Real component through-hole leads pad out well above this (≥ ~0.8 mm), so it
-/// cleanly separates "a via someone drew as a pad" from "a connector/header pin".
+/// Extra edge gap a controlled-impedance signal via's synthesized plane
+/// antipad requires. This is a via-to-foreign-copper rule too: another via's
+/// annulus may not occupy copper the plane must remove around the transition.
+fn viaAntipadGap(rules: optimizer.BoardRules, via: router.Via) f64 {
+    if (via.net < 0) return 0;
+    const ni: usize = @intCast(via.net);
+    if (ni >= rules.net.len) return 0;
+    const nr = rules.net[ni];
+    if (nr.rf.impedance.ohms <= 0 or nr.rf.impedance.diff_ohms > 0) return 0;
+    const minimum = rules.clearanceForNet(via.net, rules.design.clearance);
+    const result = via_antipad.solve(rules.physical.stack, nr.rf.impedance.ohms, via.dia, via.drill, minimum) orelse return 0;
+    return (result.antipad_dia_mm - via.dia) / 2.0;
+}
+
+/// Largest copper min-dim (mm) a plated thru pad may have and still count as a
+/// VIA-scale feature (via-in-pad / thermal / castellated) exempt from the
+/// component-lead `pad_annular` check.
 const via_pad_max_mm: f64 = 0.65;
 
-/// Run the check. All output is allocated in `arena`. `clearance` is the
-/// board-default copper-to-copper rule (mm); two features of different nets must
-/// be at least this far apart, edge to edge. Per-net `(net-class (clearance …))`
-/// overrides are layered on top via `placement.rules.net`: each pair is judged
-/// against `max(each net's clearance, base)` (see `ClearanceResolver`), so a net
-/// asking for wider spacing gets it against every neighbour. The board-level
-/// `(design-rules …)` values (min-annular, min-drill, hole-to-hole, copper-edge)
-/// are read from `placement.rules.design`. With no net-classes and an absent
-/// form, every pair resolves to `clearance` and each rule keeps its built-in
-/// default, so the output is byte-identical for existing designs.
+/// Run the check (arena-allocated output). `clearance` is the board-default
+/// copper rule (mm), edge to edge; per-net `(net-class …)` overrides come from
+/// `placement.rules.net` and board rules from `placement.rules.design`. With no
+/// classes and an absent form the output is byte-identical to before.
 pub fn check(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     routed: router.RouteResult,
     clearance: f64,
 ) std.mem.Allocator.Error![]Violation {
+    return checkImpl(arena, placement, routed, clearance, &.{});
+}
+
+/// `check` with hand-authored copper zones credited as real same-net copper
+/// for stub and via-use topology. Geometry/clearance checks remain identical.
+pub fn checkWithZones(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    clearance: f64,
+    zones: []const TopologyZone,
+) std.mem.Allocator.Error![]Violation {
+    return checkImpl(arena, placement, routed, clearance, zones);
+}
+
+/// Run only the final-state copper topology rules. This is the authoritative
+/// oracle used by post-router additive gates before copper is persisted.
+pub fn checkTopology(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    zones: []const TopologyZone,
+) std.mem.Allocator.Error![]Violation {
+    var out: Viol = .empty;
+    const pads = try padBoxes(arena, placement);
+    try checkCopperTopology(arena, &out, placement, pads, routed, zones);
+    return out.toOwnedSlice(arena);
+}
+
+/// Incremental "would adding this via create a fab error" oracle for additive
+/// via passes (the perimeter stitch fence). The old gate re-ran the FULL check
+/// once per candidate site — on a large routed board that is seconds of DRC per
+/// site and made every `/pcb-layout` page load quadratic in fence length.
+///
+/// This builds the pairwise world ONCE (pad boxes + the same culling grids the
+/// full check builds) and answers each candidate by running exactly the
+/// error-severity rules a new via can trip: via↔pad, via↔track (the full
+/// check's own functions, given a one-via slice), via↔via / via-spacing and
+/// hole↔hole (the shared pair cores `viaPairViolation` / `holePairViolation`),
+/// the via's own annular / min-drill (`checkDrillRules` with no pads), and
+/// board-edge. Every remaining stage of the full check either cannot change
+/// when one via is added (track/pad pairs, courtyards, widths) or emits only
+/// warnings / `net_open` (topology, keepouts, bends, diff pairs, match groups),
+/// which `errorCount` — the number the old gate compared — ignores by
+/// definition. So `addsError` is exactly "would `errorCount` rise".
+pub const ViaAdditionGate = struct {
+    placement: optimizer.Placement,
+    world: PairWorld,
+    /// Every via already on the board plus each accepted candidate — the set a
+    /// new candidate is paired against.
+    others: std.ArrayList(router.Via) = .empty,
+    /// Drilled features (pad holes + via holes), grown as candidates land.
+    holes: std.ArrayList(Hole) = .empty,
+    clr: ClearanceResolver,
+    clr_max: f64,
+    via_to_via: f64,
+
+    /// The fixed copper the candidates are judged against: pad boxes and the
+    /// full check's own culling grids over the (unchanging) tracks and pads.
+    const PairWorld = struct {
+        pads: []PadBox,
+        pad_grid: Grid,
+        track_grid: Grid,
+        tracks: []const router.Track,
+    };
+
+    /// The grid inflation the full check would use for this copper. `probe` is
+    /// a representative candidate via (net / geometry), folded in so a
+    /// controlled-impedance stitch net's antipad halo can never out-reach the
+    /// culling cells.
+    fn gridInflation(placement: optimizer.Placement, vias: []const router.Via, clearance: f64, probe: router.Via) f64 {
+        var clr_max = @max(clearance, placement.rules.design.via_to_via);
+        for (placement.rules.net) |nr| clr_max = @max(clr_max, nr.clearance);
+        for (vias) |via| clr_max = @max(clr_max, viaAntipadGap(placement.rules, via));
+        return @max(clr_max, viaAntipadGap(placement.rules, probe));
+    }
+
+    /// Build the fixed world once; every `addsError` after this is via-scoped.
+    pub fn build(
+        arena: std.mem.Allocator,
+        placement: optimizer.Placement,
+        routed: router.RouteResult,
+        clearance: f64,
+        probe: router.Via,
+    ) std.mem.Allocator.Error!ViaAdditionGate {
+        const pads = try padBoxes(arena, placement);
+        const clr_max = gridInflation(placement, routed.vias, clearance, probe);
+        var gate = ViaAdditionGate{
+            .placement = placement,
+            .world = .{
+                .pads = pads,
+                .pad_grid = try Grid.build(arena, PadBox, pads, padBox, clr_max),
+                .track_grid = try Grid.build(arena, router.Track, routed.tracks, trackBox, clr_max),
+                .tracks = routed.tracks,
+            },
+            .clr = .{ .base = clearance, .rules = placement.rules },
+            .clr_max = clr_max,
+            .via_to_via = placement.rules.design.via_to_via,
+        };
+        try gate.others.appendSlice(arena, routed.vias);
+        try gate.holes.appendSlice(arena, try allHoles(arena, pads, routed.vias));
+        return gate;
+    }
+
+    /// True when adding `v` to the current copper would add at least one
+    /// error-severity violation (`net_open` excluded, matching `errorCount`).
+    pub fn addsError(self: *ViaAdditionGate, arena: std.mem.Allocator, v: router.Via) std.mem.Allocator.Error!bool {
+        var out: Viol = .empty;
+        const c = Ctx{ .arena = arena, .out = &out, .clr = self.clr, .clr_max = self.clr_max, .via_to_via = self.via_to_via };
+        const one = [_]router.Via{v};
+        try checkViaPad(c, &one, self.world.pads, &self.world.pad_grid);
+        try checkViaTrack(c, &one, self.world.tracks, &self.world.track_grid);
+        for (self.others.items) |other| {
+            if (viaPairViolation(c, v, other)) |viol| try out.append(arena, viol);
+        }
+        // Annular + min-drill for the candidate alone (no pads ⇒ no pad rules,
+        // and its own single hole cannot pair with itself).
+        try checkDrillRules(arena, &out, &.{}, &one, self.placement.rules.design);
+        if (v.drill > 0) {
+            const hole = Hole{ .x = v.x, .y = v.y, .drill = v.drill, .net = v.net };
+            for (self.holes.items) |other| {
+                if (holePairViolation(self.placement.rules.design, hole, other)) |viol| try out.append(arena, viol);
+            }
+        }
+        try checkBoardEdge(arena, &out, self.placement, &.{}, &one, self.placement.rules.design.edgeClearance());
+        for (out.items) |viol| {
+            if (viol.severity == .err and viol.kind != .net_open) return true;
+        }
+        return false;
+    }
+
+    /// Commit an accepted candidate: later candidates are judged against it.
+    pub fn accept(self: *ViaAdditionGate, arena: std.mem.Allocator, v: router.Via) std.mem.Allocator.Error!void {
+        try self.others.append(arena, v);
+        if (v.drill > 0) try self.holes.append(arena, .{ .x = v.x, .y = v.y, .drill = v.drill, .net = v.net });
+    }
+};
+
+/// Reusable DRC-grade obstacle view for asking whether one same-layer track
+/// could be added to finished copper without creating a fabrication error.
+/// The route-shape benchmark uses it to distinguish necessary bends from
+/// bends whose two arms can be replaced by a clear chord.
+pub const TrackAdditionGate = struct {
+    placement: optimizer.Placement,
+    pads: []const PadBox,
+    tracks: []const router.Track,
+    vias: []const router.Via,
+    clr: ClearanceResolver,
+
+    /// Build the immutable pad/copper world once for all bend probes.
+    pub fn build(
+        arena: std.mem.Allocator,
+        placement: optimizer.Placement,
+        routed: router.RouteResult,
+        clearance: f64,
+    ) std.mem.Allocator.Error!TrackAdditionGate {
+        return .{
+            .placement = placement,
+            .pads = try padBoxes(arena, placement),
+            .tracks = routed.tracks,
+            .vias = routed.vias,
+            .clr = .{ .base = clearance, .rules = placement.rules },
+        };
+    }
+
+    /// True when `candidate` clears foreign pads, tracks, vias, and the board
+    /// edge under the same pairwise spacing rules as the full DRC.
+    pub fn clear(self: TrackAdditionGate, candidate: router.Track) bool {
+        for (self.pads) |pad| {
+            if (sameNet(candidate.net, pad.net)) continue;
+            if (!pad.thru and pad.layer != candidate.layer) continue;
+            const required = self.clr.between(candidate.net, pad.net);
+            const window = candidate.width / 2 + required;
+            if (segShapeDist(candidate, pad, window) - candidate.width / 2 < required - eps) return false;
+        }
+        for (self.tracks) |track| {
+            if (sameNet(candidate.net, track.net) or candidate.layer != track.layer) continue;
+            const required = self.clr.between(candidate.net, track.net);
+            const gap = segSegDist(candidate.x1, candidate.y1, candidate.x2, candidate.y2, track.x1, track.y1, track.x2, track.y2) -
+                candidate.width / 2 - track.width / 2;
+            if (gap < required - eps) return false;
+        }
+        for (self.vias) |via| {
+            if (sameNet(candidate.net, via.net)) continue;
+            const required = self.clr.between(candidate.net, via.net);
+            const gap = segPointDist(candidate.x1, candidate.y1, candidate.x2, candidate.y2, via.x, via.y) -
+                candidate.width / 2 - via.dia / 2;
+            if (gap < required - eps) return false;
+        }
+        return trackClearsBoardEdge(self.placement, candidate);
+    }
+};
+
+fn trackClearsBoardEdge(placement: optimizer.Placement, track: router.Track) bool {
+    const board = placement.board_rect orelse return true;
+    const half = track.width / 2;
+    const endpoints = [_][2]f64{ .{ track.x1, track.y1 }, .{ track.x2, track.y2 } };
+    var worst = std.math.inf(f64);
+    for (endpoints) |point| worst = @min(worst, boardInset(board, placement.board_poly, point[0], point[1]));
+    if (placement.board_poly) |poly| {
+        if (worst > -(half + staging_exempt_mm) and outline.segCrossesEdge(poly, track.x1, track.y1, track.x2, track.y2) != null) worst = 0;
+    }
+    if (worst < -(half + staging_exempt_mm)) return true;
+    return worst - half >= placement.rules.design.edgeClearance() - eps;
+}
+
+fn checkImpl(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    clearance: f64,
+    topology_zones: []const TopologyZone,
+) std.mem.Allocator.Error![]Violation {
     var out: std.ArrayList(Violation) = .empty;
     const pads = try padBoxes(arena, placement);
     const vias = routed.vias;
+    // Smoothed RF bends already ride in `tracks` as chords, so every
+    // geometric rule below sees the curved copper without special cases.
     const tracks = routed.tracks;
     const rules = placement.rules.design;
-    // Per-net clearance overrides layered on the board-default `clearance`: each
-    // pair below is judged against max(its two nets' clearances, base).
     const clr = ClearanceResolver{ .base = clearance, .rules = placement.rules };
+    // Widest clearance any pair can demand — the grid inflation, so no violating
+    // pair is dropped.
+    var clr_max = @max(clearance, rules.via_to_via);
+    for (placement.rules.net) |nr| clr_max = @max(clr_max, nr.clearance);
+    for (vias) |via| clr_max = @max(clr_max, viaAntipadGap(placement.rules, via));
 
-    // via ↔ pad
+    // Grids built once and shared. The pad grid is also queried by mask/silk, so
+    // its cell is sized by the widest of those deltas.
+    const mask_delta = rules.mask.web + 2 * rules.mask.margin;
+    var pad_grid = try Grid.build(arena, PadBox, pads, padBox, @max(clr_max, mask_delta));
+    var via_grid = try Grid.build(arena, router.Via, vias, viaBox, clr_max);
+    var track_grid = try Grid.build(arena, router.Track, tracks, trackBox, clr_max);
+
+    const c = Ctx{ .arena = arena, .out = &out, .clr = clr, .clr_max = clr_max, .via_to_via = rules.via_to_via };
+    try checkViaPad(c, vias, pads, &pad_grid);
+    try checkViaVia(c, vias, &via_grid);
+    try checkViaTrack(c, vias, tracks, &track_grid);
+    try checkTrackTrack(c, tracks, &track_grid);
+    try checkTrackPad(c, tracks, pads, &pad_grid);
+    // Drill / edge / courtyard / mask / silk / width rules live in helpers.
+    try checkDrillRules(arena, &out, pads, vias, rules);
+    try checkBoardEdge(arena, &out, placement, tracks, vias, rules.edgeClearance());
+    try checkPadEdge(arena, &out, placement, pads, rules.edgeClearance());
+    try checkComponentEdge(arena, &out, placement, rules.edge.component);
+    try checkCourtyards(arena, &out, placement);
+    try checkMaskSlivers(arena, &out, pads, &pad_grid, rules.mask.margin, rules.mask.web);
+    try checkSilkOverPad(arena, &out, placement, pads, &pad_grid, rules.mask.margin);
+    try checkTrackWidth(arena, &out, .{ .placement = placement, .routed = routed, .tracks = tracks, .min_width = rules.min_width });
+    try checkCopperTopology(arena, &out, placement, pads, routed, topology_zones);
+    try checkLandTransit(c, tracks, pads, &pad_grid);
+    try checkGroundPadVias(arena, &out, placement, pads, vias, rules.pour.ground_via_max);
+    try checkPadPad(c, pads, &pad_grid);
+    try drc_diffpair.check(arena, &out, placement, .{ .tracks = tracks, .vias = vias }, clearance);
+    // `(match-group …)` length matching — the same shape of tolerance judgement
+    // across N nets. `placement.match_groups` is empty for every design that
+    // declares none, so this costs nothing and adds nothing there.
+    try drc_match.check(arena, &out, placement, .{ .tracks = tracks, .vias = vias });
+    // RF same-layer keepout halos. Its own spatial reject is a per-keepout-net
+    // bbox, NOT the shared grids above: a halo is typically wider than
+    // `clr_max`, and inflating those grids to cover it would coarsen every
+    // clearance query on the board for a rule only a handful of RF nets ask
+    // for. `keepout.anyDeclared` makes it free for every other design.
+    try drc_keepout.check(arena, &out, placement, tracks, vias, try keepoutPads(arena, placement, pads));
+    try drc_perimeter_keepout.check(arena, &out, placement, tracks, vias);
+    // RF bend discipline: preserve the router's richer findings (including
+    // achieved radius on an under-floor arc), then audit the ACTUAL copper as
+    // well. Saved layouts persist arcs as track chords and do not persist the
+    // RouteResult metadata; post-route cleanup can also introduce a corner
+    // after inline smoothing. Without this second source, either path could
+    // leave a hard RF corner visible in the editor with no sharp_bend marker.
+    for (routed.sharp_bends) |sb| {
+        try appendSharpViolation(arena, &out, sb);
+    }
+    const measured = try bend_smooth.detect(arena, .{
+        .placement = placement,
+        .params = placement.rules.design.routeParams(),
+        .tracks = tracks,
+        .vias = vias,
+    });
+    for (measured) |sb| {
+        // A port-frame route is emitted as short chords, but its recorded
+        // solver result proves the underlying Euler chain is G2 continuous,
+        // tangent-correct, and above the authored radius floor. Re-running a
+        // vertex detector on that tessellation would flag the intentional
+        // chord joins as hard bends. Saved/imported copper carries no outcome
+        // and still receives the conservative geometric audit below.
+        if (successfulPortFrame(routed, sb.net)) continue;
+        if (sharpBendRecorded(routed.sharp_bends, sb)) continue;
+        try appendSharpViolation(arena, &out, sb);
+    }
+    return out.toOwnedSlice(arena);
+}
+
+fn successfulPortFrame(routed: router.RouteResult, net: i32) bool {
+    for (routed.rf_port_outcomes) |outcome| {
+        if (outcome.net == net and outcome.success and !outcome.physical.gate_removed) return true;
+    }
+    return false;
+}
+
+fn topologyTerminals(arena: std.mem.Allocator, pads: []const PadBox) std.mem.Allocator.Error![]const copper_topology.Terminal {
+    const out = try arena.alloc(copper_topology.Terminal, pads.len);
+    for (pads, out) |pad, *terminal| terminal.* = .{
+        .shape = .{ .x0 = pad.x0, .y0 = pad.y0, .x1 = pad.x1, .y1 = pad.y1, .poly = pad.poly },
+        .net = pad.net,
+        .layer = pad.layer,
+        .thru = pad.thru,
+    };
+    return out;
+}
+
+fn topologyTracks(arena: std.mem.Allocator, tracks: []const router.Track) std.mem.Allocator.Error![]const copper_topology.Track {
+    const out = try arena.alloc(copper_topology.Track, tracks.len);
+    for (tracks, out) |track, *topology| topology.* = .{
+        .a = .{ track.x1, track.y1 },
+        .b = .{ track.x2, track.y2 },
+        .layer = track.layer,
+        .width = track.width,
+        .net = track.net,
+    };
+    return out;
+}
+
+fn topologyVias(arena: std.mem.Allocator, vias: []const router.Via) std.mem.Allocator.Error![]const copper_topology.Via {
+    const out = try arena.alloc(copper_topology.Via, vias.len);
+    for (vias, out) |via, *topology| topology.* = .{ .at = .{ via.x, via.y }, .dia = via.dia, .net = via.net };
+    return out;
+}
+
+/// Copper that is electrically legal but topologically useless: loose trace
+/// leaves are errors; vias reaching at most one copper layer are warnings.
+fn checkCopperTopology(
+    arena: std.mem.Allocator,
+    out: *Viol,
+    placement: optimizer.Placement,
+    pads: []const PadBox,
+    routed: router.RouteResult,
+    zones: []const TopologyZone,
+) std.mem.Allocator.Error!void {
+    const tracks = routed.tracks;
+    const vias = routed.vias;
+    const terminals = try topologyTerminals(arena, pads);
+    const topology_tracks = try topologyTracks(arena, tracks);
+    const topology_vias = try topologyVias(arena, vias);
+    const implicit = try copper_topology.implicitJoins(arena, topology_tracks);
+    for (implicit) |join| {
+        const track = tracks[join.a];
+        try out.append(arena, .{
+            .x = join.at[0],
+            .y = join.at[1],
+            .gap = 0,
+            .clearance = 0,
+            .kind = .implicit_junction,
+            .severity = defaultSeverity(.implicit_junction),
+            .who = .{ .net_a = track.net, .track_a = partyIndex(join.a) },
+            .layer = layerOf(track.layer),
+        });
+    }
+    // Every connectivity source the redundancy walk reads — live barrels,
+    // poured trace ends, and which fill each of them is in — comes from the
+    // ONE assembly the router's finish also calls (`copper_support.assemble`).
+    // Only a LIVE barrel is a connectivity destination: a pad's escape to a
+    // real plane via is that via's copper, while a stub to a via with no
+    // second layer is junk together with it.
+    const support = try copper_support.assemble(arena, placement, terminals, topology_tracks, topology_vias, zones);
+    const via_use_counts = support.via_uses;
+    const endpoint_pours = support.branch.pour_layers;
+    const endpoint_components = support.branch.pour_components;
+    const via_candidates = try arena.alloc(bool, vias.len);
+    const via_components = try arena.alloc([]const u64, vias.len);
+    for (vias, 0..) |via, via_i| {
+        const non_ground = via.net >= 0 and @as(usize, @intCast(via.net)) < placement.nets.len and
+            !optimizer.isGroundName(router.shortName(placement.nets[@intCast(via.net)].name));
+        via_components[via_i] = try copper_support.componentsAt(arena, placement, via.net, zones, .{ via.x, via.y }, null);
+        const unobserved_fill = (support.via_poured[via_i] != 0 or support.via_planes[via_i] != 0) and
+            via_components[via_i].len == 0;
+        via_candidates[via_i] = non_ground and !unobserved_fill;
+    }
+    const terminal_components = try arena.alloc([]const u64, terminals.len);
+    for (terminals, terminal_components) |terminal, *components| {
+        const at = pad_shape.copperAnchor(terminal.shape);
+        components.* = try copper_support.componentsAt(
+            arena,
+            placement,
+            terminal.net,
+            zones,
+            at,
+            if (terminal.thru) null else terminal.layer,
+        );
+    }
+    const via_redundancy = try copper_topology.analyzeViaRedundancy(
+        arena,
+        terminals,
+        topology_tracks,
+        topology_vias,
+        .{
+            .candidates = via_candidates,
+            .terminal_components = terminal_components,
+            .track_components = endpoint_components,
+            .via_components = via_components,
+        },
+    );
+    const redundancy = try copper_topology.analyzeRedundancy(arena, terminals, topology_tracks, support.branch);
+    const redundant = redundancy.individual;
+    const removal = redundancy.removal;
+    for (tracks, 0..) |track, track_i| {
+        const loose = copper_topology.looseEnd(terminals, topology_tracks, topology_vias, track_i, .{
+            endpoint_pours[track_i][0],
+            endpoint_pours[track_i][1],
+        });
+        // The user's unit is the stored route section: one warning for every
+        // section whose deletion preserves all support connectivity.
+        if (redundant[track_i]) {
+            try out.append(arena, .{
+                .x = track.x1,
+                .y = track.y1,
+                .gap = 0,
+                .clearance = 0,
+                .kind = .dangling_copper,
+                .severity = defaultSeverity(.dangling_copper),
+                .who = .{
+                    .net_a = track.net,
+                    // Only jointly safe plan members are offered to automatic
+                    // cleanup; every independently redundant section is still
+                    // reported to the user.
+                    .track_a = if (removal[track_i]) partyIndex(track_i) else -1,
+                },
+                .layer = layerOf(track.layer),
+            });
+            continue;
+        }
+        const loose_at = loose orelse continue;
+        try out.append(arena, .{
+            .x = loose_at[0],
+            .y = loose_at[1],
+            .gap = 0,
+            .clearance = 0,
+            .kind = .copper_stub,
+            .severity = defaultSeverity(.copper_stub),
+            .who = .{ .net_a = track.net, .track_a = partyIndex(track_i) },
+            .layer = layerOf(track.layer),
+        });
+    }
+    for (vias, 0..) |via, via_i| {
+        const use_count = via_use_counts[via_i];
+        if (use_count < 2) {
+            try out.append(arena, .{
+                .x = via.x,
+                .y = via.y,
+                .gap = @floatFromInt(use_count),
+                .clearance = 2,
+                .kind = .single_layer_via,
+                .severity = defaultSeverity(.single_layer_via),
+                // Only a connectivity-proven member of the jointly safe plan
+                // carries an index the automatic cleanup is allowed to consume.
+                .who = .{ .net_a = via.net, .track_a = if (via_redundancy.removal[via_i]) partyIndex(via_i) else -1 },
+            });
+        } else if (via_redundancy.removal[via_i]) {
+            try out.append(arena, .{
+                .x = via.x,
+                .y = via.y,
+                .gap = 0,
+                .clearance = 0,
+                .kind = .redundant_via,
+                .severity = defaultSeverity(.redundant_via),
+                .who = .{ .net_a = via.net, .track_a = partyIndex(via_i) },
+            });
+        }
+    }
+}
+
+fn appendSharpViolation(arena: std.mem.Allocator, out: *Viol, sb: router.SharpBend) std.mem.Allocator.Error!void {
+    try out.append(arena, .{
+        .x = sb.x,
+        .y = sb.y,
+        .gap = sb.radius,
+        .clearance = sb.required,
+        .kind = .sharp_bend,
+        .severity = defaultSeverity(.sharp_bend),
+        .who = .{ .net_a = sb.net },
+    });
+}
+
+/// True when the router already reported this same physical corner. The
+/// copper audit deliberately supplements, rather than replaces, its metadata:
+/// an under-floor arc's router marker carries a useful non-zero radius while
+/// the chord audit can only identify genuinely hard vertices.
+fn sharpBendRecorded(recorded: []const router.SharpBend, measured: router.SharpBend) bool {
+    for (recorded) |sb| {
+        if (sb.net != measured.net or sb.layer != measured.layer) continue;
+        if (std.math.hypot(sb.x - measured.x, sb.y - measured.y) <= 1e-4) return true;
+    }
+    return false;
+}
+
+/// Project the already-joined pad list into the exact pad geometry and escape
+/// terminals `drc_keepout` needs. Empty when no net declares a keepout, so a
+/// board without one pays no allocation.
+fn keepoutPads(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    pads: []const PadBox,
+) std.mem.Allocator.Error![]const keepout.PadPt {
+    if (!keepout.anyDeclared(placement)) return &.{};
+    const out = try arena.alloc(keepout.PadPt, pads.len);
+    for (pads, out) |p, *o| o.* = .{
+        .net = p.net,
+        .x = (p.x0 + p.x1) / 2,
+        .y = (p.y0 + p.y1) / 2,
+        .guard = if (!p.npth and p.net >= 0) .{
+            .bounds = .{ p.x0, p.y0, p.x1, p.y1 },
+            .poly = p.poly,
+            .layer = p.layer,
+            .thru = p.thru,
+        } else null,
+    };
+    return out;
+}
+
+// ── Pairwise copper-clearance checks (grid-culled) ───────────────────────────
+// Each queries its inner grid for candidates near the outer feature, then runs
+// the SAME exact test the pre-cull nested loop ran, appending in the same order.
+
+/// The `Parties` of a copper-vs-copper clash: both nets, no pad identity.
+fn netParties(a: i32, b: i32) Parties {
+    return .{ .net_a = a, .net_b = b };
+}
+
+/// The `Parties` of a copper-vs-pad clash: `net` on the A side, the pad's net,
+/// part, and pad number on the B side.
+fn padParties(net: i32, p: PadBox) Parties {
+    return .{ .net_a = net, .net_b = p.net, .part_b = partyIndex(p.part), .pad_b = p.num };
+}
+
+/// The `Parties` of a pad-vs-pad clash (pad↔pad clearance, mask sliver).
+fn padPairParties(a: PadBox, b: PadBox) Parties {
+    return .{
+        .net_a = a.net,
+        .part_a = partyIndex(a.part),
+        .pad_a = a.num,
+        .net_b = b.net,
+        .part_b = partyIndex(b.part),
+        .pad_b = b.num,
+    };
+}
+
+/// The `Parties` of a single-pad finding (pad annular ring, min drill).
+fn onePadParties(p: PadBox) Parties {
+    return .{ .net_a = p.net, .part_a = partyIndex(p.part), .pad_a = p.num };
+}
+
+/// Shared inputs threaded through the copper checks.
+const Ctx = struct {
+    arena: std.mem.Allocator,
+    out: *Viol,
+    clr: ClearanceResolver,
+    clr_max: f64,
+    /// The board's `(design-rules (via-to-via MM))`, or 0 for "resolved
+    /// clearance" (see `viaSpacingRule`).
+    via_to_via: f64 = 0,
+};
+
+/// The spacing rule two vias of the SAME net are held to. An authored
+/// `(design-rules (via-to-via MM))` wins; otherwise the pair's resolved copper
+/// clearance stands in, which is the number a foreign pair would owe each
+/// other. That default is deliberate: a redundant via planted on top of an
+/// existing one sits micrometres away and flags, while a stitch fence's ~1 mm
+/// pitch — real, intentional, redundant-by-design copper — is nowhere near it.
+fn viaSpacingRule(c: Ctx, net: i32) f64 {
+    return if (c.via_to_via > 0) c.via_to_via else c.clr.between(net, net);
+}
+
+/// via ↔ pad: a via crowding a foreign pad's copper clearance.
+fn checkViaPad(c: Ctx, vias: []const router.Via, pads: []const PadBox, pad_grid: *Grid) Err {
     for (vias) |v| {
         const vr = v.dia / 2;
-        for (pads) |p| {
+        for (try pad_grid.near(c.arena, viaBox(v), c.clr_max)) |j| {
+            const p = pads[j];
             if (sameNet(v.net, p.net)) continue;
-            const eff = clr.between(v.net, p.net);
+            const eff = c.clr.between(v.net, p.net);
             const gap = pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, v.x, v.y, vr + eff) - vr;
             if (gap < eff - eps) {
-                try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = eff, .kind = .via_pad });
+                const face: ?board_layers.SignalIndex = if (p.thru) null else layerOf(p.layer);
+                try c.out.append(c.arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = eff, .kind = .via_pad, .who = padParties(v.net, p), .layer = face });
             }
         }
     }
-    // via ↔ via
+}
+
+/// One unordered via pair's clearance verdict — the single rule body shared by
+/// the full sweep (`checkViaVia`) and the additive gate (`ViaAdditionGate`),
+/// so the two can never disagree.
+fn viaPairViolation(c: Ctx, a: router.Via, b: router.Via) ?Violation {
+    const same = sameNet(a.net, b.net);
+    const eff = if (same) viaSpacingRule(c, a.net) else @max(
+        c.clr.between(a.net, b.net),
+        @max(viaAntipadGap(c.clr.rules, a), viaAntipadGap(c.clr.rules, b)),
+    );
+    const gap = std.math.hypot(a.x - b.x, a.y - b.y) - a.dia / 2 - b.dia / 2;
+    if (gap >= eff - eps) return null;
+    return .{
+        .x = (a.x + b.x) / 2,
+        .y = (a.y + b.y) / 2,
+        .gap = gap,
+        .clearance = eff,
+        .kind = if (same) .via_spacing else .via_via,
+        .who = netParties(a.net, b.net),
+    };
+}
+
+/// via ↔ via. A FOREIGN pair owes the resolved copper clearance (`via_via`); a
+/// SAME-net pair owes the via-spacing rule instead (`via_spacing`) — see
+/// `viaSpacingRule` for why the two are separate kinds and separate numbers.
+fn checkViaVia(c: Ctx, vias: []const router.Via, via_grid: *Grid) Err {
     for (vias, 0..) |a, i| {
-        for (vias[i + 1 ..]) |b| {
-            if (sameNet(a.net, b.net)) continue;
-            const eff = clr.between(a.net, b.net);
-            const gap = std.math.hypot(a.x - b.x, a.y - b.y) - a.dia / 2 - b.dia / 2;
-            if (gap < eff - eps) {
-                try out.append(arena, .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2, .gap = gap, .clearance = eff, .kind = .via_via });
-            }
+        for (try via_grid.near(c.arena, viaBox(a), c.clr_max)) |ju| {
+            if (ju <= i) continue; // emit each unordered pair once, at the lower index
+            if (viaPairViolation(c, a, vias[ju])) |v| try c.out.append(c.arena, v);
         }
     }
-    // via ↔ track
+}
+
+/// via ↔ track.
+fn checkViaTrack(c: Ctx, vias: []const router.Via, tracks: []const router.Track, track_grid: *Grid) Err {
     for (vias) |v| {
         const vr = v.dia / 2;
-        for (tracks) |t| {
+        for (try track_grid.near(c.arena, viaBox(v), c.clr_max)) |j| {
+            const t = tracks[j];
             if (sameNet(v.net, t.net)) continue;
-            const eff = clr.between(v.net, t.net);
+            const eff = c.clr.between(v.net, t.net);
             const gap = segPointDist(t.x1, t.y1, t.x2, t.y2, v.x, v.y) - vr - t.width / 2;
             if (gap < eff - eps) {
-                try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = eff, .kind = .via_track });
+                try c.out.append(c.arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = eff, .kind = .via_track, .who = netParties(v.net, t.net), .layer = layerOf(t.layer) });
             }
         }
     }
-    // track ↔ track (same layer, different nets). Maze copper satisfies this
-    // by grid construction (adjacent occupied lines are width + clearance
-    // apart, and diagonal corner cells are reserved), so what this really
-    // polices is copper drawn OFF the grid: escape/breakout stubs, hand-drawn
-    // tracks, stamped module copper. A crossing shows up as gap = −(w_a+w_b)/2.
+}
+
+/// track ↔ track (same layer, different nets): polices off-maze copper (stubs,
+/// hand-drawn, stamped copper).
+fn checkTrackTrack(c: Ctx, tracks: []const router.Track, track_grid: *Grid) Err {
     for (tracks, 0..) |a, i| {
-        for (tracks[i + 1 ..]) |b| {
+        for (try track_grid.near(c.arena, trackBox(a), c.clr_max)) |ju| {
+            if (ju <= i) continue;
+            const b = tracks[ju];
             if (a.layer != b.layer or sameNet(a.net, b.net)) continue;
-            const eff = clr.between(a.net, b.net);
+            const eff = c.clr.between(a.net, b.net);
             const gap = segSegDist(a.x1, a.y1, a.x2, a.y2, b.x1, b.y1, b.x2, b.y2) - a.width / 2 - b.width / 2;
             if (gap < eff - eps) {
                 const mx = (a.x1 + a.x2 + b.x1 + b.x2) / 4;
                 const my = (a.y1 + a.y2 + b.y1 + b.y2) / 4;
-                try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = eff, .kind = .track_track });
+                try c.out.append(c.arena, .{ .x = mx, .y = my, .gap = gap, .clearance = eff, .kind = .track_track, .who = netParties(a.net, b.net), .layer = layerOf(a.layer) });
             }
         }
     }
-    // track ↔ pad (layer-aware). The maze keeps every grid NODE `reach` from
-    // foreign pads, but stubs, hand-drawn tracks, and stamped copper are
-    // off-grid — this is what catches a breakout stub drawn across a QFN
-    // neighbour pad. Sampled along the track against the pad's real outline.
+}
+
+/// track ↔ pad (layer-aware): catches a breakout stub / hand-drawn track drawn
+/// across a foreign pad. Sampled along the track against the pad's real outline.
+/// SAME-net copper lapping a land it does not connect to (`land_transit.zig`).
+///
+/// The twin of `checkTrackPad` on the other side of the net test: that rule
+/// governs how close a track may come to a FOREIGN land, this one what a track
+/// may do on its OWN. Between them every pad's neighbourhood is covered, which
+/// it was not before — a same-net track could ride a QFN land's flank down the
+/// 0.2 mm corridor to the next pin and no rule had an opinion.
+///
+/// Only SMD lands are judged: a through-hole barrel is the connection on every
+/// layer, so copper across its annulus is not a lap (the same call `pad_entry`
+/// and `pad_escape` make). Large lands are out of scope too — see
+/// `land_transit.paddle_min_half_mm`.
+fn checkLandTransit(c: Ctx, tracks: []const router.Track, pads: []const PadBox, pad_grid: *Grid) Err {
     for (tracks) |t| {
-        for (pads) |p| {
+        const half = t.width / 2;
+        for (try pad_grid.near(c.arena, trackBox(t), c.clr_max)) |j| {
+            const p = pads[j];
+            if (!sameNet(t.net, p.net) or p.thru or p.layer != t.layer) continue;
+            const land = land_transit.Land{ .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1, .poly = p.poly };
+            const f = land_transit.segmentOffence(land, .{ t.x1, t.y1 }, .{ t.x2, t.y2 }, half) orelse continue;
+            try c.out.append(c.arena, .{
+                .x = f.at[0],
+                .y = f.at[1],
+                .gap = f.overlap_mm,
+                .clearance = f.miss_mm,
+                .kind = .land_transit,
+                .severity = defaultSeverity(.land_transit),
+                .who = padParties(t.net, p),
+                .layer = layerOf(t.layer),
+            });
+        }
+    }
+}
+
+/// Enforce the optional maximum ground-return drop distance. The pad and via
+/// must share the exact flattened net index: an AGND via cannot satisfy a GND
+/// pad merely because both names are ground-like. Through-hole pads already
+/// reach every copper layer and therefore need no separate barrel.
+fn checkGroundPadVias(
+    arena: std.mem.Allocator,
+    out: *Viol,
+    placement: optimizer.Placement,
+    pads: []const PadBox,
+    vias: []const router.Via,
+    max_distance: f64,
+) Err {
+    if (!(max_distance > 0)) return;
+    for (pads) |pad| {
+        if (pad.thru or pad.net < 0) continue;
+        const net_i: usize = @intCast(pad.net);
+        if (net_i >= placement.nets.len) continue;
+        const name = placement.nets[net_i].name;
+        if (!optimizer.isGroundName(router.shortName(name)) or !router.netHasPlane(placement, name)) continue;
+        var nearest = std.math.inf(f64);
+        for (vias) |via| {
+            if (via.net != pad.net) continue;
+            nearest = @min(nearest, std.math.hypot(via.x - pad.hx, via.y - pad.hy));
+        }
+        if (nearest <= max_distance + eps) continue;
+        try out.append(arena, .{
+            .x = pad.hx,
+            .y = pad.hy,
+            .gap = if (std.math.isFinite(nearest)) nearest else max_distance + 1,
+            .clearance = max_distance,
+            .kind = .ground_via_distance,
+            .severity = defaultSeverity(.ground_via_distance),
+            .who = onePadParties(pad),
+            .layer = layerOf(pad.layer),
+        });
+    }
+}
+
+fn checkTrackPad(c: Ctx, tracks: []const router.Track, pads: []const PadBox, pad_grid: *Grid) Err {
+    for (tracks) |t| {
+        for (try pad_grid.near(c.arena, trackBox(t), c.clr_max)) |j| {
+            const p = pads[j];
             if (sameNet(t.net, p.net)) continue;
             if (!p.thru and p.layer != t.layer) continue;
-            const eff = clr.between(t.net, p.net);
+            const eff = c.clr.between(t.net, p.net);
             const need = t.width / 2 + eff;
-            // Cheap reject: track bbox vs pad bbox inflated by the rule.
             if (@min(t.x1, t.x2) > p.x1 + need or @max(t.x1, t.x2) < p.x0 - need or
                 @min(t.y1, t.y2) > p.y1 + need or @max(t.y1, t.y2) < p.y0 - need) continue;
             const gap = segShapeDist(t, p, need) - t.width / 2;
             if (gap < eff - eps) {
                 const mx = std.math.clamp((p.x0 + p.x1) / 2, @min(t.x1, t.x2), @max(t.x1, t.x2));
                 const my = std.math.clamp((p.y0 + p.y1) / 2, @min(t.y1, t.y2), @max(t.y1, t.y2));
-                try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = eff, .kind = .track_pad });
+                try c.out.append(c.arena, .{ .x = mx, .y = my, .gap = gap, .clearance = eff, .kind = .track_pad, .who = padParties(t.net, p), .layer = layerOf(t.layer) });
             }
         }
     }
-    // Drill-related checks (annular ring, min-drill, hole-to-hole) and the
-    // copper-to-edge + courtyard-overlap checks live in helpers to keep `check`
-    // legible — each reads the board-level `(design-rules …)` value.
-    try checkDrillRules(arena, &out, pads, vias, rules);
-    try checkBoardEdge(arena, &out, placement, tracks, vias, rules.edgeClearance());
-    try checkCourtyards(arena, &out, placement);
-    try checkMaskSlivers(arena, &out, pads, rules.mask_margin, rules.mask_web);
-    try checkSilkOverPad(arena, &out, placement, pads, rules.mask_margin);
-    try checkTrackWidth(arena, &out, placement, tracks, rules.min_width);
-    // pad ↔ pad (different parts, layer-aware): two SMD pads clash only when
-    // their copper shares a face; a through pad's barrel reaches every layer,
-    // so it clashes with anything. Opposite-face SMD pads may overlap in 2D
-    // freely — that's the whole point of a two-sided board.
+}
+
+/// pad ↔ pad (different parts, layer-aware): SMD pads clash only sharing a face,
+/// a thru barrel clashes on every layer (opposite-face SMD pads may overlap).
+fn checkPadPad(c: Ctx, pads: []const PadBox, pad_grid: *Grid) Err {
     for (pads, 0..) |a, i| {
-        for (pads[i + 1 ..]) |b| {
+        for (try pad_grid.near(c.arena, padBox(a), c.clr_max)) |ju| {
+            if (ju <= i) continue;
+            const b = pads[ju];
             if (a.part == b.part or sameNet(a.net, b.net)) continue;
             const share_face = a.thru or b.thru or a.layer == b.layer;
             if (!share_face) continue;
-            const eff = clr.between(a.net, b.net);
+            const eff = c.clr.between(a.net, b.net);
             const gap = pad_shape.shapeGap(
                 .{ .x0 = a.x0, .y0 = a.y0, .x1 = a.x1, .y1 = a.y1, .poly = a.poly },
                 .{ .x0 = b.x0, .y0 = b.y0, .x1 = b.x1, .y1 = b.y1, .poly = b.poly },
@@ -269,19 +1161,20 @@ pub fn check(
             if (gap < eff - eps) {
                 const mx = (std.math.clamp((a.x0 + a.x1) / 2, b.x0, b.x1) + std.math.clamp((b.x0 + b.x1) / 2, a.x0, a.x1)) / 2;
                 const my = (std.math.clamp((a.y0 + a.y1) / 2, b.y0, b.y1) + std.math.clamp((b.y0 + b.y1) / 2, a.y0, a.y1)) / 2;
-                try out.append(arena, .{ .x = mx, .y = my, .gap = gap, .clearance = eff, .kind = .pad_pad });
+                const face: ?board_layers.SignalIndex = if (a.thru or b.thru) null else layerOf(a.layer);
+                try c.out.append(c.arena, .{ .x = mx, .y = my, .gap = gap, .clearance = eff, .kind = .pad_pad, .who = padPairParties(a, b), .layer = face });
             }
         }
     }
-    return out.toOwnedSlice(arena);
 }
 
 const Viol = std.ArrayList(Violation);
+const Err = std.mem.Allocator.Error!void;
+const GridErr = std.mem.Allocator.Error!Grid;
 
-/// The drill-station rules: via annular ring (`min_annular`), minimum drill
-/// diameter (`min_drill`), and hole-to-hole wall clearance (`hole_to_hole`).
-/// Every drilled feature (vias + drilled pads) is measured; drill=0 legacy /
-/// synthetic features are skipped, so an all-SMD board flags nothing.
+/// Drill-station rules over every drilled feature (vias + drilled pads): via
+/// annular ring, pad annular ring, min-drill, and hole-to-hole. drill=0 features
+/// are skipped, so an all-SMD board flags nothing.
 fn checkDrillRules(
     arena: std.mem.Allocator,
     out: *Viol,
@@ -294,18 +1187,12 @@ fn checkDrillRules(
         if (v.drill <= 0) continue;
         const ring = (v.dia - v.drill) / 2;
         if (ring < rules.min_annular - eps) {
-            try out.append(arena, .{ .x = v.x, .y = v.y, .gap = ring, .clearance = rules.min_annular, .kind = .annular });
+            try out.append(arena, .{ .x = v.x, .y = v.y, .gap = ring, .clearance = rules.min_annular, .kind = .annular, .who = .{ .net_a = v.net } });
         }
     }
-    // pad annular ring: a PLATED component through-hole pad's copper ring around
-    // its drill must also meet the fab minimum (vias were the only annular check
-    // before). Ring = (min copper dimension − drill) / 2. Exemptions: NPTH pads
-    // (drilled but not plated — no ring); OVAL slots (annular is axis-dependent,
-    // and the scalar `drill` is only the larger axis); and VIA-SCALE pads (min
-    // copper dim ≤ VIA_PAD_MAX_MM) — a via-in-pad stitch, thermal via, or
-    // castellated edge pad, whose tight-by-design ring is governed by the via
-    // annular rule / fab process, not a component-lead requirement. SMD pads
-    // (drill 0) never reach here.
+    // pad annular ring: a PLATED thru pad's ring = (min copper dim − drill)/2.
+    // Exempt: NPTH, OVAL slots (axis-dependent), and VIA-SCALE pads (a stitch/
+    // thermal/castellated pad, ≤ via_pad_max_mm, governed by the via rule).
     for (pads) |p| {
         if (p.drill <= 0 or p.drill_oval) continue;
         if (!p.thru or p.npth) continue; // SMD / non-plated → no plated ring
@@ -313,47 +1200,52 @@ fn checkDrillRules(
         if (min_dim <= via_pad_max_mm) continue; // via-scale stitch/thermal/castellated
         const ring = (min_dim - p.drill) / 2;
         if (ring < rules.min_annular - eps) {
-            try out.append(arena, .{ .x = p.hx, .y = p.hy, .gap = ring, .clearance = rules.min_annular, .kind = .pad_annular });
+            try out.append(arena, .{ .x = p.hx, .y = p.hy, .gap = ring, .clearance = rules.min_annular, .kind = .pad_annular, .who = onePadParties(p) });
         }
     }
-    // min drill: no drilled hole smaller than the minimum drill (vias + pads).
+    // min drill: no via/pad hole below the minimum drill diameter.
     for (vias) |v| {
         if (v.drill > 0 and v.drill < rules.min_drill - eps) {
-            try out.append(arena, .{ .x = v.x, .y = v.y, .gap = v.drill, .clearance = rules.min_drill, .kind = .min_drill });
+            try out.append(arena, .{ .x = v.x, .y = v.y, .gap = v.drill, .clearance = rules.min_drill, .kind = .min_drill, .who = .{ .net_a = v.net } });
         }
     }
     for (pads) |p| {
         if (p.drill > 0 and p.drill < rules.min_drill - eps) {
-            try out.append(arena, .{ .x = p.hx, .y = p.hy, .gap = p.drill, .clearance = rules.min_drill, .kind = .min_drill });
+            try out.append(arena, .{ .x = p.hx, .y = p.hy, .gap = p.drill, .clearance = rules.min_drill, .kind = .min_drill, .who = onePadParties(p) });
         }
     }
-    // hole ↔ hole: two drilled holes whose walls sit closer than the rule risk
-    // breakout / a merged slot. Wall-to-wall = centre distance − both radii.
-    // Coincident holes (a via on a thru-hole barrel — the same physical hole)
-    // are skipped rather than flagged against themselves.
+    // hole ↔ hole: walls closer than the rule risk breakout. O(holes²), brute
+    // (holes are few).
     const holes = try allHoles(arena, pads, vias);
     for (holes, 0..) |a, i| {
         for (holes[i + 1 ..]) |b| {
-            // Centre coincidence still skips a via on its own barrel; the wall
-            // gap is the capsule (segment ± radius) distance, so an oval slot is
-            // measured end-to-end, not as a point at its centre.
-            if (std.math.hypot(a.x - b.x, a.y - b.y) < eps) continue;
-            const wall = segSegDist(a.x - a.shx, a.y - a.shy, a.x + a.shx, a.y + a.shy, b.x - b.shx, b.y - b.shy, b.x + b.shx, b.y + b.shy);
-            const gap = wall - a.drill / 2 - b.drill / 2;
-            if (gap < rules.hole_to_hole - eps) {
-                try out.append(arena, .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2, .gap = gap, .clearance = rules.hole_to_hole, .kind = .hole_hole });
-            }
+            if (holePairViolation(rules, a, b)) |v| try out.append(arena, v);
         }
     }
 }
 
-/// copper ↔ board edge: when the design declares a board outline, routed
-/// copper (vias + tracks) must keep the copper-to-edge rule (`edge`, the
-/// `(design-rules (copper-edge …))` value, defaulting to the plain copper
-/// clearance) INSIDE it — measured against the exact polygon when the outline
-/// is non-rectangular (`board_poly`), else the rectangle. Features clearly
-/// outside (the off-board staging band, > STAGING_EXEMPT_MM out) are skipped —
-/// they're a workflow state, not an edge-clearance defect.
+/// One unordered hole pair's wall-gap verdict — the single rule body shared by
+/// `checkDrillRules` and the additive gate (`ViaAdditionGate`). Wall gap is the
+/// capsule (segment ± radius) distance (oval slots measured end-to-end); a
+/// coincident via on a thru barrel is skipped.
+fn holePairViolation(rules: optimizer.DesignRules, a: Hole, b: Hole) ?Violation {
+    if (std.math.hypot(a.x - b.x, a.y - b.y) < eps) return null;
+    const wall = segSegDist(a.x - a.shx, a.y - a.shy, a.x + a.shx, a.y + a.shy, b.x - b.shx, b.y - b.shy, b.x + b.shx, b.y + b.shy);
+    const gap = wall - a.drill / 2 - b.drill / 2;
+    if (gap >= rules.hole_to_hole - eps) return null;
+    return .{ .x = (a.x + b.x) / 2, .y = (a.y + b.y) / 2, .gap = gap, .clearance = rules.hole_to_hole, .kind = .hole_hole, .who = .{
+        .net_a = a.net,
+        .part_a = a.part,
+        .pad_a = a.num,
+        .net_b = b.net,
+        .part_b = b.part,
+        .pad_b = b.num,
+    } };
+}
+
+/// copper ↔ board edge: routed copper must stay `edge` inside the outline (exact
+/// polygon when non-rectangular, else the rect); staged copper (> staging_exempt_mm
+/// out) is skipped.
 fn checkBoardEdge(
     arena: std.mem.Allocator,
     out: *Viol,
@@ -370,14 +1262,13 @@ fn checkBoardEdge(
         if (inset < -(vr + staging_exempt_mm)) continue; // staging band
         const gap = inset - vr;
         if (gap < edge - eps) {
-            try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = edge, .kind = .board_edge });
+            try out.append(arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = edge, .kind = .board_edge, .who = .{ .net_a = v.net } });
         }
     }
     for (tracks) |t| {
         const hw = t.width / 2;
-        // For a rectangle the inset is concave over a segment, so the
-        // minimum is at an endpoint; a concave polygon can also cut the
-        // MIDDLE of a straight track, so that crossing is checked too.
+        // Rectangle inset is minimised at an endpoint; a concave polygon can also
+        // cut the middle of a straight track, so that crossing is checked too.
         const ends = [_][2]f64{ .{ t.x1, t.y1 }, .{ t.x2, t.y2 } };
         var worst: f64 = std.math.inf(f64);
         var wx: f64 = t.x1;
@@ -402,57 +1293,183 @@ fn checkBoardEdge(
         if (worst < -(hw + staging_exempt_mm)) continue; // staging band
         const gap = worst - hw;
         if (gap < edge - eps) {
-            try out.append(arena, .{ .x = wx, .y = wy, .gap = gap, .clearance = edge, .kind = .board_edge });
+            try out.append(arena, .{ .x = wx, .y = wy, .gap = gap, .clearance = edge, .kind = .board_edge, .who = .{ .net_a = t.net } });
         }
     }
 }
 
-/// courtyard ↔ courtyard: two placed parts whose keep-out courtyards overlap
-/// can't both be assembled. Parts on OPPOSITE board sides never clash (their
-/// courtyards live on different faces). A strict interpenetration is the
-/// violation (negative gap = penetration depth); touching exactly is legal.
-fn checkCourtyards(
+/// pad ↔ board edge: a component land is copper too, so a pad overhanging the
+/// cut line — or crowding it closer than the copper-edge rule — is the same
+/// fab defect as a track that does, and was the one feature class this check
+/// never looked at. Measured at the pad's own copper extremes (its polygon
+/// outline when it has one, else its box corners), so no radius is subtracted;
+/// exact against an axis-aligned edge for round pads too, and conservative by
+/// at most a corner's worth against an oblique outline edge.
+///
+/// The off-board exemption is the pad's own: a pad whose copper lies WHOLLY
+/// outside the board RECTANGLE is parked in the staging band and skipped. That
+/// is deliberately a wider exemption than the `staging_exempt_mm` distance band
+/// the track/via loops use — the solver stages loose parts only `stage_gap_mm`
+/// (5 mm) past the board edge, comfortably INSIDE that band, so a distance test
+/// alone would flag every staged part's pads on every board that has one. A
+/// part sitting entirely off the board is already `fab_readiness`'s
+/// `part-off-board` error and the layout lint's `outside-outline` warning; this
+/// rule is about copper on the board and copper straddling its cut. A pad
+/// inside the rectangle but in a concave notch is NOT exempt — the polygon
+/// inset still measures it, exactly as it does a via there.
+///
+/// Non-plated mounting holes carry no ring, so there is no copper to measure.
+fn checkPadEdge(
     arena: std.mem.Allocator,
     out: *Viol,
     placement: optimizer.Placement,
+    pads: []const PadBox,
+    edge: f64,
 ) std.mem.Allocator.Error!void {
+    const br = placement.board_rect orelse return;
+    const poly = placement.board_poly;
+    for (pads) |p| {
+        if (p.npth) continue;
+        const corners = [4][2]f64{ .{ p.x0, p.y0 }, .{ p.x1, p.y0 }, .{ p.x1, p.y1 }, .{ p.x0, p.y1 } };
+        const verts: []const [2]f64 = if (p.poly.len >= 3) p.poly else corners[0..];
+        var worst: f64 = std.math.inf(f64);
+        var wx: f64 = p.x0;
+        var wy: f64 = p.y0;
+        var on_board = false;
+        for (verts) |v| {
+            if (edgeInset(br, v[0], v[1]) > 0) on_board = true;
+            const inset = boardInset(br, poly, v[0], v[1]);
+            if (inset < worst) {
+                worst = inset;
+                wx = v[0];
+                wy = v[1];
+            }
+        }
+        if (!on_board) continue; // staged off-board — see the note above
+        if (worst < edge - eps) {
+            try out.append(arena, .{ .x = wx, .y = wy, .gap = worst, .clearance = edge, .kind = .board_edge, .who = .{
+                .net_a = p.net,
+                .part_a = partyIndex(p.part),
+                .pad_a = p.num,
+            } });
+        }
+    }
+}
+
+/// component courtyard ↔ board edge: JLCPCB Standard PCBA requires the
+/// component BODY to sit at least 2.5 mm from the finished edge. The placement
+/// engine has no separate body primitive, so its rotation-aware courtyard is
+/// the conservative body proxy; `(design-rules (component-edge MM))` can
+/// override the resolved default. A wholly off-board courtyard is staged work,
+/// already handled by fab-readiness, and NPTH-only mounting hardware has no
+/// assembled component body to police.
+fn checkComponentEdge(
+    arena: std.mem.Allocator,
+    out: *Viol,
+    placement: optimizer.Placement,
+    edge: f64,
+) std.mem.Allocator.Error!void {
+    if (!(edge > 0)) return;
+    const br = placement.board_rect orelse return;
+    const poly = placement.board_poly;
+    const bx1 = br.minx + br.w;
+    const by1 = br.miny + br.h;
+    for (placement.parts, 0..) |part, i| {
+        var npth_only = part.pads.len > 0;
+        for (part.pads) |pad| {
+            if (!pad.npth) {
+                npth_only = false;
+                break;
+            }
+        }
+        if (npth_only) continue;
+
+        // The box is the cull — it contains the courtyard at every pose — and
+        // the courtyard's own corners are the measurement. A box corner off a
+        // quarter turn is a point the part does not occupy (it needs maximum +x
+        // and minimum −y at once), so measuring it both over-reports the
+        // crowding and marks the finding somewhere the reader sees no copper.
+        const c = optimizer.worldCourtyard(&part);
+        if (c.minx + c.w < br.minx or c.minx > bx1 or
+            c.miny + c.h < br.miny or c.miny > by1) continue;
+        const corners = pad_shape.worldCourtyardCorners(part);
+        var worst = std.math.inf(f64);
+        var at = corners[0];
+        for (corners) |corner| {
+            const inset = boardInset(br, poly, corner[0], corner[1]);
+            if (inset < worst) {
+                worst = inset;
+                at = corner;
+            }
+        }
+        if (worst < edge - eps) {
+            try out.append(arena, .{
+                .x = at[0],
+                .y = at[1],
+                .gap = worst,
+                .clearance = edge,
+                .kind = .component_edge,
+                .severity = defaultSeverity(.component_edge),
+                .who = .{ .part_a = partyIndex(i) },
+            });
+        }
+    }
+}
+
+/// courtyard ↔ courtyard: two same-side parts whose keep-out courtyards
+/// interpenetrate can't both be assembled (opposite sides never clash). Strict
+/// overlap is the violation (negative gap = depth); touching exactly is legal.
+/// O(parts²) — parts are few (hundreds), so this stays brute (not grid-culled).
+///
+/// The boxes cull; the parts' REAL rotated rectangles decide. A courtyard off a
+/// quarter turn boxes up to √2 wider per axis, so two parts that clear each
+/// other on the diagonal — the pose a connector fanned out at 45° is in — read
+/// as clashing when only their boxes do, and a genuine clash is reported deeper
+/// than it is (rf-switch-eval's SMPM pairs: 1.037 mm boxed against 0.733 mm of
+/// real interpenetration).
+fn checkCourtyards(arena: std.mem.Allocator, out: *Viol, placement: optimizer.Placement) std.mem.Allocator.Error!void {
     for (placement.parts, 0..) |a, i| {
-        const ca = optimizer.worldCourtyard(a);
+        const ca = optimizer.worldCourtyard(&a);
         if (ca.w <= 0 or ca.h <= 0) continue;
-        for (placement.parts[i + 1 ..]) |b| {
+        for (placement.parts[i + 1 ..], i + 1..) |b, bi| {
             if (a.side != b.side) continue;
-            const cb = optimizer.worldCourtyard(b);
+            const cb = optimizer.worldCourtyard(&b);
             if (cb.w <= 0 or cb.h <= 0) continue;
-            const ov = rectOverlap(ca, cb);
+            if (rectOverlap(ca, cb).depth <= eps) continue;
+            const ov = pose_math.obbPenetration(
+                pad_shape.worldCourtyardCorners(a),
+                pad_shape.worldCourtyardCorners(b),
+            ) orelse continue;
             if (ov.depth > eps) {
-                // Assembly concern, not a copper defect → warn, and record the
-                // interpenetration depth in `gap` (clearance stays 0 — there is
-                // no clearance rule; the presentation layer reads this as an
-                // "overlap by |gap| mm" message, not a "gap < 0" nonsense line).
-                try out.append(arena, .{ .x = ov.x, .y = ov.y, .gap = -ov.depth, .clearance = 0, .kind = .courtyard, .severity = .warn });
+                // Assembly concern → warn; `gap` = −depth (no clearance rule).
+                // Parties are the two PARTS (a courtyard belongs to no net).
+                try out.append(arena, .{ .x = ov.x, .y = ov.y, .gap = -ov.depth, .clearance = 0, .kind = .courtyard, .severity = defaultSeverity(.courtyard), .who = .{ .part_a = partyIndex(i), .part_b = partyIndex(bi) } });
             }
         }
     }
 }
 
-/// mask sliver: the solder-mask WEB between two adjacent pad mask openings
-/// (each pad box grown by `mask_margin` per side) must not fall below `min_web`,
-/// or the thin remaining strip of mask can flake off in fab and bridge. Only
-/// cross-part pairs whose openings share a board side are considered — a
-/// footprint's own inter-pad pitch is inherent geometry, not a placement
-/// defect. Merged openings (web ≤ 0) are skipped (there is no web to lose). A
-/// warning, not an error: it never blocks the fab gate.
+/// mask sliver: the solder-mask WEB between two adjacent pad openings (each pad
+/// box grown by `mask_margin`/side) must not fall below `min_web`, or the strip
+/// flakes off and bridges. Cross-part, same-side pairs only; merged openings
+/// (web ≤ 0) skipped. A warning, never a fab-gate blocker.
 fn checkMaskSlivers(
     arena: std.mem.Allocator,
     out: *Viol,
     pads: []const PadBox,
+    grid: *Grid,
     mask_margin: f64,
     min_web: f64,
-) std.mem.Allocator.Error!void {
-    if (min_web <= 0) return;
+) Err {
+    if (min_web <= 0 or pads.len < 2) return;
     const m2 = 2 * mask_margin;
+    // A sliver needs BOTH axis gaps under `min_web`, i.e. the raw pad boxes within
+    // `min_web + 2·margin` on each axis — the grid inflation, so no pair is missed.
+    const delta = min_web + m2;
     for (pads, 0..) |a, i| {
-        for (pads[i + 1 ..]) |b| {
+        for (try grid.near(arena, padBox(a), delta)) |ju| {
+            if (ju <= i) continue;
+            const b = pads[ju];
             if (a.part == b.part) continue;
             // Openings must share a face (SMD → its part's side; thru → both).
             if (!(a.thru or b.thru or a.layer == b.layer)) continue;
@@ -468,118 +1485,163 @@ fn checkMaskSlivers(
             if (web > eps and web < min_web - eps) {
                 const mx = ((a.x0 + a.x1) + (b.x0 + b.x1)) / 4;
                 const my = ((a.y0 + a.y1) + (b.y0 + b.y1)) / 4;
-                try out.append(arena, .{ .x = mx, .y = my, .gap = web, .clearance = min_web, .kind = .mask_sliver, .severity = .warn });
+                try out.append(arena, .{ .x = mx, .y = my, .gap = web, .clearance = min_web, .kind = .mask_sliver, .severity = defaultSeverity(.mask_sliver), .who = padPairParties(a, b) });
             }
         }
     }
 }
 
-/// silk over pad: silkscreen ink (a footprint's silk lines/circles or its
-/// auto ref-des strokes) printed across a pad's solder-mask opening keeps
-/// solder from wetting cleanly. Each part's silk features are tested — on the
-/// part's own board side — against every OTHER part's pad opening (pad box
-/// grown by `mask_margin`); a footprint's silk over its own pads is treated as
-/// footprint geometry, not a placement defect, so same-part pairs are skipped.
-/// At most ONE finding is emitted per owner part (a single "this part's silk
-/// crosses a foreign pad" advisory) — otherwise a dense/overlapping layout
-/// would produce a finding per crossed pad and drown the report. Board-level
-/// `(Text …)` silk lives in the layout sidecar and is not plumbed into
-/// `drc.check`, so it is not covered here. A warning, never a blocker.
+/// silk over pad: a footprint's silk lines/circles crossing another part's pad
+/// mask opening (pad box grown by `mask_margin`) keeps solder from wetting. Own
+/// pads are exempt (footprint geometry); at most ONE finding per owner part so a
+/// dense layout doesn't drown the report. Only authored footprint art exists
+/// in this pass. A warning, never a blocker.
 fn checkSilkOverPad(
     arena: std.mem.Allocator,
     out: *Viol,
     placement: optimizer.Placement,
     pads: []const PadBox,
+    pad_grid: *Grid,
     mask_margin: f64,
-) std.mem.Allocator.Error!void {
+) Err {
+    if (pads.len == 0) return;
     for (placement.parts, 0..) |part, pi| {
-        // Only real footprint silk art (lines/circles) is judged. An auto-placed
-        // ref-des LABEL over a foreign pad is cosmetic (the fab clips silkscreen
-        // off pads) and ubiquitous on dense boards, so it is deliberately NOT a
-        // silk-over-pad violation — the label is still auto-placed + stroked on
-        // the Gerber via `pad_shape.refDesBox`, it just isn't flagged here.
-        if (part.silk_lines.len == 0 and part.silk_circles.len == 0) continue;
+        if (part.features.silk_lines.len == 0 and part.features.silk_circles.len == 0) continue;
+        const box = silkWorldBox(part) orelse continue;
         const s_layer: u8 = if (part.side == .bottom) 1 else 0;
-        const openings = try foreignOpenings(arena, pads, pi, s_layer, mask_margin);
-        if (silkOverPadHit(part, openings)) |hit| {
-            try out.append(arena, .{ .x = hit[0], .y = hit[1], .gap = 0, .clearance = 0, .kind = .silk_over_pad, .severity = .warn });
+        // Openings the silk could cross sit within `margin` of its bbox — the grid
+        // delta. Candidates stay in pad order, so the first hit is stable.
+        var openings: std.ArrayList(Opening) = .empty;
+        for (try pad_grid.near(arena, box, mask_margin)) |j| {
+            if (pads[j].part == pi) continue; // own footprint's silk-vs-pad = geometry
+            if (padOpening(pads[j], s_layer, mask_margin)) |ob| try openings.append(arena, .{ .box = ob, .pad = j });
+        }
+        if (silkOverPadHit(part, openings.items)) |hit| {
+            // Parties: A = the part whose silk offends, B = the pad it covers.
+            const victim = pads[hit.pad];
+            try out.append(arena, .{ .x = hit.x, .y = hit.y, .gap = 0, .clearance = 0, .kind = .silk_over_pad, .severity = defaultSeverity(.silk_over_pad), .who = .{
+                .part_a = partyIndex(pi),
+                .net_b = victim.net,
+                .part_b = partyIndex(victim.part),
+                .pad_b = victim.num,
+            } });
         }
     }
 }
 
-/// The foreign pad mask-openings (world boxes) `pi`'s silk is judged against —
-/// every OTHER part's pad that opens on side `s_layer`, grown by `margin`.
-fn foreignOpenings(
-    arena: std.mem.Allocator,
-    pads: []const PadBox,
-    pi: usize,
-    s_layer: u8,
-    margin: f64,
-) std.mem.Allocator.Error![]const [4]f64 {
-    var out: std.ArrayList([4]f64) = .empty;
-    for (pads) |p| {
-        if (p.part == pi) continue; // own footprint's silk-vs-pad = geometry
-        if (padOpening(p, s_layer, margin)) |ob| try out.append(arena, ob);
+/// World bounding box of a part's footprint silk (lines + circle discs), or null
+/// when it has none — the probe box for the silk-over-pad grid query.
+fn silkWorldBox(part: optimizer.Part) ?[4]f64 {
+    var x0: f64 = std.math.inf(f64);
+    var y0: f64 = std.math.inf(f64);
+    var x1: f64 = -std.math.inf(f64);
+    var y1: f64 = -std.math.inf(f64);
+    for (part.features.silk_lines) |l| {
+        const a = optimizer.worldPadCenter(&part, l.x1, l.y1);
+        const b = optimizer.worldPadCenter(&part, l.x2, l.y2);
+        x0 = @min(x0, @min(a[0], b[0]));
+        y0 = @min(y0, @min(a[1], b[1]));
+        x1 = @max(x1, @max(a[0], b[0]));
+        y1 = @max(y1, @max(a[1], b[1]));
     }
-    return out.toOwnedSlice(arena);
+    for (part.features.silk_circles) |ci| {
+        const c = optimizer.worldPadCenter(&part, ci.cx, ci.cy);
+        x0 = @min(x0, c[0] - ci.r);
+        y0 = @min(y0, c[1] - ci.r);
+        x1 = @max(x1, c[0] + ci.r);
+        y1 = @max(y1, c[1] + ci.r);
+    }
+    if (x1 < x0) return null;
+    return .{ x0, y0, x1, y1 };
 }
 
-/// The first place `part`'s footprint silkscreen (lines or circles) crosses one
-/// of the foreign `openings`, or null when clear. The auto-placed ref-des label
-/// is intentionally excluded (see `checkSilkOverPad`).
-fn silkOverPadHit(part: optimizer.Part, openings: []const [4]f64) ?[2]f64 {
-    for (openings) |ob| {
-        for (part.silk_lines) |l| {
-            const a = optimizer.worldPadCenter(part, l.x1, l.y1);
-            const b = optimizer.worldPadCenter(part, l.x2, l.y2);
-            if (segRectHit(a[0], a[1], b[0], b[1], ob)) |hit| return hit;
+/// The first foreign opening `part`'s authored footprint silk crosses, or null.
+fn silkOverPadHit(part: optimizer.Part, openings: []const Opening) ?SilkHit {
+    for (openings) |o| {
+        for (part.features.silk_lines) |l| {
+            const a = optimizer.worldPadCenter(&part, l.x1, l.y1);
+            const b = optimizer.worldPadCenter(&part, l.x2, l.y2);
+            if (segRectHit(a[0], a[1], b[0], b[1], o.box)) |hit| return .{ .x = hit[0], .y = hit[1], .pad = o.pad };
         }
-        for (part.silk_circles) |ci| {
-            const c = optimizer.worldPadCenter(part, ci.cx, ci.cy);
-            if (circleRectHit(c[0], c[1], ci.r, ob)) return .{ c[0], c[1] };
+        for (part.features.silk_circles) |ci| {
+            const c = optimizer.worldPadCenter(&part, ci.cx, ci.cy);
+            if (circleRectHit(c[0], c[1], ci.r, o.box)) return .{ .x = c[0], .y = c[1], .pad = o.pad };
         }
     }
     return null;
 }
 
-/// track width: every routed/hand-drawn track must be at least as wide as its
-/// net's `(net-class (width …))` when one is declared, else the board-wide
-/// `min_width` rule. A track thinner than its class won't carry the current the
-/// class sizes it for — an error. Width-less (synthetic) tracks are skipped.
-fn checkTrackWidth(
-    arena: std.mem.Allocator,
-    out: *Viol,
+/// A candidate mask opening for the silk check: its world box + the `pads`
+/// index it came from (so a hit can name the pad the silk covers).
+const Opening = struct { box: [4]f64, pad: usize };
+
+/// Where silk crosses an opening, and which `pads` entry it was.
+const SilkHit = struct { x: f64, y: f64, pad: usize };
+
+/// track width: each track must be at least its net-class `(width …)`, else the
+/// board `min_width`. A thinner track is an error; width-less tracks are skipped.
+const TrackWidthInput = struct {
     placement: optimizer.Placement,
+    routed: router.RouteResult,
     tracks: []const router.Track,
     min_width: f64,
-) std.mem.Allocator.Error!void {
-    const nrules = placement.rules.net;
-    for (tracks) |t| {
+};
+
+fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) std.mem.Allocator.Error!void {
+    const nrules = in.placement.rules.net;
+    for (in.tracks) |t| {
         if (t.width <= eps) continue; // no recorded width — not a real defect
-        var want = min_width;
+        var want = in.min_width;
         if (t.net >= 0) {
             const ni: usize = @intCast(t.net);
             if (ni < nrules.len and nrules[ni].width > 0) want = nrules[ni].width;
         }
-        if (t.width < want - eps) {
-            try out.append(arena, .{ .x = (t.x1 + t.x2) / 2, .y = (t.y1 + t.y2) / 2, .gap = t.width, .clearance = want, .kind = .track_width });
+        if (t.width < want - eps and !portFramePadTaper(in.routed, t, want)) {
+            try out.append(arena, .{ .x = (t.x1 + t.x2) / 2, .y = (t.y1 + t.y2) / 2, .gap = t.width, .clearance = want, .kind = .track_width, .who = .{ .net_a = t.net }, .layer = layerOf(t.layer) });
         }
     }
 }
 
-/// The mask opening box of a pad on side `s_layer` (pad world box grown by
-/// `margin` per side), or null when the pad doesn't open on that side. SMD pads
-/// open on their part's side only; through/NPTH pads open on both.
+/// The controlled-width rule applies to the transmission-line body, not to
+/// the one-width linear taper that joins it to a narrower land. Only a solver-
+/// proven port-frame route earns this exemption, and only for an exact emitted
+/// chord in that route's variable-width centreline. Imported or hand-drawn
+/// thin copper therefore remains a fabrication error.
+fn portFramePadTaper(routed: router.RouteResult, track: router.Track, nominal_width: f64) bool {
+    if (track.width >= nominal_width - eps) return false;
+    for (routed.rf_port_outcomes) |outcome| {
+        if (outcome.net != track.net or outcome.physical.layer != track.layer) continue;
+        if (!outcome.success or outcome.physical.gate_removed) continue;
+        const samples = outcome.physical.samples;
+        if (samples.len < 2) continue;
+        for (samples[1..], 1..) |sample, i| {
+            const before = samples[i - 1];
+            const width = (before.width_mm + sample.width_mm) / 2;
+            if (@abs(track.width - width) > eps) continue;
+            if (sameChord(track, before.at, sample.at)) return true;
+        }
+    }
+    return false;
+}
+
+fn sameChord(track: router.Track, a: [2]f64, b: [2]f64) bool {
+    return (samePoint(.{ track.x1, track.y1 }, a) and samePoint(.{ track.x2, track.y2 }, b)) or
+        (samePoint(.{ track.x1, track.y1 }, b) and samePoint(.{ track.x2, track.y2 }, a));
+}
+
+fn samePoint(a: [2]f64, b: [2]f64) bool {
+    return @abs(a[0] - b[0]) <= eps and @abs(a[1] - b[1]) <= eps;
+}
+
+/// The mask opening (pad box grown by `margin`) of a pad on side `s_layer`, or
+/// null when it doesn't open there (SMD → its side only; thru/NPTH → both).
 fn padOpening(p: PadBox, s_layer: u8, margin: f64) ?[4]f64 {
     if (!(p.thru or p.layer == s_layer)) return null;
     return .{ p.x0 - margin, p.y0 - margin, p.x1 + margin, p.y1 + margin };
 }
 
-/// If segment (ax,ay)-(bx,by) penetrates the interior of the AABB `box`
-/// [x0,y0,x1,y1], return an interior point; else null. Liang–Barsky clip; a
-/// segment that merely grazes an edge (clipped midpoint on the boundary, not
-/// strictly inside) is not counted as a penetration, so footprint silk running
-/// along a pad edge stays quiet.
+/// If segment (ax,ay)-(bx,by) penetrates AABB `box`, an interior point; else
+/// null (Liang–Barsky clip; a mere edge-graze doesn't count).
 fn segRectHit(ax: f64, ay: f64, bx: f64, by: f64, box: [4]f64) ?[2]f64 {
     const dx = bx - ax;
     const dy = by - ay;
@@ -609,10 +1671,9 @@ fn segRectHit(ax: f64, ay: f64, bx: f64, by: f64, box: [4]f64) ?[2]f64 {
     return null;
 }
 
-/// True when a stroked circle of radius `r` centred at (cx,cy) crosses the AABB
-/// `box`: the nearest box point is inside the disc AND the farthest box corner
-/// is outside it (so the RING actually passes through the rectangle, rather
-/// than the whole pad sitting inside an encircling marker).
+/// True when a stroked circle (r at cx,cy) crosses AABB `box`: the nearest box
+/// point is inside the disc AND the farthest corner is outside it (the ring
+/// passes through, vs. the pad sitting wholly inside an encircling marker).
 fn circleRectHit(cx: f64, cy: f64, r: f64, box: [4]f64) bool {
     const nx = std.math.clamp(cx, box[0], box[2]);
     const ny = std.math.clamp(cy, box[1], box[3]);
@@ -633,36 +1694,148 @@ fn boxOverlap(a: [4]f64, b: [4]f64) ?[2]f64 {
     return .{ (ox0 + ox1) / 2, (oy0 + oy1) / 2 };
 }
 
-/// Two features may touch only if they share a (real) net. Net index -1 means
-/// "no net" (not-connected); two such features still need clearance.
+/// Two features may touch only if they share a (real) net; index -1 ("no net")
+/// still needs clearance.
 fn sameNet(a: i32, b: i32) bool {
     return a == b and a != -1;
 }
 
-/// Build the pad-rect list with net + part index, mirroring the world-rect
-/// the router and renderer use (rotation-aware for the 0/90/180/270° poses).
+// ── Spatial hash ─────────────────────────────────────────────────────────────
+// Culls the pairwise checks from O(n²) to ~O(n). A box CONTAINS its feature, so a
+// query (probe box inflated by the check's MAX separation) that drops a pair
+// proves it beyond the rule; survivors run the identical exact test, so the
+// result is unchanged (candidates come back deduped + sorted → nested-loop order).
+
+/// Packed signed cell coordinate → key, biased non-negative in i64 so the pack
+/// is a widening cast (dodges the i32 overflow at the clamp bound), not a bitcast.
+fn cellKey(cx: i32, cy: i32) u64 {
+    const ux: u64 = @intCast(@as(i64, cx) + 0x40000000);
+    const uy: u64 = @intCast(@as(i64, cy) + 0x40000000);
+    return (ux << 32) | uy;
+}
+
+/// A scaled coordinate → cell index, saturating far off-board so the narrow is
+/// always defined and two distant features still share a boundary cell.
+fn floorCell(scaled: f64) i32 {
+    const f = @floor(scaled);
+    if (!(f > -2.0e9)) return -0x40000000;
+    if (!(f < 2.0e9)) return 0x40000000;
+    return numeric.checkedInt(i32, f) orelse 0;
+}
+
+/// Uniform spatial hash over feature AABBs (built from `items` via `boxOf`) with
+/// a reused candidate scratch. Each cell holds the indices whose box overlaps it.
+const Grid = struct {
+    inv: f64 = 1,
+    map: std.AutoHashMapUnmanaged(u64, std.ArrayList(u32)) = .empty,
+    cand: std.ArrayList(u32) = .empty,
+
+    /// Cell size ~ the typical span raised to `delta`, floored at 0.5 mm, never
+    /// letting the largest box span over 64² cells (bounds degenerate input).
+    fn build(a: std.mem.Allocator, comptime T: type, xs: []const T, comptime bf: fn (T) [4]f64, delta: f64) GridErr {
+        var sum: f64 = 0;
+        var maxext: f64 = 0;
+        for (xs) |it| {
+            const e = @max(bf(it)[2] - bf(it)[0], bf(it)[3] - bf(it)[1]);
+            sum += e;
+            maxext = @max(maxext, e);
+        }
+        var cell = @max(@max(@max(sum / @max(1.0, @as(f64, @floatFromInt(xs.len))), 2 * delta), 0.5), maxext / 64.0);
+        if (!(std.math.isFinite(cell) and cell > 0)) cell = 1;
+        var g = Grid{ .inv = 1.0 / cell };
+        for (xs, 0..) |it, i| {
+            const b = bf(it);
+            var cx = floorCell(b[0] * g.inv);
+            const cx1 = floorCell(b[2] * g.inv);
+            const cy1 = floorCell(b[3] * g.inv);
+            while (cx <= cx1) : (cx += 1) {
+                var cy = floorCell(b[1] * g.inv);
+                while (cy <= cy1) : (cy += 1) {
+                    const e = try g.map.getOrPut(a, cellKey(cx, cy));
+                    if (!e.found_existing) e.value_ptr.* = .empty;
+                    try e.value_ptr.append(a, @intCast(i));
+                }
+            }
+        }
+        return g;
+    }
+
+    /// Deduped, ascending candidate indices whose cells meet `box`±`delta`.
+    fn near(self: *Grid, arena: std.mem.Allocator, box: [4]f64, delta: f64) std.mem.Allocator.Error![]const u32 {
+        self.cand.clearRetainingCapacity();
+        var cx = floorCell((box[0] - delta) * self.inv);
+        const cx1 = floorCell((box[2] + delta) * self.inv);
+        const cy1 = floorCell((box[3] + delta) * self.inv);
+        while (cx <= cx1) : (cx += 1) {
+            var cy = floorCell((box[1] - delta) * self.inv);
+            while (cy <= cy1) : (cy += 1) {
+                if (self.map.get(cellKey(cx, cy))) |b| try self.cand.appendSlice(arena, b.items);
+            }
+        }
+        const s = self.cand.items;
+        std.mem.sort(u32, s, {}, std.sort.asc(u32));
+        var w: usize = 0;
+        for (s) |v| {
+            if (w == 0 or s[w - 1] != v) {
+                s[w] = v;
+                w += 1;
+            }
+        }
+        return s[0..w];
+    }
+};
+
+/// Feature AABBs: via bounding square, track segment-bbox + half-width, pad box.
+fn viaBox(v: router.Via) [4]f64 {
+    const r = v.dia / 2;
+    return .{ v.x - r, v.y - r, v.x + r, v.y + r };
+}
+fn trackBox(t: router.Track) [4]f64 {
+    const hw = t.width / 2;
+    return .{ @min(t.x1, t.x2) - hw, @min(t.y1, t.y2) - hw, @max(t.x1, t.x2) + hw, @max(t.y1, t.y2) + hw };
+}
+fn padBox(p: PadBox) [4]f64 {
+    return .{ p.x0, p.y0, p.x1, p.y1 };
+}
+
+/// One (pin-name → net-index) entry in a ref-des's pin list.
+const PinNet = struct { pin: []const u8, net: i32 };
+
+/// The net a pad lands on: the last matching pin in `list` (last-wins, mirroring
+/// the old map's overwrite), or -1 (no net).
+fn lookupNet(list: []const PinNet, pin: []const u8) i32 {
+    var net: i32 = -1;
+    for (list) |e| {
+        if (std.mem.eql(u8, e.pin, pin)) net = e.net;
+    }
+    return net;
+}
+
+/// The world pad-rect list (rotation-aware) with net + part index. The pad→net
+/// join keys on the ref-des slice directly (per-ref pin list) — ZERO formatted
+/// allocations per check call.
 fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]PadBox {
-    var pin_net = std.StringHashMapUnmanaged(i32).empty;
+    var by_ref: std.StringHashMapUnmanaged(std.ArrayList(PinNet)) = .empty;
     for (placement.nets, 0..) |net, ni| {
         for (net.pins) |pin| {
-            const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, pin.pin });
-            try pin_net.put(arena, key, @intCast(ni));
+            const gop = try by_ref.getOrPut(arena, pin.ref_des);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(arena, .{ .pin = pin.pin, .net = @intCast(ni) });
         }
     }
     var list: std.ArrayList(PadBox) = .empty;
     for (placement.parts, 0..) |part, pi| {
         const layer: u8 = if (part.side == .bottom) 1 else 0;
+        const pins: []const PinNet = if (by_ref.get(part.ref_des)) |l| l.items else &.{};
         for (part.pads) |pad| {
             const sh = try pad_shape.worldShape(arena, part, pad);
-            const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ part.ref_des, pad.number });
-            const net = pin_net.get(key) orelse -1;
-            const c = optimizer.worldPadCenter(part, pad.x, pad.y);
-            // World half-vector to a slot's arc centres (affine, so it's the
-            // difference of two transformed local points); zero for a round bore.
+            const net = lookupNet(pins, pad.number);
+            const c = optimizer.worldPadCenter(&part, pad.x, pad.y);
+            // World half-vector to a slot's arc centres (0 for a round bore).
             var shx: f64 = 0;
             var shy: f64 = 0;
             if (pad.isSlot()) {
-                const e1 = optimizer.worldPadCenter(part, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
+                const e1 = optimizer.worldPadCenter(&part, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
                 shx = e1[0] - c[0];
                 shy = e1[1] - c[1];
             }
@@ -674,6 +1847,7 @@ fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Al
                 .poly = sh.poly,
                 .net = net,
                 .part = pi,
+                .num = pad.number,
                 .layer = layer,
                 .thru = pad.thru,
                 .npth = pad.npth,
@@ -689,24 +1863,22 @@ fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Al
     return list.toOwnedSlice(arena);
 }
 
-/// Every drilled hole on the board unified into one list: each pad with
-/// drill>0 (world centre + diameter) plus each via with drill>0. Arena-owned.
+/// Every drilled hole (pads + vias with drill>0) unified into one arena list.
 fn allHoles(arena: std.mem.Allocator, pads: []const PadBox, vias: []const router.Via) std.mem.Allocator.Error![]Hole {
     var list: std.ArrayList(Hole) = .empty;
     for (pads) |p| {
         if (p.drill <= 0) continue;
-        try list.append(arena, .{ .x = p.hx, .y = p.hy, .drill = p.drill, .shx = p.shx, .shy = p.shy });
+        try list.append(arena, .{ .x = p.hx, .y = p.hy, .drill = p.drill, .shx = p.shx, .shy = p.shy, .net = p.net, .part = partyIndex(p.part), .num = p.num });
     }
     for (vias) |v| {
         if (v.drill <= 0) continue;
-        try list.append(arena, .{ .x = v.x, .y = v.y, .drill = v.drill });
+        try list.append(arena, .{ .x = v.x, .y = v.y, .drill = v.drill, .net = v.net });
     }
     return list.toOwnedSlice(arena);
 }
 
-/// Overlap of two axis-aligned rects: penetration depth (min of the x/y
-/// overlaps; ≤0 ⇒ disjoint or merely touching) and the centre of the shared
-/// region (the marker location). Used by the courtyard check.
+/// Overlap of two rects: penetration depth (min axis overlap; ≤0 ⇒ disjoint or
+/// touching) and the shared-region centre. Used by the courtyard check.
 fn rectOverlap(a: optimizer.BoardRect, b: optimizer.BoardRect) struct { depth: f64, x: f64, y: f64 } {
     const ax1 = a.minx + a.w;
     const ay1 = a.miny + a.h;
@@ -721,13 +1893,11 @@ fn rectOverlap(a: optimizer.BoardRect, b: optimizer.BoardRect) struct { depth: f
 }
 
 /// How far outside the outline a feature may sit before the board-edge check
-/// writes it off as staged (parked in the off-board staging band) rather
-/// than flagging it — copper just past the edge IS an error (it would be
-/// routed off the board), copper centimetres away is a workflow state.
+/// treats it as staged (off-board) rather than flagging it — copper just past
+/// the edge is an error, copper centimetres away is a workflow state.
 pub const staging_exempt_mm: f64 = 10.0;
 
-/// Signed distance from (x,y) to the nearest board-outline edge — positive
-/// inside the rectangle, negative outside.
+/// Signed distance from (x,y) to the nearest rectangle edge (positive inside).
 fn edgeInset(br: optimizer.BoardRect, x: f64, y: f64) f64 {
     const dl = x - br.minx;
     const dr = br.minx + br.w - x;
@@ -736,8 +1906,8 @@ fn edgeInset(br: optimizer.BoardRect, x: f64, y: f64) f64 {
     return @min(@min(dl, dr), @min(dt, db));
 }
 
-/// Signed inset of (x,y) from the board outline: the exact polygon when the
-/// board is non-rectangular, else the rectangle. Positive = inside.
+/// Signed inset of (x,y) from the outline (exact polygon when non-rectangular,
+/// else the rect). Positive = inside.
 fn boardInset(br: optimizer.BoardRect, poly: ?[]const [2]f64, x: f64, y: f64) f64 {
     if (poly) |p| {
         if (p.len >= 3) return outline.signedInset(p, x, y);
@@ -755,46 +1925,21 @@ fn segPointDist(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) f64 {
     return std.math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 
-/// Shortest distance from a track's centreline to a pad's copper (0 when the
-/// centreline enters the pad), or +inf when the whole segment stays farther
-/// than `win` from the pad's bbox (can't violate a `win` rule). The sampled
-/// span is slab-clipped to the pad's `win`-inflated bbox first, so a long rail
-/// passing one small pad samples only the short stretch beside it. 0.05 mm
-/// steps against the pad's real outline via `pad_shape.pointDist` — exact
-/// enough for a pass/fail against a 0.127 mm rule, and it handles polygon
-/// (thermal/EP) pads the same way the router's stub checks do.
+/// Shortest distance from a track's centreline to a pad's copper (0 inside the
+/// pad), or +inf when the whole segment stays > `win` from the pad bbox. The
+/// span is slab-clipped to the pad's `win`-inflated bbox, then sampled at 0.05 mm
+/// against the pad's real outline — exact enough for a pass/fail and polygon-safe.
 fn segShapeDist(t: router.Track, p: PadBox, win: f64) f64 {
-    const dx = t.x2 - t.x1;
-    const dy = t.y2 - t.y1;
-    var f0: f64 = 0;
-    var f1: f64 = 1;
-    if (@abs(dx) > 1e-12) {
-        const a = (p.x0 - win - t.x1) / dx;
-        const b = (p.x1 + win - t.x1) / dx;
-        f0 = @max(f0, @min(a, b));
-        f1 = @min(f1, @max(a, b));
-    } else if (t.x1 < p.x0 - win or t.x1 > p.x1 + win) return std.math.inf(f64);
-    if (@abs(dy) > 1e-12) {
-        const a = (p.y0 - win - t.y1) / dy;
-        const b = (p.y1 + win - t.y1) / dy;
-        f0 = @max(f0, @min(a, b));
-        f1 = @min(f1, @max(a, b));
-    } else if (t.y1 < p.y0 - win or t.y1 > p.y1 + win) return std.math.inf(f64);
-    if (f0 > f1) return std.math.inf(f64);
-    const len = std.math.hypot(dx, dy) * (f1 - f0);
-    const steps: usize = @max(1, numeric.toCount(@ceil(len / 0.05)));
-    var best = std.math.inf(f64);
-    var i: usize = 0;
-    while (i <= steps) : (i += 1) {
-        const f = f0 + (f1 - f0) * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps));
-        const d = pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, t.x1 + f * dx, t.y1 + f * dy, best);
-        if (d < best) best = d;
-    }
-    return best;
+    return pad_shape.segmentDist(
+        .{ .x0 = p.x0, .y0 = p.y0, .x1 = p.x1, .y1 = p.y1, .poly = p.poly },
+        .{ t.x1, t.y1 },
+        .{ t.x2, t.y2 },
+        win,
+    );
 }
 
 /// Shortest distance between two segments (0 when they properly cross).
-fn segSegDist(ax1: f64, ay1: f64, ax2: f64, ay2: f64, bx1: f64, by1: f64, bx2: f64, by2: f64) f64 {
+pub fn segSegDist(ax1: f64, ay1: f64, ax2: f64, ay2: f64, bx1: f64, by1: f64, bx2: f64, by2: f64) f64 {
     const d1x = ax2 - ax1;
     const d1y = ay2 - ay1;
     const d2x = bx2 - bx1;
@@ -829,7 +1974,7 @@ test "check flags a via overlapping a foreign pad" {
     var parts = [_]optimizer.Part{
         .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
     };
-    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
     const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
     const placement = optimizer.Placement{
         .parts = &parts,
@@ -849,9 +1994,8 @@ test "check flags a via overlapping a foreign pad" {
     const routed = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 1, .total = 1 };
 
     const v = try check(arena, placement, routed, 0.127);
-    try testing.expectEqual(@as(usize, 1), v.len);
-    try testing.expectEqual(Kind.via_pad, v[0].kind);
-    try testing.expect(v[0].gap < 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .via_pad));
+    try testing.expect(firstOfKind(v, .via_pad).?.gap < 0.127);
 }
 
 // spec: placement/drc - passes a via that shares the pad's net
@@ -864,7 +2008,7 @@ test "check ignores a via on the same net as the pad" {
     var parts = [_]optimizer.Part{
         .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
     };
-    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
     const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
     const placement = optimizer.Placement{
         .parts = &parts,
@@ -885,7 +2029,7 @@ test "check ignores a via on the same net as the pad" {
     const routed = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 1, .total = 1 };
 
     const v = try check(arena, placement, routed, 0.127);
-    try testing.expectEqual(@as(usize, 0), v.len);
+    try testing.expectEqual(@as(usize, 0), countKind(v, .via_pad));
 }
 
 // spec: placement/drc - flags a via whose annular ring is under the fab minimum
@@ -916,8 +2060,7 @@ test "check flags a thin annular ring" {
     };
     const routed = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 1, .total = 1 };
     const v = try check(arena, placement, routed, 0.127);
-    try testing.expectEqual(@as(usize, 1), v.len);
-    try testing.expectEqual(Kind.annular, v[0].kind);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .annular));
 }
 
 // spec: placement/drc - flags copper crowding the board outline and skips the off-board staging band
@@ -948,8 +2091,7 @@ test "check flags copper at the board edge, not staged copper" {
     const vias = [_]router.Via{.{ .x = -20, .y = 5, .dia = 0.4, .drill = 0.2, .net = 0 }};
     const routed = router.RouteResult{ .tracks = &tracks, .vias = &vias, .routed = 1, .total = 1 };
     const v = try check(arena, placement, routed, 0.127);
-    try testing.expectEqual(@as(usize, 1), v.len);
-    try testing.expectEqual(Kind.board_edge, v[0].kind);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .board_edge));
 }
 
 // spec: placement/drc - checks the board edge against a non-rectangular outline polygon, catching copper in a notch
@@ -992,11 +2134,15 @@ test "check measures the exact outline polygon on an L-shaped board" {
     };
     const routed = router.RouteResult{ .tracks = &tracks, .vias = &vias, .routed = 1, .total = 1 };
     const v = try check(arena, placement, routed, 0.127);
-    try testing.expectEqual(@as(usize, 2), v.len);
-    for (v) |viol| try testing.expectEqual(Kind.board_edge, viol.kind);
+    try testing.expectEqual(@as(usize, 2), countKind(v, .board_edge));
     // The notch via is reported at its own position, the track at the wall.
-    try testing.expectApproxEqAbs(@as(f64, 8), v[0].x, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 6), v[1].x, 1e-9);
+    var edge_index: usize = 0;
+    for (v) |viol| {
+        if (viol.kind != .board_edge) continue;
+        const expected_x: f64 = if (edge_index == 0) 8 else 6;
+        try testing.expectApproxEqAbs(expected_x, viol.x, 1e-9);
+        edge_index += 1;
+    }
 }
 
 // spec: placement/drc - the polygon board-edge inset is measured against the copper-edge design rule
@@ -1035,7 +2181,7 @@ test "check measures the polygon inset against the copper-edge rule" {
 
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, routed, 0.127), .board_edge));
 
-    placement.rules = .{ .design = .{ .copper_edge = 0.75 } };
+    placement.rules = .{ .design = .{ .edge = .{ .copper = 0.75, .component = 2.5 } } };
     const v = try check(arena, placement, routed, 0.127);
     try testing.expectEqual(@as(usize, 1), countKind(v, .board_edge));
     try testing.expectEqual(@as(f64, 0.75), v[0].clearance);
@@ -1065,8 +2211,8 @@ test "route then check is clean when a ground pad abuts a foreign pad" {
         .{ .ref_des = "U1", .kind = .hub, .hw = 0.6, .hh = 0.6, .pads = &u_pads, .fallback = false, .x = 0, .y = 0 },
         .{ .ref_des = "C1", .kind = .passive, .hw = 0.6, .hh = 0.6, .pads = &c_pads, .fallback = false, .x = 4, .y = 0 },
     };
-    const gnd = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "2" } };
-    const vcc = [_]export_kicad.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C1", .pin = "1" } };
+    const gnd = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "2" } };
+    const vcc = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C1", .pin = "1" } };
     const nets = [_]FlatNet{ .{ .name = "GND", .pins = &gnd }, .{ .name = "VCC", .pins = &vcc } };
     const placement = optimizer.Placement{
         .parts = &parts,
@@ -1086,9 +2232,15 @@ test "route then check is clean when a ground pad abuts a foreign pad" {
     const routed = try router.route(arena, placement, .{});
     // Both GND pads are still served by a via (connectivity preserved)…
     try testing.expect(routed.vias.len >= 2);
-    // …and the routed module has zero clearance violations.
+    // …and the routed module has zero clearance violations. The fan is judged
+    // on ERRORS: at 0.4 mm pitch the escape to the fanned via can only leave
+    // its land off the centre, which the same-net `land_transit` rule reports
+    // as a warning — that is the shape this fixture is built out of, not
+    // something the fan did wrong.
     const v = try check(arena, placement, routed, 0.127);
-    try testing.expectEqual(@as(usize, 0), v.len);
+    try testing.expectEqual(@as(usize, 0), errorCount(v));
+    try testing.expectEqual(@as(usize, 0), countKind(v, .track_pad));
+    try testing.expectEqual(@as(usize, 0), countKind(v, .via_pad));
 }
 
 // spec: placement/drc - flags same-layer track crossings and sub-clearance pairs between nets
@@ -1123,9 +2275,8 @@ test "check flags track-to-track crossings but not exact-pitch neighbours" {
     };
     const crossed = router.RouteResult{ .tracks = &crossing, .vias = &.{}, .routed = 2, .total = 2 };
     const v1 = try check(arena, placement, crossed, clearance);
-    try testing.expectEqual(@as(usize, 1), v1.len);
-    try testing.expectEqual(Kind.track_track, v1[0].kind);
-    try testing.expect(v1[0].gap < 0);
+    try testing.expectEqual(@as(usize, 1), countKind(v1, .track_track));
+    try testing.expect(firstOfKind(v1, .track_track).?.gap < 0);
 
     // The same two tracks on DIFFERENT layers never interact.
     const stacked = [_]router.Track{
@@ -1133,7 +2284,7 @@ test "check flags track-to-track crossings but not exact-pitch neighbours" {
         .{ .x1 = 0, .y1 = 2, .x2 = 2, .y2 = 0, .layer = 1, .width = w, .net = 1 },
     };
     const layered = router.RouteResult{ .tracks = &stacked, .vias = &.{}, .routed = 2, .total = 2 };
-    try testing.expectEqual(@as(usize, 0), (try check(arena, placement, layered, clearance)).len);
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, layered, clearance), .track_track));
 
     // Two parallel tracks at exactly grid pitch (width + clearance centre to
     // centre) are the router's legal adjacency — must NOT flag.
@@ -1143,7 +2294,7 @@ test "check flags track-to-track crossings but not exact-pitch neighbours" {
         .{ .x1 = 0, .y1 = pitch, .x2 = 5, .y2 = pitch, .layer = 0, .width = w, .net = 1 },
     };
     const legal = router.RouteResult{ .tracks = &parallel, .vias = &.{}, .routed = 2, .total = 2 };
-    try testing.expectEqual(@as(usize, 0), (try check(arena, placement, legal, clearance)).len);
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, legal, clearance), .track_track));
 
     // Nudge one inside the clearance rule → sub-clearance pair flags.
     const close = [_]router.Track{
@@ -1152,8 +2303,7 @@ test "check flags track-to-track crossings but not exact-pitch neighbours" {
     };
     const tight = router.RouteResult{ .tracks = &close, .vias = &.{}, .routed = 2, .total = 2 };
     const v2 = try check(arena, placement, tight, clearance);
-    try testing.expectEqual(@as(usize, 1), v2.len);
-    try testing.expectEqual(Kind.track_track, v2[0].kind);
+    try testing.expectEqual(@as(usize, 1), countKind(v2, .track_track));
 }
 
 // spec: placement/drc - flags a track crossing a foreign pad on its layer; other-layer SMD pads don't clash
@@ -1171,8 +2321,8 @@ test "check flags track-to-pad clashes layer-aware" {
     var parts = [_]optimizer.Part{
         .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 0.5, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
     };
-    const p1 = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
-    const p2 = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "2" }};
+    const p1 = [_]flat_netlist.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const p2 = [_]flat_netlist.FlatPin{.{ .ref_des = "U1", .pin = "2" }};
     const nets = [_]FlatNet{ .{ .name = "PAD", .pins = &p1 }, .{ .name = "SIG", .pins = &.{} }, .{ .name = "THRU", .pins = &p2 } };
     const placement = optimizer.Placement{
         .parts = &parts,
@@ -1193,26 +2343,67 @@ test "check flags track-to-pad clashes layer-aware" {
     const across = [_]router.Track{.{ .x1 = -1, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.127, .net = 1 }};
     const top = router.RouteResult{ .tracks = &across, .vias = &.{}, .routed = 1, .total = 1 };
     const v1 = try check(arena, placement, top, 0.127);
-    try testing.expectEqual(@as(usize, 1), v1.len);
-    try testing.expectEqual(Kind.track_pad, v1[0].kind);
-    try testing.expect(v1[0].gap < 0);
+    try testing.expectEqual(@as(usize, 1), countKind(v1, .track_pad));
+    try testing.expect(firstOfKind(v1, .track_pad).?.gap < 0);
 
     // The same track on the BOTTOM layer passes under the top SMD pad — legal.
     const under = [_]router.Track{.{ .x1 = -1, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 1, .width = 0.127, .net = 1 }};
     const bot = router.RouteResult{ .tracks = &under, .vias = &.{}, .routed = 1, .total = 1 };
-    try testing.expectEqual(@as(usize, 0), (try check(arena, placement, bot, 0.127)).len);
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, bot, 0.127), .track_pad));
 
     // A through-hole pad clashes on EVERY layer — the bottom track under it flags.
     const under_thru = [_]router.Track{.{ .x1 = 2, .y1 = 0, .x2 = 4, .y2 = 0, .layer = 1, .width = 0.127, .net = 1 }};
     const bt = router.RouteResult{ .tracks = &under_thru, .vias = &.{}, .routed = 1, .total = 1 };
     const v2 = try check(arena, placement, bt, 0.127);
-    try testing.expectEqual(@as(usize, 1), v2.len);
-    try testing.expectEqual(Kind.track_pad, v2[0].kind);
+    try testing.expectEqual(@as(usize, 1), countKind(v2, .track_pad));
 
     // A track on the pad's OWN net may touch it — never flagged.
     const own = [_]router.Track{.{ .x1 = -1, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 }};
     const ok = router.RouteResult{ .tracks = &own, .vias = &.{}, .routed = 1, .total = 1 };
-    try testing.expectEqual(@as(usize, 0), (try check(arena, placement, ok, 0.127)).len);
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, ok, 0.127), .track_pad));
+}
+
+// spec: placement/drc - A copper-clearance DRC violation names both nets it is between, and a pad party names its part and pad number
+test "check names the nets and the pad behind a track-to-pad clash" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // U7 pad "12" on VDD3V3, with a GND track drawn straight across it.
+    const pads = [_]@import("geometry.zig").Pad{.{ .number = "12", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U7", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "U7", .pin = "12" }};
+    const nets = [_]FlatNet{ .{ .name = "VDD3V3", .pins = &pins }, .{ .name = "GND", .pins = &.{} } };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -5,
+        .miny = -5,
+        .maxx = 5,
+        .maxy = 5,
+        .generated = true,
+    };
+    const across = [_]router.Track{.{ .x1 = -1, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.127, .net = 1 }};
+    const routed = router.RouteResult{ .tracks = &across, .vias = &.{}, .routed = 1, .total = 1 };
+
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .track_pad));
+    const hit = firstOfKind(v, .track_pad).?;
+    // A = the track's net; B = the pad, named down to its part + pad number.
+    try testing.expectEqual(@as(i32, 1), hit.who.net_a); // GND
+    try testing.expectEqual(@as(i32, 0), hit.who.net_b); // VDD3V3
+    try testing.expectEqual(@as(i32, 0), hit.who.part_b); // parts[0] = U7
+    try testing.expectEqualStrings("12", hit.who.pad_b);
+    // The track side has no pad — a party it cannot name stays blank.
+    try testing.expectEqual(@as(i32, -1), hit.who.part_a);
+    try testing.expectEqualStrings("", hit.who.pad_a);
 }
 
 // spec: placement/drc - inner signal layers get the same same-layer checks; through pads clash on every inner layer
@@ -1246,8 +2437,7 @@ test "check is layer-generalized across inner signal layers" {
     };
     const crossed = router.RouteResult{ .tracks = &inner_cross, .vias = &.{}, .routed = 2, .total = 2 };
     const v1 = try check(arena, placement, crossed, w);
-    try testing.expectEqual(@as(usize, 1), v1.len);
-    try testing.expectEqual(Kind.track_track, v1[0].kind);
+    try testing.expectEqual(@as(usize, 1), countKind(v1, .track_track));
 
     // The same geometry split across two DIFFERENT inner layers never clashes.
     const inner_stacked = [_]router.Track{
@@ -1255,14 +2445,14 @@ test "check is layer-generalized across inner signal layers" {
         .{ .x1 = 0, .y1 = 2, .x2 = 2, .y2 = 0, .layer = 3, .width = w, .net = 1 },
     };
     const layered = router.RouteResult{ .tracks = &inner_stacked, .vias = &.{}, .routed = 2, .total = 2 };
-    try testing.expectEqual(@as(usize, 0), (try check(arena, placement, layered, w)).len);
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, layered, w), .track_track));
 
     // A through-hole pad's barrel clashes with an inner-layer track too.
     const pads = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6, .thru = true, .drill = 0.3 }};
     var thru_parts = [_]optimizer.Part{
         .{ .ref_des = "J1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 5, .y = 5 },
     };
-    const jp = [_]export_kicad.FlatPin{.{ .ref_des = "J1", .pin = "1" }};
+    const jp = [_]flat_netlist.FlatPin{.{ .ref_des = "J1", .pin = "1" }};
     const tnets = [_]FlatNet{ .{ .name = "THRU", .pins = &jp }, .{ .name = "SIG", .pins = &.{} } };
     var thru_pl = placement;
     thru_pl.parts = &thru_parts;
@@ -1270,8 +2460,7 @@ test "check is layer-generalized across inner signal layers" {
     const under = [_]router.Track{.{ .x1 = 4, .y1 = 5, .x2 = 6, .y2 = 5, .layer = 2, .width = w, .net = 1 }};
     const bt = router.RouteResult{ .tracks = &under, .vias = &.{}, .routed = 1, .total = 1 };
     const v2 = try check(arena, thru_pl, bt, w);
-    try testing.expectEqual(@as(usize, 1), v2.len);
-    try testing.expectEqual(Kind.track_pad, v2[0].kind);
+    try testing.expectEqual(@as(usize, 1), countKind(v2, .track_pad));
 }
 
 // spec: placement/drc - SMD pads on opposite board faces may overlap in 2D; sharing a face or a through barrel still clashes
@@ -1367,6 +2556,11 @@ test "check flags overlapping courtyards only on the same side" {
     // gap (the check only appends when depth > 0, so gap < 0 by construction).
     try testing.expect(firstOfKind(v1, .courtyard).?.gap < 0);
 
+    // Exact edge contact is legal: the courtyards share x=1 but have no
+    // positive-area interpenetration.
+    overlap[1].x = 2;
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&overlap), routed, 0.127), .courtyard));
+
     // Slide U2 to 2.5 mm — the 2×2 boxes now sit 0.5 mm apart (edge-to-edge),
     // so they don't overlap and nothing flags.
     var apart = [_]optimizer.Part{
@@ -1382,6 +2576,89 @@ test "check flags overlapping courtyards only on the same side" {
         .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 1, .y = 0, .side = .bottom },
     };
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&two_sided), routed, 0.127), .courtyard));
+}
+
+// spec: placement/drc - the courtyard clash measures both parts' rotated keep-out rectangles, so parts clear on the diagonal do not read as overlapping
+test "check judges a courtyard clash on the rotated rectangles, not their boxes" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+
+    // Two 4 × 1 mm courtyards lying end to end along the 45-degree diagonal —
+    // the pose a fanned-out connector row sits in. Their centres are 4.5 mm
+    // apart, so 0.5 mm of clear board separates them.
+    const half = @sqrt(0.5);
+    var pair = [_]optimizer.Part{
+        .{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 0, .y = 0, .rot = 45 },
+        .{ .ref_des = "J2", .kind = .hub, .hw = 2, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 4.5 * half, .y = 4.5 * half, .rot = 45 },
+    };
+    // Their BOXES do overlap — 3.536 mm square each, centres 3.182 mm apart —
+    // so the old box rule called this a clash.
+    try testing.expect(rectOverlap(
+        optimizer.worldCourtyard(&pair[0]),
+        optimizer.worldCourtyard(&pair[1]),
+    ).depth > 0.35);
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&pair), routed, 0.127), .courtyard));
+
+    // Slide the second in to 3 mm and they interpenetrate by a real 1 mm, which
+    // is the depth reported — the box rule would have said 1.414 mm.
+    pair[1].x = 3 * half;
+    pair[1].y = 3 * half;
+    const v = try check(arena, partsOnly(&pair), routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .courtyard));
+    const hit = firstOfKind(v, .courtyard).?;
+    try testing.expectApproxEqAbs(@as(f64, -1), hit.gap, 1e-9);
+    // The marker lands in the shared region, not between the two centres.
+    try testing.expectApproxEqAbs(1.5 * half, hit.x, 1e-9);
+    try testing.expectApproxEqAbs(1.5 * half, hit.y, 1e-9);
+}
+
+// spec: placement/drc - the component-edge check measures the courtyard's own corners, so a chamfer clears a rotated part its bounding box would flag
+test "component-edge clearance reads the rotated courtyard's own corners" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+
+    // A 10 mm board with its bottom-left corner chamfered off along x + y = 3,
+    // and one 4 × 1 mm part turned 45° at the centre — its long axis PARALLEL
+    // to the cut, which is exactly how a part is oriented to clear a chamfer.
+    const poly = [_][2]f64{ .{ 3, 0 }, .{ 10, 0 }, .{ 10, 10 }, .{ 0, 10 }, .{ 0, 3 } };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 5, .y = 5, .rot = 45 },
+    };
+    var placement = partsOnly(&parts);
+    placement.board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 };
+    placement.board_poly = &poly;
+
+    // Its box's inner corner is a point the part does not occupy, and it sits
+    // 2.45 mm off the chamfer — inside the 2.5 mm default body margin.
+    const box = optimizer.worldCourtyard(&parts[0]);
+    try testing.expect(boardInset(placement.board_rect.?, placement.board_poly, box.minx, box.miny) < 2.5);
+    // Every corner the part HAS clears it, so nothing is flagged.
+    for (pad_shape.worldCourtyardCorners(parts[0])) |corner| {
+        try testing.expect(boardInset(placement.board_rect.?, placement.board_poly, corner[0], corner[1]) > 2.5);
+    }
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, routed, 0.127), .component_edge));
+
+    // Pushed into the chamfer, the finding returns and is marked at a corner
+    // the part really has.
+    parts[0].x = 4;
+    parts[0].y = 4;
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .component_edge));
+    const hit = firstOfKind(v, .component_edge).?;
+    try testing.expectApproxEqAbs(@as(f64, 0), cornerGap(parts[0], hit.x, hit.y), 1e-9);
+}
+
+/// Distance from (x, y) to the nearest corner the part actually has.
+fn cornerGap(part: optimizer.Part, x: f64, y: f64) f64 {
+    var nearest = std.math.inf(f64);
+    for (pad_shape.worldCourtyardCorners(part)) |corner| {
+        nearest = @min(nearest, std.math.hypot(x - corner[0], y - corner[1]));
+    }
+    return nearest;
 }
 
 // spec: placement/drc - flags two drilled holes whose walls sit closer than the hole-to-hole rule
@@ -1453,9 +2730,9 @@ test "check default rules equal the legacy constants" {
     try testing.expectEqual(@as(f64, 0.1), d.min_annular);
     try testing.expectEqual(@as(f64, 0.2), d.min_drill);
     try testing.expectEqual(@as(f64, 0.25), d.hole_to_hole);
-    try testing.expectEqual(@as(f64, 0.2), d.mask_web);
+    try testing.expectEqual(@as(f64, 0.2), d.mask.web);
     try testing.expectEqual(@as(f64, 0.1), d.min_width);
-    try testing.expectEqual(@as(f64, 0.05), d.mask_margin);
+    try testing.expectEqual(@as(f64, 0.05), d.mask.margin);
     try testing.expectEqual(@as(f64, 0.3), d.pour_clearance);
     // copper_edge unset ⇒ the DRC edge clearance falls back to the plain
     // copper clearance (the old board_edge behaviour) and the Gerber pour
@@ -1546,6 +2823,102 @@ test "check enforces a per-net class clearance from placement.rules.net" {
     try testing.expectEqual(@as(f64, 0.3), firstOfKind(v, .track_track).?.clearance);
 }
 
+// spec: placement/drc - RF bend findings are reconstructed from submitted or saved copper, not only transient router metadata
+test "check finds the saved LO1_DRIVE hard junction when RouteResult bend metadata is absent" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const nets = [_]FlatNet{.{ .name = "LO1_DRIVE", .pins = &.{} }};
+    const net_rules = [_]optimizer.NetRule{.{
+        .width = 0.3124,
+        .rf = .{ .max_freq_hz = 12e9 },
+    }};
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+        .rules = .{ .net = &net_rules },
+    };
+    // The first three persisted segments from Barracuda's rf-rounding-v1
+    // LO1_DRIVE run. The first junction turns about 82 degrees with no tangent
+    // arc; the following short chord begins the visible rounded section.
+    const tracks = [_]router.Track{
+        .{
+            .x1 = 156.0,
+            .y1 = 105.35,
+            .x2 = 157.05575853087134,
+            .y2 = 105.19867467474472,
+            .layer = 0,
+            .width = 0.3124,
+            .net = 0,
+        },
+        .{
+            .x1 = 157.05575853087134,
+            .y1 = 105.19867467474472,
+            .x2 = 157.05575853087134,
+            .y2 = 104.39269467045713,
+            .layer = 0,
+            .width = 0.3124,
+            .net = 0,
+        },
+        .{
+            .x1 = 157.05575853087134,
+            .y1 = 104.39269467045713,
+            .x2 = 157.0874347519041,
+            .y2 = 104.15208988424887,
+            .layer = 0,
+            .width = 0.3124,
+            .net = 0,
+        },
+    };
+    const raw = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
+    const found = try check(arena, placement, raw, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(found, .sharp_bend));
+    const finding = firstOfKind(found, .sharp_bend) orelse return error.ExpectedSharpBend;
+    try testing.expectApproxEqAbs(157.05575853087134, finding.x, 1e-9);
+    try testing.expectApproxEqAbs(105.19867467474472, finding.y, 1e-9);
+    try testing.expectApproxEqAbs(0.9372, finding.clearance, 1e-12);
+
+    // A fresh router result can still carry the same finding. The actual-copper
+    // audit supplements that metadata without duplicating its DRC marker.
+    const metadata = [_]router.SharpBend{.{
+        .x = 157.05575853087134,
+        .y = 105.19867467474472,
+        .layer = 0,
+        .net = 0,
+        .radius = 0,
+        .required = 0.9372,
+    }};
+    var fresh = raw;
+    fresh.sharp_bends = &metadata;
+    const deduped = try check(arena, placement, fresh, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(deduped, .sharp_bend));
+
+    // A successful port-frame outcome describes the smooth curve underlying
+    // its chord tessellation, so the same geometric vertex is not a warning.
+    const outcomes = [_]@import("rf_port_report.zig").Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = tracks.len },
+    }};
+    var synthesized = raw;
+    synthesized.rf_port_outcomes = &outcomes;
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, synthesized, 0.127), .sharp_bend));
+}
+
 // spec: placement/drc - an oval slot's hole-to-hole clearance is measured end-to-end (capsule), not at its centre
 test "check measures an oval slot as a capsule for hole-to-hole" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1561,7 +2934,7 @@ test "check measures an oval slot as a capsule for hole-to-hole" {
     var parts = [_]optimizer.Part{
         .{ .ref_des = "J1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
     };
-    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "J1", .pin = "1" }};
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "J1", .pin = "1" }};
     const nets = [_]FlatNet{.{ .name = "SLOT", .pins = &pins }};
     const placement = optimizer.Placement{
         .parts = &parts,
@@ -1629,7 +3002,7 @@ test "check flags silkscreen over a foreign pad" {
     const r_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
     const over = [_]G.SilkLine{.{ .x1 = 1.5, .y1 = 0, .x2 = 2.5, .y2 = 0 }};
     var parts = [_]optimizer.Part{
-        .{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 0, .y = 0, .silk_lines = &over },
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 0, .y = 0, .features = .{ .silk_lines = &over } },
         .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &r_pad, .fallback = false, .x = 2, .y = 0 },
     };
     const v = try check(arena, partsOnly(&parts), routed, 0.127);
@@ -1639,25 +3012,22 @@ test "check flags silkscreen over a foreign pad" {
     // Move the silk line 5 mm up, clear of the pad ⇒ no finding.
     const clear = [_]G.SilkLine{.{ .x1 = 1.5, .y1 = 5, .x2 = 2.5, .y2 = 5 }};
     var ok_parts = [_]optimizer.Part{
-        .{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 0, .y = 0, .silk_lines = &clear },
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 0, .y = 0, .features = .{ .silk_lines = &clear } },
         .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &r_pad, .fallback = false, .x = 2, .y = 0 },
     };
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, partsOnly(&ok_parts), routed, 0.127), .silk_over_pad));
 }
 
-// spec: placement/drc - silk-over-pad ignores an auto-placed ref-des label; only footprint silk art is flagged
-test "check does not flag an auto-placed ref-des that overlaps a foreign pad" {
+// spec: placement/drc - silk-over-pad checks authored footprint silk rather than inventing reference-designator artwork
+test "check ignores a bare part with ref-des but no authored silk" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
     const G = @import("geometry.zig");
     const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
 
-    // U1 carries only a ref-des (no footprint silk). Hem its label in with a ring
-    // of foreign pads on all four candidate sides so the auto-placer can't find a
-    // clear spot and draws the label over a pad on the Gerber. A ref-des label
-    // over a pad is cosmetic (fab-clipped) and ubiquitous on dense boards, so it
-    // is NOT a silk-over-pad violation — only real footprint silk art counts.
+    // U1 carries metadata but no footprint silk. Nearby foreign pads cannot
+    // create a finding because neither DRC nor fabrication invents a label.
     const ring = [_]G.Pad{
         .{ .number = "1", .x = 0, .y = -1.0, .w = 0.6, .h = 0.6 },
         .{ .number = "2", .x = 0, .y = 1.0, .w = 0.6, .h = 0.6 },
@@ -1749,6 +3119,55 @@ test "check flags sub-width tracks against class and board rules" {
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, wr, 0.127), .track_width));
 }
 
+// spec: placement/rf-port-frame-routing - a solver-proven one-width pad taper may narrow below the controlled line width, but thin copper away from the land still fails DRC
+test "track width allows only the proven port-frame pad taper" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const land = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.3, .h = 0.1 }};
+    var parts = [_]optimizer.Part{.{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &land, .fallback = false, .x = 0, .y = 0 }};
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const nets = [_]FlatNet{.{ .name = "RF", .pins = &pins }};
+    const net_rules = [_]optimizer.NetRule{.{ .width = 0.2 }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -5,
+        .miny = -5,
+        .maxx = 5,
+        .maxy = 5,
+        .generated = true,
+        .rules = .{ .net = &net_rules },
+    };
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 0.15, .y2 = 0, .layer = 0, .width = 0.15, .net = 0 },
+        .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.15, .net = 0 },
+    };
+    const samples = [_]@import("rf_path_solver.zig").Sample{
+        .{ .at = .{ 0, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.1 },
+        .{ .at = .{ 0.15, 0 }, .s_mm = 0.15, .curvature = 0, .width_mm = 0.2 },
+    };
+    const outcomes = [_]@import("rf_port_report.zig").Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = 2, .samples = &samples },
+    }};
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 0, .total = 1, .rf_port_outcomes = &outcomes };
+    const violations = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(violations, .track_width));
+    try testing.expectApproxEqAbs(@as(f64, 1.5), firstOfKind(violations, .track_width).?.x, 1e-12);
+}
+
 // spec: placement/drc - existing copper violations are error-severity; only the hygiene checks are warnings
 test "check severity: copper checks are errors, courtyard is a warning" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1762,7 +3181,7 @@ test "check severity: copper checks are errors, courtyard is a warning" {
         .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
         .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false, .x = 1, .y = 0 },
     };
-    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
     const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
 
     const placement = optimizer.Placement{
@@ -1837,4 +3256,830 @@ test "boxOverlap treats a sub-epsilon overlap on either axis as no overlap" {
     const c = boxOverlap(.{ 0, 0, 2, 2 }, .{ 1, 1, 3, 3 }).?;
     try testing.expectApproxEqAbs(@as(f64, 1.5), c[0], 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 1.5), c[1], 1e-9);
+}
+
+test "grid cull: pad-to-pad flags exactly the sub-clearance cross-cell pairs" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+
+    // Four single-pad parts on a 0.45 mm lattice: 0.4 mm boxes leave 0.05 mm
+    // orthogonal / 0.07 mm diagonal gaps (< the 0.127 mm rule) and STRADDLE the
+    // ~0.5 mm grid cells, so the cull must reach neighbouring + diagonal cells.
+    // Hand count of the 6 pairs: AB AD BC BD flag (4); AC and CD clear (0.5 mm).
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "A", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "B", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pad, .fallback = false, .x = 0.45, .y = 0 },
+        .{ .ref_des = "C", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pad, .fallback = false, .x = 0.9, .y = 0 },
+        .{ .ref_des = "D", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pad, .fallback = false, .x = 0, .y = 0.45 },
+    };
+    const na = [_]flat_netlist.FlatPin{.{ .ref_des = "A", .pin = "1" }};
+    const nb = [_]flat_netlist.FlatPin{.{ .ref_des = "B", .pin = "1" }};
+    const nc = [_]flat_netlist.FlatPin{.{ .ref_des = "C", .pin = "1" }};
+    const nd = [_]flat_netlist.FlatPin{.{ .ref_des = "D", .pin = "1" }};
+    const nets = [_]FlatNet{
+        .{ .name = "A", .pins = &na }, .{ .name = "B", .pins = &nb },
+        .{ .name = "C", .pins = &nc }, .{ .name = "D", .pins = &nd },
+    };
+    var pl = partsOnly(&parts);
+    pl.nets = &nets;
+    const rr = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    try testing.expectEqual(@as(usize, 4), countKind(try check(arena, pl, rr, 0.127), .pad_pad));
+}
+
+test "grid cull: a giant pad spanning many cells still clashes a via at its far edge" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+
+    // A 20 mm pad (net BIG) spans dozens of grid cells; a via (net V) sits 0.05 mm
+    // off its far edge (gap 0.05 < clearance). The pad is inserted into every cell
+    // it overlaps, so the via's query — in a cell far from the pad centre — still
+    // surfaces it. A 2 mm control pad (net M) far away must NOT be flagged.
+    const bigpad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 20.0, .h = 0.4 }};
+    const mpad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 2.0, .h = 0.4 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "BIG", .kind = .hub, .hw = 10, .hh = 0.2, .pads = &bigpad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "M", .kind = .passive, .hw = 1, .hh = 0.2, .pads = &mpad, .fallback = false, .x = 50, .y = 50 },
+    };
+    const nbig = [_]flat_netlist.FlatPin{.{ .ref_des = "BIG", .pin = "1" }};
+    const nets = [_]FlatNet{ .{ .name = "BIG", .pins = &nbig }, .{ .name = "M", .pins = &.{} } };
+    var pl = partsOnly(&parts);
+    pl.nets = &nets;
+    // Pad box spans x −10..10; via edge (r 0.3) at 10.05 ⇒ gap 0.05.
+    const vias = [_]router.Via{.{ .x = 10.35, .y = 0, .dia = 0.6, .net = 9 }};
+    const rr = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 0, .total = 0 };
+    try testing.expectEqual(@as(usize, 1), countKind(try check(arena, pl, rr, 0.127), .via_pad));
+}
+
+test "grid cull: via-to-via honours the exact clearance boundary and coincident vias" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // dia 0.4 ⇒ r 0.2, edge gap = centre distance − 0.4. #0–#1 sit at EXACTLY the
+    // clearance (gap 0.127, not < clr−eps ⇒ clean); #2–#3 a hair closer ⇒ flag;
+    // #4–#5 are coincident (same cell, gap −0.4 ⇒ flag). Rows are 5 mm apart.
+    const vias = [_]router.Via{
+        .{ .x = 0, .y = 0, .dia = 0.4, .net = 0 },
+        .{ .x = 0.527, .y = 0, .dia = 0.4, .net = 1 },
+        .{ .x = 0, .y = 5, .dia = 0.4, .net = 2 },
+        .{ .x = 0.526, .y = 5, .dia = 0.4, .net = 3 },
+        .{ .x = 0, .y = 10, .dia = 0.4, .net = 4 },
+        .{ .x = 0, .y = 10, .dia = 0.4, .net = 5 },
+    };
+    var parts = [_]optimizer.Part{};
+    const pl = partsOnly(&parts);
+    const rr = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 0, .total = 0 };
+    try testing.expectEqual(@as(usize, 2), countKind(try check(arena, pl, rr, 0.127), .via_via));
+}
+
+// spec: placement/drc - a foreign via must clear the synthesized RF via antipad, not only ordinary copper clearance
+test "via-to-via clearance includes the controlled-impedance antipad" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var parts = [_]optimizer.Part{};
+    const rules = [_]optimizer.NetRule{ .{ .rf = .{ .impedance = .{ .ohms = 50 } } }, .{} };
+    var pl = partsOnly(&parts);
+    pl.rules.net = &rules;
+    pl.rules.physical.stack = .{ .layers = 4, .board_mm = 1.6 };
+    const rf = router.Via{ .x = 0, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 };
+    const anti = via_antipad.solve(pl.rules.physical.stack, 50, rf.dia, rf.drill, pl.rules.design.clearance).?;
+    const centre = anti.antipad_dia_mm / 2 + 0.2;
+
+    const crowded = [_]router.Via{ rf, .{ .x = centre - 0.001, .y = 0, .dia = 0.4, .drill = 0.2, .net = 1 } };
+    try testing.expectEqual(@as(usize, 1), countKind(try check(arena, pl, .{ .tracks = &.{}, .vias = &crowded, .routed = 0, .total = 0 }, 0.127), .via_via));
+    const exact = [_]router.Via{ rf, .{ .x = centre, .y = 0, .dia = 0.4, .drill = 0.2, .net = 1 } };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, pl, .{ .tracks = &.{}, .vias = &exact, .routed = 0, .total = 0 }, 0.127), .via_via));
+}
+
+// spec: placement/drc - flags a component land crowding the board edge, exempts a staged off-board part, and reports nothing without an outline
+test "check flags a pad at the board edge and skips a staged part's pads" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+
+    // One 0.6 mm land per part on a 10×10 mm board: U1 sits mid-board, U2's
+    // land hangs 0.25 mm past the left cut line, U3 is parked 20 mm below the
+    // board in the staging band.
+    const one_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &one_pad, .fallback = false, .x = 5, .y = 5 },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &one_pad, .fallback = false, .x = 0.05, .y = 2 },
+        .{ .ref_des = "U3", .kind = .hub, .hw = 1, .hh = 1, .pads = &one_pad, .fallback = false, .x = 5, .y = 25 },
+    };
+    var placement = partsOnly(&parts);
+    placement.board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 };
+
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .board_edge));
+    const hit = firstOfKind(v, .board_edge).?;
+    try testing.expectEqual(@as(i32, 1), hit.who.part_a); // U2
+    try testing.expectEqualStrings("1", hit.who.pad_a);
+    try testing.expectApproxEqAbs(@as(f64, -0.25), hit.gap, 1e-9);
+    try testing.expectEqual(@as(f64, 0.127), hit.clearance);
+
+    // A design with NO outline has no cut line to measure against — the same
+    // silence the track/via halves of this rule keep.
+    placement.board_rect = null;
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, routed, 0.127), .board_edge));
+}
+
+// spec: placement/drc - component courtyards default to JLCPCB Standard PCBA's 2.5 mm edge margin, honor an authored override, and exempt NPTH-only/staged parts
+test "check enforces component-to-edge clearance" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    const npth = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1, .h = 1, .thru = true, .npth = true, .drill = 1 }};
+    var parts = [_]optimizer.Part{
+        // Courtyard's left edge is exactly 2.5 mm from the cut: legal.
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 3, .y = 5 },
+        // Right edge gap = 1.9 mm: one component-edge warning.
+        .{ .ref_des = "U2", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 7.6, .y = 5 },
+        // Mounting-hole courtyard touches the cut, but NPTH-only hardware has
+        // no assembled body and is intentionally exempt.
+        .{ .ref_des = "H1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &npth, .fallback = false, .x = 0.5, .y = 5 },
+        // Wholly off-board solver staging is reported by fab-readiness, not
+        // repeated as a component-edge finding.
+        .{ .ref_des = "U3", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 20, .y = 20 },
+    };
+    var placement = partsOnly(&parts);
+    placement.board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 };
+
+    const defaults = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(defaults, .component_edge));
+    const hit = firstOfKind(defaults, .component_edge).?;
+    try testing.expectEqual(@as(i32, 1), hit.who.part_a);
+    try testing.expectEqual(@as(f64, 2.5), hit.clearance);
+    try testing.expectEqual(Severity.warn, hit.severity);
+
+    // A board-specific assembly process can state a smaller positive rule.
+    placement.rules.design.edge.component = 1.5;
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, routed, 0.127), .component_edge));
+}
+
+// spec: placement/drc - component-edge clearance follows the exact rounded outline rather than its rectangular bounding box
+test "component edge measures rounded outline" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.1, .hh = 0.1, .pads = &.{}, .fallback = false, .x = 1.6, .y = 1.6 },
+    };
+    var placement = partsOnly(&parts);
+    const br = optimizer.BoardRect{ .minx = 0, .miny = 0, .w = 10, .h = 10 };
+    placement.board_rect = br;
+    placement.board_poly = try outline.roundedRectPoly(arena, br, 2);
+    placement.rules.design.edge.component = 1.5;
+
+    const hits = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(hits, .component_edge));
+    try testing.expect(firstOfKind(hits, .component_edge).?.gap < 1.5);
+}
+
+// spec: placement/drc - a pad inside the board rectangle but in a concave notch is measured against the outline polygon
+test "check flags a pad sitting in an outline notch" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+
+    // 10×10 board with the corner at (6..10, 4..10) notched out (y-down). The
+    // staging exemption is "wholly outside the RECTANGLE", so a part dropped in
+    // the notch — inside the bbox, off the real board — is still measured.
+    const l_poly = [_][2]f64{
+        .{ 0, 0 }, .{ 10, 0 }, .{ 10, 4 }, .{ 6, 4 }, .{ 6, 10 }, .{ 0, 10 },
+    };
+    const one_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &one_pad, .fallback = false, .x = 3, .y = 5 },
+        .{ .ref_des = "U2", .kind = .hub, .hw = 1, .hh = 1, .pads = &one_pad, .fallback = false, .x = 8, .y = 8 },
+    };
+    var placement = partsOnly(&parts);
+    placement.board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 };
+    placement.board_poly = &l_poly;
+
+    const v = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .board_edge));
+    try testing.expectEqual(@as(i32, 1), firstOfKind(v, .board_edge).?.who.part_a); // U2
+}
+
+// spec: placement/drc - warns once when same-net trace capsules touch across separate explicit centreline components
+test "check reports a robust crossing without an explicit centreline junction" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &.{} }};
+    var placement = partsOnly(&.{});
+    placement.nets = &nets;
+    const tracks = [_]router.Track{
+        .{ .x1 = -1, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 0, .y1 = -1, .x2 = 0, .y2 = 1, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const found = try check(arena, placement, .{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 }, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(found, .implicit_junction));
+    const join = firstOfKind(found, .implicit_junction).?;
+    try testing.expectEqual(Severity.warn, join.severity);
+    try testing.expectEqual(@as(i32, 0), join.who.net_a);
+    try testing.expectEqual(@as(?board_layers.SignalIndex, .top), join.layer);
+}
+
+// spec: placement/drc - warns once per stored trace section whose deletion preserves all pad, live-via, and pour connectivity
+test "check warns for a deletable dangling branch but not its pad-to-pad trunk" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &pad, .fallback = false, .x = 4, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
+    var placement = partsOnly(&parts);
+    placement.nets = &nets;
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 4, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 2, .y1 = 0, .x2 = 2, .y2 = 1.5, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const found = try check(arena, placement, .{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 }, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(found, .dangling_copper));
+    try testing.expectEqual(Severity.warn, firstOfKind(found, .dangling_copper).?.severity);
+    try testing.expectEqual(@as(usize, 0), countKind(found, .copper_stub));
+}
+
+test "check warns for both sections of a self-supporting backtrack" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &pad, .fallback = false, .x = 5, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
+    var placement = partsOnly(&parts);
+    placement.nets = &nets;
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 5, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 2, .y1 = 0, .x2 = 2, .y2 = 1, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 2, .y1 = 1, .x2 = 2.15, .y2 = 0.05, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const found = try check(arena, placement, .{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 }, 0.127);
+    try testing.expectEqual(@as(usize, 2), countKind(found, .dangling_copper));
+    try testing.expectEqual(Severity.warn, firstOfKind(found, .dangling_copper).?.severity);
+    try testing.expectEqual(@as(usize, 0), countKind(found, .copper_stub));
+}
+
+// spec: placement/drc - flags a routed trace endpoint that reaches no same-net copper as a copper-stub error when its section still carries support connectivity
+test "check keeps an essential loose section as a copper-stub error" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &pad, .fallback = false, .x = 1, .y = 2 },
+    };
+    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
+    var placement = partsOnly(&parts);
+    placement.nets = &nets;
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 1, .y1 = 0, .x2 = 1, .y2 = 2, .layer = 1, .width = 0.2, .net = 0 },
+    };
+    const vias = [_]router.Via{.{ .x = 1, .y = 0, .dia = 0.4, .net = 0 }};
+    const found = try check(arena, placement, .{ .tracks = &tracks, .vias = &vias, .routed = 1, .total = 1 }, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(found, .copper_stub));
+    try testing.expectEqual(Severity.err, firstOfKind(found, .copper_stub).?.severity);
+}
+
+// spec: placement/drc - warns when a net's own copper laps one of its pads instead of being aimed at the pad centre
+test "check warns on same-net copper riding a land's flank, not on its escape ray" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    // A 0.5 mm-pitch QFN lead land, long axis vertical, at the origin.
+    const pad = [_]G.Pad{.{ .number = "18", .x = 0, .y = 0, .w = 0.3, .h = 0.9 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "U1", .pin = "18" }};
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
+    var placement = partsOnly(&parts);
+    placement.nets = &nets;
+    // The board owner's pin 18: the escape leaves at 45 degrees, stops on the
+    // land's own edge, and turns north ALONG it — so the vertical leg's metal
+    // sits in the corridor to the next pin, and its line misses the pad centre
+    // by the land's half width.
+    const riding = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 0.15, .y2 = 0.15, .layer = 0, .width = 0.127, .net = 0 },
+        .{ .x1 = 0.15, .y1 = 0.15, .x2 = 0.15, .y2 = 1.14, .layer = 0, .width = 0.127, .net = 0 },
+    };
+    const found = try check(arena, placement, .{ .tracks = &riding, .vias = &.{}, .routed = 1, .total = 1 }, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(found, .land_transit));
+    const v = firstOfKind(found, .land_transit).?;
+    try testing.expectEqual(Severity.warn, v.severity);
+    try testing.expectApproxEqAbs(@as(f64, 0.15), v.clearance, 1e-9); // how far the line misses the centre
+    // The disciplined shape — north until clear of the land, THEN the 45 — is
+    // the same connection, the same length, and no finding.
+    const clean = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 0, .y2 = 0.99, .layer = 0, .width = 0.127, .net = 0 },
+        .{ .x1 = 0, .y1 = 0.99, .x2 = 0.15, .y2 = 1.14, .layer = 0, .width = 0.127, .net = 0 },
+    };
+    try testing.expectEqual(
+        @as(usize, 0),
+        countKind(try check(arena, placement, .{ .tracks = &clean, .vias = &.{}, .routed = 1, .total = 1 }, 0.127), .land_transit),
+    );
+}
+
+// spec: placement/drc - an authored ground-via maximum warns on an SMD ground pad until a same-net plane via falls within the budget
+test "ground pad via distance is a warning and accepts the exact limit" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const G = @import("geometry.zig");
+    const pad = [_]G.Pad{.{ .number = "2", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "C1",
+        .kind = .passive,
+        .hw = 0.3,
+        .hh = 0.3,
+        .pads = &pad,
+        .fallback = false,
+    }};
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "2" }};
+    const nets = [_]FlatNet{.{ .name = "GND", .pins = &pins }};
+    var placement = partsOnly(&parts);
+    placement.nets = &nets;
+    placement.rules.design.pour.ground_via_max = 1.0;
+    const missing = try check(arena, placement, .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 }, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(missing, .ground_via_distance));
+    try testing.expectEqual(Severity.warn, firstOfKind(missing, .ground_via_distance).?.severity);
+    const via = [_]router.Via{.{ .x = 1, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 }};
+    const served = try check(arena, placement, .{ .tracks = &.{}, .vias = &via, .routed = 0, .total = 0 }, 0.127);
+    try testing.expectEqual(@as(usize, 0), countKind(served, .ground_via_distance));
+}
+
+// spec: placement/drc - warns on a through-via that reaches fewer than two copper layers
+test "check warns on a one-layer via and clears it when bottom copper arrives" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &.{} }};
+    var parts = [_]optimizer.Part{};
+    var placement = partsOnly(&parts);
+    placement.nets = &nets;
+    const via = [_]router.Via{.{ .x = 0, .y = 0, .dia = 0.4, .net = 0 }};
+    const top = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
+    const one = try check(arena, placement, .{ .tracks = &top, .vias = &via, .routed = 1, .total = 1 }, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(one, .single_layer_via));
+    try testing.expectEqual(Severity.warn, firstOfKind(one, .single_layer_via).?.severity);
+    const both = [_]router.Track{
+        top[0],
+        .{ .x1 = 0, .y1 = 0, .x2 = 0, .y2 = 2, .layer = 1, .width = 0.2, .net = 0 },
+    };
+    try testing.expectEqual(
+        @as(usize, 0),
+        countKind(try check(arena, placement, .{ .tracks = &both, .vias = &via, .routed = 1, .total = 1 }, 0.127), .single_layer_via),
+    );
+}
+
+// spec: placement/drc - a jointly safe subset of multi-layer non-ground vias is reported for cleanup while every ground via is protected
+test "check plans redundant signal vias but never ground vias" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 1, .width = 0.2, .net = 0 },
+    };
+    const vias = [_]router.Via{
+        .{ .x = 0.5, .y = 0, .dia = 0.4, .net = 0 },
+        .{ .x = 1.5, .y = 0, .dia = 0.4, .net = 0 },
+    };
+    var parts = [_]optimizer.Part{};
+    var placement = partsOnly(&parts);
+    const signal_nets = [_]FlatNet{.{ .name = "SIG", .pins = &.{} }};
+    placement.nets = &signal_nets;
+    const signal = try check(arena, placement, .{ .tracks = &tracks, .vias = &vias, .routed = 0, .total = 0 }, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(signal, .redundant_via));
+    try testing.expect(firstOfKind(signal, .redundant_via).?.who.track_a >= 0);
+
+    const ground_nets = [_]FlatNet{.{ .name = "GND", .pins = &.{} }};
+    placement.nets = &ground_nets;
+    const ground = try check(arena, placement, .{ .tracks = &tracks, .vias = &vias, .routed = 0, .total = 0 }, 0.127);
+    try testing.expectEqual(@as(usize, 0), countKind(ground, .redundant_via));
+}
+
+// spec: placement/drc - credits same-net user zones when classifying trace ends and via layer use, including priority clipping
+test "checkWithZones credits same-net filled copper and honours priority clipping" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &.{} }};
+    var parts = [_]optimizer.Part{};
+    var placement = partsOnly(&parts);
+    placement.nets = &nets;
+    const tracks = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
+    const vias = [_]router.Via{.{ .x = 1, .y = 0, .dia = 0.4, .net = 0 }};
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &vias, .routed = 1, .total = 1 };
+    const bare = try check(arena, placement, routed, 0.127);
+    try testing.expectEqual(@as(usize, 0), countKind(bare, .copper_stub));
+    try testing.expectEqual(@as(usize, 1), countKind(bare, .dangling_copper));
+    try testing.expectEqual(@as(usize, 1), countKind(bare, .single_layer_via));
+    const topology_tracks = try topologyTracks(arena, &tracks);
+    const topology_vias = try topologyVias(arena, &vias);
+    try testing.expect(copper_topology.looseEnd(&.{}, topology_tracks, topology_vias, 0, .{ 0, 0 }) != null);
+
+    const region = [_][2]f64{ .{ -1, -1 }, .{ 3, -1 }, .{ 3, 1 }, .{ -1, 1 } };
+    const zones = [_]TopologyZone{
+        .{ .net = "SIG", .layer = 0, .poly = &region },
+        .{ .net = "SIG", .layer = 1, .poly = &region },
+    };
+    const filled = try checkWithZones(arena, placement, routed, 0.127, &zones);
+    try testing.expectEqual(@as(usize, 0), countKind(filled, .copper_stub));
+    try testing.expectEqual(@as(usize, 0), countKind(filled, .dangling_copper));
+    try testing.expectEqual(@as(usize, 0), countKind(filled, .single_layer_via));
+    try testing.expect(copper_topology.looseEnd(&.{}, topology_tracks, topology_vias, 0, .{ 1, 1 }) == null);
+
+    const clipped = [_]TopologyZone{
+        zones[0],
+        zones[1],
+        .{ .net = "OTHER", .layer = 1, .poly = &region, .priority = 1 },
+    };
+    try testing.expectEqual(
+        @as(usize, 1),
+        countKind(try checkWithZones(arena, placement, routed, 0.127, &clipped), .single_layer_via),
+    );
+}
+
+// ── Severity-table parity ───────────────────────────────────────────────────
+//
+// `defaultSeverity` is the ONE table; every producer stamps from it and the
+// serve layer's DRC-policy drawer renders it. The pair below keeps that claim
+// honest against the CHECKERS rather than against another copy of the table:
+// the first proves each emitted violation carries its kind's default, the
+// second proves no warning kind escapes fixture coverage. The bug they exist to
+// catch is a real one — `diff_uncoupled` / `diff_skew` moved from `drc.zig` into
+// `drc_diffpair.zig` and the drawer's mirror table kept calling them fab errors
+// while the checker emitted warnings.
+
+/// One flag per `Kind`, in enum order.
+const KindSet = [@typeInfo(Kind).@"enum".field_names.len]bool;
+
+/// Every violation a set of deliberately-bad boards produces. Between them they
+/// trip every kind whose canonical default is a WARNING: assembly hygiene
+/// (component edge, courtyard, mask sliver, silk over pad), the RF rules
+/// (keepout halo, sharp bend), both differential-pair rules, the match-group
+/// length mismatch, the single-layer via, and copper drawn dead on its own land.
+/// Error kinds come along for the ride and are checked the same way.
+fn severityFixtures(arena: std.mem.Allocator) ![7][]const Violation {
+    return .{
+        try hygieneBoard(arena),
+        try rfBoard(arena),
+        try diffPairBoard(arena),
+        try matchGroupBoard(arena),
+        try topologyBoard(arena),
+        try deadCopperBoard(arena),
+        try groundViaDistanceBoard(arena),
+    };
+}
+
+/// One plane-carried SMD GND pad with no nearby via, proving the optional
+/// return-distance rule participates in the canonical warning table.
+fn groundViaDistanceBoard(arena: std.mem.Allocator) ![]const Violation {
+    const G = @import("geometry.zig");
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "C1",
+        .kind = .passive,
+        .hw = 0.3,
+        .hh = 0.3,
+        .pads = &pad,
+        .fallback = false,
+    }};
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]FlatNet{.{ .name = "GND", .pins = &pins }};
+    var placement = partsOnly(&parts);
+    placement.nets = &nets;
+    placement.rules.design.pour.ground_via_max = 1.0;
+    return check(arena, placement, .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 }, 0.127);
+}
+
+/// One pad and a hook of copper drawn on it: out of the land by less than the
+/// trace's own half width and back, joining nothing. Both of its ends are
+/// attached (to that land), so this is the `dangling_copper` shape rather than a
+/// `copper_stub` one.
+fn deadCopperBoard(arena: std.mem.Allocator) ![]const Violation {
+    const G = @import("geometry.zig");
+    const pads = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1.2, .h = 1.2 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.7, .hh = 0.7, .pads = &pads, .fallback = false, .x = 5, .y = 5 },
+    };
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
+    const tracks = [_]router.Track{
+        .{ .x1 = 5.3, .y1 = 5.4, .x2 = 5.62, .y2 = 5.4, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 5.62, .y1 = 5.4, .x2 = 5.4, .y2 = 5.5, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+    };
+    return check(arena, placement, .{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 }, 0.127);
+}
+
+fn topologyBoard(arena: std.mem.Allocator) ![]const Violation {
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &.{} }};
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+    };
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        // A robust X crossing exercises the implicit-junction warning without
+        // relying on the cap-only graze that connectivity now rejects.
+        .{ .x1 = 1, .y1 = -1, .x2 = 1, .y2 = 1, .layer = 0, .width = 0.2, .net = 0 },
+        // A parallel bottom run reached by two vias exercises the general
+        // redundant-via warning; either barrel can carry the layer jump, but
+        // the jointly safe plan names only one of them.
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 1, .width = 0.2, .net = 0 },
+    };
+    const vias = [_]router.Via{
+        // Keep both barrels clear of the stored section endpoints: endpoint
+        // support is an independent invariant and would intentionally retain
+        // a barrel that alone terminates an otherwise loose trace end.
+        .{ .x = 0.5, .y = 0, .dia = 0.4, .net = 0 },
+        .{ .x = 1.5, .y = 0, .dia = 0.4, .net = 0 },
+        // The isolated barrel still covers the narrower single-layer warning.
+        .{ .x = 4, .y = 0, .dia = 0.4, .net = 0 },
+    };
+    return check(arena, placement, .{ .tracks = &tracks, .vias = &vias, .routed = 1, .total = 1 }, 0.127);
+}
+
+/// Two parts close enough to overlap courtyards AND leave a thin mask web
+/// between their pads, one of them drawing silk across the other's pad.
+fn hygieneBoard(arena: std.mem.Allocator) ![]const Violation {
+    const G = @import("geometry.zig");
+    const a_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    const b_pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    const silk = [_]G.SilkLine{.{ .x1 = 0.4, .y1 = 0, .x2 = 0.8, .y2 = 0 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &a_pad, .fallback = false, .x = 0, .y = 0, .features = .{ .silk_lines = &silk } },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &b_pad, .fallback = false, .x = 0.6, .y = 0 },
+    };
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    var placement = partsOnly(&parts);
+    placement.board_rect = .{ .minx = -1, .miny = -2, .w = 10, .h = 10 };
+    return check(arena, placement, routed, 0.127);
+}
+
+/// An RF net declaring a keepout halo with a foreign trace inside it, plus a
+/// corner the bend-smoothing pass could not bring up to its required radius.
+fn rfBoard(arena: std.mem.Allocator) ![]const Violation {
+    const rules = [_]optimizer.NetRule{
+        .{ .rf = .{ .keepout_mm = 0.5, .keepout_escape_mm = 0 } },
+        .{},
+    };
+    const nets = [_]FlatNet{ .{ .name = "RF_IN", .pins = &.{} }, .{ .name = "SPI_SCK", .pins = &.{} } };
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 30,
+        .maxy = 30,
+        .generated = true,
+        .rules = .{ .net = &rules },
+    };
+    // 0.4 mm centre-to-centre between two 0.2 mm traces ⇒ 0.2 mm edge-to-edge:
+    // inside the 0.5 mm halo, but clear of the 0.127 mm spacing rule, so the
+    // keepout warning is not confounded by a clearance error.
+    const tracks = [_]router.Track{
+        .{ .x1 = 5, .y1 = 10, .x2 = 15, .y2 = 10, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 5, .y1 = 10.4, .x2 = 15, .y2 = 10.4, .layer = 0, .width = 0.2, .net = 1 },
+    };
+    const bends = [_]router.SharpBend{.{ .x = 15, .y = 10, .layer = 0, .net = 0, .radius = 0.1, .required = 0.6 }};
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .sharp_bends = &bends, .routed = 2, .total = 2 };
+    return check(arena, placement, routed, 0.127);
+}
+
+/// A declared differential pair whose legs run apart AND end up different
+/// lengths — the two diff-pair rules together.
+fn diffPairBoard(arena: std.mem.Allocator) ![]const Violation {
+    const pairs = [_]@import("diff_pairs.zig").DiffPair{.{ .p = 0, .n = 1, .gap = 0.2 }};
+    const nets = [_]FlatNet{ .{ .name = "D_P", .pins = &.{} }, .{ .name = "D_N", .pins = &.{} } };
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 20,
+        .maxy = 20,
+        .generated = true,
+        .diff_pairs = &pairs,
+    };
+    // P runs 10 mm straight; N leaves at a steep angle, so it is both far from
+    // P over most of the run (uncoupled) and much longer than it (skew).
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 10, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 },
+        .{ .x1 = 0, .y1 = 0.2, .x2 = 10, .y2 = 15, .layer = 0, .width = 0.127, .net = 1 },
+    };
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 2, .total = 2 };
+    return check(arena, placement, routed, 0.127);
+}
+
+/// A declared `(match-group …)` whose three routed members come out at 10, 14
+/// and 12 mm against a 0.5 mm budget — a `length_mismatch`. The legs are 5 mm
+/// apart so no clearance rule fires alongside it.
+fn matchGroupBoard(arena: std.mem.Allocator) ![]const Violation {
+    const groups = [_]@import("match_group.zig").Group{
+        .{ .name = "addr", .tolerance_mm = 0.5, .members = &.{ 0, 1, 2 } },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "A0", .pins = &.{} },
+        .{ .name = "A1", .pins = &.{} },
+        .{ .name = "A2", .pins = &.{} },
+    };
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 20,
+        .maxy = 20,
+        .generated = true,
+        .match_groups = &groups,
+    };
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 10, .y2 = 0, .layer = 0, .width = 0.127, .net = 0 },
+        .{ .x1 = 0, .y1 = 5, .x2 = 14, .y2 = 5, .layer = 0, .width = 0.127, .net = 1 },
+        .{ .x1 = 0, .y1 = 10, .x2 = 12, .y2 = 10, .layer = 0, .width = 0.127, .net = 2 },
+    };
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 3, .total = 3 };
+    return check(arena, placement, routed, 0.127);
+}
+
+/// Assert every violation the fixtures emit carries its kind's canonical default
+/// severity, and report which kinds were observed at all.
+fn observedKindSeverities(arena: std.mem.Allocator) !KindSet {
+    var seen: KindSet = @splat(false);
+    for (try severityFixtures(arena)) |list| {
+        for (list) |v| {
+            try testing.expectEqual(defaultSeverity(v.kind), v.severity);
+            seen[@backingInt(v.kind)] = true;
+        }
+    }
+    return seen;
+}
+
+/// The first kind `defaultSeverity` calls a WARNING that no fixture emitted —
+/// the coverage ratchet. A new warning rule (or one that silently stopped
+/// firing) surfaces here instead of leaving the table unproven.
+fn firstUncoveredWarningKind(seen: KindSet) ?Kind {
+    for (0..seen.len) |i| {
+        const k: Kind = @fromBackingInt(@intCast(i));
+        // These checks are composed at the final reporting seam because their
+        // exact fill/surface graphs are intentionally too expensive for the
+        // router/WASM hot path. Their owning modules prove the emitted default
+        // severity alongside their dedicated geometry fixtures.
+        if (k == .bypass_open or k == .reference_plane_gap or
+            k == .reference_transition or k == .loop_area) continue;
+        if (defaultSeverity(k) == .warn and !seen[i]) return k;
+    }
+    return null;
+}
+
+// spec: placement/drc - every check stamps its kind's canonical default severity, and each warning kind is proved by a fixture
+test "the severity table is what the checkers emit, for every warning kind" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const seen = try observedKindSeverities(arena_inst.allocator());
+    try testing.expect(seen[@backingInt(Kind.redundant_via)]);
+    try testing.expectEqual(@as(?Kind, null), firstUncoveredWarningKind(seen));
+}
+
+// spec: placement/drc - the fab-blocking error count drops warnings and an open net, which is already the completion term
+test "errorCount counts fab-blocking geometry only" {
+    const vios = [_]Violation{
+        .{ .x = 0, .y = 0, .gap = 0.01, .clearance = 0.127, .kind = .track_pad },
+        .{ .x = 1, .y = 1, .gap = 0, .clearance = 0, .kind = .sharp_bend, .severity = .warn },
+        .{ .x = 2, .y = 2, .gap = 0.02, .clearance = 0.127, .kind = .track_track },
+        // Connectivity, not geometry — every surface that reports it also
+        // reports routed/total/open, so counting it here charges it twice.
+        .{ .x = 3, .y = 3, .gap = 0.3, .clearance = 0, .kind = .net_open },
+    };
+    try testing.expectEqual(@as(usize, 2), errorCount(&vios));
+    try testing.expectEqual(@as(usize, 0), errorCount(vios[1..2]));
+    try testing.expectEqual(@as(usize, 0), errorCount(vios[3..4]));
+    try testing.expectEqual(@as(usize, 0), errorCount(&.{}));
+}
+
+// spec: placement/drc - flags two vias of the SAME net crowded closer than the via-to-via rule, which the foreign-net clearance rule exempts
+test "same-net vias crowding each other flag via_spacing, not via_via" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // barracuda's measured duplicate: two 0.4 mm barrels of ONE net 0.402 mm
+    // apart — a copper gap of 0.002 mm. It clears the board's declared 0.2 mm
+    // hole-to-hole (drills 0.2 ⇒ wall 0.202), and `via_via` exempts a same-net
+    // pair outright, so before `via_spacing` nothing on the board saw it.
+    const vias = [_]router.Via{
+        .{ .x = 0, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 },
+        .{ .x = 0.402, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 },
+        // A legitimate stitch-fence pitch on the same net, 1.2 mm along: clean.
+        .{ .x = 1.602, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 },
+    };
+    var parts = [_]optimizer.Part{};
+    var pl = partsOnly(&parts);
+    pl.rules = .{ .design = .{ .hole_to_hole = 0.2 } };
+    const rr = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 0, .total = 0 };
+    const v = try check(arena, pl, rr, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(v, .via_spacing));
+    try testing.expectEqual(@as(usize, 0), countKind(v, .via_via));
+    try testing.expectEqual(@as(usize, 0), countKind(v, .hole_hole));
+    // The finding names the net on both sides and measures the real copper gap.
+    const hit = firstOfKind(v, .via_spacing).?;
+    try testing.expectApproxEqAbs(@as(f64, 0.002), hit.gap, 1e-9);
+    try testing.expectEqual(@as(i32, 0), hit.who.net_a);
+    try testing.expectEqual(@as(i32, 0), hit.who.net_b);
+    try testing.expectEqual(Severity.err, hit.severity);
+}
+
+// spec: placement/drc - the same-net via spacing rule defaults to the pair's resolved clearance, and an authored (design-rules (via-to-via ...)) overrides it
+test "the via-spacing rule falls back to clearance and an authored value overrides it" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // 0.6 mm of copper between two same-net barrels: clean at the 0.127 mm
+    // board clearance the rule falls back to …
+    const vias = [_]router.Via{
+        .{ .x = 0, .y = 0, .dia = 0.4, .net = 0 },
+        .{ .x = 1.0, .y = 0, .dia = 0.4, .net = 0 },
+    };
+    var parts = [_]optimizer.Part{};
+    var pl = partsOnly(&parts);
+    const rr = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 0, .total = 0 };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, pl, rr, 0.127), .via_spacing));
+    // … and flagged once the design says same-net barrels owe each other 1 mm.
+    pl.rules = .{ .design = .{ .via_to_via = 1.0 } };
+    const strict = try check(arena, pl, rr, 0.127);
+    try testing.expectEqual(@as(usize, 1), countKind(strict, .via_spacing));
+    try testing.expectApproxEqAbs(@as(f64, 1.0), firstOfKind(strict, .via_spacing).?.clearance, 1e-12);
+    // A net-class clearance raises the fallback for its own net, too.
+    pl.rules = .{ .design = .{}, .net = &[_]optimizer.NetRule{.{ .clearance = 0.8 }} };
+    try testing.expectEqual(@as(usize, 1), countKind(try check(arena, pl, rr, 0.127), .via_spacing));
 }

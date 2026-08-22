@@ -10,6 +10,7 @@ const evaluator_mod = @import("evaluator.zig");
 const Evaluator = evaluator_mod.Evaluator;
 const EvalError = evaluator_mod.EvalError;
 const ids = @import("ids.zig");
+const thermal = @import("thermal.zig");
 const PinNetDecl = evaluator_mod.PinNetDecl;
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -40,7 +41,11 @@ pub const ResolvedComponent = struct {
     pinout: []const u8,
     properties: []const env_mod.Property,
     attrs: []const []const u8,
-    datasheets: []const []const u8 = &.{},
+    docs: env_mod.ComponentDocs = .{},
+    /// The library part's `(thermal …)` envelope, carried through so every
+    /// instance built from this component reaches the thermal analyzer with
+    /// its θJA / Tj(max) / rated ambient range already attached.
+    thermal: ?env_mod.ThermalDecl = null,
     requirements: []const env_mod.Requirement = &.{},
     requirements_ignored: bool = false,
     electrical: []const env_mod.ElectricalDecl = &.{},
@@ -73,7 +78,8 @@ pub fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent {
             .pinout = cd.pinout_name,
             .properties = cd.properties,
             .attrs = attrs,
-            .datasheets = cd.datasheets,
+            .docs = cd.docs,
+            .thermal = cd.thermal,
             .requirements = cd.requirements,
             .requirements_ignored = cd.requirements_ignored,
             .electrical = cd.electrical,
@@ -93,6 +99,8 @@ pub fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent {
 /// Evaluate an `(instance "REF" (component …) (pin …) …)` form into an
 /// `InstanceResult`: the placed `Instance`, every inline pin-net declaration
 /// it produced, and any `(note …)` annotations sitting inside the form. The
+/// body may also contain bare net strings; they bind physical pads 1, 2, … in
+/// string order, while every existing sub-form remains available alongside them.
 /// component must resolve through the library cache or this errors —
 /// missing footprints would silently break KiCad export downstream.
 pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!InstanceResult {
@@ -145,12 +153,13 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         .pinout = resolved.pinout,
         .properties = resolved.properties,
         .attrs = resolved.attrs,
-        .datasheets = resolved.datasheets,
+        .docs = resolved.docs,
         .requirements = resolved.requirements,
         .requirements_ignored = resolved.requirements_ignored,
         .electrical = resolved.electrical,
         .source_offset = comp_offset,
         .id = inst_id,
+        .thermal = .{ .decl = resolved.thermal },
     };
 
     // Resolve pinout for reverse lookup (function_name -> pin_id); null when the
@@ -166,23 +175,21 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     var inline_notes: std.ArrayList(Note) = .empty;
     var inline_props: std.ArrayList(env_mod.Property) = .empty;
     var dnp_flag = false;
-    var decouple_ic: []const u8 = "";
-    var decouple_pin: []const u8 = "";
-    var decouple_rail = false;
+    var binds: env_mod.InstanceBinds = .{};
     var strap_oks: std.ArrayList(env_mod.StrapOk) = .empty;
     var nc_oks: std.ArrayList(env_mod.NcOk) = .empty;
+    var power: ?env_mod.PowerDecl = null;
+    const known_forms = [_][]const u8{ "pin", "part", "note", "bus", "id", "as", "dnp", "decouples", "near", "strap-ok", "nc-ok", "power" };
 
-    const known_forms = [_][]const u8{ "pin", "part", "note", "bus", "id", "as", "dnp", "decouples", "strap-ok", "nc-ok" };
-
+    var positional_pad: usize = 1;
     for (args[2..]) |form| {
-        if (form.isForm("note")) {
-            const nc = form.asList().?;
-            if (nc.len >= 2) {
-                const nv = try self.evalNode(nc[1], env);
-                if (nv.asString()) |text| {
-                    try inline_notes.append(self.allocator, .{ .ref_des = ref_des, .text = text });
-                }
-            }
+        if (form.asString()) |net_name| {
+            const pad = std.fmt.allocPrint(self.allocator, "{d}", .{positional_pad}) catch
+                return EvalError.OutOfMemory;
+            try pin_nets.append(self.allocator, .{ .ref_des = ref_des, .pin = pad, .net = net_name });
+            positional_pad += 1;
+        } else if (form.isForm("note")) {
+            try parseInlineNote(self, form, ref_des, env, &inline_notes);
         } else if (form.isForm("pin")) {
             try parsePinForm(self, form, ref_des, env, &pin_nets, reverse_pinout);
         } else if (form.isForm("part")) {
@@ -195,26 +202,18 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
             // (dnp) — mark Do Not Populate. Bare flag form (no value).
             dnp_flag = true;
         } else if (form.isForm("decouples")) {
-            // (decouples "IC" PIN) — bind this cap's power leg to a specific hub
-            // pad; (decouples rail) — opt out of the per-pin-decoupling lint.
-            const dc = form.asList().?;
-            if (dc.len == 2 and std.mem.eql(u8, dc[1].asAtom() orelse "", "rail")) {
-                decouple_rail = true;
-            } else if (dc.len >= 3) {
-                const ic_val = try self.evalNode(dc[1], env);
-                decouple_ic = ic_val.asString() orelse (dc[1].asAtom() orelse "");
-                // Resolve PIN the same way (pin …) does: a function name maps
-                // through the pinout to its physical pad, a number stays as-is —
-                // so the binding matches the hub's physical pad id the placer uses.
-                const raw = ids.pinId(self, dc[2]) orelse "";
-                decouple_pin = if (reverse_pinout) |rp| (resolvePinName(self, rp, raw) orelse raw) else raw;
-            } else {
-                self.warnFmt(form.span, "(decouples …) on \"{s}\" — expected (decouples \"IC\" PIN) or (decouples rail)", .{ref_des});
-            }
+            try parseDecouples(self, form, ref_des, env, &binds.decouple);
+        } else if (form.isForm("near")) {
+            try parseNear(self, form, ref_des, env, reverse_pinout, &binds.near);
         } else if (form.isForm("strap-ok")) {
             try parseStrapOk(self, form, ref_des, env, reverse_pinout, &strap_oks);
         } else if (form.isForm("nc-ok")) {
             try parseNcOk(self, form, ref_des, env, reverse_pinout, &nc_oks);
+        } else if (form.isForm("power")) {
+            power = thermal.parsePower(form.asList().?) orelse blk: {
+                self.warnFmt(form.span, "(power …) on \"{s}\" — expected (power WATTS) or (power (typ W) (max W))", .{ref_des});
+                break :blk power;
+            };
         } else if (form.isForm("bus")) {
             // (bus "NET_PREFIX" "BUS_NAME") -- expand component bus definition
             const bc = form.asList().?;
@@ -231,7 +230,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
                             for (bus_def.pins, 0..) |bus_pin, idx| {
                                 const net = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ prefix, idx }) catch continue;
                                 // Resolve pin through pinout
-                                const resolved_pin = if (reverse_pinout) |rp| (resolvePinName(self, rp, bus_pin) orelse bus_pin) else bus_pin;
+                                const resolved_pin = if (reverse_pinout) |rp| (resolvePinName(self, rp, bus_pin, form.span) orelse bus_pin) else bus_pin;
                                 try pin_nets.append(self.allocator, .{ .ref_des = ref_des, .pin = resolved_pin, .net = net });
                             }
                             break;
@@ -269,9 +268,8 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
 
     var final_inst = inst;
     final_inst.dnp = dnp_flag;
-    final_inst.decouple_ic = decouple_ic;
-    final_inst.decouple_pin = decouple_pin;
-    final_inst.decouple_rail = decouple_rail;
+    final_inst.bind = binds;
+    final_inst.thermal.power = power;
     if (strap_oks.items.len > 0) final_inst.strap_oks = strap_oks.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
     if (nc_oks.items.len > 0) final_inst.nc_oks = nc_oks.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
     if (parts.items.len > 0) final_inst.parts = parts.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
@@ -286,6 +284,23 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         .pin_nets = pin_nets.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .inline_notes = inline_notes.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
     };
+}
+
+/// Append a well-formed `(note "text")` from an instance body. Keeping this
+/// small parser out of `buildInstance` leaves room there for independent body
+/// forms without raising its frozen complexity ceiling.
+fn parseInlineNote(
+    self: *Evaluator,
+    form: Node,
+    ref_des: []const u8,
+    env: *Env,
+    inline_notes: *std.ArrayList(Note),
+) EvalError!void {
+    const children = form.asList().?;
+    if (children.len < 2) return;
+    const value = try self.evalNode(children[1], env);
+    const text = value.asString() orelse return;
+    try inline_notes.append(self.allocator, .{ .ref_des = ref_des, .text = text });
 }
 
 /// The name `getSymbolPins` searches lib/pinouts/ for: a component's declared
@@ -364,6 +379,86 @@ fn parsePartForm(
     });
 }
 
+/// Parse a `(near "REF" PIN [(own PAD)])` adjacency declaration into `out`.
+///
+/// PIN is kept RAW here, exactly as `(decouples …)` keeps its pad: the pinout
+/// that gives a function name meaning belongs to the TARGET, which this passive
+/// cannot see (it has no pinout of its own) and which may be declared later in
+/// the block. `builders.resolveNearTargets` resolves it once every instance
+/// exists. `(own PAD)` names a pad of THIS part, so it resolves here through the
+/// part's own reverse pinout like any `(pin …)` token.
+///
+/// A malformed form warns and binds nothing — silently keeping half a binding
+/// would place the part against a pad the author never named.
+/// `(decouples "IC" PIN)` — bind this cap's power leg to a specific hub pad;
+/// `(decouples rail)` — opt out of the per-pin-decoupling lint because the cap
+/// deliberately serves the whole rail. The twin of `parseNear` below, and split
+/// out for the same reason: the instance body reads as a list of sub-forms, not
+/// as one function holding every sub-form's grammar.
+fn parseDecouples(
+    self: *Evaluator,
+    form: Node,
+    ref_des: []const u8,
+    env: *Env,
+    out: *env_mod.DecoupleBind,
+) EvalError!void {
+    const dc = form.asList().?;
+    if (dc.len == 2 and std.mem.eql(u8, dc[1].asAtom() orelse "", "rail")) {
+        out.rail = true;
+        return;
+    }
+    if (dc.len < 3) {
+        self.warnFmt(form.span, "(decouples …) on \"{s}\" — expected (decouples \"IC\" PIN) or (decouples rail)", .{ref_des});
+        return;
+    }
+    const ic_val = try self.evalNode(dc[1], env);
+    out.ic = ic_val.asString() orelse (dc[1].asAtom() orelse "");
+    // PIN is kept RAW here and resolved later, in
+    // `builders.resolveDecoupleTargets`, against the TARGET IC's pinout. It
+    // cannot be resolved at this point: the pinout that gives the token meaning
+    // belongs to the named IC, not to this cap (a cap has none), and the target
+    // may be declared after the cap in the block, so it need not exist yet.
+    // Resolving it here through `reverse_pinout` — the CAP's map — is what made
+    // every function-name spelling silently degrade to the raw token.
+    out.pin = ids.pinId(self, dc[2]) orelse "";
+}
+
+fn parseNear(
+    self: *Evaluator,
+    form: Node,
+    ref_des: []const u8,
+    env: *Env,
+    reverse_pinout: ?*const std.StringHashMapUnmanaged([]const u8),
+    out: *env_mod.NearBind,
+) EvalError!void {
+    const nc = form.asList().?;
+    if (nc.len < 3) {
+        self.warnFmt(form.span, "(near …) on \"{s}\" — expected (near \"REF\" PIN [(own PAD)])", .{ref_des});
+        return;
+    }
+    const ref_val = try self.evalNode(nc[1], env);
+    const target_ref = ref_val.asString() orelse (nc[1].asAtom() orelse "");
+    const target_pin = ids.pinId(self, nc[2]) orelse "";
+    if (target_ref.len == 0 or target_pin.len == 0) {
+        self.warnFmt(form.span, "(near …) on \"{s}\" — expected (near \"REF\" PIN [(own PAD)])", .{ref_des});
+        return;
+    }
+    var own: []const u8 = "";
+    for (nc[3..]) |extra| {
+        const oc = extra.asList() orelse {
+            self.warnFmt(extra.span, "ignored token in (near …) on \"{s}\" — the only trailing form is (own PAD)", .{ref_des});
+            continue;
+        };
+        if (oc.len != 2 or !std.mem.eql(u8, oc[0].asAtom() orelse "", "own")) {
+            self.warnFmt(extra.span, "ignored sub-form in (near …) on \"{s}\" — the only trailing form is (own PAD)", .{ref_des});
+            continue;
+        }
+        const raw = ids.pinId(self, oc[1]) orelse "";
+        own = if (reverse_pinout) |rp| (resolvePinName(self, rp, raw, oc[1].span) orelse raw) else raw;
+    }
+    out.* = .{ .ref = target_ref, .pin = target_pin, .own = own };
+}
+
 /// Parse a `(strap-ok PIN "reason")` blessing into `strap_oks`. PIN resolves
 /// like a `(pin …)` token (a function name maps through the pinout to its
 /// physical pad); the reason is the author's sign-off the `strap_tied_to_rail`
@@ -382,7 +477,7 @@ fn parseStrapOk(
         return;
     }
     const raw = ids.pinId(self, sc[1]) orelse "";
-    const pad = if (reverse_pinout) |rp| (resolvePinName(self, rp, raw) orelse raw) else raw;
+    const pad = if (reverse_pinout) |rp| (resolvePinName(self, rp, raw, sc[1].span) orelse raw) else raw;
     const reason = (try self.evalNode(sc[2], env)).asString() orelse "";
     try strap_oks.append(self.allocator, .{ .pin = pad, .reason = reason });
 }
@@ -405,7 +500,7 @@ fn parseNcOk(
         return;
     }
     const raw = ids.pinId(self, sc[1]) orelse "";
-    const pad = if (reverse_pinout) |rp| (resolvePinName(self, rp, raw) orelse raw) else raw;
+    const pad = if (reverse_pinout) |rp| (resolvePinName(self, rp, raw, sc[1].span) orelse raw) else raw;
     const reason = (try self.evalNode(sc[2], env)).asString() orelse "";
     try nc_oks.append(self.allocator, .{ .pin = pad, .reason = reason });
 }
@@ -497,7 +592,7 @@ pub fn parsePinForm(
         if (pin_node.isForm("as")) continue;
         const raw = ids.pinId(self, pin_node) orelse continue;
         // Resolve: try as function name first (via pinout), fall back to physical pin ID
-        const pn = if (pinout) |pm| (resolvePinName(self, pm, raw) orelse raw) else raw;
+        const pn = if (pinout) |pm| (resolvePinName(self, pm, raw, pin_node.span) orelse raw) else raw;
         try pin_nets.append(self.allocator, .{
             .ref_des = ref_des,
             .pin = pn,
@@ -526,12 +621,13 @@ pub fn instanceFromValue(self: *Evaluator, val: Value, ref_des: []const u8, sour
         .pinout = resolved.pinout,
         .properties = resolved.properties,
         .attrs = resolved.attrs,
-        .datasheets = resolved.datasheets,
+        .docs = resolved.docs,
         .requirements = resolved.requirements,
         .requirements_ignored = resolved.requirements_ignored,
         .electrical = resolved.electrical,
         .source_offset = source_offset,
         .id = id,
+        .thermal = .{ .decl = resolved.thermal },
     };
 }
 
@@ -603,18 +699,71 @@ pub fn componentFamily(val: Value) []const u8 {
     };
 }
 
-/// Resolve a function name to a physical pin ID using the pinout map.
-/// The pinout maps pin_id -> function_name, so we need reverse lookup.
-pub fn resolvePinName(self: *Evaluator, pinout: *const std.StringHashMapUnmanaged([]const u8), name: []const u8) ?[]const u8 {
-    _ = self;
-    // Reverse lookup: find the pin_id whose function_name matches
+/// Order two pad ids: numerically when both parse as integers (so "2" < "10"),
+/// else lexicographically (a BGA "A1" / "B2"). Mirrors the placement optimizer's
+/// `pinLess`; here it is the tie-break that makes a duplicated function name
+/// resolve to the same pad on every run.
+fn padLess(a: []const u8, b: []const u8) bool {
+    const ai: ?i64 = std.fmt.parseInt(i64, a, 10) catch null;
+    const bi: ?i64 = std.fmt.parseInt(i64, b, 10) catch null;
+    if (ai != null and bi != null) return ai.? < bi.?;
+    return std.mem.lessThan(u8, a, b);
+}
+
+/// Resolve a function name to a physical pin ID using the pinout map (which maps
+/// pin_id → function_name, so this is a reverse lookup).
+///
+/// A real pinout names the SAME function on several pads — a USB-C receptacle
+/// carries `VBUS` on four contacts, an MCU repeats an EXTI name across ports —
+/// and the map is a hash table, so returning "the first match" returned whatever
+/// the hash happened to place first: the same source could bind a different pad
+/// after an unrelated edit shifted the map's layout. Every match is collected
+/// and the LOWEST pad id wins, which is stable across any rehash, and the
+/// ambiguity is reported at `span` with the fix (spell the pad) in the message
+/// rather than silently picking one of N pads for the author.
+pub fn resolvePinName(
+    self: *Evaluator,
+    pinout: *const std.StringHashMapUnmanaged([]const u8),
+    name: []const u8,
+    span: ast.Span,
+) ?[]const u8 {
+    const m = matchPinName(pinout, name) orelse return null;
+    if (m.matches > 1) {
+        self.warnFmt(span, "pin function '{s}' names {d} pads on this part (lowest '{s}', next '{s}') — using '{s}'; write the pad id instead to bind a different one", .{ name, m.matches, m.pad, m.second, m.pad });
+    }
+    return m.pad;
+}
+
+/// One reverse pinout lookup: the pad chosen for `name`, how many pads carry
+/// that function, and the runner-up (for the ambiguity message). Split out of
+/// `resolvePinName` so a caller holding no source span — a post-build pass, whose
+/// instances no longer remember where they were written — can still resolve the
+/// *same* pad without emitting a compiler-style warning pointing nowhere.
+pub const PinMatch = struct {
+    pad: []const u8,
+    matches: usize,
+    second: []const u8 = "",
+};
+
+/// Every pad whose function name is `name`, reduced to the lowest pad id.
+/// Null when nothing matches.
+pub fn matchPinName(pinout: *const std.StringHashMapUnmanaged([]const u8), name: []const u8) ?PinMatch {
+    var best: ?[]const u8 = null;
+    var second: ?[]const u8 = null;
+    var matches: usize = 0;
     var iter = pinout.iterator();
     while (iter.next()) |entry| {
-        if (std.mem.eql(u8, entry.value_ptr.*, name)) {
-            return entry.key_ptr.*;
+        if (!std.mem.eql(u8, entry.value_ptr.*, name)) continue;
+        const pad = entry.key_ptr.*;
+        matches += 1;
+        if (best == null or padLess(pad, best.?)) {
+            second = best;
+            best = pad;
+        } else if (second == null or padLess(pad, second.?)) {
+            second = pad;
         }
     }
-    return null;
+    return .{ .pad = best orelse return null, .matches = matches, .second = second orelse "" };
 }
 
 /// Evaluate a (series ...) form and emit instances + pin nets.
@@ -842,6 +991,121 @@ test "evalFanoutForm places one instance for the minimal 4-child form" {
     try testing.expectEqualStrings("VA", all_pin_nets.items[1].net);
 }
 
+// spec: eval/instance - bare string arguments after the component bind physical pads 1, 2, and onward in order
+test "instance positional nets bind consecutive physical pads" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    try eval.component_cache.put(alloc, "header-3", .{
+        .name = "header-3",
+        .symbol_name = "",
+        .footprint_name = "header-3",
+        .is_family = false,
+        .param_type = "",
+    });
+
+    const nodes = try parser_mod.parse(alloc, "(instance \"J1\" header-3 \"VDD\" \"DATA\" \"GND\")");
+    const res = try buildInstance(&eval, nodes[0].asList().?, &env);
+
+    try testing.expectEqual(@as(usize, 3), res.pin_nets.len);
+    for (res.pin_nets, 0..) |pin_net, i| {
+        const expected_pad = try std.fmt.allocPrint(alloc, "{d}", .{i + 1});
+        try testing.expectEqualStrings(expected_pad, pin_net.pin);
+    }
+    try testing.expectEqualStrings("VDD", res.pin_nets[0].net);
+    try testing.expectEqualStrings("DATA", res.pin_nets[1].net);
+    try testing.expectEqualStrings("GND", res.pin_nets[2].net);
+}
+
+// spec: eval/instance - positional nets coexist with legacy pin declarations and all instance metadata sub-forms
+test "instance positional nets preserve explicit pins and metadata forms" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    try eval.component_cache.put(alloc, "cap-0402", .{
+        .name = "cap-0402",
+        .symbol_name = "",
+        .footprint_name = "cap-0402",
+        .is_family = true,
+        .param_type = "",
+    });
+
+    const src = "(instance \"C1\" (cap-0402 \"100nF\") \"VDD\" (note \"local bypass\") \"GND\" (pin 7 \"SENSE\") (decouples \"U1\" 24) (dnp))";
+    const nodes = try parser_mod.parse(alloc, src);
+    const res = try buildInstance(&eval, nodes[0].asList().?, &env);
+
+    try testing.expectEqual(@as(usize, 3), res.pin_nets.len);
+    try testing.expectEqualStrings("1", res.pin_nets[0].pin);
+    try testing.expectEqualStrings("VDD", res.pin_nets[0].net);
+    try testing.expectEqualStrings("2", res.pin_nets[1].pin);
+    try testing.expectEqualStrings("GND", res.pin_nets[1].net);
+    try testing.expectEqualStrings("7", res.pin_nets[2].pin);
+    try testing.expectEqualStrings("SENSE", res.pin_nets[2].net);
+    try testing.expectEqual(@as(usize, 1), res.inline_notes.len);
+    try testing.expectEqualStrings("local bypass", res.inline_notes[0].text);
+    try testing.expectEqualStrings("U1", res.instance.bind.decouple.ic);
+    try testing.expectEqualStrings("24", res.instance.bind.decouple.pin);
+    try testing.expect(res.instance.dnp);
+}
+
+// spec: eval/instance - a pin function repeated on several pads resolves to the lowest pad and warns instead of picking by hash order
+test "a duplicated pin function resolves to the lowest pad and warns" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    try eval.component_cache.put(alloc, "usb-c", .{
+        .name = "usb-c",
+        .symbol_name = "usbpin",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    // A USB-C receptacle carries VBUS on four contacts and GND on one. Insertion
+    // order deliberately puts the LOWEST pad last, so "first hash match" cannot
+    // accidentally be right.
+    var pinout: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try pinout.put(alloc, "B9", "VBUS");
+    try pinout.put(alloc, "B4", "VBUS");
+    try pinout.put(alloc, "A9", "VBUS");
+    try pinout.put(alloc, "A4", "VBUS");
+    try pinout.put(alloc, "A1", "GND");
+    try eval.symbol_pin_cache.put(alloc, "usbpin", pinout);
+
+    const nodes = try parser_mod.parse(alloc, "(instance \"J1\" usb-c (pin VBUS \"VBUS\") (pin GND \"GND\"))");
+    const res = try buildInstance(&eval, nodes[0].asList().?, &env);
+
+    // Deterministic pick: the lowest pad id, not whichever the hash yields first.
+    try testing.expectEqual(@as(usize, 2), res.pin_nets.len);
+    try testing.expectEqualStrings("A4", res.pin_nets[0].pin);
+    // The unambiguous function resolves silently.
+    try testing.expectEqualStrings("A1", res.pin_nets[1].pin);
+
+    // Exactly one warning, naming the function, the count and the chosen pad.
+    try testing.expectEqual(@as(usize, 1), eval.warnings.items.len);
+    const msg = eval.warnings.items[0].message;
+    try testing.expect(std.mem.indexOf(u8, msg, "VBUS") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "4 pads") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "'A4'") != null);
+}
+
+// spec: eval/instance - numeric-aware pad ordering keeps a repeated function on the same pad across rehashes
+test "padLess orders pad ids numerically then lexicographically" {
+    // "2" < "10" numerically — a plain byte compare would say otherwise.
+    try testing.expect(padLess("2", "10"));
+    try testing.expect(!padLess("10", "2"));
+    // BGA-style ids fall back to byte order.
+    try testing.expect(padLess("A4", "A9"));
+    try testing.expect(padLess("A9", "B4"));
+    // A mixed pair is compared as text, so the answer is still total and stable.
+    try testing.expect(padLess("10", "A1"));
+}
+
 // spec: eval/instance - (decouples "IC" PIN) binds a cap to a specific hub pad
 test "decouples form sets the instance pin binding" {
     const alloc = std.heap.page_allocator;
@@ -859,9 +1123,9 @@ test "decouples form sets the instance pin binding" {
     const src = "(instance \"C1\" (cap-0402 \"100nF\") (pin 1 \"VDD\") (pin 2 \"GND\") (decouples \"U1\" 24))";
     const nodes = try parser_mod.parse(alloc, src);
     const res = try buildInstance(&eval, nodes[0].asList().?, &env);
-    try testing.expectEqualStrings("U1", res.instance.decouple_ic);
-    try testing.expectEqualStrings("24", res.instance.decouple_pin);
-    try testing.expect(!res.instance.decouple_rail);
+    try testing.expectEqualStrings("U1", res.instance.bind.decouple.ic);
+    try testing.expectEqualStrings("24", res.instance.bind.decouple.pin);
+    try testing.expect(!res.instance.bind.decouple.rail);
 }
 
 // spec: eval/instance - (decouples rail) opts a cap out of the per-pin-decoupling requirement
@@ -881,8 +1145,65 @@ test "decouples rail sets the rail opt-out flag" {
     const src = "(instance \"C9\" (cap-0402 \"10uF\") (pin 1 \"VDD\") (pin 2 \"GND\") (decouples rail))";
     const nodes = try parser_mod.parse(alloc, src);
     const res = try buildInstance(&eval, nodes[0].asList().?, &env);
-    try testing.expect(res.instance.decouple_rail);
-    try testing.expectEqualStrings("", res.instance.decouple_pin);
+    try testing.expect(res.instance.bind.decouple.rail);
+    try testing.expectEqualStrings("", res.instance.bind.decouple.pin);
+}
+
+/// A `(near …)` fixture: build `src` against a bare `res-0402` family.
+fn nearFixture(alloc: std.mem.Allocator, eval: *Evaluator, env: *Env, src: []const u8) !InstanceResult {
+    try eval.component_cache.put(alloc, "res-0402", .{
+        .name = "res-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    });
+    const nodes = try parser_mod.parse(alloc, src);
+    return buildInstance(eval, nodes[0].asList().?, env);
+}
+
+// spec: eval/instance - (near "REF" PIN) records the adjacency target with no own pad inferred at parse time
+test "near form records the target ref and pin" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    const res = try nearFixture(alloc, &eval, &env, "(instance \"R_TAP\" (res-0402 \"1k\") (pin 1 \"GPIO10\") (pin 2 \"TAP\") (near \"U3\" 14))");
+    try testing.expectEqualStrings("U3", res.instance.bind.near.ref);
+    try testing.expectEqualStrings("14", res.instance.bind.near.pin);
+    // The own leg is deliberately NOT guessed here: it is the leg sharing a net
+    // with the target pad, which the netlist knows and one instance does not.
+    try testing.expectEqualStrings("", res.instance.bind.near.own);
+    // Pure adjacency — it must not read as a decoupling binding.
+    try testing.expectEqualStrings("", res.instance.bind.decouple.pin);
+    try testing.expect(!res.instance.bind.decouple.rail);
+}
+
+// spec: eval/instance - (near … (own PAD)) records which of the declaring part's own legs docks against the target
+test "near form records an explicit own pad" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    const res = try nearFixture(alloc, &eval, &env, "(instance \"R_TAP\" (res-0402 \"1k\") (pin 1 \"VREF\") (pin 2 \"VREF\") (near \"U3\" 7 (own 2)))");
+    try testing.expectEqualStrings("U3", res.instance.bind.near.ref);
+    try testing.expectEqualStrings("7", res.instance.bind.near.pin);
+    try testing.expectEqualStrings("2", res.instance.bind.near.own);
+}
+
+// spec: eval/instance - a (near …) missing its ref or pin warns and binds nothing rather than half a target
+test "a malformed near form binds nothing" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    const res = try nearFixture(alloc, &eval, &env, "(instance \"R_TAP\" (res-0402 \"1k\") (pin 1 \"A\") (pin 2 \"B\") (near \"U3\"))");
+    // Half a binding would place the part against a pad the author never named.
+    try testing.expectEqualStrings("", res.instance.bind.near.ref);
+    try testing.expectEqualStrings("", res.instance.bind.near.pin);
 }
 
 // spec: eval/instance - (strap-ok PIN "reason") records a blessed direct strap tie
@@ -905,6 +1226,32 @@ test "strap-ok form records the pad and reason" {
     try testing.expectEqual(@as(usize, 1), res.instance.strap_oks.len);
     try testing.expectEqualStrings("5", res.instance.strap_oks[0].pin);
     try testing.expectEqualStrings("ILIM->GND = default current limit", res.instance.strap_oks[0].reason);
+}
+
+// spec: eval/instance - (power …) on an instance records the authored dissipation and the component's thermal envelope rides along
+test "power form records watts and the component thermal envelope reaches the instance" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    try eval.component_cache.put(alloc, "somechip", .{
+        .name = "somechip",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+        .thermal = .{ .theta_ja = 40, .tj_max = 150 },
+    });
+    const src = "(instance \"U1\" somechip (pin 1 \"VDD\") (power (typ 0.8) (max 1.5)))";
+    const nodes = try parser_mod.parse(alloc, src);
+    const res = try buildInstance(&eval, nodes[0].asList().?, &env);
+    try testing.expectEqual(@as(f64, 0.8), res.instance.thermal.power.?.typ.?);
+    try testing.expectEqual(@as(f64, 1.5), res.instance.thermal.power.?.max.?);
+    // The library envelope travels with the part, so the thermal analyzer
+    // never has to re-query the evaluator's component cache.
+    try testing.expectEqual(@as(f64, 40), res.instance.thermal.decl.?.theta_ja.?);
+    try testing.expectEqual(@as(f64, 150), res.instance.thermal.decl.?.tj_max.?);
 }
 
 // spec: eval/instance - (nc-ok PIN "reason") records a blessed no-connect pad

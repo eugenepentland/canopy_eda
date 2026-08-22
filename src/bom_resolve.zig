@@ -15,6 +15,7 @@ const bom_mod = @import("bom.zig");
 const export_kicad = @import("export_kicad.zig");
 const kicad_format = @import("kicad_pcb/format.zig");
 const FlatInfo = bom_mod.FlatInfo;
+const refdes_stability = @import("refdes_stability.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 
@@ -22,10 +23,10 @@ const FlatInfo = bom_mod.FlatInfo;
 /// write the .bom sidecar) with `OutOfMemory` from the various
 /// `ArrayList`/`HashMap` operations.
 pub const ResolveError = std.mem.Allocator.Error ||
-    std.fs.File.OpenError ||
-    std.fs.File.ReadError ||
-    std.fs.File.WriteError ||
-    error{ FileTooBig, StreamTooLong, EndOfStream };
+    infra_fs.File.OpenError ||
+    infra_fs.File.ReadError ||
+    infra_fs.File.WriteError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, WriteFailed, DiskQuota, BrokenPipe, NotOpenForWriting, EntropyUnavailable };
 
 /// Drop `manufacturer` and `mpn` from a property list. Used when the
 /// component family on an instance changes: the UUID stays stable for PCB
@@ -68,6 +69,57 @@ fn carryForwardProps(
     try props_map.put(allocator, info.ref_des, props_to_keep);
 }
 
+fn stabilizeRefdes(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    old_entries: []const bom_mod.BomEntry,
+) std.mem.Allocator.Error!void {
+    const priors = try allocator.alloc(refdes_stability.Prior, old_entries.len);
+    defer allocator.free(priors);
+    for (old_entries, priors) |entry, *prior| prior.* = .{ .id = entry.id, .ref_des = entry.ref_des };
+    try refdes_stability.apply(allocator, block, priors);
+}
+
+fn appendPdnModelProperties(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(Property),
+    attrs: []const Property,
+) !void {
+    for (attrs) |attr| {
+        if (!std.mem.startsWith(u8, attr.key, "pdn-")) continue;
+        var present = false;
+        for (out.items) |old| if (std.mem.eql(u8, old.key, attr.key)) {
+            present = true;
+            break;
+        };
+        if (!present) try out.append(allocator, .{
+            .key = try allocator.dupe(u8, attr.key),
+            .value = try allocator.dupe(u8, attr.value),
+        });
+    }
+}
+
+test "selected BOM rows propagate only PDN model attributes" {
+    const alloc = std.testing.allocator;
+    var out: std.ArrayList(Property) = .empty;
+    defer {
+        for (out.items) |p| {
+            alloc.free(p.key);
+            alloc.free(p.value);
+        }
+        out.deinit(alloc);
+    }
+    const attrs = [_]Property{
+        .{ .key = "dielectric", .value = "x7r" },
+        .{ .key = "pdn-esr-ohm", .value = "0.018" },
+        .{ .key = "pdn-esl-h", .value = "4e-10" },
+    };
+    try appendPdnModelProperties(alloc, &out, &attrs);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqualStrings("pdn-esr-ohm", out.items[0].key);
+    try std.testing.expectEqualStrings("pdn-esl-h", out.items[1].key);
+}
+
 /// Resolve identities and BOM data for all instances in a design block.
 pub fn resolveIdentities(
     allocator: std.mem.Allocator,
@@ -91,9 +143,11 @@ pub fn resolveIdentities(
         allocator.free(old_entries);
     }
 
+    try stabilizeRefdes(allocator, block, old_entries);
+
     var flat_list: std.ArrayList(FlatInfo) = .empty;
     defer flat_list.deinit(allocator);
-    try bom_mod.collectFlatInstances(allocator, block, "", &flat_list, block.refStyle());
+    try bom_mod.collectFlatInstances(allocator, block, "", &flat_list);
 
     var result_map = std.StringHashMapUnmanaged([]const u8).empty;
     defer result_map.deinit(allocator);
@@ -155,16 +209,10 @@ pub fn resolveIdentities(
     defer parts_db.deinit();
 
     for (flat_list.items) |info| {
-        if (props_map.get(info.ref_des)) |existing_props| {
-            var has_mpn = false;
-            for (existing_props) |p| {
-                if (std.mem.eql(u8, p.key, "mpn")) {
-                    has_mpn = true;
-                    break;
-                }
-            }
-            if (has_mpn) continue;
-        }
+        var has_mpn = false;
+        if (props_map.get(info.ref_des)) |existing_props| for (existing_props) |p| {
+            if (std.mem.eql(u8, p.key, "mpn")) has_mpn = true;
+        };
         if (info.footprint.len == 0) {
             if (info.value.len > 0) {
                 log.warn("{s} uses unsized family '{s}' — no footprint or MPN resolution", .{ info.ref_des, info.component });
@@ -178,25 +226,35 @@ pub fn resolveIdentities(
                 break;
             }
         }
-        if (has_mpn_from_component) continue;
+        if (has_mpn_from_component) has_mpn = true;
 
         if (parts_db.lookup(info.component, info.value, info.attrs)) |part| {
             var new_props: std.ArrayList(Property) = .empty;
             if (props_map.get(info.ref_des)) |existing| {
-                for (existing) |p| try new_props.append(allocator, p);
+                // Selected-row electrical data is authoritative. Do not carry
+                // a previous row's model through an MPN/value change.
+                for (existing) |p| {
+                    if (std.mem.startsWith(u8, p.key, "pdn-")) continue;
+                    try new_props.append(allocator, p);
+                }
             }
-            if (part.manufacturer.len > 0) {
+            if (!has_mpn and part.manufacturer.len > 0) {
                 try new_props.append(allocator, .{
                     .key = try allocator.dupe(u8, "manufacturer"),
                     .value = try allocator.dupe(u8, part.manufacturer),
                 });
             }
-            if (part.mpn.len > 0) {
+            if (!has_mpn and part.mpn.len > 0) {
                 try new_props.append(allocator, .{
                     .key = try allocator.dupe(u8, "mpn"),
                     .value = try allocator.dupe(u8, part.mpn),
                 });
             }
+            // Electrical model columns belong to the selected BOM row just as
+            // surely as its MPN. Persist them so post-route PDN extraction uses
+            // the part that will actually be stuffed, while ordinary matching
+            // attrs (dielectric/tolerance) stay out of the manufacturing BOM.
+            try appendPdnModelProperties(allocator, &new_props, part.attrs);
             try props_map.put(allocator, info.ref_des, try new_props.toOwnedSlice(allocator));
         }
     }
@@ -272,9 +330,9 @@ fn saveBom(
     uuid_map: *const std.StringHashMapUnmanaged([]const u8),
     props_map: *const std.StringHashMapUnmanaged([]const Property),
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
 
     try w.writeAll(";; BOM — auto-generated by netlisp build\n");
     try w.writeAll(";; Stores identity and properties per instance\n\n");
@@ -316,12 +374,12 @@ fn saveBom(
     // Mirrors the ".refdes.json writes only on change" rule.
     if (infra_fs.cwd().readFileAlloc(allocator, bom_path, 16 * 1024 * 1024)) |existing| {
         defer allocator.free(existing);
-        if (std.mem.eql(u8, existing, buf.items)) return;
+        if (std.mem.eql(u8, existing, buf.written())) return;
     } else |_| {}
 
     const f = try infra_fs.cwd().createFile(bom_path, .{});
     defer f.close();
-    try f.writeAll(buf.items);
+    try f.writeAll(buf.written());
 }
 
 /// Serialize a list of `BomEntry` back to the `.bom` sidecar grammar.
@@ -333,9 +391,9 @@ fn writeBomEntries(
     bom_path: []const u8,
     entries: []const bom_mod.BomEntry,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
 
     try w.writeAll(";; BOM — auto-generated by netlisp build\n");
     try w.writeAll(";; Stores identity and properties per instance\n\n");
@@ -367,12 +425,13 @@ fn writeBomEntries(
 
     const f = try infra_fs.cwd().createFile(bom_path, .{});
     defer f.close();
-    try f.writeAll(buf.items);
+    try f.writeAll(buf.written());
 }
 
 /// Error set for `setBomProperty`. Combines `bom.loadBom`'s read-side
 /// errors with the write-side errors from `writeBomEntries`.
-pub const SetPropertyError = bom_mod.BomError || std.fs.File.WriteError;
+pub const SetPropertyError = bom_mod.BomError || infra_fs.File.WriteError ||
+    error{ WriteFailed, DiskQuota, BrokenPipe, NotOpenForWriting, EntropyUnavailable, Canceled };
 
 /// Update or insert a single property on the BOM entry for `ref_des`.
 /// Loads the sidecar, merges `(key, value)` into the entry's properties
@@ -408,6 +467,19 @@ pub fn setBomProperty(
     var out: std.ArrayList(bom_mod.BomEntry) = .empty;
     defer out.deinit(allocator);
 
+    // Property slices (and, for a brand-new entry, its uuid) that THIS function
+    // allocates. `old_entries`' cleanup above only covers what `loadBom`
+    // allocated, so without this a non-arena caller leaks one slice per edit.
+    // Only the slices are freed — their key/value items point into `old_entries`
+    // or into the caller's `key`/`value`.
+    var owned_props: std.ArrayList([]Property) = .empty;
+    var owned_uuid: ?[]const u8 = null;
+    defer {
+        for (owned_props.items) |p| allocator.free(p);
+        owned_props.deinit(allocator);
+        if (owned_uuid) |u| allocator.free(u);
+    }
+
     var matched = false;
     for (old_entries) |entry| {
         if (!std.mem.eql(u8, entry.ref_des, ref_des)) {
@@ -426,19 +498,23 @@ pub fn setBomProperty(
             }
         }
         if (!replaced) try props.append(allocator, .{ .key = key, .value = value });
+        const owned = try props.toOwnedSlice(allocator);
+        try owned_props.append(allocator, owned);
         try out.append(allocator, .{
             .ref_des = entry.ref_des,
             .uuid = entry.uuid,
             .component = entry.component,
             .id = entry.id,
             .nets = entry.nets,
-            .properties = try props.toOwnedSlice(allocator),
+            .properties = owned,
         });
     }
 
     if (!matched) {
         const new_uuid = try bom_mod.generateUuid(allocator);
+        owned_uuid = new_uuid;
         const props = try allocator.alloc(Property, 1);
+        try owned_props.append(allocator, props);
         props[0] = .{ .key = key, .value = value };
         try out.append(allocator, .{
             .ref_des = ref_des,
@@ -463,11 +539,11 @@ test "resolveIdentities idempotent across two consecutive evaluations" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const project_dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(project_dir);
 
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/components/cap.sexp",
         .data =
         \\(component-family cap
@@ -475,25 +551,29 @@ test "resolveIdentities idempotent across two consecutive evaluations" {
         \\  (footprint "0402"))
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/components/0402.sexp",
         .data =
         \\(component 0402 (footprint "0402.kicad_mod"))
         ,
     });
 
-    try tmp.dir.makePath("src/sample");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "src/sample");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "src/sample/sample.sexp",
         .data =
+        \\(import cap)
         \\(design-block "Sample"
         \\  (instance "C1" (cap "100nF")
+        \\    (id ab000001)
         \\    (pin 1 "VDD")
         \\    (pin 2 "GND"))
         \\  (instance "C2" (cap "100nF")
+        \\    (id ab000002)
         \\    (pin 1 "VDD")
         \\    (pin 2 "GND"))
         \\  (instance "C3" (cap "100nF")
+        \\    (id ab000003)
         \\    (pin 1 "V3V3")
         \\    (pin 2 "GND")))
         ,
@@ -541,11 +621,11 @@ test "deterministic identity ignores a stale prior .bom" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const project_dir = try tmp.dir.realpathAlloc(alloc, ".");
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(project_dir);
 
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/components/cap.sexp",
         .data =
         \\(component-family cap
@@ -553,17 +633,18 @@ test "deterministic identity ignores a stale prior .bom" {
         \\  (footprint "0402"))
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/components/0402.sexp",
         .data =
         \\(component 0402 (footprint "0402.kicad_mod"))
         ,
     });
 
-    try tmp.dir.makePath("src/swap");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "src/swap");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "src/swap/swap.sexp",
         .data =
+        \\(import cap)
         \\(design-block "Swap"
         \\  (instance "C10" (cap "100nF")
         \\    (id aa000001)
@@ -622,11 +703,17 @@ test "deterministic identity ignores a stale prior .bom" {
 
 // spec: bom-resolve - A property value containing a quote/backslash round-trips through the .bom without corrupting it
 test "setBomProperty escapes a value with a quote and reloads cleanly" {
-    const alloc = std.testing.allocator;
+    // `writeBomEntries` escapes each quoted field with `kicad_format.sexprEscape`,
+    // whose contract is an ARENA caller (the result is never individually freed) —
+    // so run this on an arena rather than the raw testing allocator. The arena
+    // itself is testing-allocator-backed, so a genuine leak still fails the test.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir_path = try tmp.dir.realpathAlloc(alloc, ".");
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(dir_path);
     const bom_path = try std.fmt.allocPrint(alloc, "{s}/escape.bom", .{dir_path});
     defer alloc.free(bom_path);

@@ -2488,7 +2488,7 @@ fn stackHeight(count: usize, item_h: f64, gap: f64) f64 {
 /// buckets so they don't inflate the consumer count with non-loads.
 fn isInstrumentation(label: []const u8) bool {
     const kw = [_][]const u8{ "Test Point", "Mounting", "Fiducial", "Standoff", "Bring-up", "Debug" };
-    for (kw) |k| if (std.ascii.indexOfIgnoreCase(label, k) != null) return true;
+    for (kw) |k| if (std.ascii.findIgnoreCase(label, k) != null) return true;
     return false;
 }
 
@@ -3141,7 +3141,7 @@ test "computeFreeLayout breaks a placement cycle" {
 
 /// Map placed nodes back to (x,y) indexed by their graph id, for assertions.
 fn nodeXY(nodes: []const LNode) [8]Pt {
-    var out = [_]Pt{.{ .x = 0, .y = 0 }} ** 8;
+    var out: [8]Pt = @splat(.{ .x = 0, .y = 0 });
     for (nodes) |n| out[n.gid] = .{ .x = n.x, .y = n.y };
     return out;
 }

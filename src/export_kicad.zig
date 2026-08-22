@@ -1,7 +1,8 @@
 //! KiCad export orchestration: flattens the `DesignBlock` and drives the netlist,
 //! footprint, and model writers to hand a design off to KiCad's PCB editor.
-//! Owns `uuidFromId` — the deterministic 8-char id -> KiCad UUID map that keeps
-//! footprint placements stable across re-exports.
+//! Re-exports `uuidFromId` — the deterministic 8-char id -> KiCad UUID map that
+//! keeps footprint placements stable across re-exports — and the flatten it
+//! stamps ids during, both of which are declared in `flat_netlist.zig`.
 
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
@@ -9,11 +10,14 @@ const log = @import("infra/log.zig");
 const env_mod = @import("eval/env.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const DesignBlock = env_mod.DesignBlock;
-const Property = env_mod.Property;
+const flat_netlist = @import("flat_netlist.zig");
 
 const netlist_mod = @import("export_kicad_netlist.zig");
 const footprint_mod = @import("export_kicad_footprint.zig");
 const model_mod = @import("export_kicad_model.zig");
+const sch_mod = @import("export_kicad_sch.zig");
+const zipfile = @import("zipfile.zig");
+const lib_limits = @import("lib_limits.zig");
 
 const writeNetlist = netlist_mod.writeNetlist;
 const extractPadNames = netlist_mod.extractPadNames;
@@ -21,23 +25,10 @@ const extractPadNames = netlist_mod.extractPadNames;
 // ── Constants ─────────────────────────────────────────────────────
 const footprint_path_template = "{s}/lib/footprints/{s}.sexp";
 const model_max_bytes: usize = 20 * 1024 * 1024;
-// UUID v5 byte indices (RFC 4122)
-const uuid_version_byte: usize = 6;
-const uuid_variant_byte: usize = 8;
-const uuid_byte_5: usize = 5;
-const uuid_byte_7: usize = 7;
-const uuid_byte_9: usize = 9;
-const uuid_byte_10: usize = 10;
-const uuid_byte_11: usize = 11;
-const uuid_byte_12: usize = 12;
-const uuid_byte_13: usize = 13;
-const uuid_byte_14: usize = 14;
-const uuid_byte_15: usize = 15;
 const extractFootprintName = netlist_mod.extractFootprintName;
 const exportFootprintMod = footprint_mod.exportFootprintMod;
 const findModelFile = footprint_mod.findModelFile;
-const buildZip = footprint_mod.buildZip;
-const ZipEntry = footprint_mod.ZipEntry;
+const ZipEntry = zipfile.Entry;
 const buildKicadMod = model_mod.buildKicadMod;
 pub const loadModelConfig = model_mod.loadModelConfig;
 
@@ -48,35 +39,33 @@ pub const exportFootprints = model_mod.exportFootprints;
 pub const parseFloat3 = model_mod.parseFloat3;
 
 /// Error set for the KiCad exporter. Wraps file IO (read & write multiple
-/// `.kicad_*` files), parser errors on the source `.sexp`, and the writer
-/// allocations done while building the output buffers.
+/// `.kicad_*` files), parser errors on the source `.sexp`, the writer
+/// allocations done while building the output buffers, and — when the bundle
+/// includes the schematic — every way the `.kicad_sch` writer can fail its own
+/// self-check.
 pub const ExportError = std.mem.Allocator.Error ||
-    std.fs.File.OpenError ||
-    std.fs.File.ReadError ||
-    std.fs.File.WriteError ||
-    std.fs.Dir.MakeError ||
+    infra_fs.File.OpenError ||
+    infra_fs.File.ReadError ||
+    infra_fs.File.WriteError ||
+    infra_fs.Dir.MakeError ||
     parser_mod.ParseError ||
-    error{ FileTooBig, StreamTooLong, EndOfStream, NotDir };
+    sch_mod.SchError ||
+    error{ FileTooBig, StreamTooLong, EndOfStream, NotDir, BrokenPipe, NotOpenForWriting };
 
-/// Derive a full UUID (36-char) from an 8-char hex ID by hashing it.
-pub fn uuidFromId(allocator: std.mem.Allocator, id: []const u8) std.mem.Allocator.Error![]const u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("canopy:");
-    hasher.update(id);
-    const hash = hasher.finalResult();
-    // Format as UUID v5 style: xxxxxxxx-xxxx-5xxx-yxxx-xxxxxxxxxxxx
-    var bytes: [16]u8 = undefined;
-    @memcpy(&bytes, hash[0..16]);
-    bytes[uuid_version_byte] = (bytes[uuid_version_byte] & 0x0f) | 0x50; // version 5
-    bytes[uuid_variant_byte] = (bytes[uuid_variant_byte] & 0x3f) | 0x80; // variant 1
-    return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}" ++
-        "-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
-        bytes[0],                 bytes[1],            bytes[2],                 bytes[3],
-        bytes[4],                 bytes[uuid_byte_5],  bytes[uuid_version_byte], bytes[uuid_byte_7],
-        bytes[uuid_variant_byte], bytes[uuid_byte_9],  bytes[uuid_byte_10],      bytes[uuid_byte_11],
-        bytes[uuid_byte_12],      bytes[uuid_byte_13], bytes[uuid_byte_14],      bytes[uuid_byte_15],
-    });
-}
+/// What rides along with the netlist, footprints, and STEP models.
+pub const BundleOptions = struct {
+    /// Also emit the `.kicad_sch` hierarchy and its project sidecars into the
+    /// same directory / archive, so the bundle opens as a complete KiCad
+    /// project instead of a netlist waiting for a schematic. Off by default in
+    /// the directory flow, so an existing `export-kicad` run is byte-identical
+    /// unless `--with-schematic` asks for the drawing.
+    schematic: bool = false,
+};
+
+/// Derive a full UUID (36-char) from an 8-char hex ID by hashing it. DECLARED
+/// in `flat_netlist.zig` alongside the flatten that stamps it onto every
+/// `FlatInstance`, and re-exported here for the export-layer callers.
+pub const uuidFromId = flat_netlist.uuidFromId;
 
 /// True when `name` is unsafe as a file/zip-entry basename — it contains a
 /// path separator or a `..` traversal segment. `kicad_name` is read from the
@@ -110,54 +99,14 @@ fn sanitizeKicadName(allocator: std.mem.Allocator, kicad_name: []const u8) std.m
     return safe;
 }
 
-/// One component flattened out of the design hierarchy for KiCad export:
-/// the joined `sub-block/REF` reference designator plus the value,
-/// footprint, properties, and stable UUID written into the `.net` file.
-pub const FlatInstance = struct {
-    ref_des: []const u8,
-    component: []const u8,
-    /// Pinout lookup keys (`lib/pinouts/<key>.sexp`), carried from the source
-    /// instance so post-flatten consumers — e.g. the placement optimizer's
-    /// supply-pin detection — can resolve pin functions. Default "" so the
-    /// netlist/export paths that build `FlatInstance` literals may omit them.
-    symbol: []const u8 = "",
-    pinout: []const u8 = "",
-    /// The instance's stable source name (the first arg of `(instance …)`),
-    /// carried through ref-des renumbering. Lets post-flatten consumers — e.g.
-    /// the placement optimizer's `(placement-order …)` resolution — match a part
-    /// by the name the design author wrote, not its volatile auto-assigned
-    /// ref-des. Default "" so literal builders may omit it.
-    origin_key: []const u8 = "",
-    value: []const u8,
-    footprint: []const u8,
-    properties: []const Property,
-    uuid: []const u8,
-    /// Do Not Populate — carried from the source instance's `(dnp)` flag.
-    /// Default false so literal builders may omit it.
-    dnp: bool = false,
-    /// `(decouples "IC" PIN)` target pad, carried from the source instance so the
-    /// placement optimizer can pin this cap's decoupling-loop / ratsnest to that
-    /// hub pad. "" ⇒ no binding. `decouple_rail` carries `(decouples rail)`, the
-    /// opt-out that exempts the cap from the per-pin-decoupling lint.
-    decouple_pin: []const u8 = "",
-    decouple_rail: bool = false,
-};
-
-/// One net in the flattened design with a hierarchically-prefixed name and
-/// the list of `FlatPin`s connected to it. Net ties from `applyNetTies`
-/// merge multiple `FlatNet`s into one before the netlist is emitted.
-pub const FlatNet = struct {
-    name: []const u8,
-    pins: []const FlatPin,
-};
-
-/// One `(node (ref …) (pin …))` entry in a KiCad netlist: the flattened
-/// component reference designator and the physical pad name on the
-/// component's footprint.
-pub const FlatPin = struct {
-    ref_des: []const u8,
-    pin: []const u8,
-};
+/// The flattened-netlist currency types. They are DECLARED in
+/// `flat_netlist.zig`, a neutral module beneath both this export layer and the
+/// `src/placement/*` layer that consumes them, and re-exported here so callers
+/// that legitimately live in the export layer keep their historical spelling.
+/// See that module's header for why the split exists.
+pub const FlatInstance = flat_netlist.FlatInstance;
+pub const FlatNet = flat_netlist.FlatNet;
+pub const FlatPin = flat_netlist.FlatPin;
 
 /// Build the footprint -> pad-name-list map used for NC-pin handling, reading
 /// and parsing each unique footprint once. Footprints that fail to read or
@@ -174,7 +123,7 @@ fn buildPadMap(
         if (fp_pad_map.contains(inst.footprint)) continue;
         const fp_path = try std.fmt.allocPrint(allocator, footprint_path_template, .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
-        const fp_src = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
+        const fp_src = infra_fs.cwd().readFileAlloc(allocator, fp_path, lib_limits.max_footprint_bytes) catch continue;
         defer allocator.free(fp_src);
         const pad_names = extractPadNames(allocator, fp_src) catch continue;
         try fp_pad_map.put(allocator, inst.footprint, pad_names);
@@ -182,13 +131,15 @@ fn buildPadMap(
     return fp_pad_map;
 }
 
-/// Export a resolved design to KiCad format: netlist + footprints + STEP models.
+/// Export a resolved design to KiCad format: netlist + footprints + STEP
+/// models, plus the `.kicad_sch` hierarchy when `opts.schematic` asks for it.
 pub fn exportKicad(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     project_dir: []const u8,
     output_dir: []const u8,
     design_name: []const u8,
+    opts: BundleOptions,
 ) ExportError!void {
     // Create output directories
     const fp_dir = try std.fmt.allocPrint(allocator, "{s}/footprints.pretty", .{output_dir});
@@ -215,7 +166,7 @@ pub fn exportKicad(
     var nets: std.ArrayList(FlatNet) = .empty;
     defer nets.deinit(allocator);
 
-    try collectInstances(allocator, block, "", &instances, block.refStyle());
+    try collectInstances(allocator, block, "", &instances);
     try flattenAndMergeNets(allocator, block, &nets);
 
     // Build footprint name map: internal name -> KiCad declared name
@@ -249,7 +200,7 @@ pub fn exportKicad(
         const fp_path = try std.fmt.allocPrint(allocator, footprint_path_template, .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
 
-        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch |err| {
+        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, lib_limits.max_footprint_bytes) catch |err| {
             log.warn("cannot read footprint {s}: {}", .{ fp_path, err });
             try fp_name_map.put(allocator, inst.footprint, inst.footprint);
             continue;
@@ -327,6 +278,37 @@ pub fn exportKicad(
     defer nf.close();
     try nf.writeAll(netlist);
     std.debug.print("  Wrote {s}\n", .{net_path});
+
+    if (opts.schematic) try writeSchematicInto(allocator, block, project_dir, output_dir, design_name);
+}
+
+/// Write the `.kicad_sch` hierarchy and its project sidecars into
+/// `output_dir`. Sheet names are bare siblings (that is what the root's
+/// `Sheetfile` properties point at), and a sidecar that already exists is left
+/// alone — an export aimed at a live KiCad project must not overwrite its
+/// `.kicad_pro` or a hand-edited library table.
+fn writeSchematicInto(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    output_dir: []const u8,
+    design_name: []const u8,
+) ExportError!void {
+    const out = try sch_mod.exportSch(allocator, block, project_dir, design_name, .{});
+    defer out.deinit(allocator);
+    for (out.files) |f| {
+        const path = try std.fs.path.join(allocator, &.{ output_dir, f.name });
+        defer allocator.free(path);
+        try infra_fs.cwd().writeFile(.{ .sub_path = path, .data = f.bytes });
+        log.progress("  Wrote {s}", .{path});
+    }
+    for (out.sidecars) |f| {
+        const path = try std.fs.path.join(allocator, &.{ output_dir, f.name });
+        defer allocator.free(path);
+        if (infra_fs.cwd().access(path, .{})) |_| continue else |_| {}
+        try infra_fs.cwd().writeFile(.{ .sub_path = path, .data = f.bytes });
+        log.progress("  Wrote {s}", .{path});
+    }
 }
 
 /// Export just the KiCad netlist as a string.
@@ -341,7 +323,7 @@ pub fn exportNetlistOnly(
     var nets: std.ArrayList(FlatNet) = .empty;
     defer nets.deinit(allocator);
 
-    try collectInstances(allocator, block, "", &instances, block.refStyle());
+    try collectInstances(allocator, block, "", &instances);
     try flattenAndMergeNets(allocator, block, &nets);
 
     var fp_name_map = std.StringHashMapUnmanaged([]const u8).empty;
@@ -357,7 +339,7 @@ pub fn exportNetlistOnly(
         const fp_path = try std.fmt.allocPrint(allocator, footprint_path_template, .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
 
-        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch {
+        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, lib_limits.max_footprint_bytes) catch {
             try fp_name_map.put(allocator, inst.footprint, inst.footprint);
             continue;
         };
@@ -382,13 +364,14 @@ pub fn exportKicadZip(
     block: *const DesignBlock,
     project_dir: []const u8,
     design_name: []const u8,
+    opts: BundleOptions,
 ) ExportError![]const u8 {
     var instances: std.ArrayList(FlatInstance) = .empty;
     defer instances.deinit(allocator);
     var nets: std.ArrayList(FlatNet) = .empty;
     defer nets.deinit(allocator);
 
-    try collectInstances(allocator, block, "", &instances, block.refStyle());
+    try collectInstances(allocator, block, "", &instances);
     try flattenAndMergeNets(allocator, block, &nets);
 
     var fp_name_map = std.StringHashMapUnmanaged([]const u8).empty;
@@ -414,7 +397,7 @@ pub fn exportKicadZip(
         const fp_path = try std.fmt.allocPrint(allocator, footprint_path_template, .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
 
-        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch {
+        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, lib_limits.max_footprint_bytes) catch {
             try fp_name_map.put(allocator, inst.footprint, inst.footprint);
             continue;
         };
@@ -469,38 +452,31 @@ pub fn exportKicadZip(
     const net_filename = try std.fmt.allocPrint(allocator, "{s}.net", .{design_name});
     try zip_files.append(allocator, .{ .name = net_filename, .data = netlist });
 
+    // The schematic rides at the archive root beside the netlist, because the
+    // root sheet's `Sheetfile` links name bare siblings and the project
+    // sidecars only resolve from the directory holding the `.kicad_pro`.
+    const sch = if (opts.schematic)
+        try sch_mod.exportSch(allocator, block, project_dir, design_name, .{})
+    else
+        sch_mod.Output{ .files = &.{}, .sidecars = &.{} };
+    for (sch.files) |f| try zip_files.append(allocator, .{ .name = f.name, .data = f.bytes });
+    for (sch.sidecars) |f| try zip_files.append(allocator, .{ .name = f.name, .data = f.bytes });
+
     // Build zip
-    return buildZip(allocator, zip_files.items);
+    var zw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer zw.deinit();
+    try zipfile.write(&zw.writer, zip_files.items);
+    return zw.toOwnedSlice();
 }
 
-const collectInstances = netlist_mod.collectInstances;
-const collectNets = netlist_mod.collectNets;
-const collectNetTies = netlist_mod.collectNetTies;
-const FlatTie = netlist_mod.FlatTie;
+const collectInstances = flat_netlist.collectInstances;
 
-pub fn flattenAndMergeNets(
-    allocator: std.mem.Allocator,
-    block: *const DesignBlock,
-    nets: *std.ArrayList(FlatNet),
-) std.mem.Allocator.Error!void {
-    return flattenAndMergeNetsMapped(allocator, block, nets, null);
-}
-
-/// Flatten/merge a design while optionally returning every hierarchy-local net
-/// alias mapped to its final canonical name. This is the metadata bridge used by
-/// inherited net classes; ordinary exporters keep calling the wrapper above.
-pub fn flattenAndMergeNetsMapped(
-    allocator: std.mem.Allocator,
-    block: *const DesignBlock,
-    nets: *std.ArrayList(FlatNet),
-    aliases: ?*netlist_mod.CanonicalNetMap,
-) std.mem.Allocator.Error!void {
-    try collectNets(allocator, block, "", nets, block.refStyle());
-    var ties: std.ArrayList(FlatTie) = .empty;
-    defer ties.deinit(allocator);
-    try collectNetTies(allocator, block, "", &ties);
-    try netlist_mod.applyNetTiesMapped(allocator, nets, ties.items, aliases);
-}
+/// Flatten a design's `(sub-block …)` hierarchy into prefixed nets and merge
+/// its net ties. DECLARED in `flat_netlist.zig` — joining the hierarchy is not
+/// a KiCad concern, and `src/placement/*` needs the same flatten this exporter
+/// does — and re-exported here for the export-layer callers.
+pub const flattenAndMergeNets = flat_netlist.flattenAndMergeNets;
+pub const flattenAndMergeNetsMapped = flat_netlist.flattenAndMergeNetsMapped;
 
 const ConvertError = error{
     InvalidFormat,
@@ -511,6 +487,19 @@ const ConvertError = error{
     UnterminatedString,
     InvalidNumber,
 };
+
+// spec: export_kicad - Re-exports the flattened-netlist currency types from the export layer as the same types
+
+test "the export layer re-exports the flatten currency types unchanged" {
+    // The types are DECLARED in `flat_netlist.zig` so `src/placement/*` can
+    // reach them without importing this exporter. This layer keeps the
+    // historical spelling, and the re-export must stay the SAME type — a
+    // distinct copy would mean a `FlatPin` built by placement no longer fits a
+    // netlist writer, which is the whole point of the shared currency.
+    try std.testing.expectEqual(flat_netlist.FlatPin, FlatPin);
+    try std.testing.expectEqual(flat_netlist.FlatNet, FlatNet);
+    try std.testing.expectEqual(flat_netlist.FlatInstance, FlatInstance);
+}
 
 // spec: export_kicad - Generates a KiCad netlist from a resolved design
 test "netlist generation" {
@@ -586,4 +575,56 @@ test "sanitizeKicadName neutralizes traversal and passes safe names through" {
     const s2 = try sanitizeKicadName(alloc, "a\\b");
     defer alloc.free(s2);
     try std.testing.expect(std.mem.indexOfScalar(u8, s2, '\\') == null);
+}
+
+// spec: export_kicad - a cap's decoupling target IC survives the flatten carrying the same sub-block prefix its ref-des takes
+test "collectInstances prefixes a decoupling binding's target IC like the ref-des" {
+    const alloc = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A module holding an IC and a bypass cap bound to it. The binding names the
+    // module-LOCAL "U1"; two such modules on one board would otherwise both
+    // resolve to whichever "U1" a consumer met first.
+    var child = env_mod.DesignBlock{
+        .name = "rail",
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .instances = &.{
+            .{ .ref_des = "U1", .label = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
+            .{
+                .ref_des = "C1",
+                .label = "C1",
+                .component = "cap-0402",
+                .value = "100nF",
+                .footprint = "",
+                .symbol = "",
+                .bind = .{ .decouple = .{ .ic = "U1", .pin = "4" } },
+            },
+        },
+    };
+    const block = env_mod.DesignBlock{
+        .name = "board",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{.{ .name = "pwr", .block = &child }},
+    };
+
+    var list: std.ArrayList(FlatInstance) = .empty;
+    try netlist_mod.collectInstances(arena, &block, "", &list);
+    try std.testing.expectEqual(@as(usize, 2), list.items.len);
+    const cap = list.items[1];
+    try std.testing.expectEqualStrings("pwr/C1", cap.ref_des);
+    // Same prefix as the ref-des — the cap and its target are siblings.
+    try std.testing.expectEqualStrings("pwr/U1", cap.bind.decouple.ic);
+    try std.testing.expectEqualStrings("4", cap.bind.decouple.pin);
+    // An unbound part gains no spurious prefix-only string.
+    try std.testing.expectEqualStrings("", list.items[0].bind.decouple.ic);
 }

@@ -6,6 +6,7 @@
 const std = @import("std");
 const log = @import("../infra/log.zig");
 const env_mod = @import("../eval/env.zig");
+const rails_mod = @import("../eval/rails.zig");
 const ctx_mod = @import("context.zig");
 const RenderCtx = ctx_mod.RenderCtx;
 const FlatInst = ctx_mod.FlatInst;
@@ -15,9 +16,11 @@ const connection = @import("connection.zig");
 const hub_mod = @import("hub.zig");
 const draw = @import("draw.zig");
 const hub_width = draw.hub_width;
-const hub_x = draw.hub_x;
+const default_side_pad = draw.hub_x;
 const pin_stub = draw.pin_stub;
 const per_conn_spacing = draw.per_conn_spacing;
+const baseNetName = draw.baseNetName;
+const isGroundNet = draw.isGroundNet;
 const shortRef = draw.shortRef;
 const displayValue = draw.displayValue;
 const RenderError = draw.RenderError;
@@ -27,7 +30,6 @@ const escape = @import("../escape.zig");
 const half_divisor: f64 = 2.0;
 const hub_vpad: f64 = 40.0;
 const svg_top_margin: f64 = 20.0;
-const svg_right_pad: f64 = 320.0;
 const svg_bottom_pad: f64 = 20.0;
 const hub_title_y: f64 = 18.0;
 const pin_label_pad_x: f64 = 8.0;
@@ -35,11 +37,53 @@ const pin_label_pad_y: f64 = 4.0;
 const pin_number_inset_left: f64 = 38.0;
 const pin_number_inset_right: f64 = 36.0;
 const pin_number_baseline: f64 = 1.0;
+const functional_group_gap: f64 = 16.0;
+const functional_direct_lane_pad: f64 = 32.0;
+const estimated_net_char_width: f64 = 7.0;
+const horizontal_safety_pad: f64 = 16.0;
+const default_terminal_reach: f64 = 158.0;
+const non_spoke_terminal_reach: f64 = 178.0;
+const passive_chain_base_reach: f64 = 78.0;
+const branched_chain_base_reach: f64 = 83.0;
+const passive_chain_pitch: f64 = 60.0;
 
 /// A spoke instance whose `inst_map` entry was temporarily rewritten to add a
 /// count prefix (e.g. value `"100nF"` → `"3× 100nF"`). Restored by
 /// `restoreInstMap` after the SVG is written.
 const Saved = struct { ref: []const u8, original: FlatInst };
+
+fn functionalSignalNet(net: []const u8) bool {
+    if (net.len == 0 or isGroundNet(net)) return false;
+    for (rails_mod.schematic_supply_prefixes) |prefix| {
+        if (std.ascii.startsWithIgnoreCase(net, prefix)) return false;
+    }
+    return true;
+}
+
+fn groupsSharePassiveIsland(ctx: *const RenderCtx, a: PinGroup, b: PinGroup) bool {
+    for (a.conns) |a_conn| {
+        const a_pin = switch (a_conn.endpoint) {
+            .pin => |pin| pin,
+            .net => continue,
+        };
+        const a_anchor = ctx.spoke_anchor_net.get(a_pin.ref_des) orelse continue;
+        if (!functionalSignalNet(baseNetName(a_anchor))) continue;
+        for (b.conns) |b_conn| {
+            const b_pin = switch (b_conn.endpoint) {
+                .pin => |pin| pin,
+                .net => continue,
+            };
+            const b_anchor = ctx.spoke_anchor_net.get(b_pin.ref_des) orelse continue;
+            if (std.mem.eql(u8, baseNetName(a_anchor), baseNetName(b_anchor))) return true;
+        }
+    }
+    return false;
+}
+
+fn gapAfterGroup(ctx: *const RenderCtx, groups: []const PinGroup, index: usize, default_gap: f64) f64 {
+    if (default_gap == 0 or index + 1 >= groups.len) return 0;
+    return if (groupsSharePassiveIsland(ctx, groups[index], groups[index + 1])) 0 else default_gap;
+}
 
 /// Collapse runs of identical single-passive spokes before rendering.
 ///
@@ -136,9 +180,70 @@ fn isSinglePassiveToTerminal(
     return chain.chain.len == 0 and chain.branches.len == 0;
 }
 
+fn terminalLabelWidth(terminal: []const u8) f64 {
+    if (isGroundNet(terminal)) return 18.0;
+    return @as(f64, @floatFromInt(baseNetName(terminal).len)) * estimated_net_char_width;
+}
+
+fn maxBranchLength(branches: []const ctx_mod.Branch) usize {
+    var longest: usize = 0;
+    for (branches) |item| longest = @max(longest, item.chain.len);
+    return longest;
+}
+
+/// Conservative horizontal reach from a hub edge through one connection to
+/// the outside edge of its terminal text. This mirrors the fixed passive and
+/// wire pitches in `branch.zig`; it lets a long three-part oscillator chain
+/// enlarge the viewBox before any SVG primitives are emitted.
+fn connectionOutset(ctx: *RenderCtx, hub_ref: []const u8, conn: AdjEntry) !f64 {
+    const terminal = try connection.getConnTerminal(ctx, conn.endpoint, hub_ref, conn.pin);
+    const label_width = terminalLabelWidth(terminal);
+    const endpoint = switch (conn.endpoint) {
+        .net => return default_terminal_reach + label_width,
+        .pin => |pin| pin,
+    };
+    if (!ctx.spoke_set.contains(endpoint.ref_des)) return non_spoke_terminal_reach + label_width;
+
+    var visited: std.StringHashMapUnmanaged(void) = .empty;
+    defer visited.deinit(ctx.allocator);
+    try visited.put(ctx.allocator, endpoint.ref_des, {});
+    const chain = try connection.findSpokeChain(
+        ctx,
+        endpoint.ref_des,
+        .{ .pin = .{ .ref_des = hub_ref, .pin = conn.pin } },
+        &visited,
+    );
+    const main_count = 1 + chain.chain.len;
+    var reach = @max(
+        default_terminal_reach,
+        passive_chain_base_reach + @as(f64, @floatFromInt(main_count)) * passive_chain_pitch,
+    ) + label_width;
+    const branch_count = maxBranchLength(chain.branches);
+    if (branch_count > 0) {
+        const total_count = main_count + branch_count;
+        reach = @max(
+            reach,
+            branched_chain_base_reach + @as(f64, @floatFromInt(total_count)) * passive_chain_pitch + label_width,
+        );
+    }
+    return reach;
+}
+
+fn requiredSidePad(ctx: *RenderCtx, hub_ref: []const u8, groups: []const PinGroup) !f64 {
+    var required = default_side_pad;
+    for (groups) |group| {
+        for (group.conns) |conn| {
+            required = @max(required, try connectionOutset(ctx, hub_ref, conn) + horizontal_safety_pad);
+        }
+    }
+    return required;
+}
+
 /// Render a standalone `<svg>` showing `hub` with the supplied pin groups
-/// drawn balanced left/right. Layout mirrors `hub.renderHub`. Returns without
-/// writing anything if `groups` is empty. Identical-spoke runs (e.g. five
+/// drawn balanced left/right. Layout mirrors the main schematic's grouped hub
+/// box (`render_html.renderHubSvg`), sharing `hub.splitGroupsByHeight` for the
+/// column split. Returns without writing anything if `groups` is empty.
+/// Identical-spoke runs (e.g. five
 /// 100nF caps to the same VDD/GND terminal) are collapsed visually via
 /// `applyMergeAnnotations` before drawing.
 pub fn renderHubAllPins(
@@ -146,6 +251,7 @@ pub fn renderHubAllPins(
     w: anytype,
     hub: FlatInst,
     groups: []const PinGroup,
+    functional: bool,
 ) RenderError!void {
     if (groups.len == 0) return;
 
@@ -156,22 +262,60 @@ pub fn renderHubAllPins(
     }
     try applyMergeAnnotations(ctx, hub.ref_des, groups, &saved);
 
+    const previous_functional_layout = ctx.render_scratch.functional_layout;
+    ctx.render_scratch.functional_layout = functional;
+    ctx.render_scratch.functional_left_pin_y.clearRetainingCapacity();
+    ctx.render_scratch.functional_right_pin_y.clearRetainingCapacity();
+    ctx.render_scratch.functional_inline_nets.clearRetainingCapacity();
+    defer {
+        ctx.render_scratch.functional_layout = previous_functional_layout;
+        ctx.render_scratch.functional_left_pin_y.clearRetainingCapacity();
+        ctx.render_scratch.functional_right_pin_y.clearRetainingCapacity();
+        ctx.render_scratch.functional_inline_nets.clearRetainingCapacity();
+    }
+
     const split = try hub_mod.splitGroupsByHeight(ctx, groups, hub.ref_des);
     const left_groups = split.left;
     const right_groups = split.right;
     const left_heights = split.left_heights;
     const right_heights = split.right_heights;
+    const group_gap = if (functional) functional_group_gap else 0.0;
 
     var left_total: f64 = 0;
-    for (left_heights) |h| left_total += h;
+    for (left_heights, 0..) |h, i| left_total += h + gapAfterGroup(ctx, left_groups, i, group_gap);
     var right_total: f64 = 0;
-    for (right_heights) |h| right_total += h;
+    for (right_heights, 0..) |h, i| right_total += h + gapAfterGroup(ctx, right_groups, i, group_gap);
     const hub_height = @max(@max(left_total, right_total), hub_vpad) + hub_vpad;
 
-    // Pad viewBox to include spoke trees on either side.
+    // Size each side independently from its longest passive chain and terminal
+    // label. Long LMX2595 oscillator networks therefore stay inside the SVG
+    // instead of losing the first character at x=0.
+    const direct_lane_pad = if (functional) functional_direct_lane_pad else 0.0;
+    const left_pad = try requiredSidePad(ctx, hub.ref_des, left_groups) + direct_lane_pad;
+    const right_pad = try requiredSidePad(ctx, hub.ref_des, right_groups) + direct_lane_pad;
+    const layout_hub_x = left_pad;
     const y_start: f64 = svg_top_margin;
-    const svg_w: f64 = hub_x + hub_width + svg_right_pad;
+    const svg_w: f64 = left_pad + hub_width + right_pad;
     const svg_h: f64 = hub_height + y_start + svg_bottom_pad;
+
+    if (functional) {
+        try rememberFunctionalPinRows(ctx, .{
+            .hub_ref = hub.ref_des,
+            .groups = left_groups,
+            .heights = left_heights,
+            .side = .left,
+            .start_y = y_start + hub_vpad,
+            .group_gap = group_gap,
+        });
+        try rememberFunctionalPinRows(ctx, .{
+            .hub_ref = hub.ref_des,
+            .groups = right_groups,
+            .heights = right_heights,
+            .side = .right,
+            .start_y = y_start + hub_vpad,
+            .group_gap = group_gap,
+        });
+    }
 
     try w.print(
         \\<svg class="hub-inset" viewBox="0 0 {d:.0} {d:.0}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" data-ref="
@@ -188,11 +332,11 @@ pub fn renderHubAllPins(
         \\<text x="{d:.1}" y="{d:.1}" text-anchor="middle"
         \\  font-size="12" font-weight="bold" fill="#4a9eff">
     , .{
-        hub_x,
+        layout_hub_x,
         y_start,
         hub_width,
         hub_height,
-        hub_x + hub_width / half_divisor,
+        layout_hub_x + hub_width / half_divisor,
         y_start + hub_title_y,
     });
     try escape.writeXml(w, shortRef(hub.ref_des));
@@ -200,25 +344,68 @@ pub fn renderHubAllPins(
     try escape.writeXml(w, displayValue(hub));
     try w.writeAll("</text></g>\n");
 
+    var deferred_terminals: connection.DeferredTerminals = .{};
+
     var py_left: f64 = y_start + hub_vpad;
     for (left_groups, 0..) |group, gi| {
         const h = left_heights[gi];
         const cy = py_left + h / half_divisor;
-        try renderPinStub(w, .left, hub_x, cy, group, hub.ref_des);
-        try connection.renderGroupedConnections(ctx, w, hub.ref_des, group, hub_x - pin_stub, cy, .left);
-        py_left += h;
+        try renderPinStub(w, .left, layout_hub_x, cy, group, hub.ref_des);
+        try connection.renderGroupedConnectionsDeferred(ctx, w, .{
+            .hub_ref = hub.ref_des,
+            .group = group,
+            .stub_x = layout_hub_x - pin_stub,
+            .py = cy,
+            .side = .left,
+        }, &deferred_terminals);
+        py_left += h + gapAfterGroup(ctx, left_groups, gi, group_gap);
     }
 
     var py_right: f64 = y_start + hub_vpad;
     for (right_groups, 0..) |group, gi| {
         const h = right_heights[gi];
         const cy = py_right + h / half_divisor;
-        try renderPinStub(w, .right, hub_x + hub_width, cy, group, hub.ref_des);
-        try connection.renderGroupedConnections(ctx, w, hub.ref_des, group, hub_x + hub_width + pin_stub, cy, .right);
-        py_right += h;
+        try renderPinStub(w, .right, layout_hub_x + hub_width, cy, group, hub.ref_des);
+        try connection.renderGroupedConnectionsDeferred(ctx, w, .{
+            .hub_ref = hub.ref_des,
+            .group = group,
+            .stub_x = layout_hub_x + hub_width + pin_stub,
+            .py = cy,
+            .side = .right,
+        }, &deferred_terminals);
+        py_right += h + gapAfterGroup(ctx, right_groups, gi, group_gap);
     }
 
+    try connection.renderDeferredTerminals(ctx, w, &deferred_terminals, functional);
+
     try w.writeAll("</svg>");
+}
+
+const FunctionalRowLayout = struct {
+    hub_ref: []const u8,
+    groups: []const PinGroup,
+    heights: []const f64,
+    side: ctx_mod.Side,
+    start_y: f64,
+    group_gap: f64,
+};
+
+fn rememberFunctionalPinRows(ctx: *RenderCtx, layout: FunctionalRowLayout) !void {
+    var py = layout.start_y;
+    for (layout.groups, 0..) |group, i| {
+        const cy = py + layout.heights[i] / half_divisor;
+        if (group.conns.len > 0) {
+            const key = try std.fmt.allocPrint(ctx.allocator, "{s}.{s}", .{ layout.hub_ref, group.conns[0].pin });
+            if (ctx.pin_canonical_nets.get(key)) |net| {
+                const rows = switch (layout.side) {
+                    .left => &ctx.render_scratch.functional_left_pin_y,
+                    .right => &ctx.render_scratch.functional_right_pin_y,
+                };
+                try rows.put(ctx.allocator, baseNetName(net), cy);
+            }
+        }
+        py += layout.heights[i] + gapAfterGroup(ctx, layout.groups, i, layout.group_gap);
+    }
 }
 
 /// Draw a hub pin group's stubs. Each pin renders as its own labeled stub —
@@ -326,4 +513,47 @@ fn renderOneStub(
         },
     }
     try w.writeAll("</g>\n");
+}
+
+test "long passive chain expands side padding beyond the fixed minimum" {
+    const testing = std.testing;
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C1", .component = "cap", .value = "100nF", .footprint = "", .symbol = "" },
+        .{ .ref_des = "R1", .component = "res", .value = "100R", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C2", .component = "cap", .value = "100nF", .footprint = "", .symbol = "" },
+    };
+    const input = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const link_a = [_]env_mod.PinRef{ .{ .ref_des = "C1", .pin = "2" }, .{ .ref_des = "R1", .pin = "1" } };
+    const link_b = [_]env_mod.PinRef{ .{ .ref_des = "R1", .pin = "2" }, .{ .ref_des = "C2", .pin = "1" } };
+    const terminal = [_]env_mod.PinRef{.{ .ref_des = "C2", .pin = "2" }};
+    const nets = [_]env_mod.Net{
+        .{ .name = "OSCINP", .pins = &input },
+        .{ .name = "LINK_A", .pins = &link_a },
+        .{ .name = "LINK_B", .pins = &link_b },
+        .{ .name = "LMX_OSCIN_N", .pins = &terminal },
+    };
+    const block: env_mod.DesignBlock = .{
+        .name = "long-chain-padding",
+        .instances = &instances,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = RenderCtx.init(arena.allocator());
+    try ctx.setup(&block);
+    const group = [_]PinGroup{.{
+        .display_name = "OSCINP",
+        .pin_numbers = "1",
+        .stub_labels = &.{"OSCINP"},
+        .conns = ctx.adjacency.get("U1").?.items,
+    }};
+
+    const pad = try requiredSidePad(&ctx, "U1", &group);
+    try testing.expect(pad > default_side_pad);
 }

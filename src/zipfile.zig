@@ -104,12 +104,46 @@ test "write produces an archive std.zip can extract" {
     try testing.expect(std.mem.startsWith(u8, out[cd_off..], "PK\x01\x02"));
     // Stored data is byte-visible.
     try testing.expect(std.mem.indexOf(u8, out, "G04 top*") != null);
+
+    // And it genuinely OPENS: `std.zip` walks the central directory, resolves
+    // each name and unpacks each entry byte for byte. The structural asserts
+    // above cannot catch a wrong length field or an invalid DOS date the way
+    // a real reader does — which is what the KiCad bundle and the review
+    // package hand a board house / a browser.
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "pkg.zip", .data = out });
+    var file = try tmp.dir.openFile(io, "pkg.zip", .{});
+    defer file.close(io);
+    var read_buf: [512]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+
+    var iter = try std.zip.Iterator.init(&reader);
+    var seen: usize = 0;
+    while (try iter.next()) |entry| {
+        var name_buf: [256]u8 = undefined;
+        const filename = try entry.getFilename(&reader, &name_buf, .{});
+        try testing.expectEqual(std.zip.CompressionMethod.store, entry.compression_method);
+        var data_buf: [256]u8 = undefined;
+        var dw: std.Io.Writer = .fixed(&data_buf);
+        try entry.extractTo(&reader, &dw);
+        try testing.expectEqualStrings(entries[seen].name, filename);
+        try testing.expectEqualStrings(entries[seen].data, dw.buffered());
+        seen += 1;
+    }
+    try testing.expectEqual(entries.len, seen);
 }
 
+// Seeds: empty, a bare word, a path-shaped name carrying an embedded newline,
+// and a truncated local-file header. The third exercises a nested entry name
+// and a byte the ZIP structure must not treat as a delimiter; its extension is
+// deliberately generic, because this module is a store-only ZIP writer and
+// knows nothing about what a caller happens to pack into it.
 const zip_fuzz_corpus = [_][]const u8{
     "",
     "one",
-    "a/b/c.gtl\nlayer data",
+    "a/b/c.bin\nentry data",
     &[_]u8{ 0x50, 0x4b, 0x03, 0x04, 0, 0xff, 0x7f },
 };
 
@@ -118,7 +152,9 @@ const zip_fuzz_corpus = [_][]const u8{
 /// header and a trailing end-of-central-directory record. Entry names are kept
 /// short so the u16 name-length field can't overflow. The arena reclaims the
 /// archive buffer, so `testing.allocator` stays leak-free.
-fn fuzzZipWrite(allocator: std.mem.Allocator, input: []const u8) anyerror!void {
+fn fuzzZipWrite(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
+    var generated: [64 * 1024]u8 = undefined;
+    const input = smith.in orelse generated[0..smith.slice(&generated)];
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();

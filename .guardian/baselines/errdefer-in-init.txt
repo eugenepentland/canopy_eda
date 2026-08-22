@@ -1,2 +1,2 @@
-# guardian-snapshot v1
-src/placement/router.zig:459: init-shaped fn 'init' has multiple `try` calls without errdefer
+# guardian-snapshot v3
+errdefer-in-init|src/placement/router.zig|init-shaped fn 'init' has multiple `try` calls without errdefer

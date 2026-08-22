@@ -1,9 +1,11 @@
 /* 3D PCB-layout viewer.
  *
  * Renders the whole placed board in WebGL from the same `window.PCB` blob the
- * 2D BOARD_JS reads: a green substrate spanning the placement, every part's
- * copper pads laid on top, and — for any footprint with a resolved STEP model
- * (PCB.models) — the 3D part body, oriented exactly as KiCad would place it.
+ * 2D BOARD_JS reads: the exact physical board outline and thickness, every
+ * part's copper pads on its mounted face, and — for any footprint with a
+ * resolved STEP model (PCB.models) — the 3D part body, oriented exactly as
+ * KiCad would place it. Bottom-side parts are mirrored through the board in
+ * the same local-X-first transform used by the 2D editor and optimizer.
  *
  * It's the "3D View" tab on /pcb-layout/:name; scripts (Three.js, OrbitControls,
  * occt-import-js) are injected lazily the first time the tab is opened, then
@@ -18,15 +20,17 @@
 (function () {
   "use strict";
 
-  var THREE, occt; // resolved at init() — scripts load lazily
+  var THREE, occt, surface; // resolved at init() — scripts load lazily
   // The page emits `const PCB = {...}` — a lexical global, NOT a window
   // property — so we read the bare binding (via typeof to stay strict-safe),
   // resolved at init() time when it's guaranteed defined.
   var DATA = {};
   var renderer, scene, camera, controls;
-  var boardGroup, partsGroup, axes;
-  // One scene Group per PCB.parts entry, in the same index order — so a Load /
-  // drag / reset that mutated PCB.parts can be re-applied by walking both arrays.
+  var boardGroup, partsGroup, heatsinkGroup, axes;
+  // One pose Group per PCB.parts entry, in the same index order — so a Load /
+  // drag / reset / side flip that mutated PCB.parts can be re-applied by
+  // walking both arrays. Each pose group owns a nested `mount` group whose
+  // local Y rotation moves a top-side footprint onto the bottom face.
   var partGroups = [];
   var built = false, looping = false;
   var center = { x: 0, y: 0 }, span = 20;
@@ -35,10 +39,15 @@
   var lastSig = "";
   var statusEl, canvas;
 
-  var BOARD_T = 0.6, PAD_T = 0.06;
-  var boardMat, padMat;
+  var DEFAULT_BOARD_T = 1.6;
+  var boardCapMat, boardEdgeMat;
+  var layerVisible = { models: true, surfaces: true, heatsink: true };
 
   function deg2rad(d) { return d * Math.PI / 180; }
+  function boardThickness() {
+    var t = DATA.rules && +DATA.rules.board_thickness;
+    return t > 0 ? t : DEFAULT_BOARD_T;
+  }
   function setStatus(msg, isErr) {
     if (!statusEl) return;
     if (!msg) { statusEl.style.display = "none"; return; }
@@ -48,38 +57,92 @@
   }
 
   // ── Geometry helpers ─────────────────────────────────────────────
-  // Pad copper outline (footprint-local, Y already flipped) as a THREE.Shape.
-  function padShape(p, sx, sy) {
-    var s = new THREE.Shape();
-    if (p.shape === "circle") { s.absarc(sx, sy, Math.max(p.w, p.h) / 2, 0, Math.PI * 2, false); return s; }
-    var hw = p.w / 2, hh = p.h / 2;
-    s.moveTo(sx - hw, sy - hh); s.lineTo(sx + hw, sy - hh);
-    s.lineTo(sx + hw, sy + hh); s.lineTo(sx - hw, sy + hh); s.lineTo(sx - hw, sy - hh);
-    return s;
+  // A single letter drawn to a canvas texture, used as a camera-facing axis
+  // label (Sprites always face the camera, so X/Y/Z stay readable at any orbit).
+  function makeAxisLabel(text, cssColor) {
+    var s = 128;
+    var cv = document.createElement("canvas"); cv.width = cv.height = s;
+    var ctx = cv.getContext("2d");
+    ctx.fillStyle = cssColor;
+    ctx.font = "bold 92px sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(text, s / 2, s / 2 + 6);
+    var tex = new THREE.CanvasTexture(cv);
+    // depthTest off so the label is never buried inside board/part geometry.
+    return new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false }));
+  }
+  // Origin gizmo: R/G/B arrows for +X/+Y/+Z (arrowheads point the positive way),
+  // an X/Y/Z label at each tip, and a white dot marking (0,0,0) — the board's
+  // placement origin, so it's clear which way parts move/rotate.
+  function buildAxisGizmo(len) {
+    var g = new THREE.Group();
+    var O = new THREE.Vector3(0, 0, 0);
+    var head = len * 0.16, headW = len * 0.09, lscale = len * 0.32;
+    [
+      { dir: [1, 0, 0], col: 0xff5a5a, css: "#ff8a8a", lab: "X" },
+      { dir: [0, 1, 0], col: 0x5ad65a, css: "#8aff8a", lab: "Y" },
+      { dir: [0, 0, 1], col: 0x5a9dff, css: "#8ab8ff", lab: "Z" }
+    ].forEach(function (d) {
+      var v = new THREE.Vector3(d.dir[0], d.dir[1], d.dir[2]);
+      g.add(new THREE.ArrowHelper(v, O, len, d.col, head, headW));
+      var lb = makeAxisLabel(d.lab, d.css);
+      lb.position.copy(v.clone().multiplyScalar(len + head));
+      lb.scale.set(lscale, lscale, lscale);
+      g.add(lb);
+    });
+    g.add(new THREE.Mesh(new THREE.SphereGeometry(len * 0.05, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffffff })));
+    return g;
+  }
+  function rectPoints(r) {
+    if (!r || !(r.w > 0) || !(r.h > 0)) return null;
+    return [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]];
   }
 
-  // Add one part's pads to its group (footprint frame, Y flipped to scene).
-  function addPads(group, part) {
-    (part.pads || []).forEach(function (pad) {
-      var sx = pad.x, sy = -pad.y;
-      var mesh;
-      if (pad.poly && pad.poly.length >= 3) {
-        var ps = new THREE.Shape();
-        ps.moveTo(pad.poly[0][0], -pad.poly[0][1]);
-        for (var i = 1; i < pad.poly.length; i++) ps.lineTo(pad.poly[i][0], -pad.poly[i][1]);
-        ps.lineTo(pad.poly[0][0], -pad.poly[0][1]);
-        mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(ps, { depth: PAD_T, bevelEnabled: false }), padMat);
-      } else if (pad.shape === "circle") {
-        mesh = new THREE.Mesh(new THREE.CylinderGeometry(Math.max(pad.w, pad.h) / 2, Math.max(pad.w, pad.h) / 2, PAD_T, 24), padMat);
-        mesh.rotation.x = Math.PI / 2; mesh.position.set(sx, sy, PAD_T / 2);
-        group.add(mesh); return;
-      } else {
-        mesh = new THREE.Mesh(new THREE.BoxGeometry(Math.max(pad.w, 0.05), Math.max(pad.h, 0.05), PAD_T), padMat);
-        mesh.position.set(sx, sy, PAD_T / 2);
-        group.add(mesh); return;
-      }
-      group.add(mesh); // poly/circle extrusions already sit at z 0..PAD_T
+  // Resolve the same physical outline the 2D editor paints. A live layout
+  // override wins; PCBOutlinePoly expands its native corner radii using the
+  // editor's cached fillet geometry. Otherwise board_poly is already the
+  // server's exact sagitta-bounded profile, with board as the rectangle
+  // fallback. Re-reading this on every sync means an edited outline appears
+  // when the user returns to 3D without a page reload.
+  function outlinePoints() {
+    var pts = null;
+    if (DATA.outline) {
+      if (typeof window.PCBOutlinePoly === "function") pts = window.PCBOutlinePoly(DATA.outline);
+      else pts = DATA.outline.pts;
+      if (!pts || pts.length < 3) pts = rectPoints(DATA.outline);
+    }
+    if (!pts || pts.length < 3) pts = DATA.board_poly;
+    if (!pts || pts.length < 3) pts = rectPoints(DATA.board);
+    if (!pts || pts.length < 3) return null;
+
+    // A few importers repeat the first point at the end. Shape closes the path
+    // itself, so strip only that redundant endpoint and leave all real outline
+    // vertices (including concave ones) untouched.
+    var out = pts.slice();
+    if (out.length > 3) {
+      var a = out[0], b = out[out.length - 1];
+      if (Math.abs(a[0] - b[0]) < 1e-9 && Math.abs(a[1] - b[1]) < 1e-9) out.pop();
+    }
+    return out.length >= 3 ? out : null;
+  }
+
+  function boundsOfPoints(pts) {
+    var bb = { minx: Infinity, miny: Infinity, maxx: -Infinity, maxy: -Infinity };
+    pts.forEach(function (p) {
+      var x = +p[0], y = -p[1];
+      if (x < bb.minx) bb.minx = x; if (x > bb.maxx) bb.maxx = x;
+      if (y < bb.miny) bb.miny = y; if (y > bb.maxy) bb.maxy = y;
     });
+    return bb;
+  }
+
+  function shapeOfPoints(pts, holes) {
+    var shape = new THREE.Shape();
+    shape.moveTo(pts[0][0], -pts[0][1]);
+    for (var i = 1; i < pts.length; i++) shape.lineTo(pts[i][0], -pts[i][1]);
+    shape.closePath();
+    if (surface && holes) surface.addShapeHoles(THREE, shape, holes);
+    return shape;
   }
 
   // Grow a bounds box by a part's rotated courtyard corners (scene frame).
@@ -103,7 +166,7 @@
     return { rot: [-r[0], r[1], r[2]], off: [-o[0], -o[1], -o[2]] };
   }
 
-  var _occtPromise, modelTemplates = {}, pendingModels = 0;
+  var _occtPromise, modelTemplates = {}, modelGenerations = {}, pendingModels = 0;
   function ensureOcct() {
     if (_occtPromise) return _occtPromise;
     return _occtPromise = occt({ locateFile: function (f) { return "/static/" + f; } });
@@ -147,15 +210,21 @@
   function placeModel(partGroup, part) {
     var fp = part.fp;
     if (!fp || !((DATA.models || {})[fp])) return;
+    var generation = modelGenerations[fp] || 0;
     pendingModels++;
     setStatus("Loading 3D models…");
     getModelTemplate(fp).then(function (tmpl) {
-      if (tmpl) {
+      // An upload can replace this footprint while its old STEP is still being
+      // parsed. Only the current generation may enter the scene.
+      if (tmpl && (modelGenerations[fp] || 0) === generation) {
         var inst = tmpl.clone();
         var M = DATA.models[fp];
         var mv = kicadView(M.r || [0, 0, 0], M.o || [0, 0, 0]);
         inst.rotation.set(deg2rad(-mv.rot[0]), deg2rad(-mv.rot[1]), deg2rad(-mv.rot[2]), "ZYX");
         inst.position.set(mv.off[0], mv.off[1], mv.off[2]);
+        inst.userData.pcb3dKind = "models";
+        inst.userData.pcb3dFootprint = fp;
+        inst.visible = layerVisible.models;
         partGroup.add(inst);
       }
     }).catch(function () {}).then(function () {
@@ -163,30 +232,167 @@
     });
   }
 
+  // Register an uploaded/replaced model without rebuilding the PCB scene or
+  // disturbing the user's camera. Before 3D init, pcb_board.js updates the
+  // shared DATA.models map and init naturally picks it up; after init, this
+  // removes any old body, invalidates its parsed template, and reloads every
+  // matching placed instance.
+  function refreshModel(fp, transform) {
+    DATA.models = DATA.models || {};
+    DATA.models[fp] = transform || { o: [0, 0, 0], r: [0, 0, 0] };
+    if (!built) return;
+    modelGenerations[fp] = (modelGenerations[fp] || 0) + 1;
+    delete modelTemplates[fp];
+    (DATA.parts || []).forEach(function (part, i) {
+      if (part.fp !== fp || !partGroups[i]) return;
+      var mount = partGroups[i].userData.mount;
+      mount.children.slice().forEach(function (child) {
+        if (child.userData.pcb3dKind === "models" && child.userData.pcb3dFootprint === fp) mount.remove(child);
+      });
+      placeModel(mount, part);
+    });
+  }
+
   // ── Bounds / substrate / pose sync ───────────────────────────────
-  // Bounds from rotated courtyards (encompass the pads) of the *current* poses.
-  function computeBounds() {
+  // Fallback bounds from rotated courtyards (encompass the pads) of the
+  // *current* poses. Used only for legacy/module scenes with no board outline.
+  function computePartBounds() {
     var bb = { minx: Infinity, miny: Infinity, maxx: -Infinity, maxy: -Infinity };
     (DATA.parts || []).forEach(function (p) { growByCourtyard(bb, p); });
     if (!isFinite(bb.minx)) bb = { minx: -10, miny: -10, maxx: 10, maxy: 10 };
     return bb;
   }
 
-  // (Re)build the green substrate slab to span the current bounds, and refresh
-  // center/span (camera framing). Safe to call repeatedly — disposes the old
-  // slab geometry and preserves the Board toggle's visibility state.
+  function disposeBoardObject(obj) {
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.userData && obj.userData.disposeMaterial) {
+      var mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      mats.forEach(function (m) { if (m) { if (m.map) m.map.dispose(); m.dispose(); } });
+    }
+  }
+
+  function disposeGroup(group) {
+    var materials = [];
+    group.traverse(function (obj) {
+      if (obj.geometry) obj.geometry.dispose();
+      var mats = Array.isArray(obj.material) ? obj.material : (obj.material ? [obj.material] : []);
+      mats.forEach(function (mat) { if (materials.indexOf(mat) < 0) materials.push(mat); });
+    });
+    materials.forEach(function (mat) { if (mat.map) mat.map.dispose(); mat.dispose(); });
+    while (group.children.length) group.remove(group.children[group.children.length - 1]);
+  }
+
+  function heatsinkColor(material) {
+    if (material === "copper_c110") return 0xc87941;
+    if (material === "steel") return 0x7d8790;
+    if (material === "aluminum_6061") return 0xb0b7bd;
+    return 0xc4cbd0;
+  }
+
+  function addHeatsinkBox(group, material, sx, sy, sz, x, y, z) {
+    if (!(sx > 0) || !(sy > 0) || !(sz > 0)) return;
+    var mesh = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), material);
+    mesh.position.set(x, y, z);
+    group.add(mesh);
+  }
+
+  // Build the saved physical assembly rather than a generic thermal marker.
+  // The pad, base and every straight fin use millimetres in the same coordinate
+  // frame as the PCB. Bottom assemblies extend toward -Z, away from the board.
+  function rebuildHeatsink() {
+    disposeGroup(heatsinkGroup);
+    var s = DATA.heatsink;
+    if (!s || !(s.w > 0) || !(s.h > 0)) return;
+
+    var sign = s.side === "bottom" ? -1 : 1;
+    var faceZ = sign < 0 ? -boardThickness() : 0;
+    var padT = Math.max(0, +s.pad_thickness_mm || 0);
+    var baseT = Math.max(0, +s.base_mm || 0);
+    var finH = Math.max(0, +s.fin_height_mm || 0);
+    var finT = Math.max(0, +s.fin_thickness_mm || 0);
+    var finGap = Math.max(0, +s.fin_gap_mm || 0);
+    var cx = +s.x + +s.w / 2, cy = -(+s.y + +s.h / 2);
+    var metal = new THREE.MeshStandardMaterial({
+      color: heatsinkColor(s.material), metalness: 0.78, roughness: 0.27
+    });
+    var pad = padT > 0 ? new THREE.MeshStandardMaterial({
+      color: 0x6aa9d8, transparent: true, opacity: 0.62, metalness: 0.05, roughness: 0.8
+    }) : null;
+
+    if (pad) addHeatsinkBox(heatsinkGroup, pad, +s.w, +s.h, padT, cx, cy,
+      faceZ + sign * padT / 2);
+    addHeatsinkBox(heatsinkGroup, metal, +s.w, +s.h, baseT, cx, cy,
+      faceZ + sign * (padT + baseT / 2));
+
+    if (finH > 0 && finT > 0) {
+      var lengthAxis = (s.fin_axis || "length") === "length";
+      var across = lengthAxis ? +s.w : +s.h;
+      var along = lengthAxis ? +s.h : +s.w;
+      var pitch = finT + finGap;
+      var count = Math.min(512, Math.max(1, Math.floor((across + finGap) / pitch)));
+      var first = -(count - 1) * pitch / 2;
+      var finZ = faceZ + sign * (padT + baseT + finH / 2);
+      for (var i = 0; i < count; i++) {
+        var offset = first + i * pitch;
+        addHeatsinkBox(heatsinkGroup, metal,
+          lengthAxis ? finT : along, lengthAxis ? along : finT, finH,
+          cx + (lengthAxis ? offset : 0), cy + (lengthAxis ? 0 : offset), finZ);
+      }
+    }
+    heatsinkGroup.visible = layerVisible.heatsink;
+    span = Math.max(span, 2 * (padT + baseT + finH), 8);
+  }
+
+  // This face mesh is the board's only visible cap and carries the one
+  // composited manufacturing texture for that side. The substrate extrusion
+  // beneath it renders sidewalls only, so there is no nearly-coplanar duplicate
+  // surface to depth-fight as the camera orbits.
+  function addBoardFace(shape, pts, side, z) {
+    var painted = surface.makeTexture(THREE, DATA, pts, side);
+    var geometry = new THREE.ShapeGeometry(shape);
+    surface.mapUvs(geometry, painted.bounds);
+    var material = new THREE.MeshStandardMaterial({
+      map: painted.texture, metalness: 0.04, roughness: 0.68, side: THREE.DoubleSide
+    });
+    var mesh = new THREE.Mesh(geometry, material);
+    mesh.position.z = z; mesh.renderOrder = 2;
+    mesh.visible = layerVisible.surfaces;
+    mesh.userData.pcb3dKind = "surfaces";
+    mesh.userData.disposeMaterial = true;
+    boardGroup.add(mesh);
+  }
+
+  // (Re)build the substrate from the exact physical outline and real drill
+  // list, then lay one copper/mask/silk canvas texture over each face. Concave
+  // outlines, slots and circular holes are all triangulated into the same
+  // extrusion. Legacy scenes with no outline retain the courtyard rectangle.
   function rebuildBoard() {
-    var bb = computeBounds();
+    var pts = outlinePoints();
+    if (!pts) {
+      var partBB = computePartBounds(), mg = 2.0;
+      pts = [[partBB.minx - mg, -(partBB.miny - mg)],
+        [partBB.maxx + mg, -(partBB.miny - mg)],
+        [partBB.maxx + mg, -(partBB.maxy + mg)],
+        [partBB.minx - mg, -(partBB.maxy + mg)]];
+    }
+    var bb = boundsOfPoints(pts);
     while (boardGroup.children.length) {
       var old = boardGroup.children[boardGroup.children.length - 1];
-      if (old.geometry) old.geometry.dispose();
+      disposeBoardObject(old);
       boardGroup.remove(old);
     }
-    var mg = 2.0;
-    var x0 = bb.minx - mg, y0 = bb.miny - mg, x1 = bb.maxx + mg, y1 = bb.maxy + mg;
-    var board = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, y1 - y0, BOARD_T), boardMat);
-    board.position.set((x0 + x1) / 2, (y0 + y1) / 2, -BOARD_T / 2);
+    var thickness = boardThickness(), holes = surface.collectHoles(DATA, pts);
+    var shape = shapeOfPoints(pts, holes);
+    var geometry = new THREE.ExtrudeGeometry(shape, {
+      depth: thickness, bevelEnabled: false, curveSegments: 1
+    });
+    // ExtrudeGeometry grows toward +Z; translate it down so the top copper
+    // plane remains z=0 and the bottom component plane is z=-thickness.
+    var board = new THREE.Mesh(geometry, [boardCapMat, boardEdgeMat]);
+    board.position.z = -thickness;
     boardGroup.add(board);
+    addBoardFace(shape, pts, "top", 0);
+    addBoardFace(shape, pts, "bottom", -thickness);
     center.x = (bb.minx + bb.maxx) / 2; center.y = (bb.miny + bb.maxy) / 2;
     span = Math.max(bb.maxx - bb.minx, bb.maxy - bb.miny, 8);
   }
@@ -195,22 +401,51 @@
   // layout hasn't changed between two onShow() calls.
   function poseSig() {
     return (DATA.parts || []).map(function (p) {
-      return p.x + "," + p.y + "," + (p.rot || 0);
+      return p.x + "," + p.y + "," + (p.rot || 0) + "," + (p.side || "top");
     }).join(";");
   }
 
-  // Re-apply the current PCB.parts poses to the part groups + substrate. Pads
-  // and STEP bodies hang off each group, so moving the group moves the whole
-  // part. This is what makes "Load a saved layout" show up in 3D.
+  // Copper, mask, silk and drills can all change while the 2D editor owns the
+  // screen. Include their live arrays so returning to 3D repaints both face
+  // canvases even when no component pose moved.
+  function artworkSig() {
+    try {
+      return JSON.stringify([
+        DATA.parts, DATA.tracks, DATA.vias, DATA.pours, DATA.zone_fills,
+        DATA.mask_relief, DATA.texts, DATA.fab_text, DATA.heatsink
+      ]);
+    } catch (_) { return "artwork"; }
+  }
+
+  function sceneSig() {
+    var pts = outlinePoints();
+    return poseSig() + "|" + boardThickness() + "|" + (pts ? pts.map(function (p) {
+      return p[0] + "," + p[1];
+    }).join(";") : "auto") + "|" + artworkSig();
+  }
+
+  // Re-apply current poses to STEP bodies and rebuild the textured/drilled
+  // substrate. Surface copper and pads live in the face canvases, so this one
+  // sync also catches routing, mask, silk and drill edits made in 2D.
   function applyPoses() {
     var parts = DATA.parts || [];
+    var thickness = boardThickness();
     for (var i = 0; i < partGroups.length; i++) {
       var p = parts[i]; if (!p) continue;
-      partGroups[i].position.set(p.x, -p.y, 0);
-      partGroups[i].rotation.z = deg2rad(-(p.rot || 0)); // Y flip reverses rotation sense
+      var pose = partGroups[i], mount = pose.userData.mount;
+      pose.position.set(p.x, -p.y, 0);
+      pose.rotation.z = deg2rad(-(p.rot || 0)); // Y flip reverses rotation sense
+      var bottom = p.side === "bottom";
+      // Rotate the footprint frame 180 degrees about local Y. This mirrors
+      // local X exactly like the optimizer's bottom-side transform and also
+      // turns +Z outward beneath the board. Translation selects the physical
+      // bottom copper plane; top parts remain rooted at z=0.
+      mount.rotation.y = bottom ? Math.PI : 0;
+      mount.position.z = bottom ? -thickness : 0;
     }
     rebuildBoard();
-    lastSig = poseSig();
+    rebuildHeatsink();
+    lastSig = sceneSig();
   }
 
   // ── Scene build ──────────────────────────────────────────────────
@@ -233,25 +468,30 @@
     var key = new THREE.DirectionalLight(0xffffff, 0.85); key.position.set(40, -30, 80); scene.add(key);
     var fill = new THREE.DirectionalLight(0xffffff, 0.4); fill.position.set(-50, 40, 30); scene.add(fill);
     var rim = new THREE.DirectionalLight(0xffffff, 0.3); rim.position.set(0, 0, -60); scene.add(rim);
-    axes = new THREE.AxesHelper(8); scene.add(axes);
+    axes = buildAxisGizmo(8); scene.add(axes); // labeled +X/+Y/+Z arrows + origin dot
 
-    boardMat = new THREE.MeshStandardMaterial({ color: 0x1c5c33, metalness: 0.1, roughness: 0.85 });
-    padMat = new THREE.MeshStandardMaterial({ color: 0xb08d57, metalness: 0.85, roughness: 0.35 });
+    // ExtrudeGeometry assigns material 0 to its front/back caps and material 1
+    // to every outer and drill wall. The textured ShapeGeometry meshes are the
+    // real visible caps, so suppress material 0 completely instead of stacking
+    // two surfaces a few microns apart. Brown FR-4 sidewalls also make bores
+    // legible through the green mask and copper annulus.
+    boardCapMat = new THREE.MeshBasicMaterial({ visible: false });
+    boardEdgeMat = new THREE.MeshStandardMaterial({ color: surface.maskColor, metalness: 0.03, roughness: 0.95 });
 
     boardGroup = new THREE.Group();
     partsGroup = new THREE.Group();
-    scene.add(boardGroup); scene.add(partsGroup);
+    heatsinkGroup = new THREE.Group();
+    scene.add(boardGroup); scene.add(partsGroup); scene.add(heatsinkGroup);
 
-    // One group per part, in PCB.parts order; pads now (model loads async). Pose
-    // (position + rotation) and the substrate are applied by applyPoses() below,
-    // so a later Load just re-runs that against the same groups.
+    // One group per part, in PCB.parts order. Only STEP bodies need individual
+    // 3D objects now; pads are painted into the board's two face textures.
     partGroups = [];
     (PCB.parts || []).forEach(function (p) {
-      var g = new THREE.Group();
-      addPads(g, p);
-      partsGroup.add(g);
-      partGroups.push(g);
-      placeModel(g, p);
+      var pose = new THREE.Group(), mount = new THREE.Group();
+      pose.add(mount); partsGroup.add(pose);
+      pose.userData.mount = mount;
+      partGroups.push(pose);
+      placeModel(mount, p);
     });
     applyPoses();
 
@@ -281,21 +521,21 @@
   function wireControls() {
     var on = function (id, fn) { var e = document.getElementById(id); if (e) e.onclick = fn; };
     on("pcb3d-top", function () { frame(0, 0, 1); });
+    on("pcb3d-bottom", function () { frame(0, 0, -1); });
     on("pcb3d-iso", viewIso);
     on("pcb3d-front", function () { frame(0, -1, 0.03); });
     on("pcb3d-side", function () { frame(1, 0, 0.03); });
     var chk = function (id, fn) { var e = document.getElementById(id); if (e) e.onchange = function (ev) { fn(ev.target.checked); }; };
     chk("pcb3d-t-models", function (v) {
-      partsGroup.children.forEach(function (g) {
-        g.children.forEach(function (ch) { if (ch.type === "Group") ch.visible = v; });
-      });
+      layerVisible.models = v;
+      partsGroup.traverse(function (ch) { if (ch.userData.pcb3dKind === "models") ch.visible = v; });
     });
-    chk("pcb3d-t-pads", function (v) {
-      partsGroup.children.forEach(function (g) {
-        g.children.forEach(function (ch) { if (ch.type === "Mesh") ch.visible = v; });
-      });
+    chk("pcb3d-t-surface", function (v) {
+      layerVisible.surfaces = v;
+      boardGroup.traverse(function (ch) { if (ch.userData.pcb3dKind === "surfaces") ch.visible = v; });
     });
     chk("pcb3d-t-board", function (v) { boardGroup.visible = v; });
+    chk("pcb3d-t-heatsink", function (v) { layerVisible.heatsink = v; heatsinkGroup.visible = v; });
     chk("pcb3d-t-axes", function (v) { axes.visible = v; });
   }
 
@@ -312,11 +552,11 @@
   window.PCB3D = {
     init: function () {
       if (built) return;
-      THREE = window.THREE; occt = window.occtimportjs;
+      THREE = window.THREE; occt = window.occtimportjs; surface = window.PCB3DSurface;
       // `const PCB` is a lexical global (not on window); read it strict-safely.
       DATA = (typeof window !== "undefined" && window.PCB) ? window.PCB
         : (typeof PCB !== "undefined" ? PCB : {});
-      if (!THREE) { setStatus && setStatus("Three.js failed to load", true); return; }
+      if (!THREE || !surface) { setStatus && setStatus("3D assets failed to load", true); return; }
       built = true;
       try { build(); }
       catch (e) { console.error(e); setStatus("3D view failed: " + (e && e.message), true); }
@@ -327,11 +567,12 @@
     // deliberately left untouched (no re-fit) — only the initial build() frames
     // the board; after that the user's current orbit is preserved across loads.
     sync: function () { if (built) applyPoses(); },
+    modelAdded: function (fp, transform) { if (fp) refreshModel(fp, transform); },
     onShow: function () {
       if (!built) return;
       // Reflect any layout change made in 2D since 3D was last shown, but keep
       // the user's current camera (the "Iso" button re-fits on demand).
-      if (poseSig() !== lastSig) applyPoses();
+      if (sceneSig() !== lastSig) applyPoses();
       resize();
     }
   };

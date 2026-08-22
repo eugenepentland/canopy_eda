@@ -22,6 +22,7 @@
 //! `downloadDatasheet`'s PDF (an off-site, unauthenticated fetch) to
 //! `storeDatasheet`.
 const std = @import("std");
+const infra_fs = @import("../infra/fs.zig");
 const rate_limiter = @import("rate_limiter.zig");
 
 // ── Endpoints / headers ───────────────────────────────────────────
@@ -334,7 +335,7 @@ fn pickSuggestion(root: std.json.Value, term: []const u8, manufacturer: ?[]const
         if (first_exact == null) first_exact = s;
         if (manufacturer) |want| {
             const mfg = strField(s, field_manufacturer) orelse "";
-            if (std.ascii.indexOfIgnoreCase(mfg, want) != null) return s;
+            if (std.ascii.findIgnoreCase(mfg, want) != null) return s;
         } else return s;
     }
     if (first_exact) |s| return s;
@@ -342,7 +343,7 @@ fn pickSuggestion(root: std.json.Value, term: []const u8, manufacturer: ?[]const
     const want = manufacturer orelse return items[0];
     for (items) |s| {
         const mfg = strField(s, field_manufacturer) orelse continue;
-        if (std.ascii.indexOfIgnoreCase(mfg, want) != null) return s;
+        if (std.ascii.findIgnoreCase(mfg, want) != null) return s;
     }
     return items[0];
 }
@@ -427,7 +428,7 @@ fn searchVariants(allocator: std.mem.Allocator, part_number: []const u8) std.mem
     var list: std.ArrayList([]const u8) = .empty;
     try list.append(allocator, part_number);
 
-    try addVariant(allocator, &list, std.mem.trimRight(u8, part_number, "+"));
+    try addVariant(allocator, &list, std.mem.trimEnd(u8, part_number, "+"));
     if (std.mem.lastIndexOfScalar(u8, part_number, '-')) |i| try addVariant(allocator, &list, part_number[0..i]);
     if (std.mem.indexOfScalar(u8, part_number, '-')) |i| try addVariant(allocator, &list, part_number[0..i]);
 
@@ -490,9 +491,10 @@ fn httpGet(
     max_bytes: usize,
     timeout_secs: []const u8,
 ) ?[]u8 {
-    rate_limiter.cse.acquire();
+    rate_limiter.cse.acquire() catch return null;
     defer rate_limiter.cse.release();
     var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
     argv.appendSlice(allocator, &.{
         "curl", "-sS",      "-L", "--max-time",   timeout_secs,
         "-A",   user_agent, "-H", referer_header,
@@ -502,12 +504,16 @@ fn httpGet(
     // `-` can't be reinterpreted as a curl flag (arg-injection / SSRF hardening).
     argv.appendSlice(allocator, &.{ "--", url }) catch return null;
 
-    const res = std.process.Child.run(.{
-        .allocator = allocator,
+    const res = std.process.run(allocator, infra_fs.currentIo(), .{
         .argv = argv.items,
-        .max_output_bytes = max_bytes,
+        .stdout_limit = .limited(max_bytes),
+        .stderr_limit = .limited(max_bytes),
     }) catch return null;
-    if (res.term != .Exited or res.term.Exited != 0) return null;
+    allocator.free(res.stderr);
+    if (!res.term.success()) {
+        allocator.free(res.stdout);
+        return null;
+    }
     return res.stdout;
 }
 
