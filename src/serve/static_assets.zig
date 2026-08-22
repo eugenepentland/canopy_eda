@@ -803,6 +803,19 @@ test "PCB replay client streams the live route and follows the head" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_replay_js, marker) != null);
 }
 
+// spec: Web Server - The PCB autorouter client offers full local-then-global and subcircuits-only stages, and the local stage never falls back to the blocking whole-board endpoint
+test "PCB autorouter client selects a terminal subcircuit stage" {
+    const markers = [_][]const u8{
+        "r-stage",
+        "Subcircuits + whole board",
+        "Subcircuits only",
+        "stage:stage",
+        "subcircuits-only stage needs the live router",
+        "Route subcircuits",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // spec: Web Server - The PCB thermal overlay paints the cached heat field over the read-only board through the overlay seam
 test "PCB thermal overlay claims the board overlay seam and reads the cached field endpoint" {
     const markers = [_][]const u8{

@@ -21,9 +21,12 @@ const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const optimizer = @import("../placement/optimizer.zig");
 const router = @import("../placement/router.zig");
+const export_gerber = @import("../export_gerber.zig");
+const fab_readiness = @import("../fab_readiness.zig");
 const route_plan = @import("route_plan.zig");
 const route_review = @import("route_review.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
+const drc_rules = @import("drc_rules.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const modules_mod = @import("modules.zig");
 
@@ -46,6 +49,25 @@ const err_stream_alloc = "event streaming ran out of memory";
 const err_route_failed = "the autorouter failed";
 const err_payload_alloc = "assembling the final payload ran out of memory";
 const err_thread = "could not start the routing thread";
+
+const RouteStage = enum {
+    full,
+    subcircuits,
+
+    fn parse(root: std.json.Value) RouteStage {
+        if (root != .object) return .full;
+        const value = root.object.get("stage") orelse return .full;
+        if (value != .string) return .full;
+        if (std.mem.eql(u8, value.string, "subcircuits") or
+            std.mem.eql(u8, value.string, "subcircuits_only") or
+            std.mem.eql(u8, value.string, "subcircuits-only")) return .subcircuits;
+        return .full;
+    }
+
+    fn wireName(self: RouteStage) []const u8 {
+        return if (self == .subcircuits) "subcircuits" else "full";
+    }
+};
 
 // ── job store ─────────────────────────────────────────────────────────────
 
@@ -331,7 +353,112 @@ const LiveRun = struct {
     gen: u32,
     prep: *const pcb_layout_page.RoutePrep,
     cancel: *std.atomic.Value(bool),
+    stage: RouteStage = .full,
 };
+
+fn retainedCopper(
+    alloc: std.mem.Allocator,
+    prep: pcb_layout_page.RoutePrep,
+    options: anytype,
+) std.mem.Allocator.Error!export_gerber.Copper {
+    const tracks = try alloc.alloc(router.Track, options.existing_tracks.len);
+    for (options.existing_tracks, 0..) |track, i| tracks[i] = .{
+        .x1 = track.x1,
+        .y1 = track.y1,
+        .x2 = track.x2,
+        .y2 = track.y2,
+        .layer = track.layer,
+        .width = track.width,
+        .net = track.net,
+    };
+    const vias = try alloc.alloc(router.Via, options.existing_vias.len);
+    for (options.existing_vias, 0..) |via, i| vias[i] = .{
+        .x = via.x,
+        .y = via.y,
+        .dia = via.dia,
+        .drill = via.drill,
+        .net = via.net,
+    };
+    return .{ .tracks = tracks, .vias = vias, .zones = prep.user_zones };
+}
+
+fn traceMm(tracks: []const router.Track) f64 {
+    var total: f64 = 0;
+    for (tracks) |track| total += std.math.hypot(track.x2 - track.x1, track.y2 - track.y1);
+    return total;
+}
+
+fn subcircuitsOnlyOutcome(
+    alloc: std.mem.Allocator,
+    run: LiveRun,
+    live: route_plan.LiveRoute,
+) std.mem.Allocator.Error!pcb_layout_page.RouteOutcome {
+    var options = route_plan.lowerOrEmpty(alloc, run.prep.eff_block, run.prep.placement);
+    options.selected_nets = run.prep.scoped.selected;
+    options.existing_tracks = run.prep.scoped.existing_tracks;
+    options.existing_vias = run.prep.scoped.existing_vias;
+    options.existing_zones = run.prep.scoped.existing_zones;
+    options.stop.cancel = run.cancel;
+    if (run.prep.effort) |effort| options.effort = effort;
+    if (options.stop.deadline_ns == 0 and options.stop.max_route_ms > 0)
+        options.stop.deadline_ns = clock.nanoTimestamp() +
+            @as(i128, @intCast(options.stop.max_route_ms)) * @as(i128, clock.ns_per_ms);
+    // The seed builder normally spends one quarter here and reserves the rest
+    // for global routing. Inflate its private deadline so this terminal stage
+    // receives the full authored allowance.
+    if (options.stop.deadline_ns != 0) {
+        const now = clock.nanoTimestamp();
+        if (options.stop.deadline_ns > now)
+            options.stop.deadline_ns = now + (options.stop.deadline_ns - now) * 4;
+    }
+    const stats = try pcb_layout_page.addSubcircuitRouteSeeds(
+        alloc,
+        run.project_dir,
+        run.prep.eff_block,
+        run.prep.placement,
+        run.prep.rp,
+        &options,
+    );
+    const copper = try retainedCopper(alloc, run.prep.*, options);
+    const tally = try fab_readiness.routableTally(alloc, run.prep.placement, copper);
+    const routed = router.RouteResult{
+        .tracks = copper.tracks,
+        .vias = copper.vias,
+        .routed = tally.routed,
+        .total = tally.total,
+        .failed = tally.open,
+        .cancelled = run.cancel.load(.monotonic),
+    };
+    const events = try alloc.alloc(router.RouteEvent, 2);
+    const state = router.RouteEventState{
+        .routed = tally.routed,
+        .total = tally.total,
+        .trace_mm = traceMm(routed.tracks),
+        .tracks = routed.tracks,
+        .vias = routed.vias,
+    };
+    events[0] = .{ .kind = .initial, .detail = "subcircuits-only", .state = state };
+    events[1] = .{ .kind = .complete, .detail = "subcircuits-only", .state = state };
+    if (live.sink) |sink| for (events) |*event| sink.emit(sink.ctx, event);
+    const all_violations = drc_rules.checkFilteredZones(alloc, run.project_dir, run.name, .{
+        .placement = run.prep.placement,
+        .routed = routed,
+        .clearance = run.prep.rp.clearance,
+        .zones = run.prep.user_zones,
+    });
+    var physical: std.ArrayList(@TypeOf(all_violations[0])) = .empty;
+    // Boundary/global nets are intentionally open. Preserve every physical
+    // copper finding while suppressing only those expected airwire reports.
+    for (all_violations) |violation| if (violation.kind != .net_open) try physical.append(alloc, violation);
+    return .{
+        .run = .{ .routed = routed, .timeline = events },
+        .stuck = &.{},
+        .violations = try physical.toOwnedSlice(alloc),
+        .return_path = router.returnPathViolations(run.prep.placement, routed, router.return_path_radius_mm),
+        .subcircuit_seeds = stats,
+        .claimed_routed = tally.routed,
+    };
+}
 
 /// The worker body: route the prepared placement through the shared pipeline
 /// with the streaming sink + cancel flag attached, assemble the final
@@ -345,12 +472,15 @@ fn runLiveJob(alloc: std.mem.Allocator, run: LiveRun) void {
         .cancel = run.cancel,
         .timeline = .on,
     };
-    const outcome = pcb_layout_page.routePrepared(alloc, run.project_dir, run.name, run.prep.*, live) catch {
+    const outcome = (if (run.stage == .subcircuits)
+        subcircuitsOnlyOutcome(alloc, run, live)
+    else
+        pcb_layout_page.routePrepared(alloc, run.project_dir, run.name, run.prep.*, live)) catch {
         run.store.finishJob(run.name, run.gen, .{ .err = err_route_failed });
         return;
     };
     const routed = outcome.run.routed;
-    const final = buildFinalPayload(alloc, run.prep.*, outcome);
+    const final = buildFinalPayload(alloc, run.prep.*, outcome, run.stage);
     run.store.finishJob(run.name, run.gen, .{
         .final = final,
         .err = if (final == null) err_payload_alloc else null,
@@ -370,8 +500,9 @@ fn buildFinalPayload(
     alloc: std.mem.Allocator,
     prep: pcb_layout_page.RoutePrep,
     outcome: pcb_layout_page.RouteOutcome,
+    stage: RouteStage,
 ) ?[]const u8 {
-    const body = renderFinalPayload(alloc, prep, outcome) catch return null;
+    const body = renderFinalPayload(alloc, prep, outcome, stage) catch return null;
     return durable.dupe(u8, body) catch null;
 }
 
@@ -380,10 +511,13 @@ fn renderFinalPayload(
     alloc: std.mem.Allocator,
     prep: pcb_layout_page.RoutePrep,
     outcome: pcb_layout_page.RouteOutcome,
+    stage: RouteStage,
 ) HandlerError![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(alloc);
     try aw.writer.writeAll("{");
     try pcb_layout_page.writeRoutePayload(&aw.writer, prep, outcome);
+    if (stage == .subcircuits)
+        try aw.writer.print(",\"stage\":\"{s}\"", .{stage.wireName()});
     try aw.writer.writeAll("}");
     return aw.written();
 }
@@ -414,6 +548,7 @@ const Solved = struct {
     name: []const u8,
     project_dir: []const u8,
     prep: pcb_layout_page.RoutePrep,
+    stage: RouteStage = .full,
 };
 
 /// Free a solved start. Order matters: the evaluators are released before the
@@ -446,6 +581,7 @@ fn solveStart(project_dir: []const u8, name: []const u8, sub: ?[]const u8, body:
     const sub_sa: ?[]const u8 = if (sub) |s| try sa.dupe(u8, s) else null;
     const body_sa = try sa.dupe(u8, body);
     const root = std.json.parseFromSliceLeaky(std.json.Value, sa, body_sa, .{}) catch return error.BadJson;
+    const stage = RouteStage.parse(root);
     const eval = try sa.create(Evaluator);
     eval.* = Evaluator.init(sa, project_dir);
     var module_res: ?modules_mod.ResolvedBlock = null;
@@ -471,6 +607,7 @@ fn solveStart(project_dir: []const u8, name: []const u8, sub: ?[]const u8, body:
         .name = name_sa,
         .project_dir = project_dir,
         .prep = prep,
+        .stage = stage,
     };
 }
 
@@ -506,6 +643,7 @@ fn routeThread(task: *JobTask) void {
         .gen = task.gen,
         .prep = &task.solved.prep,
         .cancel = task.cancel,
+        .stage = task.solved.stage,
     });
     freeSolved(&task.solved);
     durable.destroy(task);
@@ -726,6 +864,22 @@ fn fixturePrep(a: std.mem.Allocator) std.mem.Allocator.Error!pcb_layout_page.Rou
 /// sidecars or replay persistence route against it.
 const no_project = "/nonexistent-route-live-project";
 
+test "live route stage parser defaults full and accepts local-only spellings" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const parse = struct {
+        fn body(alloc: std.mem.Allocator, source: []const u8) RouteStage {
+            const value = std.json.parseFromSliceLeaky(std.json.Value, alloc, source, .{}) catch return .full;
+            return RouteStage.parse(value);
+        }
+    }.body;
+    try testing.expectEqual(RouteStage.full, parse(arena, "{}"));
+    try testing.expectEqual(RouteStage.full, parse(arena, "{\"stage\":\"full\"}"));
+    try testing.expectEqual(RouteStage.subcircuits, parse(arena, "{\"stage\":\"subcircuits\"}"));
+    try testing.expectEqual(RouteStage.subcircuits, parse(arena, "{\"stage\":\"subcircuits-only\"}"));
+}
+
 const sealed_s_pins = [_]export_kicad.FlatPin{
     .{ .ref_des = "U1", .pin = "1" },
     .{ .ref_des = "R9", .pin = "1" },
@@ -846,6 +1000,63 @@ test "live job streams timeline events and finishes with the route contract" {
     try testing.expect(std.mem.indexOf(u8, final, "\"stuck\":[") != null);
     try testing.expect(std.mem.indexOf(u8, final, "\"routed\":1,\"total\":1,\"return_path\":") != null);
     try testing.expect(std.mem.indexOf(u8, final, "\"selected\":0,\"scope_unknown\":[]") != null);
+}
+
+// The subcircuits stage streams accepted local copper and completes without
+// entering whole-board global routing.
+test "subcircuits-only live stage stops before global routing" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var store: Store = .{};
+    defer clearStore(&store);
+
+    var placement = try buildFixture(arena);
+    placement.parts[0].ref_des = "amp/R1";
+    placement.parts[1].ref_des = "amp/R2";
+    const pins = try arena.dupe(export_kicad.FlatPin, &.{
+        .{ .ref_des = "amp/R1", .pin = "1" },
+        .{ .ref_des = "amp/R2", .pin = "1" },
+    });
+    const nets = try arena.dupe(optimizer.FlatNet, placement.nets);
+    nets[0].pins = pins;
+    placement.nets = nets;
+    var child = fixture_block;
+    const subs = try arena.dupe(env_mod.SubBlock, &.{.{ .name = "amp", .block = &child }});
+    var board = fixture_block;
+    board.sub_blocks = subs;
+    const prep = pcb_layout_page.RoutePrep{
+        .eff_block = &board,
+        .placement = placement,
+        .rp = .{},
+        .scoped = .{},
+        .user_zones = &.{},
+    };
+    const st = (store.begin("local") orelse return error.TestUnexpectedResult).started;
+    runLiveJob(arena, .{
+        .store = &store,
+        .name = "local",
+        .project_dir = no_project,
+        .gen = st.gen,
+        .prep = &prep,
+        .cancel = st.cancel,
+        .stage = .subcircuits,
+    });
+    const snap = (try store.snapshot(arena, "local", 0, 1)) orelse return error.TestUnexpectedResult;
+    try testing.expect(snap.done and !snap.cancelled);
+    try testing.expectEqual(@as(usize, 2), snap.events.len);
+    try testing.expect(std.mem.indexOf(u8, snap.events[0], "\"kind\":\"initial\"") != null);
+    try testing.expect(std.mem.indexOf(u8, snap.events[0], "\"detail\":\"subcircuits-only\"") != null);
+    // A global run would stream net_routed/net_failed decisions between these
+    // bookends. Their absence is the stage boundary under test.
+    for (snap.events) |event| {
+        try testing.expect(std.mem.indexOf(u8, event, "\"kind\":\"net_routed\"") == null);
+        try testing.expect(std.mem.indexOf(u8, event, "\"kind\":\"net_failed\"") == null);
+    }
+    const final = snap.final orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, final, "\"stage\":\"subcircuits\"") != null);
+    try testing.expect(std.mem.indexOf(u8, final, "\"attempted_subcircuits\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, final, "\"accepted_tracks\":1") != null);
 }
 
 // spec: serve/route-live - each streamed event serializes exactly as a replay timeline array element

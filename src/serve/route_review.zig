@@ -820,8 +820,9 @@ pub fn writeTimelineEvent(
         if (ri > 0) try w.writeByte(',');
         try writeJsonString(w, placement.nets[net_i].name);
     }
-    try w.print("],\"round\":{d},\"routed\":{d},\"total\":{d},\"trace_mm\":{d},\"tracks\":[", .{
-        event.round,
+    try w.print("],\"round\":{d},\"detail\":", .{event.round});
+    try writeJsonString(w, event.detail);
+    try w.print(",\"routed\":{d},\"total\":{d},\"trace_mm\":{d},\"tracks\":[", .{
         event.state.routed,
         event.state.total,
         event.state.trace_mm,

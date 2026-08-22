@@ -8320,7 +8320,12 @@ window.PCBApplyRouteResult=function(j,opts){
  var miss=(j.unrouted&&j.unrouted.length)?(" · missing: "+j.unrouted.join(", ")):"";
  var unk=(j.scope_unknown&&j.scope_unknown.length)?(" · unknown scope: "+j.scope_unknown.join(", ")):"";
  if(j.grid_overflow)setStat("r-stat","err","board exceeds the routing grid cap — not routed");
- else setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+(scope?" scoped":"")+" nets · "+((j.vias||[]).length)+" vias"+miss+unk);
+ else if(j.stage==="subcircuits"){
+  var ss=j.subcircuit_seeds||{};
+  setStat("r-stat",ss.timed_out_subcircuits?"warn":"ok","subcircuits "+(ss.completed_subcircuits||0)+"/"+(ss.attempted_subcircuits||0)+
+   " · "+(ss.accepted_tracks||0)+" tracks · "+(ss.accepted_vias||0)+" vias"+
+   (ss.timed_out_subcircuits?(" · "+ss.timed_out_subcircuits+" timed out"):""));
+ } else setStat("r-stat",ok?"ok":"warn","routed "+j.routed+"/"+j.total+(scope?" scoped":"")+" nets · "+((j.vias||[]).length)+" vias"+miss+unk);
  routeSummaryFrom(j);
  setStat("r-drc",(j.drc||[]).length?"err":"ok",(j.drc||[]).length?(j.drc.length+" DRC violation(s)"):"DRC clean ✓");
  var rp=j.return_path||0; setStat("r-rp",rp?"warn":"ok",rp?(rp+" return-path warning(s)"):"return paths ✓");
@@ -8337,6 +8342,15 @@ window.PCBApplyRouteResult=function(j,opts){
  if(!opts.plan){markDirty();persistLayout(curLayout||"layout",curLayout?"updating":"saving",false);}
 };
 var rgo=document.getElementById("r-go");
+// Hierarchy stage is a client-owned routing choice. Build it beside the one
+// server-rendered Route action so the large PCB page stays a stable shell.
+var rstage=null;
+(function(){if(!rgo)return;var row=rgo.parentNode;if(!row)return;
+ var label=document.createElement("label");label.className="route-stage";label.setAttribute("for","r-stage");
+ var title=document.createElement("span");title.textContent="Stage";
+ rstage=document.createElement("select");rstage.id="r-stage";rstage.title="Stop after local subcircuit routing, or continue through whole-board global routing";
+ [{v:"full",t:"Subcircuits + whole board"},{v:"subcircuits",t:"Subcircuits only"}].forEach(function(o){var e=document.createElement("option");e.value=o.v;e.textContent=o.t;rstage.appendChild(e);});
+ label.appendChild(title);label.appendChild(rstage);row.insertBefore(label,rgo);})();
 // The ONE autoroute-from-the-viewer flow: build the payload from the on-screen
 // poses + the Route panel's geometry, stream it live when the driver is there,
 // fall back to the blocking POST when it isn't. Both the Autorouter panel's
@@ -8349,7 +8363,8 @@ function runRoute(opts){
  opts=opts||{};
  var nf=function(id){return parseFloat(document.getElementById(id).value);};
  var hint=document.getElementById("r-hint");if(hint)hint.style.display="none";
- setStat("r-stat","",opts.plan?"routing plan…":"routing…");setStat("r-drc","","");
+ var stageEl=document.getElementById("r-stage"),stage=opts.plan?"full":(stageEl?stageEl.value:"full");
+ setStat("r-stat","",opts.plan?"routing plan…":(stage==="subcircuits"?"routing subcircuits…":"routing…"));setStat("r-drc","","");
  routeBusy(true);
  recordUndo();/* autoroute apply = one undo step (audit 1.1c) */
  // outline: the on-screen drawn outline (saved or not), same as the DRC
@@ -8357,12 +8372,13 @@ function runRoute(opts){
  // server falls back to the blessed saved outline when null.
  var payload={parts:P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};}),
    track_width:nf("r-tw"),clearance:nf("r-cl"),via_drill:nf("r-vd"),via_dia:nf("r-va"),
-   outline:PCB.outline||null,zones:PCB.zones||[]};
+   outline:PCB.outline||null,zones:PCB.zones||[],stage:stage};
  if(opts.effort)payload.effort=opts.effort;
  var applyOpts={clr:payload.clearance,plan:!!opts.plan};
  // Blocking fallback — the pre-live Route path, kept verbatim, used when the
  // live-route driver is absent or its /start can't be reached / is rejected.
  function blockingRoute(){
+  if(stage==="subcircuits"){setStat("r-stat","err","subcircuits-only stage needs the live router — reload and try again");routeBusy(false);return;}
   fetch("/api/pcb-route/"+encodeURIComponent(PCB.name),{method:"POST",
     headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
    .then(function(r){if(!r.ok)throw 0;return r.json();})
@@ -8392,10 +8408,13 @@ function runRoute(opts){
 // they route the same board, so a second click on another one would fight the
 // first. Re-enabled by PCBApplyRouteResult (and by the error paths here).
 function routeBusy(on){["r-go","pcb-routeplan"].forEach(function(id){
- var b=document.getElementById(id);if(b)b.disabled=!!on;});}
+ var b=document.getElementById(id);if(b)b.disabled=!!on;});
+ if(rstage)rstage.disabled=!!on;}
 // The primary editor action is deliberately bounded: an authored standard
 // tier may consume minutes on a hard board.
 if(rgo)rgo.addEventListener("click",function(){runRoute({effort:"one_shot"});});
+function routeStageLabel(){if(!rgo||!rstage)return;var local=rstage.value==="subcircuits";rgo.textContent=local?"Route subcircuits":"Route board";rgo.title=local?"Route and save validated local copper only; skip whole-board global routing":"Route all subcircuits first, then globally route the whole board and save the result";}
+if(rstage){rstage.addEventListener("change",routeStageLabel);routeStageLabel();}
 // "Route plan" — offered only on an UNSAVED board (a Rough/Regenerate seed or a
 // sub-block preview), where the placement on screen has no routing yet and no
 // saved row to compare against. one_shot because this is a look, not a commit:

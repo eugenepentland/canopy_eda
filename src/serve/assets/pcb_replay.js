@@ -189,7 +189,7 @@
 
   // ── Human-readable event labels (ported from route_review.js) ─────────
   var labels = {
-    initial: ["Local setup", "Subcircuit routes frozen", "Accepted local subcircuit traces and carrier drops are already fixed here. Whole-board global routing starts with the next decision."],
+    initial: ["Local setup", "Subcircuit routes frozen", "Accepted local subcircuit traces and carrier drops are fixed here. In a full-board run, whole-board global routing starts with the next decision."],
     plane_routed: ["Plane pass", "Plane connection added", "A plane-backed net was connected by its pour or by a legal via drop."],
     plane_failed: ["Plane pass", "Plane connection failed", "The router could not find a legal plane connection for this net."],
     net_routed: ["Greedy pass", "Net routed", "This net claimed a legal path in priority order."],
@@ -212,6 +212,10 @@
   function eventText(ev, opts) {
     opts = opts || {};
     var base = labels[ev.kind] || ["Router", (ev.kind || "").replace(/_/g, " "), ""];
+    if (ev.detail === "subcircuits-only") {
+      if (ev.kind === "initial") base = ["Local stage", "Subcircuit routes frozen", "This run stops after validated local traces and carrier drops; no whole-board global routing is executed."];
+      else if (ev.kind === "complete") base = ["Local stage", "Subcircuit-only stage complete", "This is the accepted local copper from every attempted first-level subcircuit. Boundary and deferred nets remain for a later full-board run."];
+    }
     var title = base[1] + (ev.net ? ": " + ev.net : "");
     var detail = base[2];
     var searchLimited = opts.search_limited ||
@@ -856,7 +860,10 @@
       // Timeline stays loaded: scrubbing re-enters exclusive view (the board copper
       // IS the final anyway), and Adopt/Clear return to the live board.
       var ad2 = $("rp-adopt"); if (ad2) ad2.disabled = false;
-      status("live route complete · " + routed + "/" + total + " nets — scrub to review", "ok");
+      if (j.final && j.final.stage === "subcircuits") {
+        var ss = j.final.subcircuit_seeds || {};
+        status("subcircuit stage complete · " + (ss.completed_subcircuits || 0) + "/" + (ss.attempted_subcircuits || 0) + " modules — scrub to review", "ok");
+      } else status("live route complete · " + routed + "/" + total + " nets — scrub to review", "ok");
     }
   }
 
