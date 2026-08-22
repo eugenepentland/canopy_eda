@@ -8843,6 +8843,7 @@ fn writeReadOnlyEmbedChrome(w: *std.Io.Writer, o: ReadOnlyEmbedChrome) std.Io.Wr
         .toggles = o.toggles,
         .show_toggles = !o.physical_review,
         .show_drc_status = !o.physical_review,
+        .compact_routed_count = o.physical_review,
     });
 }
 
@@ -8856,7 +8857,12 @@ fn writeEmbedRoute(
     params: router.RouteParams,
     routed: ?router.RouteResult,
     n_drc: usize,
-    display: struct { toggles: Toggles, show_toggles: bool, show_drc_status: bool = true },
+    display: struct {
+        toggles: Toggles,
+        show_toggles: bool,
+        show_drc_status: bool = true,
+        compact_routed_count: bool = false,
+    },
 ) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"pcb-route\">");
     try w.print("<input type=\"hidden\" id=\"r-tw\" value=\"{d}\">", .{params.track_width});
@@ -8869,12 +8875,20 @@ fn writeEmbedRoute(
     }
     if (routed) |r| {
         const cls = if (r.routed == r.total) "ok" else "warn";
-        try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">routed {d}/{d} nets · {d} vias", .{ cls, r.routed, r.total, r.vias.len });
-        if (r.failed.len > 0) {
-            try w.writeAll(" · missing: ");
-            for (r.failed, 0..) |fname, i| {
-                if (i > 0) try w.writeAll(", ");
-                try writeHtmlText(w, fname);
+        if (display.compact_routed_count) {
+            try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">{d} net{s} routed", .{
+                cls,
+                r.routed,
+                if (r.routed == 1) "" else "s",
+            });
+        } else {
+            try w.print("<span class=\"route-stat {s}\" id=\"r-stat\">routed {d}/{d} nets · {d} vias", .{ cls, r.routed, r.total, r.vias.len });
+            if (r.failed.len > 0) {
+                try w.writeAll(" · missing: ");
+                for (r.failed, 0..) |fname, i| {
+                    if (i > 0) try w.writeAll(", ");
+                    try writeHtmlText(w, fname);
+                }
             }
         }
         try w.writeAll("</span>");
@@ -16799,14 +16813,20 @@ test "shownSavedLayout prefers the named layout, then the starred default" {
     try std.testing.expect(shownSavedLayout(&layouts, .{ .layout = "nope" }) == null);
 }
 
-test "physical review embed omits optimizer scores and route overlay toggles" {
+test "physical review embed omits optimizer scores and route details" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var aw: std.Io.Writer.Allocating = .init(arena.allocator());
     try writeReadOnlyEmbedChrome(&aw.writer, .{
         .module_source = "",
         .params = .{},
-        .routed = null,
+        .routed = .{
+            .tracks = &.{},
+            .vias = &.{},
+            .routed = 7,
+            .total = 9,
+            .failed = &.{ "GND", "SCLK" },
+        },
         .n_drc = 0,
         .toggles = .{ .clr = false, .drc = false },
         .physical_review = true,
@@ -16817,12 +16837,22 @@ test "physical review embed omits optimizer scores and route overlay toggles" {
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-drc-show\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-drc\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "type=\"hidden\" id=\"r-cl\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, ">7 nets routed</span>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "7/9") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "vias") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "missing") == null);
 
     var ordinary: std.Io.Writer.Allocating = .init(arena.allocator());
     try writeReadOnlyEmbedChrome(&ordinary.writer, .{
         .module_source = "",
         .params = .{},
-        .routed = null,
+        .routed = .{
+            .tracks = &.{},
+            .vias = &.{},
+            .routed = 7,
+            .total = 9,
+            .failed = &.{ "GND", "SCLK" },
+        },
         .n_drc = 0,
         .toggles = .{ .clr = false, .drc = true },
         .physical_review = false,
@@ -16832,6 +16862,7 @@ test "physical review embed omits optimizer scores and route overlay toggles" {
     try std.testing.expect(std.mem.indexOf(u8, ordinary_html, "id=\"r-clr-show\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ordinary_html, "id=\"r-drc-show\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ordinary_html, "id=\"r-drc\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ordinary_html, "routed 7/9 nets · 0 vias · missing: GND, SCLK") != null);
 }
 
 /// Build a `.layouts.json` body carrying one layout with `n` tracks — enough
