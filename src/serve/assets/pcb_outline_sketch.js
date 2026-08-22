@@ -17,7 +17,10 @@
   function curve(s, id) { for (var i=0;i<s.curves.length;i++) if (s.curves[i].id===id) return s.curves[i]; return null; }
   function nextId(s) { var n=0; s.points.concat(s.curves,s.constraints||[]).forEach(function(e){n=Math.max(n,+e.id||0);}); return n+1; }
   function physicalCurves(s) { return (s.curves||[]).filter(function(c){return !c.construction;}); }
-  function physicalPoints(s) { return physicalCurves(s).map(function(c){return point(s,c.a);}).filter(Boolean); }
+  // Every point referenced by physical geometry, in stable curve order. Closed
+  // profiles naturally contribute each point once; open/disconnected sketches
+  // also expose their loose endpoints for selection and endpoint snapping.
+  function physicalPoints(s) { var out=[],seen={};physicalCurves(s).forEach(function(c){[c.a,c.b].forEach(function(id){if(seen[id])return;var p=point(s,id);if(p){seen[id]=1;out.push(p);}});});return out; }
   function dist(a,b) { return Math.hypot(b.x-a.x,b.y-a.y); }
   function lineDir(s,c) { var a=point(s,c.a),b=point(s,c.b),d=a&&b?dist(a,b):0; return d>1e-12?{x:(b.x-a.x)/d,y:(b.y-a.y)/d}:null; }
   function wrapAngle(a) { while(a>Math.PI)a-=TAU; while(a<-Math.PI)a+=TAU; return a; }
@@ -45,12 +48,25 @@
 
   function validSketch(s) {
     if(!s||s.version!==VERSION||!Array.isArray(s.points)||!Array.isArray(s.curves))return false;
-    var seen={},pcs=physicalCurves(s);if(pcs.length<2)return false;
+    var seen={},pcs=physicalCurves(s);
     for(var i=0;i<s.points.length;i++){var p=s.points[i];if(!p||!p.id||seen[p.id]||!finite(+p.x)||!finite(+p.y))return false;seen[p.id]=1;}
     for(i=0;i<s.curves.length;i++){var c=s.curves[i];if(!c||!c.id||seen[c.id]||!point(s,c.a)||!point(s,c.b)||(c.kind!=="line"&&c.kind!=="arc"))return false;seen[c.id]=1;if(c.kind==="arc"&&(!c.mid||!finite(+c.mid[0])||!finite(+c.mid[1])))return false;}
-    for(i=0;i<pcs.length;i++)if(pcs[i].b!==pcs[(i+1)%pcs.length].a)return false;
     return true;
   }
+  // Return a traversal of one closed, non-branching physical loop regardless
+  // of curve array order/direction. Open sketch geometry remains structurally
+  // valid, but has no fabrication traversal until its loose endpoints join.
+  function closedOrder(s) { var pcs=physicalCurves(s);if(pcs.length<3)return null;var incident={};
+    pcs.forEach(function(c){(incident[c.a]||(incident[c.a]=[])).push(c);(incident[c.b]||(incident[c.b]=[])).push(c);});
+    var ids=Object.keys(incident);for(var i=0;i<ids.length;i++)if(incident[ids[i]].length!==2)return null;
+    var used={},out=[],first=pcs[0].a,at=first,c=pcs[0];
+    for(i=0;i<pcs.length;i++){if(!c||used[c.id])return null;var reverse=c.b===at;if(c.a!==at&&!reverse)return null;used[c.id]=1;out.push({curve:c,reverse:reverse});at=reverse?c.a:c.b;
+      if(i+1<pcs.length){var pair=incident[at]||[];c=used[pair[0]&&pair[0].id]?pair[1]:pair[0];}}
+    return at===first&&out.length===pcs.length?out:null;
+  }
+  function isClosed(s){return !!closedOrder(s);}
+  function normalize(s){var order=closedOrder(s);if(!order)return false;var construction=(s.curves||[]).filter(function(c){return c.construction;});
+    s.curves=order.map(function(e){var c=e.curve;if(e.reverse){var a=c.a;c.a=c.b;c.b=a;}return c;}).concat(construction);return true;}
   function cornerFillet(a,b,c,want) {
     want=+want||0;if(!(want>0))return null;var x1=b[0]-a[0],y1=b[1]-a[1],x2=c[0]-b[0],y2=c[1]-b[1];
     var l1=Math.hypot(x1,y1),l2=Math.hypot(x2,y2);if(l1<1e-6||l2<1e-6)return null;
@@ -90,20 +106,23 @@
 
   function compile(s,sag) {
     if(!validSketch(s))return null;sag=Math.max(0.0001,+sag||SAG);
-    var pcs=physicalCurves(s),poly=[],arcs=[],ordered=[];
+    var pcs=physicalCurves(s),closed=closedOrder(s),walk=closed?closed.map(function(e){return {curve:e.curve,reverse:e.reverse};}):pcs.map(function(c){return {curve:c,reverse:false};}),poly=[],arcs=[],ordered=[];
     function push(x,y){var q=poly[poly.length-1];if(!q||Math.hypot(q[0]-x,q[1]-y)>1e-9)poly.push([x,y]);}
-    for(var i=0;i<pcs.length;i++){var c=pcs[i],a=point(s,c.a),b=point(s,c.b);ordered.push([a.x,a.y]);
-      if(c.kind==="line"){push(a.x,a.y);continue;}
+    for(var i=0;i<walk.length;i++){var c=walk[i].curve,a=point(s,walk[i].reverse?c.b:c.a),b=point(s,walk[i].reverse?c.a:c.b);ordered.push([a.x,a.y]);
+      if(c.kind==="line"){push(a.x,a.y);if(!closed)push(b.x,b.y);continue;}
       var g=arcCircle(s,c);if(!g||!finite(g.r)||g.r<1e-9)return null;
+      if(walk[i].reverse){g={cx:g.cx,cy:g.cy,r:g.r,start:g.start+g.sweep,sweep:-g.sweep};}
       var step=g.r<=sag?Math.abs(g.sweep):2*Math.acos(Math.max(-1,Math.min(1,1-sag/g.r)));
       var count=Math.max(1,Math.min(256,Math.ceil(Math.abs(g.sweep)/Math.max(step,0.001))));
       for(var k=0;k<count;k++){var ang=g.start+g.sweep*k/count;push(g.cx+g.r*Math.cos(ang),g.cy+g.r*Math.sin(ang));}
+      if(!closed)push(b.x,b.y);
       arcs.push({curve:c.id,p1:[a.x,a.y],pm:[+c.mid[0],+c.mid[1]],p2:[b.x,b.y],cx:g.cx,cy:g.cy,radius:g.r,start_angle:g.start,sweep:g.sweep});}
+    if(!closed)ordered=physicalPoints(s).map(function(p){return [p.x,p.y];});
     var minx=Infinity,miny=Infinity,maxx=-Infinity,maxy=-Infinity;
     poly.forEach(function(p){minx=Math.min(minx,p[0]);miny=Math.min(miny,p[1]);maxx=Math.max(maxx,p[0]);maxy=Math.max(maxy,p[1]);});
-    return {points:poly,nominal:ordered,arcs:arcs,curves:pcs,rect:{x:minx,y:miny,w:maxx-minx,h:maxy-miny}};
+    return {points:poly,nominal:ordered,arcs:arcs,curves:pcs,closed:!!closed,rect:poly.length?{x:minx,y:miny,w:maxx-minx,h:maxy-miny}:null};
   }
-  function syncOutline(o) { var g=compile(o.sketch);if(!g)return null;o.pts=g.nominal;o.x=g.rect.x;o.y=g.rect.y;o.w=g.rect.w;o.h=g.rect.h;return g; }
+  function syncOutline(o) { var g=compile(o.sketch);if(!g)return null;o.pts=g.nominal;if(g.rect){o.x=g.rect.x;o.y=g.rect.y;o.w=g.rect.w;o.h=g.rect.h;}return g; }
 
   function variables(s) {
     var out=[];s.points.forEach(function(p){out.push({kind:"px",e:p},{kind:"py",e:p});});
@@ -182,9 +201,12 @@
   function moveCurve(s,id,dx,dy){var c=curve(s,id);if(!c)return null;var a=point(s,c.a),b=point(s,c.b);return solve(s,{targets:[{id:a.id,x:a.x+dx,y:a.y+dy,weight:50},{id:b.id,x:b.x+dx,y:b.y+dy,weight:50}],iterations:10,stay:1e-4});}
   function insertPoint(s,curveId,x,y){var idx=s.curves.findIndex(function(c){return c.id===curveId;}),c=idx>=0?s.curves[idx]:null;if(!c||c.construction)return null;
     var pid=nextId(s),cid=pid+1,oldb=c.b;c.b=pid;c.kind="line";delete c.mid;s.points.push({id:pid,x:x,y:y});s.curves.splice(idx+1,0,{id:cid,kind:"line",a:pid,b:oldb});return pid;}
-  function deletePoint(s,pid){var pcs=physicalCurves(s);if(pcs.length<=3)return false;var prev=null,next=null;
-    pcs.forEach(function(c){if(c.b===pid)prev=c;if(c.a===pid)next=c;});if(!prev||!next||prev===next)return false;prev.b=next.b;prev.kind="line";delete prev.mid;
-    s.curves=s.curves.filter(function(c){return c!==next;});s.points=s.points.filter(function(p){return p.id!==pid;});s.constraints=(s.constraints||[]).filter(function(q){return q.a!==pid&&q.b!==pid&&q.c!==pid&&q.a!==next.id&&q.b!==next.id&&q.c!==next.id;});return true;}
+  function dropEntities(s,pointIds,curveIds){var ps={},cs={};(pointIds||[]).forEach(function(id){ps[id]=1;});(curveIds||[]).forEach(function(id){cs[id]=1;});
+    s.curves=s.curves.filter(function(c){return !cs[c.id];});s.points=s.points.filter(function(p){return !ps[p.id];});s.constraints=(s.constraints||[]).filter(function(q){return !ps[q.a]&&!ps[q.b]&&!ps[q.c]&&!cs[q.a]&&!cs[q.b]&&!cs[q.c];});}
+  // Fusion-style erase: deleting a vertex removes the geometry incident to
+  // that point and leaves loose endpoints. It never invents a healing segment.
+  function deletePoint(s,pid){if(!point(s,pid))return false;var hit=physicalCurves(s).filter(function(c){return c.a===pid||c.b===pid;});if(!hit.length)return false;
+    dropEntities(s,[pid],hit.map(function(c){return c.id;}));return true;}
   function toArc(s,cid,mid){var c=curve(s,cid);if(!c||c.construction)return false;c.kind="arc";c.mid=[+mid[0],+mid[1]];return !!arcCircle(s,c);}
   function toLine(s,cid){var c=curve(s,cid);if(!c)return false;c.kind="line";delete c.mid;s.constraints=(s.constraints||[]).filter(function(q){return !((q.kind==="radius"||q.kind==="diameter")&&q.a===cid);});return true;}
   function cornerCurves(s,pid){var pcs=physicalCurves(s),prev=null,next=null;pcs.forEach(function(c){if(c.b===pid)prev=c;if(c.a===pid)next=c;});return prev&&next?{prev:prev,next:next}:null;}
@@ -204,11 +226,13 @@
     var hit=lineIntersection(point(s,prev.a),point(s,prev.b),point(s,next.a),point(s,next.b));if(!hit)return false;var keep=point(s,arc.a),drop=arc.b;keep.x=hit.x;keep.y=hit.y;next.a=keep.id;
     s.curves=s.curves.filter(function(c){return c.id!==arc.id;});if(!s.curves.some(function(c){return c.a===drop||c.b===drop;}))s.points=s.points.filter(function(p){return p.id!==drop;});
     s.constraints=(s.constraints||[]).filter(function(q){return q.a!==arc.id&&q.b!==arc.id&&q.c!==arc.id&&q.a!==drop&&q.b!==drop&&q.c!==drop;});return true;}
-  // A fabricated outline must remain one closed loop, so deleting a straight
-  // curve also removes its leading corner and extends the preceding curve to
-  // the selected curve's endpoint. Constraints on removed entities leave
-  // through deletePoint, and a triangle cannot be reduced below three sides.
-  function deleteSegment(s,cid){var c=curve(s,cid);return !!(c&&!c.construction&&c.kind==="line"&&deletePoint(s,c.a));}
+  // Erasing a curve leaves its endpoints in place when neighbouring geometry
+  // still uses them. This is intentionally allowed to open the profile.
+  function deleteSegment(s,cid){var c=curve(s,cid);if(!c||c.construction)return false;dropEntities(s,[],[cid]);return true;}
+  function addLinePath(s,coords,tol){coords=coords||[];tol=Math.max(1e-9,+tol||1e-7);if(coords.length<2)return false;var added=false;
+    function existing(q){var best=null,bd=tol;physicalPoints(s).forEach(function(p){var d=Math.hypot(p.x-q[0],p.y-q[1]);if(d<=bd){bd=d;best=p;}});return best;}
+    function endpoint(q){var p=existing(q);if(p)return p;var id=nextId(s);p={id:id,x:+q[0],y:+q[1]};s.points.push(p);return p;}
+    var a=endpoint(coords[0]);for(var i=1;i<coords.length;i++){var b=endpoint(coords[i]);if(a.id!==b.id&&dist(a,b)>1e-9){s.curves.push({id:nextId(s),kind:"line",a:a.id,b:b.id});added=true;}a=b;}return added;}
   // Fusion-style line endpoint inference. Existing/profile vertices win over
   // the drawing grid, followed by horizontal/vertical alignment to the last
   // line endpoint. Returning the exact target coordinates makes the resulting
@@ -236,9 +260,9 @@
       out.push({id:q.id,x:x,y:y,kind:q.kind,value:dimensionValue(s,q),driving:q.driving!==false});});return out;}
   function state(s){var copy=cp(s),result=solve(copy,{iterations:1});return result;}
 
-  return {VERSION:VERSION,clone:cp,valid:validSketch,fromSegments:fromSegments,fromOutline:fromOutline,ensure:ensure,compile:compile,syncOutline:syncOutline,
+  return {VERSION:VERSION,clone:cp,valid:validSketch,closed:isClosed,normalize:normalize,fromSegments:fromSegments,fromOutline:fromOutline,ensure:ensure,compile:compile,syncOutline:syncOutline,
     point:point,curve:curve,physicalCurves:physicalCurves,physicalPoints:physicalPoints,nextId:nextId,arcCircle:arcCircle,
     solve:solve,state:state,addConstraint:addConstraint,removeConstraint:removeConstraint,movePoint:movePoint,moveCurve:moveCurve,
-    insertPoint:insertPoint,deletePoint:deletePoint,deleteSegment:deleteSegment,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,snapLinePoint:snapLinePoint,
+    insertPoint:insertPoint,deletePoint:deletePoint,deleteSegment:deleteSegment,addLinePath:addLinePath,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,snapLinePoint:snapLinePoint,
     offset:offset,mirror:mirror,annotations:annotations,dimensionValue:dimensionValue};
 });

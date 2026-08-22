@@ -260,9 +260,9 @@ test "the DXF board-outline importer asset is registered with its parser seam" {
 }
 
 // spec: Web Server - The PCB board-outline sketch keeps stable entities, constraints, driving dimensions, and exact arcs in a separately testable client model loaded before the editor
-// spec: Web Server - The PCB outline sketch box-selects corner vertices and Delete removes a native fillet by extending its adjacent lines to their sharp intersection, while whole-outline rectangle redraw requires explicit arming
-// spec: Web Server - The PCB outline Line tool stays inside the sketch, creates a connected native line profile, snaps endpoints exactly to existing corners and the chain start, infers horizontal or vertical alignment, and closes by clicking the start or pressing Enter
-// spec: Web Server - Backspace or Delete on a selected native straight outline segment removes that curve and its leading corner, reconnects the preceding curve to keep one closed fabrication profile, preserves at least three sides, and remains undoable
+// spec: Web Server - The PCB outline sketch box-selects corner vertices in Outline mode or the Outline-only filter; Delete removes selected vertices and their incident curves without healing the resulting open profile, while Remove fillet remains a separate sharp-corner command
+// spec: Web Server - The PCB outline Line tool stays inside the sketch, creates connected native line chains, snaps endpoints to shared existing point IDs and H/V inference, lets Enter retain an open chain, and normalizes a reconnected closed loop for fabrication
+// spec: Web Server - Backspace or Delete on a selected native outline curve removes only that curve, leaves loose endpoints for free sketch editing, remains undoable, and Save explains that open geometry must be reconnected
 test "the parametric board-outline sketch engine is registered with its editor contracts" {
     try std.testing.expect(registryHasAsset("pcb_outline_sketch.js"));
     const Check = struct { bytes: []const u8, marker: []const u8 };
@@ -276,17 +276,22 @@ test "the parametric board-outline sketch engine is registered with its editor c
         .{ .bytes = pcb_outline_sketch_js, .marker = "mirror:mirror" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "function removeFillet(s,cid)" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "function deleteSegment(s,cid)" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "function addLinePath(s,coords,tol)" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "closed:isClosed" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "snapLinePoint:snapLinePoint" },
         .{ .bytes = pcb_board_js, .marker = "outline-sketch-palette" },
         .{ .bytes = pcb_board_js, .marker = "function outlineSketchDimension()" },
         .{ .bytes = pcb_board_js, .marker = "function outlineSketchConstraint(kind)" },
         .{ .bytes = pcb_board_js, .marker = "function outlineDeleteSelected()" },
+        .{ .bytes = pcb_board_js, .marker = "function outlineRemoveFilletSelected()" },
         .{ .bytes = pcb_board_js, .marker = "OS.deleteSegment(sk,id)" },
         .{ .bytes = pcb_board_js, .marker = "function outlineDeleteKeyActive(target)" },
         .{ .bytes = pcb_board_js, .marker = "if(box.outline)" },
         .{ .bytes = pcb_board_js, .marker = "if(outlineRectArmed)outDraw=" },
         .{ .bytes = pcb_board_js, .marker = "function polySnap(m)" },
         .{ .bytes = pcb_board_js, .marker = "polyArm(!(polyMode&&polySketchOwned),true)" },
+        .{ .bytes = pcb_board_js, .marker = "OS.addLinePath(sk,pts)" },
+        .{ .bytes = pcb_board_js, .marker = "outline is open — reconnect its loose endpoints before saving" },
         .{ .bytes = pcb_board_js, .marker = "polyCur=polySnap(mm(ev))" },
     };
     for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.bytes, check.marker) != null);
