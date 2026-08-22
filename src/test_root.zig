@@ -534,6 +534,8 @@ test "shard manifest runs every named test exactly once" {
     // New serve modules must be assigned explicitly rather than disappearing
     // behind the broad integrity loop when their test-root import first lands.
     try std.testing.expectEqual(@as(usize, 1), claimingShards("serve.warmup.test.startup prioritizes PCB pages over progress ladders"));
+    try std.testing.expectEqual(@as(usize, 1), claimingShards("outline_sketch.test.outline sketch compiles an ordered line profile"));
+    try std.testing.expectEqual(@as(usize, 1), claimingShards("serve.outline_sketch_json.test.outline sketch JSON round trips stable entities and dimensions"));
 
     for (names.items) |name| {
         const claims = claimingShards(name);
