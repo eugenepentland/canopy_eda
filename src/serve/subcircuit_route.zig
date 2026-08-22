@@ -153,6 +153,54 @@ fn localPlacement(
     };
 }
 
+fn samePin(a: export_kicad.FlatPin, b: env.PinRef, path: []const u8) bool {
+    return a.ref_des.len == path.len + 1 + b.ref_des.len and
+        std.mem.startsWith(u8, a.ref_des, path) and a.ref_des[path.len] == '/' and
+        std.mem.eql(u8, a.ref_des[path.len + 1 ..], b.ref_des) and
+        std.mem.eql(u8, a.pin, b.pin);
+}
+
+/// Present parent-indexed nets under the names authored inside `sub`. Flattening
+/// may have renamed a module port onto a board net (REF_P -> REF_LMX_P), but the
+/// child PCB plan still speaks REF_P. Net indices and pins stay untouched, so
+/// router output remains directly usable by the assembled board.
+fn modulePlanPlacement(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    sub: env.SubBlock,
+) std.mem.Allocator.Error!optimizer.Placement {
+    const nets = try alloc.dupe(optimizer.FlatNet, placement.nets);
+    const named = try alloc.alloc(bool, nets.len);
+    @memset(named, false);
+    for (sub.block.nets) |module_net| {
+        var parent_i: ?usize = null;
+        for (placement.nets, 0..) |parent_net, ni| {
+            var matches = false;
+            for (parent_net.pins) |flat_pin| {
+                for (module_net.pins) |module_pin| if (samePin(flat_pin, module_pin, sub.name)) {
+                    matches = true;
+                    break;
+                };
+                if (matches) break;
+            }
+            if (matches) {
+                parent_i = ni;
+                break;
+            }
+        }
+        const ni = parent_i orelse continue;
+        // Authored module-net order is deterministic. A net tie can merge two
+        // local aliases; the first remains the name used to resolve its plan.
+        if (!named[ni]) {
+            nets[ni].name = module_net.name;
+            named[ni] = true;
+        }
+    }
+    var out = placement;
+    out.nets = nets;
+    return out;
+}
+
 fn selectedGuideTracks(
     alloc: std.mem.Allocator,
     values: []const route_policy.GuideTrack,
@@ -192,9 +240,35 @@ fn selectedReserved(
 fn localOptions(
     alloc: std.mem.Allocator,
     base: route_policy.Options,
-    selected: []const bool,
+    module: ?route_policy.Options,
+    selected: []bool,
 ) std.mem.Allocator.Error!route_policy.Options {
     var options = base;
+    if (module) |child| {
+        const policies = try alloc.alloc(route_policy.NetPolicy, selected.len);
+        for (policies, 0..) |*slot, ni| {
+            const parent = if (ni < base.net.len) base.net[ni] else route_policy.NetPolicy{};
+            var local = if (ni < child.net.len) child.net[ni] else route_policy.NetPolicy{};
+            // The module owns local ordering, layer preference, and guides. A
+            // destination board may only narrow hard constraints; conflicting
+            // hard layer sets defer this net to the global phase.
+            if (parent.allowed_layers != 0) {
+                if (local.allowed_layers != 0) {
+                    const common = local.allowed_layers & parent.allowed_layers;
+                    if (common == 0) selected[ni] = false else local.allowed_layers = common;
+                } else {
+                    local.allowed_layers = parent.allowed_layers;
+                }
+            }
+            if (local.allowed_layers != 0)
+                local.preferred_layers &= local.allowed_layers;
+            if (parent.max_vias) |limit| {
+                local.max_vias = if (local.max_vias) |own| @min(own, limit) else limit;
+            }
+            slot.* = local;
+        }
+        options.net = policies;
+    }
     options.selected_nets = selected;
     options.effort = .one_shot;
     // Isolation means no saved track, via, pour, keepout, or foreign reserved
@@ -353,7 +427,7 @@ fn carrierDrops(ctx: DropContext, selected: []const bool) std.mem.Allocator.Erro
             const only = try alloc.alloc(bool, local.nets.len);
             @memset(only, false);
             only[ni] = true;
-            const routed = try router.routeWithOptions(alloc, local, params, try localOptions(alloc, base, only));
+            const routed = try router.routeWithOptions(alloc, local, params, try localOptions(alloc, base, null, only));
             if (failed(routed, local, ni)) ctx.plane_ok[ni] = false;
             for (routed.tracks) |track| if (track.net == @as(i32, @intCast(ni))) try appendTrack(alloc, ctx.tracks, track);
             for (routed.vias) |via| if (via.net == @as(i32, @intCast(ni))) {
@@ -444,7 +518,14 @@ pub fn routeAllClassified(
             if (stopped(sub_base) and phase_deadline != 0) timed_out += 1 else completed += 1;
             continue;
         }
-        const routed = try route_plan.routeLowered(alloc, local, params, try localOptions(alloc, sub_base, selected));
+        const plan_view = try modulePlanPlacement(alloc, local, sub);
+        const lowered = try route_plan.lower(alloc, sub.block, plan_view);
+        const routed = try route_plan.routeLowered(
+            alloc,
+            plan_view,
+            params,
+            try localOptions(alloc, sub_base, if (lowered.applied) lowered.options else null, selected),
+        );
         if (routed.cancelled and stopped(sub_base)) {
             timed_out += 1;
             continue;
@@ -452,14 +533,14 @@ pub fn routeAllClassified(
         for (routed.tracks) |track| {
             if (track.net < 0) continue;
             const ni: usize = @intCast(track.net);
-            if (ni >= nets.len or !selected[ni] or failed(routed, placement, ni)) continue;
+            if (ni >= nets.len or !selected[ni] or failed(routed, plan_view, ni)) continue;
             nets[ni] = true;
             try appendTrack(alloc, &tracks, track);
         }
         for (routed.vias) |via| {
             if (via.net < 0) continue;
             const ni: usize = @intCast(via.net);
-            if (ni >= nets.len or !selected[ni] or failed(routed, placement, ni)) continue;
+            if (ni >= nets.len or !selected[ni] or failed(routed, plan_view, ni)) continue;
             nets[ni] = true;
             try appendVia(alloc, &vias, via);
         }
@@ -630,6 +711,81 @@ test "local phase cutoff reserves three quarters of a board deadline" {
     try testing.expect(cutoff > now);
     try testing.expect(cutoff <= now + 110 * clock.ns_per_ms);
     try testing.expect(board_deadline - cutoff >= 290 * clock.ns_per_ms);
+}
+
+// spec: Web Server - A hierarchical local pass resolves each child PCB plan in the child's net namespace, including flattened port renames, while the destination board may narrow hard layer and via constraints
+test "local routing lowers child plan intent onto parent net indices" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const module_pins = [_]env.PinRef{
+        .{ .ref_des = "A", .pin = "1" },
+        .{ .ref_des = "B", .pin = "1" },
+    };
+    const module_nets = [_]env.Net{.{ .name = "LOCAL_SIGNAL", .pins = &module_pins }};
+    const waves = [_]env.PlanWave{
+        .{
+            .name = "local-bottom",
+            .nets = &.{"LOCAL_SIGNAL"},
+            .preferred_layers = &.{"B.Cu"},
+            .allowed_layers = &.{ "F.Cu", "B.Cu" },
+            .max_vias = 2,
+        },
+        .{ .name = "rest", .rest = true },
+    };
+    var child = env.DesignBlock{
+        .name = "child",
+        .instances = &.{},
+        .nets = &module_nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .pcb_plan = .{ .route = &waves },
+    };
+    const flat_pins = [_]export_kicad.FlatPin{
+        .{ .ref_des = "module/A", .pin = "1" },
+        .{ .ref_des = "module/B", .pin = "1" },
+    };
+    const flat_nets = [_]optimizer.FlatNet{.{ .name = "RENAMED_ON_BOARD", .pins = &flat_pins }};
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &flat_nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = false,
+        .rules = .{ .plane_nets = &.{}, .copper_layers = 2 },
+    };
+    const sub = env.SubBlock{ .name = "module", .block = &child };
+    const plan_view = try modulePlanPlacement(alloc, placement, sub);
+    try testing.expectEqualStrings("LOCAL_SIGNAL", plan_view.nets[0].name);
+    const lowered = try route_plan.lower(alloc, &child, plan_view);
+    try testing.expect(lowered.applied);
+    var selected = [_]bool{true};
+    const parent_policies = [_]route_policy.NetPolicy{.{
+        .preferred_layers = 0b01,
+        .allowed_layers = 0b11,
+        .max_vias = 1,
+    }};
+    const options = try localOptions(alloc, .{ .net = &parent_policies }, lowered.options, &selected);
+    try testing.expect(selected[0]);
+    try testing.expectEqual(@as(u64, 0b10), options.net[0].preferred_layers);
+    try testing.expectEqual(@as(u64, 0b11), options.net[0].allowed_layers);
+    try testing.expectEqual(@as(?u16, 1), options.net[0].max_vias);
+    try testing.expectEqual(route_policy.Effort.one_shot, options.effort);
+
+    var conflict_selected = [_]bool{true};
+    const top_only = [_]route_policy.NetPolicy{.{ .allowed_layers = 0b01 }};
+    const bottom_only = [_]route_policy.NetPolicy{.{ .allowed_layers = 0b10 }};
+    _ = try localOptions(alloc, .{ .net = &top_only }, .{ .net = &bottom_only }, &conflict_selected);
+    try testing.expect(!conflict_selected[0]);
 }
 
 // spec: Web Server - Supply-like ground, power, and input-rail nets never receive local pad-to-pad traces: declared planes and live retained pours receive independent terminal drops, while uncovered terminals remain for the global route

@@ -10,6 +10,7 @@ const optimizer = @import("placement/optimizer.zig");
 const route_policy = @import("placement/route_policy.zig");
 const router = @import("placement/router.zig");
 const drc = @import("placement/drc.zig");
+const route_cleanup = @import("placement/route_cleanup.zig");
 const geometry = @import("placement/geometry.zig");
 const flat_netlist = @import("flat_netlist.zig");
 
@@ -41,22 +42,33 @@ fn routedResult(
     return .{ .tracks = rt, .vias = rv, .routed = 0, .total = 0 };
 }
 
-fn markViolation(rejected: []bool, v: drc.Violation) void {
-    if (v.severity != .err and v.kind != .land_transit and v.kind != .implicit_junction) return;
-    const both = switch (v.kind) {
-        .via_via, .via_spacing, .via_track, .track_track => true,
-        else => false,
-    };
-    const first = switch (v.kind) {
+fn actionable(v: drc.Violation) bool {
+    return v.severity == .err or v.kind == .land_transit or v.kind == .implicit_junction;
+}
+
+fn marksFirst(v: drc.Violation) bool {
+    return switch (v.kind) {
         .via_pad, .via_via, .via_spacing, .via_track, .track_track, .track_pad, .annular, .min_drill, .track_width, .copper_stub, .implicit_junction, .sharp_bend, .land_transit, .keepout_violation, .perimeter_keepout => true,
         .board_edge, .hole_hole => v.who.part_a < 0,
         else => false,
     };
-    if (first and v.who.net_a >= 0) {
+}
+
+fn marksSecond(v: drc.Violation) bool {
+    return switch (v.kind) {
+        .via_via, .via_spacing, .via_track, .track_track => true,
+        .hole_hole => v.who.part_b < 0,
+        else => false,
+    };
+}
+
+fn markViolation(rejected: []bool, v: drc.Violation) void {
+    if (!actionable(v)) return;
+    if (marksFirst(v) and v.who.net_a >= 0) {
         const ni: usize = @intCast(v.who.net_a);
         if (ni < rejected.len) rejected[ni] = true;
     }
-    if ((both or (v.kind == .hole_hole and v.who.part_b < 0)) and v.who.net_b >= 0) {
+    if (marksSecond(v) and v.who.net_b >= 0) {
         const ni: usize = @intCast(v.who.net_b);
         if (ni < rejected.len) rejected[ni] = true;
     }
@@ -81,14 +93,108 @@ fn hasVia(items: []const route_policy.ExistingVia, want: route_policy.ExistingVi
     return false;
 }
 
+fn candidateViolationCounts(
+    alloc: std.mem.Allocator,
+    selected: []const bool,
+    violations: []const drc.Violation,
+) std.mem.Allocator.Error![]usize {
+    const counts = try alloc.alloc(usize, selected.len);
+    @memset(counts, 0);
+    for (violations) |v| {
+        if (!actionable(v)) continue;
+        if (marksFirst(v) and v.who.net_a >= 0) {
+            const ni: usize = @intCast(v.who.net_a);
+            if (ni < selected.len and selected[ni]) counts[ni] += 1;
+        }
+        if (marksSecond(v) and v.who.net_b >= 0) {
+            const ni: usize = @intCast(v.who.net_b);
+            if (ni < selected.len and selected[ni]) counts[ni] += 1;
+        }
+    }
+    return counts;
+}
+
+fn normalizeCandidates(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    clearance: f64,
+    input: anytype,
+) std.mem.Allocator.Error!void {
+    const baseline_result = try routedResult(
+        @TypeOf(input.track_list.items[0]),
+        @TypeOf(input.via_list.items[0]),
+        alloc,
+        input.track_list.items,
+        input.via_list.items,
+    );
+    const baseline = try candidateViolationCounts(
+        alloc,
+        input.candidate,
+        try drc.check(alloc, placement, baseline_result, clearance),
+    );
+    var tracks: std.ArrayList(router.Track) = .empty;
+    var mutable: std.ArrayList(bool) = .empty;
+    for (input.track_list.items) |item| {
+        try tracks.append(alloc, .{
+            .x1 = item.copper.x1,
+            .y1 = item.copper.y1,
+            .x2 = item.copper.x2,
+            .y2 = item.copper.y2,
+            .layer = item.copper.layer,
+            .width = item.copper.width,
+            .net = item.copper.net,
+        });
+        try mutable.append(alloc, true);
+    }
+    const vias = try alloc.alloc(router.Via, input.via_list.items.len);
+    for (input.via_list.items, vias) |item, *via| via.* = .{
+        .x = item.copper.x,
+        .y = item.copper.y,
+        .dia = item.copper.dia,
+        .drill = item.copper.drill,
+        .net = item.copper.net,
+    };
+    const pads = try router.buildObstacles(alloc, placement.parts, placement.nets);
+    try router.canonicalizeTraceJunctions(alloc, &tracks, &mutable, vias);
+    _ = route_cleanup.snapLandTransitEndpoints(pads, &tracks, input.candidate);
+    _ = try route_cleanup.reanchorLandTransit(alloc, pads, &tracks, input.candidate);
+    mutable.clearRetainingCapacity();
+    for (tracks.items) |_| try mutable.append(alloc, true);
+    try router.canonicalizeTraceJunctions(alloc, &tracks, &mutable, vias);
+
+    const normalized = try candidateViolationCounts(
+        alloc,
+        input.candidate,
+        try drc.check(alloc, placement, .{ .tracks = tracks.items, .vias = vias, .routed = 0, .total = 0 }, clearance),
+    );
+    var improved = false;
+    for (baseline, normalized) |before, after| {
+        if (after > before) return;
+        if (after < before) improved = true;
+    }
+    if (!improved) return;
+
+    input.track_list.clearRetainingCapacity();
+    for (tracks.items) |track| try input.track_list.append(alloc, .{ .net = @intCast(track.net), .copper = .{
+        .x1 = track.x1,
+        .y1 = track.y1,
+        .x2 = track.x2,
+        .y2 = track.y2,
+        .layer = track.layer,
+        .width = track.width,
+        .net = track.net,
+    } });
+}
+
 /// Reject invalid candidates in place while preserving every earlier valid net.
 pub fn reject(alloc: std.mem.Allocator, input: anytype) std.mem.Allocator.Error!void {
     const placement = input.placement;
     const params = input.params;
     const options = input.options;
     const rejected = input.rejected;
-    const tracks = input.tracks;
-    const vias = input.vias;
+    if (@hasField(@TypeOf(input), "track_list")) try normalizeCandidates(alloc, placement, params.clearance, input);
+    const tracks = if (@hasField(@TypeOf(input), "track_list")) input.track_list.items else input.tracks;
+    const vias = if (@hasField(@TypeOf(input), "via_list")) input.via_list.items else input.vias;
     const SeedTrack = @typeInfo(@TypeOf(tracks)).pointer.child;
     const SeedVia = @typeInfo(@TypeOf(vias)).pointer.child;
     var accepted_tracks: std.ArrayList(SeedTrack) = .empty;
@@ -152,6 +258,59 @@ test "hierarchical seeds reject warning-severity own-land transit" {
     });
     try std.testing.expect(!rejected[0]);
     try std.testing.expect(rejected[1]);
+}
+
+// spec: placement/land-transit - A hierarchical route seed is centre-anchored through same-net lands before board acceptance and remains rejected when the normalized copper is not DRC-clean.
+test "hierarchical seed normalization centres an own-land crossing" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.8 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "A",
+        .kind = .passive,
+        .hw = 0.4,
+        .hh = 0.5,
+        .pads = &pad,
+        .fallback = false,
+        .x = 0,
+        .y = 0,
+    }};
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "A", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "N", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -1,
+        .maxx = 2,
+        .maxy = 1,
+        .generated = false,
+        .rules = .{ .plane_nets = &.{}, .copper_layers = 2 },
+    };
+    const TestTrack = struct { copper: route_policy.ExistingTrack, net: usize };
+    const TestVia = struct { copper: route_policy.ExistingVia, net: usize };
+    var tracks: std.ArrayList(TestTrack) = .empty;
+    try tracks.append(alloc, .{ .net = 0, .copper = .{
+        .x1 = -1,
+        .y1 = 0.3,
+        .x2 = 1,
+        .y2 = 0.3,
+        .layer = 0,
+        .width = 0.12,
+        .net = 0,
+    } });
+    var vias: std.ArrayList(TestVia) = .empty;
+    const selected = [_]bool{true};
+    try normalizeCandidates(alloc, placement, 0.127, .{ .track_list = &tracks, .via_list = &vias, .candidate = &selected });
+    const normalized = try routedResult(TestTrack, TestVia, alloc, tracks.items, vias.items);
+    const violations = try drc.check(alloc, placement, normalized, 0.127);
+    try std.testing.expectEqual(@as(usize, 0), drc.countKind(violations, .land_transit));
 }
 
 // spec: Web Server - When two local candidates collide, the earlier DRC-clean net remains frozen and only the later candidate is deferred to the global route

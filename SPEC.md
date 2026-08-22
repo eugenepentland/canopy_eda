@@ -618,14 +618,15 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 Public functions: routeAll, regressed
 
 The hierarchical autorouter routes each first-level sub-circuit before the
-assembled board. A local pass retains the real board outline and design rules,
-but its placement contains only that sub-circuit's components and its maze sees
-no saved board copper, pours, keepouts, or foreign reserved lanes. Nets with two
-or more terminals inside the sub-circuit route their local island even when the
+assembled board. A local pass retains the real board outline, stackup, design
+rules, pours, and keepouts, but its placement contains only that sub-circuit's
+components and its maze sees no saved trace/via copper or foreign reserved
+lanes. It lowers the child block's own PCB plan in the child's net namespace;
+the parent board may narrow hard layer and via constraints. Nets with two or
+more terminals inside the sub-circuit route their local island even when the
 same parent net continues elsewhere. The resulting parent-indexed copper is
 validated against the assembled placement and then fixed as same-net source
-copper for the global pass. The existing plain-global comparison remains the
-final connectivity and fabrication-DRC regression fallback.
+copper for the single global pass.
 
 - a sub-circuit routing view contains only its own components and uses their local bounds
 - an unselected scoped net is never routed by a sub-circuit phase
@@ -2609,6 +2610,7 @@ inherited a lap can still be improved.
 - Adjacent same-net lands are repaired as one centre-to-centre cluster so their individual anchoring cannot oscillate.
 - An offending on-land junction snaps all of its same-net branches to the land centre together, preserving the junction.
 - A hierarchical route seed carrying a same-net land transit is rejected before the assembled-board router can reuse it.
+- A hierarchical route seed is centre-anchored through same-net lands before board acceptance and remains rejected when the normalized copper is not DRC-clean.
 
 Public functions: offence, segmentOffence, worsens, onLand
 
@@ -5520,6 +5522,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 
 - A PCB design with PDN intents resolves selected BOM electrical model properties before placement
 - Hierarchical routing processes first-level sub-circuits in authored order, freezes each accepted DRC-clean local signal tree, and then runs exactly one assembled-board global candidate
+- A hierarchical local pass resolves each child PCB plan in the child's net namespace, including flattened port renames, while the destination board may narrow hard layer and via constraints
 - When two local candidates collide, the earlier DRC-clean net remains frozen and only the later candidate is deferred to the global route
 - Accepted local plane drops are immutable same-net sources in the single global pass, so the global plane phase does not duplicate their barrels
 - Route responses report attempted, completed, and timed-out local sub-circuits, deferred supply nets, and accepted carrier drops while the compatibility fallback flag remains false
