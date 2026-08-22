@@ -262,6 +262,7 @@ test "the DXF board-outline importer asset is registered with its parser seam" {
 // spec: Web Server - The PCB board-outline sketch keeps stable entities, constraints, driving dimensions, and exact arcs in a separately testable client model loaded before the editor
 // spec: Web Server - The PCB outline sketch box-selects corner vertices and Delete removes a native fillet by extending its adjacent lines to their sharp intersection, while whole-outline rectangle redraw requires explicit arming
 // spec: Web Server - The PCB outline Line tool stays inside the sketch, creates a connected native line profile, snaps endpoints exactly to existing corners and the chain start, infers horizontal or vertical alignment, and closes by clicking the start or pressing Enter
+// spec: Web Server - Backspace or Delete on a selected native straight outline segment removes that curve and its leading corner, reconnects the preceding curve to keep one closed fabrication profile, preserves at least three sides, and remains undoable
 test "the parametric board-outline sketch engine is registered with its editor contracts" {
     try std.testing.expect(registryHasAsset("pcb_outline_sketch.js"));
     const Check = struct { bytes: []const u8, marker: []const u8 };
@@ -274,11 +275,14 @@ test "the parametric board-outline sketch engine is registered with its editor c
         .{ .bytes = pcb_outline_sketch_js, .marker = "offset:offset" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "mirror:mirror" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "function removeFillet(s,cid)" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "function deleteSegment(s,cid)" },
         .{ .bytes = pcb_outline_sketch_js, .marker = "snapLinePoint:snapLinePoint" },
         .{ .bytes = pcb_board_js, .marker = "outline-sketch-palette" },
         .{ .bytes = pcb_board_js, .marker = "function outlineSketchDimension()" },
         .{ .bytes = pcb_board_js, .marker = "function outlineSketchConstraint(kind)" },
         .{ .bytes = pcb_board_js, .marker = "function outlineDeleteSelected()" },
+        .{ .bytes = pcb_board_js, .marker = "OS.deleteSegment(sk,id)" },
+        .{ .bytes = pcb_board_js, .marker = "function outlineDeleteKeyActive(target)" },
         .{ .bytes = pcb_board_js, .marker = "if(box.outline)" },
         .{ .bytes = pcb_board_js, .marker = "if(outlineRectArmed)outDraw=" },
         .{ .bytes = pcb_board_js, .marker = "function polySnap(m)" },
@@ -995,6 +999,7 @@ test "PCB Appearance panel splits real layers from feature objects and nets" {
         .{ .marker = "[\"outline\",\"Board outline\"" },
         .{ .marker = "data-ap-filt-only=\"outline\"" },
         .{ .marker = "if(outlineOnlyFilter())directText=-1;" },
+        .{ .marker = "if(outlineMode||outlineOnlyFilter())drawOutlineSketchSelection" },
         // Pad-number labels became a real toggle rather than an unconditional pass.
         .{ .marker = "if(PHYSICAL_REVIEW||!viewSt.vis.padnum||k<1.15||gestureBusy())return;" },
         // The old split-brain wiring is gone with the panels it served.

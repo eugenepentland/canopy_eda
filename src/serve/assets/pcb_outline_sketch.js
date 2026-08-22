@@ -204,6 +204,11 @@
     var hit=lineIntersection(point(s,prev.a),point(s,prev.b),point(s,next.a),point(s,next.b));if(!hit)return false;var keep=point(s,arc.a),drop=arc.b;keep.x=hit.x;keep.y=hit.y;next.a=keep.id;
     s.curves=s.curves.filter(function(c){return c.id!==arc.id;});if(!s.curves.some(function(c){return c.a===drop||c.b===drop;}))s.points=s.points.filter(function(p){return p.id!==drop;});
     s.constraints=(s.constraints||[]).filter(function(q){return q.a!==arc.id&&q.b!==arc.id&&q.c!==arc.id&&q.a!==drop&&q.b!==drop&&q.c!==drop;});return true;}
+  // A fabricated outline must remain one closed loop, so deleting a straight
+  // curve also removes its leading corner and extends the preceding curve to
+  // the selected curve's endpoint. Constraints on removed entities leave
+  // through deletePoint, and a triangle cannot be reduced below three sides.
+  function deleteSegment(s,cid){var c=curve(s,cid);return !!(c&&!c.construction&&c.kind==="line"&&deletePoint(s,c.a));}
   // Fusion-style line endpoint inference. Existing/profile vertices win over
   // the drawing grid, followed by horizontal/vertical alignment to the last
   // line endpoint. Returning the exact target coordinates makes the resulting
@@ -234,6 +239,6 @@
   return {VERSION:VERSION,clone:cp,valid:validSketch,fromSegments:fromSegments,fromOutline:fromOutline,ensure:ensure,compile:compile,syncOutline:syncOutline,
     point:point,curve:curve,physicalCurves:physicalCurves,physicalPoints:physicalPoints,nextId:nextId,arcCircle:arcCircle,
     solve:solve,state:state,addConstraint:addConstraint,removeConstraint:removeConstraint,movePoint:movePoint,moveCurve:moveCurve,
-    insertPoint:insertPoint,deletePoint:deletePoint,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,snapLinePoint:snapLinePoint,
+    insertPoint:insertPoint,deletePoint:deletePoint,deleteSegment:deleteSegment,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,snapLinePoint:snapLinePoint,
     offset:offset,mirror:mirror,annotations:annotations,dimensionValue:dimensionValue};
 });
