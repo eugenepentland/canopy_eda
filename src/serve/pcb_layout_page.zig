@@ -1113,7 +1113,6 @@ fn writePageScripts(w: *std.Io.Writer, mode: PageScripts) std.Io.Writer.Error!vo
     if (!mode.physical_review) try w.writeAll("<script src=\"/static/pcb_settings.js\"></script>" ++
         "<script src=\"/static/pcb_dxf.js\"></script>" ++
         "<script src=\"/static/pcb_kicad_import.js\"></script><script src=\"/static/pcb_replay.js\"></script>" ++
-        "<script src=\"/static/pcb_route_session.js\"></script>" ++
         "<script src=\"/static/pcb_stuck.js\"></script>");
     if (mode.model_sprites) try w.writeAll("<script src=\"/static/pcb_model_sprites.js\"></script>");
     if (mode.thermal_overlay) try w.writeAll("<script src=\"/static/pcb_thermal.js\"></script>");
@@ -4239,7 +4238,7 @@ fn bodyEffort(root: std.json.Value) ?route_policy.Effort {
 }
 
 /// Resolve a surface's request policy without letting its fallback overwrite
-/// an explicit tier. In particular, Deep route's `standard` must beat the
+/// an explicit tier. In particular, an API client's `standard` must beat the
 /// editor endpoints' bounded one-shot default.
 fn resolvedBodyEffort(root: std.json.Value, default: ?route_policy.Effort) ?route_policy.Effort {
     return bodyEffort(root) orelse default;
@@ -4366,7 +4365,7 @@ pub fn routePrepFailure(e: RoutePrepError) struct { status: u16, msg: ?[]const u
 /// tier for THIS run only. `Route board` and `Route plan` are bounded one-shot
 /// actions; the handler also defaults a missing or unrecognised field to that
 /// tier so a board tab left open across a deploy cannot silently run the old
-/// multi-minute policy. `Deep route` explicitly sends `standard` and retains
+/// multi-minute policy. API clients may still explicitly send `standard` for
 /// the full authored rescue behavior.
 /// Response `{tracks, vias, drc, routed, total, selected, scope_unknown}` is the
 /// routed-copper shape the page embeds, so the client redraws in place — no page
@@ -4395,8 +4394,8 @@ pub fn pcbRouteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         .root = root,
         // Route board is the bounded interactive action. New pages post this
         // explicitly; keeping the same default on the server also protects an
-        // already-open page running the old client bundle. Deep route posts
-        // `standard`, which wins over this fallback in prepareRouteFromJson.
+        // already-open page running the old client bundle. An explicit API
+        // `standard` still wins over this fallback in prepareRouteFromJson.
         .default_effort = .one_shot,
     }, &eval, &module_res) catch |e| {
         const fail = routePrepFailure(e);
@@ -8697,7 +8696,6 @@ fn writeDocHead(w: *std.Io.Writer, title: []const u8, embed: bool, edit_embed: b
     try w.writeAll(page_css);
     try w.writeAll(mobile_css);
     try w.writeAll(pad_align_css);
-    try w.writeAll(route_scope_css);
     if (embed) try w.writeAll(embed_css);
     try w.writeAll("</style></head><body");
     // `.embed` trims chrome; `.embed-edit` re-enables drag (the read-only preview
@@ -8710,14 +8708,10 @@ fn writeDocHead(w: *std.Io.Writer, title: []const u8, embed: bool, edit_embed: b
     try w.writeAll(">");
 }
 
-/// Routing panel: DRC inputs (mm), the fast interactive Route button (which
-/// streams a one-shot autoroute onto the board), an explicit deep-route action,
-/// a Stop button, and the routed/total + DRC status.
-/// The live-route / replay dock (`#panel-replay`, pcb_replay.js + pcb_route_session.js)
-/// is emitted inline at the end as a full-width in-panel section — the merged
-/// panel replaces the old separate Replay accordion chip.
-const route_draw_controls = @embedFile("assets/pcb_route_draw_controls.html");
-const route_scope_controls = @embedFile("assets/pcb_route_scope.html");
+/// Routing panel: one whole-board Route action, its Stop button and status,
+/// followed by the live replay dock. Router geometry remains authored by the
+/// design; hidden resolved values preserve the hand-routing/client contract
+/// without presenting a second tuning surface in the sidebar.
 fn writeRoutePanel(
     w: *std.Io.Writer,
     params: router.RouteParams,
@@ -8725,20 +8719,25 @@ fn writeRoutePanel(
     n_drc: usize,
     n_rp: usize,
     start_open: bool,
-    clr_toggle: bool,
+    _clr_toggle: bool,
 ) std.Io.Writer.Error!void {
+    _ = _clr_toggle;
     try w.writeAll("<div class=\"pcb-route pcb-panel\" id=\"panel-route\"");
     if (!start_open) try w.writeAll(" hidden");
     try w.writeAll("><div class=\"route-primary\">");
     try w.writeAll("<button class=\"btn route-go\" id=\"r-go\" " ++
-        "title=\"Route once and return promptly; use Deep route under Advanced routing for the full rescue tier\">" ++
+        "title=\"Route the whole board, save the result to this design, and stream progress into Replay\">" ++
         "Route board</button>");
     // Stop replaces the live-route action while a run is in flight. Keeping it
     // beside the primary action makes the common path one obvious control.
     try w.writeAll("<button class=\"btn\" id=\"r-stop\" title=\"Stop the live autoroute (keeps the partial copper to Adopt)\" hidden disabled>Stop</button>");
-    // Incremental scope stays visible because it changes what the primary
-    // action does; the geometry/detail controls below do not.
-    try w.writeAll(route_scope_controls);
+    // pcb_board.js also uses these resolved values for hand-routing geometry.
+    // They are deliberately not editable here: the design's rules are the
+    // source of truth for the common Route-board workflow.
+    try w.print("<input type=\"hidden\" id=\"r-tw\" value=\"{d}\">", .{params.track_width});
+    try w.print("<input type=\"hidden\" id=\"r-cl\" value=\"{d}\">", .{params.clearance});
+    try w.print("<input type=\"hidden\" id=\"r-vd\" value=\"{d}\">", .{params.via_drill});
+    try w.print("<input type=\"hidden\" id=\"r-va\" value=\"{d}\">", .{params.via_dia});
     try w.writeAll("<div class=\"route-status\">");
     // Status spans are updated in place by the Route button's POST (no reload,
     // so the on-screen layout stays put); pre-filled for a direct ?route=1 GET.
@@ -8765,27 +8764,6 @@ fn writeRoutePanel(
         try w.writeAll("<span class=\"route-stat\" id=\"r-rp\"></span>");
     }
     try w.writeAll("</div></div>");
-
-    try w.writeAll("<details class=\"route-disclosure route-advanced\"><summary>Advanced routing</summary><div class=\"route-advanced-body\">");
-    try w.writeAll(route_draw_controls);
-    try w.print(
-        "<label>Router/custom <input id=\"r-tw\" type=\"number\" " ++
-            "step=\"0.05\" min=\"0.05\" value=\"{d}\"></label>",
-        .{params.track_width},
-    );
-    try w.print("<label>Clearance <input id=\"r-cl\" type=\"number\" step=\"0.05\" min=\"0.05\" value=\"{d}\"></label>", .{params.clearance});
-    try w.print("<label>Via drill <input id=\"r-vd\" type=\"number\" step=\"0.05\" min=\"0.1\" value=\"{d}\"></label>", .{params.via_drill});
-    try w.print("<label>Via Ø <input id=\"r-va\" type=\"number\" step=\"0.05\" min=\"0.2\" value=\"{d}\"></label>", .{params.via_dia});
-    try w.writeAll("<button class=\"btn\" id=\"r-go-deep\" " ++
-        "title=\"Run the design's full standard rescue tier; complex boards may take several minutes\">Deep route</button>");
-    try w.writeAll("<button class=\"btn\" id=\"r-pour\" title=\"Recompute declared pours around the current tracks and vias\">Refill pours</button>");
-    try w.writeAll("<span class=\"route-stat\" id=\"r-pour-stat\"></span>");
-    // The clearance-halo toggle lives in the Appearance panel's Layers tab
-    // on the full page; embeds (no Appearance panel) keep it here.
-    if (clr_toggle) try w.writeAll("<label class=\"tune-chk\"><input id=\"r-clr-show\" type=\"checkbox\"> show clearance</label>");
-    try w.writeAll("<label class=\"tune-chk\"><input id=\"r-drc-show\" type=\"checkbox\"> show DRC</label>");
-    try w.writeAll("<span class=\"muted\" id=\"r-hint\">Routing and drawing geometry</span>");
-    try w.writeAll("</div></details>");
     // The live-route / replay dock lives INSIDE this panel now (a full-width
     // section, not a separate accordion chip), so the Route button's live stream
     // and its scrubber read as one control.
@@ -8796,8 +8774,8 @@ fn writeRoutePanel(
 
 /// Live-route / replay dock: the Route button streams the autorouter here
 /// net-by-net (window.PCBLiveRoute in pcb_replay.js), and the scrubber replays
-/// the decision timeline. All behaviour lives in pcb_replay.js + pcb_route_session.js;
-/// this only emits the static dock (`#panel-replay`, the `rp-*`/`rs-*` id contract)
+/// the decision timeline. All behaviour lives in pcb_replay.js;
+/// this only emits the static dock (`#panel-replay` and its `rp-*` controls)
 /// the scripts bind to. Emitted inline by writeRoutePanel — nested in `#panel-route`
 /// as a plain section (no `pcb-panel` accordion chrome), so it shows/hides with the
 /// Route panel and the accordion JS never toggles it independently.
@@ -10453,7 +10431,6 @@ const fab_modal =
 // ── Styles + client renderer ─────────────────────────────────────────────
 
 const pad_align_css = @embedFile("assets/pcb_pad_align.css");
-const route_scope_css = @embedFile("assets/pcb_route_scope.css");
 const page_css = @embedFile("assets/pcb_layout.css");
 
 const mobile_css = @embedFile("assets/pcb_mobile.css");
@@ -14549,28 +14526,24 @@ test "placement guides survive plane filtering" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"k\":\"signal\"") == null);
 }
 
-// spec: Web Server - the PCB draw-width menu defaults to the active net class and offers explicit standard widths
-// spec: Web Server - Manual PCB routing offers tangent-arc bends with a configurable or automatic 3x-width radius
-test "route panel offers net-class width and configurable rounded bends" {
+// spec: Web Server - the PCB hand router defaults to the active net class while the sidebar keeps its resolved geometry controls hidden
+test "route panel keeps authored geometry hidden instead of exposing routing tuners" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     try writeRoutePanel(&aw.writer, .{}, null, 0, 0, true, false);
     const html = aw.written();
-    const menu = std.mem.indexOf(u8, html, "<select id=\"r-dw\"") orelse return error.TestMenuMissing;
-    const net_class = std.mem.indexOf(u8, html, "<option value=\"net\">Net class</option>") orelse
-        return error.TestNetClassMissing;
-    try std.testing.expect(menu < net_class);
-    try std.testing.expect(std.mem.indexOf(u8, html, "0.127 mm (5 mil)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "0.254 mm (10 mil)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "Custom / router value") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "<select id=\"r-bend\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "<option value=\"arc\">Rounded arcs</option>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-br\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "automatic 3× trace width") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "type=\"hidden\" id=\"r-tw\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "type=\"hidden\" id=\"r-cl\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "type=\"hidden\" id=\"r-vd\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "type=\"hidden\" id=\"r-va\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-dw\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-bend\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-br\"") == null);
 }
 
-// spec: Web Server - The /pcb-layout Route panel embeds the live-route replay dock and a Stop control instead of a separate Replay accordion chip
-test "the route panel embeds the merged live-route dock and stop control" {
+// spec: Web Server - The PCB autorouter sidebar exposes one whole-board Route action; routing-wave scope remains an API concern rather than a routine UI choice
+// spec: Web Server - The /pcb-layout Route panel presents Route board, Stop, status, and live replay without cached-load, interactive-session, scope, or advanced-routing controls
+test "the route panel is one whole-board action with replay" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     // The Replay accordion chip is retired — no data-panel="panel-replay" chip in
@@ -14582,16 +14555,15 @@ test "the route panel embeds the merged live-route dock and stop control" {
     defer pw.deinit();
     try writeRoutePanel(&pw.writer, .{}, null, 0, 0, true, false);
     const html = pw.written();
-    // The primary Route button streams a bounded route; the full standard tier
-    // is explicit under Advanced routing. A Stop button sits next to Route,
-    // hidden until a run is in flight.
+    // The primary Route button and its in-flight Stop are the only routing
+    // actions. Scope, deep/advanced routing and interactive sessions are gone.
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-go\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-go-deep\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-stop\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-stop\" title=") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, ">Route board</button>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, ">Deep route</button>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "<summary>Advanced routing</summary>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-go-deep\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-scope\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<summary>Advanced routing</summary>") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"route-replay\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "<summary>Replay details</summary>") != null);
     // The dock is nested inside panel-route — id preserved so pcb_replay.js's
@@ -14600,17 +14572,33 @@ test "the route panel embeds the merged live-route dock and stop control" {
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"panel-replay\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "class=\"pcb-replay pcb-panel\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "class=\"pcb-replay\" id=\"panel-replay\"") != null);
-    // The redundant "Run replay" button is gone (Route = live stream now).
+    // Route itself supplies the replay. There is no cached-load or interactive
+    // launch option in the dock.
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"rp-run\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"rp-load\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"rp-session\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"rs-stuck\"") == null);
     // Every remaining control id the front-end (pcb_replay.js) binds against.
     const ids = [_][]const u8{
-        "id=\"rp-status\"",  "id=\"rp-load\"",   "id=\"rp-adopt\"", "id=\"rp-clear\"",
-        "id=\"rp-prev\"",    "id=\"rp-play\"",   "id=\"rp-next\"",  "id=\"rp-slider\"",
-        "id=\"rp-summary\"", "id=\"rp-deltas\"", "id=\"rp-log\"",
+        "id=\"rp-status\"", "id=\"rp-adopt\"",   "id=\"rp-clear\"",
+        "id=\"rp-prev\"",   "id=\"rp-play\"",    "id=\"rp-next\"",
+        "id=\"rp-slider\"", "id=\"rp-summary\"", "id=\"rp-deltas\"",
+        "id=\"rp-log\"",
     };
     for (ids) |id| try std.testing.expect(std.mem.indexOf(u8, html, id) != null);
     // Adopt starts disabled until a run produces a routed result.
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"rp-adopt\" disabled") != null);
+
+    var scripts: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer scripts.deinit();
+    try writePageScripts(&scripts.writer, .{
+        .physical_review = false,
+        .model_sprites = false,
+        .thermal_overlay = false,
+        .embed = false,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, scripts.written(), "pcb_replay.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, scripts.written(), "pcb_route_session.js") == null);
 }
 
 // spec: Web Server - The /pcb-layout left dock tabs Properties, Autorouter, DRC, and Sub-circuits, showing one pane at a time
@@ -17164,7 +17152,7 @@ test "the route body's effort field overrides the tier for that run only" {
     try std.testing.expect(bodyEffort(.{ .string = "one_shot" }) == null);
 }
 
-// spec: Web Server - Route board is bounded on the server even for an already-open legacy page that omits effort, while an explicit Deep-route standard tier wins over that default
+// spec: Web Server - Route board is bounded on the server even for an already-open legacy page that omits effort, while an explicit API standard tier wins over that default
 test "the viewer route default is one-shot and explicit standard still wins" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -17251,6 +17239,7 @@ test "prepared route options carry the body's scope, copper and effort together"
 // The full editor now renders those controls in the Autorouter placement card;
 // editable embeds retain them in the classic scorebar.
 // spec: Web Server - The scorebar offers Route plan on an unsaved solve only, running the shared route flow at the one-shot tier and marking the copper a non-persisted plan
+// spec: Web Server - A completed Route board run persists its applied copper to the active layout, or creates the conventional first `layout` snapshot; Route plan remains temporary
 test "the placement controls' Route plan action is gated to an unsaved board and routes one-shot" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
@@ -17278,12 +17267,11 @@ test "the placement controls' Route plan action is gated to an unsaved board and
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"pcb-planchip\" style=\"display:none\"></span>") != null);
 
     const js = @embedFile("assets/pcb_board.js");
-    // One route flow, three entry points: the primary Route button and the
-    // scorebar's plan action are bounded one-shot runs; Deep route explicitly
-    // requests the full standard tier.
+    // One route flow, two entry points: the primary Route button and the
+    // scorebar's temporary plan action are bounded one-shot runs.
     try std.testing.expect(std.mem.indexOf(u8, js, "function runRoute(opts)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "rgo.addEventListener(\"click\",function(){runRoute({effort:\"one_shot\"});})") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "rdeep.addEventListener(\"click\",function(){runRoute({effort:\"standard\"});})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "rdeep") == null);
     try std.testing.expect(std.mem.indexOf(u8, js, "runRoute({effort:\"one_shot\",plan:true})") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(opts.effort)payload.effort=opts.effort;") != null);
     // Revealed only on an unsaved solve — a persisted layout already has the
@@ -17292,11 +17280,14 @@ test "the placement controls' Route plan action is gated to an unsaved board and
     // The plan copper is marked as a plan, and dropped whenever the copper is.
     try std.testing.expect(std.mem.indexOf(u8, js, "if(opts.plan)planChip(j);") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function clearRoute(){planChip(null);") != null);
-    // All entry points disable together for the run (one board, one router).
-    try std.testing.expect(std.mem.indexOf(u8, js, "function routeBusy(on){[\"r-go\",\"r-go-deep\",\"pcb-routeplan\"]") != null);
+    // Both entry points disable together for the run (one board, one router).
+    try std.testing.expect(std.mem.indexOf(u8, js, "function routeBusy(on){[\"r-go\",\"pcb-routeplan\"]") != null);
+    // Route board applies then persists the active layout (or first `layout`);
+    // the plan branch is deliberately excluded.
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(!opts.plan){markDirty();persistLayout(curLayout||\"layout\"") != null);
     const replay_js = @embedFile("assets/pcb_replay.js");
-    try std.testing.expect(std.mem.indexOf(u8, replay_js, "var GATED = [\"r-go\", \"r-go-deep\",") != null);
-    try std.testing.expect(std.mem.indexOf(u8, replay_js, "[\"r-go\", \"r-go-deep\"].forEach") != null);
+    try std.testing.expect(std.mem.indexOf(u8, replay_js, "var GATED = [\"r-go\",") != null);
+    try std.testing.expect(std.mem.indexOf(u8, replay_js, "r-go-deep") == null);
 }
 
 // spec: Web Server - The page blob names which rung of the layout ladder the shown board came from, so the viewer can tell a persisted layout from an unsaved solve

@@ -17,7 +17,7 @@
 // job still running on page load.
 //
 // Contract marker strings (grepped by tests): panel-replay
-// design-route-review/cached PCBOverlay PCBOverlay.exclusive rp-slider rp-ghost
+// PCBOverlay PCBOverlay.exclusive rp-slider rp-ghost
 // route-live PCBLiveRoute follow reattach
 (function () {
   "use strict";
@@ -180,14 +180,6 @@
   function signed(n, digits) {
     if (Math.abs(n) < Math.pow(10, -digits)) return "0";
     return (n > 0 ? "+" : "") + n.toFixed(digits);
-  }
-  function ageText(ts) {
-    if (!ts) return "";
-    var s = Math.max(0, Math.floor(Date.now() / 1e3 - ts));
-    if (s < 60) return "just now";
-    if (s < 3600) return Math.floor(s / 60) + "m ago";
-    if (s < 86400) return Math.floor(s / 3600) + "h ago";
-    return Math.floor(s / 86400) + "d ago";
   }
   function status(msg, kind) {
     var s = $("rp-status"); if (!s) return;
@@ -524,7 +516,7 @@
 
   // Tool gating: Route, pour-refill, the ✎ Draw toggle, and Save/Update. Each
   // button's prior disabled state is remembered so exit restores it exactly.
-  var GATED = ["r-go", "r-go-deep", "r-pour", "pcb-pour", "pcb-draw", "pcb-saveas", "pcb-update"];
+  var GATED = ["r-go", "pcb-pour", "pcb-draw", "pcb-saveas", "pcb-update"];
   var gatePrev = {};
   function gateTools(on) {
     if (on) {
@@ -659,41 +651,6 @@
   }
 
   // ── Network ───────────────────────────────────────────────────────────
-  function parseReview(r) {
-    return r.text().then(function (t) {
-      var j;
-      try { j = JSON.parse(t); } catch (_) { throw new Error("the server returned an invalid replay response"); }
-      if (!r.ok || !j.ok) throw new Error(j.error || ("replay failed (HTTP " + r.status + ")"));
-      return j;
-    });
-  }
-  function setBusy(busy) {
-    ["rp-load", "rp-prev", "rp-play", "rp-next", "rp-slider"].forEach(function (id) {
-      var e = $(id); if (e) e.disabled = busy;
-    });
-  }
-
-  function loadCached() {
-    setBusy(true);
-    status("loading saved replay…", "running");
-    fetch("/api/design-route-review/cached/" + encodeURIComponent(PCB.name))
-      .then(function (r) {
-        if (r.status === 404) throw new Error("__nf__");
-        return parseReview(r);
-      })
-      .then(function (j) {
-        loadReview(j);
-        var age = ageText(j.generated_at);
-        status("saved replay · " + j.final.routed + "/" + j.final.total + " nets" +
-          (age ? " · routed " + age : ""), "ok");
-      })
-      .catch(function (err) {
-        if (err && err.message === "__nf__") status("no saved replay yet — press Run", "");
-        else status((err && err.message) || "could not load saved replay", "error");
-      })
-      .finally(function () { setBusy(false); });
-  }
-
   // ── Adopt: land the replayed final copper on the board ────────────────
   // The ONLY path that touches PCB state — converts the last frame's tuples to
   // PCB-native objects (netIdx→name via nets[]; layer int is already native)
@@ -741,7 +698,7 @@
   // Dock controls that must NOT fire mid-stream (they'd load a different run or
   // start an interactive session) — the scrubber (prev/play/next/slider) stays
   // live so the user can scrub back. Prior disabled state is restored on finish.
-  var LIVE_LOCK = ["rp-load", "rp-clear", "rp-adopt", "rp-session"];
+  var LIVE_LOCK = ["rp-clear", "rp-adopt"];
   var liveLockPrev = {};
   function liveLock(on) {
     if (on) LIVE_LOCK.forEach(function (id) { var e = $(id); if (!e) return; if (!(id in liveLockPrev)) liveLockPrev[id] = e.disabled; e.disabled = true; });
@@ -780,7 +737,7 @@
     liveResetTimeline(nets);
     // Reset the Route button's remembered disabled state to enabled so exitMode
     // (which restores gateTools' snapshot) leaves it clickable after the run.
-    ["r-go", "r-go-deep"].forEach(function (id) { var b = $(id); if (b) b.disabled = false; });
+    ["r-go"].forEach(function (id) { var b = $(id); if (b) b.disabled = false; });
     enterMode();          // exclusive overlay (the empty timeline paints nothing yet)
     liveLock(true);
     showStop(true);
@@ -793,7 +750,7 @@
     live.on = false; live.follow = true;
     showStop(false); liveLock(false);
     routeStat("err", msg);
-    ["r-go", "r-go-deep"].forEach(function (id) { var b = $(id); if (b) b.disabled = false; });
+    ["r-go"].forEach(function (id) { var b = $(id); if (b) b.disabled = false; });
   }
 
   // ~300ms poll loop (mirrors pcb_board.js's livePoll idiom: give up after N
@@ -915,7 +872,6 @@
 
   // ── Wiring (no global keyboard bindings — the editor owns the keymap) ──
   function onClick(id, fn) { var e = $(id); if (e) e.addEventListener("click", fn); }
-  onClick("rp-load", loadCached);
   onClick("rp-adopt", adopt);
   onClick("rp-clear", clearReplay);
   // Scrubbing during a live stream drops follow-head; landing back on the head re-arms it.

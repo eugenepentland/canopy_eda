@@ -23,7 +23,6 @@ const pcb_board_js = @embedFile("assets/pcb_board.js");
 const pcb_dxf_js = @embedFile("assets/pcb_dxf.js");
 const pcb_find_header_html = @embedFile("assets/pcb_find_header.html");
 const pcb_find_pane_html = @embedFile("assets/pcb_find_pane.html");
-const pcb_route_scope_html = @embedFile("assets/pcb_route_scope.html");
 const pcb_kicad_import_js = @embedFile("assets/pcb_kicad_import.js");
 // Route-replay panel client for the /pcb-layout page — drives the Replay dock
 // against the design-route-review endpoints (POST poses / GET solve / cached).
@@ -259,21 +258,6 @@ fn registryHasAsset(name: []const u8) bool {
         if (std.mem.eql(u8, a.name, name)) return true;
     }
     return false;
-}
-
-// spec: Web Server - The PCB autorouter scope dropdown selects one or more effective routing waves by their concrete member nets, or routes the whole board
-test "autorouter scope is a routing-wave multi-select with a whole-board option" {
-    const checks = [_]struct { bytes: []const u8, marker: []const u8, present: bool }{
-        .{ .bytes = pcb_route_scope_html, .marker = "class=\"route-scope\" id=\"r-scope\"", .present = true },
-        .{ .bytes = pcb_route_scope_html, .marker = "id=\"r-scope-all\" type=\"checkbox\" checked", .present = true },
-        .{ .bytes = pcb_route_scope_html, .marker = "id=\"r-scope-waves\"", .present = true },
-        .{ .bytes = pcb_route_scope_html, .marker = "type=\"text\"", .present = false },
-        .{ .bytes = pcb_board_js, .marker = "function routeScopeInit()", .present = true },
-        .{ .bytes = pcb_board_js, .marker = "PCB.plan.route", .present = true },
-        .{ .bytes = pcb_board_js, .marker = "payload.nets=chosen.nets", .present = true },
-        .{ .bytes = pcb_board_js, .marker = "payload.groups=scope", .present = false },
-    };
-    for (checks) |check| try std.testing.expect((std.mem.indexOf(u8, check.bytes, check.marker) != null) == check.present);
 }
 
 // spec: Web Server - The PCB editor defers whole-board diagnostics until the user requests them or edits the board
@@ -732,11 +716,10 @@ test "PCB settings expose numeric rule editors and the save-rebuild action" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_settings_js, marker) != null);
 }
 
-// spec: Web Server - The PCB replay client streams the live-route endpoint into the timeline player, follows the head, and reattaches to a running job, and still replays the cached run through the overlay seam
-test "PCB replay client streams the live route and follows the head, and still replays the cache" {
+// spec: Web Server - The PCB replay client streams the live-route endpoint into the timeline player, follows the head, and reattaches to a running job through the overlay seam
+test "PCB replay client streams the live route and follows the head" {
     const markers = [_][]const u8{
         "panel-replay", // the dock (now inside the Route panel) it attaches to
-        "design-route-review/cached", // the retained "Load saved" cached-replay path
         "PCBOverlay", // the non-persistent copper overlay seam
         "PCBOverlay.exclusive", // exclusive view mode: hides the board's own copper while a run/replay is loaded
         "rp-slider", // the transport scrubber control (grows during a live run)
