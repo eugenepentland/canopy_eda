@@ -189,7 +189,7 @@
 
   // ── Human-readable event labels (ported from route_review.js) ─────────
   var labels = {
-    initial: ["Setup", "Reference copper removed", "The fixed footprints, pads, zones, and outline are retained. The trace and via field starts empty."],
+    initial: ["Local setup", "Subcircuit routes frozen", "Accepted local subcircuit traces and carrier drops are already fixed here. Whole-board global routing starts with the next decision."],
     plane_routed: ["Plane pass", "Plane connection added", "A plane-backed net was connected by its pour or by a legal via drop."],
     plane_failed: ["Plane pass", "Plane connection failed", "The router could not find a legal plane connection for this net."],
     net_routed: ["Greedy pass", "Net routed", "This net claimed a legal path in priority order."],

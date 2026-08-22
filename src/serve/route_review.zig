@@ -2,8 +2,8 @@
 //! page. Upload mode: the browser uploads a KiCad board (and optionally its
 //! sibling project file); the server parses and routes it entirely in memory.
 //! Design mode: a project design is solved exactly as /pcb-layout would
-//! (starred layout preferred) and routed fresh through the shared `(pcb-plan)`
-//! seam. Both return the fixed placement plus the router's exact opt-in
+//! (starred layout preferred) and routed fresh through the shared hierarchical
+//! local-then-global seam. Both return the fixed placement plus the router's exact opt-in
 //! decision timeline; no source/design file is created or modified.
 
 const std = @import("std");
@@ -324,24 +324,17 @@ pub const DesignReplay = struct {
 };
 
 /// The pure core of the design replay (block + placement in, run + DRC out):
-/// route fresh through the shared plan-lowering seam with the timeline captured,
+/// route fresh through the shared local-then-global seam with the timeline captured,
 /// then filter the final DRC through the design's `<name>.drc-rules.json` rule
 /// overrides — the same `drc_rules.checkFiltered` the /pcb-layout page uses, so
 /// the replay's DRC count matches the PCB page's (an `ignore`d kind never
 /// surfaces here either). `project_dir`/`name` locate that rule sidecar.
 /// HTTP-free so tests drive it on fixtures.
 ///
-/// `routeWithTimeline` is the ONE router entry that does not run through
-/// `route_plan`'s post-route oracle gate — the timeline has to be captured from
-/// the core itself — so the counters it returns are the ROUTER'S CLAIM ("did
-/// every leg's search succeed"), not connectivity. Reporting that claim as
-/// `routed`/`total` is the exact defect fixed everywhere else, and it is worse
-/// here because `writeRouteScore` turns those two numbers into the score an
-/// agent accepts or rejects a DSL edit on. So the claim is replaced with the
-/// shared connectivity oracle's tally (`fab_readiness.routableTally`, the same
-/// answer `route_close.reconcile` overwrites its counters with) and kept beside
-/// it as `router_claimed`. Only the counters change: the timeline, the copper
-/// and the DRC are the router's own, untouched.
+/// Accepted local sub-circuit copper is frozen before the global recorder
+/// starts, making it visible in the `.initial` frame. The shared planned-live
+/// seam also applies the normal post-route connectivity gate and preserves the
+/// router's pre-gate claim beside the honest count.
 fn replayDesign(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
@@ -350,21 +343,16 @@ fn replayDesign(
     placement: optimizer.Placement,
 ) std.mem.Allocator.Error!DesignReplay {
     const params = placement.rules.design.routeParams();
-    const options = route_plan.lowerOrEmpty(alloc, block, placement);
-    var run = try router.routeWithTimeline(alloc, placement, params, options);
+    var options = route_plan.lowerOrEmpty(alloc, block, placement);
+    if (options.stop.deadline_ns == 0 and options.stop.max_route_ms > 0) {
+        options.stop.deadline_ns = clock.nanoTimestamp() +
+            @as(i128, @intCast(options.stop.max_route_ms)) * @as(i128, clock.ns_per_ms);
+    }
+    _ = try pcb_layout_page.addSubcircuitRouteSeeds(alloc, project_dir, block, placement, params, &options);
+    const planned = try route_plan.routeLoweredLive(alloc, placement, params, &options, .{ .timeline = .on });
+    const run = planned.run;
     const violations = drc_rules.checkFiltered(alloc, project_dir, name, placement, run.routed, params.clearance);
-    const claimed = run.routed.routed;
-    // No user pours: a design replay routes fresh and the declared `(stackup …)`
-    // planes are routing policy the oracle reads off the placement, not drawn
-    // zones — the same empty-zone view `writeDesignReviewJson` emits.
-    const tally = try fab_readiness.routableTally(alloc, placement, .{
-        .tracks = run.routed.tracks,
-        .vias = run.routed.vias,
-    });
-    run.routed.routed = tally.routed;
-    run.routed.total = tally.total;
-    run.routed.failed = tally.open;
-    return .{ .run = run, .violations = violations, .router_claimed = claimed };
+    return .{ .run = run, .violations = violations, .router_claimed = planned.claimed_routed };
 }
 
 /// POST /api/kicad-route-review/run — multipart board/project upload in,
@@ -1050,6 +1038,34 @@ fn trackMmTotal(tracks: []const router.Track) f64 {
     var mm: f64 = 0;
     for (tracks) |t| mm += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
     return mm;
+}
+
+// spec: serve/route-review - the design replay freezes accepted local sub-circuit copper in its first timeline frame before whole-board routing decisions
+test "design replay begins on accepted local sub-circuit copper" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parts = twoPadParts();
+    parts[0].ref_des = "amp/R1";
+    parts[1].ref_des = "amp/R2";
+    const pins = [_]export_kicad.FlatPin{
+        .{ .ref_des = "amp/R1", .pin = "1" },
+        .{ .ref_des = "amp/R2", .pin = "1" },
+    };
+    const nets = [_]optimizer.FlatNet{.{ .name = "SIG", .pins = &pins }};
+    var child = fixtureBlock(null, null);
+    const sub_blocks = [_]env_mod.SubBlock{.{ .name = "amp", .block = &child }};
+    var block = fixtureBlock(null, null);
+    block.sub_blocks = &sub_blocks;
+
+    const replay = try replayDesign(arena, no_project, "fixture", &block, fixturePlacement(&parts, &nets));
+    try testing.expect(replay.run.timeline.len > 1);
+    try testing.expectEqual(router.RouteEventKind.initial, replay.run.timeline[0].kind);
+    try testing.expect(replay.run.timeline[0].state.tracks.len > 0);
+    try testing.expectEqual(@as(i32, 0), replay.run.timeline[0].state.tracks[0].net);
+
+    const client = @embedFile("assets/pcb_replay.js");
+    try testing.expect(std.mem.indexOf(u8, client, "Subcircuit routes frozen") != null);
 }
 
 // spec: serve/route-review - the design replay honors the authored plan's allowed-layers restriction

@@ -5235,6 +5235,7 @@ are never touched.
 
 - the multipart upload filename is read from the part headers
 - the design replay honors the authored plan's allowed-layers restriction
+- the design replay freezes accepted local sub-circuit copper in its first timeline frame before whole-board routing decisions
 - the design replay JSON carries design mode, empty zones, and placement bounds
 - the design replay JSON labels each net with its class name and priority
 - the design replay JSON carries the deterministic routing score and its formula version
