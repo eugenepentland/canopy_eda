@@ -227,6 +227,7 @@ test {
     _ = @import("placement/octilinear.zig");
     _ = @import("placement/optimizer.zig");
     _ = @import("placement/outline.zig");
+    _ = @import("outline_sketch.zig");
     _ = @import("placement/pad_entry.zig");
     _ = @import("placement/pad_escape.zig");
     _ = @import("placement/pad_exit.zig");
@@ -377,6 +378,7 @@ test {
     _ = @import("serve/pcb_progress.zig");
     _ = @import("serve/pcb_rules_json.zig");
     _ = @import("serve/placement_outline.zig");
+    _ = @import("serve/outline_sketch_json.zig");
     _ = @import("serve/pour_json.zig");
     _ = @import("serve/rate_limiter.zig");
     _ = @import("serve/rework_guide.zig");
@@ -532,6 +534,8 @@ test "shard manifest runs every named test exactly once" {
     // New serve modules must be assigned explicitly rather than disappearing
     // behind the broad integrity loop when their test-root import first lands.
     try std.testing.expectEqual(@as(usize, 1), claimingShards("serve.warmup.test.startup prioritizes PCB pages over progress ladders"));
+    try std.testing.expectEqual(@as(usize, 1), claimingShards("outline_sketch.test.outline sketch compiles an ordered line profile"));
+    try std.testing.expectEqual(@as(usize, 1), claimingShards("serve.outline_sketch_json.test.outline sketch JSON round trips stable entities and dimensions"));
 
     for (names.items) |name| {
         const claims = claimingShards(name);

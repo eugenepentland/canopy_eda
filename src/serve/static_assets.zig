@@ -16,6 +16,9 @@ const footprint_svg_js = @embedFile("assets/footprint_svg.js");
 const footprint_editor_js = @embedFile("assets/footprint_editor.js");
 const footprint_editor_css = @embedFile("assets/footprint_editor.css");
 const pcb_board_js = @embedFile("assets/pcb_board.js");
+// Dependency-free parametric outline model + constraint solver. Loaded before
+// pcb_board.js so the board IIFE can use it during initial outline setup.
+const pcb_outline_sketch_js = @embedFile("assets/pcb_outline_sketch.js");
 // Client-side ASCII DXF board-outline importer (the ⤒ DXF button next to the
 // ▭ Outline / ⬡ Poly tools). Script-tagged AFTER pcb_board.js — it leans on
 // the board script's globals (PCB, snapAll, outlineBboxSync, …) and wires
@@ -131,6 +134,7 @@ const registry = [_]Asset{
     .{ .name = "footprint_editor.js", .body = footprint_editor_js, .content_type = .JS },
     .{ .name = "footprint_editor.css", .body = footprint_editor_css, .content_type = .CSS },
     .{ .name = "pcb_board.js", .body = pcb_board_js, .content_type = .JS },
+    .{ .name = "pcb_outline_sketch.js", .body = pcb_outline_sketch_js, .content_type = .JS },
     .{ .name = "pcb_dxf.js", .body = pcb_dxf_js, .content_type = .JS },
     .{ .name = "pcb_kicad_import.js", .body = pcb_kicad_import_js, .content_type = .JS },
     .{ .name = "pcb_replay.js", .body = pcb_replay_js, .content_type = .JS },
@@ -217,7 +221,7 @@ pub fn staticAsset(_: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     res.body = "asset not found";
 }
 
-// spec: Web Server - The PCB editor imports a DXF board outline: the importer asset is registered and its client-side parser exposes the loops a picked .dxf found, honouring $INSUNITS and flipping Y to the board frame, and the apply path feeds the existing outline-override seam (Save/Update persists it like any drawn outline)
+// spec: Web Server - The PCB editor imports a DXF board outline: the importer honours $INSUNITS, flips Y to the board frame, preserves native arcs in the editable sketch, and feeds the existing outline-override seam (Save/Update persists it like any drawn outline)
 // spec: Web Server - The PCB editor's DXF import assembles a line/arc contour into a closed outline even when the export left sub-µm endpoint seams, mixed winding, or a duplicated contour
 test "the DXF board-outline importer asset is registered with its parser seam" {
     // The page template references the asset by name, so it must be served.
@@ -243,6 +247,8 @@ test "the DXF board-outline importer asset is registered with its parser seam" {
         .{ .bytes = pcb_dxf_js, .marker = "MERGE_TOL" },
         .{ .bytes = pcb_dxf_js, .marker = "if (other === prev) continue; // backtracking" },
         .{ .bytes = pcb_dxf_js, .marker = "a winding mismatch cannot strand the walk" },
+        .{ .bytes = pcb_dxf_js, .marker = "function bulgeArcSegment(" },
+        .{ .bytes = pcb_dxf_js, .marker = "window.PCBOutlineSketch.fromSegments(exact)" },
         // The board script exports the apply-path seam the importer calls (it
         // is an IIFE, so without the export nothing outside it can apply an
         // outline — the failure this seam exists to prevent).
@@ -251,6 +257,27 @@ test "the DXF board-outline importer asset is registered with its parser seam" {
         .{ .bytes = pcb_board_js, .marker = "disarmTools: function(){" },
     };
     for (checks) |c| try std.testing.expect(std.mem.indexOf(u8, c.bytes, c.marker) != null);
+}
+
+// spec: Web Server - The PCB board-outline sketch keeps stable entities, constraints, driving dimensions, and exact arcs in a separately testable client model loaded before the editor
+test "the parametric board-outline sketch engine is registered with its editor contracts" {
+    try std.testing.expect(registryHasAsset("pcb_outline_sketch.js"));
+    const markers = [_][]const u8{
+        "root.PCBOutlineSketch = api",
+        "function solve(s,opts)",
+        "function fromSegments(segments)",
+        "filletPoint:filletPoint",
+        "chamferPoint:chamferPoint",
+        "offset:offset",
+        "mirror:mirror",
+        "outline-sketch-palette",
+        "function outlineSketchDimension()",
+        "function outlineSketchConstraint(kind)",
+    };
+    for (markers) |marker| {
+        const bytes = if (std.mem.startsWith(u8, marker, "outline-") or std.mem.startsWith(u8, marker, "function outline")) pcb_board_js else pcb_outline_sketch_js;
+        try std.testing.expect(std.mem.indexOf(u8, bytes, marker) != null);
+    }
 }
 
 fn registryHasAsset(name: []const u8) bool {
@@ -284,10 +311,12 @@ test "PCB board editor shows the Board outline properties on a plain outline edg
         "function showOutlineProps(){inspClear();selCuClear();selClear();selNet(null);",
         "selRef=null;selGroup=null;",
         "pcbSideTab(\"side-props\");renderProps();markGrpRow();markSelPart();",
+        "function outlineSelect(type,index,id,ev)",
+        "outlineSketchPanelSync();showOutlineProps();drawBoardRect();",
         // Wired into both outline-gesture releases: a no-move vertex press…
-        "outlineMsg(\"outline edited — Save/Update to keep\");}\n  else showOutlineProps();\n  return;}",
+        "else outlineSelect(\"point\",vd.i,vd.id,ev);",
         // …and a no-move edge press.
-        "if(od.moved){recordUndo(od.snap);scheduleDrc();outlineMsg(\"outline edited — Save/Update to keep\");}\n  else showOutlineProps();\n  return;}",
+        "else outlineSelect(\"curve\",od.i,od.id,ev);",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }

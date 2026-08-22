@@ -392,6 +392,17 @@ svg.ruler-mode{cursor:crosshair}
 #pcb-outline.on,#pcb-outline-poly.on{color:#7ee787;border-color:#2ea043;box-shadow:0 0 0 1px #2ea04366}
 #pcb-draw.on,#pcb-pour-zone.on{color:#f0c674;border-color:#b08800;box-shadow:0 0 0 1px #b0880066}
 #pcb-text.on{color:#d6a94e;border-color:#b08800;box-shadow:0 0 0 1px #b0880066}
+.outline-sketch-palette{position:absolute;z-index:28;top:10px;left:10px;width:270px;padding:8px;
+  border:1px solid #3a3b40;border-radius:8px;background:rgba(30,31,35,.96);box-shadow:0 8px 28px rgba(0,0,0,.36);
+  color:#d6d7db;font:11px system-ui,sans-serif}
+.osp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px;color:#e4e5e9;font-size:12px}
+.osp-dof{padding:1px 7px;border:1px solid #315b43;border-radius:10px;color:#7ee787;font:10px ui-monospace,monospace}
+.osp-dof.bad{border-color:#8a3a3a;color:#f0a0a0}
+.osp-group{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}.osp-group>span{flex:0 0 100%;color:#85868d;text-transform:uppercase;font-size:9px;letter-spacing:.05em}
+.osp-group button,.osp-finish{padding:3px 7px;border:1px solid #3a3b40;border-radius:4px;background:#2c2d31;color:#d6d7db;font:inherit;cursor:pointer}
+.osp-group button:hover{border-color:#5a8fd6;color:#fff}.osp-finish{width:100%;margin-top:8px;border-color:#2e7d4f;color:#7ee787}
+.prop-sketch-constraints{display:flex;flex-wrap:wrap;gap:4px;padding:7px 12px;border-bottom:1px solid #2c2d31}
+.prop-sketch-constraints button{border:1px solid #385173;border-radius:10px;background:#202b3b;color:#9fc4ef;font:10px system-ui,sans-serif;padding:2px 7px;cursor:pointer}
 /* Pour refill: amber accent when declared pours are stale (copper/pose
    edited since the last fill) — matches the Draw-armed accent language. */
 #pcb-pour.stale{color:#f0c674;border-color:#b08800;box-shadow:0 0 0 1px #b0880066}

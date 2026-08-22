@@ -1,6 +1,7 @@
 (function(){
 const NS="http://www.w3.org/2000/svg";
 const S=PCB.scale,MX=PCB.minx,MY=PCB.miny,M=PCB.margin,G=PCB.grid;
+const OS=window.PCBOutlineSketch||null;
 const P=PCB.parts,PED=PCB.part_edits||{};
 P.forEach(function(p){var e=PED[p.ref];if(e){p.src=e.src;p.srcName=e.srcName;p.srcRef=e.srcRef;}});
 const orig=P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};});
@@ -347,8 +348,9 @@ var outlineGeomRev=0,outlineFilletCache=null,boardShapeCache=null,outlineFilletB
 function outlineGeomDrop(){outlineGeomRev++;outlineFilletCache=null;boardShapeCache=null;}
 // Return the exact native fillets plus a fine chord polygon used only by the
 // browser DRC. The persisted outline remains nominal vertices + radii.
-function outlineFilletGeom(o){var pts=outlinePtsOf(o),rs=o&&o.radii;if(!pts||pts.length<3||!rs||rs.length!==pts.length)
- return {points:pts||[],arcs:[]};
+function outlineFilletGeom(o){var pts=outlinePtsOf(o),rs=o&&o.radii;
+ if(OS&&o&&o.sketch){var sg=OS.compile(o.sketch);if(sg)return {points:sg.points,arcs:sg.arcs,sketch:sg,nominal:sg.nominal};}
+ if(!pts||pts.length<3||!rs||rs.length!==pts.length)return {points:pts||[],arcs:[]};
  if(outlineFilletCache&&outlineFilletCache.o===o&&outlineFilletCache.rev===outlineGeomRev)return outlineFilletCache.geom;
  outlineFilletBuilds++;
  var fs=[],n=pts.length;
@@ -406,14 +408,18 @@ function drawBoardRect(tmp){
  var authored=PCB.outline?null:authoredOutlineSeed();
  var nominal=tmp?null:(PCB.outline?(PCB.outline.pts||null):(authored?authored.pts:(editing?null:(PCB.board_poly||null))));
  var geom=PCB.outline?outlineFilletGeom(PCB.outline):(authored?outlineFilletGeom(authored):null);
+ if(geom&&geom.nominal)nominal=geom.nominal;
  var pts=geom&&geom.points.length?geom.points:nominal;
  // A self-intersecting drawn polygon is invalid to save — draw it red so the
  // problem is obvious (Save also refuses it, see persistLayout/outlineBad).
  var bad=drawn&&pts&&pts.length>=3&&polySelfIntersects(pts);
  var SC=bad?"#f85149":EC;
+ if(outlineMode&&geom&&geom.sketch){var ss=OS.state(PCB.outline.sketch);SC=ss.conflict?"#f85149":(ss.dof?"#58a6ff":"#d6d7db");}
  if(pts&&pts.length>=3){
   var str=pts.map(function(p){return X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1);}).join(" ");
-  if(geom&&geom.arcs.length){var cs=geom.corners,first=cs[0]?cs[0].p1:{x:nominal[0][0],y:nominal[0][1]};
+  if(geom&&geom.sketch){var d=outlineSketchPath(geom.sketch);
+   gB.appendChild(el("path",{d:d,fill:outlineMode?"rgba(126,231,135,.055)":"none",stroke:SC,"stroke-width":1.4,opacity:0.95}));}
+  else if(geom&&geom.arcs.length){var cs=geom.corners,first=cs[0]?cs[0].p1:{x:nominal[0][0],y:nominal[0][1]};
    var d="M "+X(first.x).toFixed(3)+" "+Y(first.y).toFixed(3);
    for(var pi=0;pi<cs.length;pi++){var f=cs[pi],v=nominal[pi];
     if(!f){d+=" L "+X(v[0]).toFixed(3)+" "+Y(v[1]).toFixed(3);continue;}
@@ -426,6 +432,7 @@ function drawBoardRect(tmp){
   if((drawn||editing)&&!RO)(nominal||pts).forEach(function(p){gB.appendChild(el("rect",{
     x:(X(p[0])-3.5).toFixed(1),y:(Y(p[1])-3.5).toFixed(1),width:7,height:7,
     fill:TH.bg,stroke:SC,"stroke-width":1.2,opacity:0.9}));});
+  if(outlineMode&&geom&&geom.sketch){drawOutlineSketchSelection(geom.sketch);drawOutlineSketchInfo(geom.sketch,SC);}
  }else{
   gB.appendChild(el("rect",{x:X(br.x).toFixed(1),y:Y(br.y).toFixed(1),width:(br.w*S).toFixed(1),
     height:(br.h*S).toFixed(1),fill:"none",stroke:EC,"stroke-width":tmp?1.6:1.4,opacity:0.9,
@@ -441,6 +448,24 @@ function drawBoardRect(tmp){
  var bt=el("text",{x:(X(br.x)+6).toFixed(1),y:(Y(br.y)+14).toFixed(1),fill:EC,"font-size":"11",opacity:0.8});
  bt.textContent=fmtLen2(br.w)+"×"+fmtLen2(br.h)+(drawn?" (drawn)":(editing?" (edit)":"")); gB.appendChild(bt);
 }
+function outlineSketchPath(g){var cs=g.curves,d="",first=true;
+ cs.forEach(function(c){var a=OS.point(PCB.outline.sketch,c.a),b=OS.point(PCB.outline.sketch,c.b);if(!a||!b)return;
+  if(first){d="M "+X(a.x).toFixed(3)+" "+Y(a.y).toFixed(3);first=false;}
+  if(c.kind==="arc"){var ag=OS.arcCircle(PCB.outline.sketch,c);if(ag)d+=" A "+(ag.r*S).toFixed(3)+" "+(ag.r*S).toFixed(3)+" 0 "+(Math.abs(ag.sweep)>Math.PI?1:0)+" "+(ag.sweep>0?1:0)+" "+X(b.x).toFixed(3)+" "+Y(b.y).toFixed(3);
+   else d+=" L "+X(b.x).toFixed(3)+" "+Y(b.y).toFixed(3);}
+  else d+=" L "+X(b.x).toFixed(3)+" "+Y(b.y).toFixed(3);});return d+" Z";}
+function outlineCurvePath(c){var sk=PCB.outline&&PCB.outline.sketch,a=sk&&OS.point(sk,c.a),b=sk&&OS.point(sk,c.b);if(!a||!b)return "";var d="M "+X(a.x).toFixed(3)+" "+Y(a.y).toFixed(3);
+ if(c.kind!=="arc")return d+" L "+X(b.x).toFixed(3)+" "+Y(b.y).toFixed(3);var g=OS.arcCircle(sk,c);return g?d+" A "+(g.r*S).toFixed(3)+" "+(g.r*S).toFixed(3)+" 0 "+(Math.abs(g.sweep)>Math.PI?1:0)+" "+(g.sweep>0?1:0)+" "+X(b.x).toFixed(3)+" "+Y(b.y).toFixed(3):d+" L "+X(b.x).toFixed(3)+" "+Y(b.y).toFixed(3);}
+function drawOutlineSketchSelection(g){outlineResolveSelection();outlineSelection.forEach(function(s){if(s.type==="curve"){var c=OS.curve(PCB.outline.sketch,s.id);if(c)gB.appendChild(el("path",{d:outlineCurvePath(c),fill:"none",stroke:"#fff","stroke-width":3,opacity:.85}));}
+ else{var p=OS.point(PCB.outline.sketch,s.id);if(p)gB.appendChild(el("circle",{cx:X(p.x).toFixed(1),cy:Y(p.y).toFixed(1),r:5.5,fill:"none",stroke:"#fff","stroke-width":1.6}));}});}
+function drawOutlineSketchInfo(g,col){if(!OS||!PCB.outline||!PCB.outline.sketch)return;
+ g.arcs.forEach(function(a){gB.appendChild(el("circle",{cx:X(a.pm[0]).toFixed(1),cy:Y(a.pm[1]).toFixed(1),r:3.2,
+  fill:TH.bg,stroke:col,"stroke-width":1.1,transform:"rotate(45 "+X(a.pm[0]).toFixed(1)+" "+Y(a.pm[1]).toFixed(1)+")"}));});
+ OS.annotations(PCB.outline.sketch).forEach(function(a){var t=el("text",{x:(X(a.x)+7).toFixed(1),y:(Y(a.y)-7).toFixed(1),fill:a.driving?"#8ab8f0":"#85868d","font-size":"10","font-family":"ui-monospace,monospace"});
+  var unit=a.kind==="angle"?"°":" mm";t.textContent=(a.driving?"":"(")+((+a.value||0).toFixed(3))+unit+(a.driving?"":")");gB.appendChild(t);});
+ var glyph={horizontal:"H",vertical:"V",parallel:"∥",perpendicular:"⟂",tangent:"T",equal:"=",fixed:"●",midpoint:"M",symmetric:"S"};
+ (PCB.outline.sketch.constraints||[]).forEach(function(q){if(!glyph[q.kind]||q.enabled===false)return;var c=OS.curve(PCB.outline.sketch,q.a),p=OS.point(PCB.outline.sketch,q.a),x,y;if(c){var a=OS.point(PCB.outline.sketch,c.a),b=OS.point(PCB.outline.sketch,c.b);x=(a.x+b.x)/2;y=(a.y+b.y)/2;}else if(p){x=p.x;y=p.y;}else return;
+  var t=el("text",{x:(X(x)+4).toFixed(1),y:(Y(y)+11).toFixed(1),fill:"#bc8cff","font-size":"9","font-weight":"700"});t.textContent=glyph[q.kind];gB.appendChild(t);});}
 // The in-progress ⬡ Poly sketch: placed vertices as a dashed open path, a
 // rubber segment to the cursor, and a ring marking the first vertex (the
 // click-to-close target).
@@ -2728,6 +2753,19 @@ function wirePassiveFootprint(p){var sel=document.getElementById("prop-footprint
    .then(function(o){passiveRefreshApply(p,o.edit,o.score);}).catch(function(e){
     if(!saved){sel.value=p.component;sel.disabled=false;passiveFpMsg(e.message||"Footprint update failed.",true);}
     else passiveFpMsg("Source updated, but the live board refresh failed. Reload once to recover.",true);});});}
+function outlineEntityRows(){if(!OS||!PCB.outline||!PCB.outline.sketch)return "";outlineResolveSelection();var sel=outlinePrimary();if(!sel||!sel.id)return "";
+ var sk=PCB.outline.sketch,e=sel.type==="point"?OS.point(sk,sel.id):OS.curve(sk,sel.id),h='<div class="prop-head"><span class="prop-ref">'+(sel.type==="point"?'Sketch point':'Sketch '+(e&&e.kind||'curve'))+'</span><span class="prop-val">#'+sel.id+'</span></div><div class="prop-rows">';
+ if(sel.type==="point"&&e)h+=pNumRow("X (mm)","prop-sketch-x",e.x,false)+pNumRow("Y (mm)","prop-sketch-y",e.y,false);
+ else if(e){var a=OS.point(sk,e.a),b=OS.point(sk,e.b),len=Math.hypot(b.x-a.x,b.y-a.y);if(e.kind==="line")h+=pNumRow("Length (mm)","prop-sketch-length",len,false)+pNumRow("Angle (deg)","prop-sketch-angle",Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI,false);
+  else{var g=OS.arcCircle(sk,e);h+=pNumRow("Radius (mm)","prop-sketch-radius",g?g.r:0,false)+pRow("Sweep",g?(g.sweep*180/Math.PI).toFixed(2)+"°":"invalid");}}
+ h+='</div>';var qs=(sk.constraints||[]).filter(function(q){return q.a===sel.id||q.b===sel.id||q.c===sel.id;});if(qs.length)h+='<div class="prop-sketch-constraints">'+qs.map(function(q){return '<button type="button" data-rm-sk="'+q.id+'" title="Remove constraint">'+pEsc(q.kind)+(q.value!=null?' '+(+q.value).toFixed(3):'')+' ×</button>';}).join('')+'</div>';return h;}
+function outlineDimSet(kind,id,value){return outlineSketchMutate(kind+" set to "+value,function(sk){var q=(sk.constraints||[]).find(function(x){return x.kind===kind&&x.a===id&&x.driving!==false;});if(q){q.value=value;return true;}return !!OS.addConstraint(sk,kind,id,null,value);});}
+function wireOutlineEntityProps(body){if(!OS||!PCB.outline||!PCB.outline.sketch)return;outlineResolveSelection();var sel=outlinePrimary();if(!sel||!sel.id)return;var sk=PCB.outline.sketch,e=sel.type==="point"?OS.point(sk,sel.id):OS.curve(sk,sel.id);
+ function enter(id,fn){var inp=document.getElementById(id);if(!inp)return;function go(){var n=parseFloat(inp.value);if(isFinite(n))fn(n);}inp.addEventListener("keydown",function(ev){if(ev.key==="Enter"){ev.preventDefault();go();inp.blur();}});inp.addEventListener("change",go);}
+ if(sel.type==="point"&&e){enter("prop-sketch-x",function(n){outlineSketchMutate("point X set",function(s){var p=OS.point(s,sel.id);p.x=n;if(!(s.constraints||[]).some(function(q){return q.kind==="fixed"&&q.a===p.id;}))OS.addConstraint(s,"fixed",p.id);return true;});});
+  enter("prop-sketch-y",function(n){outlineSketchMutate("point Y set",function(s){var p=OS.point(s,sel.id);p.y=n;if(!(s.constraints||[]).some(function(q){return q.kind==="fixed"&&q.a===p.id;}))OS.addConstraint(s,"fixed",p.id);return true;});});}
+ else if(e){enter("prop-sketch-length",function(n){if(n>0)outlineDimSet("length",sel.id,n);});enter("prop-sketch-angle",function(n){outlineDimSet("angle",sel.id,n);});enter("prop-sketch-radius",function(n){if(n>0)outlineDimSet("radius",sel.id,n);});}
+ body.querySelectorAll("[data-rm-sk]").forEach(function(b){b.addEventListener("click",function(){var id=+b.getAttribute("data-rm-sk");outlineSketchMutate("constraint removed",function(s){OS.removeConstraint(s,id);return true;});});});}
 function renderProps(){var body=document.getElementById("prop-body");if(!body)return;
  if(insp){renderInspProps(body);return;}
  if(selGroup&&!selRef&&GRPS[selGroup]){var gn=GRPS[selGroup].length;
@@ -2744,7 +2782,8 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
    (bo?'<div class="prop-rows">'+(!RO&&!mobileInspectMode()?
     pNumRow("Width (mm)","prop-outline-width",bo.w,false)+pNumRow("Height (mm)","prop-outline-height",bo.h,false):
     pRow("Width",fmtLen(bo.w))+pRow("Height",fmtLen(bo.h)))+
-    pRow("Source",os)+(!RO&&!mobileInspectMode()?pNumRow("Corner radius","prop-outline-radius",orad,false):"")+'</div>':'<div class="prop-empty">No board outline is defined.</div>')+
+    pRow("Source",os)+(!RO&&!mobileInspectMode()&&!((PCB.outline||{}).sketch)?pNumRow("Corner radius","prop-outline-radius",orad,false):"")+'</div>':'<div class="prop-empty">No board outline is defined.</div>')+
+   (!RO&&!mobileInspectMode()?outlineEntityRows():"")+
    (!RO&&!mobileInspectMode()&&bo?'<button class="btn prop-outline-edit" type="button">Edit outline</button>'+
     '<div class="prop-edit-note">Type the finished board size, set a fillet radius, or drag a corner or edge to reshape it. Hold Shift while dragging an edge to keep its slide square. Double-click an edge to add a vertex; right-click a vertex to remove it. Save or Update to keep the result.</div>':'')+
    '<div class="prop-empty-n">'+P.length+' components</div>';
@@ -2759,8 +2798,8 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
    inp.addEventListener("keydown",function(ev){if(ev.key==="Enter"){ev.preventDefault();commitOutlineSize();try{inp.blur();}catch(e){}}});
    inp.addEventListener("blur",commitOutlineSize);});
   var ri=document.getElementById("prop-outline-radius");if(ri)ri.addEventListener("change",function(){var radius=Math.max(0,parseFloat(ri.value)||0),pre=snapAll();
-   outlineArm(true);outlinePromote();PCB.outline.radii=PCB.outline.pts.map(function(){return radius;});outlineGeomDrop();recordUndo(pre);drawBoardRect();scheduleDrc();
-   outlineMsg("corner fillet set to "+fmtLen(radius)+" — Save/Update to keep");});return;}
+   outlineArm(true);outlinePromote();PCB.outline.sketch=null;PCB.outline.radii=PCB.outline.pts.map(function(){return radius;});if(OS)OS.ensure(PCB.outline);outlineGeomDrop();recordUndo(pre);drawBoardRect();scheduleDrc();
+   outlineMsg("corner fillet set to "+fmtLen(radius)+" — Save/Update to keep");});wireOutlineEntityProps(body);return;}
  var rot=(((p.rot||0)%360)+360)%360,fpEdit=passiveFpEditable(p);
  var h='<div class="prop-head"><span class="prop-ref">'+pEsc(refLabel(p.ref))+'</span>'+
   (p.val?'<span class="prop-val">'+pEsc(p.val)+'</span>':'')+'</div>';
@@ -3399,6 +3438,8 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Edit the current board outline; drag empty space to redraw it</span><kbd>▭ Outline</kbd></div>'+
   '<div class="kbd-row"><span>Polygon outline (Enter close &middot; Backspace undo &middot; Esc cancel)</span><kbd>⬡ Poly, then click vertices</kbd></div>'+
   '<div class="kbd-row"><span>Edit outline: drag a vertex &middot; drag an edge to slide it &middot; dbl-click an edge to add a vertex &middot; right-click a vertex to delete</span><kbd>on the current outline</kbd></div>'+
+  '<div class="kbd-row"><span>Dimension selected outline geometry</span><kbd>D in outline sketch</kbd></div>'+
+  '<div class="kbd-row"><span>Constrain selected outline line</span><kbd>H / V</kbd></div>'+
   '<div class="kbd-row"><span>Hand-route mode (click pad → trace; head stops at clearance obstacles)</span><kbd>X</kbd></div>'+
   '<div class="kbd-row"><span>Drop via + flip layer (while routing)</span><kbd>V</kbd></div>'+
   '<div class="kbd-row"><span>Focus / select top or bottom copper</span><kbd>B</kbd></div>'+
@@ -3432,6 +3473,9 @@ document.addEventListener("keydown",function(ev){if((ev.key===" "||ev.code==="Sp
 document.addEventListener("keyup",function(ev){if(ev.key===" "||ev.code==="Space")SPACE=false;});
 document.addEventListener("keydown",function(ev){
  if(ev.key=="Escape"){if(pickMenu){ev.preventDefault();pickMenuClose();try{svg.focus();}catch(e){}return;}if(window.PCBFindIsOpen&&window.PCBFindIsOpen()){ev.preventDefault();window.PCBFindClose();return;}if(PHYSICAL_REVIEW){ev.preventDefault();selNet(null);return;}if(kbdOv){kbdClose();}else if(PCB.moveDlgOpen&&PCB.moveDlgOpen()){PCB.moveDlgClose();}else if(hsModalShown()){hsModalClose();}else if(heatsinkMode){heatsinkArm(false);}else if(padAlignMode){padAlignArm(false);}else if(drawMode){if(dtrace)drawEnd();else drawModeSet(false);}else if(textMode){if(txSel>=0){txSelect(-1);}else txArm(false);}else if(backingMode){backingArm(false);}else if(polyMode){if(polyPts){polyPts=null;polyCur=null;drawBoardRect();}else polyArm(false);}else if(pourMode){if(pourDlg){closePourDialog();}else if(pourPts){pourPts=null;pourCur=null;drawBoardRect();}else pourArm(false);}else if(outlineMode){outDraw=null;outlineArm(false);drawBoardRect();}else if(selCuClear()){}else if(insp){inspClear();}else{selClear();clearSel();}return;}
+ if(outlineMode&&!kbTyping(ev.target)&&(ev.key==="d"||ev.key==="D")){ev.preventDefault();outlineSketchDimension();return;}
+ if(outlineMode&&!kbTyping(ev.target)&&(ev.key==="h"||ev.key==="H")){ev.preventDefault();outlineSketchConstraint("horizontal");return;}
+ if(outlineMode&&!kbTyping(ev.target)&&(ev.key==="v"||ev.key==="V")){ev.preventDefault();outlineSketchConstraint("vertical");return;}
  if(polyMode&&ev.key=="Enter"){ev.preventDefault();polyClose();return;}
  if(polyMode&&(ev.key=="Backspace"||ev.key=="Delete")){ev.preventDefault();polyPop();return;}
  if(pourMode&&pourPts&&ev.key=="Enter"){ev.preventDefault();pourClose();return;}
@@ -3534,7 +3578,7 @@ function cloneHeatsink(){return PCB.heatsink?JSON.parse(JSON.stringify(PCB.heats
 // own vertex array — an in-place vertex drag must not mutate a stored undo step.
 function cloneOutline(){var o=PCB.outline;if(!o)return null;
  return {x:o.x,y:o.y,w:o.w,h:o.h,pts:o.pts?o.pts.map(function(p){return [p[0],p[1]];}):null,
-  radii:o.radii?o.radii.slice():null};}
+  radii:o.radii?o.radii.slice():null,sketch:o.sketch?(OS?OS.clone(o.sketch):JSON.parse(JSON.stringify(o.sketch))):null};}
 // Build a full snapshot. `poses` optionally overrides the current poses (a
 // drag's captured pre-move state); copper + texts + outline are always current.
 function snapAll(poses){var c=cloneCopper();return {poses:poses||snapPoses(),tracks:c.tracks,vias:c.vias,rf_paths:c.rf_paths,texts:cloneTexts(),outline:cloneOutline(),fabrication_layers:cloneFabricationLayers(),heatsink:cloneHeatsink()};}
@@ -3560,7 +3604,8 @@ function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y
  // edit / clear); repaint it and mark the board dirty like any restored edit.
  PCB.outline=s.outline?{x:s.outline.x,y:s.outline.y,w:s.outline.w,h:s.outline.h,
   pts:s.outline.pts?s.outline.pts.map(function(p){return [p[0],p[1]];}):null,
-  radii:s.outline.radii?s.outline.radii.slice():null}:null;
+  radii:s.outline.radii?s.outline.radii.slice():null,
+  sketch:s.outline.sketch?(OS?OS.clone(s.outline.sketch):JSON.parse(JSON.stringify(s.outline.sketch))):null}:null;
  PCB.fabrication_layers=JSON.parse(JSON.stringify(s.fabrication_layers||fabricationDefaults));
  PCB.heatsink=s.heatsink?JSON.parse(JSON.stringify(s.heatsink)):null;
  outlineGeomDrop();
@@ -4414,7 +4459,7 @@ var pan=null,marq=null,marqEl=null;
 // rectangle. The resulting override is saved
 // with the layout (SavedLayout.outline) and becomes the board edge every
 // renderer draws and the board-edge DRC checks. RO pages never arm it.
-var outlineMode=false,outDraw=null;
+var outlineMode=false,outDraw=null,outlineSelection=[];
 function outlineArm(on){
  if(on&&heatsinkMode)heatsinkArm(false);
  if(on&&backingMode)backingArm(false);
@@ -4429,9 +4474,48 @@ function outlineArm(on){
  svg.classList.toggle("outline-mode",on||polyMode);
  var msg=document.getElementById("pcb-savemsg");
  if(msg&&on){msg.style.color="#7ee787";
-  msg.textContent="outline edit: drag a corner or edge; drag empty board to redraw; Esc exits";}
+  msg.textContent="outline sketch: select geometry, type exact dimensions, or drag with persistent constraints; Esc finishes";}
  else if(msg&&!outDraw){msg.textContent="";}
- toolSync();}
+ outlineSketchPanelSync();toolSync();drawBoardRect();}
+function outlinePrimary(){return outlineSelection.length?outlineSelection[outlineSelection.length-1]:null;}
+function outlineSelect(type,index,id,ev){var add=!!(ev&&(ev.ctrlKey||ev.metaKey||ev.shiftKey)),key=type+":"+(id||index),at=-1;
+ outlineSelection.forEach(function(s,i){if(s.key===key)at=i;});if(!add)outlineSelection=[];
+ if(at>=0&&add)outlineSelection.splice(at,1);else outlineSelection.push({type:type,index:index,id:id||null,key:key});
+ outlineSketchPanelSync();showOutlineProps();drawBoardRect();}
+function outlineResolveSelection(){if(!OS||!PCB.outline||!PCB.outline.sketch)return;var ps=OS.physicalPoints(PCB.outline.sketch),cs=OS.physicalCurves(PCB.outline.sketch);
+ outlineSelection.forEach(function(s){var e=s.type==="point"?ps[s.index]:cs[s.index];if(e)s.id=e.id;});}
+function outlineSelected(type){outlineResolveSelection();return outlineSelection.filter(function(s){return s.type===type&&s.id;}).map(function(s){return s.id;});}
+function outlineSketchMutate(label,fn){if(!OS)return false;var pre=snapAll();outlinePromote();outlineResolveSelection();var ok=fn(PCB.outline.sketch);
+ if(ok===false){PCB.outline=pre.outline;outlineGeomDrop();drawBoardRect();outlineSketchPanelSync();return false;}
+ var solved=OS.solve(PCB.outline.sketch),compiled=!solved.conflict&&OS.syncOutline(PCB.outline);if(!compiled){PCB.outline=pre.outline;outlineGeomDrop();drawBoardRect();renderProps();outlineSketchPanelSync();outlineMsg("constraint conflict — "+label+" was not applied");return false;}
+ outlineGeomDrop();recordUndo(pre);drawBoardRect();renderProps();scheduleDrc();
+ outlineMsg(label+" — Save/Update to keep");outlineSketchPanelSync();return true;}
+function outlineSketchNumber(label,value){var text=window.prompt(label,String(Math.round((+value||0)*1000)/1000));if(text==null)return null;var n=parseFloat(text);return isFinite(n)?n:null;}
+function outlineSketchConstraint(kind){return outlineSketchMutate(kind+" constraint",function(sk){var cs=outlineSelected("curve"),ps=outlineSelected("point"),q=null;
+  if(kind==="horizontal"||kind==="vertical")q=cs.length&&OS.addConstraint(sk,kind,cs[0]);
+  else if(kind==="coincident")q=ps.length>=2&&OS.addConstraint(sk,kind,ps[0],ps[1]);
+  else if(kind==="midpoint")q=ps.length&&cs.length&&OS.addConstraint(sk,kind,ps[0],cs[0]);
+  else if(kind==="symmetric")q=ps.length>=2&&cs.length&&OS.addConstraint(sk,kind,ps[0],ps[1],null,cs[0]);
+  else if(kind==="fixed"){if(ps.length)q=OS.addConstraint(sk,kind,ps[0]);else if(cs.length){var c=OS.curve(sk,cs[0]);q=OS.addConstraint(sk,kind,c.a);if(q)OS.addConstraint(sk,kind,c.b);}}
+  else if(cs.length>=2)q=OS.addConstraint(sk,kind,cs[0],cs[1]);
+  if(!q){outlineMsg("select compatible points/curves for "+kind);return false;}return true;});}
+function outlineSketchDimension(){return outlineSketchMutate("driving dimension added",function(sk){var cs=outlineSelected("curve"),ps=outlineSelected("point"),kind,a,b,val,c;
+  if(cs.length){c=OS.curve(sk,cs[0]);kind=c.kind==="arc"?"radius":"length";a=c.id;val=outlineSketchNumber(kind==="radius"?"Arc radius (mm)":"Line length (mm)",c.kind==="arc"?OS.arcCircle(sk,c).r:Math.hypot(OS.point(sk,c.b).x-OS.point(sk,c.a).x,OS.point(sk,c.b).y-OS.point(sk,c.a).y));}
+  else if(ps.length>=2){kind="distance";a=ps[0];b=ps[1];val=outlineSketchNumber("Point distance (mm)",Math.hypot(OS.point(sk,b).x-OS.point(sk,a).x,OS.point(sk,b).y-OS.point(sk,a).y));}
+  else{outlineMsg("select one curve or two points to dimension");return false;}if(val==null||!(val>0))return false;return !!OS.addConstraint(sk,kind,a,b,val);});}
+function outlineSketchModify(action){return outlineSketchMutate(action,function(sk){var cs=outlineSelected("curve"),ps=outlineSelected("point"),c,p,n,g;
+  if(action==="arc"){if(!cs.length)return false;c=OS.curve(sk,cs[0]);p=OS.point(sk,c.a);var z=OS.point(sk,c.b),dx=z.x-p.x,dy=z.y-p.y,L=Math.hypot(dx,dy);n=outlineSketchNumber("Arc rise at midpoint (mm)",Math.max(.5,L/5));if(n==null)return false;PCB.outline.radii=null;return OS.toArc(sk,c.id,[(p.x+z.x)/2-dy/L*n,(p.y+z.y)/2+dx/L*n]);}
+  if(action==="line")return cs.length&&OS.toLine(sk,cs[0]);
+  if(action==="fillet"||action==="chamfer"){if(!ps.length)return false;n=outlineSketchNumber((action==="fillet"?"Fillet radius":"Chamfer distance")+" (mm)",1);if(n==null||!(n>0))return false;PCB.outline.radii=null;return !!(action==="fillet"?OS.filletPoint(sk,ps[0],n):OS.chamferPoint(sk,ps[0],n));}
+  if(action==="offset"){n=outlineSketchNumber("Profile offset (mm, positive = outward)",1);return n!=null&&OS.offset(sk,n);}
+  if(action==="mirror-x"||action==="mirror-y"){g=OS.compile(sk);return g&&OS.mirror(sk,action==="mirror-x"?"x":"y",action==="mirror-x"?g.rect.x+g.rect.w/2:g.rect.y+g.rect.h/2);}return false;});}
+function outlineSketchPanelSync(){var host=svg&&svg.parentNode,p=document.getElementById("outline-sketch-palette");if(!outlineMode||RO||!OS){if(p)p.remove();return;}if(!p){p=document.createElement("div");p.id="outline-sketch-palette";p.className="outline-sketch-palette";host.appendChild(p);}
+ var st=PCB.outline&&PCB.outline.sketch?OS.state(PCB.outline.sketch):null;p.innerHTML='<div class="osp-head"><b>Outline sketch</b><span class="osp-dof '+(st&&st.conflict?'bad':'')+'">'+(st?(st.conflict?'conflict':st.dof+' DOF'):'start editing')+'</span></div>'+
+  '<div class="osp-group"><span>Create</span><button data-sk="new-rect">Rectangle</button><button data-sk="new-poly">Line chain</button><button data-sk="dimension">Dimension</button></div>'+
+  '<div class="osp-group"><span>Constrain</span><button data-sk="horizontal">H</button><button data-sk="vertical">V</button><button data-sk="coincident">Coincident</button><button data-sk="parallel">∥</button><button data-sk="perpendicular">⟂</button><button data-sk="tangent">Tangent</button><button data-sk="equal">Equal</button><button data-sk="midpoint">Midpoint</button><button data-sk="symmetric">Symmetry</button><button data-sk="fixed">Fix</button></div>'+
+  '<div class="osp-group"><span>Modify</span><button data-sk="arc">Arc</button><button data-sk="line">Line</button><button data-sk="fillet">Fillet</button><button data-sk="chamfer">Chamfer</button><button data-sk="offset">Offset</button><button data-sk="mirror-x">Mirror X</button><button data-sk="mirror-y">Mirror Y</button></div>'+
+  '<button class="osp-finish" data-sk="finish">Finish sketch</button>';
+ p.querySelectorAll("[data-sk]").forEach(function(b){b.addEventListener("click",function(){var a=b.getAttribute("data-sk");if(a==="finish")outlineArm(false);else if(a==="new-poly"){outlineArm(false);polyArm(true);}else if(a==="new-rect")outlineMsg("rectangle: drag empty board space; existing geometry is replaced on release");else if(a==="dimension")outlineSketchDimension();else if(["horizontal","vertical","coincident","parallel","perpendicular","tangent","equal","midpoint","symmetric","fixed"].indexOf(a)>=0)outlineSketchConstraint(a);else outlineSketchModify(a);});});}
 // ⬡ Poly tool: click to place polygon-outline vertices (grid-snapped); click
 // the first vertex or press Enter to close, Backspace removes the last
 // vertex, Esc cancels. The closed polygon becomes PCB.outline
@@ -4559,6 +4643,7 @@ window.PCBDxfSeams={
 // Re-derive a polygon outline's rect fields from its vertex bbox (the server
 // does the same on parse, so the pair can never disagree).
 function outlineBboxSync(){var o=PCB.outline;if(!o||!o.pts)return;
+ if(OS&&o.sketch){OS.syncOutline(o);outlineGeomDrop();return;}
  var ax=1e18,ay=1e18,bx=-1e18,by=-1e18;
  o.pts.forEach(function(p){ax=Math.min(ax,p[0]);ay=Math.min(ay,p[1]);bx=Math.max(bx,p[0]);by=Math.max(by,p[1]);});
  o.x=ax;o.y=ay;o.w=bx-ax;o.h=by-ay;outlineGeomDrop();}
@@ -4579,6 +4664,7 @@ function outlineEditable(){if(PCB.outline)return PCB.outline;
  return authoredOutlineSeed()||{x:PCB.board.x,y:PCB.board.y,w:PCB.board.w,h:PCB.board.h,pts:null,radii:null};}
 // The editable vertex list: polygon pts, or four synthesized rect corners.
 function outlinePtsOf(o){if(!o)return null;
+ if(OS&&o.sketch){var ps=OS.physicalPoints(o.sketch);if(ps.length)return ps.map(function(p){return [p.x,p.y];});}
  if(o.pts&&o.pts.length)return o.pts;
  if(o.w>0&&o.h>0)return [[o.x,o.y],[o.x+o.w,o.y],[o.x+o.w,o.y+o.h],[o.x,o.y+o.h]];
  return null;}
@@ -4588,7 +4674,8 @@ function outlinePromote(){if(!PCB.outline){var a=outlineEditable();if(!a)return;
   PCB.outline={x:a.x,y:a.y,w:a.w,h:a.h,pts:a.pts?a.pts.map(function(p){return [p[0],p[1]];}):null,
    radii:a.radii?a.radii.slice():null};outlineGeomDrop();}
  var o=PCB.outline;
- if(o&&!(o.pts&&o.pts.length)&&o.w>0&&o.h>0){o.pts=[[o.x,o.y],[o.x+o.w,o.y],[o.x+o.w,o.y+o.h],[o.x,o.y+o.h]];outlineGeomDrop();}}
+ if(o&&!(o.pts&&o.pts.length)&&o.w>0&&o.h>0){o.pts=[[o.x,o.y],[o.x+o.w,o.y],[o.x+o.w,o.y+o.h],[o.x,o.y+o.h]];outlineGeomDrop();}
+ if(OS&&o&&!o.sketch){OS.ensure(o);outlineGeomDrop();}}
 // Set the finished board dimensions from the properties panel. The lower-left
 // bbox corner remains anchored; a polygon scales about that corner while its
 // fillet radii remain physical mm values. An authored outline materializes as
@@ -4598,18 +4685,24 @@ function outlineResize(w,h){var src=PCB.outline||authoredOutlineSeed()||PCB.boar
  if(!PCB.outline)PCB.outline={x:src.x,y:src.y,w:src.w,h:src.h,
   pts:src.pts?src.pts.map(function(p){return [p[0],p[1]];}):null,radii:src.radii?src.radii.slice():null};
  var o=PCB.outline,sx=w/ow,sy=h/oh;
- if(o.pts&&o.pts.length)o.pts=o.pts.map(function(p){return [src.x+(p[0]-src.x)*sx,src.y+(p[1]-src.y)*sy];});
+ if(OS&&o.sketch){o.sketch.points.forEach(function(p){p.x=src.x+(p.x-src.x)*sx;p.y=src.y+(p.y-src.y)*sy;});
+  o.sketch.curves.forEach(function(c){if(c.mid)c.mid=[src.x+(c.mid[0]-src.x)*sx,src.y+(c.mid[1]-src.y)*sy];});
+  (o.sketch.constraints||[]).forEach(function(q){if(q.value!=null&&q.kind!=="angle")q.value=OS.dimensionValue(o.sketch,q);});OS.syncOutline(o);}
+ else if(o.pts&&o.pts.length)o.pts=o.pts.map(function(p){return [src.x+(p[0]-src.x)*sx,src.y+(p[1]-src.y)*sy];});
  o.x=src.x;o.y=src.y;o.w=w;o.h=h;if(o.pts)outlineBboxSync();else outlineGeomDrop();
  recordUndo(pre);drawBoardRect();scheduleDrc();outlineMsg("board resized to "+fmtLen(w)+" × "+fmtLen(h)+" — Save/Update to keep");return true;}
 // The outline edge (segment vtx i → i+1) whose nearest point is within a handle
 // of board point m, or null. `px,py` is that (unsnapped) closest point.
 function edgeAt(m){var pts=outlinePtsOf(outlineEditable());if(!pts||pts.length<2)return null;
+ var eo=outlineEditable(),sk=OS&&eo&&eo.sketch,ecs=sk&&OS.physicalCurves(sk);
  var bd=7/S,best=null,n=pts.length;
- for(var i=0;i<n;i++){var a=pts[i],b=pts[(i+1)%n];
+ for(var i=0;i<n;i++){var a=pts[i],b=pts[(i+1)%n],samples=[a];
+  if(ecs&&ecs[i]&&ecs[i].kind==="arc"){var ag=OS.arcCircle(sk,ecs[i]);if(ag)for(var ak=1;ak<20;ak++){var aa=ag.start+ag.sweep*ak/20;samples.push([ag.cx+ag.r*Math.cos(aa),ag.cy+ag.r*Math.sin(aa)]);}}samples.push(b);
+  for(var si=0;si+1<samples.length;si++){a=samples[si];b=samples[si+1];
   var dx=b[0]-a[0],dy=b[1]-a[1],L2=dx*dx+dy*dy;if(L2<1e-12)continue;
   var t=((m.x-a[0])*dx+(m.y-a[1])*dy)/L2;if(t<0)t=0;else if(t>1)t=1;
   var px=a[0]+t*dx,py=a[1]+t*dy,d=Math.hypot(m.x-px,m.y-py);
-  if(d<=bd){bd=d;best={i:i,px:px,py:py};}}
+  if(d<=bd){bd=d;best={i:i,px:px,py:py,id:ecs&&ecs[i]?ecs[i].id:null};}}}
  return best;}
 // Proper segment-segment crossing (strictly interior) — JS twin of the Zig
 // outline.segIntersect that polySelfIntersects walks.
@@ -4630,19 +4723,23 @@ function polySelfIntersects(pts){if(!pts||pts.length<4)return false;var n=pts.le
 // the viewer flags it (drawn red) and Save refuses it before the round-trip.
 function outlineBad(){var o=PCB.outline;if(!o)return false;
  if(!(o.w>=2&&o.h>=2))return true;
+ if(OS&&o.sketch){var g=OS.compile(o.sketch);return !g||polySelfIntersects(g.points)||OS.state(o.sketch).conflict;}
  return !!(o.pts&&o.pts.length>=3&&polySelfIntersects(o.pts));}
 // Delete a vertex (right-click a handle), keeping ≥3; a rect promotes first
 // (→ triangle). One undo step; re-DRCs so the board edge tracks the new shape.
 function outlineVertexDelete(i){var o=outlineEditable();if(!o)return;
  var cur=outlinePtsOf(o);if(!cur||cur.length<=3){outlineMsg("outline needs at least 3 vertices");return;}
  var pre=snapAll();outlinePromote();
- PCB.outline.pts.splice(i,1);if(PCB.outline.radii)PCB.outline.radii.splice(i,1);outlineBboxSync();recordUndo(pre);drawBoardRect();scheduleDrc();
+ if(OS&&PCB.outline.sketch){var ps=OS.physicalPoints(PCB.outline.sketch);if(!ps[i]||!OS.deletePoint(PCB.outline.sketch,ps[i].id)){outlineMsg("outline needs at least 3 vertices");return;}OS.syncOutline(PCB.outline);}
+ else PCB.outline.pts.splice(i,1);
+ if(PCB.outline.radii)PCB.outline.radii.splice(i,1);outlineBboxSync();recordUndo(pre);drawBoardRect();scheduleDrc();
  outlineMsg("vertex removed — Save/Update to keep");}
 // Insert a vertex splitting edge `e.i` at its grid-snapped projection point
 // (double-click an edge); the new vertex is immediately draggable.
 function outlineInsertVertex(e){var pre=snapAll();outlinePromote();
  var gx=Math.round(e.px/G)*G,gy=Math.round(e.py/G)*G;
- PCB.outline.pts.splice(e.i+1,0,[gx,gy]);
+ if(OS&&PCB.outline.sketch){var cs=OS.physicalCurves(PCB.outline.sketch),c=cs[e.i];if(!c||!OS.insertPoint(PCB.outline.sketch,c.id,gx,gy))return;OS.syncOutline(PCB.outline);}
+ else PCB.outline.pts.splice(e.i+1,0,[gx,gy]);
  if(PCB.outline.radii)PCB.outline.radii.splice(e.i+1,0,0);
  outlineBboxSync();recordUndo(pre);drawBoardRect();scheduleDrc();
  outlineMsg("vertex added — Save/Update to keep");}
@@ -4650,7 +4747,8 @@ function outlineInsertVertex(e){var pre=snapAll();outlinePromote();
 // delta. Captures the pre-drag snapshot (a rect is promoted lazily on the first
 // actual move, so a bare click never rewrites a rect into a polygon).
 function osegStart(e,m){var pts=outlinePtsOf(outlineEditable()),i=e.i,j=(i+1)%pts.length;
- return {i:i,j:j,m0:m,a0:pts[i].slice(),b0:pts[j].slice(),moved:false,snap:snapAll()};}
+ var sk=OS&&outlineEditable().sketch,cs=sk&&OS.physicalCurves(sk),c=cs&&cs[i];
+ return {i:i,j:j,id:c&&c.id,aid:c&&c.a,bid:c&&c.b,mid0:c&&c.mid&&c.mid.slice(),m0:m,a0:pts[i].slice(),b0:pts[j].slice(),moved:false,snap:snapAll()};}
 function osegMove(m,square){var sd=osdrag,cur=outlinePtsOf(outlineEditable());
  var dx=Math.round((m.x-sd.m0.x)/G)*G,dy=Math.round((m.y-sd.m0.y)/G)*G;
  // Shift keeps a rectangular side square by sliding it only perpendicular to
@@ -4659,8 +4757,11 @@ function osegMove(m,square){var sd=osdrag,cur=outlinePtsOf(outlineEditable());
  if(square){var ex=sd.b0[0]-sd.a0[0],ey=sd.b0[1]-sd.a0[1];if(Math.abs(ex)>=Math.abs(ey))dx=0;else dy=0;}
  var na=[sd.a0[0]+dx,sd.a0[1]+dy],nb=[sd.b0[0]+dx,sd.b0[1]+dy];
  if(cur[sd.i][0]===na[0]&&cur[sd.i][1]===na[1]&&cur[sd.j][0]===nb[0]&&cur[sd.j][1]===nb[1])return;
- outlinePromote();var pts=PCB.outline.pts;
- pts[sd.i]=na;pts[sd.j]=nb;sd.moved=true;outlineBboxSync();drawBoardRect();}
+ outlinePromote();
+ if(OS&&PCB.outline.sketch){if(!sd.id){var sc=OS.physicalCurves(PCB.outline.sketch)[sd.i];sd.id=sc&&sc.id;sd.aid=sc&&sc.a;sd.bid=sc&&sc.b;}
+  var ap=OS.point(PCB.outline.sketch,sd.aid),bp=OS.point(PCB.outline.sketch,sd.bid),scur=OS.curve(PCB.outline.sketch,sd.id);ap.x=sd.a0[0];ap.y=sd.a0[1];bp.x=sd.b0[0];bp.y=sd.b0[1];if(scur&&sd.mid0)scur.mid=[sd.mid0[0]+dx,sd.mid0[1]+dy];OS.moveCurve(PCB.outline.sketch,sd.id,dx,dy);OS.syncOutline(PCB.outline);}
+ else{var pts=PCB.outline.pts;pts[sd.i]=na;pts[sd.j]=nb;}
+ sd.moved=true;outlineBboxSync();drawBoardRect();}
 function polyClose(){
  if(!polyPts||polyPts.length<3){polyArm(false);drawBoardRect();return;}
  // Snapshot the pre-close outline so a committed polygon is one undo step.
@@ -4839,6 +4940,8 @@ function vtxAt(m){var pts=outlinePtsOf(outlineEditable());if(!pts)return -1;
  var bd=7/S,best=-1;
  pts.forEach(function(p,i){var d=Math.max(Math.abs(p[0]-m.x),Math.abs(p[1]-m.y));if(d<=bd){bd=d;best=i;}});
  return best;}
+function outlineVdrag(i){var o=outlineEditable(),sk=OS&&o&&o.sketch,ps=sk&&OS.physicalPoints(sk),p=ps&&ps[i];
+ return {i:i,id:p&&p.id,moved:false,snap:snapAll(),x0:p&&p.x,y0:p&&p.y};}
 // Start a viewport pan from the current pointer. Shared by the empty-space
 // handler below AND the part/pad pointerdown handlers (defined earlier, this is
 // hoisted), so a middle-button or Space-held drag pans the board even when the
@@ -5032,7 +5135,7 @@ svg.addEventListener("pointerdown",function(ev){
  if(backingMode){if(ev.button!==0)return;var bm=mm(ev),bi=backingVtxAt(bm);
   if(bi>=0){backingDrag={i:bi,moved:false,snap:snapAll()};pcap(ev);}return;}
  if((outlineMode||polyMode)&&ev.button===0&&!polyPts){var hv=vtxAt(mm(ev));
-  if(hv>=0){vdrag={i:hv,moved:false,snap:snapAll()};pcap(ev);return;}}
+  if(hv>=0){vdrag=outlineVdrag(hv);pcap(ev);return;}}
  if(polyMode){if(ev.button!==0)return;
   var pm=mm(ev);
   if(polyPts&&polyPts.length>=3){var pf=polyPts[0];
@@ -5091,7 +5194,7 @@ svg.addEventListener("pointerdown",function(ev){
  var reviewPad=RO?padHitAt(m.x,m.y):null;
  var hi=reviewPad?reviewPad.i:((PHYSICAL_REVIEW||viewSt.filt.fp)?partAt(m.x,m.y):-1);
  if(hi<0){
-  if(!RO){var uv=vtxAt(m);if(uv>=0){vdrag={i:uv,moved:false,snap:snapAll()};pcap(ev);return;}}
+  if(!RO){var uv=vtxAt(m);if(uv>=0){vdrag=outlineVdrag(uv);pcap(ev);return;}}
   // The visible sub-circuit box is itself selectable, including its empty
   // interior. This always returns to group scope; drilling into a component
   // still requires clicking an actual component below.
@@ -5138,7 +5241,9 @@ svg.addEventListener("pointermove",function(ev){
  if(heatsinkDraw){var hsm=mm(ev);heatsinkDraw.x1=hsm.x;heatsinkDraw.y1=hsm.y;drawBoardRect();return;}
  if(vdrag){var vv=mm(ev),vgx=Math.round(vv.x/G)*G,vgy=Math.round(vv.y/G)*G,vc=outlinePtsOf(outlineEditable());
   if(vc&&vdrag.i<vc.length&&(vc[vdrag.i][0]!==vgx||vc[vdrag.i][1]!==vgy)){
-   outlinePromote();PCB.outline.pts[vdrag.i]=[vgx,vgy];vdrag.moved=true;outlineBboxSync();drawBoardRect();}
+   outlinePromote();if(OS&&PCB.outline.sketch){if(!vdrag.id){var vps=OS.physicalPoints(PCB.outline.sketch);vdrag.id=vps[vdrag.i]&&vps[vdrag.i].id;}
+    OS.movePoint(PCB.outline.sketch,vdrag.id,vgx,vgy);OS.syncOutline(PCB.outline);}
+   else PCB.outline.pts[vdrag.i]=[vgx,vgy];vdrag.moved=true;outlineBboxSync();drawBoardRect();}
   return;}
  if(osdrag){osegMove(mm(ev),ev.shiftKey);return;}
  if(segdrag){segMove(mm(ev),ev.shiftKey);return;}
@@ -5225,13 +5330,13 @@ svg.addEventListener("pointerup",function(ev){try{svg.releasePointerCapture(ev.p
   // the board-edge geometry the mid-drag session probes tracks the new shape.
   // A stationary press is a plain click: select the board outline itself.
   if(vd.moved){if(vd.snap)recordUndo(vd.snap);else markDirty();scheduleDrc();outlineMsg("outline edited — Save/Update to keep");}
-  else showOutlineProps();
+  else outlineSelect("point",vd.i,vd.id,ev);
   return;}
  if(osdrag){var od=osdrag;osdrag=null;svg.style.cursor="";
   // A whole-edge slide is one undo step; re-DRC so the board edge follows it.
   // A stationary press is a plain click: select the board outline itself.
   if(od.moved){recordUndo(od.snap);scheduleDrc();outlineMsg("outline edited — Save/Update to keep");}
-  else showOutlineProps();
+  else outlineSelect("curve",od.i,od.id,ev);
   return;}
  if(segdrag){var sgd=segdrag;segdrag=null;svg.style.cursor="";
   segJogClean(sgd);

@@ -38,6 +38,8 @@ const drc = @import("../placement/drc.zig");
 const drc_json = @import("drc_json.zig");
 const drc_rules = @import("drc_rules.zig");
 const outline_mod = @import("../placement/outline.zig");
+const outline_sketch = @import("../outline_sketch.zig");
+const outline_sketch_json = @import("outline_sketch_json.zig");
 const via_fence = @import("../placement/via_fence.zig");
 const perimeter_fence = @import("../placement/perimeter_fence.zig");
 const pcb_keepout_json = @import("pcb_keepout_json.zig");
@@ -444,10 +446,15 @@ pub const SavedOutline = struct {
     pts: ?[]const [2]f64 = null,
     /// Per-vertex fillet radii, index-aligned with `pts`.
     radii: ?[]const f64 = null,
-    /// Internal sagitta-bounded fallback and exact native arcs. These are
-    /// derived while parsing and deliberately omitted by the JSON writer.
-    poly: ?[]const [2]f64 = null,
-    arcs: []const optimizer.BoardArc = &.{},
+    /// Internal physical projection, derived while parsing and deliberately
+    /// omitted by the JSON writer.
+    derived: struct {
+        poly: ?[]const [2]f64 = null,
+        arcs: []const optimizer.BoardArc = &.{},
+    } = .{},
+    /// Versioned parametric authoring intent; physical fields above are its
+    /// compiled compatibility projection when present.
+    sketch: ?outline_sketch.Sketch = null,
 };
 
 /// Per-layout editable positive polygons for one authored backing layer.
@@ -1109,6 +1116,7 @@ fn writePageScripts(w: *std.Io.Writer, mode: PageScripts) std.Io.Writer.Error!vo
     if (!mode.physical_review) try w.writeAll("<script src=\"/static/drc_marshal.js\"></script>");
     // WebGPU must precede pcb_board.js, which reads window.PCBGpu at boot.
     try w.writeAll("<script src=\"/static/pcb_gpu.js\"></script>");
+    if (!mode.physical_review) try w.writeAll("<script src=\"/static/pcb_outline_sketch.js\"></script>");
     try w.writeAll("<script src=\"/static/pcb_board.js\"></script>");
     if (!mode.physical_review) try w.writeAll("<script src=\"/static/pcb_settings.js\"></script>" ++
         "<script src=\"/static/pcb_dxf.js\"></script>" ++
@@ -3531,6 +3539,7 @@ test "assembly iframe defers CAM and omits editor-only clients" {
     });
     const html = scripts.written();
     try std.testing.expect(std.mem.indexOf(u8, html, "pcb_board.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "pcb_outline_sketch.js") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "drc_marshal.js") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "pcb_settings.js") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "pcb_replay.js") == null);
@@ -4702,8 +4711,8 @@ fn blessedFabView(ctx: *Server, req: *httpz.Request, res: *httpz.Response, name:
         from_saved = true;
         if (L.outline) |o| {
             placement.board_rect = .{ .minx = o.x, .miny = o.y, .w = o.w, .h = o.h };
-            placement.board_poly = o.poly orelse o.pts;
-            placement.board_arcs = o.arcs;
+            placement.board_poly = o.derived.poly orelse o.pts;
+            placement.board_arcs = o.derived.arcs;
         }
         applyFabricationLayerOverrides(req.arena, &placement, L.fabrication_layers);
         if (L.routes) |sr| {
@@ -4987,6 +4996,13 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
     // Score the hand layout with the optimizer's own objective (comparable to
     // the auto baseline); the same pass hands back the block's layer rules.
     const checked = try scoreSavedLayout(ctx, req, name, sub, parts);
+    const outline_value = root.object.get("outline");
+    const saved_outline = parseSavedOutline(req.arena, outline_value);
+    if (outline_value) |value| if (value == .object and value.object.get("sketch") != null and saved_outline == null) {
+        res.status = 400;
+        res.body = "invalid board outline sketch — repair its open, crossing, or malformed geometry";
+        return;
+    };
 
     var entry = SavedLayout{
         .name = nm,
@@ -4995,7 +5011,7 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
         .score = checked.score,
         .parts = parts,
         .routes = parseSavedRoutes(req.arena, root.object.get("routes")),
-        .outline = parseSavedOutline(req.arena, root.object.get("outline")),
+        .outline = saved_outline,
         .fabrication_layers = parseSavedFabricationLayers(req.arena, root.object.get("fabrication_layers")),
         .heatsink = parseSavedHeatsink(root.object.get("heatsink")),
         .texts = parseSavedTexts(req.arena, root.object.get("texts")),
@@ -6061,6 +6077,10 @@ fn writeSavedOutlineJson(w: *std.Io.Writer, o: SavedOutline) std.Io.Writer.Error
         }
         try w.writeAll("]");
     }
+    if (o.sketch) |sketch| {
+        try w.writeAll(",\"sketch\":");
+        try outline_sketch_json.write(w, sketch);
+    }
     try w.writeAll("}");
 }
 
@@ -6632,7 +6652,7 @@ fn shownTexts(layouts: []const SavedLayout, shown: ?[]const u8) []const font5x7.
 /// `placeFromPoses` with `drawnSource(o)` — used on the `solve` paths,
 /// which have no pose seed.
 fn applyOutline(placement: *optimizer.Placement, o: SavedOutline) void {
-    placement_outline.apply(placement, .{ .minx = o.x, .miny = o.y, .w = o.w, .h = o.h }, o.poly orelse o.pts, o.arcs);
+    placement_outline.apply(placement, .{ .minx = o.x, .miny = o.y, .w = o.w, .h = o.h }, o.derived.poly orelse o.pts, o.derived.arcs);
     placement.minx = @min(placement.minx, o.x);
     placement.miny = @min(placement.miny, o.y);
     placement.maxx = @max(placement.maxx, o.x + o.w);
@@ -6686,8 +6706,8 @@ fn blessedOutline(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
 fn drawnSource(o: SavedOutline) optimizer.OutlineSource {
     return .{ .drawn = .{
         .rect = .{ .minx = o.x, .miny = o.y, .w = o.w, .h = o.h },
-        .poly = o.poly orelse o.pts,
-        .arcs = o.arcs,
+        .poly = o.derived.poly orelse o.pts,
+        .arcs = o.derived.arcs,
     } };
 }
 
@@ -8125,7 +8145,7 @@ const tip_poly = "Polygon board outline (L/T shapes, cutout-free " ++
     board_layers.edge_cuts ++ " traces.";
 const tip_dxf = "Import a DXF file as the board outline (picks the same saved override the " ++
     "▭/⬡ tools draw): reads closed LWPOLYLINE/POLYLINE loops, chains LINE/ARC segments, honours the file's $INSUNITS " ++
-    "(mm/inch selectable in the dialog), and tessellates arcs to fine chords. The chosen loop becomes the exact board " ++
+    "(mm/inch selectable in the dialog), and preserves arcs as editable sketch curves. The chosen loop becomes the exact board " ++
     "edge the renderers draw, the board-edge DRC measures, and the " ++
     board_layers.edge_cuts ++ " Gerber traces. Saved with the layout (Save/Update).";
 const tip_pour_zone = "Custom copper pour (Z): click to place polygon " ++
@@ -14555,7 +14575,10 @@ test "the route panel is one whole-board action with replay" {
         .thermal_overlay = false,
         .embed = false,
     });
-    try std.testing.expect(std.mem.indexOf(u8, scripts.written(), "pcb_replay.js") != null);
+    const script_html = scripts.written();
+    try std.testing.expect(std.mem.indexOf(u8, script_html, "pcb_replay.js") != null);
+    try std.testing.expect((std.mem.indexOf(u8, script_html, "pcb_outline_sketch.js") orelse return error.TestUnexpectedResult) <
+        (std.mem.indexOf(u8, script_html, "pcb_board.js") orelse return error.TestUnexpectedResult));
     try std.testing.expect(std.mem.indexOf(u8, scripts.written(), "pcb_route_session.js") == null);
 }
 
@@ -15018,7 +15041,7 @@ test "layouts sidecar round-trips a drawn outline" {
     try std.testing.expectEqual(@as(f64, -5), o.x);
     try std.testing.expectEqual(@as(f64, 50), o.w);
     try std.testing.expectEqual(@as(f64, 40), o.h);
-    try std.testing.expectEqual(@as(usize, 4), o.arcs.len);
+    try std.testing.expectEqual(@as(usize, 4), o.derived.arcs.len);
     try std.testing.expectEqual(@as(f64, 2), o.radii.?[0]);
     // A degenerate outline (zero size) never round-trips into existence.
     try std.testing.expect(parseSavedOutline(alloc, null) == null);

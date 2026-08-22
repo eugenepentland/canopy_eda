@@ -10,6 +10,8 @@ const numeric = @import("../numeric.zig");
 const font5x7 = @import("../font5x7.zig");
 const optimizer = @import("../placement/optimizer.zig");
 const outline_mod = @import("../placement/outline.zig");
+const outline_sketch = @import("../outline_sketch.zig");
+const outline_sketch_json = @import("outline_sketch_json.zig");
 const page = @import("pcb_layout_page.zig");
 const env_mod = @import("../eval/env.zig");
 const SavedRfPath = @typeInfo(@FieldType(page.SavedRoutes, "rf_paths")).pointer.child;
@@ -213,6 +215,18 @@ pub fn layerIndexFromJson(v: ?std.json.Value) u8 {
 pub fn parseSavedOutline(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.SavedOutline {
     const obj = v orelse return null;
     if (obj != .object) return null;
+    if (outline_sketch_json.parse(alloc, obj.object.get("sketch"))) |sketch| {
+        const compiled = outline_sketch.compile(alloc, sketch, outline_sketch.default_sagitta_mm) catch return null;
+        return .{
+            .x = compiled.rect.minx,
+            .y = compiled.rect.miny,
+            .w = compiled.rect.w,
+            .h = compiled.rect.h,
+            .pts = compiled.pts,
+            .derived = .{ .poly = compiled.poly, .arcs = compiled.arcs },
+            .sketch = sketch,
+        };
+    }
     if (parseOutlinePts(alloc, obj.object.get("pts"))) |pts| {
         const radii = parseOutlineRadii(alloc, obj.object.get("radii"), pts.len);
         const fillet = if (radii) |rs| outline_mod.filletPath(alloc, pts, rs, 0.01) catch null else null;
@@ -225,8 +239,7 @@ pub fn parseSavedOutline(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Sav
             .h = bb.h,
             .pts = pts,
             .radii = radii,
-            .poly = poly,
-            .arcs = if (fillet) |f| f.arcs else &.{},
+            .derived = .{ .poly = poly, .arcs = if (fillet) |f| f.arcs else &.{} },
         };
         alloc.free(pts);
     }
@@ -238,6 +251,27 @@ pub fn parseSavedOutline(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Sav
     };
     if (!(o.w > 0) or !(o.h > 0)) return null;
     return o;
+}
+
+test "saved outline prefers the versioned sketch and compiles its native arcs" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const source =
+        "{\"x\":99,\"y\":99,\"w\":1,\"h\":1,\"sketch\":{" ++
+        "\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":10,\"y\":0}," ++
+        "{\"id\":3,\"x\":10,\"y\":10},{\"id\":4,\"x\":0,\"y\":10}]," ++
+        "\"curves\":[{\"id\":11,\"kind\":\"arc\",\"a\":1,\"b\":2,\"mid\":[5,-2]}," ++
+        "{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4}," ++
+        "{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}],\"constraints\":[]}}";
+    var tree = try std.json.parseFromSlice(std.json.Value, alloc, source, .{});
+    defer tree.deinit();
+    const got = parseSavedOutline(alloc, tree.value) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(got.sketch != null);
+    try std.testing.expectEqual(@as(usize, 1), got.derived.arcs.len);
+    try std.testing.expect(got.derived.poly.?.len > got.pts.?.len);
+    try std.testing.expectEqual(@as(f64, 10), got.w);
+    try std.testing.expect(got.y < 0);
 }
 
 /// Parse visually edited backing polygons from a saved layout. Invalid
