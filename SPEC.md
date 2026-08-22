@@ -3447,12 +3447,14 @@ leaves no stub for the walk to charge at all.
 - a decoupling loop's power leg bonds the cap's rail land to the hub pad it decouples
 - a loop's ground leg bonds on the ground net by the same rule, so no plane kind is a special case
 - a leg whose pads are not both terminals of the net being stitched is no bond, so a rail's pass never draws a ground leg
-- a leg whose pads are further apart than via_share_max_mm is no bond, so no run is drawn that one via could not serve
+- a lone leg whose pads are farther apart than via_share_max_mm is no bond, so no run is drawn that one via could not serve
+- a same-target capacitor bank extends a far exact-target leg through bounded local cap-to-cap hops while the path-length gate still places another via when needed
 - the bonded cap land is offered a via before any other pad, so the shared barrel lands beside the cap
 - a pad whose surface copper reaches a same-net via within via_share_max_mm needs no via of its own
 - a pad further along the copper than via_share_max_mm keeps its own via
 - a net with no drawn copper shares nothing, so every pad of it is stitched exactly as before
 - a bond carries the pair's span, so the share walk charges a run the same length the gate admitted it on
+- final fill-blind copper cleanup preserves exact-target bypass surface paths even when a rail plane makes their trace sections connectivity-redundant
 - a plane-carried net draws its bound cap's surface run to the hub pad before it stitches, and one via then serves both pads
 - a diagonal bound decoupling leg that the compact land hookup declines falls back to the continuous direct search instead of becoming two unrelated plane drops
 - the shared via of a DRAWN bond stands on the bypass cap's own land centre, so no copper is spent reaching the drop
@@ -5526,7 +5528,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - When two local candidates collide, the earlier DRC-clean net remains frozen and only the later candidate is deferred to the global route
 - Accepted local plane drops are immutable same-net sources in the single global pass, so the global plane phase does not duplicate their barrels
 - Route responses report attempted, completed, and timed-out local sub-circuits, deferred supply nets, and accepted carrier drops while the compatibility fallback flag remains false
-- Carrier-backed ground, power, and input-rail terminals receive independent local drops; without a declared plane or retained pour, a supply net routes its passive-to-IC island locally and leaves its board-spanning remainder for the global route
+- Carrier-backed ground, power, and input-rail terminals receive independent local drops except that an authored exact-target bypass bank keeps its bounded cap-to-pin surface bonds; without a declared plane or retained pour, a supply net routes its passive-to-IC island locally and leaves its board-spanning remainder for the global route
 - A hard route deadline gives all one-shot local sub-circuit attempts at most one quarter of the initially remaining time and preserves the original absolute deadline for the global phase
 - get_schematic_image is a registered read-only CLI tool
 - get_pcb_layout_image renders the heat-zone image when thermal is set, and a different picture for each cooling scenario

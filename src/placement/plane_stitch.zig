@@ -25,8 +25,9 @@
 //!      THIS net that belong together: the power leg on the rail, the ground
 //!      leg on ground. The same question asked twice, so no plane kind is a
 //!      special case.
-//!      A pair further apart than `via_share_max_mm` is not local and is no
-//!      bond at all.
+//!      A pair further apart than `via_share_max_mm` is not a direct bond. In a
+//!      same-target capacitor bank, it may instead join a nearer already-bound
+//!      cap by a local hop; a lone far cap remains independent.
 //!   2. The caller draws each bond with the ordinary short-hookup machinery
 //!      (`net_topology.padJoin` — a land-to-land run when the pair can take
 //!      one, the outward-axis escape join otherwise), through the same
@@ -242,6 +243,8 @@ fn shortName(s: []const u8) []const u8 {
 /// realizing it (see `via_share_max_mm`).
 pub const Bond = struct { cap: usize, hub: usize, mm: f64 };
 
+const Candidate = struct { cap: usize, hub: usize, mm: f64 };
+
 /// The bonded pad pairs of one plane-carried net: for every decoupling loop,
 /// its power leg (cap's rail pad ↔ the hub pad it decouples) and its ground leg
 /// (cap's ground pad ↔ the hub ground pad the return targets). A leg lands here
@@ -249,16 +252,18 @@ pub const Bond = struct { cap: usize, hub: usize, mm: f64 };
 /// rail's pass sees the power legs, ground's pass sees the ground legs, and no
 /// caller has to know which is which.
 ///
-/// A pair is LOCAL by `via_share_max_mm` — further apart than that it is no
-/// bond at all, so this never draws a run one via could not serve. A pair
-/// already present (two loops naming the same two pads) is returned once:
-/// drawing one bond twice would stack duplicate copper.
+/// A pair is LOCAL by `via_share_max_mm`. A cap within that distance of its hub
+/// bonds directly. A farther cap in a bank may bond to a nearer cap already
+/// connected to the SAME target pad, provided that cap-to-cap hop is local;
+/// this forms the ordinary pin -> smallest cap -> larger caps surface chain.
+/// The web's separate path-length gate still decides where another via is
+/// needed, so a chain can never share one barrel beyond the same bound.
 pub fn bonds(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     pts: []const pad_exit.NetPt,
 ) std.mem.Allocator.Error![]const Bond {
-    var out: std.ArrayList(Bond) = .empty;
+    var candidates: std.ArrayList(Candidate) = .empty;
     for (placement.loops) |loop| {
         if (loop.cap >= placement.parts.len or loop.hub >= placement.parts.len) continue;
         const cap = placement.parts[loop.cap];
@@ -270,25 +275,60 @@ pub fn bonds(
         for (legs) |leg| {
             const a = terminalAt(pts, cap, leg[0]) orelse continue;
             const b = terminalAt(pts, hub, leg[1]) orelse continue;
-            if (a == b or pts[a].layer != pts[b].layer) continue;
-            // Local only: a pair one barrel could not serve anyway is left to
-            // the two independent stitch vias the plane always gave it.
-            const span = std.math.hypot(pts[b].x - pts[a].x, pts[b].y - pts[a].y);
-            if (span > via_share_max_mm) continue;
-            if (known(out.items, a, b)) continue;
-            try out.append(arena, .{ .cap = a, .hub = b, .mm = span });
+            if (a == b or pts[a].layer != pts[b].layer or candidateKnown(candidates.items, a, b)) continue;
+            try candidates.append(arena, .{
+                .cap = a,
+                .hub = b,
+                .mm = std.math.hypot(pts[b].x - pts[a].x, pts[b].y - pts[a].y),
+            });
+        }
+    }
+
+    var out: std.ArrayList(Bond) = .empty;
+    const parent = try arena.alloc(usize, pts.len);
+    for (parent, 0..) |*slot, i| slot.* = i;
+    for (candidates.items) |candidate| {
+        if (candidate.mm > via_share_max_mm) continue;
+        try out.append(arena, .{ .cap = candidate.cap, .hub = candidate.hub, .mm = candidate.mm });
+        unite(parent, candidate.cap, candidate.hub);
+    }
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (candidates.items) |candidate| {
+            if (root(parent, candidate.cap) == root(parent, candidate.hub)) continue;
+            var best: ?Candidate = null;
+            for (candidates.items) |anchor| {
+                if (anchor.cap == candidate.cap or anchor.hub != candidate.hub) continue;
+                if (root(parent, anchor.cap) != root(parent, candidate.hub)) continue;
+                const mm = std.math.hypot(pts[anchor.cap].x - pts[candidate.cap].x, pts[anchor.cap].y - pts[candidate.cap].y);
+                if (mm > via_share_max_mm or (best != null and mm >= best.?.mm)) continue;
+                best = .{ .cap = candidate.cap, .hub = anchor.cap, .mm = mm };
+            }
+            const hop = best orelse continue;
+            try out.append(arena, .{ .cap = hop.cap, .hub = hop.hub, .mm = hop.mm });
+            unite(parent, hop.cap, hop.hub);
+            changed = true;
         }
     }
     return out.items;
 }
 
-/// Is this pad pair already bonded, in either order?
-fn known(list: []const Bond, a: usize, b: usize) bool {
-    for (list) |bond| {
-        if (bond.cap == a and bond.hub == b) return true;
-        if (bond.cap == b and bond.hub == a) return true;
-    }
+fn candidateKnown(list: []const Candidate, a: usize, b: usize) bool {
+    for (list) |candidate| if (candidate.cap == a and candidate.hub == b) return true;
     return false;
+}
+
+fn root(parent: []const usize, start: usize) usize {
+    var at = start;
+    while (parent[at] != at) at = parent[at];
+    return at;
+}
+
+fn unite(parent: []usize, a: usize, b: usize) void {
+    const ar = root(parent, a);
+    const br = root(parent, b);
+    if (ar != br) parent[@max(ar, br)] = @min(ar, br);
 }
 
 /// The terminal index of part `p`'s pad `rect`, or null when this net has no
@@ -535,7 +575,7 @@ test "the ground leg of a loop is a bond on the ground net" {
     try testing.expectEqualStrings("U1", pts[bs[0].hub].ref_des);
 }
 
-// spec: placement/plane-stitch - a leg whose pads are further apart than via_share_max_mm is no bond, so no run is drawn that one via could not serve
+// spec: placement/plane-stitch - a lone leg whose pads are farther apart than via_share_max_mm is no bond, so no run is drawn that one via could not serve
 test "a leg longer than the share distance is not a bond" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();

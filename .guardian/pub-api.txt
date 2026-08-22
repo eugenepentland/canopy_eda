@@ -1348,6 +1348,7 @@ src/placement/blocker_nomination.zig::ranked | fn ranked(self: Table, alloc: std
 src/placement/blocker_nomination.zig::sweepHops | fn sweepHops(t: *Table, alloc: std.mem.Allocator, s: Sweep) std.mem.Allocator.Error!void
 src/placement/blocker_nomination.zig::trackGap | fn trackGap(hops: []const Hop, c: router.Track) f64
 src/placement/blocker_nomination.zig::viaGap | fn viaGap(hops: []const Hop, v: router.Via) f64
+src/placement/bypass_intent.zig::exactNet | fn exactNet(placement: optimizer.Placement, net_i: usize) bool
 src/placement/bypass_open.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, tracks: []const router.Track, ) std.mem.Allocator.Error![]drc.Violation
 src/placement/cap_bind.zig::CapBinds struct_
 src/placement/cap_bind.zig::CapTarget struct_

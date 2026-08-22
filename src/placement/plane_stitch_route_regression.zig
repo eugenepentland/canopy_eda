@@ -8,6 +8,7 @@ const optimizer = @import("optimizer.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 const geometry = @import("geometry.zig");
 const route_policy = @import("route_policy.zig");
+const bypass_open = @import("bypass_open.zig");
 
 const testing = std.testing;
 
@@ -214,6 +215,125 @@ test "an angled bound bypass pair stays one surface-connected stitch island" {
     // The net-open connectivity model must see the hub pad and cap land on one
     // surface island; a trace merely drawn toward an independent via fails.
     try testing.expect(try angledPadsConnected(arena, routed));
+}
+
+// spec: placement/plane-stitch - final fill-blind copper cleanup preserves exact-target bypass surface paths even when a rail plane makes their trace sections connectivity-redundant
+// spec: placement/plane-stitch - a same-target capacitor bank extends a far exact-target leg through bounded local cap-to-cap hops while the path-length gate still places another via when needed
+test "two three-cap bypass banks remain surface-connected to their exact IC pins" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const qfn_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -1.55, .y = -0.75, .w = 0.70, .h = 0.30 },
+        .{ .number = "2", .x = -1.55, .y = -0.25, .w = 0.70, .h = 0.30 },
+        .{ .number = "3", .x = -1.55, .y = 0.25, .w = 0.70, .h = 0.30 },
+        .{ .number = "4", .x = -1.55, .y = 0.75, .w = 0.70, .h = 0.30 },
+        .{ .number = "5", .x = -0.75, .y = 1.55, .w = 0.30, .h = 0.70 },
+        .{ .number = "6", .x = -0.25, .y = 1.55, .w = 0.30, .h = 0.70 },
+        .{ .number = "7", .x = 0.25, .y = 1.55, .w = 0.30, .h = 0.70 },
+        .{ .number = "8", .x = 0.75, .y = 1.55, .w = 0.30, .h = 0.70 },
+        .{ .number = "9", .x = 1.55, .y = 0.75, .w = 0.70, .h = 0.30 },
+        .{ .number = "10", .x = 1.55, .y = 0.25, .w = 0.70, .h = 0.30 },
+        .{ .number = "11", .x = 1.55, .y = -0.25, .w = 0.70, .h = 0.30 },
+        .{ .number = "12", .x = 1.55, .y = -0.75, .w = 0.70, .h = 0.30 },
+        .{ .number = "13", .x = 0.75, .y = -1.55, .w = 0.30, .h = 0.70 },
+        .{ .number = "14", .x = 0.25, .y = -1.55, .w = 0.30, .h = 0.70 },
+        .{ .number = "15", .x = -0.25, .y = -1.55, .w = 0.30, .h = 0.70 },
+        .{ .number = "16", .x = -0.75, .y = -1.55, .w = 0.30, .h = 0.70 },
+        .{ .number = "17", .x = 0, .y = 0, .w = 1.95, .h = 1.95 },
+    };
+    const real_0402_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -0.48, .y = 0, .w = 0.56, .h = 0.62, .shape = "roundrect" },
+        .{ .number = "2", .x = 0.48, .y = 0, .w = 0.56, .h = 0.62, .shape = "roundrect" },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2.125, .hh = 2.125, .pads = &qfn_pads, .fallback = false },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.85, .hh = 0.35, .pads = &real_0402_pads, .fallback = false, .x = -0.70, .y = -2.80, .rot = 180 },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.85, .hh = 0.35, .pads = &real_0402_pads, .fallback = false, .x = -0.70, .y = -3.80, .rot = 180 },
+        .{ .ref_des = "C3", .kind = .passive, .hw = 0.85, .hh = 0.35, .pads = &real_0402_pads, .fallback = false, .x = -0.70, .y = -4.80, .rot = 180 },
+        .{ .ref_des = "C4", .kind = .passive, .hw = 0.85, .hh = 0.35, .pads = &real_0402_pads, .fallback = false, .x = 1.30, .y = -2.80 },
+        .{ .ref_des = "C5", .kind = .passive, .hw = 0.85, .hh = 0.35, .pads = &real_0402_pads, .fallback = false, .x = 1.30, .y = -3.80 },
+        .{ .ref_des = "C6", .kind = .passive, .hw = 0.85, .hh = 0.35, .pads = &real_0402_pads, .fallback = false, .x = 1.30, .y = -4.80 },
+    };
+    const rail_pins_bank = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "U1", .pin = "15" },
+        .{ .ref_des = "C1", .pin = "1" },
+        .{ .ref_des = "C2", .pin = "1" },
+        .{ .ref_des = "C3", .pin = "1" },
+        .{ .ref_des = "U1", .pin = "13" },
+        .{ .ref_des = "C4", .pin = "1" },
+        .{ .ref_des = "C5", .pin = "1" },
+        .{ .ref_des = "C6", .pin = "1" },
+    };
+    const ground_pins_bank = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "U1", .pin = "14" },
+        .{ .ref_des = "U1", .pin = "16" },
+        .{ .ref_des = "U1", .pin = "17" },
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "U1", .pin = "2" },
+        .{ .ref_des = "U1", .pin = "4" },
+        .{ .ref_des = "U1", .pin = "5" },
+        .{ .ref_des = "U1", .pin = "6" },
+        .{ .ref_des = "U1", .pin = "7" },
+        .{ .ref_des = "U1", .pin = "8" },
+        .{ .ref_des = "U1", .pin = "9" },
+        .{ .ref_des = "U1", .pin = "11" },
+        .{ .ref_des = "U1", .pin = "12" },
+        .{ .ref_des = "C1", .pin = "2" },
+        .{ .ref_des = "C2", .pin = "2" },
+        .{ .ref_des = "C3", .pin = "2" },
+        .{ .ref_des = "C4", .pin = "2" },
+        .{ .ref_des = "C5", .pin = "2" },
+        .{ .ref_des = "C6", .pin = "2" },
+    };
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &ground_pins_bank },
+        .{ .name = "VCC", .pins = &rail_pins_bank },
+    };
+    const cap_power = optimizer.PadRect{ .x = -0.48, .y = 0, .w = 0.56, .h = 0.62 };
+    const cap_ground = optimizer.PadRect{ .x = 0.48, .y = 0, .w = 0.56, .h = 0.62 };
+    const pin_15 = optimizer.PadRect{ .x = -0.25, .y = -1.55, .w = 0.30, .h = 0.70 };
+    const pin_16 = optimizer.PadRect{ .x = -0.75, .y = -1.55, .w = 0.30, .h = 0.70 };
+    const pin_13 = optimizer.PadRect{ .x = 0.75, .y = -1.55, .w = 0.30, .h = 0.70 };
+    const pin_14 = optimizer.PadRect{ .x = 0.25, .y = -1.55, .w = 0.30, .h = 0.70 };
+    const loops = [_]optimizer.Loop{
+        .{ .cap = 1, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_15, .hub_gnd = &.{}, .hub_gnd_pin = pin_16, .pwr_net = 1, .explicit_pin = "15" },
+        .{ .cap = 2, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_15, .hub_gnd = &.{}, .hub_gnd_pin = pin_16, .pwr_net = 1, .explicit_pin = "15" },
+        .{ .cap = 3, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_15, .hub_gnd = &.{}, .hub_gnd_pin = pin_16, .pwr_net = 1, .explicit_pin = "15" },
+        .{ .cap = 4, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_13, .hub_gnd = &.{}, .hub_gnd_pin = pin_14, .pwr_net = 1, .explicit_pin = "13" },
+        .{ .cap = 5, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_13, .hub_gnd = &.{}, .hub_gnd_pin = pin_14, .pwr_net = 1, .explicit_pin = "13" },
+        .{ .cap = 6, .hub = 0, .cap_pwr = cap_power, .cap_gnd = cap_ground, .hub_pwr = &.{}, .hub_pwr_pin = pin_13, .hub_gnd = &.{}, .hub_gnd_pin = pin_14, .pwr_net = 1, .explicit_pin = "13" },
+    };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &loops,
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2.125,
+        .miny = -5.15,
+        .maxx = 2.125,
+        .maxy = 2.125,
+        .generated = true,
+        .rules = .{ .planes = .{ .implicit_rail = "VCC" } },
+        .board_rect = .{ .minx = -2.3, .miny = -5.3, .w = 4.6, .h = 7.6 },
+    };
+    const selected = [_]bool{ false, true };
+    const routed = try router.routeWithOptions(arena, placement, .{
+        .track_width = 0.127,
+        .clearance = 0.127,
+        .via_dia = 0.4,
+        .via_drill = 0.2,
+    }, .{ .selected_nets = &selected });
+    const opens = try bypass_open.check(arena, placement, routed.tracks);
+    try testing.expectEqual(@as(usize, 0), opens.len);
+    // The isolated router keeps four candidate stitches; the shared outer
+    // topology prune proves and removes the two redundant ones before a routed
+    // board is returned.
+    try testing.expectEqual(@as(usize, 4), viasOn(routed.vias, 1));
 }
 
 // spec: placement/router - signal nets in an explicit authored route wave claim their copper before plane stitching, while the rest wave still follows the plane pass

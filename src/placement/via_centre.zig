@@ -88,6 +88,7 @@
 //! net outside a scoped route's selection (that copper is the caller's).
 
 const std = @import("std");
+const bypass_intent = @import("bypass_intent.zig");
 const bend_smooth = @import("bend_smooth.zig");
 const diff_pairs = @import("diff_pairs.zig");
 const land_transit = @import("land_transit.zig");
@@ -276,6 +277,7 @@ fn mayCentre(placement: optimizer.Placement, selected: []const bool, net: i32) b
     for (placement.diff_pairs) |dp| {
         if (dp.p == ni or dp.n == ni) return false;
     }
+    if (bypass_intent.exactNet(placement, ni)) return false;
     if (ni < placement.rules.net.len and placement.rules.net[ni].rf.escape_mm > 0) return false;
     return true;
 }
@@ -720,4 +722,17 @@ test "diff-pair legs, escape-ruled and out-of-scope nets are left alone" {
     // caller's retained copper echoed back unchanged.
     const scope = [_]bool{ false, false, false, false };
     try testing.expect(!mayCentre(placement, &scope, 3));
+
+    const loops = [_]optimizer.Loop{.{
+        .cap = 0,
+        .hub = 0,
+        .cap_pwr = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .cap_gnd = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .hub_pwr = &.{},
+        .hub_gnd = &.{},
+        .pwr_net = 3,
+        .explicit_pin = "15",
+    }};
+    placement.loops = &loops;
+    try testing.expect(!mayCentre(placement, &.{}, 3));
 }

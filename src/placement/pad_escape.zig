@@ -128,6 +128,7 @@
 //!     runs inside the router's finish, so it governs GENERATED copper only.
 
 const std = @import("std");
+const bypass_intent = @import("bypass_intent.zig");
 const bend_smooth = @import("bend_smooth.zig");
 const land_transit = @import("land_transit.zig");
 const diff_pairs = @import("diff_pairs.zig");
@@ -1064,7 +1065,7 @@ pub fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void {
     }
     for (0..placement.nets.len) |net_i| {
         if (!netSelected(ctx.selected_nets, net_i)) continue;
-        if (escapeRuled(placement, net_i) or inDiffPair(placement, net_i)) continue;
+        if (escapeRuled(placement, net_i) or bypass_intent.exactNet(placement, net_i) or inDiffPair(placement, net_i)) continue;
         const ni: i32 = @intCast(net_i);
         router.setNetParams(ctx, placement, net_i);
         router.rebuildCopperIndex(ctx, board.tracks.items, board.vias.items);

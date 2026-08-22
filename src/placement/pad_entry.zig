@@ -43,6 +43,7 @@
 //! alone would decouple the pair).
 
 const std = @import("std");
+const bypass_intent = @import("bypass_intent.zig");
 const router = @import("router.zig");
 const bend_smooth = @import("bend_smooth.zig");
 const optimizer = @import("optimizer.zig");
@@ -348,10 +349,12 @@ fn netPads(
 }
 
 /// Nets this pass never touches: an escape-ruled `(max-freq …)` net (its
-/// straight reserve is measured from the pad anchor) and either leg of a
-/// diff pair (trimming one leg alone would decouple the pair).
+/// straight reserve is measured from the pad anchor), an exact-target bypass
+/// rail (its surface topology is an authored requirement), and either leg of
+/// a diff pair (trimming one leg alone would decouple the pair).
 fn skipNet(placement: optimizer.Placement, net_i: usize) bool {
     if (net_i < placement.rules.net.len and placement.rules.net[net_i].rf.escape_mm > 0) return true;
+    if (bypass_intent.exactNet(placement, net_i)) return true;
     for (placement.diff_pairs) |dp| {
         if (dp.p == net_i or dp.n == net_i) return true;
     }

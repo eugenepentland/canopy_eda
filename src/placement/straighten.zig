@@ -60,6 +60,7 @@
 //! a nearly-done board.
 
 const std = @import("std");
+const bypass_intent = @import("bypass_intent.zig");
 const router = @import("router.zig");
 const bend_smooth = @import("bend_smooth.zig");
 const octilinear = @import("octilinear.zig");
@@ -785,6 +786,10 @@ pub fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void {
         // (`stampExistingCopper`), which must echo back unchanged — never
         // straightened into a different board than the caller submitted.
         if (!netSelected(ctx.selected_nets, net_i)) continue;
+        // The plane stitcher already drew this authored cap-to-pin requirement
+        // as clean octilinear copper. Tautening the whole plane-carried net can
+        // shorten that small graph past the exact IC land.
+        if (bypass_intent.exactNet(placement, net_i)) continue;
         const ni: i32 = @intCast(net_i);
         router.setNetParams(ctx, placement, net_i); // the probe reads this net's width/clearance
         // `route_cleanup.removeNetTracks` below SHIFTS the track list indexes

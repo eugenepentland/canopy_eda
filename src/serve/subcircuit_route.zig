@@ -434,10 +434,11 @@ fn livePourAt(zones: []const route_policy.ExistingZone, net: i32, layer: u8, x: 
     return false;
 }
 
-/// Supply terminals are independent carrier requests. Declared planes use the
-/// ordinary plane pass with local loop bonds removed (which retains exposed-pad
-/// arrays); one-pad plane nets and pour-backed pads use the public stitch hop.
-/// Neither path can create a pad-to-pad power trace.
+/// Supply terminals are carrier requests. Declared planes use the ordinary
+/// plane pass, including its bounded exact-target bypass bonds; one-pad plane
+/// nets and pour-backed pads use the public stitch hop. Generic supply pads
+/// remain independent, while an authored `(decouples ... PIN)` keeps the local
+/// cap-to-pin surface path that `bypass_open` requires.
 const DropContext = struct {
     alloc: std.mem.Allocator,
     local: optimizer.Placement,
@@ -481,7 +482,6 @@ fn carrierDrops(ctx: DropContext, selected: []const bool) std.mem.Allocator.Erro
         const smd_pins = try surfacePins(alloc, net, pts);
         if (router.netHasPlane(local_in, net.name) and smd_pins.len >= 2) {
             var local = local_in;
-            local.loops = &.{};
             const local_nets = try alloc.dupe(optimizer.FlatNet, local.nets);
             local_nets[ni].pins = smd_pins;
             local.nets = local_nets;
@@ -868,7 +868,7 @@ fn expectSeedTracks(tracks: []const SeedTrack, net: usize, max_x: ?f64) !void {
     }
 }
 
-// spec: Web Server - Carrier-backed ground, power, and input-rail terminals receive independent local drops; without a declared plane or retained pour, a supply net routes its passive-to-IC island locally and leaves its board-spanning remainder for the global route
+// spec: Web Server - Carrier-backed ground, power, and input-rail terminals receive independent local drops except that an authored exact-target bypass bank keeps its bounded cap-to-pin surface bonds; without a declared plane or retained pour, a supply net routes its passive-to-IC island locally and leaves its board-spanning remainder for the global route
 test "supply nets drop to a plane and uncarried supply routes its local passive bond" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -919,9 +919,8 @@ test "supply nets drop to a plane and uncarried supply routes its local passive 
     try testing.expect(planed.vias.len >= 1);
     try testing.expect(planed.complete_planes[0]);
     try testing.expectEqual(@as(usize, 0), planed.phase.deferred_supply_nets);
-    for (planed.tracks) |track| {
-        try testing.expect(std.math.hypot(track.copper.x2 - track.copper.x1, track.copper.y2 - track.copper.y1) < 2.0);
-    }
+    try testing.expect(planed.tracks.len > 0);
+    try expectSeedTracks(planed.tracks, 0, 3.5);
 
     const thru_pads = [_]Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.7, .h = 0.7, .thru = true, .drill = 0.3 }};
     parts[0].pads = &thru_pads;

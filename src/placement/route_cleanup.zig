@@ -31,6 +31,7 @@
 //! unannounced.
 
 const std = @import("std");
+const bypass_intent = @import("bypass_intent.zig");
 const router = @import("router.zig");
 const optimizer = @import("optimizer.zig");
 const pad_shape = @import("pad_shape.zig");
@@ -1007,6 +1008,30 @@ fn dropRedundantSections(
     return removed;
 }
 
+/// Scope for the fill-blind section-deletion pass. An authored per-pin bypass
+/// binding makes its rail's surface path functional copper, even when a plane
+/// leaves every pad in the same ordinary connectivity component. The full DRC
+/// calls that missing path `bypass_open`; this lower hot seam cannot run that
+/// graph after every tentative deletion, so it conservatively leaves section
+/// deletion off for the few nets carrying exact-target bypass intent. Leaf and
+/// one-layer-via pruning still run on them below.
+fn redundantSectionScope(board: Board) std.mem.Allocator.Error![]const bool {
+    var has_exact = false;
+    for (0..board.placement.nets.len) |net_i| {
+        if (!board.enabled(net_i) or !bypass_intent.exactNet(board.placement, net_i)) continue;
+        has_exact = true;
+        break;
+    }
+    if (!has_exact) return board.ctx.selected_nets;
+
+    const scope = try board.ctx.arena.alloc(bool, board.placement.nets.len);
+    for (scope, 0..) |*enabled, net_i| enabled.* = board.enabled(net_i);
+    for (scope, 0..) |*enabled, net_i| {
+        if (bypass_intent.exactNet(board.placement, net_i)) enabled.* = false;
+    }
+    return scope;
+}
+
 /// Remove topology artifacts to a fixed point. A leaf trace is dropped first;
 /// that may expose the preceding segment or leave a via used on only one layer,
 /// so track and via pruning alternate until neither list changes. Retained nets
@@ -1059,6 +1084,7 @@ pub fn pruneDanglingCopper(board: Board) std.mem.Allocator.Error!void {
 /// `liveSupportVias` for what crediting outlines here cost when it was tried.
 pub fn pruneDeadCopper(board: Board) std.mem.Allocator.Error!void {
     try pruneDanglingCopper(board);
+    const section_scope = try redundantSectionScope(board);
     const limit = board.tracks.items.len + 1;
     var round: usize = 0;
     while (round < limit) : (round += 1) {
@@ -1070,7 +1096,7 @@ pub fn pruneDeadCopper(board: Board) std.mem.Allocator.Error!void {
         // Pads, traces and live barrels — and no pour term at all. See
         // `liveSupportVias`: the fill this seam can see is an outline, and a
         // deletion licensed by an outline has no rollback here.
-        if (!try dropRedundantSections(board.ctx.arena, terminals, .{ .live_vias = live }, board.tracks, board.ctx.selected_nets))
+        if (!try dropRedundantSections(board.ctx.arena, terminals, .{ .live_vias = live }, board.tracks, section_scope))
             break;
         router.copperCompacted(board.ctx);
         try pruneDanglingCopper(board);
