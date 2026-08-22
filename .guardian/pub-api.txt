@@ -2549,6 +2549,7 @@ src/placement/router.zig::keepoutExtra | fn keepoutExtra(ctx: *const Ctx, obstac
 src/placement/router.zig::layer | fn layer(self: VisionMask, index: usize) []const u8
 src/placement/router.zig::layerInMask | fn layerInMask(mask: u64, layer: u8) bool
 src/placement/router.zig::legLen | fn legLen(self: *LoopRouter, cap_c: [2]f64, hub_c: [2]f64, net_id: i32) std.mem.Allocator.Error!?f64
+src/placement/router.zig::localSupplyBonds value
 src/placement/router.zig::netEnabled | fn netEnabled(ctx: *const Ctx, net_i: usize) bool
 src/placement/router.zig::netHasPlane value
 src/placement/router.zig::netLayerAuthored | fn netLayerAuthored(ctx: *const Ctx, net_i: usize) bool

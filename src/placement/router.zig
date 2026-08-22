@@ -4170,6 +4170,8 @@ fn isInductorBridge(placement: optimizer.Placement, idx_of: *std.StringHashMapUn
 
 pub const NetPt = pad_exit.NetPt;
 pub const netPoints = pad_exit.netPoints;
+/// Exact local capacitor-to-IC pad pairs from authored decoupling intent.
+pub const localSupplyBonds = plane_stitch.bonds;
 const escTerm = pad_exit.asTerm;
 
 /// World centre of `pin` on `part`, or null if the pad isn't in the footprint.

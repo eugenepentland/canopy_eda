@@ -340,6 +340,67 @@ fn appendVia(alloc: std.mem.Allocator, out: *std.ArrayList(SeedVia), via: router
     } });
 }
 
+fn hasRetainedPour(zones: []const route_policy.ExistingZone, net: usize) bool {
+    for (zones) |zone| if (zone.copper and zone.net == @as(i32, @intCast(net))) return true;
+    return false;
+}
+
+const SupplyBondContext = struct {
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    params: router.RouteParams,
+    base: route_policy.Options,
+    module: ?route_policy.Options,
+    supply: []const bool,
+    tracks: *std.ArrayList(SeedTrack),
+    vias: *std.ArrayList(SeedVia),
+    routed_nets: []bool,
+};
+
+/// An uncarried supply does not need a local high-fanout rail tree, but its
+/// authored bypass bindings are local physical intent: cap land to the exact IC
+/// supply pad named by `(decouples ...)`. Route those short pairs independently
+/// and leave the shared rail trunk for the assembled-board pass.
+fn appendUncarriedSupplyBonds(
+    ctx: SupplyBondContext,
+) std.mem.Allocator.Error!void {
+    const alloc = ctx.alloc;
+    const placement = ctx.placement;
+    var idx_of = std.StringHashMapUnmanaged(usize).empty;
+    for (placement.parts, 0..) |part, i| try idx_of.put(alloc, part.ref_des, i);
+    for (placement.nets, 0..) |net, ni| {
+        if (ni >= ctx.supply.len or !ctx.supply[ni]) continue;
+        if (!enabled(ctx.base, ni)) continue;
+        if (router.netHasPlane(placement, net.name) or hasRetainedPour(ctx.base.existing_zones, ni)) continue;
+        const pts = try router.netPoints(alloc, placement, &idx_of, net);
+        for (try router.localSupplyBonds(alloc, placement, pts)) |bond| {
+            if (stopped(ctx.base)) return;
+            const pins = try alloc.alloc(export_kicad.FlatPin, 2);
+            pins[0] = .{ .ref_des = pts[bond.cap].ref_des, .pin = pts[bond.cap].pin };
+            pins[1] = .{ .ref_des = pts[bond.hub].ref_des, .pin = pts[bond.hub].pin };
+            const pair_nets = try alloc.dupe(optimizer.FlatNet, placement.nets);
+            pair_nets[ni].pins = pins;
+            var pair = placement;
+            pair.nets = pair_nets;
+            const only = try alloc.alloc(bool, pair.nets.len);
+            @memset(only, false);
+            only[ni] = true;
+            const routed = try router.routeWithOptions(alloc, pair, ctx.params, try localOptions(alloc, ctx.base, ctx.module, only));
+            if (failed(routed, pair, ni)) continue;
+            var drew = false;
+            for (routed.tracks) |track| if (track.net == @as(i32, @intCast(ni))) {
+                try appendTrack(alloc, ctx.tracks, track);
+                drew = true;
+            };
+            for (routed.vias) |via| if (via.net == @as(i32, @intCast(ni))) {
+                try appendVia(alloc, ctx.vias, via);
+                drew = true;
+            };
+            if (drew) ctx.routed_nets[ni] = true;
+        }
+    }
+}
+
 fn polygonContains(poly: []const [2]f64, x: f64, y: f64) bool {
     if (poly.len < 3) return false;
     var inside = false;
@@ -450,11 +511,7 @@ fn carrierDrops(ctx: DropContext, selected: []const bool) std.mem.Allocator.Erro
         if (gaps.items.len == 0) continue;
         // A stitch without a retained pour assumes a plane target, so never ask
         // it for an unplaned supply net unless an actual same-net pour exists.
-        var has_pour = false;
-        for (base.existing_zones) |zone| if (zone.copper and zone.net == @as(i32, @intCast(ni))) {
-            has_pour = true;
-            break;
-        };
+        const has_pour = hasRetainedPour(base.existing_zones, ni);
         if (!router.netHasPlane(local_in, net.name) and !has_pour) continue;
         const paths = try router.closeGaps(
             alloc,
@@ -514,37 +571,50 @@ pub fn routeAllClassified(
             continue;
         };
         const selected = try selectedNets(alloc, placement, sub.name, sub_base, supply, false);
-        if (!anySelected(selected)) {
-            if (stopped(sub_base) and phase_deadline != 0) timed_out += 1 else completed += 1;
-            continue;
-        }
         const plan_view = try modulePlanPlacement(alloc, local, sub);
         const lowered = try route_plan.lower(alloc, sub.block, plan_view);
-        const routed = try route_plan.routeLowered(
-            alloc,
-            plan_view,
-            params,
-            try localOptions(alloc, sub_base, if (lowered.applied) lowered.options else null, selected),
-        );
-        if (routed.cancelled and stopped(sub_base)) {
-            timed_out += 1;
-            continue;
+        const module_options = if (lowered.applied) lowered.options else null;
+        if (anySelected(selected)) {
+            const routed = try route_plan.routeLowered(
+                alloc,
+                plan_view,
+                params,
+                try localOptions(alloc, sub_base, module_options, selected),
+            );
+            if (routed.cancelled and stopped(sub_base)) {
+                timed_out += 1;
+                continue;
+            }
+            for (routed.tracks) |track| {
+                if (track.net < 0) continue;
+                const ni: usize = @intCast(track.net);
+                if (ni >= nets.len or !selected[ni] or failed(routed, plan_view, ni)) continue;
+                nets[ni] = true;
+                try appendTrack(alloc, &tracks, track);
+            }
+            for (routed.vias) |via| {
+                if (via.net < 0) continue;
+                const ni: usize = @intCast(via.net);
+                if (ni >= nets.len or !selected[ni] or failed(routed, plan_view, ni)) continue;
+                nets[ni] = true;
+                try appendVia(alloc, &vias, via);
+            }
         }
-        for (routed.tracks) |track| {
-            if (track.net < 0) continue;
-            const ni: usize = @intCast(track.net);
-            if (ni >= nets.len or !selected[ni] or failed(routed, plan_view, ni)) continue;
-            nets[ni] = true;
-            try appendTrack(alloc, &tracks, track);
-        }
-        for (routed.vias) |via| {
-            if (via.net < 0) continue;
-            const ni: usize = @intCast(via.net);
-            if (ni >= nets.len or !selected[ni] or failed(routed, plan_view, ni)) continue;
-            nets[ni] = true;
-            try appendVia(alloc, &vias, via);
-        }
-        completed += 1;
+        try appendUncarriedSupplyBonds(.{
+            .alloc = alloc,
+            // Carrier declarations live in the assembled-board namespace;
+            // the lowered module policy is already indexed and can still be
+            // applied while routing the parent's original net names.
+            .placement = local,
+            .params = params,
+            .base = sub_base,
+            .module = module_options,
+            .supply = supply,
+            .tracks = &tracks,
+            .vias = &vias,
+            .routed_nets = nets,
+        });
+        if (stopped(sub_base) and phase_deadline != 0) timed_out += 1 else completed += 1;
     }
 
     const selected_supply = try alloc.alloc(bool, placement.nets.len);
@@ -788,8 +858,18 @@ test "local routing lowers child plan intent onto parent net indices" {
     try testing.expect(!conflict_selected[0]);
 }
 
-// spec: Web Server - Supply-like ground, power, and input-rail nets never receive local pad-to-pad traces: declared planes and live retained pours receive independent terminal drops, while uncovered terminals remain for the global route
-test "supply nets drop to a plane and unplaned supply waits for global routing" {
+fn expectSeedTracks(tracks: []const SeedTrack, net: usize, max_x: ?f64) !void {
+    for (tracks) |track| {
+        try testing.expectEqual(net, track.net);
+        if (max_x) |limit| {
+            try testing.expect(track.copper.x1 < limit);
+            try testing.expect(track.copper.x2 < limit);
+        }
+    }
+}
+
+// spec: Web Server - Carrier-backed ground, power, and input-rail terminals receive independent local drops; without a declared plane or retained pour, a supply net routes its passive-to-IC island locally and leaves its board-spanning remainder for the global route
+test "supply nets drop to a plane and uncarried supply routes its local passive bond" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
@@ -797,33 +877,46 @@ test "supply nets drop to a plane and unplaned supply waits for global routing" 
     const pads = [_]Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.7, .h = 0.7 }};
     var parts = [_]optimizer.Part{
         .{ .ref_des = "power/C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
-        .{ .ref_des = "power/U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 4, .y = 0 },
+        .{ .ref_des = "power/U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 2, .y = 0 },
+        .{ .ref_des = "power/J1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 6, .y = 0 },
     };
     const pins = [_]export_kicad.FlatPin{
         .{ .ref_des = "power/C1", .pin = "1" },
         .{ .ref_des = "power/U1", .pin = "1" },
+        .{ .ref_des = "power/J1", .pin = "1" },
     };
     const nets = [_]optimizer.FlatNet{.{ .name = "VCC", .pins = &pins }};
+    const land = optimizer.PadRect{ .x = 0, .y = 0, .w = 0.7, .h = 0.7 };
+    const loops = [_]optimizer.Loop{.{
+        .cap = 0,
+        .hub = 1,
+        .cap_pwr = land,
+        .cap_gnd = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+        .hub_pwr = &.{land},
+        .hub_pwr_pin = land,
+        .hub_gnd = &.{},
+        .pwr_net = 0,
+    }};
     var child = env.DesignBlock{ .name = "power", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{} };
     const subs = [_]env.SubBlock{.{ .name = "power", .block = &child }};
     var board = env.DesignBlock{ .name = "board", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &subs };
     var placement = optimizer.Placement{
         .parts = &parts,
         .links = &.{},
-        .loops = &.{},
+        .loops = &loops,
         .stubs = &.{},
         .instances = &.{},
         .nets = &nets,
         .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
         .minx = -1,
         .miny = -1,
-        .maxx = 5,
+        .maxx = 7,
         .maxy = 1,
         .generated = false,
         .rules = .{ .plane_nets = &.{"VCC"}, .copper_layers = 4 },
     };
     const planed = try routeAllClassified(alloc, &board, placement, .{}, .{}, &.{true});
-    try testing.expect(planed.vias.len >= 2);
+    try testing.expect(planed.vias.len >= 1);
     try testing.expect(planed.complete_planes[0]);
     try testing.expectEqual(@as(usize, 0), planed.phase.deferred_supply_nets);
     for (planed.tracks) |track| {
@@ -833,14 +926,17 @@ test "supply nets drop to a plane and unplaned supply waits for global routing" 
     const thru_pads = [_]Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.7, .h = 0.7, .thru = true, .drill = 0.3 }};
     parts[0].pads = &thru_pads;
     parts[1].pads = &thru_pads;
+    parts[2].pads = &thru_pads;
     const thru = try routeAllClassified(alloc, &board, placement, .{}, .{}, &.{true});
     try testing.expectEqual(@as(usize, 0), thru.vias.len);
     try testing.expect(thru.complete_planes[0]);
 
     placement.rules = .{ .plane_nets = &.{}, .copper_layers = 2 };
     const deferred = try routeAllClassified(alloc, &board, placement, .{}, .{}, &.{true});
-    try testing.expectEqual(@as(usize, 0), deferred.tracks.len);
+    try testing.expect(deferred.tracks.len > 0);
     try testing.expectEqual(@as(usize, 0), deferred.vias.len);
+    try testing.expect(deferred.nets[0]);
+    try expectSeedTracks(deferred.tracks, 0, 3.5);
     try testing.expect(!deferred.complete_planes[0]);
     try testing.expectEqual(@as(usize, 1), deferred.phase.deferred_supply_nets);
 }
