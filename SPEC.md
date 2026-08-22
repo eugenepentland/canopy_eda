@@ -5566,7 +5566,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB editor imports a DXF board outline: the importer honours $INSUNITS, flips Y to the board frame, preserves native arcs in the editable sketch, and feeds the existing outline-override seam (Save/Update persists it like any drawn outline)
 - The PCB board-outline sketch keeps stable entities, constraints, driving dimensions, and exact arcs in a separately testable client model loaded before the editor
 - The PCB outline sketch box-selects corner vertices in Outline mode or the Outline-only filter; Delete removes selected vertices and their incident curves without healing the resulting open profile, while Remove fillet remains a separate sharp-corner command
-- The PCB editor selection filter includes the board outline and an Outline only preset that disables every other filter type and suppresses board-text selection
+- The PCB editor selection filter includes the board outline and a session-only Outline only preset that disables every other filter type and suppresses board-text selection without making a reopened board appear unresponsive
 - The PCB outline Line tool stays inside the sketch, creates connected native line chains, snaps endpoints to shared existing point IDs and H/V inference, lets Enter retain an open chain, and normalizes a reconnected closed loop for fabrication
 - Backspace or Delete on a selected native outline curve removes only that curve, leaves loose endpoints for free sketch editing, remains undoable, and Save explains that open geometry must be reconnected
 - The PCB editor overlays source-declared fabrication backing, edits its polygon with undo, and persists per-layout geometry without changing its side or material

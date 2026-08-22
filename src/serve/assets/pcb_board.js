@@ -213,9 +213,13 @@ try{var _vs=JSON.parse(localStorage.getItem(viewKey)||"null");if(_vs){
  if(typeof _vs.pourOp==="number")viewSt.pourOp=Math.max(0,Math.min(1,_vs.pourOp));
  if(_vs.vis){var _mv=visMigrate(_vs.vis);if(_mv)_vmig=true;var _sv=_mv||_vs.vis;
   for(var _k in viewSt.vis)if(_sv[_k]!==undefined)viewSt.vis[_k]=_sv[_k];}
- if(_vs.filt)for(var _kf in viewSt.filt)if(_vs.filt[_kf]!==undefined)viewSt.filt[_kf]=_vs.filt[_kf];}}catch(e){}
+ // Selection filters are temporary editing context. In particular, reopening
+ // a board after using Outline only must not make every component and copper
+ // object appear unresponsive. Legacy persisted filters are intentionally
+ // ignored; the defaults above restore normal selection on every page load.
+ }}catch(e){}
 if(_vmig)viewSave(); // rewrite the store once, in the canonical spelling
-function viewSave(){try{localStorage.setItem(viewKey,JSON.stringify(viewSt));}catch(e){}}
+function viewSave(){try{localStorage.setItem(viewKey,JSON.stringify(viewSt,function(k,v){return k==="filt"?undefined:v;}));}catch(e){}}
 // Effective snap step (mm). grid "off" (0) → a tiny step so parts still move
 // smoothly but aren't quantized.
 function snapG(){return viewSt.grid>0?viewSt.grid:0.001;}

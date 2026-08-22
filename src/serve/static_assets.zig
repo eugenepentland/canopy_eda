@@ -984,7 +984,7 @@ test "PCB WebGPU renderer skips out-of-range track layers as the 2D path does" {
 }
 
 // spec: Web Server - The Appearance panel separates Layers, Objects and Nets tabs, listing real fabrication layers in top-to-bottom physical order and the feature overlays under Objects
-// spec: Web Server - The PCB editor selection filter includes the board outline and an Outline only preset that disables every other filter type and suppresses board-text selection
+// spec: Web Server - The PCB editor selection filter includes the board outline and a session-only Outline only preset that disables every other filter type and suppresses board-text selection without making a reopened board appear unresponsive
 test "PCB Appearance panel splits real layers from feature objects and nets" {
     const Check = struct { haystack: []const u8 = pcb_board_js, marker: []const u8, present: bool = true };
     const checks = [_]Check{
@@ -1003,6 +1003,8 @@ test "PCB Appearance panel splits real layers from feature objects and nets" {
         .{ .marker = "function apFiltRows(){return [" },
         .{ .marker = "[\"outline\",\"Board outline\"" },
         .{ .marker = "data-ap-filt-only=\"outline\"" },
+        .{ .marker = "return k===\"filt\"?undefined:v" },
+        .{ .marker = "Legacy persisted filters are intentionally" },
         .{ .marker = "if(outlineOnlyFilter())directText=-1;" },
         .{ .marker = "if(outlineMode||outlineOnlyFilter())drawOutlineSketchSelection" },
         // Pad-number labels became a real toggle rather than an unconditional pass.
