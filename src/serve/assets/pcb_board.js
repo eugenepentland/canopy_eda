@@ -8151,53 +8151,14 @@ window.PCBApplyRouteResult=function(j,opts){
  // Route leaves whatever chip was there (it did not change what "saved" means).
  if(opts.plan)planChip(j);
  routeBusy(false);
+ // Route board is the commit action: persist its just-applied copper into the
+ // active snapshot, or mint the conventional first "layout" snapshot. Marking
+ // dirty HERE (after copper lands) makes this generation win over any autosave
+ // that may have started while a long route was still running. Route plan stays
+ // explicitly non-persistent.
+ if(!opts.plan){markDirty();persistLayout(curLayout||"layout",curLayout?"updating":"saving",false);}
 };
-// The route scope is an honest multi-select over the EFFECTIVE routing waves
-// already resolved into PCB.plan.route by the server. A selection is lowered
-// to the waves' concrete net names before POSTing, so duplicate display names,
-// synthesized waves, and wave selectors that are not generic group tokens all
-// route exactly the members shown in the dropdown.
-var routeScopeChecks=[];
-function routeScopeSelection(){
- var names=[],nets=[],seen=Object.create(null);
- routeScopeChecks.forEach(function(cb){if(!cb.checked)return;var w=cb._wave||{};
-  names.push(String(w.name||"Wave"));(w.members||[]).forEach(function(n){n=String(n||"");
-   if(n&&!seen[n]){seen[n]=1;nets.push(n);}});});
- return {waves:names,nets:nets};
-}
-function routeScopeSync(preferWhole){
- var all=document.getElementById("r-scope-all"),sum=document.getElementById("r-scope-summary");
- if(!all||!sum)return;
- var any=routeScopeChecks.some(function(cb){return cb.checked;});
- if(preferWhole&&all.checked){routeScopeChecks.forEach(function(cb){cb.checked=false;});any=false;}
- if(any)all.checked=false;else all.checked=true;
- var chosen=routeScopeSelection(),label="Whole board";
- if(chosen.waves.length===1)label=chosen.waves[0]+" · "+chosen.nets.length+" nets";
- else if(chosen.waves.length>1)label=chosen.waves.length+" waves · "+chosen.nets.length+" nets";
- sum.textContent=label;sum.title=chosen.waves.length?chosen.waves.join(", "):label;
-}
-function routeScopeInit(){
- var ctl=document.getElementById("r-scope"),all=document.getElementById("r-scope-all"),
-     host=document.getElementById("r-scope-waves");
- if(!ctl||!all||!host)return;
- routeScopeChecks=[];while(host.firstChild)host.removeChild(host.firstChild);
- var waves=(PCB.plan&&Array.isArray(PCB.plan.route))?PCB.plan.route:[];
- waves.forEach(function(w,i){var row=document.createElement("label"),cb=document.createElement("input"),
-   text=document.createElement("span"),count=document.createElement("small"),members=Array.isArray(w.members)?w.members:[];
-  row.className="route-scope-option";cb.type="checkbox";cb.setAttribute("data-route-wave",String(i));
-  cb._wave=w;cb.disabled=members.length===0;text.textContent=String(w.name||("Wave "+(i+1)));
-  count.textContent=members.length+" net"+(members.length===1?"":"s");
-  row.title=w.reason?String(w.reason):("Route the "+text.textContent+" wave only");
-  row.appendChild(cb);row.appendChild(text);row.appendChild(count);host.appendChild(row);
-  routeScopeChecks.push(cb);cb.addEventListener("change",function(){if(cb.checked)all.checked=false;routeScopeSync(false);});
- });
- if(!waves.length){var empty=document.createElement("span");empty.className="route-scope-empty";
-  empty.textContent="No routing waves available";host.appendChild(empty);}
- all.checked=true;all.addEventListener("change",function(){routeScopeSync(true);});routeScopeSync(true);
- document.addEventListener("click",function(ev){if(ctl.open&&!ctl.contains(ev.target))ctl.open=false;});
-}
-routeScopeInit();
-var rgo=document.getElementById("r-go"),rdeep=document.getElementById("r-go-deep");
+var rgo=document.getElementById("r-go");
 // The ONE autoroute-from-the-viewer flow: build the payload from the on-screen
 // poses + the Route panel's geometry, stream it live when the driver is there,
 // fall back to the blocking POST when it isn't. Both the Autorouter panel's
@@ -8213,8 +8174,6 @@ function runRoute(opts){
  setStat("r-stat","",opts.plan?"routing plan…":"routing…");setStat("r-drc","","");
  routeBusy(true);
  recordUndo();/* autoroute apply = one undo step (audit 1.1c) */
- var chosen=routeScopeSelection();
- var scope=chosen.waves.join(", ");
  // outline: the on-screen drawn outline (saved or not), same as the DRC
  // payload — so an outline edit is honored by Route before it's saved; the
  // server falls back to the blessed saved outline when null.
@@ -8222,10 +8181,7 @@ function runRoute(opts){
    track_width:nf("r-tw"),clearance:nf("r-cl"),via_drill:nf("r-vd"),via_dia:nf("r-va"),
    outline:PCB.outline||null,zones:PCB.zones||[]};
  if(opts.effort)payload.effort=opts.effort;
- // Incremental scope: send the selected waves' concrete nets + current copper,
- // so the server routes only those waves and preserves the rest of the board.
- if(chosen.waves.length){payload.nets=chosen.nets;payload.tracks=PCB.tracks||[];payload.vias=PCB.vias||[];}
- var applyOpts={scope:scope,clr:payload.clearance,plan:!!opts.plan};
+ var applyOpts={clr:payload.clearance,plan:!!opts.plan};
  // Blocking fallback — the pre-live Route path, kept verbatim, used when the
  // live-route driver is absent or its /start can't be reached / is rejected.
  function blockingRoute(){
@@ -8257,13 +8213,11 @@ function runRoute(opts){
 // Every route entry point is disabled together for the duration of a run —
 // they route the same board, so a second click on another one would fight the
 // first. Re-enabled by PCBApplyRouteResult (and by the error paths here).
-function routeBusy(on){["r-go","r-go-deep","pcb-routeplan"].forEach(function(id){
+function routeBusy(on){["r-go","pcb-routeplan"].forEach(function(id){
  var b=document.getElementById(id);if(b)b.disabled=!!on;});}
 // The primary editor action is deliberately bounded: an authored standard
-// tier may consume minutes on a hard board. The full rescue ladder remains an
-// explicit Advanced-routing action for unattended work.
+// tier may consume minutes on a hard board.
 if(rgo)rgo.addEventListener("click",function(){runRoute({effort:"one_shot"});});
-if(rdeep)rdeep.addEventListener("click",function(){runRoute({effort:"standard"});});
 // "Route plan" — offered only on an UNSAVED board (a Rough/Regenerate seed or a
 // sub-block preview), where the placement on screen has no routing yet and no
 // saved row to compare against. one_shot because this is a look, not a commit:

@@ -112,60 +112,10 @@
 </style>
 <div class="pcb-replay" id="panel-replay">
   <span class="tune-h">Live route &amp; replay</span>
-  <div id="rp-status" class="muted">Press <b>Route</b> to stream the autorouter live, or <b>Load saved</b> to replay the last run.</div>
+  <div id="rp-status" class="muted">Press <b>Route board</b> to stream the autorouter live, then scrub or play its decisions here.</div>
   <div class="rp-actions">
-    <button class="btn" id="rp-load">Load saved</button>
     <button class="btn" id="rp-adopt" disabled>Adopt result</button>
     <button class="btn" id="rp-clear">Clear</button>
-    <button class="btn rs-entry" id="rp-session" title="Route the board live and answer the router when it gets stuck">&#9889; Interactive route</button>
-  </div>
-  <!-- Interactive route session: reconnect banner (a session was left running) -->
-  <div id="rs-resume" class="rs-resume" hidden>
-    <span>A route session is in progress.</span>
-    <button class="btn" id="rs-resume-btn">Resume session</button>
-  </div>
-  <!-- Interactive route session: STUCK card — the router paused for a hint -->
-  <div id="rs-stuck" class="rs-card rs-stuck" hidden>
-    <div class="rs-head">
-      <span class="rs-badge">STUCK</span>
-      <span class="rs-net" id="rs-net"></span>
-      <span class="rs-attempts" id="rs-attempts"></span>
-    </div>
-    <div class="rs-line" id="rs-occ"></div>
-    <!-- Grid view: frontier heatmap vs per-layer occupied-cells overlay -->
-    <div class="rs-seg" id="rs-occview" hidden></div>
-    <div id="rs-occlegend"></div>
-    <div class="rs-blockers-h">Blockers &mdash; click a row to flash it on the board</div>
-    <ul id="rs-blockers"></ul>
-    <div id="rs-actions" class="rs-actions">
-      <button class="btn" id="rs-corridor" title="Click waypoints on the board to guide this net; Enter/double-click confirms, Esc cancels">Draw corridor</button>
-      <button class="btn" id="rs-rip" title="Pick a blocker to rip up, then retry">Rip a blocker</button>
-      <button class="btn" id="rs-layers" title="Restrict this net to specific copper layers">Layers&hellip;</button>
-      <button class="btn" id="rs-retry" title="Try routing this net again (e.g. after a rip)">Retry now</button>
-      <button class="btn rs-skip" id="rs-abandon" title="Give up on this net and move on">Skip net</button>
-    </div>
-    <div id="rs-hint" class="rs-hint"></div>
-    <!-- layer-restriction popover -->
-    <div id="rs-layers-pop" class="rs-pop" hidden>
-      <div class="rs-pop-h">Allow this net on:</div>
-      <div id="rs-layers-list"></div>
-      <div class="rs-pop-actions">
-        <button class="btn" id="rs-layers-apply">Apply</button>
-        <button class="btn" id="rs-layers-cancel">Cancel</button>
-      </div>
-    </div>
-  </div>
-  <!-- Interactive route session: DONE card -->
-  <div id="rs-done" class="rs-card rs-done" hidden>
-    <div class="rs-head"><span class="rs-badge rs-badge-ok">DONE</span><span class="rs-net" id="rs-done-sum"></span></div>
-    <div class="rs-actions">
-      <button class="btn" id="rs-distill" title="Distill accepted hints into a (pcb-plan) fragment">Distill to (pcb-plan)</button>
-      <button class="btn" id="rs-close">Close session</button>
-    </div>
-    <div class="rs-frag-wrap" hidden id="rs-frag-wrap">
-      <div class="rs-pop-actions"><span class="muted" id="rs-frag-note"></span><button class="btn" id="rs-copy">Copy</button></div>
-      <pre id="rs-fragment"></pre>
-    </div>
   </div>
   <label class="rp-ghost-row" title="Draw the board's saved copper faintly beneath the replay for net-by-net comparison"><input type="checkbox" id="rp-ghost"> Ghost saved copper</label>
   <label class="rp-ghost-row" title="Wash the board with the free space the autorouter could actually use for this step's net, as it stood at this step — not on the finished board">Router vision

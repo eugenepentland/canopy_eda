@@ -461,7 +461,7 @@ fn solveStart(project_dir: []const u8, name: []const u8, sub: ?[]const u8, body:
         // This endpoint backs the editor's Route board action. Default it to
         // the bounded tier as a server-side guarantee, including for a board
         // tab left open across a deployment whose old JS sends no `effort`.
-        // The explicit `standard` posted by Deep route still takes precedence.
+        // An explicit API `standard` still takes precedence.
         .default_effort = .one_shot,
     }, eval, &module_res);
     return .{

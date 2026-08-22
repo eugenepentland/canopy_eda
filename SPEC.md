@@ -5586,13 +5586,13 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - coordinate-scoped clear_routes removes one selected via without erasing the rest of a dense shared net
 - The viewer Route scope parses a group into an incremental ScopedRoute that retains submitted copper for the unselected nets
 - The route-body effort parser accepts both one-shot spellings and standard, while leaving each API surface to choose its missing-field default
-- Route board is bounded on the server even for an already-open legacy page that omits effort, while an explicit Deep-route standard tier wins over that default
+- Route board is bounded on the server even for an already-open legacy page that omits effort, while an explicit API standard tier wins over that default
 - One lowering builds the route options for a prepared body, so the blocking and live halves route it at the same scope and effort
 - The page blob names which rung of the layout ladder the shown board came from, so the viewer can tell a persisted layout from an unsaved solve
 - The page blob ships every single-ended controlled-impedance via's solved and minimum plane-antipad diameters, and the viewer's layer panels expose an Antipads overlay that draws both rings and prints the numbers
 - The Antipads overlay measures each via's achieved plane opening from the drawn fills and flags a starved reference plane in red with the excess printed
 - The scorebar offers Route plan on an unsaved solve only, running the shared route flow at the one-shot tier and marking the copper a non-persisted plan
-- The PCB autorouter scope dropdown selects one or more effective routing waves by their concrete member nets, or routes the whole board
+- The PCB autorouter sidebar exposes one whole-board Route action; routing-wave scope remains an API concern rather than a routine UI choice
 - The PNG and describe endpoints restore the shown layout's persisted routed copper against the current netlist when no fresh route is requested
 - routableTally summarises copper connectivity into routed/total/open counts, excluding nets that need no copper
 - the route-vision mask survives a run-length round trip across both long runs and maximal alternation
@@ -5708,9 +5708,10 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - Stamped module copper maps its net names onto the parent design via the origin-key bridge, slug-prefixing private nets
 - Stamped copper adopts destination net-class geometry
 - Restamping a sub-circuit preserves its anchor's board side and rigidly mirrors its parts and stamped copper onto that side
-- the PCB draw-width menu defaults to the active net class and offers explicit standard widths
-- The /pcb-layout Route panel embeds the live-route replay dock and a Stop control instead of a separate Replay accordion chip
-- The PCB replay client streams the live-route endpoint into the timeline player, follows the head, and reattaches to a running job, and still replays the cached run through the overlay seam
+- the PCB hand router defaults to the active net class while the sidebar keeps its resolved geometry controls hidden
+- The /pcb-layout Route panel presents Route board, Stop, status, and live replay without cached-load, interactive-session, scope, or advanced-routing controls
+- A completed Route board run persists its applied copper to the active layout, or creates the conventional first `layout` snapshot; Route plan remains temporary
+- The PCB replay client streams the live-route endpoint into the timeline player, follows the head, and reattaches to a running job through the overlay seam
 - The PCB board editor publishes the replay overlay, copper-adopt, and live-route result seams the replay client drives
 - The PCB thermal overlay paints the cached heat field over the read-only board through the overlay seam
 - The interactive route-session client bundles the stuck-net, corridor, and frontier surfaces
@@ -5830,7 +5831,6 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - the schematic page HTML cache keys the embedded pane apart from the full page
 - each assembly rework guide takes its title from its first Markdown H1 and falls back to its filename slug
 - the assembly guide panel opens as a clickable list of guide titles, renders one guide at a time, and returns to that list from any guide
-- Manual PCB routing offers tangent-arc bends with a configurable or automatic 3x-width radius
 - PCB trace selection preserves layer color and component drags ignore click jitter
 - PCB design-rule settings illustrate every board rule with an accessible SVG
 - The DRC policy settings section edits each check's error, warning, or ignored action in grouped rows and resets them to defaults
@@ -5839,7 +5839,6 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - every physical copper layer is selectable and a plane-only view uses its computed fill
 - Drilled via and through-hole pad bores remain board-coloured on every copper view, including generated RF fence sites and the far side of opaque pours
 - selecting a routable copper layer reveals it and gives custom pour fills on that active layer a clear baseline highlight
-- The PCB Route panel refills declared copper pours from the current browser board state
 - the /pcb-layout action toolbar carries a first-class pour-refill button gated to designs that declare outer-layer copper pours
 - the toolbar pour button flags a stale indicator after board edits and disables during replay
 - the /pcb-layout toolbar carries a custom copper-pour tool that draws a polygon zone, picks its net and layer, persists it with the layout, and refills its fill

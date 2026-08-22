@@ -475,16 +475,6 @@ test "viewer exposes the physical stack and a persistent B-key active side" {
     try std.testing.expect(std.mem.indexOf(u8, js, "layer!==focus") != null);
 }
 
-// spec: Web Server - The PCB Route panel refills declared copper pours from the current browser board state
-test "viewer refills pours without saving or regenerating placement" {
-    const js = @embedFile("assets/pcb_board.js");
-    const page = @embedFile("pcb_layout_page.zig");
-    try std.testing.expect(std.mem.indexOf(u8, js, "function refillPours") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "pours=1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, page, "id=\\\"r-pour\\\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, page, "queryFlag(req, \"pours\")") != null);
-}
-
 // spec: Web Server - the /pcb-layout action toolbar carries a first-class pour-refill button gated to designs that declare outer-layer copper pours
 test "toolbar exposes a pour-refill button gated on declared pours" {
     const js = @embedFile("assets/pcb_board.js");
@@ -546,7 +536,7 @@ test "active custom copper pours remain visible on selected inner layers" {
 }
 
 // spec: Web Server - The PCB Route request always carries the current custom copper pours so the autorouter can terminate pour nets through vias
-test "viewer sends custom copper pours with whole-board and scoped routes" {
+test "viewer sends custom copper pours with the whole-board route" {
     const js = @embedFile("assets/pcb_board.js");
     const payload_start = std.mem.indexOf(u8, js, "var payload={parts:") orelse
         return error.TestRoutePayloadMissing;
@@ -555,15 +545,9 @@ test "viewer sends custom copper pours with whole-board and scoped routes" {
         return error.TestRoutePayloadEndMissing;
     const payload = payload_tail[0..payload_end];
 
-    // `zones` belongs to the unconditional payload, before the optional scope
-    // adds retained tracks/vias. Thus a normal whole-board Route (Barracuda's
-    // common path) and an incremental Route both seed the maze from In2 pours.
+    // `zones` belongs to the unconditional whole-board payload, so the routine
+    // Route-board action always seeds the maze from custom/inner-layer pours.
     try std.testing.expect(std.mem.indexOf(u8, payload, "zones:PCB.zones||[]") != null);
-    const scoped = std.mem.indexOf(u8, payload, "if(chosen.waves.length){") orelse
-        return error.TestScopedRouteMissing;
-    const zones = std.mem.indexOf(u8, payload, "zones:PCB.zones||[]") orelse
-        return error.TestRouteZonesMissing;
-    try std.testing.expect(zones < scoped);
 }
 
 // spec: Web Server - The route_pcb MCP tool counts DRC against the shown custom pours through the direct pour-aware checker result
