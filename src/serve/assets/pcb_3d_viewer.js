@@ -433,6 +433,18 @@
     for (var i = 0; i < partGroups.length; i++) {
       var p = parts[i]; if (!p) continue;
       var pose = partGroups[i], mount = pose.userData.mount;
+      if (pose.userData.footprint !== p.fp) {
+        var previous = pose.userData.footprint;
+        mount.children.slice().forEach(function (child) {
+          if (child.userData.pcb3dKind === "models") mount.remove(child);
+        });
+        pose.userData.footprint = p.fp;
+        // Invalidate an old async STEP parse before it can land back on this
+        // mount. Refresh any other instances that still use that package, then
+        // load the replacement body when its refreshed model map has one.
+        if (previous && (DATA.models || {})[previous]) refreshModel(previous, DATA.models[previous]);
+        if (p.fp && (DATA.models || {})[p.fp]) placeModel(mount, p);
+      }
       pose.position.set(p.x, -p.y, 0);
       pose.rotation.z = deg2rad(-(p.rot || 0)); // Y flip reverses rotation sense
       var bottom = p.side === "bottom";
@@ -490,6 +502,7 @@
       var pose = new THREE.Group(), mount = new THREE.Group();
       pose.add(mount); partsGroup.add(pose);
       pose.userData.mount = mount;
+      pose.userData.footprint = p.fp;
       partGroups.push(pose);
       placeModel(mount, p);
     });

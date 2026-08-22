@@ -2685,6 +2685,30 @@ function passiveLibLoad(){if(!passiveLibPromise)passiveLibPromise=fetch("/api/li
 function passiveFpEditable(p){return !RO&&!mobileInspectMode()&&p.kind==="passive"&&p.component&&p.src&&p.srcName;}
 function passiveFpMsg(text,bad){var e=document.getElementById("prop-fp-msg");if(!e)return;
  e.textContent=text;e.classList.toggle("bad",!!bad);}
+function passiveRefreshLoops(){loopPin={};partLoops={};(PCB.loops||[]).forEach(function(L,k){
+ if(L.pp)loopPin[L.hub+":"+L.pp.x.toFixed(2)+":"+L.pp.y.toFixed(2)]=1;
+ (partLoops[L.hub]=partLoops[L.hub]||[]).push(k);
+ (partLoops[L.cap]=partLoops[L.cap]||[]).push(k);});}
+function passiveRefreshTopology(index,oldPads,newPads){var next={};newPads.forEach(function(pd){next[String(pd.num)]=pd;});
+ function move(x,y){for(var i=0;i<oldPads.length;i++){var old=oldPads[i];
+  if(Math.abs(old.x-x)<1e-6&&Math.abs(old.y-y)<1e-6){var pd=next[String(old.num)];if(pd)return {x:pd.x,y:pd.y};}}return {x:x,y:y};}
+ (PCB.links||[]).forEach(function(l){var q;if(l.a===index){q=move(l.ax,l.ay);l.ax=q.x;l.ay=q.y;}
+  if(l.b===index){q=move(l.bx,l.by);l.bx=q.x;l.by=q.y;}});
+ (PCB.nets||[]).forEach(function(net){net.forEach(function(pin){if(pin.p!==index)return;var q=move(pin.x,pin.y);pin.x=q.x;pin.y=q.y;});});
+ (PCB.loops||[]).forEach(function(L){var q;if(L.cap===index){q=move(L.cp.x,L.cp.y);L.cp=q;q=move(L.cg.x,L.cg.y);L.cg=q;L.cgv=null;}
+  if(L.hub===index){q=move(L.pp.x,L.pp.y);L.pp=q;q=move(L.gp.x,L.gp.y);L.gp=q;L.gpv=null;}});}
+function passiveRefreshApply(p,edit,score){var fresh=score&&score.refresh&&score.refresh.part;
+ if(!fresh||fresh.ref!==p.ref)throw new Error("Updated footprint geometry was not returned.");
+ var index=P.indexOf(p),oldPads=p.pads||[],oldFp=p.fp;passiveRefreshTopology(index,oldPads,fresh.pads||[]);
+ var fields=["origin","hw","hh","ccx","ccy","kind","fb","fp","val","component","pads","silk"];
+ fields.forEach(function(k){if(Object.prototype.hasOwnProperty.call(fresh,k))p[k]=fresh[k];else delete p[k];});
+ var meta=edit&&edit.part_edits&&edit.part_edits[p.ref];
+ if(meta){p.src=meta.src;p.srcName=meta.srcName;p.srcRef=meta.srcRef;}
+ if(oldFp!==p.fp){PCB.models=PCB.models||{};Object.keys(score.refresh.models||{}).forEach(function(fp){PCB.models[fp]=score.refresh.models[fp];});}
+ if(score.blame)P.forEach(function(q){if(score.blame[q.ref]!==undefined)q.blame=score.blame[q.ref];});
+ linksDirty=true;linkConnCache={};cullBox=null;passiveRefreshLoops();PCB.drc=[];
+ dragCacheDrop();rats();drawDrc();showScore(score);renderProps();scheduleDrc();
+ if(heatOn)applyHeat();if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();}
 function wirePassiveFootprint(p){var sel=document.getElementById("prop-footprint");if(!sel)return;
  sel.disabled=true;passiveLibLoad().then(function(comps){
   if(selRef!==p.ref||document.getElementById("prop-footprint")!==sel)return;
@@ -2693,13 +2717,17 @@ function wirePassiveFootprint(p){var sel=document.getElementById("prop-footprint
   sel.disabled=choices.length<2;if(choices.length<2)passiveFpMsg("No compatible footprint families are available for this part.",false);
  }).catch(function(e){passiveFpMsg(e.message||"Could not load footprint choices.",true);});
  sel.addEventListener("change",function(){var next=sel.value;if(!next||next===p.component)return;
-  sel.disabled=true;passiveFpMsg("Updating schematic source…",false);
+  var saved=false;sel.disabled=true;passiveFpMsg("Updating schematic source…",false);
   fetch("/api/edit-footprint/"+encodeURIComponent(PCB.name),{method:"POST",headers:{"Content-Type":"application/json"},
    body:JSON.stringify({ref:p.srcRef||p.ref,component:next,oldComponent:p.component,srcOff:p.src,sourceName:p.srcName})})
    .then(function(r){return r.text().then(function(t){if(!r.ok)throw new Error(t||"Footprint update failed.");
-    try{var j=t?JSON.parse(t):null;if(j&&j.error)throw new Error(j.error);}catch(e){if(e instanceof SyntaxError)return;throw e;} });})
-   .then(function(){window.location.reload();}).catch(function(e){sel.value=p.component;sel.disabled=false;
-    passiveFpMsg(e.message||"Footprint update failed.",true);});});}
+    try{var j=t?JSON.parse(t):null;if(j&&j.error)throw new Error(j.error);return j;}catch(e){if(e instanceof SyntaxError)return {};throw e;} });})
+   .then(function(edit){saved=true;return fetch("/api/pcb-score/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({parts:P.map(function(q){return {ref:q.ref,x:q.x,y:q.y,rot:q.rot||0,side:q.side||"top",locked:!!q.locked};}),blame:true,refresh:p.ref})})
+    .then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error((j&&j.error)||"Could not refresh the board.");return {edit:edit,score:j};});});})
+   .then(function(o){passiveRefreshApply(p,o.edit,o.score);}).catch(function(e){
+    if(!saved){sel.value=p.component;sel.disabled=false;passiveFpMsg(e.message||"Footprint update failed.",true);}
+    else passiveFpMsg("Source updated, but the live board refresh failed. Reload once to recover.",true);});});}
 function renderProps(){var body=document.getElementById("prop-body");if(!body)return;
  if(insp){renderInspProps(body);return;}
  if(selGroup&&!selRef&&GRPS[selGroup]){var gn=GRPS[selGroup].length;
@@ -2745,7 +2773,7 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
    (fpEdit?pSelRow("Footprint","prop-footprint",[[p.component,passiveFpLabel({name:p.component,footprint:p.fp})]],p.component,false):
     (p.kind==="passive"&&p.fp?pRow("Footprint",p.fp):""))+
    pRow("Type",(p.kind=="hub"?"Hub / IC":"Passive"))+'</div>';
-  if(fpEdit)h+='<div class="prop-edit-note" id="prop-fp-msg">Changing this updates the schematic source and reloads the board.</div>';
+  if(fpEdit)h+='<div class="prop-edit-note" id="prop-fp-msg">Changing this updates the schematic source and refreshes the part in place.</div>';
   if(p.locked)h+='<div class="prop-lock">🔒 Locked — press <kbd>L</kbd> over the part to unlock before editing.</div>';
  }else{
   h+='<div class="prop-rows">'+pRow("X",fmtLen(p.x),"prop-x")+pRow("Y",fmtLen(p.y),"prop-y")+

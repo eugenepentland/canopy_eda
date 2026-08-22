@@ -3524,6 +3524,8 @@ src/serve/pcb_part_json.zig::buildEditSources | fn buildEditSources( allocator: 
 src/serve/pcb_part_json.zig::writeComponentField | fn writeComponentField(w: *std.Io.Writer, instances: []const export_kicad.FlatInstance, index: usize) std.Io.Writer.Error!void
 src/serve/pcb_part_json.zig::writePadRect | fn writePadRect(w: *std.Io.Writer, pr: optimizer.PadRect) std.Io.Writer.Error!void
 src/serve/pcb_part_json.zig::writePadRectList | fn writePadRectList(w: *std.Io.Writer, list: []const optimizer.PadRect) std.Io.Writer.Error!void
+src/serve/pcb_part_json.zig::writePadsJson | fn writePadsJson( w: *std.Io.Writer, alloc: std.mem.Allocator, part: optimizer.Part, pin_net: std.StringHashMapUnmanaged([]const u8), ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
+src/serve/pcb_part_json.zig::writePartJson | fn writePartJson( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, index: usize, blame: f64, pin_net: std.StringHashMapUnmanaged([]const u8), ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/serve/pcb_part_json.zig::writePoseSideLocked | fn writePoseSideLocked(w: *std.Io.Writer, side: optimizer.Side, locked: bool) std.Io.Writer.Error!void
 src/serve/pcb_progress.zig::assemble | fn assemble( arena: Allocator, project_dir: []const u8, name: []const u8, solved: pcb_layout_page.SolvedRequest, opts: pcb_layout_page.PngRequest, policy: module_policy.ModulePolicy, ) Allocator.Error!progress.Report
 src/serve/pcb_rules_json.zig::writeGroundNames | fn writeGroundNames(w: *std.Io.Writer) std.Io.Writer.Error!void

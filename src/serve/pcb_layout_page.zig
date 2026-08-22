@@ -3995,9 +3995,13 @@ pub fn pcbScoreApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         const v = root.object.get("blame") orelse break :blk false;
         break :blk v == .bool and v.bool;
     };
+    const refresh_ref: ?[]const u8 = blk: {
+        const value = root.object.get("refresh") orelse break :blk null;
+        break :blk if (value == .string and value.string.len > 0) value.string else null;
+    };
 
     var aw: std.Io.Writer.Allocating = .init(arena);
-    if (want_blame) {
+    if (want_blame or refresh_ref != null) {
         // Scoring only — no score term reads the board outline.
         const placement = optimizer.placeFromPoses(arena, eff_block, ctx.project_dir, .{ .poses = poses.items, .outline = .authored_only }, tune.params) catch {
             res.status = 500;
@@ -4013,7 +4017,16 @@ pub fn pcbScoreApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
             try writeJsonStr(&aw.writer, pt.ref_des);
             try aw.writer.print(":{d:.4}", .{if (i < blame.len) blame[i] else 0});
         }
-        try aw.writer.writeAll("}}");
+        try aw.writer.writeAll("}");
+        if (refresh_ref) |ref| {
+            try aw.writer.writeAll(",");
+            if (!try writePlacementRefresh(&aw.writer, arena, ctx.project_dir, placement, ref)) {
+                res.status = 404;
+                res.body = "part no longer exists after footprint update";
+                return;
+            }
+        }
+        try aw.writer.writeAll("}");
     } else {
         const bd = optimizer.scorePoses(arena, eff_block, ctx.project_dir, poses.items, tune.params) catch {
             res.status = 500;
@@ -4024,6 +4037,39 @@ pub fn pcbScoreApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     }
     res.content_type = .JSON;
     res.body = aw.written();
+}
+
+/// The exact part geometry the PCB client must replace after a passive package
+/// edit. Poses come from the request, so refreshing a package never moves any
+/// part or disturbs the user's current viewport/editor state.
+fn writePlacementRefresh(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    placement: optimizer.Placement,
+    ref: []const u8,
+) HandlerError!bool {
+    var part_index: ?usize = null;
+    for (placement.parts, 0..) |part, i| {
+        if (std.mem.eql(u8, part.ref_des, ref)) part_index = i;
+    }
+    const selected = part_index orelse return false;
+
+    var pin_net = std.StringHashMapUnmanaged([]const u8).empty;
+    for (placement.nets) |net| for (net.pins) |pin| {
+        const key = try std.fmt.allocPrint(alloc, "{s}|{s}", .{ pin.ref_des, pin.pin });
+        try pin_net.put(alloc, key, netKey(net.name));
+    };
+
+    try w.writeAll("\"refresh\":{\"part\":");
+    try pcb_part_json.writePartJson(w, alloc, placement, selected, 0, pin_net);
+    try w.writeAll(",\"models\":");
+    if (selected < placement.instances.len)
+        try writeModelsJson(w, alloc, project_dir, placement.instances[selected .. selected + 1])
+    else
+        try w.writeAll("{}");
+    try w.writeAll("}");
+    return true;
 }
 
 /// A parsed viewer Route scope: the incremental `ScopedRoute` to route with
@@ -9287,49 +9333,6 @@ fn partBlameRaw(alloc: std.mem.Allocator, p: optimizer.Placement, params: optimi
     return blame;
 }
 
-/// Emit one part's `,"pads":[…]` array — each pad's geometry, number, DRC flags,
-/// optional custom-poly outline, and resolved net (from `pin_net`, `"<ref>|<num>"`).
-fn writePadsJson(
-    w: *std.Io.Writer,
-    alloc: std.mem.Allocator,
-    pt: optimizer.Part,
-    pin_net: std.StringHashMapUnmanaged([]const u8),
-) HandlerError!void {
-    try w.writeAll(",\"pads\":[");
-    for (pt.pads, 0..) |pad, j| {
-        if (j > 0) try w.writeAll(",");
-        try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"shape\":", .{ pad.x, pad.y, pad.w, pad.h });
-        try writeJsonStr(w, pad.shape);
-        try w.writeAll(",\"num\":");
-        try writeJsonStr(w, pad.number);
-        // Orientation / oval-slot / through-hole flags the client DRC rebuilds
-        // geometry.Pad from (worldShape rotation, hole-to-hole, layer sharing).
-        if (pad.rot != 0) try w.print(",\"rot\":{d}", .{pad.rot});
-        if (pad.rratio() != 0) try w.print(",\"rratio\":{d}", .{pad.rratio()});
-        if (pad.isSlot()) try w.print(",\"slot_half\":[{d},{d}]", .{ pad.slot_half[0], pad.slot_half[1] });
-        if (pad.thru) try w.writeAll(",\"thru\":true");
-        if (pad.poly.len >= 3) { // custom pad: the real copper outline
-            try w.writeAll(",\"poly\":[");
-            for (pad.poly, 0..) |pp, k| {
-                if (k > 0) try w.writeAll(",");
-                try w.print(pt_pair_fmt, .{ pp[0], pp[1] });
-            }
-            try w.writeAll("]");
-        }
-        if (pad.drill > 0) { // drilled bore (mm) for thru/npth pads
-            try w.print(",\"drill\":{d}", .{pad.drill});
-            if (pad.npth) try w.writeAll(",\"npth\":true");
-        }
-        const pkey = try std.fmt.allocPrint(alloc, "{s}|{s}", .{ pt.ref_des, pad.number });
-        if (pin_net.get(pkey)) |nk| {
-            try w.writeAll(",\"net\":");
-            try writeJsonStr(w, nk);
-        }
-        try w.writeAll("}");
-    }
-    try w.writeAll("]");
-}
-
 /// The request body, or null with a 400 already written — the guard every
 /// JSON-POST handler opens with.
 pub fn bodyParam(req: *httpz.Request, res: *httpz.Response) ?[]const u8 {
@@ -9470,12 +9473,6 @@ fn writePcbData(
     // ref → part index, and "ref|pin" → collapsed net (for pad tags).
     var idx = std.StringHashMapUnmanaged(usize).empty;
     for (p.parts, 0..) |pt, i| try idx.put(alloc, pt.ref_des, i);
-    // ref → footprint name (for the courtyard editor).
-    var fp_of = std.StringHashMapUnmanaged([]const u8).empty;
-    for (p.instances) |inst| try fp_of.put(alloc, inst.ref_des, inst.footprint);
-    // ref → display value ("100nF", "STM32…") for the properties panel.
-    var val_of = std.StringHashMapUnmanaged([]const u8).empty;
-    for (p.instances) |inst| try val_of.put(alloc, inst.ref_des, instLabel(inst));
     var pin_net = std.StringHashMapUnmanaged([]const u8).empty;
     for (p.nets) |net| {
         for (net.pins) |pin| {
@@ -9512,40 +9509,9 @@ fn writePcbData(
 
     // Parts.
     try w.writeAll(parts_open);
-    for (p.parts, 0..) |pt, i| {
+    for (p.parts, 0..) |_, i| {
         if (i > 0) try w.writeAll(",");
-        try w.writeAll(ref_open);
-        try writeJsonStr(w, pt.ref_des);
-        // Renumber-stable module-local key, so a saved-layout Load can match on
-        // it instead of the volatile ref-des (see PartPose.origin / bindLayLoad).
-        try w.writeAll(origin_open);
-        try writeJsonStr(w, if (i < p.instances.len) p.instances[i].origin_key else "");
-        try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"kind\":\"{s}\",\"fb\":{s}", .{
-            pt.x,                                 pt.y,  pt.rot,
-            pt.hw,                                pt.hh, if (pt.kind == .hub) "hub" else "passive",
-            if (pt.fallback) "true" else "false",
-        });
-        // Courtyard-box centre offset (footprint-local; omitted when centred).
-        if (pt.ccx != 0 or pt.ccy != 0) try w.print(",\"ccx\":{d},\"ccy\":{d}", .{ pt.ccx, pt.ccy });
-        try pcb_part_json.writePoseSideLocked(w, pt.side, pt.locked);
-        try w.print(",\"blame\":{d:.4},", .{if (i < blame.len) blame[i] else 0});
-        try w.writeAll("\"fp\":");
-        try writeJsonStr(w, fp_of.get(pt.ref_des) orelse "");
-        try w.writeAll(",\"val\":");
-        try writeJsonStr(w, val_of.get(pt.ref_des) orelse "");
-        try pcb_part_json.writeComponentField(w, p.instances, i);
-        try writePadsJson(w, alloc, pt, pin_net);
-        try w.writeAll(",\"silk\":{\"l\":[");
-        for (pt.features.silk_lines, 0..) |s, j| {
-            if (j > 0) try w.writeAll(",");
-            try w.print("[{d},{d},{d},{d}]", .{ s.x1, s.y1, s.x2, s.y2 });
-        }
-        try w.writeAll("],\"c\":[");
-        for (pt.features.silk_circles, 0..) |c, j| {
-            if (j > 0) try w.writeAll(",");
-            try w.print("[{d},{d},{d}]", .{ c.cx, c.cy, c.r });
-        }
-        try w.writeAll("]}}");
+        try pcb_part_json.writePartJson(w, alloc, p, i, if (i < blame.len) blame[i] else 0, pin_net);
     }
     try w.writeAll("],");
 
@@ -10250,14 +10216,6 @@ fn kindStr(k: optimizer.RatKind) []const u8 {
         .ground => "ground",
         .signal => "signal",
     };
-}
-
-fn instLabel(inst: anytype) []const u8 {
-    if (inst.value.len > 0) return inst.value;
-    for (inst.properties) |prop| {
-        if (std.mem.eql(u8, prop.key, "value") and prop.value.len > 0) return prop.value;
-    }
-    return inst.component;
 }
 
 fn shortName(s: []const u8) []const u8 {
@@ -14916,7 +14874,7 @@ test "pad json carries rotation, roundrect ratio, oval slot, and thru; omits def
     const pin_net = std.StringHashMapUnmanaged([]const u8).empty;
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
-    try writePadsJson(&aw.writer, alloc, pt, pin_net);
+    try pcb_part_json.writePadsJson(&aw.writer, alloc, pt, pin_net);
     const s = aw.written();
 
     // Each DRC-input extra is present with its exact value.

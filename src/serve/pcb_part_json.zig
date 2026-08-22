@@ -35,6 +35,96 @@ pub fn writeComponentField(w: *std.Io.Writer, instances: []const export_kicad.Fl
     try writeJsonString(w, if (index < instances.len) instances[index].component else "");
 }
 
+/// Emit one part's browser pad array, including exact shape/drill metadata and
+/// the net resolved by the caller for each `ref|pad` key.
+pub fn writePadsJson(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    part: optimizer.Part,
+    pin_net: std.StringHashMapUnmanaged([]const u8),
+) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
+    try w.writeAll(",\"pads\":[");
+    for (part.pads, 0..) |pad, j| {
+        if (j > 0) try w.writeByte(',');
+        try w.print("{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"shape\":", .{ pad.x, pad.y, pad.w, pad.h });
+        try writeJsonString(w, pad.shape);
+        try w.writeAll(",\"num\":");
+        try writeJsonString(w, pad.number);
+        if (pad.rot != 0) try w.print(",\"rot\":{d}", .{pad.rot});
+        if (pad.rratio() != 0) try w.print(",\"rratio\":{d}", .{pad.rratio()});
+        if (pad.isSlot()) try w.print(",\"slot_half\":[{d},{d}]", .{ pad.slot_half[0], pad.slot_half[1] });
+        if (pad.thru) try w.writeAll(",\"thru\":true");
+        if (pad.poly.len >= 3) {
+            try w.writeAll(",\"poly\":[");
+            for (pad.poly, 0..) |point, k| {
+                if (k > 0) try w.writeByte(',');
+                try w.print("[{d},{d}]", .{ point[0], point[1] });
+            }
+            try w.writeByte(']');
+        }
+        if (pad.drill > 0) {
+            try w.print(",\"drill\":{d}", .{pad.drill});
+            if (pad.npth) try w.writeAll(",\"npth\":true");
+        }
+        const key = try std.fmt.allocPrint(alloc, "{s}|{s}", .{ part.ref_des, pad.number });
+        if (pin_net.get(key)) |net| {
+            try w.writeAll(",\"net\":");
+            try writeJsonString(w, net);
+        }
+        try w.writeByte('}');
+    }
+    try w.writeByte(']');
+}
+
+/// Geometry-bearing JSON for one PCB part. Shared by the initial board blob
+/// and the live passive-footprint refresh response.
+pub fn writePartJson(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    index: usize,
+    blame: f64,
+    pin_net: std.StringHashMapUnmanaged([]const u8),
+) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
+    const part = placement.parts[index];
+    const inst: ?export_kicad.FlatInstance = if (index < placement.instances.len) placement.instances[index] else null;
+    try w.writeAll("{\"ref\":");
+    try writeJsonString(w, part.ref_des);
+    try w.writeAll(",\"origin\":");
+    try writeJsonString(w, if (inst) |item| item.origin_key else "");
+    try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d},\"hw\":{d},\"hh\":{d},\"kind\":\"{s}\",\"fb\":{s}", .{
+        part.x,                                      part.y,                                 part.rot, part.hw, part.hh,
+        if (part.kind == .hub) "hub" else "passive", if (part.fallback) "true" else "false",
+    });
+    if (part.ccx != 0 or part.ccy != 0) try w.print(",\"ccx\":{d},\"ccy\":{d}", .{ part.ccx, part.ccy });
+    try writePoseSideLocked(w, part.side, part.locked);
+    try w.print(",\"blame\":{d:.4},\"fp\":", .{blame});
+    try writeJsonString(w, if (inst) |item| item.footprint else "");
+    try w.writeAll(",\"val\":");
+    try writeJsonString(w, if (inst) |item| instanceLabel(item) else "");
+    try writeComponentField(w, placement.instances, index);
+    try writePadsJson(w, alloc, part, pin_net);
+    try w.writeAll(",\"silk\":{\"l\":[");
+    for (part.features.silk_lines, 0..) |line, j| {
+        if (j > 0) try w.writeByte(',');
+        try w.print("[{d},{d},{d},{d}]", .{ line.x1, line.y1, line.x2, line.y2 });
+    }
+    try w.writeAll("],\"c\":[");
+    for (part.features.silk_circles, 0..) |circle, j| {
+        if (j > 0) try w.writeByte(',');
+        try w.print("[{d},{d},{d}]", .{ circle.cx, circle.cy, circle.r });
+    }
+    try w.writeAll("]}}");
+}
+
+fn instanceLabel(inst: export_kicad.FlatInstance) []const u8 {
+    if (inst.value.len > 0) return inst.value;
+    for (inst.properties) |property| {
+        if (std.mem.eql(u8, property.key, "value") and property.value.len > 0) return property.value;
+    }
+    return inst.component;
+}
+
 /// Build {ref:{src,srcName,srcRef}} for every source-backed instance. Root
 /// instances edit root_source; recursion switches to each sub-block's actual
 /// module source so a flattened parent board never patches the wrong file.
@@ -153,4 +243,51 @@ test "PCB edit metadata resolves root and nested module sources without flatteni
     try std.testing.expect(std.mem.indexOf(u8, json, "\"R1\":{\"src\":19,\"srcName\":\"black-canyon\",\"srcRef\":\"R_BIAS\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"filter/C7\":{\"src\":73,\"srcName\":\"rf-filter\",\"srcRef\":\"C_FILTER\"}") != null);
     try std.testing.expectEqualStrings("", editableSourceName("custom/rf-filter.sexp"));
+}
+
+test "live PCB part JSON carries replacement footprint geometry" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "C1",
+        .kind = .passive,
+        .hw = 0.8,
+        .hh = 0.5,
+        .pads = &.{.{ .number = "1", .x = -0.5, .y = 0, .w = 0.6, .h = 0.7, .shape = "roundrect" }},
+        .fallback = false,
+        .features = .{ .silk_lines = &.{.{ .x1 = -0.2, .y1 = -0.2, .x2 = 0.2, .y2 = -0.2 }} },
+    }};
+    const instances = [_]export_kicad.FlatInstance{.{
+        .ref_des = "C1",
+        .component = "cap-0201",
+        .origin_key = "C_FILTER",
+        .value = "100nF",
+        .footprint = "c-0201",
+        .properties = &.{},
+        .uuid = "",
+    }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &instances,
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 2,
+        .maxy = 1,
+        .generated = false,
+    };
+    var writer: std.Io.Writer.Allocating = .init(alloc);
+    defer writer.deinit();
+    try writePartJson(&writer.writer, alloc, placement, 0, 0, .empty);
+    const json = writer.written();
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"component\":\"cap-0201\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"fp\":\"c-0201\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"pads\":[{\"x\":-0.5") != null);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
 }

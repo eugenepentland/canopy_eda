@@ -314,9 +314,15 @@ test "PCB passive inspector edits footprint families through the schematic sourc
         "fetch(\"/api/edit-footprint/\"+encodeURIComponent(PCB.name)",
         "oldComponent:p.component",
         "sourceName:p.srcName",
-        "window.location.reload()",
+        "fetch(\"/api/pcb-score/\"+encodeURIComponent(PCB.name)+subq()",
+        "refresh:p.ref",
+        "function passiveRefreshTopology(index,oldPads,newPads)",
+        "passiveRefreshApply(p,o.edit,o.score)",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    const flow_start = std.mem.indexOf(u8, pcb_board_js, "function wirePassiveFootprint") orelse return error.PassiveFootprintFlowMissing;
+    const flow_end = std.mem.indexOfPos(u8, pcb_board_js, flow_start, "function renderProps") orelse return error.PassiveFootprintFlowEndMissing;
+    try std.testing.expect(std.mem.indexOf(u8, pcb_board_js[flow_start..flow_end], "location.reload") == null);
 }
 
 // spec: Web Server - The PCB pad aligner snaps exact pad centers and moves a source sub-circuit as one owner

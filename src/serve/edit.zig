@@ -16,6 +16,7 @@ const env_mod = @import("../eval/env.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const bom_html = @import("bom_html.zig");
+const pcb_part_json = @import("pcb_part_json.zig");
 const history = @import("history.zig");
 const id_insert = @import("../id_insert.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
@@ -483,12 +484,15 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     serve_root.setLiveLayoutJson(name, new_layout);
     _ = serve_root.bumpLiveVersion(name);
 
-    // Return updated COMPONENTS so the client can refresh srcOff values
+    // Return updated COMPONENTS plus PCB edit provenance so both schematic and
+    // board clients can refresh source offsets without navigating away.
     var comp_json: std.Io.Writer.Allocating = .init(ctx.allocator);
     const cw = &comp_json.writer;
     try cw.writeAll("{\"ok\":true,\"components\":{");
     _ = try bom_html.writeComponentsJson(cw, block, "", &svg_sym_cache, ctx.allocator, ctx.project_dir);
-    try cw.writeAll("}}");
+    try cw.writeAll("},\"part_edits\":");
+    try cw.writeAll(pcb_part_json.buildEditSources(ctx.allocator, block, name));
+    try cw.writeAll("}");
 
     res.header(header_cors_allow_origin, "*");
     res.content_type = .JSON;

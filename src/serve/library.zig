@@ -762,5 +762,6 @@ test "pcb board js opens the library card modal from the footprint button" {
     try std.testing.expect(std.mem.indexOf(u8, board_js, "PCB.models[fp]=tf") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "PCB3D.modelAdded(fp,tf)") != null);
     try std.testing.expect(std.mem.indexOf(u8, viewer_js, "modelAdded: function (fp, transform)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, viewer_js, "pose.userData.footprint !== p.fp") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "loadFpCardPreview") != null);
 }
