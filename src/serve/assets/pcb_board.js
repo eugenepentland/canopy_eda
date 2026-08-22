@@ -184,7 +184,8 @@ var TECH=[
 // ── Live view state (layers / grid / units) — audit 1.5 ─────────────────
 // Persisted per design in localStorage alongside the existing "pcb-rigid-off:"
 // key. `G` stays the footprint-editor grid constant; snap uses gridMM (0 = off).
-var viewKey="pcb-view:"+PCB.name,viewSt={grid:G,units:"mm",active:0,stack:null,pourOp:0,vis:{refdes:0,padnum:1,rats:0,drc:0,netcol:1,guides:0,keepouts:1,antipads:0,clr:0,heatsink:1},filt:{fp:1,sub:1,pad:1,track:1,via:1,zone:1,drc:1}};
+var viewKey="pcb-view:"+PCB.name,viewSt={grid:G,units:"mm",active:0,stack:null,pourOp:0,vis:{refdes:0,padnum:1,rats:0,drc:0,netcol:1,guides:0,keepouts:1,antipads:0,clr:0,heatsink:1},filt:{fp:1,sub:1,pad:1,track:1,via:1,zone:1,drc:1,outline:1}};
+function outlineOnlyFilter(){if(!viewSt.filt.outline)return false;for(var k in viewSt.filt)if(k!=="outline"&&viewSt.filt[k])return false;return true;}
 // Copper defaults: every ROUTABLE layer visible. A PLANE row starts HIDDEN, so
 // a board opens exactly as it always did (a plane used to render only while it
 // was the viewed stack row) and its new eye is an opt-in comparison tool.
@@ -396,9 +397,9 @@ function drawBoardRect(tmp){
  // ▩ Pour polygon in progress — drawn over the outline (not instead of it), so
  // the board edge stays visible while placing a copper-pour boundary.
  if(pourPts&&pourPts.length)pourSketch();
- if(polyPts&&polyPts.length){polySketch();return;} // ⬡ Poly in progress
- var br=tmp||PCB.outline||PCB.board;if(!br||!(br.w>0)||!(br.h>0))return;
- if(!tmp&&!viewSt.vis[LN.edge_cuts])return; // outline hidden in the Appearance panel
+ var linePreview=polyPts&&polyPts.length,br=tmp||PCB.outline||PCB.board;
+ if(!br||!(br.w>0)||!(br.h>0)){if(linePreview)polySketch();return;}
+ if(!tmp&&!viewSt.vis[LN.edge_cuts]&&!linePreview)return; // outline hidden in the Appearance panel
  var drawn=!!(tmp||PCB.outline),editing=!tmp&&!RO&&outlineMode;
  // Committed outlines draw in KiCad's Edge.Cuts grey; the in-progress drag
  // rectangle keeps the green dashed tool feedback.
@@ -444,6 +445,7 @@ function drawBoardRect(tmp){
      x:(X(p[0])-3.5).toFixed(1),y:(Y(p[1])-3.5).toFixed(1),width:7,height:7,
      fill:TH.bg,stroke:EC,"stroke-width":1.2,opacity:0.9}));});}
  }
+ if(linePreview)polySketch(); // connected Line preview stays over the outline it may snap to
  if(PHYSICAL_REVIEW)return; // fabrication dimensions are not printed on the board
  var bt=el("text",{x:(X(br.x)+6).toFixed(1),y:(Y(br.y)+14).toFixed(1),fill:EC,"font-size":"11",opacity:0.8});
  bt.textContent=fmtLen2(br.w)+"×"+fmtLen2(br.h)+(drawn?" (drawn)":(editing?" (edit)":"")); gB.appendChild(bt);
@@ -477,6 +479,9 @@ function polySketch(){
   gB.appendChild(el("line",{x1:X(lp[0]).toFixed(1),y1:Y(lp[1]).toFixed(1),
     x2:X(polyCur.x).toFixed(1),y2:Y(polyCur.y).toFixed(1),
     stroke:"#7ee787","stroke-width":1,opacity:0.6,"stroke-dasharray":"3 3"}));}
+ if(polyCur&&polyCur.axis){var lp2=polyPts[polyPts.length-1],guide=polyCur.axis==="horizontal"?{x1:X(lp2[0]),y1:Y(lp2[1]),x2:X(polyCur.x),y2:Y(lp2[1])}:{x1:X(lp2[0]),y1:Y(lp2[1]),x2:X(lp2[0]),y2:Y(polyCur.y)};
+  gB.appendChild(el("line",{x1:guide.x1.toFixed(1),y1:guide.y1.toFixed(1),x2:guide.x2.toFixed(1),y2:guide.y2.toFixed(1),stroke:"#58a6ff","stroke-width":1,opacity:.8,"stroke-dasharray":"2 3"}));}
+ if(polyCur&&polyCur.mag)gB.appendChild(el("circle",{cx:X(polyCur.x).toFixed(1),cy:Y(polyCur.y).toFixed(1),r:7,fill:"none",stroke:polyCur.close?"#f0b72f":"#58a6ff","stroke-width":1.6,opacity:.95}));
  var f=polyPts[0];
  gB.appendChild(el("circle",{cx:X(f[0]).toFixed(1),cy:Y(f[1]).toFixed(1),r:6,fill:"none",
    stroke:"#7ee787","stroke-width":1.4,opacity:0.9}));
@@ -2785,7 +2790,7 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
     pRow("Source",os)+(!RO&&!mobileInspectMode()&&!((PCB.outline||{}).sketch)?pNumRow("Corner radius","prop-outline-radius",orad,false):"")+'</div>':'<div class="prop-empty">No board outline is defined.</div>')+
    (!RO&&!mobileInspectMode()?outlineEntityRows():"")+
    (!RO&&!mobileInspectMode()&&bo?'<button class="btn prop-outline-edit" type="button">Edit outline</button>'+
-    '<div class="prop-edit-note">Type exact dimensions, drag geometry, or drag a box around both ends of a fillet and press Delete to restore the sharp corner. Arm Rectangle before dragging empty space to replace the whole outline. Save or Update to keep the result.</div>':'')+
+   '<div class="prop-edit-note">Type exact dimensions, drag geometry, or use Line to click connected segments; endpoints snap to corners, the start point, and horizontal/vertical inference. Box-select both ends of a fillet and press Delete to restore its sharp corner. Save or Update to keep the result.</div>':'')+
    '<div class="prop-empty-n">'+P.length+' components</div>';
   var oe=body.querySelector(".prop-outline-edit");if(oe)oe.addEventListener("click",function(){outlineArm(true);drawBoardRect();});
   var wi=document.getElementById("prop-outline-width"),hi=document.getElementById("prop-outline-height");
@@ -3436,7 +3441,7 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Explode / re-cohere hovered sub-circuit</span><kbd>G</kbd></div>'+
   '<div class="kbd-row"><span>Move whole sub-circuit</span><kbd>drag any of its parts</kbd></div>'+
   '<div class="kbd-row"><span>Edit the current board outline; drag empty space to box-select vertices</span><kbd>▭ Outline</kbd></div>'+
-  '<div class="kbd-row"><span>Polygon outline (Enter close &middot; Backspace undo &middot; Esc cancel)</span><kbd>⬡ Poly, then click vertices</kbd></div>'+
+  '<div class="kbd-row"><span>Connected outline lines (corner + H/V snap &middot; Enter close &middot; Backspace undo)</span><kbd>Line, then click endpoints</kbd></div>'+
   '<div class="kbd-row"><span>Edit outline: drag a vertex &middot; box-select both fillet vertices + Delete restores a sharp corner &middot; Rectangle then drag redraws</span><kbd>in outline sketch</kbd></div>'+
   '<div class="kbd-row"><span>Dimension selected outline geometry</span><kbd>D in outline sketch</kbd></div>'+
   '<div class="kbd-row"><span>Constrain selected outline line</span><kbd>H / V</kbd></div>'+
@@ -4462,6 +4467,7 @@ var pan=null,marq=null,marqEl=null;
 // renderer draws and the board-edge DRC checks. RO pages never arm it.
 var outlineMode=false,outDraw=null,outlineSelection=[],outlineRectArmed=false;
 function outlineArm(on){
+ if(!on&&polyMode&&polySketchOwned)polyArm(false);
  if(on&&heatsinkMode)heatsinkArm(false);
  if(on&&backingMode)backingArm(false);
  if(on&&padAlignMode)padAlignArm(false);
@@ -4516,41 +4522,44 @@ function outlineSketchModify(action){return outlineSketchMutate(action,function(
   if(action==="mirror-x"||action==="mirror-y"){g=OS.compile(sk);return g&&OS.mirror(sk,action==="mirror-x"?"x":"y",action==="mirror-x"?g.rect.x+g.rect.w/2:g.rect.y+g.rect.h/2);}return false;});}
 function outlineSketchPanelSync(){var host=svg&&svg.parentNode,p=document.getElementById("outline-sketch-palette");if(!outlineMode||RO||!OS){if(p)p.remove();return;}if(!p){p=document.createElement("div");p.id="outline-sketch-palette";p.className="outline-sketch-palette";host.appendChild(p);}
  var st=PCB.outline&&PCB.outline.sketch?OS.state(PCB.outline.sketch):null;p.innerHTML='<div class="osp-head"><b>Outline sketch</b><span class="osp-dof '+(st&&st.conflict?'bad':'')+'">'+(st?(st.conflict?'conflict':st.dof+' DOF'):'start editing')+'</span></div>'+
-  '<div class="osp-group"><span>Create</span><button data-sk="new-rect"'+(outlineRectArmed?' class="on"':'')+'>Rectangle</button><button data-sk="new-poly">Line chain</button><button data-sk="dimension">Dimension</button></div>'+
+  '<div class="osp-group"><span>Create</span><button data-sk="new-rect"'+(outlineRectArmed?' class="on"':'')+'>Rectangle</button><button data-sk="new-poly"'+(polyMode&&polySketchOwned?' class="on"':'')+'>Line</button><button data-sk="dimension">Dimension</button></div>'+
   '<div class="osp-group"><span>Constrain</span><button data-sk="horizontal">H</button><button data-sk="vertical">V</button><button data-sk="coincident">Coincident</button><button data-sk="parallel">∥</button><button data-sk="perpendicular">⟂</button><button data-sk="tangent">Tangent</button><button data-sk="equal">Equal</button><button data-sk="midpoint">Midpoint</button><button data-sk="symmetric">Symmetry</button><button data-sk="fixed">Fix</button></div>'+
   '<div class="osp-group"><span>Modify</span><button data-sk="arc">Arc</button><button data-sk="line">Line</button><button data-sk="fillet">Fillet</button><button data-sk="remove-fillet">Remove fillet</button><button data-sk="chamfer">Chamfer</button><button data-sk="offset">Offset</button><button data-sk="mirror-x">Mirror X</button><button data-sk="mirror-y">Mirror Y</button></div>'+
   '<button class="osp-finish" data-sk="finish">Finish sketch</button>';
- p.querySelectorAll("[data-sk]").forEach(function(b){b.addEventListener("click",function(){var a=b.getAttribute("data-sk");if(a==="finish")outlineArm(false);else if(a==="new-poly"){outlineArm(false);polyArm(true);}else if(a==="new-rect"){outlineRectArmed=!outlineRectArmed;outlineSketchPanelSync();outlineMsg(outlineRectArmed?"rectangle armed: drag empty board space to replace the outline":"rectangle cancelled: empty drag box-selects sketch vertices");}else if(a==="remove-fillet")outlineDeleteSelected();else if(a==="dimension")outlineSketchDimension();else if(["horizontal","vertical","coincident","parallel","perpendicular","tangent","equal","midpoint","symmetric","fixed"].indexOf(a)>=0)outlineSketchConstraint(a);else outlineSketchModify(a);});});}
-// ⬡ Poly tool: click to place polygon-outline vertices (grid-snapped); click
-// the first vertex or press Enter to close, Backspace removes the last
-// vertex, Esc cancels. The closed polygon becomes PCB.outline
+ p.querySelectorAll("[data-sk]").forEach(function(b){b.addEventListener("click",function(){var a=b.getAttribute("data-sk");if(a==="finish"){if(polyMode)polyArm(false);outlineArm(false);}else if(a==="new-poly")polyArm(!(polyMode&&polySketchOwned),true);else if(a==="new-rect"){if(polyMode)polyArm(false);outlineRectArmed=!outlineRectArmed;outlineSketchPanelSync();outlineMsg(outlineRectArmed?"rectangle armed: drag empty board space to replace the outline":"rectangle cancelled: empty drag box-selects sketch vertices");}else if(a==="remove-fillet")outlineDeleteSelected();else if(a==="dimension")outlineSketchDimension();else if(["horizontal","vertical","coincident","parallel","perpendicular","tangent","equal","midpoint","symmetric","fixed"].indexOf(a)>=0)outlineSketchConstraint(a);else outlineSketchModify(a);});});}
+// ⬡ Poly / in-sketch Line tool: click connected polygon-outline vertices.
+// Endpoints magnetize to existing corners and the chain start, infer horizontal
+// or vertical alignment, and otherwise use the grid. Click the first vertex or
+// press Enter to close; Backspace removes the last vertex and Esc cancels. The closed polygon becomes PCB.outline
 // ({x,y,w,h}=bbox + pts) — persisted by Save/Update exactly like the
 // rectangle — and its vertices stay draggable for editing afterwards.
-var polyMode=false,polyPts=null,polyCur=null,vdrag=null;
+var polyMode=false,polyPts=null,polyCur=null,polySketchOwned=false,vdrag=null;
 // ▩ Pour tool state (user-drawn custom copper pours): an in-progress polygon
 // (pourPts + rubber pourCur), an open net/layer dialog (pourDlg). Separate from
 // the ⬡ Poly outline tool — a closed pour becomes a PCB.zones entry (copper
 // region filled server-side), not the board edge.
 var pourMode=false,pourPts=null,pourCur=null,pourDlg=null;
-function polyArm(on){if(RO&&on)return;
+function polyArm(on,withinOutline){if(RO&&on)return;
  if(on&&heatsinkMode)heatsinkArm(false);
  if(on&&backingMode)backingArm(false);
  if(on&&padAlignMode)padAlignArm(false);
- if(on&&outlineMode)outlineArm(false);
+ if(on&&outlineMode&&!withinOutline)outlineArm(false);
  if(on&&pourMode)pourArm(false);
  if(on&&drawMode)drawModeSet(false);
  if(on&&textMode)txArm(false);
  if(on&&PCB.rulerOff)PCB.rulerOff();
- polyMode=on;
- if(!on){polyPts=null;polyCur=null;}
+ if(on&&withinOutline)outlineRectArmed=false;
+ polyMode=on;polySketchOwned=!!(on&&withinOutline);
+ if(!on){polyPts=null;polyCur=null;polySketchOwned=false;}
  var b=document.getElementById("pcb-outline-poly");if(b)b.classList.toggle("on",on);
  svg.classList.toggle("outline-mode",on||outlineMode);
  var msg=document.getElementById("pcb-savemsg");
  if(msg&&on){msg.style.color="#7ee787";
-  msg.textContent="polygon outline: click to place vertices — click the first vertex or Enter closes, Backspace undoes, Esc cancels";}
+  msg.textContent="outline line: click connected endpoints — corners and H/V alignments snap; click the first point or Enter to close";}
  else if(msg&&!on){msg.textContent="";}
- toolSync();
+ toolSync();outlineSketchPanelSync();
  drawBoardRect();}
+function polySnap(m){var existing=outlinePtsOf(outlineEditable())||[],tol=9/S,g=viewSt.grid;return OS&&OS.snapLinePoint?OS.snapLinePoint(polyPts||[],existing,m.x,m.y,g,tol,6/S):{x:g>0?Math.round(m.x/g)*g:m.x,y:g>0?Math.round(m.y/g)*g:m.y};}
 function outlineMsg(txt){var msg=document.getElementById("pcb-savemsg");
  if(msg){msg.style.color="#8b949e";msg.textContent=txt;}}
 function heatsinkArm(on){if(RO&&on)return;
@@ -4773,11 +4782,11 @@ function polyClose(){
  var pre=snapAll();
  var prev=PCB.outline,pts=polyPts.slice();polyPts=null;polyCur=null;
  PCB.outline={x:0,y:0,w:0,h:0,pts:pts};outlineBboxSync();
- var ok=PCB.outline.w>=2&&PCB.outline.h>=2;
+ var ok=PCB.outline.w>=2&&PCB.outline.h>=2&&!polySelfIntersects(pts);
  if(!ok)PCB.outline=prev;
- else recordUndo(pre);
+ else{if(OS)OS.ensure(PCB.outline);recordUndo(pre);}
  polyArm(false);drawBoardRect();
- outlineMsg(ok?"polygon outline set — Save/Update to keep":"polygon too small — outline unchanged");}
+ outlineMsg(ok?"connected outline profile closed — Save/Update to keep":"profile is too small or crosses itself — outline unchanged");}
 function polyPop(){if(polyPts&&polyPts.length){polyPts.pop();if(!polyPts.length)polyPts=null;drawBoardRect();}}
 // ── ▩ Custom copper pours ────────────────────────────────────────────────
 // Draw a polygon (grid-snapped clicks, Shift = free), close it, then a small
@@ -5139,14 +5148,13 @@ svg.addEventListener("pointerdown",function(ev){
    else{txSelect(-1);txPlace(tm);}}}return;}
  if(backingMode){if(ev.button!==0)return;var bm=mm(ev),bi=backingVtxAt(bm);
   if(bi>=0){backingDrag={i:bi,moved:false,snap:snapAll()};pcap(ev);}return;}
- if((outlineMode||polyMode)&&ev.button===0&&!polyPts){var hv=vtxAt(mm(ev));
+ if(outlineMode&&!polyMode&&ev.button===0&&!polyPts){var hv=vtxAt(mm(ev));
   if(hv>=0){vdrag=outlineVdrag(hv);pcap(ev);return;}}
  if(polyMode){if(ev.button!==0)return;
-  var pm=mm(ev);
-  if(polyPts&&polyPts.length>=3){var pf=polyPts[0];
-   if(Math.max(Math.abs(pm.x-pf[0]),Math.abs(pm.y-pf[1]))<=7/S){polyClose();return;}}
+  var pm=mm(ev),sn=polySnap(pm);
+  if(polyPts&&polyPts.length>=3&&sn.close){polyClose();return;}
   polyPts=polyPts||[];
-  var np=[Math.round(pm.x/G)*G,Math.round(pm.y/G)*G],lp2=polyPts[polyPts.length-1];
+  var np=[sn.x,sn.y],lp2=polyPts[polyPts.length-1];
   if(!lp2||lp2[0]!==np[0]||lp2[1]!==np[1])polyPts.push(np);
   polyCur=null;drawBoardRect();return;}
  if(pourMode){if(ev.button!==0||pourDlg)return; // the net/layer dialog owns clicks while open
@@ -5178,6 +5186,7 @@ svg.addEventListener("pointerdown",function(ev){
  // copper and footprints because its visible glyph box is the precise target;
  // the Text tool remains responsible only for placing new labels.
  var directText=ev.button===0?txDirectAt(m):-1,directSnap=null,directAdopt=false;
+ if(outlineOnlyFilter())directText=-1;
  var directSub=(directText<0&&ev.button===0)?subSilkAt(m.x,m.y):null;
  if(directSub){directSnap=snapAll();directText=subSilkAdopt(directSub);directAdopt=true;}
  var directTp=(directText<0&&ev.button===0)?testPointSilkAt(m.x,m.y):null;
@@ -5201,7 +5210,7 @@ svg.addEventListener("pointerdown",function(ev){
  var reviewPad=RO?padHitAt(m.x,m.y):null;
  var hi=reviewPad?reviewPad.i:((PHYSICAL_REVIEW||viewSt.filt.fp)?partAt(m.x,m.y):-1);
  if(hi<0){
-  if(!RO){var uv=vtxAt(m);if(uv>=0){vdrag=outlineVdrag(uv);pcap(ev);return;}}
+  if(!RO&&viewSt.filt.outline){var uv=vtxAt(m);if(uv>=0){vdrag=outlineVdrag(uv);pcap(ev);return;}}
   // The visible sub-circuit box is itself selectable, including its empty
   // interior. This always returns to group scope; drilling into a component
   // still requires clicking an actual component below.
@@ -5216,7 +5225,7 @@ svg.addEventListener("pointerdown",function(ev){
    if(sh&&sh.t==="via"){viadrag=viaStart(sh.o,m);pcap(ev);return;}}
   // An outline EDGE away from its vertices arms a whole-segment slide (copper
   // above wins — this is reached only for empty perimeter space).
-  if(!RO&&!anyDrawTool()){var oe=edgeAt(m);
+  if(!RO&&!anyDrawTool()&&viewSt.filt.outline){var oe=edgeAt(m);
    if(oe){osdrag=osegStart(oe,m);pcap(ev);svg.style.cursor="grabbing";return;}}
   marq={x0:m.x,y0:m.y,x1:m.x,y1:m.y,moved:false};pcap(ev);
   marqEl=el("rect",{"class":"marquee",x:0,y:0,width:0,height:0});gU.appendChild(marqEl);return;}
@@ -5255,7 +5264,7 @@ svg.addEventListener("pointermove",function(ev){
  if(osdrag){osegMove(mm(ev),ev.shiftKey);return;}
  if(segdrag){segMove(mm(ev),ev.shiftKey);return;}
  if(viadrag){viaMove(mm(ev));return;}
- if(polyMode&&polyPts){polyCur=mm(ev);drawBoardRect();return;}
+ if(polyMode&&polyPts){polyCur=polySnap(mm(ev));drawBoardRect();return;}
  if(pourMode&&pourPts){pourCur=mm(ev);drawBoardRect();return;}
  if(txDrag){var tm=mm(ev),t=PCB.texts[txDrag.i];if(t){
    var nx=Math.round((tm.x+txDrag.ox)/G)*G,ny=Math.round((tm.y+txDrag.oy)/G)*G;
@@ -6818,7 +6827,7 @@ svg.addEventListener("dblclick",function(ev){if(drawMode&&dtrace){ev.preventDefa
  if(backingMode&&!RO){var bm=mm(ev);if(backingVtxAt(bm)>=0)return;var be=backingEdgeAt(bm);
   if(be){ev.preventDefault();backingInsert(be);}return;}
  // Double-click an outline edge (not on a vertex) to insert a new vertex there.
- if(RO||textMode||polyPts)return;
+ if(RO||textMode||polyPts||(!outlineMode&&!viewSt.filt.outline))return;
  var m=mm(ev);if(vtxAt(m)>=0)return;var e=edgeAt(m);
  if(e){ev.preventDefault();outlineInsertVertex(e);}});
 svg.addEventListener("contextmenu",function(ev){
@@ -6829,7 +6838,7 @@ svg.addEventListener("contextmenu",function(ev){
  if(pourMode&&!RO){ev.preventDefault();pourDeleteAt(mm(ev));return;}
  // Right-click a drawn outline vertex to delete it (≥3 kept) — this precedes
  // the copper-delete path so a vertex handle wins over a track beneath it.
- if(!RO&&!drawMode&&!textMode){var vm=mm(ev),vi=vtxAt(vm);
+ if(!RO&&!drawMode&&!textMode&&(outlineMode||polyMode||viewSt.filt.outline)){var vm=mm(ev),vi=vtxAt(vm);
   if(vi>=0){ev.preventDefault();outlineVertexDelete(vi);return;}}
  if(textMode){var tm=mm(ev),ti=txAt(tm.x,tm.y);if(ti>=0){ev.preventDefault();txDelete(ti);}return;}
  if(!drawMode)return;ev.preventDefault();
@@ -8534,6 +8543,7 @@ loadCamReview();
  // "Footprints off" clicks the track under a part, and "Pours / keepouts"
  // makes filled areas an intentional target. Persists in viewSt.filt.
  function apFiltRows(){return [
+  ["outline","Board outline","Select and drag board-outline vertices and edges"],
   ["fp","Footprints","Click a component to select or drag it"],
   ["sub","Sub-circuits","Select or drag rigid sub-circuit bounding boxes"],
   ["pad","Pads","Click a pad to select its net"],
@@ -8584,8 +8594,9 @@ function apPresetApply(n){
   // the compact surface is a view switcher, and the filter belongs beside the
   // full editor's selection tools.
   if(!compact)h+='<div class="ap-h ap-h-row"><span>Selection filter</span><span class="ap-hbtns">'+
-   '<button type="button" class="btn" data-ap-filt-all="1">Enable all</button>'+
-   '<button type="button" class="btn" data-ap-filt-all="0">Disable all</button></span></div>'+
+   '<button type="button" class="btn" data-ap-filt-only="outline">Outline only</button>'+
+   '<button type="button" class="btn" data-ap-filt-all="1" title="Enable every selection type">All</button>'+
+   '<button type="button" class="btn" data-ap-filt-all="0" title="Disable every selection type">None</button></span></div>'+
    apFiltRows().map(function(r){return '<label class="ap-row" title="'+pEsc(r[2])+
     '"><input type="checkbox" data-ap-filt="'+r[0]+'"'+(viewSt.filt[r[0]]!==0?' checked':'')+
     '><span>'+pEsc(r[1])+'</span></label>';}).join("");
@@ -8612,6 +8623,7 @@ function apPresetApply(n){
   dragCacheDrop();paintSoon();drawDrc();rats();drawBoardRect();}
  function apFiltSet(k,on){viewSt.filt[k]=on?1:0;
   if(k==="sub"&&!on){hoverGrpName=null;if(selGroup)clearSel();}
+  if(k==="outline"&&!on)outlineSelection=[];
   if(!on&&insp&&(insp.t===k||(k==="zone"&&(insp.t==="zone"||insp.t==="keepout"))))inspClear();}
  function apPourOp(v){viewSt.pourOp=Math.max(0,Math.min(1,(parseFloat(v)||0)/100));viewSave();
   var pct=Math.round(viewSt.pourOp*100);
@@ -8637,6 +8649,9 @@ function apPresetApply(n){
    var on=b.getAttribute("data-ap-filt-all")==="1";
    apFiltRows().forEach(function(r){apFiltSet(r[0],on);});viewSave();
    if(PCB.apSync)PCB.apSync();paintSoon();});});
+  box.querySelectorAll("[data-ap-filt-only]").forEach(function(b){b.addEventListener("click",function(){
+   var only=b.getAttribute("data-ap-filt-only");apFiltRows().forEach(function(r){apFiltSet(r[0],r[0]===only);});selClear();selCuClear();clearSel();inspClear();viewSave();
+   if(PCB.apSync)PCB.apSync();paintSoon();drawBoardRect();});});
   box.querySelectorAll("[data-ap-pourop]").forEach(function(s){s.addEventListener("input",function(){
    apPourOp(s.value);});});}
  function apFill(box,html){if(!box)return;box.innerHTML=html;apWire(box);}

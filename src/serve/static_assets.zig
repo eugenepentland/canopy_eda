@@ -261,28 +261,31 @@ test "the DXF board-outline importer asset is registered with its parser seam" {
 
 // spec: Web Server - The PCB board-outline sketch keeps stable entities, constraints, driving dimensions, and exact arcs in a separately testable client model loaded before the editor
 // spec: Web Server - The PCB outline sketch box-selects corner vertices and Delete removes a native fillet by extending its adjacent lines to their sharp intersection, while whole-outline rectangle redraw requires explicit arming
+// spec: Web Server - The PCB outline Line tool stays inside the sketch, creates a connected native line profile, snaps endpoints exactly to existing corners and the chain start, infers horizontal or vertical alignment, and closes by clicking the start or pressing Enter
 test "the parametric board-outline sketch engine is registered with its editor contracts" {
     try std.testing.expect(registryHasAsset("pcb_outline_sketch.js"));
-    const markers = [_][]const u8{
-        "root.PCBOutlineSketch = api",
-        "function solve(s,opts)",
-        "function fromSegments(segments)",
-        "filletPoint:filletPoint",
-        "chamferPoint:chamferPoint",
-        "offset:offset",
-        "mirror:mirror",
-        "function removeFillet(s,cid)",
-        "outline-sketch-palette",
-        "function outlineSketchDimension()",
-        "function outlineSketchConstraint(kind)",
-        "function outlineDeleteSelected()",
-        "if(box.outline)",
-        "if(outlineRectArmed)outDraw=",
+    const Check = struct { bytes: []const u8, marker: []const u8 };
+    const checks = [_]Check{
+        .{ .bytes = pcb_outline_sketch_js, .marker = "root.PCBOutlineSketch = api" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "function solve(s,opts)" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "function fromSegments(segments)" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "filletPoint:filletPoint" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "chamferPoint:chamferPoint" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "offset:offset" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "mirror:mirror" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "function removeFillet(s,cid)" },
+        .{ .bytes = pcb_outline_sketch_js, .marker = "snapLinePoint:snapLinePoint" },
+        .{ .bytes = pcb_board_js, .marker = "outline-sketch-palette" },
+        .{ .bytes = pcb_board_js, .marker = "function outlineSketchDimension()" },
+        .{ .bytes = pcb_board_js, .marker = "function outlineSketchConstraint(kind)" },
+        .{ .bytes = pcb_board_js, .marker = "function outlineDeleteSelected()" },
+        .{ .bytes = pcb_board_js, .marker = "if(box.outline)" },
+        .{ .bytes = pcb_board_js, .marker = "if(outlineRectArmed)outDraw=" },
+        .{ .bytes = pcb_board_js, .marker = "function polySnap(m)" },
+        .{ .bytes = pcb_board_js, .marker = "polyArm(!(polyMode&&polySketchOwned),true)" },
+        .{ .bytes = pcb_board_js, .marker = "polyCur=polySnap(mm(ev))" },
     };
-    for (markers) |marker| {
-        const bytes = if (std.mem.startsWith(u8, marker, "outline-") or std.mem.startsWith(u8, marker, "function outline") or std.mem.startsWith(u8, marker, "if(")) pcb_board_js else pcb_outline_sketch_js;
-        try std.testing.expect(std.mem.indexOf(u8, bytes, marker) != null);
-    }
+    for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.bytes, check.marker) != null);
 }
 
 fn registryHasAsset(name: []const u8) bool {
@@ -972,6 +975,7 @@ test "PCB WebGPU renderer skips out-of-range track layers as the 2D path does" {
 }
 
 // spec: Web Server - The Appearance panel separates Layers, Objects and Nets tabs, listing real fabrication layers in top-to-bottom physical order and the feature overlays under Objects
+// spec: Web Server - The PCB editor selection filter includes the board outline and an Outline only preset that disables every other filter type and suppresses board-text selection
 test "PCB Appearance panel splits real layers from feature objects and nets" {
     const Check = struct { haystack: []const u8 = pcb_board_js, marker: []const u8, present: bool = true };
     const checks = [_]Check{
@@ -988,6 +992,9 @@ test "PCB Appearance panel splits real layers from feature objects and nets" {
         // The selection filter is Objects' second half, not a separate builder.
         .{ .marker = "<span>Selection filter</span>" },
         .{ .marker = "function apFiltRows(){return [" },
+        .{ .marker = "[\"outline\",\"Board outline\"" },
+        .{ .marker = "data-ap-filt-only=\"outline\"" },
+        .{ .marker = "if(outlineOnlyFilter())directText=-1;" },
         // Pad-number labels became a real toggle rather than an unconditional pass.
         .{ .marker = "if(PHYSICAL_REVIEW||!viewSt.vis.padnum||k<1.15||gestureBusy())return;" },
         // The old split-brain wiring is gone with the panels it served.
@@ -1083,7 +1090,7 @@ test "PCB layer visibility keys are canonical names with a one-time migration" {
         // Unknown keys keep being dropped: only known flags are copied across.
         .{ .marker = "for(var _k in viewSt.vis)if(_sv[_k]!==undefined)viewSt.vis[_k]=_sv[_k];" },
         // Painters read the canonical spelling…
-        .{ .marker = "if(!tmp&&!viewSt.vis[LN.edge_cuts])return;" },
+        .{ .marker = "if(!tmp&&!viewSt.vis[LN.edge_cuts]&&!linePreview)return;" },
         // …and nothing still speaks the legacy namespace.
         .{ .marker = "vis:{top:1,bottom:1", .present = false },
         .{ .marker = "viewSt.vis[\"l\"+", .present = false },
