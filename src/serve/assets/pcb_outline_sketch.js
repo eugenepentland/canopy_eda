@@ -204,6 +204,16 @@
     var hit=lineIntersection(point(s,prev.a),point(s,prev.b),point(s,next.a),point(s,next.b));if(!hit)return false;var keep=point(s,arc.a),drop=arc.b;keep.x=hit.x;keep.y=hit.y;next.a=keep.id;
     s.curves=s.curves.filter(function(c){return c.id!==arc.id;});if(!s.curves.some(function(c){return c.a===drop||c.b===drop;}))s.points=s.points.filter(function(p){return p.id!==drop;});
     s.constraints=(s.constraints||[]).filter(function(q){return q.a!==arc.id&&q.b!==arc.id&&q.c!==arc.id&&q.a!==drop&&q.b!==drop&&q.c!==drop;});return true;}
+  // Fusion-style line endpoint inference. Existing/profile vertices win over
+  // the drawing grid, followed by horizontal/vertical alignment to the last
+  // line endpoint. Returning the exact target coordinates makes the resulting
+  // curves share one corner instead of merely looking coincident on screen.
+  function snapLinePoint(chain,existing,x,y,grid,tol,axisTol){chain=chain||[];existing=existing||[];grid=+grid||0;tol=Math.max(0,+tol||0);axisTol=Math.max(0,+axisTol||tol);
+    var q={x:grid>0?Math.round(x/grid)*grid:+x,y:grid>0?Math.round(y/grid)*grid:+y,kind:grid>0?"grid":"free",mag:false,close:false,axis:null,target:-1},best=tol+1e-12;
+    function vertex(p,kind,index){var px=Array.isArray(p)?+p[0]:+p.x,py=Array.isArray(p)?+p[1]:+p.y,d=Math.hypot(x-px,y-py);if(d<best){best=d;q.x=px;q.y=py;q.kind=kind;q.mag=true;q.close=kind==="close";q.axis=null;q.target=index;}}
+    if(chain.length>=3)vertex(chain[0],"close",0);existing.forEach(function(p,i){vertex(p,"vertex",i);});if(q.mag)return q;
+    if(chain.length){var last=chain[chain.length-1],dx=Math.abs(x-last[0]),dy=Math.abs(y-last[1]);if(dx<=axisTol&&dx<=dy){q.x=last[0];q.kind="inference";q.axis="vertical";}else if(dy<=axisTol){q.y=last[1];q.kind="inference";q.axis="horizontal";}}
+    return q;}
   function offset(s,distance){var pcs=physicalCurves(s);if(pcs.some(function(c){return c.kind!=="line";}))return false;var ps=physicalPoints(s),area=0,i,n=ps.length;
     for(i=0;i<n;i++){var a=ps[i],b=ps[(i+1)%n];area+=a.x*b.y-b.x*a.y;}var side=area>=0?1:-1,shift=[];
     for(i=0;i<n;i++){a=ps[i];b=ps[(i+1)%n];var dx=b.x-a.x,dy=b.y-a.y,l=Math.hypot(dx,dy);if(l<1e-9)return false;var nx=side*dy/l,ny=-side*dx/l;
@@ -224,6 +234,6 @@
   return {VERSION:VERSION,clone:cp,valid:validSketch,fromSegments:fromSegments,fromOutline:fromOutline,ensure:ensure,compile:compile,syncOutline:syncOutline,
     point:point,curve:curve,physicalCurves:physicalCurves,physicalPoints:physicalPoints,nextId:nextId,arcCircle:arcCircle,
     solve:solve,state:state,addConstraint:addConstraint,removeConstraint:removeConstraint,movePoint:movePoint,moveCurve:moveCurve,
-    insertPoint:insertPoint,deletePoint:deletePoint,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,
+    insertPoint:insertPoint,deletePoint:deletePoint,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,snapLinePoint:snapLinePoint,
     offset:offset,mirror:mirror,annotations:annotations,dimensionValue:dimensionValue};
 });
