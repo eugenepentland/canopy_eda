@@ -17,6 +17,14 @@ test "sidebar pin re-wire updates in place without a full-page reload" {
     try std.testing.expect(std.mem.indexOf(u8, js, "if (pendingEdits) return;") != null);
 }
 
+test "sidebar passive footprint update preserves the page and version watermark" {
+    const js = schematic_viewer_js_asset;
+    try std.testing.expect(std.mem.indexOf(u8, js, "function updatePassiveFootprint(ref, requested, reply)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "var passive = c.kind === 'passive';") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "srcOff: c.src }, !passive,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "updatePassiveFootprint(ref, nc, reply);") != null);
+}
+
 test "sidebar delete carries source identity for auto-numbered parts" {
     const js = schematic_viewer_js_asset;
     try std.testing.expect(std.mem.indexOf(u8, js, "{ ref: ref, srcOff: c.src }, true,") != null);

@@ -894,6 +894,28 @@
     pinRec.net = newNet;
   }
 
+  // A passive package swap does not change schematic connectivity or symbol
+  // geometry. Refresh the inspector/search record from the edit response and
+  // advance the version watermark through postEdit instead of reloading the
+  // whole schematic page. Hub/component swaps remain structural and reload.
+  function updatePassiveFootprint(ref, requested, reply) {
+    var c = compByRef[ref];
+    if (!c) return;
+    var fresh = reply && reply.components && reply.components[ref];
+    c.component = (fresh && fresh.component) || requested;
+    if (fresh) {
+      c.footprint = fresh.footprint || '';
+      c.value = fresh.value || c.value;
+      if (typeof fresh.srcOff === 'number') c.src = fresh.srcOff;
+    }
+    showComponent(ref, false);
+    var msg = detailBox.querySelector('.sb-insp-msg');
+    if (msg) {
+      msg.textContent = 'Footprint updated.';
+      msg.className = 'sb-insp-msg is-ok';
+    }
+  }
+
   // Unified detail view for any component — hubs render their pin table,
   // passives render a compact info card with a "show net" jump for each pin.
   function showComponent(ref, doScroll) {
@@ -1040,7 +1062,8 @@
 
   // Wire the structured inspector panel + inline pin re-wiring for an
   // editable (top-level, non-module) instance. Each control POSTs a surgical
-  // edit; structural changes reload the page, scalar value/MPN edits don't.
+  // edit; structural changes reload the page, while passive package swaps and
+  // scalar value/MPN edits update the inspector in place.
   function wireInspector(box, ref, c) {
     var panel = box.querySelector('.sb-inspect');
     if (!panel) return;
@@ -1071,8 +1094,10 @@
           var nc = panel.querySelector('.sb-insp-comp').value.trim();
           if (!nc || nc === c.component) { showMsg('Enter a different component.', true); return; }
           showMsg('Applying…', false);
-          postEdit('/api/edit-footprint', { ref: ref, component: nc, oldComponent: c.component || '', srcOff: c.src }, true,
-            function (e) { showMsg(e, true); });
+          var passive = c.kind === 'passive';
+          postEdit('/api/edit-footprint', { ref: ref, component: nc, oldComponent: c.component || '', srcOff: c.src }, !passive,
+            function (e) { showMsg(e, true); },
+            passive ? function (reply) { updatePassiveFootprint(ref, nc, reply); } : null);
         }
       });
     });

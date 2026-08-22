@@ -482,13 +482,13 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
 
     const new_layout = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
     serve_root.setLiveLayoutJson(name, new_layout);
-    _ = serve_root.bumpLiveVersion(name);
+    const version = serve_root.bumpLiveVersion(name);
 
     // Return updated COMPONENTS plus PCB edit provenance so both schematic and
     // board clients can refresh source offsets without navigating away.
     var comp_json: std.Io.Writer.Allocating = .init(ctx.allocator);
     const cw = &comp_json.writer;
-    try cw.writeAll("{\"ok\":true,\"components\":{");
+    try cw.print("{{\"ok\":true,\"version\":{d},\"components\":{{", .{version});
     _ = try bom_html.writeComponentsJson(cw, block, "", &svg_sym_cache, ctx.allocator, ctx.project_dir);
     try cw.writeAll("},\"part_edits\":");
     try cw.writeAll(pcb_part_json.buildEditSources(ctx.allocator, block, name));
