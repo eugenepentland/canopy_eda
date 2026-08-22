@@ -170,7 +170,8 @@
   // the SAME `data.timeline` the replay player reads, following the head until
   // the user scrubs back.
   var live = { on: false, gen: 0, attempt: 0, since: 0, misses: 0,
-               follow: true, onFinal: null, logSeq: 0, seq: 0 };
+               follow: true, onFinal: null, logSeq: 0, seq: 0,
+               stopping: false, elapsedMs: 0, stopElapsedMs: 0 };
 
   // ── Small formatters ──────────────────────────────────────────────────
   function nm(idx) {
@@ -736,7 +737,8 @@
     // followed by a Route click that 409-attaches) stops instead of double-ingesting.
     live.seq++;
     live.on = true; live.gen = gen; live.attempt = 0; live.since = 0;
-    live.misses = 0; live.follow = true;
+    live.misses = 0; live.follow = true; live.stopping = false;
+    live.elapsedMs = 0; live.stopElapsedMs = 0;
     live.onFinal = (opts && opts.onFinal) || null;
     liveResetTimeline(nets);
     // Reset the Route button's remembered disabled state to enabled so exitMode
@@ -751,7 +753,7 @@
   }
 
   function liveGiveUp(msg) {
-    live.on = false; live.follow = true;
+    live.on = false; live.follow = true; live.stopping = false;
     showStop(false); liveLock(false);
     routeStat("err", msg);
     ["r-go"].forEach(function (id) { var b = $(id); if (b) b.disabled = false; });
@@ -827,6 +829,12 @@
   // mid-run event total is 0 — never shown). A non-fatal envelope err (sink OOM)
   // shows as a warn note in the dock's own status without stopping the stream.
   function liveStatusEnvelope(j) {
+    live.elapsedMs = +j.elapsed_ms || 0;
+    if (live.stopping) {
+      routeStat("warn", "stopping… · " + (live.stopElapsedMs / 1000).toFixed(1) + "s");
+      if (j.err) status("⚠ " + j.err + " — stopping", "warn");
+      return;
+    }
     var ev = data.timeline.length ? data.timeline[data.timeline.length - 1] : null;
     var bits = [];
     if (ev) bits.push(eventText(ev)[1]);
@@ -838,7 +846,7 @@
   }
 
   function liveFinish(j) {
-    live.on = false;
+    live.on = false; live.stopping = false;
     revealReplay(); // surface Adopt/Clear and the finished route steps
     showStop(false); liveLock(false);
     if (j.final) data.final = j.final;
@@ -892,13 +900,24 @@
   if (slider) slider.addEventListener("input", function () {
     stop(); liveUnfollow(); ensureArmed(); setFrame(parseInt(this.value, 10) || 0, false); liveRefollowIfHead();
   });
-  // Stop: trip the live route's cooperative cancel; the job still finishes to a
-  // partial result (done + cancelled), which liveFinish keeps for Adopt.
+  // Stop: freeze the user-visible elapsed time immediately, then trip the live
+  // route's cooperative cancel. Polling continues only so the current net can
+  // finish and liveFinish can retain the partial result for Adopt.
   onClick("r-stop", function () {
+    if (!live.on || live.stopping) return;
+    live.stopping = true; live.stopElapsedMs = live.elapsedMs;
     var b = $("r-stop"); if (b) b.disabled = true; // debounce; keep polling
     status("stopping — finishing the current net…", "running");
-    routeStat("running", "stopping…");
-    fetch("/api/route-live/" + encodeURIComponent(PCB.name) + "/cancel", { method: "POST" }).catch(function () { });
+    routeStat("warn", "stopping… · " + (live.stopElapsedMs / 1000).toFixed(1) + "s");
+    fetch("/api/route-live/" + encodeURIComponent(PCB.name) + "/cancel", { method: "POST" })
+      .then(function (r) { if (!r.ok) throw new Error("stop failed"); })
+      .catch(function () {
+        if (!live.on) return;
+        live.stopping = false;
+        if (b) b.disabled = false;
+        routeStat("err", "stop failed — router still running");
+        status("stop failed — the autorouter is still running", "error");
+      });
   });
   // Ghost-saved-copper toggle: only meaningful while exclusive mode is active,
   // but wiring the flag live lets it take effect the instant it's flipped.

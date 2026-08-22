@@ -5741,6 +5741,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The /pcb-layout Route panel presents Route board, Stop, status, and live replay without cached-load, interactive-session, scope, or advanced-routing controls
 - A completed Route board run persists its applied copper to the active layout, or creates the conventional first `layout` snapshot; Route plan remains temporary
 - The PCB replay client streams the live-route endpoint into the timeline player, follows the head, and reattaches to a running job through the overlay seam
+- The PCB live-route Stop action freezes the displayed elapsed time immediately while cooperative cancellation finishes, and resumes live progress if the cancellation request fails
 - The PCB autorouter client offers full local-then-global and subcircuits-only stages, and the local stage never falls back to the blocking whole-board endpoint
 - The PCB board editor publishes the replay overlay, copper-adopt, and live-route result seams the replay client drives
 - The PCB thermal overlay paints the cached heat field over the read-only board through the overlay seam

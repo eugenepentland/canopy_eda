@@ -815,6 +815,19 @@ test "PCB replay client streams the live route and follows the head" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_replay_js, marker) != null);
 }
 
+// spec: Web Server - The PCB live-route Stop action freezes the displayed elapsed time immediately while cooperative cancellation finishes, and resumes live progress if the cancellation request fails
+test "PCB live-route Stop freezes elapsed time while cancellation finishes" {
+    const markers = [_][]const u8{
+        "stopping: false, elapsedMs: 0, stopElapsedMs: 0",
+        "live.stopping = true; live.stopElapsedMs = live.elapsedMs;",
+        "if (live.stopping) {",
+        "(live.stopElapsedMs / 1000).toFixed(1)",
+        "live.stopping = false;",
+        "stop failed — router still running",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_replay_js, marker) != null);
+}
+
 // spec: Web Server - The PCB autorouter client offers full local-then-global and subcircuits-only stages, and the local stage never falls back to the blocking whole-board endpoint
 test "PCB autorouter client selects a terminal subcircuit stage" {
     const markers = [_][]const u8{
