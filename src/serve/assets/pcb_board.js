@@ -8197,7 +8197,7 @@ function routeScopeInit(){
  document.addEventListener("click",function(ev){if(ctl.open&&!ctl.contains(ev.target))ctl.open=false;});
 }
 routeScopeInit();
-var rgo=document.getElementById("r-go");
+var rgo=document.getElementById("r-go"),rdeep=document.getElementById("r-go-deep");
 // The ONE autoroute-from-the-viewer flow: build the payload from the on-screen
 // poses + the Route panel's geometry, stream it live when the driver is there,
 // fall back to the blocking POST when it isn't. Both the Autorouter panel's
@@ -8254,12 +8254,16 @@ function runRoute(opts){
     blockingRoute();})
   .catch(function(){blockingRoute();});
 }
-// Both route entry points are disabled together for the duration of a run —
-// they route the same board, so a second click on the other one would fight the
+// Every route entry point is disabled together for the duration of a run —
+// they route the same board, so a second click on another one would fight the
 // first. Re-enabled by PCBApplyRouteResult (and by the error paths here).
-function routeBusy(on){["r-go","pcb-routeplan"].forEach(function(id){
+function routeBusy(on){["r-go","r-go-deep","pcb-routeplan"].forEach(function(id){
  var b=document.getElementById(id);if(b)b.disabled=!!on;});}
-if(rgo)rgo.addEventListener("click",function(){runRoute({});});
+// The primary editor action is deliberately bounded: an authored standard
+// tier may consume minutes on a hard board. The full rescue ladder remains an
+// explicit Advanced-routing action for unattended work.
+if(rgo)rgo.addEventListener("click",function(){runRoute({effort:"one_shot"});});
+if(rdeep)rdeep.addEventListener("click",function(){runRoute({effort:"standard"});});
 // "Route plan" — offered only on an UNSAVED board (a Rough/Regenerate seed or a
 // sub-block preview), where the placement on screen has no routing yet and no
 // saved row to compare against. one_shot because this is a look, not a commit:

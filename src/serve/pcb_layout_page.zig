@@ -8692,8 +8692,9 @@ fn writeDocHead(w: *std.Io.Writer, title: []const u8, embed: bool, edit_embed: b
     try w.writeAll(">");
 }
 
-/// Routing panel: DRC inputs (mm), the Route button (which streams the live
-/// autoroute onto the board), a Stop button, and the routed/total + DRC status.
+/// Routing panel: DRC inputs (mm), the fast interactive Route button (which
+/// streams a one-shot autoroute onto the board), an explicit deep-route action,
+/// a Stop button, and the routed/total + DRC status.
 /// The live-route / replay dock (`#panel-replay`, pcb_replay.js + pcb_route_session.js)
 /// is emitted inline at the end as a full-width in-panel section — the merged
 /// panel replaces the old separate Replay accordion chip.
@@ -8711,7 +8712,9 @@ fn writeRoutePanel(
     try w.writeAll("<div class=\"pcb-route pcb-panel\" id=\"panel-route\"");
     if (!start_open) try w.writeAll(" hidden");
     try w.writeAll("><div class=\"route-primary\">");
-    try w.writeAll("<button class=\"btn route-go\" id=\"r-go\">Route board</button>");
+    try w.writeAll("<button class=\"btn route-go\" id=\"r-go\" " ++
+        "title=\"Route once and return promptly; use Deep route under Advanced routing for the full rescue tier\">" ++
+        "Route board</button>");
     // Stop replaces the live-route action while a run is in flight. Keeping it
     // beside the primary action makes the common path one obvious control.
     try w.writeAll("<button class=\"btn\" id=\"r-stop\" title=\"Stop the live autoroute (keeps the partial copper to Adopt)\" hidden disabled>Stop</button>");
@@ -8755,6 +8758,8 @@ fn writeRoutePanel(
     try w.print("<label>Clearance <input id=\"r-cl\" type=\"number\" step=\"0.05\" min=\"0.05\" value=\"{d}\"></label>", .{params.clearance});
     try w.print("<label>Via drill <input id=\"r-vd\" type=\"number\" step=\"0.05\" min=\"0.1\" value=\"{d}\"></label>", .{params.via_drill});
     try w.print("<label>Via Ø <input id=\"r-va\" type=\"number\" step=\"0.05\" min=\"0.2\" value=\"{d}\"></label>", .{params.via_dia});
+    try w.writeAll("<button class=\"btn\" id=\"r-go-deep\" " ++
+        "title=\"Run the design's full standard rescue tier; complex boards may take several minutes\">Deep route</button>");
     try w.writeAll("<button class=\"btn\" id=\"r-pour\" title=\"Recompute declared pours around the current tracks and vias\">Refill pours</button>");
     try w.writeAll("<span class=\"route-stat\" id=\"r-pour-stat\"></span>");
     // The clearance-halo toggle lives in the Appearance panel's Layers tab
@@ -14545,12 +14550,15 @@ test "the route panel embeds the merged live-route dock and stop control" {
     defer pw.deinit();
     try writeRoutePanel(&pw.writer, .{}, null, 0, 0, true, false);
     const html = pw.written();
-    // The Route button streams the live route; a Stop button sits next to it,
+    // The primary Route button streams a bounded route; the full standard tier
+    // is explicit under Advanced routing. A Stop button sits next to Route,
     // hidden until a run is in flight.
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-go\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-go-deep\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-stop\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"r-stop\" title=") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, ">Route board</button>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, ">Deep route</button>") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "<summary>Advanced routing</summary>") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"route-replay\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "<summary>Replay details</summary>") != null);
@@ -17200,10 +17208,12 @@ test "the placement controls' Route plan action is gated to an unsaved board and
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"pcb-planchip\" style=\"display:none\"></span>") != null);
 
     const js = @embedFile("assets/pcb_board.js");
-    // One route flow, two entry points: the Autorouter panel's Route button at
-    // the authored tier, the scorebar's plan action at one_shot.
+    // One route flow, three entry points: the primary Route button and the
+    // scorebar's plan action are bounded one-shot runs; Deep route explicitly
+    // requests the full standard tier.
     try std.testing.expect(std.mem.indexOf(u8, js, "function runRoute(opts)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "rgo.addEventListener(\"click\",function(){runRoute({});})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "rgo.addEventListener(\"click\",function(){runRoute({effort:\"one_shot\"});})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "rdeep.addEventListener(\"click\",function(){runRoute({effort:\"standard\"});})") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "runRoute({effort:\"one_shot\",plan:true})") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "if(opts.effort)payload.effort=opts.effort;") != null);
     // Revealed only on an unsaved solve — a persisted layout already has the
@@ -17212,8 +17222,11 @@ test "the placement controls' Route plan action is gated to an unsaved board and
     // The plan copper is marked as a plan, and dropped whenever the copper is.
     try std.testing.expect(std.mem.indexOf(u8, js, "if(opts.plan)planChip(j);") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function clearRoute(){planChip(null);") != null);
-    // Both entry points disable together for the run (one board, one router).
-    try std.testing.expect(std.mem.indexOf(u8, js, "function routeBusy(on){[\"r-go\",\"pcb-routeplan\"]") != null);
+    // All entry points disable together for the run (one board, one router).
+    try std.testing.expect(std.mem.indexOf(u8, js, "function routeBusy(on){[\"r-go\",\"r-go-deep\",\"pcb-routeplan\"]") != null);
+    const replay_js = @embedFile("assets/pcb_replay.js");
+    try std.testing.expect(std.mem.indexOf(u8, replay_js, "var GATED = [\"r-go\", \"r-go-deep\",") != null);
+    try std.testing.expect(std.mem.indexOf(u8, replay_js, "[\"r-go\", \"r-go-deep\"].forEach") != null);
 }
 
 // spec: Web Server - The page blob names which rung of the layout ladder the shown board came from, so the viewer can tell a persisted layout from an unsaved solve

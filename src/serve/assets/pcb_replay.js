@@ -524,7 +524,7 @@
 
   // Tool gating: Route, pour-refill, the ✎ Draw toggle, and Save/Update. Each
   // button's prior disabled state is remembered so exit restores it exactly.
-  var GATED = ["r-go", "r-pour", "pcb-pour", "pcb-draw", "pcb-saveas", "pcb-update"];
+  var GATED = ["r-go", "r-go-deep", "r-pour", "pcb-pour", "pcb-draw", "pcb-saveas", "pcb-update"];
   var gatePrev = {};
   function gateTools(on) {
     if (on) {
@@ -780,7 +780,7 @@
     liveResetTimeline(nets);
     // Reset the Route button's remembered disabled state to enabled so exitMode
     // (which restores gateTools' snapshot) leaves it clickable after the run.
-    var rg = $("r-go"); if (rg) rg.disabled = false;
+    ["r-go", "r-go-deep"].forEach(function (id) { var b = $(id); if (b) b.disabled = false; });
     enterMode();          // exclusive overlay (the empty timeline paints nothing yet)
     liveLock(true);
     showStop(true);
@@ -793,7 +793,7 @@
     live.on = false; live.follow = true;
     showStop(false); liveLock(false);
     routeStat("err", msg);
-    var rg = $("r-go"); if (rg) rg.disabled = false;
+    ["r-go", "r-go-deep"].forEach(function (id) { var b = $(id); if (b) b.disabled = false; });
   }
 
   // ~300ms poll loop (mirrors pcb_board.js's livePoll idiom: give up after N
