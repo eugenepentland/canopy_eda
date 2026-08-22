@@ -33,11 +33,12 @@ fn appendFromBlock(allocator: Allocator, map: *Map, block: *const DesignBlock) A
 fn join(allocator: Allocator, fns: []const []const u8) ?[]const u8 {
     if (fns.len == 0) return null;
     if (fns.len == 1) return fns[0];
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
     for (fns, 0..) |f, i| {
         if (i > 0) w.writeAll(", ") catch return null;
         w.writeAll(f) catch return null;
     }
-    return buf.toOwnedSlice(allocator) catch null;
+    return buf.toOwnedSlice() catch null;
 }

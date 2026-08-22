@@ -20,8 +20,8 @@ const sexp_path_template = "{s}/{s}.sexp";
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
-    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
-    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    infra_fs.File.WriteError || infra_fs.File.OpenError || infra_fs.File.ReadError ||
+    infra_fs.Dir.MakeError || infra_fs.Dir.StatFileError ||
     error{ FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, ReadOnlyFileSystem, LinkQuotaExceeded };
 
 /// POST /api/upload-package — accept a multipart upload of a KiCad symbol

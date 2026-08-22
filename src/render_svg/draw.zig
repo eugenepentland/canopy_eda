@@ -4,6 +4,7 @@
 //! (`isHub`, `shortRef`, `baseNetName`, …) the other render_svg modules build on.
 
 const std = @import("std");
+const na = @import("../eval/net_analysis.zig");
 const ctx_mod = @import("context.zig");
 const FlatInst = ctx_mod.FlatInst;
 const Endpoint = ctx_mod.Endpoint;
@@ -320,8 +321,8 @@ pub fn isHubRef(ref_des: []const u8) bool {
 /// starting with VSS. Drives whether the renderer draws a GND symbol
 /// instead of a labeled net stub.
 pub fn isGroundNet(name: []const u8) bool {
-    return std.mem.eql(u8, name, "GND") or std.mem.eql(u8, name, "AGND") or
-        std.mem.eql(u8, name, "DGND") or std.mem.startsWith(u8, name, "VSS");
+    for (na.schematic_ground_names) |g| if (std.mem.eql(u8, name, g)) return true;
+    return std.mem.startsWith(u8, name, "VSS");
 }
 
 /// Strip the "subblock/" path from a ref-des — turns "ldo/U1" into "U1"
@@ -430,25 +431,25 @@ pub fn pinOrder(a: []const u8, b: []const u8) bool {
 
 // spec: render_svg - Net names are XML-escaped in the emitted SVG markup
 test "drawNetWire escapes a quote/angle-bracket in the net name" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    const w = buf.writer(std.testing.allocator);
+    var buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
     // An import-kicad net name that tries to break out of the data-net attribute
     // and inject a <script> tag.
     try drawNetWire(w, 0, 0, 10, 0, "\"><script>alert(1)</script>");
     // The raw payload must not survive: no unescaped '<', '>' or '"' from the
     // net name can reach the inlined SVG markup.
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<script>") == null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "data-net=\"&quot;&gt;&lt;script&gt;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "<script>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "data-net=\"&quot;&gt;&lt;script&gt;") != null);
 }
 
 test "drawWire emits a straight line for a horizontal (y1==y2) wire" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    const w = buf.writer(std.testing.allocator);
+    var buf: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
     // Equal endpoints on y ⇒ the horizontal branch: a single <line>, not the
     // H-V-H <polyline> the y1!=y2 branch draws. `==`→`!=` swaps the two branches.
     try drawWire(w, 0, 5, 10, 5);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<line ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "<polyline") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "<line ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "<polyline") == null);
 }

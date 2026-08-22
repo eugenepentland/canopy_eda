@@ -6,6 +6,119 @@ const std = @import("std");
 const env_mod = @import("env.zig");
 const DesignBlock = env_mod.DesignBlock;
 
+// ── Ground-net name vocabulary ───────────────────────────────────────────
+// Every ground-name spelling this project recognises lives HERE. Nine other
+// modules used to keep a private token list of their own — the plane stitcher,
+// the pin-role reader, the block-diagram classifier, the schematic renderer
+// (twice), the ERC, the PCB page and the board viewer's JS — and a net that is
+// ground to the router and signal to the ERC is a stitch via that never gets
+// planted.
+//
+// This module is the home rather than `placement/optimizer.zig` for one
+// structural reason: the optimizer sits near the top of the placement graph, so
+// `pin_roles` — which the optimizer itself imports — cannot import it back, and
+// neither can the eval-layer checkers. `net_analysis` is a leaf every one of
+// those modules already can, and does, reach. The project's ground PREDICATE,
+// `isGroundName`, lives here for the same reason and is re-exported as
+// `optimizer.isGroundName`, which stays the spelling every consumer calls: the
+// tokens and the rule that reads them must not be separable, or a module below
+// the optimizer re-derives the rule (as `critical_rough` did, matching only
+// GND/GROUND/VSS and routing every split ground as signal).
+//
+// The tables are the private lists TRANSCRIBED, not merged: they genuinely
+// disagree today (only `ground_fn_prefixes` lists `SGND`; only
+// `schematic_ground_names` omits `PGND`; `ground_tokens` demands an all-digit
+// suffix where the prefix tables accept anything), and every one of those
+// disagreements is a live behaviour some surface depends on. Naming them side
+// by side is what makes the next one visible. Merging two is a design decision
+// — make it here, in one edit, with a test.
+
+/// `AGND` — the analog 0 V reference of a split-ground part or board.
+pub const analog_ground = "AGND";
+
+/// `DGND` — the digital 0 V reference (the twin of `analog_ground`).
+pub const digital_ground = "DGND";
+
+/// `PGND` — the power-stage return of a converter or driver, kept separate from
+/// the quiet grounds so its high-dI/dt loop can be judged on its own.
+pub const power_ground = "PGND";
+
+/// `SGND` — a signal/sense ground, star-tied to the others at one point.
+const signal_ground = "SGND";
+
+/// `GNDA` / `GNDD` — the suffix spelling of the analog/digital split, used by
+/// the parts whose datasheets name them that way round.
+const analog_ground_suffixed = "GNDA";
+const digital_ground_suffixed = "GNDD";
+
+/// The canonical ground TOKEN list — `placement/optimizer.isGroundName`'s own,
+/// which accepts each token bare or with an all-digit suffix (`GND1`, `AGND2`,
+/// `PGND_2`) and nothing else, so a real signal like `GND_SENSE` stays a
+/// signal. Ordered longest-first so `GNDA` is not shadowed by `GND`; the PCB
+/// page's exact-match copy shares it. The one list the plane stitcher, the
+/// pour, the DRC and the fab outputs all judge a board by.
+pub const ground_tokens = [_][]const u8{
+    analog_ground_suffixed, digital_ground_suffixed, analog_ground, power_ground,
+    digital_ground,         "VSSA",                  "GND",         "VSS",
+};
+
+/// True when `name` — already stripped to its `/`-leaf by the caller — is a
+/// ground rail. Re-exported as `placement/optimizer.isGroundName`, the spelling
+/// every consumer calls; it is defined here so a module the optimizer imports
+/// can reach it without an import cycle.
+///
+/// A ground rail is one of `ground_tokens`, optionally with a *numbered* suffix
+/// (GND1, GND2, AGND2, VSS1, PGND_2 on a multi-ground part) — an exact-match
+/// list missed numbered grounds, so on an isolated/split-ground part those nets
+/// read as *signal*, corrupting loop detection, rail direction, and scoring. The
+/// suffix must be (an optional single '_'/'-' then) all digits, so a real signal
+/// like GND_SENSE / GNDSW stays a signal. `ground_tokens` is ordered longest
+/// first so e.g. GNDA is not shadowed by GND.
+pub fn isGroundName(name: []const u8) bool {
+    for (ground_tokens) |t| {
+        if (!std.mem.startsWith(u8, name, t)) continue;
+        var rest = name[t.len..];
+        if (rest.len == 0) return true;
+        if (rest[0] == '_' or rest[0] == '-') rest = rest[1..];
+        if (rest.len == 0) return false; // bare separator, no number
+        for (rest) |c| {
+            if (!std.ascii.isDigit(c)) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+/// Pinout FUNCTION-name prefixes that denote a ground return. Read by
+/// `placement/pin_roles.isGroundFn`, which normalises separators/case first
+/// and then also accepts a short list of exposed-pad names. Uniquely lists
+/// `SGND`, and being a bare prefix set it accepts `GND_SENSE` where
+/// `ground_tokens` does not.
+pub const ground_fn_prefixes = [_][]const u8{
+    "GND", "VSS", analog_ground, digital_ground, power_ground, signal_ground,
+};
+
+/// The exact ground base-net names the block-diagram classifier matches
+/// (`diagram/classify`), which pairs them with `ground_stem_prefixes`.
+pub const ground_base_names = [_][]const u8{ "GND", analog_ground, digital_ground, power_ground };
+
+/// Named/derived grounds keep their stem as a prefix: an isolated barrier
+/// ground (`GND_ISO`), a digital/analog split (`GND_A`). `VSS`/`VSSA` is the
+/// 0 V reference in CMOS naming (not a rail), so it belongs here — otherwise a
+/// VSS-named design gets the spurious dense power-edge fan the ground class
+/// exists to suppress.
+pub const ground_stem_prefixes = [_][]const u8{
+    "GND_",              analog_ground ++ "_", digital_ground ++ "_",
+    power_ground ++ "_", "VSS",
+};
+
+/// The ground names the SCHEMATIC draws a GND symbol for rather than a labelled
+/// net stub (`render_svg/draw.isGroundNet`, plus the always-significant net
+/// seeds in `render_svg/context`). Deliberately omits `PGND`: a power-stage
+/// return is drawn as its own labelled node so the reader can see it is not
+/// the quiet ground.
+pub const schematic_ground_names = [_][]const u8{ "GND", analog_ground, digital_ground };
+
 /// Strip a `.subnet` suffix so `VDD.U3.W6` collapses to `VDD`. The `.`
 /// separator is used by the eval builder to carve per-pin/per-port split
 /// nets off a base rail; for most analyses we want the base name.
@@ -28,7 +141,7 @@ pub fn refDesLocalPrefix(ref_des: []const u8) u8 {
 }
 
 /// Walk a sub-block path like `ldo/VOUT` or `adc1/VLOGIC` into the block
-/// tree and return true if the leaf net carries at least one C-prefix pin.
+/// tree and return true if the leaf net has a capacitor bridged to ground.
 /// Used to detect decoupling that lives inside a sub-block whose port is
 /// tied to a top-level power rail via a `(net ...)` form.
 pub fn subBlockNetHasCap(block: *const DesignBlock, net_path: []const u8) bool {
@@ -44,7 +157,8 @@ pub fn subBlockNetHasCap(block: *const DesignBlock, net_path: []const u8) bool {
         if (!std.mem.eql(u8, n.name, net_path)) continue;
         for (n.pins) |pin| {
             if (pin.ref_des.len == 0) continue;
-            if (refDesLocalPrefix(pin.ref_des) == 'C') return true;
+            if (refDesLocalPrefix(pin.ref_des) == 'C' and
+                capBridgesBaseToGround(block, pin.ref_des, baseNetName(n.name))) return true;
         }
         return false;
     }
@@ -63,15 +177,19 @@ pub fn findMissingDecouplingNets(
 ) std.mem.Allocator.Error![]const []const u8 {
     var power_nets: std.StringHashMapUnmanaged(void) = .empty;
     defer power_nets.deinit(allocator);
-    for (block.sections) |sec| {
-        // Concept sections haven't been implemented yet — skip so we don't
-        // demand decoupling caps on rails that aren't wired to anything.
-        if (sec.status == .concept) continue;
-        for (sec.ports) |p| {
-            if (p.signal_type == .power and p.direction == .in) {
-                try power_nets.put(allocator, p.name, {});
-            }
+    for (block.ports) |port| {
+        if (!std.mem.eql(u8, port.direction, "in")) continue;
+        // An explicit non-power kind is authoritative (`Port.isDeclaredNonPower`,
+        // shared with the power budget). A rated enable/control input can
+        // therefore declare its voltage envelope without becoming a supply rail
+        // that incorrectly demands a bypass capacitor.
+        if (port.isDeclaredNonPower()) continue;
+        if (std.ascii.eqlIgnoreCase(port.kind, "power") or port.isPowerSource()) {
+            try power_nets.put(allocator, baseNetName(port.net), {});
         }
+    }
+    for (block.sections) |sec| {
+        try collectSectionPowerInputs(allocator, &power_nets, sec);
     }
 
     // Aggregate IC- and cap-presence per *base* rail name, folding the trunk
@@ -95,7 +213,8 @@ pub fn findMissingDecouplingNets(
             if (pin.ref_des.len == 0) continue;
             switch (refDesLocalPrefix(pin.ref_des)) {
                 'U' => try rails_with_ic.put(allocator, base, {}),
-                'C' => try rails_with_cap.put(allocator, base, {}),
+                'C' => if (capBridgesBaseToGround(block, pin.ref_des, base))
+                    try rails_with_cap.put(allocator, base, {}),
                 else => {},
             }
         }
@@ -118,6 +237,57 @@ pub fn findMissingDecouplingNets(
         try missing.append(allocator, base);
     }
     return missing.toOwnedSlice(allocator);
+}
+
+fn collectSectionPowerInputs(
+    allocator: std.mem.Allocator,
+    power_nets: *std.StringHashMapUnmanaged(void),
+    section: env_mod.Section,
+) std.mem.Allocator.Error!void {
+    // Concept sections haven't been implemented yet — skip so we don't demand
+    // bypassing on rails that aren't wired to anything.
+    if (section.status == .concept) return;
+    for (section.ports) |port| {
+        if (port.signal_type == .power and port.direction == .in) {
+            try power_nets.put(allocator, baseNetName(port.name), {});
+        }
+    }
+    for (section.sub_sections) |sub| {
+        try collectSectionPowerInputs(allocator, power_nets, sub);
+    }
+}
+
+/// A capacitor qualifies as decoupling only when it touches this rail and a
+/// recognised ground-return net. Merely placing any C-prefix pin on a supply
+/// rail no longer suppresses the missing-decoupling warning.
+fn capBridgesBaseToGround(block: *const DesignBlock, cap_ref: []const u8, rail_base: []const u8) bool {
+    var has_rail = false;
+    var has_ground = false;
+    for (block.nets) |net| {
+        var touches = false;
+        for (net.pins) |pin| {
+            if (std.mem.eql(u8, pin.ref_des, cap_ref)) {
+                touches = true;
+                break;
+            }
+        }
+        if (!touches) continue;
+        const base = baseNetName(net.name);
+        if (std.mem.eql(u8, base, rail_base)) has_rail = true;
+        if (isGroundBase(base)) has_ground = true;
+    }
+    return has_rail and has_ground;
+}
+
+/// The eval-layer ground test. Alone among this project's ground predicates it
+/// is case-INSENSITIVE, because it reads names straight off a design file where
+/// an author may have typed `gnd`; the placement and schematic predicates all
+/// judge already-normalised net names.
+fn isGroundBase(name: []const u8) bool {
+    for (ground_base_names) |g| if (std.ascii.eqlIgnoreCase(name, g)) return true;
+    if (std.ascii.eqlIgnoreCase(name, "VSS")) return true;
+    return std.ascii.startsWithIgnoreCase(name, "GND_") or
+        std.ascii.startsWithIgnoreCase(name, "VSS_");
 }
 
 /// True when `base` is tied — via a `(net …)` form / net-tie — to a sub-block
@@ -216,4 +386,124 @@ pub fn buildFerriteBridges(
         }
     }
     return net_parent;
+}
+
+// The vocabulary tables' independent witness. Each expectation is the literal
+// list the consuming module held before it started importing the table,
+// transcribed by hand — so a table edited here without its consumer in mind
+// fails HERE, naming the classifier whose answer just changed, instead of
+// silently making a net ground to the plane stitcher and signal to the ERC.
+// Deriving the expectation from the table itself would make the test circular.
+test "the ground-net vocabulary tables keep the spellings their consumers had" {
+    const S = []const []const u8;
+    try std.testing.expectEqualDeep(
+        @as(S, &.{ "GNDA", "GNDD", "AGND", "PGND", "DGND", "VSSA", "GND", "VSS" }),
+        @as(S, &ground_tokens),
+    );
+    try std.testing.expectEqualDeep(
+        @as(S, &.{ "GND", "VSS", "AGND", "DGND", "PGND", "SGND" }),
+        @as(S, &ground_fn_prefixes),
+    );
+    try std.testing.expectEqualDeep(
+        @as(S, &.{ "GND", "AGND", "DGND", "PGND" }),
+        @as(S, &ground_base_names),
+    );
+    try std.testing.expectEqualDeep(
+        @as(S, &.{ "GND_", "AGND_", "DGND_", "PGND_", "VSS" }),
+        @as(S, &ground_stem_prefixes),
+    );
+    try std.testing.expectEqualDeep(
+        @as(S, &.{ "GND", "AGND", "DGND" }),
+        @as(S, &schematic_ground_names),
+    );
+    try std.testing.expectEqualStrings("AGND", analog_ground);
+    try std.testing.expectEqualStrings("DGND", digital_ground);
+    try std.testing.expectEqualStrings("PGND", power_ground);
+}
+
+// `isGroundBase` is case-insensitive where every other ground predicate here is
+// not; this pins that difference rather than leaving it to be "fixed" by
+// someone unifying the tables.
+test "isGroundBase accepts the base names in any case and only those" {
+    try std.testing.expect(isGroundBase("GND"));
+    try std.testing.expect(isGroundBase("gnd"));
+    try std.testing.expect(isGroundBase("AGND"));
+    try std.testing.expect(isGroundBase("dgnd"));
+    try std.testing.expect(isGroundBase("PGND"));
+    try std.testing.expect(isGroundBase("VSS"));
+    try std.testing.expect(isGroundBase("GND_ISO"));
+    try std.testing.expect(isGroundBase("vss_a"));
+    // Not ground: the suffix spellings this table deliberately omits, a signal
+    // that merely starts with a ground stem, and a rail.
+    try std.testing.expect(!isGroundBase("GNDA"));
+    try std.testing.expect(!isGroundBase("GNDSW"));
+    try std.testing.expect(!isGroundBase("VDD"));
+}
+
+// spec: net_analysis - a top-level input power port creates decoupling demand
+test "top-level input power ports require decoupling" {
+    const allocator = std.testing.allocator;
+    const instances = [_]env_mod.Instance{.{
+        .ref_des = "U1",
+        .component = "ic",
+        .value = "ic",
+        .footprint = "x",
+        .symbol = "ic",
+    }};
+    const nets = [_]env_mod.Net{.{ .name = "VDD", .pins = &.{.{ .ref_des = "U1", .pin = "1" }} }};
+    const ports = [_]env_mod.Port{.{ .name = "VIN", .net = "VDD", .direction = "in", .kind = "power" }};
+    const block: DesignBlock = .{
+        .name = "top power port",
+        .instances = &instances,
+        .nets = &nets,
+        .ports = &ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const missing = try findMissingDecouplingNets(allocator, &block);
+    defer allocator.free(missing);
+    try std.testing.expectEqual(@as(usize, 1), missing.len);
+    try std.testing.expectEqualStrings("VDD", missing[0]);
+}
+
+// spec: net_analysis - a capacitor only qualifies when it bridges the supply to ground
+test "supply capacitor without a ground leg is not decoupling" {
+    const allocator = std.testing.allocator;
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ic", .value = "ic", .footprint = "x", .symbol = "ic" },
+        .{ .ref_des = "C1", .component = "cap", .value = "100nF", .footprint = "x", .symbol = "cap" },
+    };
+    const ports = [_]env_mod.Port{.{ .name = "VIN", .net = "VDD", .direction = "in", .kind = "power" }};
+    const wrong_nets = [_]env_mod.Net{
+        .{ .name = "VDD", .pins = &.{
+            .{ .ref_des = "U1", .pin = "1" },
+            .{ .ref_des = "C1", .pin = "1" },
+        } },
+        .{ .name = "SENSE", .pins = &.{.{ .ref_des = "C1", .pin = "2" }} },
+    };
+    var block = DesignBlock{
+        .name = "wrong return",
+        .instances = &instances,
+        .nets = &wrong_nets,
+        .ports = &ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const missing = try findMissingDecouplingNets(allocator, &block);
+    defer allocator.free(missing);
+    try std.testing.expectEqual(@as(usize, 1), missing.len);
+
+    const valid_nets = [_]env_mod.Net{
+        .{ .name = "VDD", .pins = &.{
+            .{ .ref_des = "U1", .pin = "1" },
+            .{ .ref_des = "C1", .pin = "1" },
+        } },
+        .{ .name = "GND", .pins = &.{.{ .ref_des = "C1", .pin = "2" }} },
+    };
+    block.nets = &valid_nets;
+    const satisfied = try findMissingDecouplingNets(allocator, &block);
+    defer allocator.free(satisfied);
+    try std.testing.expectEqual(@as(usize, 0), satisfied.len);
 }

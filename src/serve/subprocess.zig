@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const clock = @import("../infra/clock.zig");
+const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 
 /// How a `runCaptured` invocation ended.
@@ -56,38 +57,40 @@ pub fn runCaptured(
     max_output_bytes: usize,
     timeout_ms: u64,
 ) std.mem.Allocator.Error!Result {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
     // pgid = 0 makes the child call setpgid(0, 0): it leads a new process
     // group (id == pid), so signalling the negative pid reaches its whole
     // subtree — a shell wrapper's grandchildren, not just the child.
-    child.pgid = 0;
+    const io = infra_fs.currentIo();
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .pgid = 0,
+    }) catch return failedResult(.spawn_failed);
+    var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    multi_reader.init(allocator, io, multi_reader_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer multi_reader.deinit();
 
-    child.spawn() catch return failedResult(.spawn_failed);
-
-    var poller = std.Io.poll(allocator, enum { stdout, stderr }, .{
-        .stdout = child.stdout.?,
-        .stderr = child.stderr.?,
-    });
-    defer poller.deinit();
-
-    const status = drain(&poller, max_output_bytes, timeout_ms);
+    const status = drain(&multi_reader, max_output_bytes, timeout_ms);
     if (status != .ok) killGroup(&child);
 
     // Always reap so the child can't linger as a zombie.
-    const term = child.wait() catch |e| {
+    const term = child.wait(io) catch |e| {
         log.warn("subprocess: wait failed: {s}", .{@errorName(e)});
         return failedResult(if (status == .ok) .spawn_failed else status);
     };
     if (status != .ok) return failedResult(status);
 
-    const stdout_owned = try poller.toOwnedSlice(.stdout);
+    const stdout_owned = try multi_reader.toOwnedSlice(0);
     return .{
         .outcome = .ok,
         .stdout = stdout_owned,
-        .exit_code = if (term == .Exited) term.Exited else null,
+        .exit_code = switch (term) {
+            .exited => |code| code,
+            else => null,
+        },
     };
 }
 
@@ -96,31 +99,29 @@ fn failedResult(outcome: Outcome) Result {
 }
 
 /// Poll both pipes until EOF (`.ok`), the byte cap trips (`.output_too_long`),
-/// or the deadline passes (`.timed_out`). `poller` is the `*Poller` value.
-fn drain(poller: anytype, max_output_bytes: usize, timeout_ms: u64) Outcome {
-    const stdout_r = poller.reader(.stdout);
-    const stderr_r = poller.reader(.stderr);
-    const deadline_ms = clock.milliTimestamp() +| @as(i64, @intCast(timeout_ms));
-
+/// or the deadline passes (`.timed_out`).
+fn drain(multi_reader: *std.Io.File.MultiReader, max_output_bytes: usize, timeout_ms: u64) Outcome {
+    const stdout_r = multi_reader.reader(0);
+    const stderr_r = multi_reader.reader(1);
+    const timeout: std.Io.Timeout = .{ .deadline = .fromNow(infra_fs.currentIo(), .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(@intCast(timeout_ms)),
+    }) };
     while (true) {
-        const remaining_ms = deadline_ms - clock.milliTimestamp();
-        if (remaining_ms <= 0) return .timed_out;
-        const remaining_ns: u64 = @as(u64, @intCast(remaining_ms)) *| clock.ns_per_ms;
-
-        // pollTimeout returns false only when every stream has hit EOF; it
-        // returns true both after reading data and when the timeout expires,
-        // so the wall-clock deadline above is what actually bounds the wait.
-        const still_open = poller.pollTimeout(remaining_ns) catch return .timed_out;
-        if (!still_open) return .ok;
-        if (stdout_r.bufferedLen() > max_output_bytes) return .output_too_long;
-        if (stderr_r.bufferedLen() > max_output_bytes) return .output_too_long;
+        multi_reader.fill(1, timeout) catch |err| switch (err) {
+            error.EndOfStream => return .ok,
+            error.Timeout => return .timed_out,
+            else => return .timed_out,
+        };
+        if (stdout_r.buffered().len > max_output_bytes) return .output_too_long;
+        if (stderr_r.buffered().len > max_output_bytes) return .output_too_long;
     }
 }
 
 /// SIGKILL the child's whole process group. Kill errors are benign here — the
 /// group is already gone or we are tearing it down regardless.
 fn killGroup(child: *std.process.Child) void {
-    const pgid: std.posix.pid_t = child.id;
+    const pgid = child.id orelse return;
     std.posix.kill(-pgid, std.posix.SIG.KILL) catch |e|
         log.warn("subprocess: group kill failed: {s}", .{@errorName(e)});
 }

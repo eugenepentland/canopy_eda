@@ -15,6 +15,11 @@ const requireString = mcp_tools.requireString;
 const optionalString = mcp_tools.optionalString;
 const optionalU64 = mcp_tools.optionalU64;
 const missingArg = mcp_tools.missingArg;
+const AllocatingWriter = @import("../allocating_writer.zig").AllocatingWriter;
+
+fn writeJsonString(w: anytype, value: []const u8) std.mem.Allocator.Error!void {
+    json_writer.writeString(w, value) catch return error.OutOfMemory;
+}
 
 // ── Library component requirements ────────────────────────────────────
 
@@ -119,21 +124,22 @@ fn listDesignNotes(
     out: *std.ArrayList(u8),
 ) std.mem.Allocator.Error!bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
     var raw: ?[]u8 = null;
     const parsed = notes.loadNotes(allocator, project_dir, name, &raw) catch |e| {
-        const w = out.writer(allocator);
         try w.print("error: cannot read notes: {s}", .{@errorName(e)});
         return false;
     };
     defer if (raw) |d| allocator.free(d);
-    const w = out.writer(allocator);
     try w.writeAll("{\"tasks\":[");
     for (parsed.tasks, 0..) |t, i| {
         if (i > 0) try w.writeAll(",");
         try writeNoteJsonMcp(w, t);
     }
     try w.writeAll("],\"scratchpad\":");
-    try json_writer.writeString(w, parsed.scratchpad);
+    try writeJsonString(w, parsed.scratchpad);
     try w.writeAll("}");
     return true;
 }
@@ -146,17 +152,17 @@ fn addDesignNote(
 ) std.mem.Allocator.Error!bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const text = requireString(args_val, "text") orelse return missingArg(out, allocator, "text");
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
     if (text.len == 0) {
-        const w = out.writer(allocator);
         try w.writeAll("error: text must be a non-empty string");
         return false;
     }
     const new_task = notes.addTaskCore(allocator, project_dir, name, text) catch |e| {
-        const w = out.writer(allocator);
         try w.print("error: add failed: {s}", .{@errorName(e)});
         return false;
     };
-    const w = out.writer(allocator);
     try w.writeAll("{\"ok\":true,\"task\":");
     try writeNoteJsonMcp(w, new_task);
     try w.writeAll("}");
@@ -172,31 +178,31 @@ fn mutateDesignNote(
 ) std.mem.Allocator.Error!bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const id = requireString(args_val, "id") orelse return missingArg(out, allocator, "id");
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w: AllocatingWriter = .{ .writer = &aw.writer };
     const result = notes.mutateTaskCore(allocator, project_dir, name, id, mode) catch |e| {
-        const w = out.writer(allocator);
         try w.print("error: mutate failed: {s}", .{@errorName(e)});
         return false;
     };
     if (result == null) {
-        const w = out.writer(allocator);
         try w.print("error: task id \"{s}\" not found", .{id});
         return false;
     }
-    const w = out.writer(allocator);
     try w.writeAll("{\"ok\":true}");
     return true;
 }
 
 fn writeNoteJsonMcp(w: anytype, t: notes.Note) std.mem.Allocator.Error!void {
     try w.writeAll("{\"id\":");
-    try json_writer.writeString(w, t.id);
+    try writeJsonString(w, t.id);
     try w.writeAll(",\"text\":");
-    try json_writer.writeString(w, t.text);
+    try writeJsonString(w, t.text);
     try w.writeAll(",\"created\":");
-    try json_writer.writeString(w, t.created);
+    try writeJsonString(w, t.created);
     if (t.completed) |c| {
         try w.writeAll(",\"completed\":");
-        try json_writer.writeString(w, c);
+        try writeJsonString(w, c);
     } else {
         try w.writeAll(",\"completed\":null");
     }

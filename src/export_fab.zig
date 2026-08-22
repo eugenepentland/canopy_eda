@@ -14,6 +14,37 @@ const std = @import("std");
 const optimizer = @import("placement/optimizer.zig");
 const router = @import("placement/router.zig");
 const export_kicad = @import("export_kicad.zig");
+const zipfile = @import("zipfile.zig");
+
+/// The manufacturing package under construction: the archive members a fab
+/// receives, each named `<prefix>-<suffix>`.
+///
+/// The naming rule lives HERE, once, because two things must agree about it
+/// that are written far apart: the archive's own entry names, and the `Path`
+/// fields `export_gerber.writeJobFile` writes into the job file to point at
+/// them. A job file naming a member the archive does not contain is a package
+/// CAM cannot load — so the prefix is chosen (and sanitized) in one place and
+/// every member is named from it.
+pub const Package = struct {
+    arena: std.mem.Allocator,
+    /// The basename every member shares — pass the SAME string to
+    /// `writeJobFile`, whose `Path` fields must resolve to these entries.
+    prefix: []const u8,
+    entries: std.ArrayList(zipfile.Entry) = .empty,
+
+    /// Append one fabrication file under the package's shared naming rule.
+    pub fn add(self: *Package, suffix: []const u8, data: []const u8) std.mem.Allocator.Error!void {
+        const entry_name = try std.fmt.allocPrint(self.arena, "{s}-{s}", .{ self.prefix, suffix });
+        try self.entries.append(self.arena, .{ .name = entry_name, .data = data });
+    }
+
+    /// Append a vendor-contract file whose basename must not be decorated by
+    /// the package prefix (for example JLCPCB `psb_*` / `pst_*` FPC backing
+    /// artwork). The caller validates the basename at DSL parse time.
+    pub fn addNamed(self: *Package, name: []const u8, data: []const u8) std.mem.Allocator.Error!void {
+        try self.entries.append(self.arena, .{ .name = try self.arena.dupe(u8, name), .data = data });
+    }
+};
 
 /// The shared fab-output coordinate frame: emitted = `(x - ox, oy - y)`.
 /// Build one with `frameFor` and pass the SAME frame to every writer of a
@@ -88,6 +119,11 @@ pub fn centroidCsv(
         // The placement angle is CW-positive in its y-down world; the pos-file
         // (and Gerber) world is y-up, where the same physical orientation
         // reads CCW-positive — emit the negated angle (KiCad does the same).
+        //
+        // The Layer column says "Top"/"Bottom" and NOT the layer table's
+        // `F.Cu`/`B.Cu`: those are the words every assembler's pick-and-place
+        // importer expects in a centroid file. They mean the same two faces
+        // the table calls `Side.front` / `Side.back` (`board_layers.Side`).
         try w.print(",{d:.3}mm,{d:.3}mm,{d:.0},{s}\n", .{
             c[0],
             c[1],
@@ -107,22 +143,33 @@ const Hole = struct { x: f64, y: f64, d: f64, x2: f64 = 0, y2: f64 = 0, slot: bo
 /// separate Excellon files.
 pub const DrillClass = enum { plated, non_plated };
 
+/// One drill file's identity: which holes it carries, and the board they are
+/// drilled through. Both are what the file's X2 `TF.FileFunction` states, so
+/// they travel together rather than as two loose arguments.
+pub const DrillFile = struct {
+    class: DrillClass,
+    /// The board's physical copper count, from the shared layer table — the
+    /// span the header declares these holes reach through.
+    copper_layers: u8,
+};
+
 /// Write an Excellon (METRIC, decimal, trailing-zero) drill file.
 /// `.plated` emits the PTH file: every plated through-hole pad of every
 /// placed part plus every routed via. `.non_plated` emits the NPTH file
 /// (mounting holes / non-plated pads only). Holes are grouped into one tool
 /// per distinct diameter (0.01 mm resolution), smallest first. Coordinates
 /// are in the shared package `frame` (y-up) so the holes stack on the
-/// gerbers.
+/// gerbers. `file` says which holes this is and how many copper layers they
+/// drill through (see `DrillFile`).
 pub fn excellonDrill(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,
     parts: []const optimizer.Part,
     vias: []const router.Via,
-    class: DrillClass,
+    file: DrillFile,
     frame: Frame,
 ) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
-    const plated = class == .plated;
+    const plated = file.class == .plated;
     var holes: std.ArrayList(Hole) = .empty;
     for (parts) |p| {
         for (p.pads) |pad| {
@@ -131,13 +178,13 @@ pub fn excellonDrill(
             if (!want) continue;
             if (pad.isSlot()) {
                 // The two slot-end arc centres, at the pad's world pose.
-                const e1 = optimizer.worldPadCenter(p, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
-                const e2 = optimizer.worldPadCenter(p, pad.x - pad.slot_half[0], pad.y - pad.slot_half[1]);
+                const e1 = optimizer.worldPadCenter(&p, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
+                const e2 = optimizer.worldPadCenter(&p, pad.x - pad.slot_half[0], pad.y - pad.slot_half[1]);
                 const f1 = frame.pt(e1[0], e1[1]);
                 const f2 = frame.pt(e2[0], e2[1]);
                 try holes.append(alloc, .{ .x = f1[0], .y = f1[1], .x2 = f2[0], .y2 = f2[1], .d = pad.drill, .slot = true });
             } else {
-                const c = optimizer.worldPadCenter(p, pad.x, pad.y);
+                const c = optimizer.worldPadCenter(&p, pad.x, pad.y);
                 const f = frame.pt(c[0], c[1]);
                 try holes.append(alloc, .{ .x = f[0], .y = f[1], .d = pad.drill });
             }
@@ -166,6 +213,18 @@ pub fn excellonDrill(
     std.sort.pdq(f64, dias.items, {}, std.sort.asc(f64));
 
     try w.writeAll("M48\n");
+    // The X2 file function, in the `; #@!` comment form Excellon carries it
+    // (the format has no attribute syntax of its own, so the standard smuggles
+    // it through a comment every CAM package recognises). It names the plating
+    // AND the layer span the holes drill through, which is what tells a fab
+    // these are through-holes of an n-layer board rather than blind/buried
+    // ones. Without it a package's two `.drl` files are distinguished only by
+    // their file names.
+    try w.print("; #@! TF.FileFunction,{s},1,{d},{s}\n", .{
+        if (plated) @as([]const u8, "Plated") else "NonPlated",
+        @max(file.copper_layers, 1),
+        if (plated) @as([]const u8, "PTH") else "NPTH",
+    });
     try w.print(";TYPE={s}\n", .{if (plated) @as([]const u8, "PLATED") else "NON_PLATED"});
     try w.writeAll("METRIC,TZ\n");
     for (dias.items, 1..) |d, ti| try w.print("T{d}C{d:.3}\n", .{ ti, d });
@@ -304,7 +363,7 @@ test "excellonDrill separates PTH and NPTH files" {
     // Board bottom at y=20 → the part-origin pad (10,10) emits at (10,10).
     const frame = Frame{ .ox = 0, .oy = 20 };
     var pth: std.Io.Writer.Allocating = .init(alloc);
-    try excellonDrill(&pth.writer, alloc, &parts, &vias, .plated, frame);
+    try excellonDrill(&pth.writer, alloc, &parts, &vias, .{ .class = .plated, .copper_layers = 4 }, frame);
     const pth_out = pth.written();
     try testing.expect(std.mem.indexOf(u8, pth_out, "T1C0.200") != null); // via tool (smallest first)
     try testing.expect(std.mem.indexOf(u8, pth_out, "C0.920") != null); // thru pad tool
@@ -313,11 +372,42 @@ test "excellonDrill separates PTH and NPTH files" {
     try testing.expect(std.mem.indexOf(u8, pth_out, "C0.750") == null); // NPTH kept out
 
     var npth: std.Io.Writer.Allocating = .init(alloc);
-    try excellonDrill(&npth.writer, alloc, &parts, &vias, .non_plated, frame);
+    try excellonDrill(&npth.writer, alloc, &parts, &vias, .{ .class = .non_plated, .copper_layers = 4 }, frame);
     const npth_out = npth.written();
     try testing.expect(std.mem.indexOf(u8, npth_out, "T1C0.750") != null); // the mounting hole
     try testing.expect(std.mem.indexOf(u8, npth_out, "X13.000Y10.000") != null);
     try testing.expect(std.mem.indexOf(u8, npth_out, "C0.200") == null); // vias are plated-only
+}
+
+// spec: export_fab - each Excellon file declares its X2 file function, naming its plating and the copper span it drills through
+test "excellonDrill declares its file function and layer span" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    const pads = [_]geometry.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 1.4, .h = 1.4, .thru = true, .drill = 0.92 },
+        .{ .number = "MH1", .x = 3, .y = 0, .w = 0.75, .h = 0.75, .thru = true, .npth = true, .drill = 0.75 },
+    };
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "J1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 10 },
+    };
+    const frame = Frame{ .ox = 0, .oy = 20 };
+
+    // The attribute rides in Excellon's `; #@!` comment form (the format has
+    // no attribute syntax), immediately after M48 and before the tool table.
+    var pth: std.Io.Writer.Allocating = .init(alloc);
+    try excellonDrill(&pth.writer, alloc, &parts, &.{}, .{ .class = .plated, .copper_layers = 6 }, frame);
+    try testing.expect(std.mem.startsWith(u8, pth.written(), "M48\n; #@! TF.FileFunction,Plated,1,6,PTH\n;TYPE=PLATED\n"));
+
+    var npth: std.Io.Writer.Allocating = .init(alloc);
+    try excellonDrill(&npth.writer, alloc, &parts, &.{}, .{ .class = .non_plated, .copper_layers = 6 }, frame);
+    try testing.expect(std.mem.startsWith(u8, npth.written(), "M48\n; #@! TF.FileFunction,NonPlated,1,6,NPTH\n;TYPE=NON_PLATED\n"));
+
+    // The span follows the board: a plain two-layer stackup drills 1..2.
+    var two: std.Io.Writer.Allocating = .init(alloc);
+    try excellonDrill(&two.writer, alloc, &parts, &.{}, .{ .class = .plated, .copper_layers = 2 }, frame);
+    try testing.expect(std.mem.indexOf(u8, two.written(), "TF.FileFunction,Plated,1,2,PTH") != null);
 }
 
 // spec: export_fab - an oval drill exports as a G85 slot at its minor-axis tool between the two arc centres, in both drill files
@@ -340,7 +430,7 @@ test "excellonDrill routes oval slots with a G85 record" {
     const frame = Frame{ .ox = 0, .oy = 20 }; // board bottom at y=20
 
     var pth: std.Io.Writer.Allocating = .init(alloc);
-    try excellonDrill(&pth.writer, alloc, &parts, &.{}, .plated, frame);
+    try excellonDrill(&pth.writer, alloc, &parts, &.{}, .{ .class = .plated, .copper_layers = 4 }, frame);
     const pth_out = pth.written();
     try testing.expect(std.mem.indexOf(u8, pth_out, "T1C0.400") != null); // tool = minor axis
     // Slot centred at world (10,10) → (10,10) y-up, ends at x = 10±0.35.
@@ -348,10 +438,29 @@ test "excellonDrill routes oval slots with a G85 record" {
     try testing.expect(std.mem.indexOf(u8, pth_out, "C0.500") == null); // NPTH kept out
 
     var npth: std.Io.Writer.Allocating = .init(alloc);
-    try excellonDrill(&npth.writer, alloc, &parts, &.{}, .non_plated, frame);
+    try excellonDrill(&npth.writer, alloc, &parts, &.{}, .{ .class = .non_plated, .copper_layers = 4 }, frame);
     const npth_out = npth.written();
     try testing.expect(std.mem.indexOf(u8, npth_out, "T1C0.500") != null);
     // NPTH slot at world (14,10); its two ends (14,10±0.30) flip through the
     // y-up frame (20-y), so the first end lands at y=9.700, the second at 10.300.
     try testing.expect(std.mem.indexOf(u8, npth_out, "X14.000Y9.700G85X14.000Y10.300") != null);
+}
+
+// spec: export_fab - ordinary manufacturing-package members are named from the package's one shared prefix; vendor-contract auxiliary files may retain an exact safe basename, and the job file's Path fields resolve both forms exactly
+test "a fab package prefixes ordinary members and preserves vendor names" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+
+    var pkg = Package{ .arena = arena_i.allocator(), .prefix = "board" };
+    try pkg.add("F_Cu.gtl", "copper");
+    try pkg.add("PTH.drl", "holes");
+    try pkg.addNamed("psb_tesa8854.gbr", "backing");
+
+    try testing.expectEqual(@as(usize, 3), pkg.entries.items.len);
+    try testing.expectEqualStrings("board-F_Cu.gtl", pkg.entries.items[0].name);
+    try testing.expectEqualStrings("copper", pkg.entries.items[0].data);
+    // The suffix is appended verbatim, so a member's name is exactly what the
+    // job file's `Path` field spells for it — never a second transformation.
+    try testing.expectEqualStrings("board-PTH.drl", pkg.entries.items[1].name);
+    try testing.expectEqualStrings("psb_tesa8854.gbr", pkg.entries.items[2].name);
 }

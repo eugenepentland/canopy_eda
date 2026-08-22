@@ -48,7 +48,7 @@ const err_not_object = "{\"error\":\"body must be a JSON object\"}";
 const ok_json = "{\"ok\":true}";
 
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
-    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
+    infra_fs.File.WriteError || infra_fs.File.OpenError || infra_fs.File.ReadError ||
     error{ StreamTooLong, EndOfStream };
 
 pub const NoteStatus = enum { open, done };
@@ -103,7 +103,7 @@ pub fn parseNotes(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocat
     // freeing the buffer).
     defer scratch.deinit(allocator);
     defer tasks.deinit(allocator); // no-op after a successful toOwnedSlice; frees the buffer if it OOMs
-    const scratch_trimmed = std.mem.trimRight(u8, std.mem.trimLeft(u8, scratch.items, "\n\r"), "\n\r \t");
+    const scratch_trimmed = std.mem.trimEnd(u8, std.mem.trimStart(u8, scratch.items, "\n\r"), "\n\r \t");
 
     const tasks_owned = try tasks.toOwnedSlice(allocator);
     errdefer allocator.free(tasks_owned);
@@ -161,15 +161,15 @@ fn isIsoDate(s: []const u8) bool {
 /// Render `Notes` as canonical markdown: tasks first (in given order),
 /// blank line, then scratchpad. Returns allocated bytes the caller owns.
 pub fn renderNotes(allocator: std.mem.Allocator, notes: Notes) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    const w = out.writer(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    const w = &out.writer;
     for (notes.tasks) |t| try writeTaskLine(w, t);
     if (notes.scratchpad.len > 0) {
         if (notes.tasks.len > 0) try w.writeAll("\n");
         try w.writeAll(notes.scratchpad);
         if (notes.scratchpad[notes.scratchpad.len - 1] != '\n') try w.writeAll("\n");
     }
-    return out.toOwnedSlice(allocator);
+    return out.toOwnedSlice();
 }
 
 fn writeTaskLine(w: anytype, t: Note) !void {
@@ -184,7 +184,7 @@ fn writeTaskLine(w: anytype, t: Note) !void {
 /// per-design TODO list are astronomically unlikely for a 32-bit space.
 fn generateNoteId(allocator: std.mem.Allocator) ![]u8 {
     var bytes: [4]u8 = undefined;
-    infra_random.bytes(&bytes);
+    try infra_random.bytes(&bytes);
     return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ bytes[0], bytes[1], bytes[2], bytes[3] });
 }
 
@@ -197,7 +197,7 @@ fn todayIsoDate(allocator: std.mem.Allocator) ![]u8 {
     const md = yd.calculateMonthDay();
     return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{
         @as(u32, yd.year),
-        @intFromEnum(md.month),
+        @backingInt(md.month),
         md.day_index + 1,
     });
 }
@@ -298,12 +298,12 @@ pub fn getNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     defer if (data) |d| ctx.allocator.free(d);
     const text: []const u8 = data orelse "";
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
     try w.writeAll("{\"text\":");
     try json_writer.writeString(w, text);
     try w.writeAll("}");
-    res.body = buf.items;
+    res.body = buf.written();
 }
 
 /// PUT /api/notes/:name — body `{"text":"<raw markdown>"}`. Writes the
@@ -343,10 +343,10 @@ pub fn getTasksApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         return jsonError(res, http_internal_error, err_read_notes);
     defer if (raw) |d| ctx.allocator.free(d);
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
     try writeTasksJson(ctx.allocator, w, notes);
-    res.body = buf.items;
+    res.body = buf.written();
 }
 
 /// POST /api/notes/:name/tasks/add — body `{"text":"…"}`. Appends a new
@@ -367,12 +367,12 @@ pub fn addTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     const new_task = addTaskCore(ctx.allocator, ctx.project_dir, name, text_val.string) catch
         return jsonError(res, http_internal_error, "{\"error\":\"add failed\"}");
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
     try w.writeAll("{\"ok\":true,\"task\":");
     try writeNoteJson(w, new_task);
     try w.writeAll("}");
-    res.body = buf.items;
+    res.body = buf.written();
 }
 
 /// POST /api/notes/:name/tasks/complete — body `{"id":"…"}`. Stamps

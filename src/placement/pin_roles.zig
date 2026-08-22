@@ -27,10 +27,12 @@ const parser = @import("../sexpr/parser.zig");
 const infra_fs = @import("../infra/fs.zig");
 const electrical = @import("../eval/electrical.zig");
 const env = @import("../eval/env.zig");
+const rails_mod = @import("../eval/rails.zig");
+const na = @import("../eval/net_analysis.zig");
 const numeric = @import("../numeric.zig");
+const lib_limits = @import("../lib_limits.zig");
 
 const Node = ast.Node;
-const max_bytes = 1024 * 256;
 
 /// Placement-time role of one IC pad relative to the net it sits on.
 pub const PinClass = enum {
@@ -101,7 +103,7 @@ pub fn load(arena: std.mem.Allocator, project_dir: []const u8, component: []cons
 /// top-level form's children. Null on any read/parse failure (caller degrades).
 fn loadList(arena: std.mem.Allocator, project_dir: []const u8, dir: []const u8, name: []const u8) ?[]const Node {
     const path = std.fmt.allocPrint(arena, "{s}/lib/{s}/{s}.sexp", .{ project_dir, dir, name }) catch return null;
-    const src = infra_fs.cwd().readFileAlloc(arena, path, max_bytes) catch return null;
+    const src = infra_fs.cwd().readFileAlloc(arena, path, lib_limits.max_lib_file_bytes) catch return null;
     const nodes = parser.parse(arena, src) catch return null;
     if (nodes.len == 0) return null;
     return nodes[0].asList();
@@ -150,8 +152,7 @@ pub fn isGroundFn(fn_name: []const u8) bool {
         },
     };
     const s = buf[0..n];
-    const prefixes = [_][]const u8{ "GND", "VSS", "AGND", "DGND", "PGND", "SGND" };
-    for (prefixes) |p| if (std.mem.startsWith(u8, s, p)) return true;
+    for (na.ground_fn_prefixes) |p| if (std.mem.startsWith(u8, s, p)) return true;
     const exact = [_][]const u8{ "EP", "EPAD", "PAD", "TAB", "THERMAL", "EXP", "EXPOSED", "DAP", "RTN", "RETURN" };
     for (exact) |e| if (std.mem.eql(u8, s, e)) return true;
     return false;
@@ -183,11 +184,7 @@ pub fn isSupplyFn(fn_name: []const u8) bool {
     // reads as a strap, not a supply. Done inline rather than via `isStrapFn`
     // to avoid mutual recursion — `isStrapFn` calls `isSupplyFn` first.)
     if (hasStrapToken(fn_name)) return false;
-    const prefixes = [_][]const u8{
-        "VCC",  "VDD", "AVDD", "DVDD", "PVDD", "VBAT",
-        "VBUS", "VIN", "VOUT", "VEE",  "VPP",  "VREF",
-    };
-    for (prefixes) |p| if (std.mem.startsWith(u8, s, p)) return true;
+    for (rails_mod.supply_pad_prefixes) |p| if (std.mem.startsWith(u8, s, p)) return true;
     const exact = [_][]const u8{ "V+", "VS" };
     for (exact) |e| if (std.mem.eql(u8, s, e)) return true;
     return false;
@@ -536,6 +533,8 @@ test "isSupplyFn separates real supplies from grounds and signals" {
     try testing.expect(isSupplyFn("VDD"));
     try testing.expect(isSupplyFn("VDD_1"));
     try testing.expect(isSupplyFn("AVDD"));
+    try testing.expect(isSupplyFn("DVDD"));
+    try testing.expect(isSupplyFn("PVDD"));
     try testing.expect(isSupplyFn("VBAT"));
     try testing.expect(isSupplyFn("VIN"));
     try testing.expect(isSupplyFn("VREF_A"));
@@ -628,11 +627,11 @@ test "strapPads collects strap pads by name and by electrical type" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/pinouts");
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/reg.sexp", .data = comp });
-    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/reg.sexp", .data = pinout });
-    const path = try tmp.dir.realpathAlloc(arena, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/reg.sexp", .data = comp });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/reg.sexp", .data = pinout });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
 
     const straps = strapPads(arena, path, "reg");
     try testing.expectEqual(@as(usize, 3), straps.count()); // pads 2, 3, 6
@@ -660,11 +659,11 @@ test "strapPads ignores connector positional pins" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/pinouts");
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/conn.sexp", .data = comp });
-    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/conn.sexp", .data = pinout });
-    const path = try tmp.dir.realpathAlloc(arena, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/conn.sexp", .data = comp });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/conn.sexp", .data = pinout });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
 
     const straps = strapPads(arena, path, "conn");
     try testing.expectEqual(@as(usize, 1), straps.count()); // only the real EN
@@ -719,11 +718,11 @@ test "padRequirements maps only the pads worth flagging" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/pinouts");
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/reg.sexp", .data = comp });
-    try tmp.dir.writeFile(.{ .sub_path = "lib/pinouts/reg.sexp", .data = pinout });
-    const path = try tmp.dir.realpathAlloc(arena, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/reg.sexp", .data = comp });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/reg.sexp", .data = pinout });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
 
     const reqs = padRequirements(arena, path, "reg");
     try testing.expectEqual(@as(usize, 3), reqs.count()); // pads 2, 3, 6

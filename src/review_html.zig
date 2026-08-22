@@ -2,6 +2,11 @@
 //! power-sequence tables, the test-point list, and per-section coverage. These
 //! fragments are embedded inline in the schematic page — there is no standalone
 //! review-report endpoint.
+//!
+//! Thermal is deliberately absent. Its panel needs the cooling-scenario ladder,
+//! which needs the saved layouts, and the schematic page reads nothing but the
+//! design's own `.sexp`. Thermal has its own page at `/thermal/:name` (rendered
+//! by `serve/thermal_page.zig`) and its own JSON at `/api/thermal/:name`.
 
 const std = @import("std");
 const review = @import("review.zig");
@@ -333,3 +338,7 @@ fn writeHtmlEscaped(w: anytype, s: []const u8) !void {
         else => try w.writeByte(c),
     };
 }
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+const testing = std.testing;

@@ -91,37 +91,50 @@ fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
 
 /// Everything the backup roll + atomic write can fail with: allocation, the
 /// `backups/` mkdir, the pre-write copy, and the tmp-file create/write/rename.
-pub const WriteFileAtomicError = std.mem.Allocator.Error || std.fs.Dir.MakeError ||
-    std.fs.Dir.CopyFileError || std.fs.File.OpenError || std.fs.File.WriteError ||
-    std.fs.Dir.RenameError;
+pub const WriteFileAtomicError = std.mem.Allocator.Error || infra_fs.Dir.MakeError ||
+    infra_fs.Dir.CopyFileError || infra_fs.File.OpenError || infra_fs.File.WriteError ||
+    infra_fs.Dir.RenameError;
+
+/// Everything the backup roll alone can fail with — the `backups/` mkdir and
+/// the pre-write copy. A subset of `WriteFileAtomicError`.
+pub const RollBackupError = std.mem.Allocator.Error || infra_fs.Dir.MakeError ||
+    infra_fs.Dir.CopyFileError;
+
+/// Roll the current contents of `path` into `backups/<name>.bak-<timestamp>`
+/// beside it, then prune to the newest `max_board_backups`.
+///
+/// Split out of `writeFileAtomic` so a multi-file writer that stages every file
+/// before renaming any of them (the schematic push, `kicad_sch_push.commit`)
+/// can still roll the same backups into the same place, rather than growing a
+/// second, subtly-different backup convention in the same directory.
+///
+/// Timestamped (rather than a single `.bak`) so a quick second push can't
+/// clobber the only good backup, and in a `backups/` subfolder rather than as
+/// `.bak-*` siblings so the KiCad project directory stays tidy. A missing
+/// source file = first write, nothing to back up, so the roll is skipped
+/// entirely and no empty `backups/` folder is left behind. Any failure
+/// propagates: better to fail loudly than to overwrite with no fallback.
+pub fn rollBackup(arena: std.mem.Allocator, path: []const u8) RollBackupError!void {
+    if (!boardExists(path)) return;
+    const now = clock.timestamp();
+    const stamp = try formatBackupStamp(arena, if (now < 0) 0 else @intCast(now));
+    const backup_dir = try backupDirPath(arena, path);
+    try infra_fs.cwd().makePath(backup_dir);
+    const base = std.fs.path.basename(path);
+    const backup_name = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ base, backup_infix, stamp });
+    const backup_path = try std.fs.path.join(arena, &.{ backup_dir, backup_name });
+    try infra_fs.cwd().copyFile(path, infra_fs.cwd(), backup_path, .{});
+    pruneBackups(arena, path);
+}
 
 /// Write `contents` to `path` atomically via tmp file → fsync(file) →
 /// rename. NAS callers concerned about partial visibility through NFS
 /// caches can run `sync` post-hoc; for a human-driven button press the
-/// rename is durable enough in practice.
+/// rename is durable enough in practice. The pre-write copy is rolled by
+/// `rollBackup` above — the board lives on the NAS, outside git, so it is the
+/// only undo.
 pub fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, contents: []const u8) WriteFileAtomicError!void {
-    // Roll the current file to `backups/<name>.bak-<timestamp>` before
-    // overwriting so a bad sync (e.g. an unwanted prune) is one copy away from
-    // undo — the board lives on the NAS, outside git, so this is the only
-    // safety net. Backups live in a `backups/` subfolder beside the board (not
-    // as `.bak-*` siblings) so the KiCad project directory stays tidy.
-    // Timestamped (rather than a single `.bak`) so a quick second push can't
-    // clobber the only good backup; `pruneBackups` keeps the newest
-    // MAX_BOARD_BACKUPS. Abort the whole write if the backup can't be made;
-    // better to fail loudly than overwrite with no fallback. A missing source
-    // board = first sync, nothing to back up yet, so skip the roll entirely
-    // (and don't leave an empty backups/ folder behind).
-    if (boardExists(path)) {
-        const now = clock.timestamp();
-        const stamp = try formatBackupStamp(arena, if (now < 0) 0 else @intCast(now));
-        const backup_dir = try backupDirPath(arena, path);
-        try infra_fs.cwd().makePath(backup_dir);
-        const base = std.fs.path.basename(path);
-        const backup_name = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ base, backup_infix, stamp });
-        const backup_path = try std.fs.path.join(arena, &.{ backup_dir, backup_name });
-        try infra_fs.cwd().copyFile(path, infra_fs.cwd(), backup_path, .{});
-        pruneBackups(arena, path);
-    }
+    try rollBackup(arena, path);
 
     const tmp_path = try std.fmt.allocPrint(arena, "{s}.tmp", .{path});
 
@@ -152,14 +165,14 @@ test "formatBackupStamp renders epoch zero as a sortable filesystem-safe stamp" 
 /// Test helper: pre-seed `n` stamped backups of `b.kicad_pcb`. 1969 stamps
 /// sort before any real clock stamp, so a prune must drop the oldest of
 /// these, never the freshly-rolled backup.
-fn writeStaleBackupsForTest(dir: std.fs.Dir, arena: std.mem.Allocator, n: usize) !void {
-    try dir.makePath(backup_dir_name);
-    var bdir = try dir.openDir(backup_dir_name, .{});
-    defer bdir.close();
+fn writeStaleBackupsForTest(dir: std.Io.Dir, arena: std.mem.Allocator, n: usize) !void {
+    try dir.createDirPath(std.testing.io, backup_dir_name);
+    var bdir = try dir.openDir(std.testing.io, backup_dir_name, .{});
+    defer bdir.close(std.testing.io);
     var i: usize = 0;
     while (i < n) : (i += 1) {
         const bname = try std.fmt.allocPrint(arena, "b.kicad_pcb.bak-1969-01-01T00-00-{d:0>2}", .{i});
-        try bdir.writeFile(.{ .sub_path = bname, .data = "stale" });
+        try bdir.writeFile(std.testing.io, .{ .sub_path = bname, .data = "stale" });
     }
 }
 
@@ -168,20 +181,20 @@ const BackupScanForTest = struct { count: usize, fresh_holds_old: bool, oldest_p
 /// Test helper: tally the `b.kicad_pcb.bak-*` files in the `backups/` folder —
 /// how many, whether the oldest 1969 stamp survived, and whether the fresh
 /// (real-clock) backup carries the pre-write board contents.
-fn scanBackupsForTest(dir: std.fs.Dir, arena: std.mem.Allocator) !BackupScanForTest {
+fn scanBackupsForTest(dir: std.Io.Dir, arena: std.mem.Allocator) !BackupScanForTest {
     var out = BackupScanForTest{ .count = 0, .fresh_holds_old = false, .oldest_present = false };
-    var bdir = dir.openDir(backup_dir_name, .{ .iterate = true }) catch |e| switch (e) {
+    var bdir = dir.openDir(std.testing.io, backup_dir_name, .{ .iterate = true }) catch |e| switch (e) {
         error.FileNotFound => return out,
         else => return e,
     };
-    defer bdir.close();
+    defer bdir.close(std.testing.io);
     var it = bdir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(std.testing.io)) |entry| {
         if (!std.mem.startsWith(u8, entry.name, "b.kicad_pcb.bak-")) continue;
         out.count += 1;
         if (std.mem.endsWith(u8, entry.name, "1969-01-01T00-00-00")) out.oldest_present = true;
         if (std.mem.indexOf(u8, entry.name, "1969") == null) {
-            const content = try bdir.readFileAlloc(arena, entry.name, 64);
+            const content = try bdir.readFileAlloc(std.testing.io, entry.name, arena, .limited64(64));
             out.fresh_holds_old = std.mem.eql(u8, content, "old-board");
         }
     }
@@ -196,15 +209,15 @@ test "writeFileAtomic rolls a timestamped backup and prunes beyond the cap" {
     defer aa.deinit();
     const arena = aa.allocator();
 
-    const root = try tmp.dir.realpathAlloc(arena, ".");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
     const board_path = try std.fmt.allocPrint(arena, "{s}/b.kicad_pcb", .{root});
-    try tmp.dir.writeFile(.{ .sub_path = "b.kicad_pcb", .data = "old-board" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.kicad_pcb", .data = "old-board" });
     // Start at the cap so the freshly-rolled backup pushes the count over it.
     try writeStaleBackupsForTest(tmp.dir, arena, max_board_backups);
 
     try writeFileAtomic(arena, board_path, "new-board");
 
-    const got = try tmp.dir.readFileAlloc(arena, "b.kicad_pcb", 64);
+    const got = try tmp.dir.readFileAlloc(std.testing.io, "b.kicad_pcb", arena, .limited64(64));
     try std.testing.expectEqualStrings("new-board", got);
     // Cap holds after the new backup joined: the oldest 1969 stamp was pruned
     // and the fresh backup carries the pre-write contents.

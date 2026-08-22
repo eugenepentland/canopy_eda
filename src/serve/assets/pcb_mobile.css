@@ -1,0 +1,139 @@
+/* Phone / narrow-tablet inspection mode: keep the board in the viewport,
+   remove editing chrome, and turn the existing Properties and Appearance
+   docks into touch-sized bottom sheets. One finger pans, a tap inspects,
+   and two fingers pinch-zoom; desktop layout and editing stay unchanged. */
+.pcb-mobile-tools{display:none}
+
+/* Compact desktop / tablet: keep the editing canvas and tool strip intact,
+   but turn both heavyweight docks into mutually-exclusive drawers reached
+   from the activity rail.  The phone breakpoint below remains inspection-only. */
+@media (min-width:921px) and (max-width:1560px){
+  body:not(.embed) .pcb-layout{gap:8px}
+  body:not(.embed) .pcb-activity{display:flex}
+  body:not(.embed) .pcb-side,
+  body:not(.embed) .pcb-rside{
+    display:flex;position:fixed;z-index:115;top:51px;bottom:8px;height:auto;max-height:none;
+    box-sizing:border-box;visibility:hidden;opacity:0;pointer-events:none;
+    transition:opacity .14s ease,transform .14s ease,visibility 0s linear .14s;
+    box-shadow:0 14px 38px rgba(0,0,0,.68)
+  }
+  body:not(.embed) .pcb-side{left:62px;transform:translateX(-12px)}
+  body:not(.embed) .pcb-rside{right:10px;transform:translateX(12px)}
+  body:not(.embed) .pcb-side.compact-open,
+  body:not(.embed) .pcb-rside.compact-open{
+    visibility:visible;opacity:1;transform:none;pointer-events:auto;transition-delay:0s
+  }
+  body:not(.embed) .dock-close{display:block}
+  body:not(.embed) .pcb-find{padding-right:38px}
+  body:not(.embed) .ap-tabs{padding-right:34px}
+  body:not(.embed) .pcb-head{min-height:34px;margin-top:0}
+  body:not(.embed) .pcb-commandbar{flex-wrap:nowrap}
+}
+
+@media (min-width:921px) and (max-width:1120px){
+  body:not(.embed) .pcb-sub{display:none}
+  body:not(.embed) .pcb-commandbar .icon-btn span{display:none}
+  body:not(.embed) .pcb-commandbar .icon-btn{min-width:30px;justify-content:center}
+  body:not(.embed) .pcb-head{gap:8px}
+  body:not(.embed) .pcb-head .viewtoggle a{padding-left:10px;padding-right:10px}
+}
+
+@media (max-width:920px){
+  html{height:100%}
+  body:not(.embed){height:100%;overflow:hidden;overscroll-behavior:none}
+  body:not(.embed) .navbar{
+    padding-left:max(10px,env(safe-area-inset-left));
+    padding-right:max(10px,env(safe-area-inset-right))
+  }
+  body:not(.embed) .pcb-layout{
+    display:block;height:calc(100dvh - 48px);min-height:0;padding:0;overflow:hidden
+  }
+  body:not(.embed) .pcb-main{width:100%;height:100%;overflow:hidden}
+  body:not(.embed) .pcb-head{
+    height:42px;min-height:42px;margin:0;padding:0 10px;gap:8px;flex-wrap:nowrap;
+    border-bottom:1px solid #2c2d31;background:#1b1c20;box-sizing:border-box
+  }
+  body:not(.embed) .pcb-head h1{display:none}
+  body:not(.embed) .pcb-sub{display:none}
+  body:not(.embed) .pcb-route-summary{padding:4px 7px;font-size:0}
+  body:not(.embed) .pcb-route-summary strong{font-size:11px}
+  body:not(.embed) .pcb-head .viewtoggle{display:flex;flex:1;width:100%;min-width:0}
+  body:not(.embed) .pcb-head .viewtoggle a{
+    min-width:0;min-height:0;flex:1;justify-content:center;padding:5px 8px;
+    font-size:12px;white-space:nowrap
+  }
+  body:not(.embed) .pcb-bar,
+  body:not(.embed) .pcb-note,
+  body:not(.embed) .pcb-legend,
+  body:not(.embed) .heat-legend{display:none!important}
+  body:not(.embed) .pcb-stage{position:relative;flex:1;min-height:0;height:auto;margin:0}
+  body:not(.embed) .pcb-toolstrip,
+  body:not(.embed) .pcb-status{display:none}
+  body:not(.embed) .pcb-canvas-host{border:0;border-radius:0}
+  body:not(.embed) .pcb-mobile-tools{
+    position:absolute;z-index:12;left:50%;
+    bottom:max(10px,env(safe-area-inset-bottom));
+    transform:translateX(-50%);display:flex;align-items:center;gap:4px;padding:5px;
+    border:1px solid #3a3b40;border-radius:12px;background:rgba(35,36,40,.94);
+    box-shadow:0 5px 20px rgba(0,0,0,.48)
+  }
+  body:not(.embed) .pcb-mobile-tools button{
+    min-width:44px;height:44px;padding:0 11px;border:1px solid transparent;
+    border-radius:8px;background:none;color:#d6d7db;
+    font:600 13px system-ui,sans-serif;touch-action:manipulation
+  }
+  body:not(.embed) .pcb-mobile-tools button:active,
+  body:not(.embed) .pcb-mobile-tools button.on{
+    background:rgba(90,143,214,.28);border-color:#5a8fd6;color:#fff
+  }
+  body:not(.embed) .mobile-tool-sep{
+    width:1px;height:28px;background:#3a3b40;margin:0 2px
+  }
+  body:not(.embed) .pcb-side,
+  body:not(.embed) .pcb-rside{
+    display:flex;position:fixed;z-index:115;
+    left:max(8px,env(safe-area-inset-left));
+    right:max(8px,env(safe-area-inset-right));
+    bottom:calc(max(10px,env(safe-area-inset-bottom)) + 60px);
+    width:auto;max-height:min(52dvh,480px);
+    border:1px solid #3a3b40;border-radius:12px;background:#232428;
+    box-shadow:0 12px 36px rgba(0,0,0,.7);
+    overflow:hidden;visibility:hidden;opacity:0;transform:translateY(18px);
+    pointer-events:none;
+    transition:opacity .16s ease,transform .16s ease,visibility 0s linear .16s
+  }
+  body:not(.embed) .pcb-side.mobile-open,
+  body:not(.embed) .pcb-rside.mobile-open{
+    visibility:visible;opacity:1;transform:none;pointer-events:auto;
+    transition-delay:0s
+  }
+  body:not(.embed) .pcb-appear{width:auto;min-height:220px}
+  body:not(.embed) .pcb-find{position:static;min-height:48px;box-sizing:border-box;padding:8px}
+  body:not(.embed) .pcb-find-box{height:32px}
+  body:not(.embed) .pcb-find kbd{display:none}
+  body:not(.embed) .side-tabs,
+  body:not(.embed) .ap-tabs{min-height:44px;top:0}
+  body:not(.embed) .side-tab,
+  body:not(.embed) .ap-tab{min-height:44px;padding:8px 4px}
+  body:not(.embed) .side-pane{
+    flex:1;overflow-y:auto;overscroll-behavior:contain
+  }
+  body:not(.embed) .find-row{min-height:48px;box-sizing:border-box;padding-top:8px;padding-bottom:8px}
+  body:not(.embed) .ap-row,
+  body:not(.embed) .ap-lrow{min-height:44px;box-sizing:border-box}
+  body:not(.embed) .prop-row{min-height:30px;align-items:center}
+  body:not(.embed) .prop-pins{gap:8px;padding-bottom:14px}
+  body:not(.embed) .pn{font-size:12px;padding:4px 7px}
+  .pcb-live{top:56px;width:calc(100vw - 20px)}
+  body:not(.embed) .pcb-3d-stage{
+    height:auto;min-height:0;flex:1;border:0;border-radius:0
+  }
+}
+
+@media (max-width:420px){
+  body:not(.embed) .pcb-head .viewtoggle a{padding:5px 4px;font-size:11px}
+  body:not(.embed) .pcb-mobile-tools{gap:2px;padding:4px}
+  body:not(.embed) .pcb-mobile-tools button{
+    min-width:40px;height:42px;padding:0 8px;font-size:12px
+  }
+}

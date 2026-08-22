@@ -2,11 +2,17 @@
 //! shared across every request, and holds the global live schematic state
 //! (scene-graph JSON behind `live_mutex`). Handlers run on httpz's per-request
 //! arena; anything cached past the response — like the live layout JSON — is
-//! duped into `page_allocator` here, never left pointing at the arena.
+//! duped into `page_allocator` here, never left pointing at the arena. The
+//! traffic goes the other way too: a handler reads the live slot through
+//! `liveLayoutFor`, which copies into the request arena under the lock, because
+//! httpz serializes `res.body` after the handler returns and a concurrent push
+//! frees the buffer the handler saw.
 
 const std = @import("std");
 const httpz = @import("httpz");
+const infra_fs = @import("infra/fs.zig");
 const deflate = @import("deflate.zig");
+const gzip_cache = @import("serve/gzip_cache.zig");
 
 /// Error set for the `serve` entry point — wraps all the failure modes that
 /// can come out of `httpz.Server.init`, `router`, and `listen`. The set is
@@ -19,9 +25,11 @@ pub const ServeError = std.mem.Allocator.Error ||
     error{ InvalidIPAddressFormat, ThreadQuotaExceeded };
 
 // Sub-modules
+const paths = @import("paths.zig");
 const pages = @import("serve/pages.zig");
 const api = @import("serve/api.zig");
 const edit = @import("serve/edit.zig");
+const design_rules_edit = @import("serve/design_rules_edit.zig");
 const edit_assist = @import("serve/edit_assist.zig");
 const library = @import("serve/library.zig");
 const library_3d = @import("serve/library_3d.zig");
@@ -30,9 +38,29 @@ const upload_package = @import("serve/upload_package.zig");
 const upload_datasheet = @import("serve/upload_datasheet.zig");
 const pdf_viewer = @import("serve/pdf_viewer.zig");
 const footprint_preview = @import("serve/footprint_preview.zig");
+const footprint_editor = @import("serve/footprint_editor.zig");
 const schematic_page = @import("serve/schematic_page.zig");
-const editor_page = @import("serve/editor_page.zig");
+const schematic_png = @import("serve/schematic_png.zig");
+const schematic_pdf = @import("serve/schematic_pdf.zig");
+const thermal_api = @import("serve/thermal_api.zig");
+const thermal_page = @import("serve/thermal_page.zig");
+const kicad_sch_export = @import("serve/kicad_sch_export.zig");
+const sync_kicad_sch = @import("serve/sync_kicad_sch.zig");
+const assembly_debug = @import("serve/assembly_debug.zig");
+const assembly_page_cache = @import("serve/assembly_page_cache.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
+const matlab_rf_export = @import("serve/matlab_rf_export.zig");
+const pcb_page_cache = @import("serve/pcb_page_cache.zig");
+const thermal_cache = @import("serve/thermal_cache.zig");
+const progress_cache = @import("serve/progress_cache.zig");
+const warmup = @import("serve/warmup.zig");
+const pcb_fence = @import("serve/pcb_fence.zig");
+const pcb_layout_sync = @import("serve/pcb_layout_sync.zig");
+const route_review = @import("serve/route_review.zig");
+const route_session_api = @import("serve/route_session_api.zig");
+const route_live = @import("serve/route_live.zig");
+const route_analyze_api = @import("serve/route_analyze_api.zig");
+const route_vision = @import("serve/route_vision.zig");
 const pcb_describe = @import("serve/pcb_describe.zig");
 const drc_rules = @import("serve/drc_rules.zig");
 const layout_match = @import("serve/layout_match.zig");
@@ -52,29 +80,66 @@ const mcp_docs = @import("serve/mcp_docs.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
 
-pub var live_mutex: std.Thread.Mutex = .{};
-pub var live_layout_json: ?[]const u8 = null;
+var live_mutex: infra_fs.Mutex = .{};
 
-/// Replace the cached live schematic scene-graph JSON. The incoming slice may
-/// come from a request-scoped arena (e.g. MCP tool dispatch) so it must be
-/// duplicated into page_allocator memory that outlives the caller. The previous
-/// value, if any, is freed.
-pub fn setLiveLayoutJson(data: ?[]const u8) void {
-    const dup: ?[]const u8 = if (data) |d|
-        (std.heap.page_allocator.dupe(u8, d) catch null)
-    else
-        null;
+/// The one live scene-graph slot: the JSON the last build/push produced, plus
+/// the design it was produced FOR. The name travels with the JSON because there
+/// is exactly one slot for the whole server — without it `/api/scene-graph/:name`
+/// cannot tell whether the bytes it holds actually answer the request.
+const LiveLayout = struct {
+    /// Design name the JSON was rendered for (page_allocator-owned).
+    name: []const u8,
+    /// The rendered scene-graph JSON (page_allocator-owned).
+    json: []const u8,
+};
+
+var live_layout: ?LiveLayout = null;
+
+/// Replace the cached live schematic scene-graph JSON for design `name`. Both
+/// slices may come from a request-scoped arena (e.g. MCP tool dispatch) so they
+/// are duplicated into page_allocator memory that outlives the caller. The
+/// previous pair, if any, is freed — which is why readers must copy the bytes
+/// out under `live_mutex` (see `liveLayoutFor`) rather than borrow them.
+pub fn setLiveLayoutJson(name: []const u8, data: ?[]const u8) void {
+    const alloc = std.heap.page_allocator;
+    const next: ?LiveLayout = if (data) |d| blk: {
+        const json = alloc.dupe(u8, d) catch break :blk null;
+        const owned_name = alloc.dupe(u8, name) catch {
+            alloc.free(json);
+            break :blk null;
+        };
+        break :blk .{ .name = owned_name, .json = json };
+    } else null;
     live_mutex.lock();
-    const old = live_layout_json;
-    live_layout_json = dup;
+    const old = live_layout;
+    live_layout = next;
     live_mutex.unlock();
-    if (old) |o| std.heap.page_allocator.free(o);
+    if (old) |o| {
+        alloc.free(o.json);
+        alloc.free(o.name);
+    }
+}
+
+/// The live scene-graph JSON when it belongs to design `name`, copied into
+/// `alloc` (the caller's request arena) while the lock is held. Null when
+/// nothing has been pushed yet, when the slot holds a DIFFERENT design, or when
+/// the copy fails.
+///
+/// The copy is the whole point: `setLiveLayoutJson` frees the previous buffer,
+/// so a handler that stashed the raw pointer and let httpz serialize it after
+/// dispatch returned would race a concurrent push into a use-after-free.
+pub fn liveLayoutFor(alloc: std.mem.Allocator, name: []const u8) ?[]const u8 {
+    live_mutex.lock();
+    defer live_mutex.unlock();
+    const cur = live_layout orelse return null;
+    if (!std.mem.eql(u8, cur.name, name)) return null;
+    return alloc.dupe(u8, cur.json) catch null;
 }
 
 // Per-design live version. The browser polls /api/version/:name; each design
 // has its own counter so mutating design A never invalidates B's viewer.
 // Keys are duplicated into page_allocator memory so they outlive callers.
-pub var live_version_mutex: std.Thread.Mutex = .{};
+pub var live_version_mutex: infra_fs.Mutex = .{};
 pub var live_versions: std.StringHashMapUnmanaged(u32) = .empty;
 
 /// Increment and return the live version for a design.
@@ -128,7 +193,7 @@ pub const JobOutcome = enum { ok, failed };
 
 // Private to this module — only the pcbJob* helpers below touch them, so they
 // stay unexported (no need for a mutable global on the public surface).
-var pcb_jobs_mutex: std.Thread.Mutex = .{};
+var pcb_jobs_mutex: infra_fs.Mutex = .{};
 var pcb_jobs: std.StringHashMapUnmanaged(PcbJob) = .empty;
 
 /// Result of `pcbJobBegin`: the job's generation and whether a fresh solver
@@ -226,6 +291,50 @@ pub fn pcbJobSnapshot(alloc: std.mem.Allocator, name: []const u8) ?PcbJobView {
 // every route handler through `Server.state`. Persisted stores keep their
 // exact on-disk formats and paths; only the in-memory containers moved.
 
+/// Everything the server keeps only because recomputing it would be wasted
+/// work. Every entry here is DERIVED — validated against the design files it
+/// came from and safe to drop at any moment — which is what separates it from
+/// the subsystems above it in `ServerState`, whose contents exist nowhere else.
+pub const Caches = struct {
+    /// Dependency-validated rendered assembly workspaces, bounded per server.
+    assembly_pages: assembly_page_cache.Store = .{},
+    /// Dependency-validated rendered PCB pages, bounded per server instance.
+    pcb_pages: pcb_page_cache.Store = .{},
+    /// Dependency-validated solved thermal fields, keyed by design name. The
+    /// fields are ambient-free rises, so one cached solve answers the page, the
+    /// facts JSON, the heat-zone PNG and every ambient a reader dials in.
+    thermal_solves: thermal_cache.Store = .{},
+    /// Dependency-validated PCB-completion ladder JSON (`/api/layout-progress`),
+    /// the per-card body the home page requests once per design on every load.
+    progress_json: progress_cache.Store = .{},
+    /// Memoised gzip streams, keyed on the response body itself (see
+    /// `gzip_cache`). Held here rather than module-scope so two server
+    /// instances stay independent.
+    gzip: gzip_cache.Store = .{},
+
+    /// Give every store the server's long-lived allocator. A store left at its
+    /// default has no allocator and simply never caches, so this is the switch
+    /// that turns caching on.
+    pub fn init(allocator: std.mem.Allocator) Caches {
+        return .{
+            .assembly_pages = .{ .allocator = allocator },
+            .pcb_pages = .{ .allocator = allocator },
+            .thermal_solves = .{ .allocator = allocator },
+            .progress_json = .{ .allocator = allocator },
+            .gzip = .{ .allocator = allocator },
+        };
+    }
+
+    /// Release every store. Safe on a default-constructed `Caches`.
+    pub fn deinit(self: *Caches) void {
+        self.assembly_pages.deinit();
+        self.pcb_pages.deinit();
+        self.thermal_solves.deinit();
+        self.progress_json.deinit();
+        self.gzip.deinit();
+    }
+};
+
 /// Mutable per-server state. Post ward-migration this is the plugin-token store
 /// (bearer tokens for the KiCad sync helper) plus the ward auth adapter state;
 /// sessions, passkeys, users, and OAuth grants all live in wardd now. One
@@ -238,6 +347,16 @@ pub const ServerState = struct {
     /// built once in `serve()` via `WardState.init`. netlisp now verifies
     /// sessions and bearer tokens against wardd through this.
     ward: ward_auth.WardState = .{},
+    /// Interactive routing sessions, keyed by design name — mutex-guarded,
+    /// idle-evicted, and capped (see `route_session_api.Store`). Held here so
+    /// the table lives for the server's lifetime without a module-level global.
+    route_sessions: route_session_api.Store = .{},
+    /// Background live-route jobs, keyed by design name — mutex-guarded and
+    /// generation-versioned (see `route_live.Store`). One job per design; a
+    /// detached routing thread streams serialized timeline events into it.
+    route_live: route_live.Store = .{},
+    /// Derived results held so a repeat request costs nothing.
+    caches: Caches = .{},
 };
 
 // ── Server ─────────────────────────────────────────────────────────────
@@ -285,6 +404,10 @@ pub const Server = struct {
         req: *httpz.Request,
         res: *httpz.Response,
     ) !void {
+        // A request is a snapshot: revalidate the `src/` basename index once
+        // here so the handlers below resolve however many design siblings they
+        // need without re-walking the tree per lookup (`paths.beginRequest`).
+        paths.beginRequest();
         // Hand the route handler a request-scoped view of the Server whose
         // allocator is httpz's per-request arena (reset after the response is
         // written). Every per-request allocation — evaluator state, rendered
@@ -309,7 +432,7 @@ pub const Server = struct {
         // gzip text responses for clients that accept it. The compressed buffer
         // lives in res.arena (dies with the request) — stateless, nothing to
         // invalidate. Biggest win for remote clients where transfer dominates.
-        maybeCompress(req, res);
+        maybeCompress(&req_handler.state.caches.gzip, req, res);
     }
 
     pub fn notFound(_: *Server, _: *httpz.Request, res: *httpz.Response) !void {
@@ -325,11 +448,12 @@ const gzip_min_bytes: usize = 1400;
 
 /// gzip-compress a 200 text response in place when the client advertised gzip
 /// support. Runs after every route handler. The compressed buffer is allocated
-/// in the per-request arena (`res.arena`), so it dies with the request — there
-/// is no cross-request state and nothing to invalidate. No-op for small bodies,
+/// in the per-request arena (`res.arena`), so it dies with the request; the
+/// deflate work behind it is memoised across requests by `gzip_cache`, keyed on
+/// the body bytes, so there is still nothing to invalidate. No-op for small bodies,
 /// non-text content types, already-written/chunked responses (e.g. the MCP
 /// WebSocket upgrade, event streams), or clients that don't send gzip.
-fn maybeCompress(req: *httpz.Request, res: *httpz.Response) void {
+fn maybeCompress(gzip_store: *gzip_cache.Store, req: *httpz.Request, res: *httpz.Response) void {
     if (res.written or res.chunked or res.status != 200) return;
     const ct = res.content_type orelse return;
     switch (ct) {
@@ -345,7 +469,11 @@ fn maybeCompress(req: *httpz.Request, res: *httpz.Response) void {
     const accept = req.header("accept-encoding") orelse return;
     if (std.mem.indexOf(u8, accept, "gzip") == null) return;
 
-    const compressed = deflate.gzip(res.arena, body) catch return;
+    // Memoised on the body itself: a page answering from a rendered-HTML
+    // cache would otherwise re-deflate its whole body on every view, which for
+    // a 1.2 MB schematic cost ~150 ms — far more than the cached render it
+    // wrapped. A content key cannot go stale, so there is nothing to invalidate.
+    const compressed = gzip_store.compress(res.arena, body) catch return;
     if (compressed.len >= body.len) return; // never inflate
 
     // Route the response through res.body and drop any writer-buffer contents,
@@ -356,6 +484,73 @@ fn maybeCompress(req: *httpz.Request, res: *httpz.Response) void {
     res.header("Vary", "Accept-Encoding");
 }
 
+/// Redirect target for a retired /pcb-route-lab/:name request: the ordinary PCB
+/// layout page, with `:name` verbatim (still percent-encoded as received) so
+/// the URL re-encodes correctly.
+fn routeLabLocation(alloc: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(alloc, "/pcb-layout/{s}", .{name});
+}
+
+/// GET /pcb-route-lab/:name — the Route Lab page + its scheduler engine were
+/// retired (the surviving router.zig surface supersedes them); 302 to the
+/// ordinary PCB layout page so lingering bookmarks/agents don't 404 — mirrors
+/// the `/modules` redirect.
+fn routeLabRedirect(_: *Server, req: *httpz.Request, res: *httpz.Response) !void {
+    const name = req.param("name") orelse {
+        res.status = 404;
+        return;
+    };
+    res.status = 302;
+    res.header("Location", try routeLabLocation(res.arena, name));
+}
+
+// spec: Web Server - the retired /pcb-route-lab page 302-redirects to the /pcb-layout page for the same design
+test "retired Route Lab path redirects to the PCB layout page" {
+    const loc = try routeLabLocation(std.testing.allocator, "barracuda");
+    defer std.testing.allocator.free(loc);
+    try std.testing.expectEqualStrings("/pcb-layout/barracuda", loc);
+}
+
+// spec: Web Server - the live scene graph is answered only for the design it was pushed for
+test "the live scene-graph slot answers its own design and refuses another name" {
+    defer setLiveLayoutJson("", null); // leave the process-global slot empty
+    setLiveLayoutJson("alpha", "{\"design\":\"alpha\"}");
+
+    const mine = liveLayoutFor(std.testing.allocator, "alpha").?;
+    defer std.testing.allocator.free(mine);
+    try std.testing.expectEqualStrings("{\"design\":\"alpha\"}", mine);
+
+    // ONE slot server-wide, so a request naming a different design must be
+    // refused rather than handed these bytes.
+    try std.testing.expect(liveLayoutFor(std.testing.allocator, "beta") == null);
+    // A near-miss name is not a match either (no prefix/substring leniency).
+    try std.testing.expect(liveLayoutFor(std.testing.allocator, "alph") == null);
+    try std.testing.expect(liveLayoutFor(std.testing.allocator, "alphax") == null);
+
+    // Nothing pushed at all reads back null for every name.
+    setLiveLayoutJson("alpha", null);
+    try std.testing.expect(liveLayoutFor(std.testing.allocator, "alpha") == null);
+}
+
+// spec: Web Server - a live scene-graph read copies the bytes so a later push cannot free the response body
+test "a live scene-graph read survives the push that replaces the slot" {
+    defer setLiveLayoutJson("", null);
+    setLiveLayoutJson("alpha", "{\"v\":1}");
+
+    // The reader's copy is its own allocation, not a borrow of the live slot…
+    const held = liveLayoutFor(std.testing.allocator, "alpha").?;
+    defer std.testing.allocator.free(held);
+
+    // …so the push that frees the previous page_allocator buffer — exactly what
+    // races httpz's post-dispatch serialization of `res.body` — leaves it intact.
+    setLiveLayoutJson("alpha", "{\"v\":2}");
+    try std.testing.expectEqualStrings("{\"v\":1}", held);
+
+    const fresh = liveLayoutFor(std.testing.allocator, "alpha").?;
+    defer std.testing.allocator.free(fresh);
+    try std.testing.expectEqualStrings("{\"v\":2}", fresh);
+}
+
 /// Bring up the EDA web server on `port`: registers every page, JSON API,
 /// auth, OAuth, and MCP route against an httpz instance, then blocks on
 /// `server.listen()`. Project files are served out of `project_dir`; auth
@@ -364,10 +559,28 @@ fn maybeCompress(req: *httpz.Request, res: *httpz.Response) void {
 /// layout snapshot management, routing/regen, and the fab outputs
 /// (centroid, drill, gerber package).
 fn registerPcbRoutes(router: anytype) void {
+    router.get("/assembly-debug/:name", assembly_debug.assemblyDebugPage, .{});
+    router.get("/route-review", route_review.routeReviewPage, .{});
+    router.post("/api/kicad-route-review/run", route_review.routeReviewApi, .{});
+    router.get("/api/design-route-review/run/:name", route_review.designRouteReviewApi, .{});
+    router.post("/api/design-route-review/run/:name", route_review.designRouteReviewApi, .{});
+    router.get("/api/design-route-review/cached/:name", route_review.cachedDesignRouteReviewApi, .{});
+    router.post("/api/route-session/:name/start", route_session_api.startSessionApi, .{});
+    router.post("/api/route-session/:name/hint", route_session_api.hintSessionApi, .{});
+    router.get("/api/route-session/:name/distill", route_session_api.distillSessionApi, .{});
+    router.get("/api/route-session/:name", route_session_api.getSessionApi, .{});
+    router.delete("/api/route-session/:name", route_session_api.deleteSessionApi, .{});
+    // The Route Lab page + its scheduler engine were retired (superseded by the
+    // router.zig surface); redirect any lingering /pcb-route-lab links to the
+    // ordinary PCB layout page so bookmarks/agents don't 404.
+    router.get("/pcb-route-lab/:name", routeLabRedirect, .{});
     router.get("/pcb-layout/:name", pcb_layout_page.pcbLayoutPage, .{});
+    router.get("/api/pcb-cam/:name", pcb_layout_page.pcbCamJsonApi, .{});
     router.get("/api/pcb-layout/:name", pcb_layout_page.pcbLayoutJsonApi, .{});
+    router.get("/api/pcb-settings/:name", pcb_layout_page.pcbSettingsApi, .{});
     router.get("/api/pcb-png/:name", pcb_layout_page.pcbPngApi, .{});
     router.get("/api/pcb-describe/:name", pcb_describe.pcbDescribeApi, .{});
+    router.get("/api/layout-progress/:name", pcb_describe.layoutProgressApi, .{});
     router.get("/api/layout-match/:name", layout_match.layoutMatchApi, .{});
     router.get("/api/rough-best/:name", rough_best.bestRoughApi, .{});
     router.get("/api/rough-best-png/:name", rough_best.bestRoughPngApi, .{});
@@ -375,16 +588,26 @@ fn registerPcbRoutes(router: anytype) void {
     router.get("/api/pcb-drill/:name", pcb_layout_page.pcbDrillApi, .{});
     router.get("/api/fab-readiness/:name", pcb_layout_page.pcbFabReadinessApi, .{});
     router.get("/api/pcb-gerbers/:name", pcb_layout_page.pcbGerbersApi, .{});
+    router.get("/api/pcb-matlab-rf/:name", matlab_rf_export.pcbMatlabRfApi, .{});
     router.post("/api/pcb-layouts/:name", pcb_layout_page.saveNamedLayoutApi, .{});
     router.get("/api/pcb-layout-history/:name", pcb_layout_page.pcbLayoutHistoryApi, .{});
     router.post("/api/pcb-layout-history/:name/restore", pcb_layout_page.restoreLayoutHistoryApi, .{});
+    router.post("/api/pcb-normalize-junctions/:name", pcb_layout_page.normalizeJunctionsApi, .{});
     router.post("/api/pcb-layouts/:name/delete", pcb_layout_page.deleteNamedLayoutApi, .{});
+    router.post("/api/pcb-layouts/:name/rename", pcb_layout_page.renameNamedLayoutApi, .{});
     router.post("/api/pcb-layouts/:name/default", pcb_layout_page.setDefaultLayoutApi, .{});
+    router.post("/api/import-kicad-layout/:name", pcb_layout_sync.importKicadLayoutApi, .{});
     router.post("/api/pcb-rescore/:name", pcb_layout_page.rescoreLayoutsApi, .{});
     router.post("/api/pcb-score/:name", pcb_layout_page.pcbScoreApi, .{});
     router.post("/api/pcb-score-batch/:name", pcb_layout_page.pcbScoreBatchApi, .{});
     router.post("/api/pcb-route/:name", pcb_layout_page.pcbRouteApi, .{});
+    router.post("/api/route-live/:name/start", route_live.routeLiveStartApi, .{});
+    router.get("/api/route-live/:name", route_live.routeLivePollApi, .{});
+    router.post("/api/route-live/:name/cancel", route_live.routeLiveCancelApi, .{});
+    router.post("/api/pcb-route-analyze/:name", route_analyze_api.pcbRouteAnalyzeApi, .{});
+    router.post("/api/route-vision/:name", route_vision.routeVisionApi, .{});
     router.post("/api/pcb-drc/:name", pcb_layout_page.pcbDrcApi, .{});
+    router.post("/api/pcb-fence/:name", pcb_fence.pcbFenceApi, .{});
     router.get("/api/pcb-drc-rules/:name", drc_rules.getApi, .{});
     router.post("/api/pcb-drc-rules/:name", drc_rules.setApi, .{});
     router.post("/api/pcb-regen-start/:name", pcb_layout_page.pcbRegenStartApi, .{});
@@ -393,9 +616,29 @@ fn registerPcbRoutes(router: anytype) void {
     router.post("/api/library-courtyard/:name", pcb_layout_page.savePcbCourtyardApi, .{});
 }
 
+fn registerLibraryRoutes(router: anytype) void {
+    router.get("/library", library.libraryPage, .{});
+    router.get("/api/library-card/:name", library.libraryCardApi, .{});
+    router.get("/library/footprint/:name", footprint_editor.editorPage, .{});
+    router.get("/library/3d/:footprint", library_3d.viewerPage, .{});
+    router.get("/api/model-file/:footprint", library_3d.modelFileApi, .{});
+    router.get("/api/model-sprite/:footprint", library_3d.modelFileApi, .{});
+    router.post("/api/model-sprite/:footprint", library_3d.modelFileApi, .{});
+    router.post("/api/model-transform/:footprint", library_3d.saveTransformApi, .{});
+    router.post("/api/upload-package", upload_package.uploadPackageApi, .{});
+    router.get("/api/footprint/:name", footprint_preview.footprintApi, .{});
+    router.post("/api/footprint/:name", footprint_editor.saveApi, .{});
+    router.get("/api/board-footprint/:name", footprint_preview.boardFootprintApi, .{});
+    router.post("/api/upload-zip", upload.uploadZipApi, .{});
+    router.post("/api/cse-fetch", library.cseFetchApi, .{});
+    router.post("/api/upload-model/:name", library.uploadModelApi, .{});
+    router.post("/api/library-delete/:kind/:name", library.deleteLibraryEntryApi, .{});
+}
+
 /// Start the HTTP server: configure auth/rate limits, register every route
 /// (pages, APIs, MCP, OAuth), and block serving requests until shutdown.
 pub fn serve(
+    io: std.Io,
     allocator: std.mem.Allocator,
     port: u16,
     project_dir: []const u8,
@@ -410,10 +653,15 @@ pub fn serve(
     // the ban-env policy holds (only config.zig touches the environment).
     const dev_mode = @import("config.zig").devMode(allocator);
     if (dev_mode) std.debug.print("netlisp: NETLISP_DEV set — loopback requests bypass auth as dev@localhost\n", .{});
-    var state: ServerState = .{}; // owned here; shared by pointer (see ServerState)
+    var state: ServerState = .{ .caches = .init(allocator) }; // owned here; shared by pointer
+    defer state.caches.deinit();
+    // Published AFTER the deinit defer so the retraction below runs FIRST
+    // (defers unwind last-in-first-out): no surface can reach a torn-down store.
+    thermal_cache.publish(&state.caches.thermal_solves);
+    defer thermal_cache.publish(null);
     state.ward.init(allocator); // ward verdict caches + HTTP client from WARD_* env
     var handler = Server{ .allocator = allocator, .project_dir = project_dir, .auth_dir = effective_auth, .dev_mode = dev_mode, .state = &state };
-    var server = try httpz.Server(*Server).init(allocator, .{
+    var server = try httpz.Server(*Server).init(io, allocator, .{
         .address = .all(port),
         .request = .{
             // 64 MiB so datasheet PDFs and large KiCad zips fit. Individual
@@ -436,9 +684,6 @@ pub fn serve(
     router.get("/style.css", pages.cssPage, .{});
     router.get("/static/:name", static_assets.staticAsset, .{});
     router.get("/schematics/:name", schematic_page.schematicPage, .{});
-    // KiCad-style sheet editor (prototype): section-as-sheet canvas navigator.
-    router.get("/editor/:name", editor_page.editorPage, .{});
-    router.get("/api/editor-scene/:name", editor_page.editorSceneApi, .{});
     registerPcbRoutes(router);
     router.get("/modules", modules_page.modulesListPage, .{});
     router.get("/modules/:name", modules_page.moduleViewPage, .{});
@@ -456,6 +701,35 @@ pub fn serve(
     router.post("/api/sync-kicad-pcb/:name", sync.syncKicadPcbApi, .{});
     router.get("/api/export-bom/:name", api.exportBomCsvApi, .{});
     router.get("/api/export-review/:name", api.exportReviewPackageApi, .{});
+    // Native schematic-block raster; unlike a browser screenshot this route
+    // is deterministic, headless, and directly shared with MCP/CLI export.
+    router.get("/api/schematic-png/:name", schematic_png.schematicPngApi, .{});
+    // Review-document PDF (`?theme=dark` for the screen palette) — the HTTP
+    // twin of `netlisp export-pdf`, served as a `<name>.pdf` attachment.
+    router.get("/api/schematic-pdf/:name", schematic_pdf.schematicPdfApi, .{});
+    // Exported KiCad schematic (+ project sidecars) as one store-only zip —
+    // the HTTP twin of `netlisp export-kicad-sch`. `?vendor=0` / `?flat=1`
+    // mirror the CLI flags.
+    router.get("/api/kicad-sch/:name", kicad_sch_export.kicadSchApi, .{});
+    // Guarded push of that same schematic INTO the KiCad project directory the
+    // design's (kicad-pcb "<path>") names. `?dry_run=1` returns the per-file
+    // plan without writing; a hand-drawn sheet in the way or a KiCad lock on
+    // the project answers 409 and writes nothing.
+    router.post("/api/sync-kicad-sch/:name", sync_kicad_sch.syncKicadSchApi, .{});
+    // Lumped steady-state thermal screening as read-only facts JSON — the
+    // HTTP twin of the `describe_thermal` MCP tool, sharing its whole body.
+    // `?ambient=NN` screens at the caller's ambient instead of bench 25 °C.
+    router.get("/api/thermal/:name", thermal_api.thermalApi, .{});
+    // The solved rise FIELD of one cooling scenario, in board millimetres —
+    // what the thermal page's board overlay paints on the live PCB view. The
+    // numbers above are the authority; this is the same solve as a grid.
+    router.get("/api/thermal-field/:name", thermal_api.thermalFieldApi, .{});
+    // …and the Thermal tab that reads it: the verdict headline, the cooling
+    // ladder and the per-part junction table in a panel beside the live board,
+    // which is the read-only PCB viewer with the heat overlay painted on it.
+    // `?fragment=1` answers the two ambient-dependent regions alone, which is
+    // what the page's own client swaps in on an ambient change.
+    router.get("/thermal/:name", thermal_page.thermalPage, .{});
     router.get("/api/erc/:name", api.ercApi, .{});
     // Version history: snapshot list + structured diff between two stored
     // revisions (or a revision and the current working file).
@@ -478,6 +752,7 @@ pub fn serve(
 
     // Edit
     router.post("/api/edit-value/:name", edit.editValueApi, .{});
+    router.post("/api/design-rules/:name", design_rules_edit.editDesignRulesApi, .{});
     router.post("/api/edit-mpn/:name", edit.editMpnApi, .{});
     router.post("/api/edit-footprint/:name", edit.editFootprintApi, .{});
     router.post("/api/new-design", edit.newDesignApi, .{});
@@ -515,25 +790,7 @@ pub fn serve(
     router.post("/api/notes/:name/tasks/reopen", notes.reopenTaskApi, .{});
     router.post("/api/notes/:name/tasks/remove", notes.removeTaskApi, .{});
 
-    // Library
-    router.get("/library", library.libraryPage, .{});
-    // 3D model alignment viewer + its STEP stream + transform persistence.
-    router.get("/library/3d/:footprint", library_3d.viewerPage, .{});
-    router.get("/api/model-file/:footprint", library_3d.modelFileApi, .{});
-    router.post("/api/model-transform/:footprint", library_3d.saveTransformApi, .{});
-
-    // Upload
-    router.post("/api/upload-package", upload_package.uploadPackageApi, .{});
-    router.get("/api/footprint/:name", footprint_preview.footprintApi, .{});
-    // Board-side twin of /api/footprint — one footprint as it exists on the
-    // design's .kicad_pcb, for the sync preview's old-vs-new comparison.
-    router.get("/api/board-footprint/:name", footprint_preview.boardFootprintApi, .{});
-    router.post("/api/upload-zip", upload.uploadZipApi, .{});
-    // Fetch a part's footprint + datasheet from Component Search Engine.
-    router.post("/api/cse-fetch", library.cseFetchApi, .{});
-    // Drop a zip onto a card → attach/replace its STEP 3D model; delete a card.
-    router.post("/api/upload-model/:name", library.uploadModelApi, .{});
-    router.post("/api/library-delete/:kind/:name", library.deleteLibraryEntryApi, .{});
+    registerLibraryRoutes(router);
 
     // MCP — POST /mcp is the streamable-HTTP transport Claude Code connects
     // to via its remote-MCP connector. GET /mcp upgrades to WebSocket, used
@@ -545,5 +802,8 @@ pub fn serve(
     router.get("/.well-known/oauth-protected-resource", ward_auth.metadataProtectedResource, .{});
 
     std.debug.print("Listening on http://localhost:{d}\nProject: {s}\n", .{ port, project_dir });
+    // Fill the read-path caches in the background so the first visitor after a
+    // deploy is not the one who pays for them. Overlaps with listen().
+    warmup.spawn(&handler);
     try server.listen();
 }

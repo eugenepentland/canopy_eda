@@ -10,15 +10,22 @@
 //!     const ns  = clock.nanoTimestamp();      // i128 ns
 
 const std = @import("std");
+const infra_fs = @import("fs.zig");
 
 /// Seconds since the Unix epoch.
-pub const timestamp = std.time.timestamp;
+pub fn timestamp() i64 {
+    return @intCast(@divFloor(nanoTimestamp(), std.time.ns_per_s));
+}
 
 /// Milliseconds since the Unix epoch.
-pub const milliTimestamp = std.time.milliTimestamp;
+pub fn milliTimestamp() i64 {
+    return @intCast(@divFloor(nanoTimestamp(), std.time.ns_per_ms));
+}
 
 /// Nanoseconds since the Unix epoch.
-pub const nanoTimestamp = std.time.nanoTimestamp;
+pub fn nanoTimestamp() i128 {
+    return @intCast(std.Io.Timestamp.now(infra_fs.currentIo(), .real).nanoseconds);
+}
 
 /// Re-exported so callers can convert between time units without
 /// reaching back to `std.time`.
@@ -29,8 +36,8 @@ pub const ns_per_ms = std.time.ns_per_ms;
 
 /// Block the current thread for `nanoseconds`. Routed here so the rate limiter
 /// (the one place that intentionally waits) has a single whitelisted entry.
-pub fn sleep(nanoseconds: u64) void {
-    std.Thread.sleep(nanoseconds);
+pub fn sleep(nanoseconds: u64) std.Io.Cancelable!void {
+    return std.Io.sleep(infra_fs.currentIo(), .{ .nanoseconds = @intCast(nanoseconds) }, .awake);
 }
 
 /// Re-exported so callers building ISO timestamps from a Unix epoch

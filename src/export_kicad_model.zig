@@ -11,13 +11,14 @@ const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Property = env_mod.Property;
 
-const export_kicad = @import("export_kicad.zig");
-const FlatInstance = export_kicad.FlatInstance;
+const flat_netlist = @import("flat_netlist.zig");
+const FlatInstance = flat_netlist.FlatInstance;
 const netlist_mod = @import("export_kicad_netlist.zig");
-const collectInstances = netlist_mod.collectInstances;
+const collectInstances = flat_netlist.collectInstances;
 const footprint_mod = @import("export_kicad_footprint.zig");
 const exportFootprintMod = footprint_mod.exportFootprintMod;
 const findModelFile = footprint_mod.findModelFile;
+const lib_limits = @import("lib_limits.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 /// Length of the JSON key prefix `"rotation":[` (advance past it to read array).
@@ -32,10 +33,10 @@ const extractFootprintName = netlist_mod.extractFootprintName;
 /// covers the file-system surface (open / read / write / makePath) plus
 /// allocator + footprint-parser errors.
 pub const ModelError = std.mem.Allocator.Error ||
-    std.fs.File.OpenError ||
-    std.fs.File.ReadError ||
-    std.fs.File.WriteError ||
-    std.fs.Dir.MakeError ||
+    infra_fs.File.OpenError ||
+    infra_fs.File.ReadError ||
+    infra_fs.File.WriteError ||
+    infra_fs.Dir.MakeError ||
     footprint_mod.FootprintError ||
     error{ FileTooBig, StreamTooLong, EndOfStream };
 
@@ -157,7 +158,7 @@ pub fn exportFootprints(
 
     var instances: std.ArrayList(FlatInstance) = .empty;
     defer instances.deinit(allocator);
-    try collectInstances(allocator, block, "", &instances, block.refStyle());
+    try collectInstances(allocator, block, "", &instances);
 
     var processed_fps = std.StringHashMapUnmanaged(void).empty;
     defer processed_fps.deinit(allocator);
@@ -173,7 +174,7 @@ pub fn exportFootprints(
         const fp_path = try std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, inst.footprint });
         defer allocator.free(fp_path);
 
-        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 1024 * 1024) catch continue;
+        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, lib_limits.max_footprint_bytes) catch continue;
         defer allocator.free(fp_source);
 
         const kicad_name = extractFootprintName(allocator, fp_source) catch inst.footprint;
@@ -259,20 +260,20 @@ pub fn exportSectionLayout(
         }
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
 
-    try w.writeAll("{\"cell_size_mm\":50,\"sections\":[");
+    w.writeAll("{\"cell_size_mm\":50,\"sections\":[") catch return error.OutOfMemory;
     for (flat_sections.items, 0..) |sec, si| {
-        if (si > 0) try w.writeAll(",");
+        if (si > 0) w.writeAll(",") catch return error.OutOfMemory;
         const row = si / n_cols;
         const col = si % n_cols;
-        try w.print("{{\"name\":\"{s}\",\"row\":{d},\"col\":{d},\"refs\":[", .{ sec.name, row, col });
+        w.print("{{\"name\":\"{s}\",\"row\":{d},\"col\":{d},\"refs\":[", .{ sec.name, row, col }) catch return error.OutOfMemory;
         var first = true;
         for (sec.instances) |inst| {
-            if (!first) try w.writeAll(",");
-            try w.print("\"{s}\"", .{inst.ref_des});
+            if (!first) w.writeAll(",") catch return error.OutOfMemory;
+            w.print("\"{s}\"", .{inst.ref_des}) catch return error.OutOfMemory;
             first = false;
         }
         for (sec.pin_groups) |pg| {
@@ -284,23 +285,23 @@ pub fn exportSectionLayout(
                 }
             }
             if (!found) {
-                if (!first) try w.writeAll(",");
-                try w.print("\"{s}\"", .{pg.ref_des});
+                if (!first) w.writeAll(",") catch return error.OutOfMemory;
+                w.print("\"{s}\"", .{pg.ref_des}) catch return error.OutOfMemory;
                 first = false;
             }
         }
-        try w.writeAll("]}");
+        w.writeAll("]}") catch return error.OutOfMemory;
     }
 
-    try w.writeAll("],\"ref_section\":{");
+    w.writeAll("],\"ref_section\":{") catch return error.OutOfMemory;
     var ref_first = true;
     var ref_iter = ref_map.iterator();
     while (ref_iter.next()) |entry| {
-        if (!ref_first) try w.writeAll(",");
-        try w.print("\"{s}\":{d}", .{ entry.key_ptr.*, entry.value_ptr.* });
+        if (!ref_first) w.writeAll(",") catch return error.OutOfMemory;
+        w.print("\"{s}\":{d}", .{ entry.key_ptr.*, entry.value_ptr.* }) catch return error.OutOfMemory;
         ref_first = false;
     }
-    try w.writeAll("}}");
+    w.writeAll("}}") catch return error.OutOfMemory;
 
-    return try allocator.dupe(u8, buf.items);
+    return buf.toOwnedSlice();
 }

@@ -299,7 +299,10 @@ test "leak: pcb_describe.writeDescribeJson honors the arena contract" {
     };
     const p = mkPlacement(&parts, &nets, &instances, &.{});
 
+    var policy = try module_policy.analyze(arena, p);
+    defer policy.deinit(arena);
     var aw: std.Io.Writer.Allocating = .init(arena);
-    try pcb_describe.writeDescribeJson(&aw.writer, arena, p, .{ .unplaced = &.{} }, null, "t", "Test");
+    const an = pcb_describe.Analyses{ .policy = policy };
+    try pcb_describe.writeDescribeJson(&aw.writer, arena, p, .{ .unplaced = &.{} }, null, "t", "Test", an);
     try testing.expect(aw.written().len > 0);
 }

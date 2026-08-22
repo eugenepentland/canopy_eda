@@ -1,0 +1,281 @@
+//! Composing a board's full DRC verdict: the geometric rules, plus the
+//! board-text overlap warnings, plus the `net_open` connectivity layer.
+//!
+//! This is the seam every reporting surface measures a board through, and
+//! deliberately NOT `drc.check`: geometry alone says nothing about whether the
+//! routed copper actually joins each net's pads, so a board whose copper left a
+//! net in two islands reads as clean without the connectivity layer. (The
+//! router's candidate loop and the client WASM engine still call `drc.check`
+//! directly — the per-net pour raster must not run in a hot path.)
+//!
+//! It was declared in `serve/drc_rules.zig` next to the `<name>.drc-rules.json`
+//! severity sidecar, so `kicad_pcb/route_command.zig` — which scores an
+//! uploaded board and wants no server at all — had to import `serve/`. Every
+//! input here is a placement type and nothing touches the filesystem or HTTP,
+//! so the composition belongs beneath both. `drc_rules.zig` keeps the sidecar
+//! half and re-exports `CopperCheck` / `checkDefaultRules`; its
+//! `checkFilteredZones` is now visibly this composition plus the override pass.
+
+const std = @import("std");
+const drc = @import("drc.zig");
+const drc_return_path = @import("drc_return_path.zig");
+const bypass_open = @import("bypass_open.zig");
+const net_open = @import("net_open.zig");
+const optimizer = @import("optimizer.zig");
+const router = @import("router.zig");
+const pour = @import("pour.zig");
+const font = @import("../font5x7.zig");
+const silk_font = @import("../silk_font.zig");
+
+/// The copper context one connectivity/geometry DRC pass measures: the
+/// placement, the routed copper, the clearance rule, and any hand-drawn user
+/// copper pours to credit toward connectivity.
+pub const CopperCheck = struct {
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    clearance: f64,
+    zones: []const pour.UserZone = &.{},
+    /// The caller's shared board-edge margin field, when the whole render
+    /// pours the same board and seeded it once (see `pour.sharedEdgeField`).
+    /// Every fill below — the topology zones and the net-open connectivity —
+    /// reads it, so the outline walk is not repeated per pass. Null seeds
+    /// per call, exactly as before.
+    base_edge: ?pour.EdgeField = null,
+    /// Saved board-level silkscreen labels shown with this copper. Empty for
+    /// route-only/internal checks that have no layout text context.
+    texts: []const font.BoardText = &.{},
+};
+
+/// `checkFilteredZones` for copper that belongs to NO project design: an
+/// uploaded `.kicad_pcb` on the route-review endpoint, or a board the
+/// `route-kicad-reference` CLI is scoring. There is no `<name>.drc-rules.json`
+/// to load for a foreign board, so the built-in severities stand — but the
+/// `net_open` connectivity layer must still be there, or the report claims a
+/// board whose copper leaves islands is DRC-clean. Identical to
+/// `checkFilteredZones` against a design with no rule sidecar, minus the
+/// pointless filesystem probe.
+pub fn checkDefaultRules(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violation {
+    const geom = checkFilled(alloc, in);
+    const silk = withBoardText(alloc, in.placement, geom, in.texts);
+    const bypass = withBypassOpen(alloc, in.placement, in.routed, silk);
+    return withNetOpen(alloc, in.placement, in.routed, bypass, in.zones, in.base_edge);
+}
+
+/// Run only copper-topology findings against the fabricated fill components.
+/// Persisted cleanup uses this to obtain the exact same jointly-safe removal
+/// plan as full DRC without paying for unrelated geometry findings each round.
+pub fn checkTopologyFilled(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violation {
+    const topology_zones = filledTopologyZones(alloc, in) catch return &.{};
+    return drc.checkTopology(alloc, in.placement, in.routed, topology_zones) catch &.{};
+}
+
+/// Append exact-target bypass connectivity warnings. This stays beside the
+/// net-open layer, outside `drc.check`, so router candidates and client WASM do
+/// not rebuild a surface graph for every tentative edit.
+fn withBypassOpen(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    r: router.RouteResult,
+    base: []const drc.Violation,
+) []const drc.Violation {
+    const warnings = bypass_open.check(alloc, placement, r.tracks) catch return base;
+    if (warnings.len == 0) return base;
+    var all: std.ArrayList(drc.Violation) = .empty;
+    all.appendSlice(alloc, base) catch return base;
+    all.appendSlice(alloc, warnings) catch return base;
+    return all.items;
+}
+
+fn textBox(t: font.BoardText) [4]f64 {
+    const width = silk_font.widthMm(t.text, t.size);
+    const height = silk_font.heightMm(t.size);
+    const radians = t.rot * std.math.pi / 180;
+    const cs = @abs(@cos(radians));
+    const sn = @abs(@sin(radians));
+    const hw = (width * cs + height * sn) / 2;
+    const hh = (width * sn + height * cs) / 2;
+    return .{ t.x - hw, t.y - hh, t.x + hw, t.y + hh };
+}
+
+fn boxOverlap(a: [4]f64, b: optimizer.BoardRect) ?[2]f64 {
+    const x0 = @max(a[0], b.minx);
+    const y0 = @max(a[1], b.miny);
+    const x1 = @min(a[2], b.minx + b.w);
+    const y1 = @min(a[3], b.miny + b.h);
+    if (!(x1 > x0 + 1e-9 and y1 > y0 + 1e-9)) return null;
+    return .{ (x0 + x1) / 2, (y0 + y1) / 2 };
+}
+
+/// Add one warning for each board-level silk label whose printed bounding box
+/// crosses a same-side component courtyard. Footprint-owned silk already has
+/// the exact pad-opening check in `drc.zig`; this covers the layout Text tool.
+fn withBoardText(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    base: []const drc.Violation,
+    texts: []const font.BoardText,
+) []const drc.Violation {
+    if (texts.len == 0) return base;
+    var out: std.ArrayList(drc.Violation) = .empty;
+    out.appendSlice(alloc, base) catch return base;
+    for (texts) |t| {
+        if (t.text.len == 0 or !(t.size > 0)) continue;
+        const tb = textBox(t);
+        for (placement.parts, 0..) |part, i| {
+            if (t.bottom != (part.side == .bottom)) continue;
+            const hit = boxOverlap(tb, optimizer.worldCourtyard(&part)) orelse continue;
+            out.append(alloc, .{
+                .x = hit[0],
+                .y = hit[1],
+                .gap = 0,
+                .clearance = 0,
+                .kind = .silk_over_pad,
+                .severity = drc.defaultSeverity(.silk_over_pad),
+                .who = .{ .part_a = drc.partyIndex(i) },
+            }) catch return base;
+        }
+    }
+    return out.items;
+}
+
+/// The FULL geometry + copper-topology check against the fabricated fill — the
+/// twin of `checkTopologyFilled`, for a caller that must judge copper the same
+/// way the fill does AND still see every clearance rule.
+///
+/// `drc.check` is the same rules with NO fill, and the difference is not
+/// cosmetic: the topology rules credit a same-net pour as copper, so a trace
+/// that ends on its own rail's pour is a finished run here and an unattached
+/// `copper_stub` — an ERROR — to the zone-blind spelling. A caller that pours a
+/// rail and then judges its copper without the pour is contradicting itself.
+pub fn checkFilled(alloc: std.mem.Allocator, in: CopperCheck) []const drc.Violation {
+    const topology_zones = filledTopologyZones(alloc, in) catch
+        return drc.check(alloc, in.placement, in.routed, in.clearance) catch &.{};
+    const base = drc.checkWithZones(alloc, in.placement, in.routed, in.clearance, topology_zones) catch &.{};
+    var out: std.ArrayList(drc.Violation) = .empty;
+    out.appendSlice(alloc, base) catch return base;
+    drc_return_path.check(alloc, &out, in.placement, in.routed, topology_zones) catch return base;
+    return out.items;
+}
+
+/// Reduce every declared plane/pour and hand-authored zone to the exact kept
+/// fill components the Gerber uses. The DRC topology graph receives one node
+/// per component (and its holes), never one outline-wide conductor.
+fn filledTopologyZones(alloc: std.mem.Allocator, in: CopperCheck) std.mem.Allocator.Error![]const drc.TopologyZone {
+    var out: std.ArrayList(drc.TopologyZone) = .empty;
+    var component: u64 = 1;
+    const copper = pour.Copper{ .tracks = in.routed.tracks, .vias = in.routed.vias, .zones = in.zones };
+    // Every plane, pour and zone below rasters the SAME board on the SAME
+    // lattice, so the outline walk that seeds each cell's edge margin is done
+    // once here and copied per fill. `base_edge` is the whole render's field
+    // when the caller seeded it; otherwise we seed our own.
+    const base = if (in.base_edge) |b| b else try pour.sharedEdgeField(alloc, in.placement);
+    for (in.placement.nets) |net| {
+        const layers = try pour.carryingLayers(alloc, in.placement.rules, net.name);
+        for (layers) |layer| {
+            var spec = layer;
+            if (spec.track_layer) |track_layer|
+                spec.higher = try pour.higherThanDeclared(alloc, in.zones, track_layer, spec.net);
+            const fill = try pour.computeShared(alloc, in.placement, copper, spec, base);
+            for (fill.contours, 0..) |contour, contour_i| {
+                try out.append(alloc, .{
+                    .net = net.name,
+                    .layer = spec.track_layer orelse 0,
+                    .stack = spec.stack,
+                    .poly = contour,
+                    .holes = fill.holes[contour_i],
+                    .component = component,
+                    .plane = spec.track_layer == null,
+                });
+                component += 1;
+            }
+        }
+    }
+    for (in.zones, 0..) |zone, zone_i| {
+        var spec = pour.zoneLayerSpec(zone.net, pour.sideOfSignal(zone.layer), zone.layer, zone.poly);
+        spec.higher = try pour.higherPolys(alloc, in.zones, zone_i);
+        const fill = try pour.computeShared(alloc, in.placement, copper, spec, base);
+        for (fill.contours, 0..) |contour, contour_i| {
+            try out.append(alloc, .{
+                .net = zone.net,
+                .layer = zone.layer,
+                .poly = contour,
+                .holes = fill.holes[contour_i],
+                .component = component,
+            });
+            component += 1;
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// Append the net-open connectivity violations to the geometric ones. Fail-open:
+/// on any allocation failure the geometric list rides through unchanged (a
+/// partial DRC beats none).
+fn withNetOpen(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    r: router.RouteResult,
+    geom: []const drc.Violation,
+    zones: []const pour.UserZone,
+    base: ?pour.EdgeField,
+) []const drc.Violation {
+    const tracks = connectivityTracks(alloc, r) catch return geom;
+    const opens = net_open.check(alloc, placement, .{ .tracks = tracks, .vias = r.vias, .zones = zones }, base) catch return geom;
+    if (opens.len == 0) return geom;
+    var all: std.ArrayList(drc.Violation) = .empty;
+    all.appendSlice(alloc, geom) catch return geom;
+    all.appendSlice(alloc, opens) catch return geom;
+    return all.items;
+}
+
+/// A persisted RF path intentionally omits its solver chords: the compact
+/// sample chain is the copper authority rendered and fabricated as one swept
+/// polygon. Reconstruct those chords only for connectivity when no ordinary
+/// track remains on that net. Geometry DRC keeps the polygon proof instead of
+/// reclassifying its implementation samples as editable track segments.
+fn connectivityTracks(alloc: std.mem.Allocator, r: router.RouteResult) std.mem.Allocator.Error![]const router.Track {
+    var missing: usize = 0;
+    for (r.rf_port_outcomes) |outcome| {
+        if (!outcome.success or outcome.physical.gate_removed or outcome.physical.samples.len < 2) continue;
+        for (outcome.physical.samples[1..], 1..) |sample, i| {
+            const before = outcome.physical.samples[i - 1];
+            if (!hasTrackChord(r.tracks, outcome.net, outcome.physical.layer, before.at, sample.at)) missing += 1;
+        }
+    }
+    if (missing == 0) return r.tracks;
+    var tracks: std.ArrayList(router.Track) = .empty;
+    try tracks.ensureTotalCapacity(alloc, r.tracks.len + missing);
+    try tracks.appendSlice(alloc, r.tracks);
+    for (r.rf_port_outcomes) |outcome| {
+        if (!outcome.success or outcome.physical.gate_removed or outcome.physical.samples.len < 2) continue;
+        for (outcome.physical.samples[1..], 1..) |sample, i| {
+            const before = outcome.physical.samples[i - 1];
+            if (std.math.hypot(sample.at[0] - before.at[0], sample.at[1] - before.at[1]) <= 1e-9) continue;
+            if (hasTrackChord(r.tracks, outcome.net, outcome.physical.layer, before.at, sample.at)) continue;
+            try tracks.append(alloc, .{
+                .x1 = before.at[0],
+                .y1 = before.at[1],
+                .x2 = sample.at[0],
+                .y2 = sample.at[1],
+                .layer = outcome.physical.layer,
+                .width = (before.width_mm + sample.width_mm) / 2,
+                .net = outcome.net,
+            });
+        }
+    }
+    return tracks.toOwnedSlice(alloc);
+}
+
+fn hasTrackChord(tracks: []const router.Track, net: i32, layer: u8, a: [2]f64, b: [2]f64) bool {
+    for (tracks) |track| {
+        if (track.net != net or track.layer != layer) continue;
+        const forward = sameTrackPoint(.{ track.x1, track.y1 }, a) and sameTrackPoint(.{ track.x2, track.y2 }, b);
+        const reverse = sameTrackPoint(.{ track.x1, track.y1 }, b) and sameTrackPoint(.{ track.x2, track.y2 }, a);
+        if (forward or reverse) return true;
+    }
+    return false;
+}
+
+fn sameTrackPoint(a: [2]f64, b: [2]f64) bool {
+    return @abs(a[0] - b[0]) <= 1e-7 and @abs(a[1] - b[1]) <= 1e-7;
+}

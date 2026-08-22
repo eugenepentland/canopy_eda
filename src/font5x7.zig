@@ -1,11 +1,8 @@
-//! A 5x7 bitmap font for PCB-layout PNG labels (ref-designators, net names,
-//! captions) and board-level silkscreen text. Glyphs are authored as visual
-//! ASCII-art grids — each row is a 5-char string drawn with '#' (lit) and
-//! ' ' (clear) — and packed to column-major bytes at comptime, so the source
-//! reads as the rendered shape and is verifiable by eye. Covers uppercase
-//! A-Z, lowercase a-z, digits, and the punctuation that appears in ref-des /
-//! net names / user text; ref-des labelling uppercases text before drawing,
-//! but user silkscreen text draws lowercase directly (unknown chars blank).
+//! A 5x7 bitmap font for diagnostic PNG labels (reference designators, net
+//! names, and captions). Glyphs are authored as visual ASCII-art grids — each
+//! row is a 5-char string drawn with '#' (lit) and ' ' (clear) — and packed to
+//! column-major bytes at comptime. Fabricated board text uses `silk_font.zig`;
+//! this module also owns its persisted `BoardText` data shape.
 
 const std = @import("std");
 
@@ -15,7 +12,7 @@ pub const gh: u32 = 7;
 
 /// Pack a 7-row visual grid into 5 column bytes (bit r = row r, top..bottom).
 fn pack(rows: [gh][]const u8) [gw]u8 {
-    var out = [_]u8{0} ** gw;
+    var out: [gw]u8 = @splat(0);
     for (rows, 0..) |row, r| {
         var c: usize = 0;
         while (c < gw) : (c += 1) {
@@ -81,7 +78,7 @@ const glyph_rows = [_]GlyphDef{
     .{ .c = '*', .r = .{ "     ", "# # #", " ### ", "#####", " ### ", "# # #", "     " } },
     .{ .c = '%', .r = .{ "##  #", "## # ", "  #  ", " #   ", "# ## ", "#  ##", "    #" } },
     // Lowercase a-z. Two-row ascender/descender headroom keeps them inside the
-    // 7-row cell; drawn directly for user silkscreen text (ref-des is uppercased).
+    // 7-row cell for diagnostic labels and captions.
     .{ .c = 'a', .r = .{ "     ", "     ", " ### ", "    #", " ####", "#   #", " ####" } },
     .{ .c = 'b', .r = .{ "#    ", "#    ", "#### ", "#   #", "#   #", "#   #", "#### " } },
     .{ .c = 'c', .r = .{ "     ", "     ", " ### ", "#   #", "#    ", "#   #", " ### " } },
@@ -114,7 +111,7 @@ const glyph_rows = [_]GlyphDef{
 /// char) is blank.
 const glyph_table: [128][gw]u8 = blk: {
     @setEvalBranchQuota(100_000);
-    var t = [_][gw]u8{[_]u8{0} ** gw} ** 128;
+    var t: [128][gw]u8 = @splat(@splat(0));
     for (glyph_rows) |g| t[g.c] = pack(g.r);
     break :blk t;
 };
@@ -124,12 +121,15 @@ pub fn cols(c: u8) [gw]u8 {
     return if (c < 128) glyph_table[c] else glyph_table[0];
 }
 
+const BoardTextOwner = union(enum) {
+    subcircuit: []const u8,
+    testpoint: []const u8,
+};
+
 /// A board-level silkscreen text label placed by the viewer's Text tool and
 /// persisted in the layout sidecar (`SavedLayout.texts`). World-mm anchor,
-/// quarter-turn rotation, board side, cap height in mm (the stroke font is
-/// vector — `size` scales the 5x7 pixel pitch), and the string. Bottom-side
-/// text mirrors on the silk layer so it reads from the board's bottom view,
-/// the same convention as ref-des.
+/// quarter-turn rotation, board side, nominal font size in mm, and the string.
+/// Bottom-side text mirrors on the silk layer so it reads from that face.
 pub const BoardText = struct {
     x: f64,
     y: f64,
@@ -137,14 +137,23 @@ pub const BoardText = struct {
     rot: f64 = 0,
     /// "top" or "bottom" — which silk layer the text lands on.
     bottom: bool = false,
-    /// Cap height in mm (glyph is GH pixels tall, so pixel pitch = size / GH).
+    /// Nominal fabricated font size in mm. The vector font's visible cap is
+    /// slightly smaller, like a conventional font's cap within its em square.
     size: f64 = 1.0,
     text: []const u8,
+    /// Generated label this editable text replaces. Null means ordinary
+    /// user-authored text. Test points use their full flattened ref-des so
+    /// same-named test points in separate sub-circuits remain distinct.
+    owner: ?BoardTextOwner = null,
+    /// True when this is the generated fabrication identity. Its position may
+    /// be user-authored, but the text itself remains derived from the board's
+    /// manufacturing geometry and is excluded from that identity's digest.
+    fabrication_id: bool = false,
 };
 
-/// Default cap height (mm) for a new silkscreen text — matches the ~1 mm
-/// ref-des height (GH * 0.15 mm pixel pitch), the KiCad stock legend size.
-pub const default_size_mm: f64 = @as(f64, @floatFromInt(gh)) * 0.15;
+/// Default nominal size for new silkscreen text, matching KiCad's conventional
+/// 1 mm PCB legend setting while stroke thickness remains an independent rule.
+pub const default_size_mm: f64 = 1.0;
 
 /// One lit horizontal run in a glyph row: pixel columns [c0, c1] (inclusive)
 /// are lit on row `r`. `c0 == c1` is a single lit pixel (a dot).
@@ -184,9 +193,10 @@ test "font packs a known glyph and leaves unknowns blank" {
     try std.testing.expect(cols('T')[2] & (1 << 6) != 0);
     // Lowercase now has its own glyphs (not blank); space and truly undefined
     // chars still render blank.
-    try std.testing.expect(!std.meta.eql([_]u8{0} ** gw, cols('a')));
-    try std.testing.expectEqual([_]u8{0} ** gw, cols(' '));
-    try std.testing.expectEqual([_]u8{0} ** gw, cols('\t'));
+    const blank: [gw]u8 = @splat(0);
+    try std.testing.expect(!std.meta.eql(blank, cols('a')));
+    try std.testing.expectEqual(blank, cols(' '));
+    try std.testing.expectEqual(blank, cols('\t'));
 }
 
 test "glyphRuns enumerates a glyph's lit horizontal runs" {

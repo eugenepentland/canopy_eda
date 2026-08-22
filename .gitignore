@@ -1,5 +1,13 @@
 zig-out/
+# The LIVE production executable (deploy-prod.sh installs it here). Kept out
+# of zig-out/ so a plain `zig build` cannot overwrite what prod runs.
+.deploy/
+# Debug-binary side installs (zig build -p zig-out-dbg); a 200 MB Debug
+# netlisp was once committed from here by a path-scoped commit sweep.
+zig-out-dbg/
 .zig-cache
+# Isolated per-task build caches (agents pass --cache-dir .zig-cache-<tag>)
+.zig-cache-*/
 *.o
 *.swp
 *~
@@ -23,6 +31,10 @@ guardian_runtime.db
 # Loose root-level scratch files
 /ADC.md
 /ad7380-4.pdf
+
+# Reasonix local metadata
+/.reasonix/
+/reasonix.toml
 
 # Claude Code worktree metadata (per-machine; not part of the project)
 .claude/worktrees/

@@ -2,7 +2,10 @@
 .navbar a{color:#8b949e;text-decoration:none;padding:0.6rem 0;border-bottom:2px solid transparent;min-height:42px;display:flex;align-items:center}
 .navbar a:hover{color:#e0e0e0;}
 .navbar a.active{color:#e0e0e0;border-bottom-color:#58a6ff;}
+/* The brand IS the link home — there is no separate "Designs" tab, so this is
+   the only route back to the design list and it must read as clickable. */
 .navbar .brand{color:#58a6ff;font-weight:600;font-size:0.9rem;margin-right:0.3rem;}
+.navbar a.brand:hover{color:#79c0ff;}
 /* Segmented Schematic ⇄ PCB Layout switcher — shared by both views so a
    design/module flips between them in one click. Same control on each page,
    only the active segment differs. */
@@ -12,9 +15,23 @@
 .viewtoggle a:hover{color:#e6edf3;background:#1c2230;text-decoration:none;}
 .viewtoggle a.active{color:#fff;background:#1f6feb;}
 .viewtoggle a.active:hover{background:#388bfd;color:#fff;}
-/* Narrow screens: the tab row scrolls sideways instead of wrapping or
-   overflowing the viewport — shared by every page that embeds the navbar. */
+/* Narrow screens: keep every destination available in one touch-sized,
+   horizontally scrollable app bar. The brand stays pinned at the left so the
+   page retains context while the destinations move underneath it. */
 @media (max-width:920px){
-  .navbar{overflow-x:auto;-webkit-overflow-scrolling:touch;padding:0 0.6rem;gap:0.7rem;}
-  .navbar a{white-space:nowrap;flex:none;}
+  .navbar{
+    height:48px;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;
+    scrollbar-width:none;padding:0 max(8px,env(safe-area-inset-left));gap:2px;
+    overscroll-behavior-x:contain
+  }
+  .navbar::-webkit-scrollbar{display:none}
+  .navbar .brand{
+    position:sticky;left:0;z-index:2;display:flex;align-items:center;height:48px;
+    margin-right:4px;padding-right:8px;background:#161b22;white-space:nowrap
+  }
+  .navbar a{
+    min-height:44px;padding:.65rem 10px;white-space:nowrap;flex:none;
+    touch-action:manipulation
+  }
+  .navbar a:last-child{margin-left:0!important}
 }

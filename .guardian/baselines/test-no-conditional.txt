@@ -1,10 +1,10 @@
-# guardian-snapshot v1
-src/bom_resolve.zig:682: more than one top-level loop
-src/eval/design_block.zig:1880: switch at top level of test body
-src/eval/design_block.zig:1902: switch at top level of test body
-src/eval/design_block.zig:1954: switch at top level of test body
-src/eval/design_block.zig:1980: switch at top level of test body
-src/eval/design_block.zig:2015: switch at top level of test body
-src/eval/design_block.zig:2042: switch at top level of test body
-src/kicad_pcb/format.zig:107: while at top level of test body
-src/kicad_pcb/writer.zig:2284: while at top level of test body
+# guardian-snapshot v3
+test-no-conditional|src/bom_resolve.zig|setBomProperty escapes a value with a quote and reloads cleanly|loop
+test-no-conditional|src/eval/design_block.zig|design-block captures (design-rules …)|switch
+test-no-conditional|src/eval/design_block.zig|design-block captures (kicad-pcb path)|switch
+test-no-conditional|src/eval/design_block.zig|design-block captures (net-class …) rules|switch
+test-no-conditional|src/eval/design_block.zig|design-block captures (stackup …)|switch
+test-no-conditional|src/eval/design_block.zig|design-block captures a plane-less (stackup 2)|switch
+test-no-conditional|src/eval/design_block.zig|design-block without (design-rules …) has no rules present|switch
+test-no-conditional|src/kicad_pcb/format.zig|sexprEscape escapes quotes and backslashes, passes clean text through|while
+test-no-conditional|src/kicad_pcb/writer.zig|applyOpsToSource escapes a set_field value containing a quote and backslash|while

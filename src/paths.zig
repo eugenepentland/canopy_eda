@@ -21,9 +21,25 @@
 //!    cleanly with every existing error union (which all already cover
 //!    `Allocator.Error`).
 //!
-//! The walk runs once per call. With a small project tree this is
-//! microseconds; introducing a cache would mean threading invalidation
-//! through every write site, which is a worse trade-off.
+//! The lookup is served from a cached `src/` basename index rather than a
+//! walk per call. The walk-per-call this replaced was measured at ~31 ms of a
+//! 42 ms warm `GET /`: the home page resolves one `.layouts.json` sibling per
+//! card, and 106 cards each re-walked the same 347-entry tree.
+//!
+//! Freshness is per REQUEST, not per call. `beginRequest` bumps an epoch from
+//! the server's dispatcher; the first lookup of a new epoch re-walks `src/`
+//! and compares a no-stat fingerprint (entry count plus a hash of every
+//! relative path, which together move on any create, delete or rename), and
+//! the rest of that request are served straight from the index. So a request
+//! pays at most one walk however many siblings it resolves, and treats the
+//! tree as fixed for its own duration — a snapshot, which is what a request
+//! wants anyway. A process that never bumps the epoch (the CLI) validates
+//! exactly once, matching its one-shot lifetime.
+//!
+//! Directory mtimes are deliberately NOT the signal, though the kernel does
+//! move them: `std.Io.Dir.statFile` on a directory here reports an mtime that
+//! does not change when an entry is created inside it, so an index gated on it
+//! would freeze permanently. The fingerprint walk is measured instead.
 //!
 //! Name contract (enforced): `name` is a bare design basename — no path
 //! separators (`/`, `\`), no parent-traversal `..`, and no leading `.`
@@ -106,34 +122,180 @@ fn findUniqueInSrc(
     const src_path = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
     defer allocator.free(src_path);
 
-    var dir = infra_fs.cwd().openDir(src_path, .{ .iterate = true }) catch return null;
-    defer dir.close();
-
-    var walker = dir.walk(allocator) catch return null;
-    defer walker.deinit();
-
-    var found: ?[]u8 = null;
-    while (walker.next() catch null) |entry| {
-        if (entry.kind != .file and entry.kind != .sym_link) continue;
-        if (!std.mem.eql(u8, entry.basename, filename)) continue;
-        const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src_path, entry.path });
-        if (found) |existing| {
-            log.warn("paths: ambiguous design basename {s}: keeping {s}, also found {s}", .{ filename, existing, full });
-            allocator.free(full);
-            continue;
-        }
-        found = full;
+    SrcIndex.mutex.lock();
+    defer SrcIndex.mutex.unlock();
+    if (!srcIndexIsFresh(src_path)) rebuildSrcIndex(src_path);
+    const hit = SrcIndex.files.get(filename) orelse return null;
+    // Reported per LOOKUP, not per index rebuild: `src/` legitimately holds
+    // colliding basenames the caller never asks about (a handoff export tree
+    // repeats its README and plots per variant), and warning for those on
+    // every rebuild would bury the one collision that actually shadowed a
+    // resolution.
+    if (hit.shadowed) |other| {
+        log.warn("paths: ambiguous design basename {s}: keeping {s}, also found {s}", .{ filename, hit.path, other });
     }
-    return found;
+    return try allocator.dupe(u8, hit.path);
 }
 
-// Pull `commands.zig`'s CLI-arg-parsing tests (e.g. `parseBuildArgs`) into the
-// test tree. `commands.zig` is not referenced by `main.zig`'s root `test {}`
-// block, and it already depends on this module, so bridging here (test-scope
-// only) is the least-intrusive way to collect those tests without editing the
-// root file. The `@import` cycle is harmless — it is not comptime-recursive.
-test {
-    _ = @import("commands.zig");
+// ── src/ basename index ────────────────────────────────────────────────
+//
+// Retained for the process, revalidated at most once per request. See the
+// module doc for the freshness contract. Everything here runs under
+// `SrcIndex.mutex`.
+
+/// One indexed file: the path that wins, plus the first path it shadowed (null
+/// when the basename is unique). First match in walk order wins, matching the
+/// pre-index behaviour on an ambiguous basename.
+const IndexedFile = struct {
+    path: []const u8,
+    shadowed: ?[]const u8 = null,
+};
+
+/// What `src/` looked like, cheaply. Counting entries catches a create or a
+/// delete; hashing every relative path catches a rename, which leaves the
+/// count alone. Neither needs a `stat`, so a fingerprint walk costs one
+/// directory sweep and nothing else.
+const SrcFingerprint = struct {
+    count: usize = 0,
+    hash: u64 = 0,
+
+    fn eql(a: SrcFingerprint, b: SrcFingerprint) bool {
+        return a.count == b.count and a.hash == b.hash;
+    }
+};
+
+/// The index's state. Scoped inside this non-pub struct rather than left as
+/// module-level `var`s because `findUniqueInSrc` is reached from plain path
+/// helpers with no server handle to thread a store through — the same reason
+/// `layout_status.Memo` is shaped this way.
+const SrcIndex = struct {
+    // The index outlives every request arena that queries it, and has the
+    // process's own lifetime.
+    // allocator-ok: process-lifetime index, deliberately not request-scoped.
+    const store = std.heap.page_allocator;
+
+    var mutex: infra_fs.Mutex = .{};
+    /// The `<project_dir>/src` this index describes. Empty means "no index
+    /// yet"; a different root (a second project, or a test's tmp tree)
+    /// rebuilds.
+    var root: []const u8 = "";
+    var print: SrcFingerprint = .{};
+    /// The epoch this index was last validated against, so repeated lookups
+    /// within one request skip the walk.
+    var checked_epoch: u64 = 0;
+    /// basename → the file that resolves it.
+    var files: std.StringHashMapUnmanaged(IndexedFile) = .empty;
+
+    /// Bumped once per request. Starts at 1 so a never-bumped process (the
+    /// CLI) still differs from a fresh `checked_epoch` of 0 exactly once.
+    var epoch: std.atomic.Value(u64) = .init(1);
+};
+
+/// Mark the start of a request, so the next `src/` lookup revalidates the
+/// index once and the rest of the request reuses it. Called by the server's
+/// dispatcher; a caller that never calls it (the CLI) simply validates once.
+pub fn beginRequest() void {
+    _ = SrcIndex.epoch.fetchAdd(1, .monotonic);
+}
+
+/// True while the cached index can be trusted for this request: same root, and
+/// either already validated under this epoch or still matching a freshly
+/// measured fingerprint of `src/`.
+fn srcIndexIsFresh(src_path: []const u8) bool {
+    if (SrcIndex.root.len == 0) return false;
+    if (!std.mem.eql(u8, SrcIndex.root, src_path)) return false;
+
+    const now = SrcIndex.epoch.load(.monotonic);
+    if (SrcIndex.checked_epoch == now) return true;
+    SrcIndex.checked_epoch = now;
+
+    const measured = srcFingerprint(src_path) orelse return false;
+    return measured.eql(SrcIndex.print);
+}
+
+/// Walk `src_path` counting entries and hashing their relative paths. No
+/// `stat`, no allocation beyond the walker's own path buffer. Null when the
+/// tree cannot be read, which forces a rebuild rather than a stale hit.
+fn srcFingerprint(src_path: []const u8) ?SrcFingerprint {
+    var dir = infra_fs.cwd().openDir(src_path, .{ .iterate = true }) catch return null;
+    defer dir.close();
+    var walker = dir.walk(SrcIndex.store) catch return null;
+    defer walker.deinit();
+
+    var out: SrcFingerprint = .{};
+    var hasher = std.hash.Wyhash.init(0);
+    while (walker.next() catch null) |entry| {
+        out.count += 1;
+        hasher.update(entry.path);
+    }
+    out.hash = hasher.final();
+    return out;
+}
+
+/// Walk `src_path` and replace the index with what is there now. Any failure
+/// leaves the index empty and un-rooted, which is fail-CLOSED: an un-rooted
+/// index is never fresh, so every lookup rebuilds (a walk per call — exactly
+/// the pre-index behaviour) instead of serving a half-built map.
+fn rebuildSrcIndex(src_path: []const u8) void {
+    buildSrcIndex(src_path) catch freeSrcIndex();
+}
+
+fn buildSrcIndex(src_path: []const u8) !void {
+    freeSrcIndex();
+
+    var dir = infra_fs.cwd().openDir(src_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var walker = try dir.walk(SrcIndex.store);
+    defer walker.deinit();
+
+    var print: SrcFingerprint = .{};
+    var hasher = std.hash.Wyhash.init(0);
+    while (walker.next() catch null) |entry| {
+        print.count += 1;
+        hasher.update(entry.path);
+        switch (entry.kind) {
+            .file, .sym_link => try indexFile(src_path, entry.path, entry.basename),
+            else => {},
+        }
+    }
+    print.hash = hasher.final();
+
+    SrcIndex.print = print;
+    SrcIndex.root = try SrcIndex.store.dupe(u8, src_path);
+}
+
+/// Record one file under its basename, keeping the first match in walk order
+/// and remembering the first path it shadowed for the lookup-time warning.
+fn indexFile(src_path: []const u8, rel: []const u8, basename: []const u8) std.mem.Allocator.Error!void {
+    const full = try std.fmt.allocPrint(SrcIndex.store, "{s}/{s}", .{ src_path, rel });
+    errdefer SrcIndex.store.free(full);
+    const gop = try SrcIndex.files.getOrPut(SrcIndex.store, basename);
+    if (gop.found_existing) {
+        if (gop.value_ptr.shadowed == null) {
+            gop.value_ptr.shadowed = full;
+        } else {
+            SrcIndex.store.free(full);
+        }
+        return;
+    }
+    gop.key_ptr.* = try SrcIndex.store.dupe(u8, basename);
+    gop.value_ptr.* = .{ .path = full };
+}
+
+/// Drop every string the index owns and reset it to "no index yet".
+fn freeSrcIndex() void {
+    var it = SrcIndex.files.iterator();
+    while (it.next()) |e| {
+        SrcIndex.store.free(e.key_ptr.*);
+        SrcIndex.store.free(e.value_ptr.path);
+        if (e.value_ptr.shadowed) |sh| SrcIndex.store.free(sh);
+    }
+    SrcIndex.files.deinit(SrcIndex.store);
+    SrcIndex.files = .empty;
+    if (SrcIndex.root.len > 0) SrcIndex.store.free(SrcIndex.root);
+    SrcIndex.root = "";
+    SrcIndex.print = .{};
 }
 
 // spec: paths - Resolves <name>.sexp via designSourcePath, falling back to flat layout when missing
@@ -167,4 +329,49 @@ test "designSiblingPath rejects non-basename names" {
     const ok = try designSourcePath(allocator, "/tmp/no-such-project", "stm32n6");
     defer allocator.free(ok);
     try std.testing.expectEqualStrings("/tmp/no-such-project/src/stm32n6.sexp", ok);
+}
+
+// spec: Web Server - The src basename index resolves a design sibling without re-walking the tree, and rebuilds when a directory it walked changes mtime
+test "src index resolves siblings and rebuilds when the tree's shape changes" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "src", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "src/boards", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/boards/alpha.sexp", .data = "(design-block \"A\")" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/boards/alpha.layouts.json", .data = "{}" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    // An existing sibling resolves to its real nested location, not to the
+    // flat fallback.
+    const first = try designSiblingPath(testing.allocator, root, "alpha", ".layouts.json");
+    defer testing.allocator.free(first);
+    try testing.expect(std.mem.endsWith(u8, first, "src/boards/alpha.layouts.json"));
+
+    // Repeating the lookup is served from the index and must not change the
+    // answer — this is the path that used to re-walk `src/` on every call.
+    const again = try designSiblingPath(testing.allocator, root, "alpha", ".layouts.json");
+    defer testing.allocator.free(again);
+    try testing.expectEqualStrings(first, again);
+
+    // A sibling that does not exist yet still falls back to the flat path, so
+    // the helper can name a file about to be written.
+    const pending = try designSiblingPath(testing.allocator, root, "beta", ".bom");
+    defer testing.allocator.free(pending);
+    try testing.expect(std.mem.endsWith(u8, pending, "src/beta.bom"));
+
+    // Creating that file changes its directory's mtime, which is the whole
+    // invalidation contract: the next lookup must find it rather than keep
+    // serving the flat fallback out of a stale index.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/boards/beta.bom", .data = "x" });
+    bustSrcIndexStamps();
+    const found = try designSiblingPath(testing.allocator, root, "beta", ".bom");
+    defer testing.allocator.free(found);
+    try testing.expect(std.mem.endsWith(u8, found, "src/boards/beta.bom"));
+}
+
+/// Force the next lookup to revalidate, as a new request would.
+fn bustSrcIndexStamps() void {
+    beginRequest();
 }

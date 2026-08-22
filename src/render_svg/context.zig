@@ -7,6 +7,7 @@
 const std = @import("std");
 const log = @import("../infra/log.zig");
 const env_mod = @import("../eval/env.zig");
+const na = @import("../eval/net_analysis.zig");
 const DesignBlock = env_mod.DesignBlock;
 const PinRef = env_mod.PinRef;
 const draw = @import("draw.zig");
@@ -37,6 +38,49 @@ fn originOf(ref: []const u8) []const u8 {
 }
 
 const Allocator = std.mem.Allocator;
+const HubCountMap = std.StringHashMapUnmanaged(u32);
+const SoleHubMap = std.StringHashMapUnmanaged(PinRef);
+const RefNetsMap = std.StringHashMapUnmanaged(std.ArrayList([]const u8));
+
+const PassiveIsland = struct {
+    refs: []const []const u8,
+    has_explicit_binding: bool,
+};
+
+const IslandAnchorChoice = struct {
+    has_busy_boundary: bool = false,
+    candidate_hub_ref: ?[]const u8 = null,
+    conflicting_candidate_hubs: bool = false,
+    anchor_net: ?[]const u8 = null,
+    anchor_pin: ?PinRef = null,
+    anchor_reaches_port: bool = false,
+};
+
+const IslandAnchorInputs = struct {
+    seed_ref: []const u8,
+    refs: []const []const u8,
+    hub_count: *const HubCountMap,
+    sole_hub: *const SoleHubMap,
+    spoke_nets: *const RefNetsMap,
+};
+
+const RenderScratch = struct {
+    hub_splits: std.StringHashMapUnmanaged(MergeAwareSplit) = .empty,
+    deferred_branch_terminals: std.ArrayList(BranchBody) = .empty,
+    defer_branch_terminals: bool = false,
+    /// Functional-view pin rows on each side of the current hub. Connection
+    /// rendering consults these to turn an outside-edge series resistor toward
+    /// the signal pin it feeds instead of spending another horizontal lane.
+    functional_layout: bool = false,
+    functional_left_pin_y: std.StringHashMapUnmanaged(f64) = .empty,
+    functional_right_pin_y: std.StringHashMapUnmanaged(f64) = .empty,
+    /// Nets whose Functional return already turns through a vertical series
+    /// part. Their destination pin anchors directly on that inline rail rather
+    /// than emitting a short outward terminal stub first.
+    functional_inline_nets: std.StringHashMapUnmanaged(void) = .empty,
+    functional_series_target_y: ?f64 = null,
+    rendered_connection_end_y: ?f64 = null,
+};
 
 // ── Flat types ────────────────────────────────────────────────────────
 
@@ -134,6 +178,16 @@ pub const BranchBody = struct {
     end_x: f64,
     cy: f64,
     terminal: []const u8,
+    /// A Functional vertical series return already defines the x-lane that
+    /// should close its direct connection. Reusing it prevents the terminal
+    /// pass from pulling the wire out to a separate label lane.
+    inline_direct_lane: bool = false,
+    /// Functional-only single resistor whose final horizontal position waits
+    /// until the hub-level direct-return lane has been selected. Sequential
+    /// rendering leaves this null and draws the chain immediately.
+    deferred_series: ?FlatInst = null,
+    deferred_start_x: f64 = 0,
+    deferred_source_net: []const u8 = "",
 };
 
 /// Pin group for hub rendering.
@@ -154,6 +208,13 @@ pub const PinGroup = struct {
     group: []const u8 = "",
 };
 
+/// Why a net is exempt from the single-pin significance filter — see
+/// `RenderCtx.lone_pin_nets`. `.boundary_port` is a net that LEAVES this
+/// schematic (a declared `(port …)`, or a sub-block port as this schematic
+/// spells it) and is drawn in the boundary-port colour; `.internal` is ordinary
+/// wiring that merely has to survive the filter, drawn like any other net.
+pub const LonePinRole = enum { boundary_port, internal };
+
 /// Result of splitting a hub's pin groups across the two columns, merge-aware
 /// (identical single-passive spokes collapse to one slot). Lives here so
 /// `RenderCtx` can memoize it — the scene-graph renderer computes it three
@@ -169,7 +230,7 @@ pub const MergeAwareSplit = struct {
 
 /// All the pre-computed lookup tables the SVG schematic renderer needs:
 /// flattened instances + nets, hub/spoke classification, adjacency lists,
-/// per-pin canonical net mapping, port-net set, and the section→index
+/// per-pin canonical net mapping, lone-pin/boundary-port roles, and the section→index
 /// table that drives section-aware label placement. Built once via
 /// `collectFlat` + helpers, then fed to the per-hub render passes.
 pub const RenderCtx = struct {
@@ -191,27 +252,36 @@ pub const RenderCtx = struct {
     /// passive on the rail (which would pull in sibling sub-blocks' identical
     /// networks). Populated by `buildSignificantNets`.
     shared_rail_nets: std.StringHashMapUnmanaged(void),
-    port_nets: std.StringHashMapUnmanaged(void),
+    /// Nets exempt from the single-pin significance filter — a pin sitting alone
+    /// on one still draws its wire and net label — each tagged with WHY.
+    /// `.boundary_port` additionally paints the label boundary-blue and sets the
+    /// scene graph's `port` flag; `.internal` does not. Keeping the two roles
+    /// apart is load-bearing: a bridged sub-block port resolves to the PARENT's
+    /// own net, which needs the filter escape but is ordinary internal wiring, and
+    /// calling it a port recoloured stm32n6's labels 53 → 288 as board
+    /// boundaries. Read through `rendersWhenAlone` / `isBoundaryPort`.
+    lone_pin_nets: std.StringHashMapUnmanaged(LonePinRole),
     pin_canonical_nets: std.StringHashMapUnmanaged([]const u8),
     rendered_spokes: std.StringHashMapUnmanaged(void),
     section_map: std.StringHashMapUnmanaged(usize),
     /// Spoke ref-des → the base net name it should be drawn off (its "anchor"
-    /// side). Populated for a 2-terminal passive that bridges a net with a
-    /// single hub pin and a net with several hub pins: it renders off the
-    /// single-pin side (e.g. a BOOT pull-up at the MCU's lone BOOT pin) instead
-    /// of being buried among the busy rail's pins. See `computeSpokeAnchors`.
+    /// side). Populated for a passive, or a passive island joined through local
+    /// junction nets, that bridges one or more lone signal pins to a busy hub
+    /// rail. The whole island renders from the signal pin that continues to a
+    /// declared port, or the lowest physical signal pin when none does, and
+    /// labels the busy rail at its far end (e.g. a BOOT pull-up or RF bias tee)
+    /// instead of being claimed by the first supply pin rendered.
+    /// See `computeSpokeAnchors`.
     spoke_anchor_net: std.StringHashMapUnmanaged([]const u8),
-    /// Memoized merge-aware hub splits, keyed by hub_ref + the groups' pin ids
-    /// (see `render_json.splitGroupsByMergeAwareHeight`). The three per-hub
-    /// render passes recompute an identical split otherwise; a hit is only ever
-    /// returned for byte-identical inputs, so it's result-identical. Arena-
-    /// backed like the rest of the render state (no explicit deinit).
-    hub_split_cache: std.StringHashMapUnmanaged(MergeAwareSplit) = .empty,
+    /// Memoized merge-aware hub splits plus terminal bodies temporarily
+    /// collected from passive branch trees for the final hub-level connection
+    /// pass. Arena-backed like the rest of the render state.
+    render_scratch: RenderScratch = .{},
 
     pub fn init(allocator: Allocator) RenderCtx {
         return .{
             .allocator = allocator,
-            .hub_split_cache = .empty,
+            .render_scratch = .{},
             .instances = .empty,
             .nets = .empty,
             .hub_order = .empty,
@@ -222,7 +292,7 @@ pub const RenderCtx = struct {
             .net_index = .empty,
             .significant_nets = .empty,
             .shared_rail_nets = .empty,
-            .port_nets = .empty,
+            .lone_pin_nets = .empty,
             .pin_canonical_nets = .empty,
             .rendered_spokes = .empty,
             .section_map = .empty,
@@ -324,9 +394,9 @@ pub const RenderCtx = struct {
         try self.buildPinNetMap();
         try self.classify();
         try self.buildAdjacency();
-        try self.synthesizeSpokeConnections();
         try self.buildNetIndex();
         try self.buildSignificantNets(block);
+        try self.synthesizeSpokeConnections();
         try self.buildPinCanonicalNets();
     }
 
@@ -365,9 +435,9 @@ pub const RenderCtx = struct {
                 // their offsets don't map into the design source — only
                 // top-level (unprefixed) instances get a source link.
                 .src_offset = if (prefix.len == 0) inst.source_offset else 0,
-                .decouple_ic = inst.decouple_ic,
-                .decouple_pin = inst.decouple_pin,
-                .decouple_rail = inst.decouple_rail,
+                .decouple_ic = inst.bind.decouple.ic,
+                .decouple_pin = inst.bind.decouple.pin,
+                .decouple_rail = inst.bind.decouple.rail,
             };
             try self.instances.append(self.allocator, flat);
             try self.inst_map.put(self.allocator, rd, flat);
@@ -434,13 +504,20 @@ pub const RenderCtx = struct {
         }
     }
 
-    /// A 2-terminal passive bridging a single-hub-pin net and a multi-hub-pin
-    /// net belongs on its single-pin side. For each spoke, gather the distinct
-    /// non-ground nets it touches; when there are exactly two and one has a lone
-    /// hub pin while the other has two or more, record that lone-pin net as the
-    /// spoke's anchor. `synthesizeSpokeConnections` then attaches the spoke only
-    /// to its anchor net's hub, so it renders off that pin (e.g. a BOOT pull-up
-    /// at the MCU's BOOT pin) and labels the busy rail at its far end instead.
+    /// A passive network bridging lone hub pins and a multi-hub-pin rail belongs
+    /// on its signal side. The simple case is one 2-terminal passive (a BOOT
+    /// pull-up). The general case is an island of passives joined through local
+    /// nets with no hub pins, such as an RF bias tee whose choke reaches VCC and
+    /// whose two load resistors reach RFOUTAM/RFOUTAP. Pin-order rendering must
+    /// not let the earlier VCC pad claim that whole island.
+    ///
+    /// First preserve the direct-passive rule, then discover local passive
+    /// islands. When one touches a busy rail plus one or more lone pins on the
+    /// same hub, anchor every member to a signal pin. A pin whose off-island
+    /// passive continues to a declared port wins (for example RFOUTAP feeding
+    /// LO_OUT); otherwise the lowest physical pin is the deterministic tie-break.
+    /// Only the member actually touching that net gets a synthesized hub
+    /// attachment; the chain walker reaches the others through local junctions.
     ///
     /// Only set the anchor when the spoke would actually attach to that lone hub
     /// under the section-preference rules below (same section, or one side has
@@ -450,8 +527,8 @@ pub const RenderCtx = struct {
         const a = self.allocator;
 
         // Per base-net: hub-pin count, and the lone hub pin when the count is 1.
-        var hub_count: std.StringHashMapUnmanaged(u32) = .empty;
-        var sole_hub: std.StringHashMapUnmanaged(PinRef) = .empty;
+        var hub_count: HubCountMap = .empty;
+        var sole_hub: SoleHubMap = .empty;
         for (self.nets.items) |net| {
             const bn = baseNetName(net.name);
             for (net.pins) |pin| {
@@ -463,7 +540,8 @@ pub const RenderCtx = struct {
         }
 
         // Per spoke: the distinct non-ground base nets its pins touch.
-        var spoke_nets: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty;
+        var spoke_nets: RefNetsMap = .empty;
+        var net_spokes: RefNetsMap = .empty;
         for (self.nets.items) |net| {
             const bn = baseNetName(net.name);
             if (isGroundNet(bn)) continue;
@@ -479,6 +557,17 @@ pub const RenderCtx = struct {
                     }
                 }
                 if (!present) try gop.value_ptr.append(a, bn);
+
+                const ngop = try net_spokes.getOrPut(a, bn);
+                if (!ngop.found_existing) ngop.value_ptr.* = .empty;
+                var net_has_spoke = false;
+                for (ngop.value_ptr.items) |ref| {
+                    if (std.mem.eql(u8, ref, pin.ref_des)) {
+                        net_has_spoke = true;
+                        break;
+                    }
+                }
+                if (!net_has_spoke) try ngop.value_ptr.append(a, pin.ref_des);
             }
         }
 
@@ -506,6 +595,219 @@ pub const RenderCtx = struct {
                 }
             }
         }
+
+        try self.anchorPassiveIslands(&hub_count, &sole_hub, &spoke_nets, &net_spokes);
+    }
+
+    /// Propagate one signal-side owner across every local passive island. Nets
+    /// with hub pins are boundaries, not island links: crossing one would merge
+    /// unrelated pull-ups, bypass caps, and sibling blocks through a rail.
+    fn anchorPassiveIslands(
+        self: *RenderCtx,
+        hub_count: *const HubCountMap,
+        sole_hub: *const SoleHubMap,
+        spoke_nets: *const RefNetsMap,
+        net_spokes: *const RefNetsMap,
+    ) !void {
+        var seen_spokes: std.StringHashMapUnmanaged(void) = .empty;
+        for (self.instances.items) |seed_inst| {
+            if (!self.spoke_set.contains(seed_inst.ref_des)) continue;
+            if (seen_spokes.contains(seed_inst.ref_des)) continue;
+
+            const island = try self.collectPassiveIsland(seed_inst.ref_des, hub_count, spoke_nets, net_spokes, &seen_spokes);
+            // An explicit `(decouples ...)` declaration is stronger than any
+            // inferred island owner and remains handled by `boundHubPin`.
+            if (island.has_explicit_binding) continue;
+            const anchor = try self.passiveIslandAnchor(seed_inst.ref_des, island.refs, hub_count, sole_hub, spoke_nets) orelse continue;
+            for (island.refs) |ref| try self.spoke_anchor_net.put(self.allocator, ref, anchor);
+        }
+    }
+
+    fn collectPassiveIsland(
+        self: *RenderCtx,
+        seed_ref: []const u8,
+        hub_count: *const HubCountMap,
+        spoke_nets: *const RefNetsMap,
+        net_spokes: *const RefNetsMap,
+        seen_spokes: *std.StringHashMapUnmanaged(void),
+    ) !PassiveIsland {
+        const a = self.allocator;
+        var pending: std.ArrayList([]const u8) = .empty;
+        var component: std.ArrayList([]const u8) = .empty;
+        var has_explicit_binding = false;
+        try pending.append(a, seed_ref);
+        try seen_spokes.put(a, seed_ref, {});
+
+        while (pending.pop()) |ref| {
+            try component.append(a, ref);
+            if (self.inst_map.get(ref)) |inst| {
+                has_explicit_binding = has_explicit_binding or inst.decouple_pin.len > 0 or inst.decouple_rail;
+            }
+            const nets = spoke_nets.get(ref) orelse continue;
+            for (nets.items) |net| {
+                if ((hub_count.get(net) orelse 0) != 0) continue;
+                try self.queueIslandNeighbours(seed_ref, net, net_spokes, seen_spokes, &pending);
+            }
+        }
+        return .{ .refs = component.items, .has_explicit_binding = has_explicit_binding };
+    }
+
+    fn queueIslandNeighbours(
+        self: *RenderCtx,
+        seed_ref: []const u8,
+        net: []const u8,
+        net_spokes: *const RefNetsMap,
+        seen_spokes: *std.StringHashMapUnmanaged(void),
+        pending: *std.ArrayList([]const u8),
+    ) !void {
+        const neighbours = net_spokes.get(net) orelse return;
+        for (neighbours.items) |other| {
+            if (seen_spokes.contains(other)) continue;
+            if (!self.renderSectionsCompatible(seed_ref, other)) continue;
+            try seen_spokes.put(self.allocator, other, {});
+            try pending.append(self.allocator, other);
+        }
+    }
+
+    fn passiveIslandAnchor(
+        self: *RenderCtx,
+        seed_ref: []const u8,
+        refs: []const []const u8,
+        hub_count: *const HubCountMap,
+        sole_hub: *const SoleHubMap,
+        spoke_nets: *const RefNetsMap,
+    ) !?[]const u8 {
+        var boundary_seen: std.StringHashMapUnmanaged(void) = .empty;
+        var choice: IslandAnchorChoice = .{};
+        const inputs: IslandAnchorInputs = .{
+            .seed_ref = seed_ref,
+            .refs = refs,
+            .hub_count = hub_count,
+            .sole_hub = sole_hub,
+            .spoke_nets = spoke_nets,
+        };
+        for (refs) |ref| {
+            const nets = spoke_nets.get(ref) orelse continue;
+            for (nets.items) |net| {
+                if (boundary_seen.contains(net)) continue;
+                try boundary_seen.put(self.allocator, net, {});
+                self.considerIslandBoundary(inputs, net, &choice);
+            }
+        }
+        if (!choice.has_busy_boundary or choice.conflicting_candidate_hubs) return null;
+        const candidate_hub = choice.candidate_hub_ref orelse return null;
+        if (!self.hubTouchesBusyIslandBoundary(candidate_hub, refs, hub_count, spoke_nets)) return null;
+        return choice.anchor_net;
+    }
+
+    /// The lone-pin owner must also be one of the hubs on the island's busy
+    /// boundary. This distinguishes an IC's own RF bias tee from a supply chain
+    /// that merely runs from that IC's VDD pads through L/FB parts to a connector:
+    /// the connector must not steal the supply chain from the IC schematic.
+    fn hubTouchesBusyIslandBoundary(
+        self: *RenderCtx,
+        hub_ref: []const u8,
+        refs: []const []const u8,
+        hub_count: *const HubCountMap,
+        spoke_nets: *const RefNetsMap,
+    ) bool {
+        for (refs) |ref| {
+            const nets = spoke_nets.get(ref) orelse continue;
+            for (nets.items) |net| {
+                if ((hub_count.get(net) orelse 0) < 2) continue;
+                if (self.hubHasPinOnNet(hub_ref, net)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn hubHasPinOnNet(self: *RenderCtx, hub_ref: []const u8, want_net: []const u8) bool {
+        for (self.nets.items) |net| {
+            if (!std.mem.eql(u8, baseNetName(net.name), want_net)) continue;
+            for (net.pins) |pin| {
+                if (std.mem.eql(u8, pin.ref_des, hub_ref) and !self.spoke_set.contains(pin.ref_des)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn considerIslandBoundary(
+        self: *RenderCtx,
+        inputs: IslandAnchorInputs,
+        net: []const u8,
+        choice: *IslandAnchorChoice,
+    ) void {
+        const count = inputs.hub_count.get(net) orelse 0;
+        if (count >= 2) {
+            choice.has_busy_boundary = true;
+            return;
+        }
+        if (count != 1) return;
+
+        const hp = inputs.sole_hub.get(net) orelse return;
+        if (!self.renderSectionsCompatible(inputs.seed_ref, hp.ref_des)) return;
+        if (choice.candidate_hub_ref) |owner| {
+            if (!std.mem.eql(u8, owner, hp.ref_des)) choice.conflicting_candidate_hubs = true;
+        } else {
+            choice.candidate_hub_ref = hp.ref_des;
+        }
+
+        const reaches_port = self.islandBoundaryReachesPort(net, inputs.refs, inputs.spoke_nets);
+        const better = if (choice.anchor_pin) |current|
+            (reaches_port and !choice.anchor_reaches_port) or
+                (reaches_port == choice.anchor_reaches_port and
+                    (draw.pinOrder(hp.pin, current.pin) or
+                        (std.mem.eql(u8, hp.pin, current.pin) and std.mem.lessThan(u8, net, choice.anchor_net.?))))
+        else
+            true;
+        if (better) {
+            choice.anchor_pin = hp;
+            choice.anchor_net = net;
+            choice.anchor_reaches_port = reaches_port;
+        }
+    }
+
+    /// Whether `boundary_net` leaves this passive island through one extra
+    /// passive and reaches a declared schematic port. This is the common RF
+    /// output shape: the bias tee owns both differential pins, while only the
+    /// used leg continues through its DC block to the module output.
+    fn islandBoundaryReachesPort(
+        self: *RenderCtx,
+        boundary_net: []const u8,
+        island_refs: []const []const u8,
+        spoke_nets: *const RefNetsMap,
+    ) bool {
+        for (self.instances.items) |inst| {
+            if (!self.spoke_set.contains(inst.ref_des)) continue;
+            var in_island = false;
+            for (island_refs) |ref| {
+                if (std.mem.eql(u8, ref, inst.ref_des)) {
+                    in_island = true;
+                    break;
+                }
+            }
+            if (in_island) continue;
+
+            const nets = spoke_nets.get(inst.ref_des) orelse continue;
+            var touches_boundary = false;
+            for (nets.items) |candidate| {
+                if (std.mem.eql(u8, candidate, boundary_net)) {
+                    touches_boundary = true;
+                    break;
+                }
+            }
+            if (!touches_boundary) continue;
+            for (nets.items) |candidate| {
+                if (!std.mem.eql(u8, candidate, boundary_net) and self.isBoundaryPort(candidate)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn renderSectionsCompatible(self: *RenderCtx, a_ref: []const u8, b_ref: []const u8) bool {
+        const a_section = self.section_map.get(a_ref);
+        const b_section = self.section_map.get(b_ref);
+        return a_section == null or b_section == null or a_section.? == b_section.?;
     }
 
     /// The single hub pin a `(decouples …)` cap should dock on, chosen among
@@ -713,18 +1015,64 @@ pub const RenderCtx = struct {
         }
     }
 
-    pub fn buildSignificantNets(self: *RenderCtx, block: *const DesignBlock) !void {
-        for (block.ports) |port| {
-            try self.port_nets.put(self.allocator, baseNetName(port.net), {});
-            try self.significant_nets.put(self.allocator, baseNetName(port.net), {});
-        }
+    /// Record `net` as significant and exempt from the single-pin filter, in
+    /// `role`. A `.boundary_port` claim never degrades to `.internal`: the same
+    /// spelling can be both a declared port of this block and a sub-block's
+    /// bridged port, and the boundary is the stronger fact.
+    fn markLonePinNet(self: *RenderCtx, net: []const u8, role: LonePinRole) !void {
+        const gop = try self.lone_pin_nets.getOrPut(self.allocator, net);
+        if (!gop.found_existing or role == .boundary_port) gop.value_ptr.* = role;
+        try self.significant_nets.put(self.allocator, net, {});
+    }
+
+    /// Whether a pin sitting ALONE on `net` still draws its wire and net label.
+    pub fn rendersWhenAlone(self: *const RenderCtx, net: []const u8) bool {
+        return self.lone_pin_nets.contains(net);
+    }
+
+    /// Whether `net` leaves this schematic — what paints its label the
+    /// boundary-port colour and sets the scene graph's `port` flag.
+    pub fn isBoundaryPort(self: *const RenderCtx, net: []const u8) bool {
+        return (self.lone_pin_nets.get(net) orelse return false) == .boundary_port;
+    }
+
+    /// Register every sub-block's port nets under the spelling the *flattened*
+    /// scene actually carries. `collectFlatWithRenames` resolves a bridged port
+    /// net through the parent's net-ties — `(bridge "" TXOUT+)` / `(net "TXOUT+"
+    /// "tx/TXOUT+")` rewrites `tx/TXOUT+` to `TXOUT+` — so keying on the
+    /// pre-rename `"<slug>/<port>"` path left every bridged module port out of the
+    /// set. A bridged port net whose only pin is the module's own pad (its far end
+    /// being net-less printed copper) then failed the significance test in
+    /// `connection.renderGroupedConnections` and the pad drew nothing at all.
+    ///
+    /// The two spellings are registered in DIFFERENT roles. The path name is the
+    /// port as this schematic sees it, a genuine boundary. The resolved name is
+    /// the parent's own net — internal wiring that merely needs the single-pin
+    /// escape, so it lands `.internal`; calling it a port repainted every bridged
+    /// internal net boundary-blue and set its scene `port` flag.
+    fn registerSubBlockPortNets(self: *RenderCtx, block: *const DesignBlock) !void {
+        var renames = try self.buildNetRenameMap(block, "");
+        defer renames.deinit(self.allocator);
+        const maps = [_]std.StringHashMapUnmanaged([]const u8){renames};
         for (block.sub_blocks) |sb| {
             for (sb.block.ports) |port| {
-                const full = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ sb.name, baseNetName(port.net) });
-                try self.port_nets.put(self.allocator, full, {});
-                try self.significant_nets.put(self.allocator, full, {});
+                const path = try std.fmt.allocPrint(
+                    self.allocator,
+                    "{s}/{s}",
+                    .{ sb.name, baseNetName(port.net) },
+                );
+                try self.markLonePinNet(path, .boundary_port);
+                const resolved = baseNetName(resolveNetName(self.allocator, path, &maps));
+                if (!std.mem.eql(u8, resolved, path)) try self.markLonePinNet(resolved, .internal);
             }
         }
+    }
+
+    pub fn buildSignificantNets(self: *RenderCtx, block: *const DesignBlock) !void {
+        for (block.ports) |port| {
+            try self.markLonePinNet(baseNetName(port.net), .boundary_port);
+        }
+        try self.registerSubBlockPortNets(block);
         for (self.nets.items) |net| {
             const bn = baseNetName(net.name);
             if (isGroundNet(bn)) continue;
@@ -780,7 +1128,8 @@ pub const RenderCtx = struct {
                 }
             }
         }
-        for ([_][]const u8{ "GND", "AGND", "DGND", "VSS" }) |g| {
+        // The names the schematic draws a GND symbol for, plus `VSS`.
+        for (na.schematic_ground_names ++ [_][]const u8{"VSS"}) |g| {
             try self.significant_nets.put(self.allocator, g, {});
         }
     }
@@ -890,8 +1239,8 @@ test "decouples binding docks each cap on its served hub pad" {
     // pad, which is what piled every cap onto one part block before the fix.
     const insts = [_]env_mod.Instance{
         .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
-        .{ .ref_des = "C1", .component = "cap", .value = "100nF", .footprint = "", .symbol = "", .decouple_ic = "U1", .decouple_pin = "2" },
-        .{ .ref_des = "C2", .component = "cap", .value = "100nF", .footprint = "", .symbol = "", .decouple_ic = "U1", .decouple_pin = "1" },
+        .{ .ref_des = "C1", .component = "cap", .value = "100nF", .footprint = "", .symbol = "", .bind = .{ .decouple = .{ .ic = "U1", .pin = "2" } } },
+        .{ .ref_des = "C2", .component = "cap", .value = "100nF", .footprint = "", .symbol = "", .bind = .{ .decouple = .{ .ic = "U1", .pin = "1" } } },
     };
     const vdd_pins = [_]env_mod.PinRef{
         .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "U1", .pin = "2" },
@@ -929,6 +1278,74 @@ test "decouples binding docks each cap on its served hub pad" {
     // to both pads, so one part block claimed them all).
     try testing.expect(!hubReachesSpokeOnPin(&ctx, "U1", "1", "C1"));
     try testing.expect(!hubReachesSpokeOnPin(&ctx, "U1", "2", "C2"));
+}
+
+// spec: render_svg - A passive bias island shared by RF output pins and a busy supply rail is owned by the pin that continues to a declared output port, falling back to the lowest RF pin
+test "bias tee island anchors to the RF pin that continues to an output port" {
+    const testing = std.testing;
+    // L1/C1/R1/R2 are the LMX2595 output-bias shape: a choke from the busy VDD
+    // rail feeds a local BIAS junction, and two 50R loads take that junction to
+    // adjacent RF output pads. C3 continues RFOUTAP through a DC block to the
+    // declared LO_OUT port, so that used leg owns the island even though pin 22
+    // sorts first. C2 remains the real pin-7 bypass with explicit ownership.
+    const insts = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "L1", .component = "ind", .value = "18nH", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C1", .component = "cap", .value = "10nF", .footprint = "", .symbol = "" },
+        .{ .ref_des = "R1", .component = "res", .value = "50R", .footprint = "", .symbol = "" },
+        .{ .ref_des = "R2", .component = "res", .value = "50R", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C2", .component = "cap", .value = "1uF", .footprint = "", .symbol = "", .bind = .{ .decouple = .{ .ic = "U1", .pin = "7" } } },
+        .{ .ref_des = "C3", .component = "cap", .value = "10nF", .footprint = "", .symbol = "" },
+    };
+    const vdd_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "7" }, .{ .ref_des = "U1", .pin = "11" },
+        .{ .ref_des = "L1", .pin = "2" }, .{ .ref_des = "C2", .pin = "1" },
+    };
+    const bias_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "L1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" },
+        .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "2" },
+    };
+    const am_pins = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "22" }, .{ .ref_des = "R1", .pin = "2" } };
+    const ap_pins = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "23" }, .{ .ref_des = "R2", .pin = "1" }, .{ .ref_des = "C3", .pin = "1" } };
+    const lo_out_pins = [_]env_mod.PinRef{.{ .ref_des = "C3", .pin = "2" }};
+    const gnd_pins = [_]env_mod.PinRef{ .{ .ref_des = "C1", .pin = "2" }, .{ .ref_des = "C2", .pin = "2" } };
+    const nets = [_]env_mod.Net{
+        .{ .name = "VDD", .pins = &vdd_pins },
+        .{ .name = "BIAS", .pins = &bias_pins },
+        .{ .name = "RFOUTAM", .pins = &am_pins },
+        .{ .name = "RFOUTAP", .pins = &ap_pins },
+        .{ .name = "LO_OUT", .pins = &lo_out_pins },
+        .{ .name = "GND", .pins = &gnd_pins },
+    };
+    const block: DesignBlock = .{
+        .name = "bias-tee-anchor-test",
+        .instances = &insts,
+        .nets = &nets,
+        .ports = &[_]env_mod.Port{.{ .name = "LO_OUT", .net = "LO_OUT", .direction = "out" }},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = RenderCtx.init(arena.allocator());
+    try ctx.setup(&block);
+
+    // Every member has one precomputed owner, so render order cannot move the
+    // island. R2 is the member touching the port-feeding owner and therefore
+    // the only synthesized entry into the island from U1.
+    for ([_][]const u8{ "L1", "C1", "R1", "R2" }) |ref| {
+        try testing.expectEqualStrings("RFOUTAP", ctx.spoke_anchor_net.get(ref).?);
+    }
+    try testing.expect(hubReachesSpokeOnPin(&ctx, "U1", "23", "R2"));
+    try testing.expect(!hubReachesSpokeOnPin(&ctx, "U1", "7", "L1"));
+    try testing.expect(!hubReachesSpokeOnPin(&ctx, "U1", "11", "L1"));
+    try testing.expect(!hubReachesSpokeOnPin(&ctx, "U1", "22", "R1"));
+
+    // The unrelated per-pin bypass still obeys `(decouples "U1" 7)`.
+    try testing.expect(hubReachesSpokeOnPin(&ctx, "U1", "7", "C2"));
+    try testing.expect(!hubReachesSpokeOnPin(&ctx, "U1", "11", "C2"));
 }
 
 test "isStdRefDes rejects a ref shorter than two characters" {

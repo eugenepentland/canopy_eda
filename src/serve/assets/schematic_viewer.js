@@ -824,7 +824,15 @@
   // POST a surgical edit, then act on the result. `reload` true forces a full
   // page reload (the netlist/geometry changed); false just advances the
   // version watermark so our own edit doesn't trigger the 2s poll's reload.
-  function postEdit(endpoint, body, reload, onErr) {
+  var pendingEdits = 0;
+  function postEdit(endpoint, body, reload, onErr, onOk) {
+    pendingEdits++;
+    var finished = false;
+    function finish() {
+      if (finished) return;
+      finished = true;
+      pendingEdits--;
+    }
     fetch(endpoint + '/' + DESIGN_NAME, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     })
@@ -840,12 +848,50 @@
       })
       .then(function (res) {
         if (!res.ok || !res.j || res.j.ok === false || res.j.error) {
+          finish();
           onErr((res.j && (res.j.error || res.j.message)) || 'edit failed'); return;
         }
-        if (reload) { window.location.reload(); return; }
+        if (reload) { finish(); window.location.reload(); return; }
         if (res.j && typeof res.j.version === 'number') lastVersion = res.j.version;
+        finish();
+        if (onOk) onOk(res.j);
       })
-      .catch(function (e) { onErr(e.message || 'network error'); });
+      .catch(function (e) { finish(); onErr(e.message || 'network error'); });
+  }
+
+  // Keep the page's embedded scene index in sync after a pin re-wire. The
+  // rendered schematic geometry intentionally stays put until the user next
+  // reloads, but sidebar component/net views and subsequent edits should use
+  // the newly-saved connection immediately.
+  function updatePinNet(ref, pin, newNet) {
+    var c = compByRef[ref];
+    var pinRec = c && c.pins && c.pins.find(function (p) { return p.id === pin; });
+    if (!pinRec) return;
+    var oldNet = pinRec.net || '';
+    if (oldNet === newNet) return;
+
+    var oldRec = netByName[oldNet];
+    if (oldRec) {
+      oldRec.members = (oldRec.members || []).filter(function (m) {
+        return m.ref !== ref || m.pin !== pin;
+      });
+      if (!oldRec.members.length) {
+        SCH_INDEX.nets = (SCH_INDEX.nets || []).filter(function (n) { return n !== oldRec; });
+        delete netByName[oldNet];
+      }
+    }
+
+    var newRec = netByName[newNet];
+    if (!newRec) {
+      newRec = { name: newNet, members: [] };
+      if (!SCH_INDEX.nets) SCH_INDEX.nets = [];
+      SCH_INDEX.nets.push(newRec);
+      netByName[newNet] = newRec;
+    }
+    var member = { ref: ref, pin: pin };
+    if (pinRec.fn) member.fn = pinRec.fn;
+    newRec.members.push(member);
+    pinRec.net = newNet;
   }
 
   // Unified detail view for any component — hubs render their pin table,
@@ -879,10 +925,10 @@
         '" title="Open the PCB layout view zoomed to this part">Locate on PCB →</a></div>';
     }
     // Source cross-probe: `src` is the byte offset of this instance's defining
-    // form in the design file (absent for sub-block parts, whose source lives
-    // in a module file the editor can't load — and module pages, where
-    // /api/source/:name doesn't resolve).
-    var canEditSrc = c.src && (typeof SCH_VIEW === 'undefined' || SCH_VIEW !== 'module');
+    // form in the source file. It is absent for generated/flattened children,
+    // but is valid for both design files and standalone `lib/modules` pages:
+    // paths.designSourcePath resolves the latter by module name too.
+    var canEditSrc = !!c.src;
     if (canEditSrc) {
       html += '<div class="sb-src-edit"><a href="#" ' +
         'title="Open the source editor at this instance’s definition">Edit source →</a></div>';
@@ -905,10 +951,15 @@
           '<input class="sb-insp-mpn" spellcheck="false" placeholder="manufacturer part #" value="' + escapeHtml(c.mpn || '') + '">' +
           '<button class="sb-insp-btn" data-act="mpn">Save</button></div>' +
         '<div class="sb-insp-msg"></div>' +
-        '<button class="sb-insp-del" data-act="delete">Delete component</button>' +
         '</details>';
+      // Destructive action stays outside the collapsible properties block so
+      // clicking either a passive or an IC makes deletion immediately visible.
+      html += '<button class="sb-insp-del" data-act="delete">Delete part</button>';
     }
     if (c.footprint) html += footprintPreviewHtml(c.footprint);
+    if (canEditSrc) {
+      html += '<div class="sb-pin-edit-head"><b>Pin connections</b><span>Click ✎ to edit a net</span></div>';
+    }
     if (c.kind !== 'hub') {
       // Passives: show the nets they sit on, derived from SCH_INDEX.nets.
       var rows = [];
@@ -1025,14 +1076,15 @@
         }
       });
     });
-    var del = panel.querySelector('.sb-insp-del');
+    var del = box.querySelector('.sb-insp-del');
     if (del) del.addEventListener('click', function () {
       if (!window.confirm('Delete ' + ref + ' from the design?')) return;
       showMsg('Deleting…', false);
-      postEdit('/api/remove-instance', { ref: ref }, true, function (e) { showMsg(e, true); });
+      postEdit('/api/remove-instance', { ref: ref, srcOff: c.src }, true, function (e) { showMsg(e, true); });
     });
     // Inline pin re-wiring: an ✎ button on each pin row swaps the net text for
-    // an input (net datalist); Enter/blur POSTs rewire-pin and reloads.
+    // an input (net datalist); Enter/blur POSTs rewire-pin and refreshes this
+    // component in place so the next pin can be edited immediately.
     box.querySelectorAll('.sb-pin-row').forEach(function (row) {
       var pin = row.getAttribute('data-pin');
       var netCell = row.querySelector('.sb-pin-net');
@@ -1054,7 +1106,10 @@
           if (done) return; done = true;
           var nn = inp.value.trim();
           if (!nn || nn === (row.getAttribute('data-net') || '')) { showComponent(ref, false); return; }
-          postEdit('/api/rewire-pin', { ref: ref, pin: pin, net: nn, srcOff: c.src }, true, function (er) { alert('Re-wire failed: ' + er); showComponent(ref, false); });
+          inp.disabled = true;
+          postEdit('/api/rewire-pin', { ref: ref, pin: pin, net: nn, srcOff: c.src }, false,
+            function (er) { alert('Re-wire failed: ' + er); showComponent(ref, false); },
+            function () { updatePinNet(ref, pin, nn); showComponent(ref, false); });
         }
         // Searchable net dropdown; picking a net commits immediately.
         wireNetCombo(inp, netNames, box, function () { commit(); });
@@ -1560,12 +1615,16 @@
     }
     // Partition: meaningful board-shape ops (grouped by section) vs. hidden
     // metadata vs. housekeeping (pad-nets / vias / staging graphics).
-    var meaningful = [], padnets = 0, vias = 0, gfx = 0, hiddenMeta = 0;
+    var meaningful = [], padnets = 0, vias = 0, tracks = 0, gfx = 0, hiddenMeta = 0;
     ops.forEach(function (op) {
       if (op.op === 'set_field') {
         if (op.field === 'value') meaningful.push(op); else hiddenMeta++;
       } else if (op.op === 'set_pad_net') padnets++;
       else if (op.op === 'add_via') vias++;
+      // Seeded copper is housekeeping like the stitching vias: a routed board
+      // carries hundreds of segments, and listing each one row-per-segment
+      // buries the part changes the reader is actually reviewing.
+      else if (op.op === 'add_track') tracks++;
       else if (op.op === 'create_board_item') gfx++;
       else meaningful.push(op);    // add / remove / swap_footprint / flag_stale / unknown
     });
@@ -1587,6 +1646,7 @@
     var house = [];
     if (padnets) house.push(padnets + ' pad-net assignment' + (padnets === 1 ? '' : 's'));
     if (vias) house.push(vias + ' stitching via' + (vias === 1 ? '' : 's'));
+    if (tracks) house.push(tracks + ' routed track' + (tracks === 1 ? '' : 's'));
     if (gfx) house.push(gfx + ' staging box' + (gfx === 1 ? '' : 'es'));
     if (house.length) html += '<div class="kpv-house">+ ' + house.join(', ') +
       ' — routing &amp; staging, applied automatically</div>';
@@ -1598,7 +1658,7 @@
   }
 
   function kicadSummaryChips(s) {
-    var keys = ['updated', 'relabeled', 'added', 'removed', 'swapped', 'flagged_stale', 'suppressed', 'vias'];
+    var keys = ['updated', 'relabeled', 'added', 'removed', 'swapped', 'flagged_stale', 'vias'];
     return keys.map(function (k) {
       var n = (s && s[k]) || 0;
       return '<span class="kpv-chip' + (n > 0 ? ' hot' : '') + '">' + n + ' ' + k.replace('_', ' ') + '</span>';
@@ -1822,9 +1882,7 @@
   //                      clicking opens the dry-run preview modal and writes
   //                      the .kicad_pcb on confirm.
   //   • board unreadable → "⚠ PCB unreachable"; clicking re-checks.
-  // dataset.pending tracks which mode the next click is in. The count excludes
-  // `suppressed` (already-applied no-ops) so it tracks exactly what a push
-  // would change.
+  // dataset.pending tracks which mode the next click is in.
   var kicadSyncChip = document.getElementById('kicad-sync-chip');
   function setSyncChip(state, pending, text, title) {
     if (!kicadSyncChip) return;
@@ -1893,6 +1951,73 @@
       }
     });
     refreshKicadSyncChip();
+  }
+
+  // ---- Push SCHEMATIC to the KiCad project directory ----
+  // POSTs /api/sync-kicad-sch/:name with ?dry_run=1 first, shows the per-file
+  // plan (create / overwrite / keep / advise / skip) for confirmation, and only
+  // then POSTs the writing call. The endpoint refuses — HTTP 409, nothing
+  // written — when a sheet in the way is neither netlisp's own nor an empty
+  // eeschema stub, or when KiCad has the project open; both refusals come back
+  // in the SAME JSON body as a success, so one renderer handles all three.
+  var schPushBtn = document.getElementById('kicad-sch-push-btn');
+
+  // The plan as lines a human reads in a confirm() dialog. Everything the push
+  // will not touch is folded into one trailing count, so the dialog leads with
+  // what actually changes on disk.
+  function schPushPlanText(j) {
+    var lines = ['Write the KiCad schematic into:', '  ' + (j.dir || '?'), ''];
+    var quiet = 0, advice = [];
+    (j.files || []).forEach(function (f) {
+      if (f.action === 'create' || f.action === 'overwrite') {
+        lines.push('  ' + f.action + '  ' + f.name + (f.note ? '  (' + f.note + ')' : ''));
+      } else {
+        quiet++;
+        if (f.action === 'advise' && f.note) advice.push('  ' + f.name + ': ' + f.note);
+      }
+    });
+    if (quiet) lines.push('', '  ' + quiet + ' file(s) left untouched');
+    if (advice.length) lines.push('', 'Needs a manual edit:', advice.join('\n'));
+    lines.push('', 'Replaced files roll into backups/ beside the board.');
+    // The two reasons this schematic must not drive the board — worth saying
+    // where a user is about to open it in the same project as that board.
+    lines.push('', 'Note: KiCad escapes "/" in net names and netlisp labels each',
+      'per-pin bypass stub as its rail, so do NOT run "Update PCB from',
+      'Schematic" from these sheets — netlisp\'s netlist stays the board authority.');
+    return lines.join('\n');
+  }
+
+  function schPushRun(force, confirmFirst) {
+    if (schPushBtn.dataset.busy === '1') return;
+    schPushBtn.dataset.busy = '1';
+    var original = schPushBtn.textContent;
+    schPushBtn.textContent = confirmFirst ? 'Previewing…' : 'Pushing…';
+    var q = '?' + (confirmFirst ? 'dry_run=1' : '') + (force ? '&force=1' : '');
+    fetch('/api/sync-kicad-sch/' + DESIGN_NAME + q, { method: 'POST' }).then(function (r) {
+      return r.text().then(function (body) { return { ok: r.ok, status: r.status, body: body }; });
+    }).then(function (resp) {
+      schPushBtn.textContent = original;
+      schPushBtn.dataset.busy = '';
+      var j = null;
+      try { j = JSON.parse(resp.body); } catch (_e) {}
+      if (!j) { schToast('Schematic push failed: ' + (resp.body || resp.status), 'err', 9000); return; }
+      if (j.refusal) { schToast('Refused: ' + j.refusal, 'err', 12000); return; }
+      if (!confirmFirst) {
+        var s = j.summary || {};
+        schToast('Schematic pushed to ' + j.dir + ' — ' +
+          ((s.create || 0) + (s.overwrite || 0)) + ' file(s) written, root ' + j.root, 'ok', 9000);
+        return;
+      }
+      if (window.confirm(schPushPlanText(j))) schPushRun(force, false);
+    }).catch(function (e) {
+      schPushBtn.textContent = original;
+      schPushBtn.dataset.busy = '';
+      schToast('Schematic push failed: ' + e, 'err', 9000);
+    });
+  }
+
+  if (schPushBtn) {
+    schPushBtn.addEventListener('click', function () { schPushRun(false, true); });
   }
 
   // ---- Edit SRC ----
@@ -2213,7 +2338,9 @@
   // ---- Live reload ----
   var lastVersion = null;
   function poll() {
+    if (pendingEdits) return;
     fetch('/api/version/' + DESIGN_NAME).then(function (r) { return r.json(); }).then(function (j) {
+      if (pendingEdits) return;
       if (lastVersion === null) { lastVersion = j.version; return; }
       if (j.version !== lastVersion) window.location.reload();
     }).catch(function () {});
@@ -3650,7 +3777,11 @@
   // board view's module-local "U2" still lands on "pwr/U2" here. xpMuted
   // stops a highlight applied for a received message from echoing back.
   var xpc = null, xpMuted = false;
-  try { xpc = new BroadcastChannel('netlisp-xprobe'); } catch (e) { xpc = null; }
+  // Double-quoted to match the other two participants byte for byte: the
+  // channel name is a hand-matched literal in three files with no shared
+  // source, so guardian.toml's `xprobe-protocol` rule owns the exact quoted
+  // spelling and a rename in one window can no longer go unnoticed.
+  try { xpc = new BroadcastChannel("netlisp-xprobe"); } catch (e) { xpc = null; }
   if (xpc) {
     xpc.onmessage = function (ev) {
       var m = ev.data || {};
@@ -3662,8 +3793,10 @@
     };
   }
   function xpSend(ref) {
-    if (!xpc || xpMuted) return;
-    try { xpc.postMessage({ from: 'sch', design: DESIGN_NAME, ref: ref }); } catch (e) { }
+    if (xpMuted) return;
+    if (xpc) {
+      try { xpc.postMessage({ from: 'sch', design: DESIGN_NAME, ref: ref }); } catch (e) { }
+    }
   }
 
   // ---- Revision changelog popover ----

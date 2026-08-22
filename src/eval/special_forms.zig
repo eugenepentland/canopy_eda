@@ -1,5 +1,9 @@
+//! Non-eager evaluator forms: lexical bindings and loops, conditionals,
+//! assertions, and string formatting with source-located diagnostics.
+
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
+const numeric = @import("../numeric.zig");
 const env_mod = @import("env.zig");
 const fmt_mod = @import("fmt.zig");
 const forms = @import("forms.zig");
@@ -54,6 +58,100 @@ pub fn evalLet(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value 
     const value = try self.evalNode(args[1], env);
     try env.put(name, value);
     return .nil;
+}
+
+/// Parsed shape of `(repeat name start end body…)`. The bounds are evaluated
+/// once in the enclosing environment; each body evaluation gets a child scope
+/// with `name` bound to the current integer.
+pub const RepeatSpec = struct {
+    name: []const u8,
+    start: i64,
+    end: i64,
+    body: []const Node,
+
+    /// Return a fresh iterator positioned at this repeat's inclusive start.
+    pub fn iterator(self: RepeatSpec) RepeatIterator {
+        return .{ .next_value = self.start, .end = self.end };
+    }
+};
+
+/// Stateful inclusive iterator used by both expression and design-body repeat.
+pub const RepeatIterator = struct {
+    next_value: i64,
+    end: i64,
+    finished: bool = false,
+
+    /// Inclusive in either direction: `(repeat i 3 1 …)` yields 3, 2, 1.
+    pub fn next(self: *RepeatIterator) ?i64 {
+        if (self.finished) return null;
+        const value = self.next_value;
+        if (value == self.end) {
+            self.finished = true;
+        } else if (value < self.end) {
+            self.next_value += 1;
+        } else {
+            self.next_value -= 1;
+        }
+        return value;
+    }
+};
+
+/// A repeat is intentionally bounded: design files are accepted by the HTTP
+/// server, so a typo such as `1 1000000000` must fail before allocating or
+/// evaluating a billion copies of the body.
+const max_repeat_iterations: usize = 4096;
+
+/// Validate and evaluate the binding + range portion of `(repeat …)`. Kept
+/// public so design-block materialization can iterate scope forms (instance,
+/// sub-block, net, …) through its normal builders while sharing the exact same
+/// lexical/range semantics as expression-level repeat.
+pub fn parseRepeat(self: *Evaluator, args: []const Node, env: *Env) EvalError!RepeatSpec {
+    try checkArity(self, .repeat, args);
+    const name = args[0].asAtom() orelse {
+        self.setError(args[0].span, "(repeat …) first argument must be a bare name, e.g. (repeat ch 1 8 …)");
+        return EvalError.InvalidForm;
+    };
+    const start = try repeatBound(self, args[1], env, "start");
+    const end = try repeatBound(self, args[2], env, "end");
+    const count_f = @abs(@as(f64, @floatFromInt(end)) - @as(f64, @floatFromInt(start))) + 1.0;
+    if (count_f > @as(f64, @floatFromInt(max_repeat_iterations))) {
+        self.setErrorFmt(args[2].span, "(repeat …) range contains more than {d} iterations", .{max_repeat_iterations});
+        return EvalError.InvalidForm;
+    }
+    return .{ .name = name, .start = start, .end = end, .body = args[3..] };
+}
+
+fn repeatBound(self: *Evaluator, node: Node, env: *Env, label: []const u8) EvalError!i64 {
+    const value = try self.evalNode(node, env);
+    const number = value.asNumber() orelse {
+        self.setErrorFmt(node.span, "(repeat …) {s} bound must be an integer", .{label});
+        return EvalError.TypeError;
+    };
+    if (!std.math.isFinite(number) or @trunc(number) != number) {
+        self.setErrorFmt(node.span, "(repeat …) {s} bound must be a finite integer", .{label});
+        return EvalError.InvalidForm;
+    }
+    return numeric.checkedInt(i64, number) orelse {
+        self.setErrorFmt(node.span, "(repeat …) {s} bound is outside the supported integer range", .{label});
+        return EvalError.InvalidForm;
+    };
+}
+
+/// Evaluate an expression-level repeat and return the final body value (or
+/// `.nil` only when a future range policy permits an empty range). A new child
+/// environment per iteration makes the loop variable and body-local lets
+/// lexical: neither leaks outward or sideways into the next iteration.
+pub fn evalRepeat(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
+    const spec = try parseRepeat(self, args, env);
+    var result: Value = .nil;
+    var it = spec.iterator();
+    while (it.next()) |index| {
+        var loop_env = Env.init(self.allocator, env);
+        defer loop_env.deinit();
+        try loop_env.put(spec.name, .{ .number = @floatFromInt(index) });
+        for (spec.body) |form| result = try self.evalNode(form, &loop_env);
+    }
+    return result;
 }
 
 /// Evaluate `(if cond then else)`: short-circuits — only the matching

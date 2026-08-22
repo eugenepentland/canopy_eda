@@ -1,6 +1,6 @@
-# guardian-snapshot v1
-src/bom.zig::applyBomUuids: unused public declaration
-src/serve.zig::WebsocketHandler: unused public declaration
-src/serve.zig::dispatch: unused public declaration
-src/serve/mcp.zig::clientMessage: unused public declaration
-src/serve/templates/pages.zig::formatHtml: unused public declaration
+# guardian-snapshot v3
+dead-pub|src/bom.zig|:applyBomUuids: unused public declaration
+dead-pub|src/serve.zig|:WebsocketHandler: unused public declaration
+dead-pub|src/serve.zig|:dispatch: unused public declaration
+dead-pub|src/serve/mcp.zig|:clientMessage: unused public declaration
+dead-pub|src/serve/templates/pages.zig|:formatHtml: unused public declaration

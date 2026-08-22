@@ -1,0 +1,188 @@
+<style>
+/* Replay dock — ported from route_review.css's decision-log/deltas/status
+   styles, re-scoped to the panel's #rp-* ids and recoloured to the /pcb-layout
+   editor's dark sidebar palette so the dock reads as native (the Route panel's
+   typography: 11-12px, #9b9ca3 muted, #f0f1f3 headers). The dock now lives INSIDE
+   the Route panel (no longer a standalone accordion panel): it's a full-width
+   section that breaks onto its own row of the Route panel's flex box, ruled off
+   from the routing controls above it. */
+.pcb-replay{font-size:12px;color:#9b9ca3;flex:1 0 100%;width:100%;
+  margin-top:6px;padding-top:8px;border-top:1px solid #2c2d31}
+.pcb-replay .tune-h{font-weight:700;color:#f0f1f3;display:block;margin-bottom:4px}
+.pcb-replay .muted{color:#85868d}
+.rp-actions,.rp-transport{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
+.rp-transport #rp-slider{flex:1;min-width:80px;accent-color:#5a8fd6}
+.rp-ghost-row{display:flex;gap:6px;align-items:center;font-size:11px;color:#9b9ca3;margin:4px 0;cursor:pointer}
+.rp-ghost-row input{accent-color:#5a8fd6;margin:0}
+/* Exclusive-view mode badge, docked in the scorebar (.pcb-bar) next to the
+   source/score chips — amber, styled to match .src-chip.src-star. */
+.rp-mode-chip{font-size:11px;font-weight:700;padding:2px 9px;border-radius:10px;
+  border:1px solid #9e6a03;color:#e3b341;background:#2a2410;white-space:nowrap;letter-spacing:.02em}
+#rp-status{font-size:11px;color:#9b9ca3;margin:4px 0}
+#rp-status.ok{color:#4cae54}
+#rp-status.warn{color:#d8a03c}
+#rp-status.error{color:#e05b4b}
+#rp-status.running:before{content:"";display:inline-block;width:10px;height:10px;
+  border:2px solid #3a3b40;border-top-color:#5a8fd6;border-radius:50%;
+  margin-right:6px;vertical-align:-1px;animation:rpspin .8s linear infinite}
+@keyframes rpspin{to{transform:rotate(360deg)}}
+#rp-summary{margin:6px 0}
+#rp-summary .rp-sum-head{font-size:11px;font-weight:700;color:#e4e5e9}
+#rp-summary .rp-sum-stats{font-size:10px;color:#85868d;margin-top:2px}
+#rp-summary .rp-sum-detail{font-size:10px;color:#9b9ca3;line-height:1.4;margin-top:4px}
+#rp-deltas{display:flex;gap:5px;flex-wrap:wrap;margin:6px 0}
+#rp-deltas span{font-size:10px;background:#1a1b1e;border:1px solid #2c2d31;
+  border-radius:4px;padding:2px 5px;color:#9b9ca3}
+#rp-deltas .pos{color:#4cae54}
+#rp-deltas .neg{color:#e05b4b}
+#rp-log{list-style:none;margin:6px 0 0;padding:0;max-height:280px;overflow:auto}
+#rp-log li{display:grid;grid-template-columns:24px 9px 1fr auto;gap:6px;align-items:center;
+  padding:4px 6px;cursor:pointer;border-left:2px solid transparent;border-radius:4px}
+#rp-log li:hover{background:#26272c}
+#rp-log li.active{background:#243044;border-left-color:#5a8fd6}
+#rp-log li[hidden]{display:none}
+#rp-log .seq{font-size:9px;color:#637287;text-align:right}
+#rp-log .dot{width:8px;height:8px;border-radius:50%;background:#667589}
+#rp-log .dot.ok{background:#4cae54}
+#rp-log .dot.fail{background:#e05b4b}
+#rp-log .dot.rip{background:#d8a03c}
+#rp-log .dot.end{background:#b69cff}
+#rp-log .event-name{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#rp-log .event-meta{font-size:9px;color:#85868d}
+#rp-log li.group-head{display:flex;gap:6px;align-items:center;position:sticky;top:0;z-index:1;
+  background:#181920;border-top:1px solid #2c2d31;border-bottom:1px solid #2c2d31;
+  border-left:2px solid transparent;padding:5px 6px;margin-top:2px}
+#rp-log li.group-head:hover{background:#1d1e25}
+#rp-log li.group-head .chev{width:0;height:0;border-left:5px solid #7ea4cf;
+  border-top:4px solid transparent;border-bottom:4px solid transparent;
+  transform:rotate(90deg);transition:transform .12s ease;flex:none}
+#rp-log li.group-head.closed .chev{transform:rotate(0)}
+#rp-log li.group-head .group-title{font-size:9px;font-weight:800;color:#bcd2ea;
+  text-transform:uppercase;letter-spacing:.06em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#rp-log li.group-head .group-meta{margin-left:auto;font-size:9px;color:#85868d;white-space:nowrap}
+/* ── Interactive route session (pcb_route_session.js) ─────────────────────
+   Amber-accented cards docked in the same replay panel; compact, matching the
+   dock's typography. `.rs-entry` is the ⚡ entry button in the actions row. */
+.rs-entry{border-color:#9e6a03!important;color:#e3b341!important}
+.rs-resume{display:flex;gap:8px;align-items:center;font-size:11px;color:#e3b341;
+  background:#2a2410;border:1px solid #6b4a08;border-radius:5px;padding:5px 7px;margin:6px 0}
+.rs-card{border:1px solid #2c2d31;border-radius:6px;padding:7px 8px;margin:8px 0;background:#16171b}
+.rs-card.rs-stuck{border-color:#9e6a03;background:#1c1810}
+.rs-card.rs-done{border-color:#2f6d36;background:#131a14}
+.rs-head{display:flex;gap:7px;align-items:center;margin-bottom:5px}
+.rs-badge{font-size:9px;font-weight:800;letter-spacing:.06em;padding:2px 7px;border-radius:9px;
+  border:1px solid #9e6a03;color:#e3b341;background:#2a2410}
+.rs-badge.rs-badge-ok{border-color:#2f6d36;color:#69c46f;background:#152a17}
+.rs-net{font-size:12px;font-weight:700;color:#f0f1f3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rs-attempts{margin-left:auto;font-size:10px;color:#85868d;white-space:nowrap}
+.rs-line{font-size:10px;color:#9b9ca3;margin:3px 0}
+.rs-seg{display:flex;gap:4px;flex-wrap:wrap;margin:5px 0 2px}
+.rs-seg button{font-size:10px;padding:2px 8px;border-radius:9px;border:1px solid #3a3b40;
+  background:#1a1b1e;color:#9b9ca3;cursor:pointer}
+.rs-seg button:hover{border-color:#e3b341;color:#e3b341}
+.rs-seg button.sel{background:#2a2410;border-color:#e3b341;color:#ffe08a;font-weight:700}
+#rs-occlegend{display:flex;gap:9px;flex-wrap:wrap;font-size:9px;color:#85868d;margin:2px 0 3px}
+#rs-occlegend span{display:inline-flex;gap:4px;align-items:center}
+#rs-occlegend span i{width:8px;height:8px;border-radius:2px;display:inline-block}
+.rs-blockers-h{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;
+  color:#bcaea0;margin:6px 0 3px}
+#rs-blockers{list-style:none;margin:0 0 4px;padding:0;max-height:120px;overflow:auto}
+#rs-blockers li{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;
+  font-size:11px;padding:3px 6px;border-radius:4px;cursor:pointer;border-left:2px solid transparent}
+#rs-blockers li:hover,#rs-blockers li.sel{background:#2a2410;border-left-color:#e3b341}
+#rs-blockers .bl-net{color:#e4e5e9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#rs-blockers .bl-share{color:#d8a03c;font-variant-numeric:tabular-nums}
+#rs-blockers .bl-cost{color:#85868d;font-variant-numeric:tabular-nums}
+.rs-actions{display:flex;gap:5px;flex-wrap:wrap;margin:6px 0 2px}
+.rs-actions .btn.rs-skip{border-color:#7a3b34;color:#e0917f}
+.rs-actions .btn.armed{background:#3a2f0c;border-color:#e3b341;color:#ffe08a}
+.rs-hint{font-size:10px;color:#9b9ca3;line-height:1.4;margin-top:4px;min-height:0}
+.rs-hint.err{color:#e05b4b}
+.rs-hint.ok{color:#69c46f}
+.rs-pop{margin-top:6px;padding:6px 7px;border:1px solid #3a3b40;border-radius:5px;background:#1a1b1e}
+.rs-pop-h{font-size:10px;font-weight:700;color:#cbd2da;margin-bottom:4px}
+#rs-layers-list{display:flex;flex-direction:column;gap:3px;margin-bottom:5px}
+#rs-layers-list label{display:flex;gap:6px;align-items:center;font-size:11px;color:#c9cbd1;cursor:pointer}
+#rs-layers-list input{accent-color:#5a8fd6;margin:0}
+.rs-pop-actions{display:flex;gap:6px;align-items:center}
+.rs-frag-wrap{margin-top:6px}
+.rs-frag-wrap .rs-pop-actions{justify-content:space-between;margin-bottom:4px}
+#rs-fragment{font-size:10px;line-height:1.45;color:#c9cbd1;background:#0f1013;border:1px solid #2c2d31;
+  border-radius:5px;padding:7px 8px;margin:0;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+</style>
+<div class="pcb-replay" id="panel-replay">
+  <span class="tune-h">Live route &amp; replay</span>
+  <div id="rp-status" class="muted">Press <b>Route</b> to stream the autorouter live, or <b>Load saved</b> to replay the last run.</div>
+  <div class="rp-actions">
+    <button class="btn" id="rp-load">Load saved</button>
+    <button class="btn" id="rp-adopt" disabled>Adopt result</button>
+    <button class="btn" id="rp-clear">Clear</button>
+    <button class="btn rs-entry" id="rp-session" title="Route the board live and answer the router when it gets stuck">&#9889; Interactive route</button>
+  </div>
+  <!-- Interactive route session: reconnect banner (a session was left running) -->
+  <div id="rs-resume" class="rs-resume" hidden>
+    <span>A route session is in progress.</span>
+    <button class="btn" id="rs-resume-btn">Resume session</button>
+  </div>
+  <!-- Interactive route session: STUCK card — the router paused for a hint -->
+  <div id="rs-stuck" class="rs-card rs-stuck" hidden>
+    <div class="rs-head">
+      <span class="rs-badge">STUCK</span>
+      <span class="rs-net" id="rs-net"></span>
+      <span class="rs-attempts" id="rs-attempts"></span>
+    </div>
+    <div class="rs-line" id="rs-occ"></div>
+    <!-- Grid view: frontier heatmap vs per-layer occupied-cells overlay -->
+    <div class="rs-seg" id="rs-occview" hidden></div>
+    <div id="rs-occlegend"></div>
+    <div class="rs-blockers-h">Blockers &mdash; click a row to flash it on the board</div>
+    <ul id="rs-blockers"></ul>
+    <div id="rs-actions" class="rs-actions">
+      <button class="btn" id="rs-corridor" title="Click waypoints on the board to guide this net; Enter/double-click confirms, Esc cancels">Draw corridor</button>
+      <button class="btn" id="rs-rip" title="Pick a blocker to rip up, then retry">Rip a blocker</button>
+      <button class="btn" id="rs-layers" title="Restrict this net to specific copper layers">Layers&hellip;</button>
+      <button class="btn" id="rs-retry" title="Try routing this net again (e.g. after a rip)">Retry now</button>
+      <button class="btn rs-skip" id="rs-abandon" title="Give up on this net and move on">Skip net</button>
+    </div>
+    <div id="rs-hint" class="rs-hint"></div>
+    <!-- layer-restriction popover -->
+    <div id="rs-layers-pop" class="rs-pop" hidden>
+      <div class="rs-pop-h">Allow this net on:</div>
+      <div id="rs-layers-list"></div>
+      <div class="rs-pop-actions">
+        <button class="btn" id="rs-layers-apply">Apply</button>
+        <button class="btn" id="rs-layers-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+  <!-- Interactive route session: DONE card -->
+  <div id="rs-done" class="rs-card rs-done" hidden>
+    <div class="rs-head"><span class="rs-badge rs-badge-ok">DONE</span><span class="rs-net" id="rs-done-sum"></span></div>
+    <div class="rs-actions">
+      <button class="btn" id="rs-distill" title="Distill accepted hints into a (pcb-plan) fragment">Distill to (pcb-plan)</button>
+      <button class="btn" id="rs-close">Close session</button>
+    </div>
+    <div class="rs-frag-wrap" hidden id="rs-frag-wrap">
+      <div class="rs-pop-actions"><span class="muted" id="rs-frag-note"></span><button class="btn" id="rs-copy">Copy</button></div>
+      <pre id="rs-fragment"></pre>
+    </div>
+  </div>
+  <label class="rp-ghost-row" title="Draw the board's saved copper faintly beneath the replay for net-by-net comparison"><input type="checkbox" id="rp-ghost"> Ghost saved copper</label>
+  <label class="rp-ghost-row" title="Wash the board with the free space the autorouter could actually use for this step's net, as it stood at this step — not on the finished board">Router vision
+    <select id="rp-vision">
+      <option value="0">off</option>
+      <option value="1">free space</option>
+      <option value="2">reach</option>
+    </select>
+    <span class="muted" id="rp-vision-note"></span>
+  </label>
+  <div class="rp-transport">
+    <button class="btn" id="rp-prev" aria-label="Previous step">&#8592;</button>
+    <button class="btn" id="rp-play">Play</button>
+    <button class="btn" id="rp-next" aria-label="Next step">&#8594;</button>
+    <input type="range" id="rp-slider" min="0" value="0">
+  </div>
+  <div id="rp-summary"></div>
+  <div id="rp-deltas"></div>
+  <ol id="rp-log"></ol>
+</div>

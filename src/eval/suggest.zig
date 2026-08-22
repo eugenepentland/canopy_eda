@@ -167,9 +167,9 @@ test "unboundMessage suggests import for a library file" {
     const alloc = std.heap.page_allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/mx66uw-flash.sexp", .data = "(component \"mx66uw-flash\")" });
-    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/mx66uw-flash.sexp", .data = "(component \"mx66uw-flash\")" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     var eval = Evaluator.init(alloc, root);
     defer eval.deinit();

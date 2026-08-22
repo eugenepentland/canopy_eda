@@ -33,7 +33,9 @@ pub fn renderNamedSummary(
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const nb = try mcp_tools.evalNamedBlock(allocator, project_dir, name, &eval);
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
     const ident: Ident = .{ .key = "name", .value = name };
     try writeBlockSummary(allocator, w, project_dir, ident, nb.block, eval.assertions.items);
     return true;
@@ -121,6 +123,22 @@ test "writeBlockSummary is compact and carries the orienting fields" {
 
     // A block with several instances, nets, a port, and a sub-block — enough
     // that the geometry-laden scene graph dwarfs the summary projection.
+    //
+    // Two properties of the fixture are load-bearing for that, both learned the
+    // first time this test was ever executed (2026-08-17):
+    //
+    //   * every instance carries a FOOTPRINT. The summary inlines full ERC
+    //     prose and the scene graph carries none, so a footprint-less part adds
+    //     ~110 bytes of "Missing footprint" text to the summary and nothing to
+    //     the scene — a PER-INSTANCE term that cancels the size gap at every
+    //     scale instead of being amortized away by one. A board whose every
+    //     part lacks a footprint is also not the "real board" the compact
+    //     default exists for (see this file's header).
+    //   * the part count is not tiny. What is left of ERC once footprints are
+    //     set is a roughly FIXED ~450 bytes (a missing-requirements error and a
+    //     layout-class note), while each added instance costs the scene graph
+    //     ~470 bytes against the summary's ~50. Six parts leaves the ratio at
+    //     2.8x — the gap only opens at the sizes the summary exists to survive.
     var inner: env_mod.DesignBlock = .{
         .name = "pwr-sub",
         .instances = &.{},
@@ -131,27 +149,40 @@ test "writeBlockSummary is compact and carries the orienting fields" {
         .sub_blocks = &.{},
     };
     const insts = [_]env_mod.Instance{
-        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
-        .{ .ref_des = "R1", .component = "res", .value = "10k", .footprint = "", .symbol = "" },
-        .{ .ref_des = "R2", .component = "res", .value = "20k", .footprint = "", .symbol = "" },
-        .{ .ref_des = "C1", .component = "cap", .value = "100nF", .footprint = "", .symbol = "" },
-        .{ .ref_des = "C2", .component = "cap", .value = "100nF", .footprint = "", .symbol = "" },
-        .{ .ref_des = "C3", .component = "cap", .value = "100nF", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "SOIC-8", .symbol = "ic" },
+        .{ .ref_des = "R1", .component = "res", .value = "10k", .footprint = "0402", .symbol = "res" },
+        .{ .ref_des = "R2", .component = "res", .value = "20k", .footprint = "0402", .symbol = "res" },
+        .{ .ref_des = "R3", .component = "res", .value = "47k", .footprint = "0402", .symbol = "res" },
+        .{ .ref_des = "R4", .component = "res", .value = "100k", .footprint = "0402", .symbol = "res" },
+        .{ .ref_des = "C1", .component = "cap", .value = "100nF", .footprint = "0402", .symbol = "cap" },
+        .{ .ref_des = "C2", .component = "cap", .value = "100nF", .footprint = "0402", .symbol = "cap" },
+        .{ .ref_des = "C3", .component = "cap", .value = "100nF", .footprint = "0402", .symbol = "cap" },
+        .{ .ref_des = "C4", .component = "cap", .value = "1uF", .footprint = "0603", .symbol = "cap" },
+        .{ .ref_des = "C5", .component = "cap", .value = "10uF", .footprint = "0805", .symbol = "cap" },
     };
     const p_vin = [_]env_mod.PinRef{
-        .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" },
+        .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R1", .pin = "1" },
+        .{ .ref_des = "C1", .pin = "1" }, .{ .ref_des = "C4", .pin = "1" },
     };
     const p_gnd = [_]env_mod.PinRef{
         .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "C1", .pin = "2" },
         .{ .ref_des = "C2", .pin = "2" }, .{ .ref_des = "C3", .pin = "2" },
+        .{ .ref_des = "C4", .pin = "2" }, .{ .ref_des = "C5", .pin = "2" },
+        .{ .ref_des = "R4", .pin = "2" },
     };
     const p_out = [_]env_mod.PinRef{
-        .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "R2", .pin = "1" }, .{ .ref_des = "C2", .pin = "1" },
+        .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "R2", .pin = "1" },
+        .{ .ref_des = "C2", .pin = "1" }, .{ .ref_des = "C5", .pin = "1" },
+    };
+    const p_fb = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "4" }, .{ .ref_des = "R3", .pin = "1" },
+        .{ .ref_des = "R4", .pin = "1" }, .{ .ref_des = "C3", .pin = "1" },
     };
     const nets = [_]env_mod.Net{
         .{ .name = "VIN", .pins = &p_vin },
         .{ .name = "GND", .pins = &p_gnd },
         .{ .name = "OUT", .pins = &p_out },
+        .{ .name = "FB", .pins = &p_fb },
     };
     const ports = [_]env_mod.Port{.{ .name = "VIN", .net = "VIN", .direction = "in" }};
     const subs = [_]env_mod.SubBlock{.{ .name = "pwr", .block = &inner }};
@@ -165,9 +196,10 @@ test "writeBlockSummary is compact and carries the orienting fields" {
         .sub_blocks = &subs,
     };
 
-    var summary: std.ArrayList(u8) = .empty;
+    var summary: std.Io.Writer.Allocating = .init(alloc);
+    defer summary.deinit();
     const ident: Ident = .{ .key = "name", .value = "test-design" };
-    try writeBlockSummary(alloc, summary.writer(alloc), "", ident, &block, &.{});
+    try writeBlockSummary(alloc, &summary.writer, "", ident, &block, &.{});
 
     // The identity field, orienting sections, an instance ref, a net name, and
     // the sub-block name are all present.
@@ -177,10 +209,10 @@ test "writeBlockSummary is compact and carries the orienting fields" {
         "\"pwr\"",
     };
     for (needles) |needle| {
-        try std.testing.expect(std.mem.indexOf(u8, summary.items, needle) != null);
+        try std.testing.expect(std.mem.indexOf(u8, summary.written(), needle) != null);
     }
 
     // The full scene graph is much larger — the summary is a small fraction.
     const scene = try render_json.renderSceneGraph(alloc, &block, "");
-    try std.testing.expect(scene.len > summary.items.len * 3);
+    try std.testing.expect(scene.len > summary.written().len * 3);
 }

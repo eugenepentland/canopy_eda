@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
+const rails_mod = @import("eval/rails.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const infra_fs = @import("infra/fs.zig");
 const ast = @import("sexpr/ast.zig");
@@ -29,23 +30,23 @@ const AdjEntry = ctx_mod.AdjEntry;
 const PinGroup = ctx_mod.PinGroup;
 
 const hub_mod = @import("render_svg/hub.zig");
+const connection = @import("render_svg/connection.zig");
 const draw = @import("render_svg/draw.zig");
 const escape = @import("escape.zig");
 const section_inset = @import("render_svg/section_inset.zig");
 const block_diagram = @import("diagram/diagram.zig");
 const membership = @import("diagram/membership.zig");
 const rb = @import("render_block_types.zig");
+const lib_limits = @import("lib_limits.zig");
 const bom_html = @import("serve/bom_html.zig");
 const pages_tmpl = @import("serve/templates/pages.zig");
-const layout_status = @import("layout_status.zig");
 const isHub = draw.isHub;
 const pinOrder = draw.pinOrder;
 const numeric = @import("numeric.zig");
 const muted_em_dash = review_html.mutedDash;
 
-// Shared table-row HTML fragments — reused across the port tables and the
-// module-layout checklist so the literals aren't duplicated (guardian's
-// repeated-string-literal check).
+// Shared table-row HTML fragments — reused across the port tables so the
+// literals aren't duplicated (guardian's repeated-string-literal check).
 const row_td_code_open = "<tr><td><code>";
 const td_cell_sep = "</td><td>";
 const row_td_close = "</td></tr>";
@@ -53,6 +54,56 @@ const table_details_close = "</tbody></table></details>";
 const pill_warn = "pill-warn";
 
 const Allocator = std.mem.Allocator;
+
+/// The two intentionally separate schematic presentations. `original` keeps
+/// every repeated endpoint as a local net label; `functional` may close
+/// recognised feedback loops with direct outside rails.
+pub const SchematicView = enum { original, functional };
+
+/// Route prefix and presentation selected for one rendered schematic page.
+/// `embed` trims the page chrome (navbar, header, sidebar) for the iframe
+/// panes that host a schematic beside another surface.
+pub const SchematicOptions = struct {
+    path: []const u8,
+    view: SchematicView = .functional,
+    embed: bool = false,
+};
+
+const PageRender = struct {
+    svg: *RenderCtx,
+    view: SchematicView,
+    /// The design's URL name, for the `?sub=` PCB-layout link a path- or
+    /// inline-sourced sub circuit falls back to. Carried here rather than
+    /// passed down because `writeSection` recurses and only the leaf needs it.
+    ///
+    /// Defaults to empty for the static hub-SVG exporters
+    /// (`renderHubSvgForView`), which render one hub in isolation and so never
+    /// reach a sub circuit card — the only reader of this field.
+    design_name: []const u8 = "",
+};
+
+/// Parse the `?view=` selector. Functional leads — it is what a reader wants
+/// from a schematic — so an absent or unrecognised value lands there and only
+/// the two names the slider links spell out (`sequential`, and the enum's own
+/// `original`) select the label-connected presentation. `render_schematic_png`
+/// parses the same pair of names for the image export.
+pub fn parseSchematicView(value: ?[]const u8) SchematicView {
+    const raw = value orelse return .functional;
+    if (std.ascii.eqlIgnoreCase(raw, "sequential")) return .original;
+    if (std.ascii.eqlIgnoreCase(raw, "original")) return .original;
+    return .functional;
+}
+
+/// The `?view=` spelling that reproduces `view`, or null when `view` is the
+/// default a bare URL already renders. Every link this module writes appends
+/// the selector through here, so the address bar carries a query only when it
+/// is actually selecting something.
+fn viewQuery(view: SchematicView) ?[]const u8 {
+    return switch (view) {
+        .functional => null,
+        .original => "?view=sequential",
+    };
+}
 
 /// Error set for HTML emit helpers. The writers in this module are
 /// `ArrayListUnmanaged(u8).writer()` (only fails on OOM), but we also
@@ -79,13 +130,12 @@ pub fn renderToHtml(
     status: review.Status,
     review_doc: ?review.ReviewDoc,
     check_results: *const CheckResultMap,
-    // Route prefix for *this* schematic view ("/schematics/" for designs,
-    // "/modules/" for reusable modules). Drives the active link in the
-    // Schematic ⇄ PCB Layout switcher; the PCB side is always "/pcb-layout/".
-    schematic_path: []const u8,
+    // Route prefix and presentation mode for this schematic page.
+    options: SchematicOptions,
 ) RenderError![]const u8 {
     var ctx = try setupRenderCtx(allocator, block);
     ctx.project_dir = project_dir;
+    const page_render: PageRender = .{ .svg = &ctx, .view = options.view, .design_name = design_name };
 
     var asserted_fns = try asserted_fns_mod.buildMap(allocator, block);
 
@@ -93,7 +143,7 @@ pub fn renderToHtml(
     const w = &aw.writer;
 
     try w.writeAll("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
-    try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+    try w.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">");
     try w.writeAll("<title>");
     try writeHtmlEscaped(w, block.name);
     try w.writeAll(" — Schematic</title>");
@@ -102,17 +152,19 @@ pub fn renderToHtml(
     try w.writeAll("<style>");
     try w.writeAll(navbar_css);
     if (review_doc != null) try w.writeAll(review_html.body_css);
-    try w.writeAll("</style></head><body>");
+    // `sch-embed` is the one hook the stylesheet needs to strip this page down
+    // to its drawing for an iframe pane (the assembly workspace hosts it under
+    // the board). Emitted server-side rather than set by script on load so the
+    // pane never flashes the full-page chrome before hiding it.
+    try w.print(
+        "</style></head><body data-schematic-view=\"{s}\"{s}>",
+        .{ @tagName(options.view), if (options.embed) " class=\"sch-embed\"" else "" },
+    );
 
     try pages_tmpl.Navbar.render(.{""}, w);
     try w.writeAll("<div class=\"sch-layout\">");
     try w.writeAll("<div class=\"sch-wrap\">");
-    try writeHeader(w, block.name, design_name, status, schematic_path, block.revision, block.kicad_pcb_path != null);
-
-    // Global PCB-layout controls (via/trace/DRC) that feed every per-sub-block
-    // preview below. Shown only when the design has sub-blocks to preview — the
-    // whole-design layout is deliberately never computed from this page.
-    if (block.sub_blocks.len > 0) try writePcbGlobals(w);
+    try writeHeader(w, block.name, design_name, status, options, block.revision, block.kicad_pcb_path != null);
 
     // Pair top-level `(sub-block …)` declarations with the section that wires
     // them (e.g. `(section "XSPI2 NOR Flash" …)` adopts `(sub-block "flash" …)`)
@@ -135,9 +187,9 @@ pub fn renderToHtml(
     try w.writeAll("</div>");
     if (review_doc) |doc| {
         try w.writeAll("<div class=\"review-embed review-wrap\">");
-        if (doc.power_sequence.len > 0) {
+        if (doc.power.sequence.len > 0) {
             try w.writeAll("<div id=\"page-power-sequence\" class=\"page-anchor\">");
-            try review_html.writePowerSequence(w, doc.power_sequence);
+            try review_html.writePowerSequence(w, doc.power.sequence);
             try w.writeAll("</div>");
         }
         if (doc.test_points.len > 0) {
@@ -145,9 +197,9 @@ pub fn renderToHtml(
             try review_html.writeTestPoints(w, doc.test_points);
             try w.writeAll("</div>");
         }
-        if (doc.power_budget.len > 0) {
+        if (doc.power.budget.len > 0) {
             try w.writeAll("<div id=\"page-power-budget\" class=\"page-anchor\">");
-            try review_html.writePowerBudget(w, doc.power_budget);
+            try review_html.writePowerBudget(w, doc.power.budget);
             try w.writeAll("</div>");
         }
         try w.writeAll("</div>");
@@ -165,12 +217,6 @@ pub fn renderToHtml(
     );
     try bom_html.writeSchematicBomHtml(allocator, w, block);
     try w.writeAll("</details>");
-
-    // Module-layout checklist — one row per top-level (sub-block …) flagging
-    // whether its module carries a (placement …) spec yet. Surfaced so the
-    // author can confirm every sub-module is laid out before a KiCad hand-off.
-    // Only meaningful when the design actually instantiates modules.
-    if (block.sub_blocks.len > 0) try writeModuleLayoutStatus(allocator, project_dir, w, block);
 
     // Design notes — structured TODO list backed by `<design>.notes.md`.
     // The task list + add form drive /api/notes/:name/tasks/*; the
@@ -200,14 +246,12 @@ pub fn renderToHtml(
     );
 
     for (block.sections, 0..) |sec, sec_idx| {
-        var attached: std.ArrayList(env_mod.SubBlock) = .empty;
-        defer attached.deinit(allocator);
-        for (block.sub_blocks, 0..) |sb, sb_idx| {
-            if (sub_attachments[sb_idx]) |idx| {
-                if (idx == sec_idx) try attached.append(allocator, sb);
-            }
-        }
-        try writeSection(&ctx, w, allocator, block, sec, 0, check_results, attached.items);
+        // Shared with the PDF composer, which draws these same modules on the
+        // section's own sheet — one authority so the two surfaces can never
+        // disagree about which section owns a module.
+        const attached = try membership.attachedSubBlocks(allocator, block, sub_attachments, sec_idx);
+        defer allocator.free(attached);
+        try writeSection(page_render, w, allocator, block, sec, 0, check_results, attached);
     }
 
     // Designs without sections (typical of sub-block-only or flat hub+passives
@@ -237,11 +281,11 @@ pub fn renderToHtml(
             .{ .extra_names = group_names.items, .copies = copies }
         else
             null;
-        try writeSubBlockCard(&ctx, w, allocator, sb, check_results, .standalone, group);
+        try writeSubBlockCard(page_render, w, allocator, sb, check_results, .standalone, group);
     }
 
     if (block.sections.len == 0 and hasTopLevelHubs(block)) {
-        try writeFlatHubs(&ctx, w, allocator, block, check_results);
+        try writeFlatHubs(page_render, w, allocator, block, check_results);
     }
 
     // ERC violations and assertions no longer render at the bottom of the
@@ -249,13 +293,9 @@ pub fn renderToHtml(
     // lists the design's assertions). Keeps the page tail clean.
 
     try w.writeAll("</div>");
-    try writeSidebar(w, review_doc, block.sub_blocks.len > 0);
+    try writeSidebar(w, review_doc);
     try w.writeAll("</div>");
-    try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results, review_doc, schematic_path);
-    // Per-sub-circuit Schematic ⇄ PCB toggle wiring — reuses the DESIGN_NAME
-    // global declared by writeScripts, so it must follow that call. Only emitted
-    // when there are sub circuits (matching the global PCB-settings bar above).
-    if (block.sub_blocks.len > 0) try w.writeAll(subc_toggle_script);
+    try writeScripts(w, allocator, design_name, block, &ctx, &asserted_fns, check_results, review_doc, options.path);
     if (review_doc != null) {
         // review_notes.js (design-note handlers) reuses DESIGN_NAME —
         // already declared as a global by writeScripts above.
@@ -313,18 +353,44 @@ fn writeRevisionLabel(w: *std.Io.Writer, revision: env_mod.Revision) !void {
     }
 }
 
+fn writeSchematicModeSwitch(w: anytype, design_name: []const u8, options: SchematicOptions) !void {
+    const functional = options.view == .functional;
+    try w.print(
+        "<nav class=\"schematic-mode-switch\" aria-label=\"Schematic view\">" ++
+            "<span class=\"schematic-mode-label{s}\">Sequential</span>",
+        .{if (!functional) " active" else ""},
+    );
+    try w.print("<a class=\"schematic-mode-slider{s}\" href=\"", .{if (functional) " functional" else ""});
+    try w.writeAll(options.path);
+    try writeUrlEncoded(w, design_name);
+    // The slider links the OTHER view, so it carries the selector exactly when
+    // the view it links is not the default.
+    if (viewQuery(if (functional) .original else .functional)) |q| try w.writeAll(q);
+    try w.print(
+        "\" role=\"switch\" aria-checked=\"{s}\" aria-label=\"Switch to {s} view\" " ++
+            "title=\"Switch to {s} view\"><span class=\"schematic-mode-thumb\"></span></a>" ++
+            "<span class=\"schematic-mode-label{s}\">Functional</span></nav>",
+        .{
+            if (functional) "true" else "false",
+            if (functional) "Sequential" else "Functional",
+            if (functional) "Sequential" else "Functional",
+            if (functional) " active" else "",
+        },
+    );
+}
+
 fn writeHeader(
     w: anytype,
     title: []const u8,
     design_name: []const u8,
     status: review.Status,
-    schematic_path: []const u8,
+    options: SchematicOptions,
     revision: env_mod.Revision,
     has_kicad_pcb: bool,
 ) !void {
-    // `schematic_path` is "/modules/" for a reusable module, "/schematics/" for
-    // a full design. Both get the Schematic ⇄ PCB Layout switcher so the two
-    // views toggle symmetrically from either page.
+    // `options.path` is "/modules/" for a reusable module, "/schematics/" for
+    // a full design. Both get Schematic ⇄ PCB Layout; physical board designs
+    // additionally link to the view-only Assembly surface.
     const banner_class: []const u8 = switch (status) {
         .pass => "banner banner-pass",
         .warn => "banner banner-warn",
@@ -345,17 +411,34 @@ fn writeHeader(
     try w.writeAll("</div></div>");
     try w.print("<div class=\"{s}\">{s}</div>", .{ banner_class, banner_label });
     try w.writeAll("<div class=\"head-links\">");
-    // Schematic ⇄ PCB Layout switcher — active tab uses `schematic_path`.
+    // Schematic ⇄ PCB Layout switcher — active tab uses `options.path`.
     try w.writeAll("<nav class=\"viewtoggle\" aria-label=\"View\"><a class=\"active\" href=\"");
-    try w.writeAll(schematic_path);
+    try w.writeAll(options.path);
     try writeUrlEncoded(w, design_name);
+    if (viewQuery(options.view)) |q| try w.writeAll(q);
     try w.writeAll("\">Schematic</a><a href=\"/pcb-layout/");
     try writeUrlEncoded(w, design_name);
-    try w.writeAll("\">PCB Layout</a></nav>");
-    // Deliberately minimal toolbar: Reload, Edit SRC, ERC, the BOM + design-review
-    // exports, and a single PCB-sync control. Everything else (History,
-    // Netlist export, datasheet upload) was moved off this bar to keep it
-    // uncluttered.
+    try w.writeAll("\">PCB Layout</a><a href=\"/pcb-layout/");
+    try writeUrlEncoded(w, design_name);
+    try w.writeAll("?view=3d\">3D</a>");
+    if (std.mem.eql(u8, options.path, "/schematics/")) {
+        try w.writeAll("<a href=\"/assembly-debug/");
+        try writeUrlEncoded(w, design_name);
+        try w.writeAll("\">Assembly</a>");
+    }
+    // Thermal reads the same block as everything left of it and works on a
+    // module as well as a design, so it is the one tab with no board of its own
+    // to gate on. It is a link, never an embed: the cooling-scenario ladder
+    // needs the saved layouts, and this page is deliberately .sexp-only.
+    try w.writeAll("<a href=\"/thermal/");
+    try writeUrlEncoded(w, design_name);
+    try w.writeAll("\">Thermal</a>");
+    try w.writeAll("</nav>");
+    try writeSchematicModeSwitch(w, design_name, options);
+    // Deliberately minimal toolbar: Reload, Edit SRC, ERC, the BOM +
+    // design-review + PDF exports, and a single PCB-sync control. Everything
+    // else (History, Netlist export, datasheet upload) was moved off this bar
+    // to keep it uncluttered.
     try w.writeAll(
         "<button class=\"head-link head-btn\" id=\"reload-btn\" type=\"button\" " ++
             "title=\"Re-read the .sexp source from disk and rebuild\">\u{21BB} Reload</button>",
@@ -386,6 +469,26 @@ fn writeHeader(
     try w.writeAll(
         "\" download title=\"Download the design-review package (review.md + BOM + all source .sexp) as a .zip\">\u{2B07} Review .zip</a>",
     );
+    // Review PDF: the same report as a printable/emailable document (cover,
+    // per-section schematic pages, validation appendix, power tables). Composed
+    // on demand by GET /api/schematic-pdf/:name — a plain <a download>, no JS.
+    // Written here rather than in the design branch so module pages get it too.
+    try w.writeAll("<a class=\"head-link head-btn\" id=\"pdf-export-btn\" href=\"/api/schematic-pdf/");
+    try writeUrlEncoded(w, design_name);
+    try w.writeAll(
+        "\" download title=\"Download the design-review document as <name>.pdf\">\u{2913} PDF</a>",
+    );
+    // KiCad schematic export: a .zip of the `.kicad_sch` hierarchy plus the
+    // project sidecars (sym-lib-table / fp-lib-table / <name>.kicad_pro /
+    // netlisp.kicad_sym) that make its library references resolve. Composed on
+    // demand by GET /api/kicad-sch/:name — a plain <a download>, no JS, and on
+    // module pages too for the same reason the PDF button is here.
+    try w.writeAll("<a class=\"head-link head-btn\" id=\"kicad-sch-btn\" href=\"/api/kicad-sch/");
+    try writeUrlEncoded(w, design_name);
+    try w.writeAll(
+        "\" download title=\"Download the KiCad schematic (.kicad_sch sheets + project files) as <name>-kicad-sch.zip\">" ++
+            "\u{2913} KiCad</a>",
+    );
     // Single file-based PCB-sync control — only for designs that declare a
     // (kicad-pcb "<path>") target. schematic_viewer.js dry-runs the sync on
     // page load and reflects the result in ONE button:
@@ -398,6 +501,17 @@ fn writeHeader(
         try w.writeAll(
             "<button class=\"head-link head-btn sync-chip\" id=\"kicad-sync-chip\" type=\"button\" " ++
                 "title=\"Checking whether the .kicad_pcb matches the design\u{2026}\">\u{27F3} PCB sync\u{2026}</button>",
+        );
+        // Schematic push into the SAME KiCad project directory the board sync
+        // writes to. schematic_viewer.js dry-runs it, shows the per-file plan
+        // for confirmation, and only then writes — the same preview-then-write
+        // shape as the board button, and gated on the same (kicad-pcb …) form,
+        // since without one there is no project directory to push into.
+        try w.writeAll(
+            "<button class=\"head-link head-btn\" id=\"kicad-sch-push-btn\" type=\"button\" " ++
+                "title=\"Write the KiCad schematic into the project directory beside the .kicad_pcb " ++
+                "(refuses to overwrite a hand-drawn sheet or a project KiCad has open)\">" ++
+                "\u{2191} Push SCH</button>",
         );
     }
     try w.writeAll("</div></header>");
@@ -481,17 +595,16 @@ fn countsForRefs(check_results: *const CheckResultMap, refs: []const []const u8)
 /// get a chip when their backing data is non-empty — the renderer skips
 /// the matching `<section>` block in those cases too, so a chip linking to
 /// a missing section would scroll to nowhere.
-fn writeSidebar(w: anytype, review_doc: ?review.ReviewDoc, has_modules: bool) !void {
+fn writeSidebar(w: anytype, review_doc: ?review.ReviewDoc) !void {
     try w.writeAll("<aside class=\"sch-sidebar\" id=\"sch-sidebar\">");
     try w.writeAll("<nav class=\"sb-toc\" aria-label=\"Page contents\">");
     try writeTocChip(w, "page-block-diagram", "Block diagram");
     if (review_doc) |doc| {
-        if (doc.power_sequence.len > 0) try writeTocChip(w, "page-power-sequence", "Power sequencing");
+        if (doc.power.sequence.len > 0) try writeTocChip(w, "page-power-sequence", "Power sequencing");
         if (doc.test_points.len > 0) try writeTocChip(w, "page-test-points", "Test points");
-        if (doc.power_budget.len > 0) try writeTocChip(w, "page-power-budget", "Power budget");
+        if (doc.power.budget.len > 0) try writeTocChip(w, "page-power-budget", "Power budget");
     }
     try writeTocChip(w, "page-bom", "BOM");
-    if (has_modules) try writeTocChip(w, "page-module-layouts", "Module layouts");
     try writeTocChip(w, "page-notes", "Notes");
     try w.writeAll("</nav>");
     try w.writeAll(
@@ -520,7 +633,64 @@ fn writeTocChip(w: anytype, anchor_id: []const u8, label: []const u8) !void {
 pub fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) std.mem.Allocator.Error!RenderCtx {
     var ctx = RenderCtx.init(allocator);
     try ctx.setup(block);
+    try attachSvgLocalIslandBranches(&ctx);
     return ctx;
+}
+
+fn isSupplyLikeSchematicNet(net: []const u8) bool {
+    if (draw.isGroundNet(net)) return true;
+    for (rails_mod.schematic_supply_prefixes) |prefix| {
+        if (std.ascii.startsWithIgnoreCase(net, prefix)) return true;
+    }
+    return false;
+}
+
+fn appendSvgAdjacency(ctx: *RenderCtx, ref_des: []const u8, entry: AdjEntry) !void {
+    const gop = try ctx.adjacency.getOrPut(ctx.allocator, ref_des);
+    if (!gop.found_existing) gop.value_ptr.* = .empty;
+    try gop.value_ptr.append(ctx.allocator, entry);
+}
+
+/// SVG-only supplemental ownership for a resistor on the non-owner boundary of
+/// a shared passive island. The JSON scene graph retains one canonical island
+/// owner; the schematic gets the extra local branch readers need at the pin.
+fn attachSvgLocalIslandBranches(ctx: *RenderCtx) !void {
+    for (ctx.nets.items) |net| {
+        const net_name = draw.baseNetName(net.name);
+        if (isSupplyLikeSchematicNet(net_name)) continue;
+
+        var hub_pin: ?env_mod.PinRef = null;
+        var hub_count: usize = 0;
+        for (net.pins) |pin| {
+            if (ctx.spoke_set.contains(pin.ref_des)) continue;
+            hub_count += 1;
+            hub_pin = pin;
+        }
+        if (hub_count != 1) continue;
+
+        for (net.pins) |spoke_pin| {
+            if (!ctx.spoke_set.contains(spoke_pin.ref_des)) continue;
+            const owner = ctx.spoke_anchor_net.get(spoke_pin.ref_des) orelse continue;
+            if (std.mem.eql(u8, draw.baseNetName(owner), net_name)) continue;
+            const inst = ctx.inst_map.get(spoke_pin.ref_des) orelse continue;
+            const local_ref = draw.shortRef(spoke_pin.ref_des);
+            const resistor = std.mem.eql(u8, inst.symbol, "generic-res") or (local_ref.len > 0 and local_ref[0] == 'R');
+            if (!resistor) continue;
+
+            const hub = hub_pin.?;
+            const spoke_section = ctx.section_map.get(spoke_pin.ref_des);
+            const hub_section = ctx.section_map.get(hub.ref_des);
+            if (spoke_section != null and hub_section != null and spoke_section.? != hub_section.?) continue;
+            try appendSvgAdjacency(ctx, hub.ref_des, .{
+                .pin = hub.pin,
+                .endpoint = .{ .pin = .{ .ref_des = spoke_pin.ref_des, .pin = spoke_pin.pin } },
+            });
+            try appendSvgAdjacency(ctx, spoke_pin.ref_des, .{
+                .pin = spoke_pin.pin,
+                .endpoint = .{ .pin = .{ .ref_des = hub.ref_des, .pin = hub.pin } },
+            });
+        }
+    }
 }
 
 /// Emit one hub's grouped pin-table SVG(s) to `w`. Returns true if the hub
@@ -533,8 +703,23 @@ pub fn renderHubSvg(
     pin_groups: []const env_mod.PinGroup,
     hub_ref: []const u8,
 ) RenderError!bool {
-    if (try analyzeHub(ctx, allocator, pin_groups, hub_ref)) |a| {
-        try renderGroupedHubSvgs(ctx, w, allocator, a);
+    return renderHubSvgForView(ctx, w, allocator, pin_groups, hub_ref, .functional);
+}
+
+/// View-selectable static hub renderer. Native image export uses this entry so
+/// its Sequential/Functional switch is the same layout decision as the web
+/// page; the legacy `renderHubSvg` wrapper above remains Functional for PDF and
+/// markdown callers that predate the two-view UI.
+pub fn renderHubSvgForView(
+    ctx: *RenderCtx,
+    w: anytype,
+    allocator: Allocator,
+    pin_groups: []const env_mod.PinGroup,
+    hub_ref: []const u8,
+    view: SchematicView,
+) RenderError!bool {
+    if (try analyzeHub(ctx, allocator, pin_groups, hub_ref, view)) |a| {
+        try renderGroupedHubSvgs(.{ .svg = ctx, .view = view }, w, allocator, a);
         return true;
     }
     return false;
@@ -557,15 +742,19 @@ pub const static_svg_css =
 ;
 
 fn writeSection(
-    ctx: *RenderCtx,
+    page_render: PageRender,
     w: anytype,
     allocator: Allocator,
     block: *const DesignBlock,
     sec: Section,
     depth: u8,
     check_results: *const CheckResultMap,
-    attached_subs: []const env_mod.SubBlock,
+    /// Indices into `block.sub_blocks` of the modules this section owns, per
+    /// `membership.attachedSubBlocks` — the same authority the PDF composer uses
+    /// to draw them on the section's sheet.
+    attached_subs: []const usize,
 ) !void {
+    const ctx = page_render.svg;
     const indent_class: []const u8 = if (depth == 0) "sch-section" else "sch-section sch-subsection";
     const slug = try review.slugify(allocator, sec.name);
     try w.print("<section class=\"{s}\" id=\"sec-{s}\" data-slug=\"{s}\">", .{ indent_class, slug, slug });
@@ -642,11 +831,13 @@ fn writeSection(
     if (sec.notes.len > 0) try writeNotes(w, sec.notes);
     try writeSectionRequirements(ctx, w, allocator, sec.pin_groups, hub_refs.items, check_results);
 
-    try writeSectionHubs(ctx, w, allocator, sec.pin_groups, hub_refs.items, check_results);
+    try writeSectionHubs(page_render, w, allocator, sec.pin_groups, hub_refs.items, check_results);
 
-    for (sec.sub_sections) |sub| try writeSection(ctx, w, allocator, block, sub, depth + 1, check_results, &.{});
+    for (sec.sub_sections) |sub| try writeSection(page_render, w, allocator, block, sub, depth + 1, check_results, &.{});
 
-    for (attached_subs) |sb| try writeSubBlockCard(ctx, w, allocator, sb, check_results, .attached, null);
+    for (attached_subs) |sb_idx| {
+        try writeSubBlockCard(page_render, w, allocator, block.sub_blocks[sb_idx], check_results, .attached, null);
+    }
 
     try w.writeAll(sectionClose);
 }
@@ -664,7 +855,7 @@ fn writeSectionRequirements(
     check_results: *const CheckResultMap,
 ) !void {
     for (hub_refs) |hub_ref| {
-        if (try analyzeHub(ctx, allocator, pin_groups, hub_ref)) |a| {
+        if (try analyzeHub(ctx, allocator, pin_groups, hub_ref, .original)) |a| {
             if (a.inst.requirements.len > 0) {
                 try w.writeAll("<div class=\"sec-hub-reqs\" data-ref=\"");
                 try writeHtmlEscaped(w, a.inst.ref_des);
@@ -696,27 +887,35 @@ const HubAnalysis = struct {
 /// no longer needs a master pin-table to surface hub-to-net relationships.
 /// Search and inspection of nets/components/pins live in the sidebar.
 fn writeSectionHubs(
-    ctx: *RenderCtx,
+    page_render: PageRender,
     w: anytype,
     allocator: Allocator,
     pin_groups: []const env_mod.PinGroup,
     hub_refs: []const []const u8,
     check_results: *const CheckResultMap,
 ) !void {
+    const ctx = page_render.svg;
     for (hub_refs) |hub_ref| {
-        if (try analyzeHub(ctx, allocator, pin_groups, hub_ref)) |a| {
-            try writeHubCard(ctx, w, allocator, a, check_results);
+        if (try analyzeHub(ctx, allocator, pin_groups, hub_ref, page_render.view)) |a| {
+            try writeHubCard(page_render, w, allocator, a, check_results);
         }
     }
 }
 
-fn writeHubCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, h: HubAnalysis, check_results: *const CheckResultMap) !void {
+fn writeHubCard(
+    page_render: PageRender,
+    w: anytype,
+    allocator: Allocator,
+    h: HubAnalysis,
+    check_results: *const CheckResultMap,
+) !void {
     try w.writeAll("<div class=\"sch-hub\" data-ref=\"");
     try writeHtmlEscaped(w, h.inst.ref_des);
     try w.writeAll("\">");
-    try w.writeAll("<div class=\"hub-head\"><h3><code>");
-    try writeHtmlEscaped(w, h.inst.ref_des);
-    try w.writeAll("</code></h3><span class=\"hub-comp\">");
+    // The standalone SVG already carries the hub ref-des in its title. Keep
+    // the surrounding card's component metadata, but do not print the same
+    // ref-des a second time immediately above the drawing.
+    try w.writeAll("<div class=\"hub-head\"><span class=\"hub-comp\">");
     try writeHtmlEscaped(w, h.inst.component);
     try w.writeAll("</span>");
     if (h.inst.value.len > 0) {
@@ -726,7 +925,7 @@ fn writeHubCard(ctx: *RenderCtx, w: anytype, allocator: Allocator, h: HubAnalysi
     }
     try w.writeAll("</div>");
     try w.writeAll("<div class=\"hub-inset-wrap\">");
-    try renderGroupedHubSvgs(ctx, w, allocator, h);
+    try renderGroupedHubSvgs(page_render, w, allocator, h);
     try w.writeAll("</div>");
     // Requirements now render once per section (above the SVGs) via
     // writeSectionRequirements — don't duplicate them inside each hub card.
@@ -890,11 +1089,12 @@ fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckR
 /// one mini-SVG per bucket with the label as a small heading. When there's
 /// only one bucket (single label, or none), emit one ungrouped SVG.
 fn renderGroupedHubSvgs(
-    ctx: *RenderCtx,
+    page_render: PageRender,
     w: anytype,
     allocator: Allocator,
     h: HubAnalysis,
 ) !void {
+    const ctx = page_render.svg;
     var buckets: std.StringArrayHashMapUnmanaged(std.ArrayList(PinGroup)) = .empty;
     defer {
         var it = buckets.iterator();
@@ -909,7 +1109,7 @@ fn renderGroupedHubSvgs(
     }
 
     if (buckets.count() <= 1) {
-        try section_inset.renderHubAllPins(ctx, w, h.inst, h.groups);
+        try section_inset.renderHubAllPins(ctx, w, h.inst, h.groups, page_render.view == .functional);
         return;
     }
 
@@ -923,7 +1123,7 @@ fn renderGroupedHubSvgs(
             try writeHtmlEscaped(w, label);
             try w.writeAll("</h4>");
         }
-        try section_inset.renderHubAllPins(ctx, w, h.inst, subset);
+        try section_inset.renderHubAllPins(ctx, w, h.inst, subset, page_render.view == .functional);
         try w.writeAll("</div>");
     }
 }
@@ -955,11 +1155,12 @@ fn pinNameMapFor(ctx: *RenderCtx, allocator: Allocator, inst: FlatInst) std.Stri
     return map;
 }
 
-/// Parse `lib/pinouts/<x>.sexp` into a pin_id -> function-name map. Mirrors the
-/// evaluator's loader (numeric pin ids stringify to "5", "11", …); ERC's loader
-/// only handles atom/string ids and so drops every numeric pin.
+/// Parse `lib/pinouts/<x>.sexp` into a pin_id -> function-name map. Numeric pin
+/// ids stringify to "5", "11", … — the spelling the evaluator's `ids.pinId`
+/// gives a `PinRef.pin`, and the one `erc.loadPinoutMap` and
+/// `kicad_sch/shape.zig`'s `readPinout` now key on too (via `Node.tokenText`).
 fn loadPinoutNames(allocator: Allocator, path: []const u8) ?std.StringHashMapUnmanaged([]const u8) {
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, 1 << 18) catch return null;
+    const content = infra_fs.cwd().readFileAlloc(allocator, path, lib_limits.max_lib_file_bytes) catch return null;
     const nodes = parser_mod.parse(allocator, content) catch return null;
     if (nodes.len == 0) return null;
     const top = nodes[0].asList() orelse return null;
@@ -975,10 +1176,14 @@ fn loadPinoutNames(allocator: Allocator, path: []const u8) ?std.StringHashMapUnm
     return map;
 }
 
-/// Pin identifier as a string: bare number -> "5", atom/string -> itself.
+/// Pin identifier as a string: bare number -> "5", atom/string -> itself. A
+/// numeric token that is not a representable integer (`1e30`) is no pad at all,
+/// so it returns null and the caller skips the row — same as `ids.pinId`. It
+/// used to fall back to pad "0", which invented a row and could shadow a real
+/// `(pin 0 …)` entry.
 fn pinIdStr(allocator: Allocator, node: ast.Node) ?[]const u8 {
     if (node.asNumber()) |n| {
-        const i: i64 = numeric.checkedInt(i64, n) orelse 0;
+        const i: i64 = numeric.checkedInt(i64, n) orelse return null;
         return std.fmt.allocPrint(allocator, "{d}", .{i}) catch null;
     }
     return node.asAtom() orelse node.asString();
@@ -989,6 +1194,7 @@ fn analyzeHub(
     allocator: Allocator,
     pin_groups: []const env_mod.PinGroup,
     hub_ref: []const u8,
+    view: SchematicView,
 ) !?HubAnalysis {
     const hub_inst = ctx.inst_map.get(hub_ref) orelse return null;
     // Test points get a dedicated table at the top of the page; they don't
@@ -1064,8 +1270,15 @@ fn analyzeHub(
                 return pinOrder(a, b);
             }
         }.lt);
-        const hub_pg = try hub_mod.groupHubPins(ctx, pins, adj_entries, &pn_map);
-        for (hub_pg) |g| {
+        const hub_pg = switch (view) {
+            .original => try hub_mod.groupHubPins(ctx, pins, adj_entries, &pn_map),
+            .functional => try hub_mod.groupHubPinsFunctional(ctx, pins, adj_entries, &pn_map),
+        };
+        const ordered = switch (view) {
+            .original => hub_pg,
+            .functional => try orderFunctionalPinGroups(ctx, hub_ref, hub_pg),
+        };
+        for (ordered) |g| {
             var tagged = g;
             tagged.group = grp;
             try all_groups.append(allocator, tagged);
@@ -1078,6 +1291,120 @@ fn analyzeHub(
         .inst = hub_inst,
         .groups = try all_groups.toOwnedSlice(allocator),
     };
+}
+
+fn pinGroupCanonicalNet(ctx: *RenderCtx, hub_ref: []const u8, group: PinGroup) ![]const u8 {
+    for (group.conns) |conn| {
+        const key = try std.fmt.allocPrint(ctx.allocator, "{s}.{s}", .{ hub_ref, conn.pin });
+        if (ctx.pin_canonical_nets.get(key)) |net| return draw.baseNetName(net);
+    }
+    return "";
+}
+
+/// Lift `items[from]` out and re-seat it at `after + 1`, sliding everything in
+/// between one slot later. Generic over the element type so the pin groups and
+/// their parallel canonical-net cache are permuted by the same call and cannot
+/// drift out of sync.
+fn moveGroupAfter(comptime T: type, items: []T, from: usize, after: usize) void {
+    std.debug.assert(from > after + 1);
+    const moved = items[from];
+    std.mem.copyBackwards(T, items[after + 2 .. from + 1], items[after + 1 .. from]);
+    items[after + 1] = moved;
+}
+
+fn isFeedbackPinGroup(group: PinGroup) bool {
+    for (group.stub_labels) |label| {
+        if (isFeedbackPinLabel(label)) return true;
+    }
+    return isFeedbackPinLabel(group.display_name);
+}
+
+fn isFeedbackPinLabel(label: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(label, "FB") or
+        std.ascii.eqlIgnoreCase(label, "VFB") or
+        std.ascii.eqlIgnoreCase(label, "SENSE") or
+        std.ascii.eqlIgnoreCase(label, "VSENSE") or
+        std.ascii.startsWithIgnoreCase(label, "FB_(") or
+        std.ascii.startsWithIgnoreCase(label, "VFB_(") or
+        std.ascii.startsWithIgnoreCase(label, "SENSE_(") or
+        std.ascii.startsWithIgnoreCase(label, "VSENSE_(");
+}
+
+fn isFunctionalSignalTerminal(net: []const u8) bool {
+    if (net.len == 0 or draw.isGroundNet(net)) return false;
+    for (rails_mod.schematic_supply_prefixes) |prefix| {
+        if (std.ascii.startsWithIgnoreCase(net, prefix)) return false;
+    }
+    return true;
+}
+
+/// `canonical_nets` is the per-position canonical net of `groups`, computed once
+/// per hub by the caller and permuted alongside it. Deriving it here instead
+/// cost an `allocPrint` per (source conn × candidate) pair — O(n²) arena
+/// garbage per hub, on a page that renders every hub of every section.
+fn relatedTargetIndex(
+    ctx: *RenderCtx,
+    hub_ref: []const u8,
+    groups: []const PinGroup,
+    canonical_nets: []const []const u8,
+    source_idx: usize,
+) !?usize {
+    const source = groups[source_idx];
+    const accepts_supply = isFeedbackPinGroup(source);
+    for (source.conns) |conn| {
+        const spoke = switch (conn.endpoint) {
+            .pin => |pin| pin,
+            .net => continue,
+        };
+        if (!ctx.spoke_set.contains(spoke.ref_des)) continue;
+        const terminal = draw.baseNetName(try connection.getConnTerminal(ctx, conn.endpoint, hub_ref, conn.pin));
+        if (!accepts_supply and !isFunctionalSignalTerminal(terminal)) continue;
+        for (canonical_nets, 0..) |candidate_net, candidate_idx| {
+            if (candidate_idx == source_idx) continue;
+            if (std.mem.eql(u8, terminal, candidate_net)) return candidate_idx;
+        }
+    }
+    return null;
+}
+
+/// Keep physical order as the baseline, then close only the gaps that carry a
+/// functional connection. The later group moves beside the earlier one, so all
+/// unrelated pins retain their relative order. This covers feedback dividers
+/// and non-supply signal returns such as OSCINP/OSCINM, RFOUTBM/RFOUTBP, and
+/// CPOUT/VTUNE without pulling ordinary VDD/VCC bias networks out of sequence.
+fn orderFunctionalPinGroups(
+    ctx: *RenderCtx,
+    hub_ref: []const u8,
+    groups: []const PinGroup,
+) ![]const PinGroup {
+    var ordered: std.ArrayList(PinGroup) = .empty;
+    try ordered.appendSlice(ctx.allocator, groups);
+
+    // Canonical net per position, permuted in lockstep with `ordered` below.
+    const canonical_nets = try ctx.allocator.alloc([]const u8, ordered.items.len);
+    for (ordered.items, canonical_nets) |group, *net| net.* = try pinGroupCanonicalNet(ctx, hub_ref, group);
+
+    // Each group is considered as a source exactly once, in position order.
+    // `source_idx` must therefore only ever advance: an earlier revision reset
+    // it to `target_idx + 1` after a backward move, which — since that branch
+    // requires `source_idx > target_idx + 1` — rewound to at or before the
+    // current position. Two groups both related to one earlier target then
+    // swapped the same pair of slots forever, spinning a request thread and
+    // leaking an arena allocation per pass until the box ran out of memory.
+    // Nothing is lost by not rewinding: a backward move only shifts groups
+    // that already had their turn as a source.
+    var source_idx: usize = 0;
+    while (source_idx < ordered.items.len) : (source_idx += 1) {
+        const target_idx = try relatedTargetIndex(ctx, hub_ref, ordered.items, canonical_nets, source_idx) orelse continue;
+        if (target_idx > source_idx + 1) {
+            moveGroupAfter(PinGroup, ordered.items, target_idx, source_idx);
+            moveGroupAfter([]const u8, canonical_nets, target_idx, source_idx);
+        } else if (source_idx > target_idx + 1) {
+            moveGroupAfter(PinGroup, ordered.items, source_idx, target_idx);
+            moveGroupAfter([]const u8, canonical_nets, source_idx, target_idx);
+        }
+    }
+    return ordered.toOwnedSlice(ctx.allocator);
 }
 
 fn writeSectionPorts(w: anytype, sec: Section) !void {
@@ -1219,7 +1546,11 @@ const SubBlockMode = enum {
 /// source and evaluated to the same shape (instance/net counts and the same
 /// component+value sequence). Module calls with different parameters that
 /// change the produced circuit fail the sequence check and render apart.
-fn sameSubBlockShape(a: env_mod.SubBlock, b: env_mod.SubBlock) bool {
+///
+/// Public because it is the single authority on this question: the schematic
+/// page collapses identical repeats into one card, and `export_pdf.zig` gives
+/// them one PDF page, off the same predicate.
+pub fn sameSubBlockShape(a: env_mod.SubBlock, b: env_mod.SubBlock) bool {
     if (a.source.len == 0 or !std.mem.eql(u8, a.source, b.source)) return false;
     if (a.block.instances.len != b.block.instances.len) return false;
     if (a.block.nets.len != b.block.nets.len) return false;
@@ -1238,7 +1569,7 @@ const SubBlockGroup = struct {
 };
 
 fn writeSubBlockCard(
-    ctx: *RenderCtx,
+    page_render: PageRender,
     w: anytype,
     allocator: Allocator,
     sb: env_mod.SubBlock,
@@ -1270,21 +1601,20 @@ fn writeSubBlockCard(
         try w.writeAll("<span class=\"pill pill-ok\">sub circuit</span>");
     }
     // Right-side header actions: "Copy source" (pulls the underlying module/file
-    // text via /api/module-source) plus the Schematic ⇄ PCB Layout toggle. The
-    // toggle flips this card's body between the schematic hubs and an on-demand
-    // PCB-layout iframe (see writeSubCircuitPcb / SUBC_TOGGLE_SCRIPT) — replacing
-    // the old open-in-new-tab links so the layout can be viewed, edited, roughed
-    // and saved without leaving the schematic page.
+    // text via /api/module-source) plus a link to this sub circuit's PCB layout.
+    //
+    // The layout is a LINK, never an embed. It used to be a Schematic ⇄ PCB
+    // toggle that swapped this card's body for a `/pcb-layout/…?embed=1` iframe,
+    // which meant opening a sub circuit pulled a whole second page — placement
+    // solve, sidecar parse and all — into the schematic. This page renders the
+    // design's `.sexp` and nothing else, so the layout opens in its own tab.
     try w.writeAll("<div class=\"subc-head-actions\">");
     if (sb.source.len > 0) {
         try w.writeAll("<button type=\"button\" class=\"copy-src-btn\" data-src=\"");
         try writeHtmlEscaped(w, sb.source);
         try w.writeAll("\">Copy source</button>");
     }
-    try w.writeAll("<div class=\"subc-toggle\" role=\"group\" aria-label=\"View\">");
-    try w.writeAll("<button type=\"button\" class=\"subc-tab active\" data-subc-view=\"sch\">Schematic</button>");
-    try w.writeAll("<button type=\"button\" class=\"subc-tab\" data-subc-view=\"pcb\">PCB Layout</button>");
-    try w.writeAll("</div>"); // .subc-toggle
+    try writeSubCircuitPcbLink(w, page_render.design_name, slug, sb);
     try w.writeAll("</div>"); // .subc-head-actions
     try w.writeAll("</div>"); // .sec-head
     try w.writeAll(secDescOpen);
@@ -1323,19 +1653,7 @@ fn writeSubBlockCard(
         }
     }
 
-    // The card body is two stacked views the header toggle flips between. The
-    // schematic hubs are the default; the PCB view loads its iframe on demand.
-    try w.writeAll("<div class=\"subc-view subc-sch\">");
-    try writeSectionHubs(ctx, w, allocator, sb_pin_groups.items, hub_refs.items, check_results);
-    try w.writeAll("</div>");
-
-    // PCB-layout view (hidden until the toggle selects it). A module sub circuit
-    // gets the *editable* embed of its own layout (?embed=1&edit=1 — drag, Rough,
-    // Save, ★ all write the module's lib/modules/<m>.layouts.json), so the user
-    // can lay it out / rough it right here. A path- or inline-sourced sub circuit
-    // has no reusable module layout, so it falls back to the read-only
-    // design-scoped preview (?sub=<slug>). Wired by SUBC_TOGGLE_SCRIPT.
-    try writeSubCircuitPcb(w, slug, sb);
+    try writeSectionHubs(page_render, w, allocator, sb_pin_groups.items, hub_refs.items, check_results);
 
     try w.writeAll(switch (mode) {
         .standalone => sectionClose,
@@ -1343,237 +1661,45 @@ fn writeSubBlockCard(
     });
 }
 
-/// Global PCB-layout controls shared by every sub circuit's inline PCB view. The
-/// whole-design layout is intentionally not offered (it places every component
-/// at once, which is too slow to be useful); each `(sub-block …)` card loads its
-/// own PCB iframe on demand using these via/clearance/DRC values. The number
-/// inputs mirror the standalone PCB page's Route panel defaults
-/// (router.RouteParams). Read by SUBC_TOGGLE_SCRIPT when building each iframe URL.
-fn writePcbGlobals(w: *std.Io.Writer) !void {
-    try w.writeAll(
-        \\<details class="pcb-globals" id="page-pcb-globals">
-        \\<summary>PCB Layout settings <span class="sch-card-sub muted">via / trace / DRC — used by each sub circuit's PCB view</span></summary>
-        \\<div class="pcb-globals-body">
-        \\<label>Track <input id="g-tw" type="number" step="0.05" min="0.05" value="0.127"></label>
-        \\<label>Clearance <input id="g-cl" type="number" step="0.05" min="0.05" value="0.127"></label>
-        \\<label>Via drill <input id="g-vd" type="number" step="0.05" min="0.1" value="0.2"></label>
-        \\<label>Via &Oslash; <input id="g-va" type="number" step="0.05" min="0.2" value="0.4"></label>
-        \\<label class="pcb-globals-chk"><input id="g-clr-show" type="checkbox"> show clearance</label>
-        \\<label class="pcb-globals-chk"><input id="g-drc-show" type="checkbox" checked> show DRC</label>
-        \\<span class="pcb-globals-hint muted">Switch a sub circuit to its &ldquo;PCB Layout&rdquo;
-        \\view to lay it out. Changing a value here applies the next time a PCB view loads.</span>
-        \\</div>
-        \\</details>
-    );
-}
-
-/// The PCB-layout view of a sub circuit card — the toggle's "PCB Layout" panel.
-/// A lazily-loaded iframe (no `src` until the toggle first selects PCB, so
-/// nothing is placed on page load) plus a one-line hint and an "open full editor"
-/// escape hatch. `data-mod` is the sub circuit's module name (empty for
-/// path-/inline-sourced ones) and `data-sub` its slug; SUBC_TOGGLE_SCRIPT reads
-/// both to build the editable-module vs. read-only-preview iframe URL.
-fn writeSubCircuitPcb(w: *std.Io.Writer, slug: []const u8, sb: env_mod.SubBlock) !void {
-    const mod_name = moduleSourceName(sb) orelse "";
-    // `slug` is review.slugify output ([a-z0-9-]) — safe in an attribute and a
-    // URL component without further escaping.
-    try w.writeAll("<div class=\"subc-view subc-pcb\" hidden data-sub=\"");
-    try w.writeAll(slug);
-    try w.writeAll("\" data-mod=\"");
-    try writeHtmlEscaped(w, mod_name);
-    try w.writeAll("\"><div class=\"subc-pcb-bar\">");
-    const hint_mid = " drag to arrange, <b>Rough</b> for a clustered start, " ++
-        "then ★ a saved layout to bless it. ";
-    if (mod_name.len > 0) {
-        try w.writeAll("<span class=\"subc-pcb-hint muted\">Editing <b>");
-        try writeHtmlEscaped(w, mod_name);
-        try w.writeAll("</b> —" ++ hint_mid ++
-            "Saved into the module, so every design using it picks it up.</span>");
+/// The sub circuit's "PCB Layout" header link — the one way to its layout from
+/// this page, opening in a new tab rather than embedding.
+///
+/// A module sub circuit owns a reusable layout, so it links to that module's own
+/// editor (`/pcb-layout/<module>`) where drag / Rough / Save / ★ write
+/// `lib/modules/<module>.layouts.json` and every design instantiating it picks
+/// the result up. A path- or inline-sourced sub circuit has no reusable module,
+/// so it links to the design-scoped view of just its slice (`?sub=<slug>`).
+///
+/// `slug` is `review.slugify` output ([a-z0-9-]), safe unescaped in a URL;
+/// `design_name` and the module name are percent-encoded.
+fn writeSubCircuitPcbLink(
+    w: *std.Io.Writer,
+    design_name: []const u8,
+    slug: []const u8,
+    sb: env_mod.SubBlock,
+) !void {
+    try w.writeAll("<a class=\"subc-pcb-open\" target=\"_blank\" rel=\"noopener\" href=\"/pcb-layout/");
+    if (moduleSourceName(sb)) |m| {
+        try writeUrlEncoded(w, m);
+        try w.writeAll("\">");
     } else {
-        try w.writeAll("<span class=\"subc-pcb-hint muted\">Lay it out:" ++ hint_mid ++
-            "Saved with this design.</span>");
+        try writeUrlEncoded(w, design_name);
+        try w.writeAll("?sub=");
+        try w.writeAll(slug);
+        try w.writeAll("\">");
     }
-    try w.writeAll("<a class=\"subc-pcb-open view-src-link\" target=\"_blank\" rel=\"noopener\" href=\"#\">Open full editor \u{2197}</a>");
-    try w.writeAll("</div><div class=\"subc-pcb-frame-wrap\">");
-    try w.writeAll("<iframe class=\"subc-pcb-frame\" title=\"PCB layout\" loading=\"lazy\"></iframe>");
-    try w.writeAll("</div>"); // .subc-pcb-frame-wrap
-    try w.writeAll("</div>"); // .subc-pcb
+    try w.writeAll("PCB Layout \u{2197}</a>");
 }
 
-/// "Module layouts" checklist panel — one row per top-level `(sub-block …)`,
-/// tracking each sub-module through the placement workflow: AI authors the
-/// grouping in the DSL, seeds a **Rough** placement (`?rough=1`), and a human
-/// hand-finishes it and **stars** the result (the `/pcb-layout` panel's ★ — the
-/// "done" marker). The Rough/Starred columns read each module's
-/// `<module>.layouts.json` sidecar (`layout_status`). The `<summary>` shows the
-/// starred tally even when collapsed and the card opens itself when a sub-module
-/// still lacks a starred layout. A `(reflow)` sub-block is intentionally re-flowed
-/// by the parent and so doesn't count as missing.
-/// Caller guards on `block.sub_blocks.len > 0`.
-fn writeModuleLayoutStatus(allocator: Allocator, project_dir: []const u8, w: *std.Io.Writer, block: *const DesignBlock) !void {
-    // One sidecar read per sub-block, reused by both the summary tally and the
-    // per-row chips. A non-module sub-block (path source / inline block) has no
-    // resolvable sidecar, so its status stays all-false and reads as "—".
-    const statuses = try allocator.alloc(layout_status.ModuleLayoutStatus, block.sub_blocks.len);
-    defer allocator.free(statuses);
-    var have: usize = 0;
-    var missing: usize = 0;
-    var rough_n: usize = 0;
-    for (block.sub_blocks, statuses) |sb, *st| {
-        st.* = if (moduleSourceName(sb)) |m| layout_status.read(allocator, project_dir, m) else .{};
-        if (st.rough) rough_n += 1;
-        if (st.starred) {
-            have += 1;
-        } else if (!sb.reflow) {
-            missing += 1;
-        }
-    }
-    const total = block.sub_blocks.len;
-    const summary_pill: []const u8 = if (missing == 0) "pill-ok" else pill_warn;
-
-    try w.print(
-        "<details id=\"page-module-layouts\" class=\"sch-bom-card page-anchor\"{s}>",
-        .{if (missing > 0) " open" else ""},
-    );
-    try w.print(
-        "<summary>Module layouts <span class=\"pill {s}\">{d}/{d} starred</span>",
-        .{ summary_pill, have, total },
-    );
-    try w.print(
-        "<span class=\"sch-card-sub muted\">{d} rough · {d} starred</span>",
-        .{ rough_n, have },
-    );
-    if (missing > 0) {
-        try w.print(
-            "<span class=\"sch-card-sub muted\">{d} sub circuit{s} still need a starred layout</span>",
-            .{ missing, if (missing == 1) "" else "s" },
-        );
-    }
-    try w.writeAll("</summary>");
-
-    try w.writeAll(
-        "<p class=\"muted\" style=\"font-size:0.85rem;margin:6px 0 10px;\">" ++
-            "Workflow per sub circuit: author the placement grouping in the DSL, " ++
-            "seed a <b>Rough</b> placement on the sub circuit's PCB Layout view (the “Rough” button), " ++
-            "hand-finish it, then <b>star</b> the saved layout (the ★) as its blessed reference — " ++
-            "do this for every sub circuit before a KiCad hand-off. A <code>(reflow)</code> " ++
-            "sub circuit is placed freely by the parent and needs none.</p>",
-    );
-
-    try w.writeAll("<table><thead><tr><th>Sub circuit</th><th>Module</th>" ++
-        "<th>Rough</th><th>Starred</th></tr></thead><tbody>");
-    for (block.sub_blocks, statuses) |sb, st| {
-        const mod_name = moduleSourceName(sb);
-        try w.writeAll(row_td_code_open);
-        try writeHtmlEscaped(w, sb.name);
-        try w.writeAll("</code></td><td>");
-        if (sb.source.len > 0) {
-            // Module-name sources (no slash) link to the standalone /modules
-            // viewer where the layout is authored; path-based sub-blocks can't
-            // route there, so show the bare path.
-            if (mod_name) |m| {
-                try w.writeAll("<a href=\"/modules/");
-                try writeUrlEncoded(w, m);
-                try w.writeAll("\">");
-                try writeHtmlEscaped(w, m);
-                try w.writeAll("</a>");
-            } else {
-                try w.writeAll("<code>");
-                try writeHtmlEscaped(w, sb.source);
-                try w.writeAll("</code>");
-            }
-        } else {
-            try writeHtmlEscaped(w, sb.block.name);
-        }
-
-        // Rough — has a rough placement been seeded for this module?
-        try w.writeAll(td_cell_sep);
-        if (mod_name == null) {
-            try w.writeAll(layout_dash);
-        } else if (st.rough) {
-            try w.writeAll("<span class=\"pill pill-ok\">rough \u{2713}</span>");
-        } else {
-            try w.writeAll(rough_todo_cell);
-        }
-
-        // Starred — has a finished layout been starred (the ★ / sync default)?
-        try w.writeAll(td_cell_sep);
-        if (mod_name == null) {
-            try w.writeAll(layout_dash);
-        } else if (st.starred) {
-            try w.writeAll("<span class=\"pill pill-ok\">starred \u{2605}</span>");
-        } else if (sb.reflow) {
-            try w.writeAll("<span class=\"pill pill-concept\">reflow — parent places</span>");
-        } else {
-            try w.writeAll(starred_todo_cell);
-        }
-        try w.writeAll(row_td_close);
-    }
-    try w.writeAll(table_details_close);
-}
-
-/// The module name a sub-block instantiates, for resolving its layout sidecar:
-/// `sb.source` when it is a bare module name (non-empty, no `/`). Null for
-/// path-based sources and inline design-blocks, which have no `/modules/` page
-/// or `<module>.layouts.json` to read.
+/// The module name a sub-block instantiates: `sb.source` when it is a bare
+/// module name (non-empty, no `/`). Null for path-based sources and inline
+/// design-blocks, which have no reusable module and so no `/pcb-layout/<module>`
+/// page of their own.
 fn moduleSourceName(sb: env_mod.SubBlock) ?[]const u8 {
     if (sb.source.len == 0) return null;
     if (std.mem.indexOfScalar(u8, sb.source, '/') != null) return null;
     return sb.source;
 }
-
-/// Shared "no data" cell for the Rough/Starred columns (a non-module sub-block).
-const layout_dash = "<span class=\"muted\">—</span>";
-
-/// Rough column, not-yet-seeded state.
-const rough_todo_cell = "<span class=\"pill pill-todo\" title=\"No rough placement seeded yet — " ++
-    "open the module's PCB Layout and hit Rough\">pending</span>";
-
-/// Starred column, not-yet-starred state.
-const starred_todo_cell = "<span class=\"pill pill-todo\" title=\"No layout starred yet — " ++
-    "finish the layout and star it (\u{2605}) on the module's PCB Layout view\">\u{2606} not yet</span>";
-
-/// Wires every sub circuit card's Schematic ⇄ PCB Layout toggle. Clicking "PCB
-/// Layout" hides the schematic hubs and reveals the PCB view, lazily setting the
-/// iframe `src` on first show (so opening the schematic page never triggers a
-/// placement). A module sub circuit (`data-mod` set) loads the *editable* embed
-/// of its own layout — drag / Rough / Save / ★ write the module's layout sidecar;
-/// others load the read-only design-scoped preview (`?sub=`). The iframe URL
-/// carries the global PCB-settings (via/track/clearance/DRC). Iterates `.subc-pcb`
-/// (one per card) and resolves each card via `closest`, so a section that adopts
-/// an attached sub circuit doesn't double-wire it. Reuses the `DESIGN_NAME`
-/// global declared by writeScripts, so this must be emitted after it.
-const subc_toggle_script =
-    \\<script>(function(){
-    \\function gv(id,dflt){var e=document.getElementById(id);var v=e?parseFloat(e.value):NaN;return (v>0)?v:dflt;}
-    \\function gck(id){var e=document.getElementById(id);return (e&&e.checked)?1:0;}
-    \\function settings(){return "track_width="+gv("g-tw",0.127)+"&clearance="+gv("g-cl",0.127)
-    \\ +"&via_drill="+gv("g-vd",0.2)+"&via_dia="+gv("g-va",0.4)
-    \\ +"&clr="+gck("g-clr-show")+"&drc="+gck("g-drc-show");}
-    \\function embedUrl(mod,sub){
-    \\ if(mod)return "/pcb-layout/"+encodeURIComponent(mod)+"?embed=1&edit=1&"+settings();
-    \\ return "/pcb-layout/"+encodeURIComponent(DESIGN_NAME)+"?sub="+encodeURIComponent(sub)
-    \\  +"&embed=1&edit=1&"+settings();}
-    \\function fullUrl(mod,sub){
-    \\ if(mod)return "/pcb-layout/"+encodeURIComponent(mod);
-    \\ return "/pcb-layout/"+encodeURIComponent(DESIGN_NAME)+"?sub="+encodeURIComponent(sub)+"&embed=1&edit=1";}
-    \\document.querySelectorAll(".subc-pcb").forEach(function(pcb){
-    \\ var card=pcb.closest(".sch-section,.sch-attached-sub"); if(!card)return;
-    \\ var tabs=card.querySelectorAll(".subc-tab");
-    \\ var sch=card.querySelector(".subc-sch");
-    \\ var frame=pcb.querySelector(".subc-pcb-frame");
-    \\ if(!tabs.length||!sch||!frame)return;
-    \\ var mod=pcb.getAttribute("data-mod")||""; var sub=pcb.getAttribute("data-sub")||"";
-    \\ var open=pcb.querySelector(".subc-pcb-open"); if(open)open.setAttribute("href",fullUrl(mod,sub));
-    \\ var loaded=false;
-    \\ function show(view){
-    \\  var isPcb=(view==="pcb"); sch.hidden=isPcb; pcb.hidden=!isPcb;
-    \\  tabs.forEach(function(t){t.classList.toggle("active",t.getAttribute("data-subc-view")===view);});
-    \\  if(isPcb&&!loaded){loaded=true; frame.setAttribute("src",embedUrl(mod,sub));}}
-    \\ tabs.forEach(function(t){t.addEventListener("click",function(){show(t.getAttribute("data-subc-view"));});});
-    \\});
-    \\})();</script>
-;
 
 /// Minimal DesignBlock for attachment tests — all collections empty so the
 /// test only populates the fields it exercises.
@@ -1587,6 +1713,182 @@ fn emptyAttachBlock(name: []const u8) DesignBlock {
         .groups = &.{},
         .sub_blocks = &.{},
     };
+}
+
+fn svgPassiveCount(svg: []const u8) !usize {
+    const needle = "data-passive-count=\"";
+    var total: usize = 0;
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, svg, cursor, needle)) |at| {
+        const start = at + needle.len;
+        const end = std.mem.indexOfScalarPos(u8, svg, start, '"') orelse return error.InvalidCharacter;
+        total += try std.fmt.parseInt(usize, svg[start..end], 10);
+        cursor = end + 1;
+    }
+    return total;
+}
+
+fn svgFirstY1After(svg: []const u8, marker: []const u8) !f64 {
+    const marker_at = std.mem.indexOf(u8, svg, marker) orelse return error.InvalidCharacter;
+    const y_at = std.mem.indexOfPos(u8, svg, marker_at + marker.len, " y1=\"") orelse return error.InvalidCharacter;
+    const start = y_at + " y1=\"".len;
+    const end = std.mem.indexOfScalarPos(u8, svg, start, '"') orelse return error.InvalidCharacter;
+    return std.fmt.parseFloat(f64, svg[start..end]);
+}
+
+// spec: render_svg - Passive accounting in the SVG equals the physical source count even when identical spokes fold into one visual symbol
+test "SVG passive metadata preserves exact source count across folded spokes" {
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "C1", .component = "cap-0402", .value = "0.1uF", .footprint = "", .symbol = "generic-cap" },
+        .{ .ref_des = "C2", .component = "cap-0402", .value = "0.1uF", .footprint = "", .symbol = "generic-cap" },
+    };
+    const supply_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "C1", .pin = "1" },
+        .{ .ref_des = "C2", .pin = "1" },
+    };
+    const ground_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "C1", .pin = "2" },
+        .{ .ref_des = "C2", .pin = "2" },
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "VCC", .pins = &supply_pins },
+        .{ .name = "GND", .pins = &ground_pins },
+    };
+    var block = emptyAttachBlock("passive-accounting");
+    block.instances = &instances;
+    block.nets = &nets;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var ctx = try setupRenderCtx(allocator, &block);
+    var svg: std.Io.Writer.Allocating = .init(allocator);
+    try std.testing.expect(try renderHubSvg(&ctx, &svg.writer, allocator, &.{}, "U1"));
+
+    var source_passives: usize = 0;
+    for (instances) |inst| {
+        const flat: FlatInst = .{ .ref_des = inst.ref_des, .component = inst.component, .value = inst.value, .symbol = inst.symbol };
+        if (!draw.isHub(flat)) source_passives += 1;
+    }
+    try std.testing.expectEqual(source_passives, try svgPassiveCount(svg.written()));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, svg.written(), "data-passive-count=\""));
+    try std.testing.expect(std.mem.indexOf(u8, svg.written(), "data-passive-count=\"2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, svg.written(), ">C1 2× 0.1uF</text>") != null);
+}
+
+// spec: render_svg - A Functional shared RF bias rail directly joins compact P/M pull-up rows and centers its choke/bypass tree between them
+// spec: render_svg - A Functional RF pair keeps its grounded termination and externally visible signal on clear outer rows instead of crossing the centered shared-bias tree
+// spec: render_svg - Functional shared supply rails keep signal-owned RF bias chokes off unrelated pull-ups such as CE
+test "functional RF bias rail joins compact output pull-ups around a centered bias tree" {
+    const hub_pins = [_]env_mod.PartPin{
+        .{ .pin = "1", .net = "LMX_CE", .pin_name = "CE" },
+        .{ .pin = "2", .net = "AUX_2", .pin_name = "AUX2" },
+        .{ .pin = "3", .net = "AUX_3", .pin_name = "AUX3" },
+        .{ .pin = "7", .net = "V_3V3", .pin_name = "VCC" },
+        .{ .pin = "11", .net = "V_3V3", .pin_name = "VCC" },
+        .{ .pin = "22", .net = "LMX_RFOUTAM", .pin_name = "RFOUTAM" },
+        .{ .pin = "23", .net = "LMX_RFOUTAP", .pin_name = "RFOUTAP" },
+    };
+    const hub_parts = [_]env_mod.Part{.{ .name = "Straps", .pins = &hub_pins }};
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "lmx2595", .value = "", .footprint = "", .symbol = "lmx2595", .parts = &hub_parts },
+        .{ .ref_des = "R_AM", .component = "res-0402", .value = "50R", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "R_AP", .component = "res-0402", .value = "50R", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "C_AM_TERM", .component = "cap-0402", .value = "0.01uF", .footprint = "", .symbol = "generic-cap" },
+        .{ .ref_des = "R_AM_TERM", .component = "res-0402", .value = "50R", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "C_AP_OUT", .component = "cap-0402", .value = "0.01uF", .footprint = "", .symbol = "generic-cap" },
+        .{ .ref_des = "L_BIAS", .component = "ind-0402", .value = "18nH", .footprint = "", .symbol = "generic-ind" },
+        .{ .ref_des = "C_BIAS", .component = "cap-0402", .value = "0.01uF", .footprint = "", .symbol = "generic-cap" },
+        .{ .ref_des = "R_CE", .component = "res-0402", .value = "100K", .footprint = "", .symbol = "generic-res" },
+    };
+    const am_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "22" },
+        .{ .ref_des = "R_AM", .pin = "1" },
+        .{ .ref_des = "C_AM_TERM", .pin = "1" },
+    };
+    const ap_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "23" },
+        .{ .ref_des = "R_AP", .pin = "1" },
+        .{ .ref_des = "C_AP_OUT", .pin = "2" },
+    };
+    const bias_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "R_AM", .pin = "2" },
+        .{ .ref_des = "R_AP", .pin = "2" },
+        .{ .ref_des = "L_BIAS", .pin = "1" },
+        .{ .ref_des = "C_BIAS", .pin = "1" },
+    };
+    const term_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "C_AM_TERM", .pin = "2" },
+        .{ .ref_des = "R_AM_TERM", .pin = "1" },
+    };
+    const ground_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "R_AM_TERM", .pin = "2" },
+        .{ .ref_des = "C_BIAS", .pin = "2" },
+    };
+    const out_pins = [_]env_mod.PinRef{.{ .ref_des = "C_AP_OUT", .pin = "1" }};
+    const ce_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "R_CE", .pin = "2" },
+    };
+    const aux_2_pins = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "2" }};
+    const aux_3_pins = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "3" }};
+    const supply_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "7" },
+        .{ .ref_des = "U1", .pin = "11" },
+        .{ .ref_des = "L_BIAS", .pin = "2" },
+        .{ .ref_des = "R_CE", .pin = "1" },
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "LMX_CE", .pins = &ce_pins },
+        .{ .name = "AUX_2", .pins = &aux_2_pins },
+        .{ .name = "AUX_3", .pins = &aux_3_pins },
+        .{ .name = "LMX_RFOUTAM", .pins = &am_pins },
+        .{ .name = "LMX_RFOUTAP", .pins = &ap_pins },
+        .{ .name = "LO_BIAS_A", .pins = &bias_pins },
+        .{ .name = "RFOUTAM_TERM", .pins = &term_pins },
+        .{ .name = "GND", .pins = &ground_pins },
+        .{ .name = "LO1_SYNTH", .pins = &out_pins },
+        .{ .name = "V_3V3", .pins = &supply_pins },
+    };
+    const ports = [_]env_mod.Port{
+        .{ .name = "LO1_SYNTH", .net = "LO1_SYNTH", .direction = "out" },
+        .{ .name = "V_3V3", .net = "V_3V3", .direction = "in" },
+        .{ .name = "GND", .net = "GND", .direction = "bidi" },
+    };
+    var block = emptyAttachBlock("lmx-output-network");
+    block.instances = &instances;
+    block.nets = &nets;
+    block.ports = &ports;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var ctx = try setupRenderCtx(allocator, &block);
+    var svg: std.Io.Writer.Allocating = .init(allocator);
+    try std.testing.expect(try renderHubSvg(&ctx, &svg.writer, allocator, &.{}, "U1"));
+
+    try std.testing.expectEqual(@as(usize, 8), try svgPassiveCount(svg.written()));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, svg.written(), "<g data-ref=\"L_BIAS\""));
+    const pin_22 = std.mem.indexOf(u8, svg.written(), "<g class=\"pin-stub\" data-ref=\"U1\" data-pin=\"22\"").?;
+    const pullup = std.mem.indexOf(u8, svg.written(), "<g data-ref=\"R_AM\"").?;
+    const pin_23 = std.mem.indexOf(u8, svg.written(), "<g class=\"pin-stub\" data-ref=\"U1\" data-pin=\"23\"").?;
+    try std.testing.expect(pin_22 < pullup);
+    try std.testing.expect(pullup < pin_23);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, svg.written(), ">LO_BIAS_A</text>"));
+    try std.testing.expect(std.mem.count(u8, svg.written(), "data-net=\"LO_BIAS_A.local.R_AM\"") >= 3);
+
+    const pin_22_y = try svgFirstY1After(svg.written(), "<g class=\"pin-stub\" data-ref=\"U1\" data-pin=\"22\"");
+    const pin_23_y = try svgFirstY1After(svg.written(), "<g class=\"pin-stub\" data-ref=\"U1\" data-pin=\"23\"");
+    const choke_y = try svgFirstY1After(svg.written(), "<g data-ref=\"L_BIAS\"");
+    const bypass_y = try svgFirstY1After(svg.written(), "<g data-ref=\"C_BIAS\"");
+    const termination_y = try svgFirstY1After(svg.written(), "<g data-ref=\"C_AM_TERM\"");
+    const output_y = try svgFirstY1After(svg.written(), "<g data-ref=\"C_AP_OUT\"");
+    try std.testing.expectApproxEqAbs(pin_22_y + pin_23_y, choke_y + bypass_y, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f64, 80.0), @abs(pin_23_y - pin_22_y), 0.1);
+    try std.testing.expect(@abs(termination_y - choke_y) >= 40.0);
+    try std.testing.expect(@abs(output_y - bypass_y) >= 40.0);
 }
 
 /// Count how many of a spoke's synthesized hub attachments land on `hub_ref`,
@@ -1657,7 +1959,7 @@ test "single-pin-side passive anchors to its lone hub pin, not the busy rail" {
 /// hub-prefixed top-level instance becomes its own card inside one synthetic
 /// section.
 fn writeFlatHubs(
-    ctx: *RenderCtx,
+    page_render: PageRender,
     w: anytype,
     allocator: Allocator,
     block: *const DesignBlock,
@@ -1685,7 +1987,7 @@ fn writeFlatHubs(
         try hub_refs.append(allocator, inst.ref_des);
     }
 
-    try writeSectionHubs(ctx, w, allocator, &.{}, hub_refs.items, check_results);
+    try writeSectionHubs(page_render, w, allocator, &.{}, hub_refs.items, check_results);
 
     try w.writeAll(sectionClose);
 }
@@ -2118,14 +2420,129 @@ fn writeUrlEncoded(w: anytype, s: []const u8) !void {
 /// the source file.
 pub const schematic_css = @embedFile("assets/schematic_inline.css") ++ block_diagram.diagram_css;
 
+test "functional pin order moves a feedback output beside its feedback pin" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var ctx = RenderCtx.init(allocator);
+
+    try ctx.spoke_set.put(allocator, "R_TOP", {});
+    var resistor_adj: std.ArrayList(AdjEntry) = .empty;
+    try resistor_adj.append(allocator, .{ .pin = "1", .endpoint = .{ .pin = .{ .ref_des = "U1", .pin = "2" } } });
+    try resistor_adj.append(allocator, .{ .pin = "2", .endpoint = .{ .net = "VOUT" } });
+    try ctx.adjacency.put(allocator, "R_TOP", resistor_adj);
+    try ctx.pin_canonical_nets.put(allocator, "U1.1", "EN");
+    try ctx.pin_canonical_nets.put(allocator, "U1.2", "FB");
+    try ctx.pin_canonical_nets.put(allocator, "U1.3", "GND");
+    try ctx.pin_canonical_nets.put(allocator, "U1.4", "VOUT");
+
+    const groups = [_]PinGroup{
+        .{ .display_name = "EN", .pin_numbers = "1", .stub_labels = &.{"EN"}, .conns = &.{.{ .pin = "1", .endpoint = .{ .net = "EN" } }} },
+        .{ .display_name = "FB", .pin_numbers = "2", .stub_labels = &.{"FB"}, .conns = &.{.{ .pin = "2", .endpoint = .{ .pin = .{ .ref_des = "R_TOP", .pin = "1" } } }} },
+        .{ .display_name = "GND", .pin_numbers = "3", .stub_labels = &.{"GND"}, .conns = &.{.{ .pin = "3", .endpoint = .{ .net = "GND" } }} },
+        .{ .display_name = "VOUT", .pin_numbers = "4", .stub_labels = &.{"VOUT"}, .conns = &.{.{ .pin = "4", .endpoint = .{ .net = "VOUT" } }} },
+    };
+
+    const ordered = try orderFunctionalPinGroups(&ctx, "U1", &groups);
+    try std.testing.expectEqualStrings("1", ordered[0].pin_numbers);
+    try std.testing.expectEqualStrings("2", ordered[1].pin_numbers);
+    try std.testing.expectEqualStrings("4", ordered[2].pin_numbers);
+    try std.testing.expectEqualStrings("3", ordered[3].pin_numbers);
+}
+
+test "functional pin order pairs signal returns but leaves supply pullups sequential" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var ctx = RenderCtx.init(allocator);
+
+    try ctx.spoke_set.put(allocator, "R_CE", {});
+    try ctx.spoke_set.put(allocator, "R_TUNE", {});
+    var ce_adj: std.ArrayList(AdjEntry) = .empty;
+    try ce_adj.append(allocator, .{ .pin = "1", .endpoint = .{ .pin = .{ .ref_des = "U1", .pin = "1" } } });
+    try ce_adj.append(allocator, .{ .pin = "2", .endpoint = .{ .net = "V_3V3" } });
+    try ctx.adjacency.put(allocator, "R_CE", ce_adj);
+    var tune_adj: std.ArrayList(AdjEntry) = .empty;
+    try tune_adj.append(allocator, .{ .pin = "1", .endpoint = .{ .pin = .{ .ref_des = "U1", .pin = "2" } } });
+    try tune_adj.append(allocator, .{ .pin = "2", .endpoint = .{ .net = "LMX_VTUNE" } });
+    try ctx.adjacency.put(allocator, "R_TUNE", tune_adj);
+
+    try ctx.pin_canonical_nets.put(allocator, "U1.1", "CE");
+    try ctx.pin_canonical_nets.put(allocator, "U1.2", "CPOUT");
+    try ctx.pin_canonical_nets.put(allocator, "U1.7", "V_3V3");
+    try ctx.pin_canonical_nets.put(allocator, "U1.16", "SPI_SCK");
+    try ctx.pin_canonical_nets.put(allocator, "U1.35", "LMX_VTUNE");
+
+    const groups = [_]PinGroup{
+        .{ .display_name = "CE", .pin_numbers = "1", .stub_labels = &.{"CE"}, .conns = &.{.{ .pin = "1", .endpoint = .{ .pin = .{ .ref_des = "R_CE", .pin = "1" } } }} },
+        .{ .display_name = "CPOUT", .pin_numbers = "2", .stub_labels = &.{"CPOUT"}, .conns = &.{.{ .pin = "2", .endpoint = .{ .pin = .{ .ref_des = "R_TUNE", .pin = "1" } } }} },
+        .{ .display_name = "VCC", .pin_numbers = "7", .stub_labels = &.{"VCC"}, .conns = &.{.{ .pin = "7", .endpoint = .{ .net = "V_3V3" } }} },
+        .{ .display_name = "SCK", .pin_numbers = "16", .stub_labels = &.{"SCK"}, .conns = &.{.{ .pin = "16", .endpoint = .{ .net = "SPI_SCK" } }} },
+        .{ .display_name = "VTUNE", .pin_numbers = "35", .stub_labels = &.{"VTUNE"}, .conns = &.{.{ .pin = "35", .endpoint = .{ .net = "LMX_VTUNE" } }} },
+    };
+
+    const ordered = try orderFunctionalPinGroups(&ctx, "U1", &groups);
+    try std.testing.expectEqualStrings("1", ordered[0].pin_numbers);
+    try std.testing.expectEqualStrings("2", ordered[1].pin_numbers);
+    try std.testing.expectEqualStrings("35", ordered[2].pin_numbers);
+    try std.testing.expectEqualStrings("7", ordered[3].pin_numbers);
+    try std.testing.expectEqualStrings("16", ordered[4].pin_numbers);
+}
+
+// spec: render_html - Functional pin ordering terminates when several pins share one earlier partner
+test "functional pin order terminates with two pins related to the same earlier group" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var ctx = RenderCtx.init(allocator);
+
+    // Two spokes land on the same net, so pins 4 and 5 are each "related" to
+    // pin 2 — a target sitting more than one slot earlier, which is the
+    // backward-move branch. Under the old rewind both took turns moving into
+    // the slot after pin 2, displacing each other forever; this test hung
+    // rather than failed. Reproduces /schematics/cyclops-analog, which spun a
+    // request thread past 39 GB RSS instead of ever rendering.
+    for ([_][]const u8{ "R_A", "R_B" }, [_][]const u8{ "4", "5" }) |spoke, hub_pin| {
+        try ctx.spoke_set.put(allocator, spoke, {});
+        var adj: std.ArrayList(AdjEntry) = .empty;
+        try adj.append(allocator, .{ .pin = "1", .endpoint = .{ .pin = .{ .ref_des = "U1", .pin = hub_pin } } });
+        try adj.append(allocator, .{ .pin = "2", .endpoint = .{ .net = "NET_T" } });
+        try ctx.adjacency.put(allocator, spoke, adj);
+    }
+    try ctx.pin_canonical_nets.put(allocator, "U1.1", "SIG_P");
+    try ctx.pin_canonical_nets.put(allocator, "U1.2", "NET_T");
+    try ctx.pin_canonical_nets.put(allocator, "U1.3", "SIG_R");
+    try ctx.pin_canonical_nets.put(allocator, "U1.4", "SIG_A");
+    try ctx.pin_canonical_nets.put(allocator, "U1.5", "SIG_B");
+
+    const groups = [_]PinGroup{
+        .{ .display_name = "P", .pin_numbers = "1", .stub_labels = &.{"P"}, .conns = &.{.{ .pin = "1", .endpoint = .{ .net = "SIG_P" } }} },
+        .{ .display_name = "T", .pin_numbers = "2", .stub_labels = &.{"T"}, .conns = &.{.{ .pin = "2", .endpoint = .{ .net = "NET_T" } }} },
+        .{ .display_name = "R", .pin_numbers = "3", .stub_labels = &.{"R"}, .conns = &.{.{ .pin = "3", .endpoint = .{ .net = "SIG_R" } }} },
+        .{ .display_name = "A", .pin_numbers = "4", .stub_labels = &.{"A"}, .conns = &.{.{ .pin = "4", .endpoint = .{ .pin = .{ .ref_des = "R_A", .pin = "1" } } }} },
+        .{ .display_name = "B", .pin_numbers = "5", .stub_labels = &.{"B"}, .conns = &.{.{ .pin = "5", .endpoint = .{ .pin = .{ .ref_des = "R_B", .pin = "1" } } }} },
+    };
+
+    const ordered = try orderFunctionalPinGroups(&ctx, "U1", &groups);
+
+    // Both related pins end up beside their shared partner, and every input
+    // group survives exactly once — the move must reorder, never duplicate.
+    try std.testing.expectEqual(groups.len, ordered.len);
+    try std.testing.expectEqualStrings("1", ordered[0].pin_numbers);
+    try std.testing.expectEqualStrings("2", ordered[1].pin_numbers);
+    try std.testing.expectEqualStrings("5", ordered[2].pin_numbers);
+    try std.testing.expectEqualStrings("4", ordered[3].pin_numbers);
+    try std.testing.expectEqualStrings("3", ordered[4].pin_numbers);
+}
+
 test "loadPinoutNames rejects a top list whose head is not pinout" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    try tmp.dir.writeFile(.{ .sub_path = "notpinout.sexp", .data = "(notpinout a b)" });
-    const dir = try tmp.dir.realpathAlloc(arena, ".");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "notpinout.sexp", .data = "(notpinout a b)" });
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
     const path = try std.fmt.allocPrint(arena, "{s}/notpinout.sexp", .{dir});
     // The guard `top.len < 2 or top[0] != "pinout"` bails on any non-pinout head.
     // `or`→`and` only bails when BOTH hold, so a well-formed non-pinout list would
@@ -2133,23 +2550,278 @@ test "loadPinoutNames rejects a top list whose head is not pinout" {
     try std.testing.expect(loadPinoutNames(arena, path) == null);
 }
 
-test "schematic header view toggle links both designs and modules to PCB layout" {
+// spec: Web Server - the schematic page serves an embedded pane variant that drops the navbar, page header, and sidebar
+test "the embedded schematic page marks its body for the pane stylesheet" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var block = emptyAttachBlock("Demo");
+    var checks: CheckResultMap = .empty;
+    const full = try renderToHtml(alloc, &block, "", "demo", "", .pass, null, &checks, .{ .path = "/schematics/" });
+    const embedded = try renderToHtml(alloc, &block, "", "demo", "", .pass, null, &checks, .{ .path = "/schematics/", .embed = true });
+
+    // One body class is the whole difference: the drawing is untouched, so a
+    // board pick lands on exactly the card the full page would scroll to.
+    try std.testing.expect(std.mem.indexOf(u8, embedded, "<body data-schematic-view=\"functional\" class=\"sch-embed\">") != null);
+    try std.testing.expect(std.mem.indexOf(u8, full, "class=\"sch-embed\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, full, "<body data-schematic-view=\"functional\">") != null);
+
+    // The chrome the host surface already provides is hidden by stylesheet, so
+    // the pane never flashes a navbar before dropping it.
+    try std.testing.expect(std.mem.indexOf(u8, schematic_css, "body.sch-embed .navbar{display:none;}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schematic_css, "body.sch-embed .sch-head{display:none;}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schematic_css, "body.sch-embed .sch-sidebar{display:none;}") != null);
+}
+
+// spec: render_html - The schematic page renders no thermal panel, linking out to /thermal/:name instead, so the page reads nothing but the design's own .sexp
+test "a review doc with screened thermal parts still renders no thermal panel" {
+    const thermal = @import("eval/thermal.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A part hot enough that the old panel would certainly have drawn a row.
+    const parts = [_]thermal.PartThermal{.{ .ref_des = "U5", .component = "buck" }};
+    var block = emptyAttachBlock("Demo");
+    var checks: CheckResultMap = .empty;
+    const doc: review.ReviewDoc = .{
+        .design_name = "demo",
+        .title = "Demo",
+        .generated_at = "2026-08-19T00:00:00Z",
+        .summary = std.mem.zeroInit(review.Summary, .{ .status = review.Status.pass }),
+        .sections = &.{},
+        .power = .{
+            .budget = &.{},
+            .sequence = &.{},
+            .thermal = .{ .ambient_c = 25, .parts = &parts },
+        },
+        .test_points = &.{},
+        .bom = &.{},
+        .assertions = &.{},
+        .unresolved = &.{},
+    };
+    const html = try renderToHtml(alloc, &block, "", "demo", "", .pass, doc, &checks, .{ .path = "/schematics/" });
+
+    // Neither the panel nor the sidebar chip that used to scroll to it. The
+    // chip mattered as much as the panel: a chip pointing at a section that is
+    // no longer emitted scrolls to nowhere.
+    try std.testing.expect(std.mem.indexOf(u8, html, "page-thermal") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<h2>Thermal</h2>") == null);
+
+    // The nav tab stays — that is where thermal went, and it is the reason
+    // dropping the panel loses the reader nothing.
+    try std.testing.expect(std.mem.indexOf(u8, html, "<a href=\"/thermal/demo\">Thermal</a>") != null);
+}
+
+// spec: render_html - Each sub circuit card links out to its PCB layout in a new tab rather than embedding one, so no sub circuit opens a layout from the schematic page
+test "a sub circuit card carries a PCB-layout link and no embedded layout view" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var mod = emptyAttachBlock("flash-module");
+    const subs = [_]env_mod.SubBlock{.{ .name = "flash", .source = "xspi-flash", .block = &mod }};
+    var block = emptyAttachBlock("Demo");
+    block.sub_blocks = &subs;
+    var checks: CheckResultMap = .empty;
+
+    const html = try renderToHtml(alloc, &block, "", "demo", "", .pass, null, &checks, .{ .path = "/schematics/" });
+
+    // No iframe, no view-swapping tabs, and no global PCB-settings bar that
+    // only ever existed to parameterise those iframes. An iframe is the whole
+    // point: it pulls a second page — placement solve and sidecar parse — into
+    // this one.
+    try std.testing.expect(std.mem.indexOf(u8, html, "subc-pcb-frame") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<iframe") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "subc-tab") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "embed=1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "pcb-globals") == null);
+
+    // Nor the "Module layouts" checklist, which read one .layouts.json per
+    // sub-block, nor the sidebar chip that scrolled to it.
+    try std.testing.expect(std.mem.indexOf(u8, html, "page-module-layouts") == null);
+
+    // What remains is one link, opening in its own tab.
+    try std.testing.expect(std.mem.indexOf(u8, html, "target=\"_blank\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "PCB Layout \u{2197}</a>") != null);
+}
+
+// spec: render_html - A sub circuit backed by a reusable module links to that module's own layout editor, and a path- or inline-sourced one to the design-scoped view of its slice
+test "the PCB-layout link targets the module for a module sub circuit and the design otherwise" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A module-sourced sub circuit owns a reusable layout, so it links to the
+    // module's own editor — where a save writes lib/modules/<m>.layouts.json
+    // and every design instantiating it picks the result up.
+    var mod = emptyAttachBlock("flash-module");
+    const mod_subs = [_]env_mod.SubBlock{.{ .name = "flash", .source = "xspi-flash", .block = &mod }};
+    var mod_block = emptyAttachBlock("Demo");
+    mod_block.sub_blocks = &mod_subs;
+    var checks: CheckResultMap = .empty;
+    const mod_html = try renderToHtml(alloc, &mod_block, "", "demo", "", .pass, null, &checks, .{ .path = "/schematics/" });
+    try std.testing.expect(std.mem.indexOf(u8, mod_html, "href=\"/pcb-layout/xspi-flash\"") != null);
+
+    // A path-sourced one has no reusable module, so it falls back to the
+    // design-scoped view of just its slice, keyed on the card's slug.
+    var inl = emptyAttachBlock("inline-module");
+    const inl_subs = [_]env_mod.SubBlock{.{ .name = "Power In", .source = "boards/x/power.sexp", .block = &inl }};
+    var inl_block = emptyAttachBlock("Demo");
+    inl_block.sub_blocks = &inl_subs;
+    const inl_html = try renderToHtml(alloc, &inl_block, "", "demo", "", .pass, null, &checks, .{ .path = "/schematics/" });
+    try std.testing.expect(std.mem.indexOf(u8, inl_html, "href=\"/pcb-layout/demo?sub=power-in\"") != null);
+}
+
+// spec: render_html - Schematic pages expose a URL-backed Sequential and Functional slider with Functional as the default a bare URL renders
+test "schematic header switches between sequential and functional views" {
     // A design served at /schematics/ gets a view toggle whose active Schematic
     // tab points back at /schematics/, with a sibling link to /pcb-layout/.
+    // No `?view=` on any of them: Functional is what a bare URL renders, so the
+    // default page never has to spell its own view out.
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
-    try writeHeader(&aw.writer, "Demo", "demo", .pass, "/schematics/", .{}, false);
+    try writeHeader(&aw.writer, "Demo", "demo", .pass, .{ .path = "/schematics/" }, .{}, false);
     const html = aw.written();
     try std.testing.expect(std.mem.indexOf(u8, html, "class=\"viewtoggle\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/schematics/demo\">Schematic</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/pcb-layout/demo\">PCB Layout</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/pcb-layout/demo?view=3d\">3D</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "/editor/") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/assembly-debug/demo\">Assembly</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "aria-label=\"Schematic view\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "class=\"schematic-mode-label active\">Functional") != null);
+    // The slider links the view it is NOT showing, so from the default it is
+    // the Sequential link that carries the selector.
+    try std.testing.expect(std.mem.indexOf(u8, html, "class=\"schematic-mode-slider functional\" href=\"/schematics/demo?view=sequential\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "role=\"switch\" aria-checked=\"true\"") != null);
 
     // A module served at /modules/ gets the same toggle rooted at /modules/ —
-    // the switcher is symmetric across both page kinds.
+    // the switcher is symmetric across both page kinds. Held on Sequential,
+    // every self-link carries `?view=sequential` so a reload stays put.
     var mw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer mw.deinit();
-    try writeHeader(&mw.writer, "Mod", "mod", .pass, "/modules/", .{}, false);
+    try writeHeader(&mw.writer, "Mod", "mod", .pass, .{ .path = "/modules/", .view = .original }, .{}, false);
     const mhtml = mw.written();
-    try std.testing.expect(std.mem.indexOf(u8, mhtml, "href=\"/modules/mod\">Schematic</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mhtml, "href=\"/modules/mod?view=sequential\">Schematic</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, mhtml, "href=\"/pcb-layout/mod\">PCB Layout</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mhtml, "href=\"/pcb-layout/mod?view=3d\">3D</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mhtml, "/editor/") == null);
+    try std.testing.expect(std.mem.indexOf(u8, mhtml, "/assembly-debug/") == null);
+    try std.testing.expect(std.mem.indexOf(u8, mhtml, "class=\"schematic-mode-slider\" href=\"/modules/mod\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mhtml, "role=\"switch\" aria-checked=\"false\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mhtml, "class=\"schematic-mode-label active\">Sequential") != null);
+
+    // Absent and unrecognised values both land on Functional; only the two
+    // names the Sequential link can carry select the label-connected view.
+    try std.testing.expectEqual(SchematicView.functional, parseSchematicView(null));
+    try std.testing.expectEqual(SchematicView.functional, parseSchematicView("unknown"));
+    try std.testing.expectEqual(SchematicView.functional, parseSchematicView("functional"));
+    try std.testing.expectEqual(SchematicView.original, parseSchematicView("sequential"));
+    try std.testing.expectEqual(SchematicView.original, parseSchematicView("original"));
+}
+
+// spec: render_svg - A bridged sub-block port net keeps its wire and net label on the module's own pin
+test "a bridged sub-block port net renders its net label" {
+    // The cyclops-kband ADAR2001 case. The `tx` module declares an output port
+    // TXOUT+; the parent bridges it (`(bridge "" TXOUT+)` ⇒ net-tie
+    // TXOUT+ ↔ tx/TXOUT+), and the only pin on the flattened net is the module's
+    // own U1.1 — the far end is net-less printed patch copper. The pad must still
+    // draw its wire and net label. While the significance sets were keyed on the
+    // PRE-rename spelling ("tx/TXOUT+") the test failed, the one-connection group
+    // filtered to zero, and the pad drew nothing at all.
+    const mod_insts = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
+    };
+    const out_pins = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "1" }};
+    const gnd_pins = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "2" }};
+    const mod_nets = [_]env_mod.Net{
+        .{ .name = "TXOUT+", .pins = &out_pins },
+        .{ .name = "GND", .pins = &gnd_pins },
+    };
+    const mod_ports = [_]env_mod.Port{
+        .{ .name = "TXOUT+", .net = "TXOUT+", .direction = "out" },
+    };
+    var mod = emptyAttachBlock("tx-module");
+    mod.instances = &mod_insts;
+    mod.nets = &mod_nets;
+    mod.ports = &mod_ports;
+
+    const subs = [_]env_mod.SubBlock{.{ .name = "tx", .block = &mod }};
+    const ties = [_]env_mod.NetTie{
+        .{ .a = "TXOUT+", .b = "tx/TXOUT+" },
+        .{ .a = "GND", .b = "tx/GND" },
+    };
+    var block = emptyAttachBlock("bridged-port-test");
+    block.sub_blocks = &subs;
+    block.net_ties = &ties;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = try setupRenderCtx(a, &block);
+
+    // The flattened net carries the parent's spelling, so the single-pin escape
+    // must be keyed on it.
+    try std.testing.expect(ctx.rendersWhenAlone("TXOUT+"));
+
+    var buf: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expect(try renderHubSvg(&ctx, &buf.writer, a, &.{}, "U1"));
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), ">TXOUT+</text>") != null);
+}
+
+// spec: render_svg - A bridged sub-block port net renders its label without being coloured or flagged a board-boundary port
+test "a bridged sub-block port net is not a boundary port" {
+    // Same fixture as above. Calling the RESOLVED (parent-side) spelling a
+    // BOUNDARY port fixed the missing label but repainted every bridged internal
+    // net in the boundary-port blue and set its scene-graph `port` flag — stm32n6
+    // went from 53 to 288 blue labels, recolouring ordinary internal nets like
+    // ADC1_CS as board boundaries. The two roles are separate now: the label
+    // renders, in the internal colour, with the port flag clear.
+    const mod_insts = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
+    };
+    const out_pins = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "1" }};
+    const gnd_pins = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "2" }};
+    const mod_nets = [_]env_mod.Net{
+        .{ .name = "TXOUT+", .pins = &out_pins },
+        .{ .name = "GND", .pins = &gnd_pins },
+    };
+    const mod_ports = [_]env_mod.Port{
+        .{ .name = "TXOUT+", .net = "TXOUT+", .direction = "out" },
+    };
+    var mod = emptyAttachBlock("tx-module");
+    mod.instances = &mod_insts;
+    mod.nets = &mod_nets;
+    mod.ports = &mod_ports;
+
+    const subs = [_]env_mod.SubBlock{.{ .name = "tx", .block = &mod }};
+    const ties = [_]env_mod.NetTie{
+        .{ .a = "TXOUT+", .b = "tx/TXOUT+" },
+        .{ .a = "GND", .b = "tx/GND" },
+    };
+    var block = emptyAttachBlock("bridged-port-colour-test");
+    block.sub_blocks = &subs;
+    block.net_ties = &ties;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = try setupRenderCtx(a, &block);
+
+    // The parent-side spelling is internal wiring, not a declared boundary: the
+    // parent block has no (port …) of its own.
+    try std.testing.expect(!ctx.isBoundaryPort("TXOUT+"));
+    try std.testing.expect(ctx.rendersWhenAlone("TXOUT+"));
+
+    var buf: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expect(try renderHubSvg(&ctx, &buf.writer, a, &.{}, "U1"));
+    const label = std.mem.indexOf(u8, buf.written(), ">TXOUT+</text>").?;
+    // The label's own <text> opener carries the internal-net fill, never the
+    // boundary-port blue.
+    const open = std.mem.lastIndexOf(u8, buf.written()[0..label], "<text ").?;
+    const tag = buf.written()[open..label];
+    try std.testing.expect(std.mem.indexOf(u8, tag, "#e8c547") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tag, "#4a9eff") == null);
 }

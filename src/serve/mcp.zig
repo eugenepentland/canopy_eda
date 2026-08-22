@@ -141,15 +141,15 @@ fn handleToolCall(
     if (tool_name.len == 0) return errorEnvelope(allocator, id_val, jsonrpc_invalid_params, "missing tool name");
 
     if (mcp_tools.isMutationTool(tool_name) and !role.canWrite()) {
-        var msg: std.ArrayList(u8) = .empty;
-        const mw = msg.writer(allocator);
+        var msg: std.Io.Writer.Allocating = .init(allocator);
+        const mw = &msg.writer;
         try mw.print("Your role \"{s}\" cannot use tool \"{s}\" (writer or admin required)", .{ role.toString(), tool_name });
-        var result: std.ArrayList(u8) = .empty;
-        const rw = result.writer(allocator);
+        var result: std.Io.Writer.Allocating = .init(allocator);
+        const rw = &result.writer;
         try rw.writeAll("{\"content\":[{\"type\":\"text\",\"text\":");
-        try json_writer.writeString(rw, msg.items);
+        try json_writer.writeString(rw, msg.written());
         try rw.writeAll("}],\"isError\":true}");
-        return resultEnvelope(allocator, id_val, result.items);
+        return resultEnvelope(allocator, id_val, result.written());
     }
 
     const args_val: ?std.json.Value = p.object.get("arguments");
@@ -167,8 +167,8 @@ fn handleToolCall(
 
     if (is_mutation and call_result.ok) autocommit.commit(ac_session, username, tool_name);
 
-    var result: std.ArrayList(u8) = .empty;
-    const rw = result.writer(allocator);
+    var result: std.Io.Writer.Allocating = .init(allocator);
+    const rw = &result.writer;
     if (call_result.image_mime) |mime| {
         // `content_buf` holds base64 (no characters needing JSON escaping), so
         // it's written raw between the quotes.
@@ -185,7 +185,7 @@ fn handleToolCall(
     if (!call_result.ok) try rw.writeAll(",\"isError\":true");
     try rw.writeAll("}");
 
-    return resultEnvelope(allocator, id_val, result.items);
+    return resultEnvelope(allocator, id_val, result.written());
 }
 
 /// Static help document advertised as the `eda://docs/workspace` resource.
@@ -199,8 +199,8 @@ fn handleResourcesList(
     project_dir: []const u8,
     id_val: ?std.json.Value,
 ) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     try w.writeAll("{\"resources\":[");
     // Static help resource — emitted first so clients with a UI for
     // "important resources" surface it without having to scroll through
@@ -217,7 +217,7 @@ fn handleResourcesList(
         try w.writeAll("\",\"mimeType\":\"application/json\"}");
     }
     try w.writeAll("]}");
-    return resultEnvelope(allocator, id_val, buf.items);
+    return resultEnvelope(allocator, id_val, buf.written());
 }
 
 fn handleResourcesRead(
@@ -233,14 +233,14 @@ fn handleResourcesRead(
 
     // Static workspace help — embedded markdown, no project access needed.
     if (std.mem.eql(u8, uri, "eda://docs/workspace")) {
-        var buf: std.ArrayList(u8) = .empty;
-        const w = buf.writer(allocator);
+        var buf: std.Io.Writer.Allocating = .init(allocator);
+        const w = &buf.writer;
         try w.writeAll("{\"contents\":[{\"uri\":\"");
         try w.writeAll(uri);
         try w.writeAll("\",\"mimeType\":\"text/markdown\",\"text\":");
         try json_writer.writeString(w, workspace_doc);
         try w.writeAll("}]}");
-        return resultEnvelope(allocator, id_val, buf.items);
+        return resultEnvelope(allocator, id_val, buf.written());
     }
 
     const prefix = "eda://schematic/";
@@ -252,42 +252,42 @@ fn handleResourcesRead(
         return errorEnvelope(allocator, id_val, jsonrpc_server_error, @errorName(err));
     };
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     try w.writeAll("{\"contents\":[{\"uri\":\"");
     try w.writeAll(uri);
     try w.writeAll("\",\"mimeType\":\"application/json\",\"text\":");
     try json_writer.writeString(w, graph);
     try w.writeAll("}]}");
-    return resultEnvelope(allocator, id_val, buf.items);
+    return resultEnvelope(allocator, id_val, buf.written());
 }
 
 // ── JSON-RPC envelope writers ──────────────────────────────────────────
 
 fn resultEnvelope(allocator: std.mem.Allocator, id_val: ?std.json.Value, result_json: []const u8) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     try w.writeAll(jsonrpc_envelope_prefix);
     try writeIdTo(w, id_val);
     try w.writeAll(",\"result\":");
     try w.writeAll(result_json);
     try w.writeAll("}");
-    return buf.items;
+    return buf.written();
 }
 
 fn errorEnvelope(allocator: std.mem.Allocator, id_val: ?std.json.Value, code: i32, msg: []const u8) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
     try w.writeAll(jsonrpc_envelope_prefix);
     try writeIdTo(w, id_val);
     try w.print(",\"error\":{{\"code\":{d},\"message\":", .{code});
     try json_writer.writeString(w, msg);
     try w.writeAll("}}");
-    return buf.items;
+    return buf.written();
 }
 
 fn parseErrorEnvelope(_: std.mem.Allocator) ?[]const u8 {
-    return @as([]const u8, 
+    return @as([]const u8,
         \\{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}
     );
 }

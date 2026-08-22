@@ -19,6 +19,7 @@ pub templ Library(rows: []const LibraryRow) {
     <!DOCTYPE html>
     <html>
         <head>
+            <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
             <title>Component Library</title>
             {!style_block}
         </head>
@@ -29,7 +30,7 @@ pub templ Library(rows: []const LibraryRow) {
                 {!upload_block}
                 <input
                     type="text" class="search-box" id="lib-search"
-                    placeholder="Search components, footprints, pinouts..." autofocus />
+                    placeholder="Search components, footprints, pinouts..." />
                 <div class="count-info" id="count-info"></div>
                 <div class="card-grid" id="lib-grid">
                     for (rows) |row| {

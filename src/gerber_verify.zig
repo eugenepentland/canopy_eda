@@ -8,10 +8,10 @@
 //! Scope of the reader (exactly what our writer emits): `%FSLAX46Y46*%` (4.6
 //! integer.fraction coordinates), `%MOMM*%`, aperture defs `%ADDnnK,w[Xh]*%`
 //! for K ∈ {C,R,O}, aperture selects `Dnn*` (nn ≥ 10), `X…Y…D03*` flashes,
-//! `X…Y…D02*`/`D01*` moves+draws, `G36*/G37*` regions (their interior draws
-//! are captured as the region contour, not tracks), and `%LPD*%`/`%LPC*%`
-//! polarity. Anything else on a line is ignored — this is a verifier, not a
-//! general Gerber importer.
+//! `X…Y…D02*`/`D01*` moves+draws, `G36*/G37*` regions, native `G02`/`G03`
+//! arcs, and `%LPD*%`/`%LPC*%` polarity. The ordered operation stream is also
+//! the source for the in-app CAM preview, so that surface paints the bytes the
+//! fab receives instead of independently reconstructing their geometry.
 //!
 //! Coordinates come back through the shared `export_fab.Frame`: a parsed
 //! integer (x,y) is `(x/1e6, y/1e6)` mm in the y-up output frame, and the
@@ -34,14 +34,34 @@ pub const Flash = struct { x: f64, y: f64, kind: ApKind, w: f64, h: f64, dark: b
 /// aperture width that was current.
 pub const Segment = struct { x1: f64, y1: f64, x2: f64, y2: f64, w: f64, dark: bool };
 
+/// One native circular interpolation, in output-frame coordinates. `cw` is
+/// Gerber G02 (false is G03); the aperture is circular in every arc our writer
+/// emits, so its diameter is represented by `w` like a linear segment.
+pub const Arc = struct { p1: [2]f64, p2: [2]f64, center: [2]f64, w: f64, cw: bool, dark: bool };
+
+/// One filled G36/G37 contour. Points include the D02 start and every D01
+/// vertex, including the writer's explicit closing point when needed.
+pub const Region = struct { points: []const [2]f64, dark: bool };
+
+/// Ordered draw operations. Polarity composition is order-sensitive (mask
+/// terminal repairs clear an opening and then repaint its rounded patch), so a
+/// preview cannot safely regroup flashes, strokes, and regions by shape.
+pub const Op = union(enum) {
+    flash: Flash,
+    segment: Segment,
+    arc: Arc,
+    region: Region,
+};
+
 /// The parsed contents of one copper Gerber file (mm, y-up frame).
 pub const Parsed = struct {
     apertures: []const Aperture,
     flashes: []const Flash,
     segments: []const Segment,
-    /// Number of `G36…G37` regions seen (pours). Their contour draws are NOT
-    /// counted as `segments` — a region is a fill, not a track.
-    regions: usize,
+    arcs: []const Arc,
+    regions: []const Region,
+    /// Every flash/stroke/region in byte order, retaining polarity.
+    ops: []const Op,
 };
 
 pub const ParseError = error{ MalformedCoord, MalformedAperture, MissingFormat, Overflow } || std.mem.Allocator.Error;
@@ -53,11 +73,15 @@ pub fn parse(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
     var apertures: std.ArrayList(Aperture) = .empty;
     var flashes: std.ArrayList(Flash) = .empty;
     var segments: std.ArrayList(Segment) = .empty;
-    var regions: usize = 0;
+    var arcs: std.ArrayList(Arc) = .empty;
+    var regions: std.ArrayList(Region) = .empty;
+    var ops: std.ArrayList(Op) = .empty;
+    var region_points: std.ArrayList([2]f64) = .empty;
 
     var saw_format = false;
     var dark = true;
     var in_region = false;
+    var region_dark = true;
     var cur_ap: ?Aperture = null;
     var cx: f64 = 0;
     var cy: f64 = 0;
@@ -84,17 +108,30 @@ pub fn parse(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
             continue;
         }
 
-        // G-codes: region on/off, linear mode (ignored).
+        // G-codes: region on/off plus native circular interpolation. Region
+        // contours are finalized only at G37 so they occupy one ordered op.
         if (std.mem.eql(u8, line, "G36*")) {
             in_region = true;
-            regions += 1;
+            region_dark = dark;
+            region_points.clearRetainingCapacity();
             continue;
         }
         if (std.mem.eql(u8, line, "G37*")) {
             in_region = false;
+            if (region_points.items.len >= 3) {
+                const region = Region{ .points = try region_points.toOwnedSlice(arena), .dark = region_dark };
+                try regions.append(arena, region);
+                try ops.append(arena, .{ .region = region });
+            } else {
+                region_points.clearRetainingCapacity();
+            }
             continue;
         }
-        if (std.mem.startsWith(u8, line, "G")) continue; // G01* etc.
+        const arc_cw = std.mem.startsWith(u8, line, "G02");
+        const arc_ccw = std.mem.startsWith(u8, line, "G03");
+        if (std.mem.startsWith(u8, line, "G")) {
+            if (!arc_cw and !arc_ccw) continue; // G01*, G75*
+        }
         if (std.mem.eql(u8, line, "M02*")) break;
 
         // Aperture select: Dnn* with nn >= 10 (a bare Dnn with no coords).
@@ -113,30 +150,43 @@ pub fn parse(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
             2 => {
                 cx = op.x;
                 cy = op.y;
+                if (in_region) try region_points.append(arena, .{ cx, cy });
             },
             1 => {
-                if (!in_region) {
-                    try segments.append(arena, .{
+                if (in_region) {
+                    try region_points.append(arena, .{ op.x, op.y });
+                } else if (arc_cw or arc_ccw) {
+                    const arc = Arc{
+                        .p1 = .{ cx, cy },
+                        .p2 = .{ op.x, op.y },
+                        .center = .{ cx + op.i, cy + op.j },
+                        .w = if (cur_ap) |a| a.w else 0,
+                        .cw = arc_cw,
+                        .dark = dark,
+                    };
+                    try arcs.append(arena, arc);
+                    try ops.append(arena, .{ .arc = arc });
+                } else {
+                    const segment = Segment{
                         .x1 = cx,
                         .y1 = cy,
                         .x2 = op.x,
                         .y2 = op.y,
                         .w = if (cur_ap) |a| a.w else 0,
                         .dark = dark,
-                    });
+                    };
+                    try segments.append(arena, segment);
+                    try ops.append(arena, .{ .segment = segment });
                 }
                 cx = op.x;
                 cy = op.y;
             },
             3 => {
-                if (cur_ap) |a| try flashes.append(arena, .{
-                    .x = op.x,
-                    .y = op.y,
-                    .kind = a.kind,
-                    .w = a.w,
-                    .h = a.h,
-                    .dark = dark,
-                });
+                if (cur_ap) |a| {
+                    const flash = Flash{ .x = op.x, .y = op.y, .kind = a.kind, .w = a.w, .h = a.h, .dark = dark };
+                    try flashes.append(arena, flash);
+                    try ops.append(arena, .{ .flash = flash });
+                }
                 cx = op.x;
                 cy = op.y;
             },
@@ -148,7 +198,9 @@ pub fn parse(arena: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
         .apertures = try apertures.toOwnedSlice(arena),
         .flashes = try flashes.toOwnedSlice(arena),
         .segments = try segments.toOwnedSlice(arena),
-        .regions = regions,
+        .arcs = try arcs.toOwnedSlice(arena),
+        .regions = try regions.toOwnedSlice(arena),
+        .ops = try ops.toOwnedSlice(arena),
     };
 }
 
@@ -178,34 +230,45 @@ fn parseAperture(inner: []const u8) ParseError!Aperture {
     return .{ .code = code, .kind = kind, .w = w, .h = w };
 }
 
-const CoordOp = struct { x: f64, y: f64, d: u8 };
+const CoordOp = struct { x: f64, y: f64, i: f64 = 0, j: f64 = 0, d: u8 };
 
 /// Parse `X<int>Y<int>D0n*` (either coord may be omitted → keep the previous).
 /// Integers are 4.6 fixed-point (÷1e6 → mm).
 fn parseCoordLine(line: []const u8, prev_x: f64, prev_y: f64) ParseError!CoordOp {
     var x = prev_x;
     var y = prev_y;
+    var i_off: f64 = 0;
+    var j_off: f64 = 0;
     var d: u8 = 0;
     var i: usize = 0;
     while (i < line.len) {
         const c = line[i];
         if (c == '*') break;
-        if (c == 'X' or c == 'Y' or c == 'D') {
-            i += 1;
-            const start = i;
-            if (i < line.len and (line[i] == '-' or line[i] == '+')) i += 1;
-            while (i < line.len and std.ascii.isDigit(line[i])) i += 1;
-            if (i == start) return error.MalformedCoord;
-            const num = line[start..i];
-            if (c == 'D') {
-                d = std.fmt.parseInt(u8, num, 10) catch return error.MalformedCoord;
-            } else {
-                const v = @as(f64, @floatFromInt(std.fmt.parseInt(i64, num, 10) catch return error.MalformedCoord)) / 1e6;
-                if (c == 'X') x = v else y = v;
-            }
-        } else i += 1;
+        switch (c) {
+            'X', 'Y', 'I', 'J', 'D' => {
+                i += 1;
+                const start = i;
+                if (i < line.len and (line[i] == '-' or line[i] == '+')) i += 1;
+                while (i < line.len and std.ascii.isDigit(line[i])) i += 1;
+                if (i == start) return error.MalformedCoord;
+                const num = line[start..i];
+                if (c == 'D') {
+                    d = std.fmt.parseInt(u8, num, 10) catch return error.MalformedCoord;
+                } else {
+                    const v = @as(f64, @floatFromInt(std.fmt.parseInt(i64, num, 10) catch return error.MalformedCoord)) / 1e6;
+                    switch (c) {
+                        'X' => x = v,
+                        'Y' => y = v,
+                        'I' => i_off = v,
+                        'J' => j_off = v,
+                        else => {},
+                    }
+                }
+            },
+            else => i += 1,
+        }
     }
-    return .{ .x = x, .y = y, .d = d };
+    return .{ .x = x, .y = y, .i = i_off, .j = j_off, .d = d };
 }
 
 fn apertureByCode(aps: []const Aperture, code: u32) ?Aperture {
@@ -351,6 +414,7 @@ fn testPlacement(parts: []optimizer.Part, nets: []const export_kicad.FlatNet) op
 }
 
 // spec: gerber_verify - the reader parses our own aperture/flash/segment/region output
+// spec: export_gerber - Gerber read-back preserves ordered polarity operations, filled contours, and native arcs for the Assembly CAM preview
 test "parse reads apertures, flashes, segments, and regions" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_i.deinit();
@@ -363,6 +427,7 @@ test "parse reads apertures, flashes, segments, and regions" {
         "%ADD10R,1.000000X0.500000*%\n%ADD11C,0.200000*%\n" ++
         "D10*\nX5000000Y5000000D03*\n" ++
         "D11*\nX1000000Y2000000D02*\nX3000000Y2000000D01*\n" ++
+        "X3000000Y3000000D02*\nG02X5000000Y3000000I1000000J0D01*\nG01*\n" ++
         "G36*\nX0Y0D02*\nX1000000Y0D01*\nX0Y0D01*\nG37*\n" ++
         "M02*\n";
     const p = try parse(arena, g);
@@ -376,7 +441,12 @@ test "parse reads apertures, flashes, segments, and regions" {
     // draws are NOT segments.
     try testing.expectEqual(@as(usize, 1), p.segments.len);
     try testing.expectApproxEqAbs(@as(f64, 0.2), p.segments[0].w, 1e-9);
-    try testing.expectEqual(@as(usize, 1), p.regions);
+    try testing.expectEqual(@as(usize, 1), p.arcs.len);
+    try testing.expect(p.arcs[0].cw);
+    try testing.expectApproxEqAbs(@as(f64, 4), p.arcs[0].center[0], 1e-9);
+    try testing.expectEqual(@as(usize, 1), p.regions.len);
+    try testing.expectEqual(@as(usize, 3), p.regions[0].points.len);
+    try testing.expectEqual(@as(usize, 4), p.ops.len);
 }
 
 // spec: gerber_verify - a written copper layer reads back matching the placement model
@@ -399,7 +469,7 @@ test "round-trip: writeLayer then verifyCopperLayer matches every pad and track"
     const frame = export_fab.frameFor(placement);
 
     var aw: std.Io.Writer.Allocating = .init(arena);
-    try export_gerber.writeLayer(&aw.writer, arena, placement, .{ .tracks = &tracks }, &.{}, frame, .{ .copper = .top }, "Copper,L1,Top");
+    try export_gerber.writeLayer(&aw.writer, arena, placement, .{ .tracks = &tracks }, &.{}, frame, .{ .copper = .top }, .{ .function = "Copper,L1,Top" });
 
     // Pad 1 is a rect at world (9,5) — 1.0x0.5. Pad 2 a circle at (11,5), 1.4.
     // The track is a 0.2-wide segment from (9,5) to (12,5).
@@ -429,7 +499,7 @@ test "verify reports a mislocated pad" {
     const placement = testPlacement(&parts, &.{});
     const frame = export_fab.frameFor(placement);
     var aw: std.Io.Writer.Allocating = .init(arena);
-    try export_gerber.writeLayer(&aw.writer, arena, placement, .{}, &.{}, frame, .{ .copper = .top }, "Copper,L1,Top");
+    try export_gerber.writeLayer(&aw.writer, arena, placement, .{}, &.{}, frame, .{ .copper = .top }, .{ .function = "Copper,L1,Top" });
 
     // Expect the pad at the WRONG place (off by 5 mm) → a miss.
     const ef = [_]ExpectFlash{.{ .x = 15, .y = 5, .kind = .r, .w = 1.0, .h = 1.0 }};
@@ -455,12 +525,12 @@ test "round-trip covers both board sides" {
     const frame = export_fab.frameFor(placement);
 
     var tw: std.Io.Writer.Allocating = .init(arena);
-    try export_gerber.writeLayer(&tw.writer, arena, placement, .{}, &.{}, frame, .{ .copper = .top }, "Copper,L1,Top");
+    try export_gerber.writeLayer(&tw.writer, arena, placement, .{}, &.{}, frame, .{ .copper = .top }, .{ .function = "Copper,L1,Top" });
     const top_flash = [_]ExpectFlash{.{ .x = 6, .y = 4, .kind = .r, .w = 0.8, .h = 0.8 }};
     try testing.expect((try verifyCopperLayer(arena, tw.written(), frame, &top_flash, &.{})).ok());
 
     var bw: std.Io.Writer.Allocating = .init(arena);
-    try export_gerber.writeLayer(&bw.writer, arena, placement, .{}, &.{}, frame, .{ .copper = .bottom }, "Copper,L4,Bot");
+    try export_gerber.writeLayer(&bw.writer, arena, placement, .{}, &.{}, frame, .{ .copper = .bottom }, .{ .function = "Copper,L4,Bot" });
     const bot_flash = [_]ExpectFlash{.{ .x = 14, .y = 6, .kind = .r, .w = 0.6, .h = 0.6 }};
     try testing.expect((try verifyCopperLayer(arena, bw.written(), frame, &bot_flash, &.{})).ok());
 }

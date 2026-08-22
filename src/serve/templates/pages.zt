@@ -37,7 +37,7 @@ pub const ModuleCardVM = struct {
 const home_style_block: []const u8 = "<style>" ++ @embedFile("../assets/navbar.css") ++
     \\body{margin:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
     \\.designs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;padding:16px}
-    \\.design-card{background:#161b22;border:1px solid #21262d;
+    \\.design-card{min-width:0;background:#161b22;border:1px solid #21262d;
     \\border-radius:10px;padding:18px 20px;display:flex;flex-direction:column;
     \\gap:10px;transition:border-color 0.15s}
     \\.design-card:hover{border-color:#58a6ff}
@@ -47,11 +47,18 @@ const home_style_block: []const u8 = "<style>" ++ @embedFile("../assets/navbar.c
     \\.design-card-stats{display:flex;gap:8px;font-size:12px;color:#8b949e;align-items:center;flex-wrap:wrap}
     \\.design-card-stats .sep{color:#30363d}
     \\.design-card-stats .warn{color:#d29922}
-    \\.status-chips{display:flex;flex-wrap:wrap;gap:5px}
-    \\.st-chip{font-size:11px;padding:1px 8px;border-radius:10px;border:1px solid #30363d;color:#8b949e}
-    \\.st-chip.err{color:#f85149;border-color:#da3633}
-    \\.st-chip.warn{color:#d29922;border-color:#9e6a03}
-    \\.st-chip.pass{color:#3fb950;border-color:#238636}
+    \\.layout-progress{display:flex;flex-direction:column;gap:5px;padding:8px 10px;
+    \\border:1px solid #30363d;border-radius:7px;background:#0d1117;text-decoration:none;color:#8b949e}
+    \\.layout-progress:hover{border-color:#58a6ff;text-decoration:none}
+    \\.layout-progress-head{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:#c9d1d9}
+    \\.layout-progress.loading .layout-progress-head{color:#6e7681}
+    \\.layout-progress.done .layout-progress-head{color:#3fb950}
+    \\.layout-progress.error .layout-progress-head{color:#d29922}
+    \\.layout-progress-steps{display:grid;grid-template-columns:repeat(6,1fr);gap:3px;height:4px}
+    \\.layout-progress-step{border-radius:2px;background:#30363d}
+    \\.layout-progress-step.done{background:#238636}
+    \\.layout-progress-step.current{background:#58a6ff}
+    \\.layout-progress-next{font-size:11px;color:#6e7681;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     \\.design-card-sections{display:flex;flex-wrap:wrap;gap:4px}
     \\.section-chip{background:#1a1a2e;color:#8b949e;font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid #21262d;text-decoration:none}
     \\a.section-chip:hover{border-color:#58a6ff;color:#c9d1d9}
@@ -89,7 +96,21 @@ const home_style_block: []const u8 = "<style>" ++ @embedFile("../assets/navbar.c
     \\.home-new{flex:0 0 auto;background:#238636;border:1px solid #2ea043;border-radius:6px;
     \\color:#fff;font-size:13px;padding:.55rem .9rem;cursor:pointer;font-family:inherit;white-space:nowrap}
     \\.home-new:hover{filter:brightness(1.1)}
-    \\@media(max-width:600px){.designs-grid{grid-template-columns:1fr;padding:12px;gap:10px}.design-card{padding:16px}}
+    \\@media(max-width:600px){
+    \\.home-shell{width:100%;overflow:hidden}
+    \\.home-title{margin:0;padding:18px 12px 2px!important;font-size:1.45rem}
+    \\.mod-sub-note{padding:0 12px;margin-top:4px;line-height:1.45}
+    \\.home-newrow{flex-direction:column;align-items:stretch;margin:12px 12px 6px}
+    \\.home-newrow .home-search{width:100%;min-height:44px;font-size:16px}
+    \\.home-new{width:100%;min-height:44px;font-size:14px}
+    \\.home-filters{padding:2px 12px 5px;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+    \\.home-filters::-webkit-scrollbar{display:none}
+    \\.home-filter{min-height:40px;padding:.45rem .9rem;flex:none;touch-action:manipulation}
+    \\.home-count{margin:0 12px 4px}
+    \\.designs-grid{grid-template-columns:minmax(0,1fr);padding:10px 12px 20px;gap:10px}
+    \\.design-card{padding:14px}
+    \\.design-card-link{display:flex;align-items:center;justify-content:center;min-height:44px;padding:6px 10px}
+    \\.layout-progress{padding:10px}}
 ++ "</style>";
 
 // Client-side filter for the unified Designs + Modules grid. Mirrors the
@@ -136,8 +157,70 @@ const home_search_script: []const u8 =
     \\</script>
 ;
 
+// Lazily hydrate the six-stage PCB completion tracker on each design card.
+// A small concurrency cap keeps a large project from launching every placement
+// solve at once; cards fill in as their compact progress response arrives.
+const home_progress_script: []const u8 =
+    \\<script>
+    \\(function(){
+    \\ var cards=[];
+    \\ Array.prototype.slice.call(document.querySelectorAll('.design-card[data-progress-name]')).forEach(function(card){
+    \\  var name=card.getAttribute('data-progress-name')||'';if(!name)return;
+    \\  var link=card.querySelector('a[href^="/pcb-layout/"]');if(!link)return;
+    \\  var boardHref=link.getAttribute('href');var el=document.createElement('a');
+    \\  el.className='layout-progress loading';el.href=boardHref;el.setAttribute('data-board-href',boardHref);
+    \\  el.setAttribute('data-layout-progress',name);el.title='Loading PCB design progress';
+    \\  el.innerHTML='<span class="layout-progress-head"><span class="layout-progress-label">Loading layout progress\u2026</span></span>'+
+    \\   '<span class="layout-progress-steps" aria-hidden="true"></span>'+
+    \\   '<span class="layout-progress-next">Checking the six design stages\u2026</span>';
+    \\  card.querySelector('.design-card-stats').insertAdjacentElement('afterend',el);cards.push(el);
+    \\ });
+    \\ if(!cards.length)return;
+    \\ var labels={schematic:'Schematic',sub_circuits:'Sub-circuits',board_setup:'Board setup',
+    \\  placement:'Placement',routing:'Routing',fab_ready:'Fab-ready'};
+    \\ function stageName(id){return labels[id]||String(id||'').replace(/_/g,' ').replace(/^./,function(c){return c.toUpperCase();});}
+    \\ function setError(el){el.classList.remove('loading');el.classList.add('error');
+    \\  el.querySelector('.layout-progress-label').textContent='Layout progress unavailable';
+    \\  el.querySelector('.layout-progress-next').textContent='Open the PCB layout to inspect this design';}
+    \\ function schematicCounts(el){var fields=[
+    \\  ['data-erc-errors','ERC error','ERC errors'],['data-erc-warnings','ERC warning','ERC warnings'],
+    \\  ['data-assert-fails','failed assertion','failed assertions'],['data-open-notes','open note','open notes']];
+    \\  var parts=[];fields.forEach(function(f){var n=parseInt(el.getAttribute(f[0])||'0',10);
+    \\   parts.push(n+' '+(n===1?f[1]:f[2]));});return parts.join(' \u00b7 ');}
+    \\ function render(el,d){var stages=(d&&d.stages)||[];if(!stages.length){setError(el);return;}
+    \\  var allDone=stages.every(function(s){return s.status==='done';});var idx=-1,cur=null;
+    \\  for(var i=0;i<stages.length;i++)if(stages[i].status==='current'){idx=i;cur=stages[i];break;}
+    \\  if(idx<0)for(var j=0;j<stages.length;j++)if(stages[j].status!=='done'){idx=j;cur=stages[j];break;}
+    \\  if(idx<0){idx=stages.length-1;cur=stages[idx];}
+    \\  var label=allDone?'Fab-ready \u2713':('Stage '+(idx+1)+'/'+stages.length+' \u00b7 '+stageName(cur.id));
+    \\  var wave=null;if(cur.waves&&cur.waves.length){
+    \\   for(var k=0;k<cur.waves.length;k++)if(cur.waves[k].name===d.current_wave||cur.waves[k].status==='current'){wave=cur.waves[k];break;}}
+    \\  if(!allDone){if(wave)label+=' \u2014 '+wave.name+' '+(wave.done||0)+'/'+(wave.total||0);
+    \\   else if(cur.total!=null)label+=' '+(cur.done||0)+'/'+cur.total;}
+    \\  el.classList.remove('loading','error');el.classList.toggle('done',allDone);
+    \\  el.querySelector('.layout-progress-label').textContent=label;
+    \\  var steps=el.querySelector('.layout-progress-steps');steps.textContent='';
+    \\  stages.forEach(function(s){var x=document.createElement('span');x.className='layout-progress-step '+(s.status||'pending');steps.appendChild(x);});
+    \\  var items=(cur&&cur.items)||[],next=el.querySelector('.layout-progress-next');
+    \\  var summary=cur&&cur.id==='schematic'?schematicCounts(el):'';
+    \\  next.textContent=allDone?'All six PCB design stages complete':(summary||(items.length?('Next: '+(items[0].message||items[0].kind)):'Open the PCB layout for details'));
+    \\  var first=items.length?items[0]:null,name=el.getAttribute('data-layout-progress')||'';
+    \\  el.href=first&&first.pcb_target?('/pcb-layout/'+encodeURIComponent(first.pcb_target)):
+    \\   (first&&first.kind==='erc-errors'?('/schematics/'+encodeURIComponent(name)):el.getAttribute('data-board-href'));
+    \\  var tips=[];items.slice(0,3).forEach(function(it){if(it.message)tips.push(it.message);});el.title=tips.length?tips.join('\n'):label;}
+    \\ var next=0,active=0,max=3;
+    \\ function pump(){while(active<max&&next<cards.length){(function(el){active++;
+    \\   var name=el.getAttribute('data-layout-progress')||'';
+    \\   fetch('/api/layout-progress/'+encodeURIComponent(name)).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+    \\    .then(function(d){render(el,d);},function(){setError(el);}).then(function(){active--;pump();});
+    \\  })(cards[next++]);}}
+    \\ pump();
+    \\})();
+    \\</script>
+;
+
 // "+ New design" → prompt for a name/title, POST /api/new-design, then open the
-// editor on the fresh stub. Raw block so zt doesn't interpolate the JS.
+// schematic page for the fresh stub. Raw block so zt doesn't interpolate the JS.
 const home_new_script: []const u8 =
     \\<script>
     \\(function(){
@@ -151,7 +234,7 @@ const home_new_script: []const u8 =
     \\   var r=await fetch('/api/new-design',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,title:title})});
     \\   if(!r.ok){var t=await r.text().catch(function(){return '';});alert(t||('HTTP '+r.status));return;}
     \\   var d=await r.json().catch(function(){return {};});
-    \\   location.href=d.url||('/editor/'+name);
+    \\   location.href=d.url||('/schematics/'+name);
     \\  }catch(e){alert('Failed: '+e.message);}
     \\ });
     \\})();
@@ -162,8 +245,6 @@ const seconds_per_minute: i64 = 60;
 const seconds_per_hour: i64 = 3600;
 const seconds_per_day: i64 = 86400;
 const days_per_month_approx: i64 = 30;
-
-const max_chips: usize = 6;
 
 // Route prefix for the schematic viewer. Interpolated into every "open the
 // schematic" href so the generated template emits one shared const reference
@@ -222,28 +303,26 @@ fn hasOwnTitle(s: DesignSummary) bool {
     return s.title.len > 0 and !std.mem.eql(u8, s.title, s.name);
 }
 
-fn chipsShown(n: usize) usize {
-    return if (n < max_chips) n else max_chips;
-}
-
-/// True when a built design has nothing to flag — no ERC errors/warnings, no
-/// failed assertions, no open notes — so the card shows one green PASS chip.
-fn allClear(s: DesignSummary) bool {
-    return s.erc_errors == 0 and s.erc_warnings == 0 and s.assert_fails == 0 and s.open_notes == 0;
-}
-
 pub templ Navbar(active: []const u8) {
     <div class="navbar">
-        <span class="brand">Netlisp</span>
-        <a href="/" class={if (std.mem.eql(u8, active, "designs")) "active" else null}>Designs</a>
+        <a href="/" class="brand">Netlisp</a>
         <a href="/library" class={if (std.mem.eql(u8, active, "library")) "active" else null}>Library</a>
+        <a href="/route-review" class={if (std.mem.eql(u8, active, "route-review")) "active" else null}>Route Review</a>
         <a href="/mcp-tools" class={if (std.mem.eql(u8, active, "mcp")) "active" else null}>MCP</a>
         <a href="https://ward.eugenepentland.dev/admin" style="margin-left:auto">Account</a>
     </div>
 }
 
 pub templ DesignCard(s: DesignSummary, search: []const u8, has_starred: bool, now_sec: i64) {
-    <div class="design-card" data-kind={if (s.is_board) "board" else "subcircuit"} data-search={search}>
+    <div
+        class="design-card"
+        data-kind={if (s.is_board) "board" else "subcircuit"}
+        data-search={search}
+        data-progress-name={if (s.build_ok) s.name else null}
+        data-erc-errors={s.erc_errors}
+        data-erc-warnings={s.erc_warnings}
+        data-assert-fails={s.assert_fails}
+        data-open-notes={s.open_notes}>
         <div class="type-row">
             if (s.is_board) {
                 <span class="type-tag board">Board</span>
@@ -278,36 +357,6 @@ pub templ DesignCard(s: DesignSummary, search: []const u8, has_starred: bool, no
                 <span>{relTime(now_sec - s.mtime_sec)}</span>
             }
         </div>
-        if (s.build_ok) {
-            <div class="status-chips">
-                if (allClear(s)) {
-                    <span class="st-chip pass" title="No ERC issues, no failed assertions, no open notes">PASS</span>
-                } else {
-                    if (s.erc_errors > 0) {
-                        <span class="st-chip err" title="ERC errors">{s.erc_errors} ERC error{pluralS(s.erc_errors)}</span>
-                    }
-                    if (s.erc_warnings > 0) {
-                        <span class="st-chip warn" title="ERC warnings">{s.erc_warnings} ERC warning{pluralS(s.erc_warnings)}</span>
-                    }
-                    if (s.assert_fails > 0) {
-                        <span class="st-chip err" title="Failed (assert …) checks">{s.assert_fails} failed assertion{pluralS(s.assert_fails)}</span>
-                    }
-                    if (s.open_notes > 0) {
-                        <span class="st-chip" title="Open tasks in the design notes">{s.open_notes} open note{pluralS(s.open_notes)}</span>
-                    }
-                }
-            </div>
-        }
-        if (s.sections.len > 0) {
-            <div class="design-card-sections">
-                for (s.sections[0..chipsShown(s.sections.len)]) |sec| {
-                    <span class="section-chip">{sec}</span>
-                }
-                if (s.sections.len > max_chips) {
-                    <span class="section-chip-more">+{s.sections.len - max_chips} more</span>
-                }
-            </div>
-        }
         <div class="design-card-links">
             <a class="design-card-link" href="{schematic_prefix}{s.name}">Schematic</a>
             <a class="design-card-link" href="/pcb-layout/{s.name}">PCB layout</a>
@@ -353,18 +402,18 @@ pub templ Home(design_cards: []const DesignCardVM, module_cards: []const ModuleC
     <!DOCTYPE html>
     <html>
         <head>
-            <meta name="viewport" content="width=device-width,initial-scale=1" />
+            <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
             <title>Netlisp — Designs &amp; Modules</title>
             {!home_style_block}
         </head>
         <body>
             @Navbar("designs")
-            <div style="max-width:960px;margin:0 auto">
-                <h1 style="padding:16px 16px 0;color:#f0f6fc">Designs &amp; Modules</h1>
+            <div class="home-shell" style="max-width:960px;margin:0 auto">
+                <h1 class="home-title" style="padding:16px 16px 0;color:#f0f6fc">Designs &amp; Modules</h1>
                 <p class="mod-sub-note">Every <code>.sexp</code> design and reusable <code>lib/modules/</code> block — tagged and searchable.</p>
                 <div class="home-newrow">
                     <input
-                        type="text" id="home-search" class="home-search" autofocus
+                        type="text" id="home-search" class="home-search"
                         placeholder="Search designs and modules…" />
                     <button type="button" id="home-new" class="home-new">+ New design</button>
                 </div>
@@ -388,6 +437,7 @@ pub templ Home(design_cards: []const DesignCardVM, module_cards: []const ModuleC
                 <div class="empty-hint" id="home-empty" style="display:none">No designs or modules match your search.</div>
             </div>
             {!home_search_script}
+            {!home_progress_script}
             {!home_new_script}
         </body>
     </html>

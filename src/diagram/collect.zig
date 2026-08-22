@@ -261,13 +261,11 @@ fn buildSubBlockNodes(
         // for an untitled module. The slug stays keyed on the handle so the
         // node's `#sec-<slug>` link still resolves to the schematic card.
         const label = if (sb.block.name.len > 0) sb.block.name else sb.name;
-        // The module title (label) names the part family; `mp.role` adds a
-        // one-line "what it does" pulled from a matching top-level critical-IC
-        // (e.g. "VPWR_IN → 5 V system buck"), and `mp.tokens` the part numbers.
+        // `mp.tokens` adds the representative part numbers beneath the title.
         const mp = try mainParts(allocator, scratch, sb.block.instances);
         try nodes.append(allocator, .{
             .label = label,
-            .subtitle = mp.role,
+            .subtitle = "",
             .category = rb.classifyByName(sb.name, sb.block.instances),
             .slug = try review.slugify(allocator, sb.name),
             .key = sb.name,
@@ -430,10 +428,6 @@ const MainParts = struct {
     /// Headline part tokens ("TPS62933DRLR", "3× LSF0108"), owned by the
     /// caller's allocator (each entry + the slice freed by `Graph.deinit`).
     tokens: []const []const u8 = &.{},
-    /// One-line "what it does" subtitle fallback for blocks with no section
-    /// description. Currently always empty (no per-part role source); kept so
-    /// callers needn't change shape if a role source returns.
-    role: []const u8 = "",
 };
 
 /// ASCII-uppercase `s` into `scratch` (component basenames are lowercase; part
@@ -455,7 +449,6 @@ fn mainParts(
 ) Allocator.Error!MainParts {
     var order: std.ArrayList([]const u8) = .empty;
     var counts: std.StringHashMapUnmanaged(usize) = .empty;
-    const role: []const u8 = "";
     for (instances) |inst| {
         if (!isHubRef(inst.ref_des)) continue;
         if (inst.component.len == 0) continue;
@@ -482,7 +475,7 @@ fn mainParts(
             try allocator.dupe(u8, tok);
         try out.append(allocator, rendered);
     }
-    return .{ .tokens = try out.toOwnedSlice(allocator), .role = role };
+    return .{ .tokens = try out.toOwnedSlice(allocator) };
 }
 
 /// Lend each `(diagram hidden)` concept-section's description + card anchor to
@@ -577,7 +570,7 @@ fn buildFlatNets(scratch: Allocator, block: *const DesignBlock) Allocator.Error!
     // false: keep the diagram's internal flatten prefixed exactly as before —
     // it's a self-consistent rendering pipeline, independent of the board's
     // grouped-refdes ref-des strings.
-    try netlist.collectNets(scratch, block, "", &nets, .hierarchical);
+    try netlist.collectNets(scratch, block, "", &nets);
     var ties: std.ArrayList(netlist.FlatTie) = .empty;
     try netlist.collectNetTies(scratch, block, "", &ties);
     try netlist.applyNetTies(scratch, &nets, ties.items);
@@ -837,8 +830,8 @@ fn antennaPass(
 /// *chips*, which are modelled as their own sections (e.g. cyclops's SiT5157),
 /// so we don't double-count them.
 fn isCrystalComponent(component: []const u8) bool {
-    return std.ascii.indexOfIgnoreCase(component, "crystal") != null or
-        std.ascii.indexOfIgnoreCase(component, "xtal") != null;
+    return std.ascii.findIgnoreCase(component, "crystal") != null or
+        std.ascii.findIgnoreCase(component, "xtal") != null;
 }
 
 /// Surface an on-board crystal as a synthesized clock-source node feeding the

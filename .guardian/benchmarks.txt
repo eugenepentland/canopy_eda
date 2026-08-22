@@ -1,0 +1,9 @@
+# guardian-snapshot v1
+barracuda_drc_errors 17 - min fdefa93170c9959005467b447e9eb2960a7cde04 2026-07-27 2 track-pad + 15 net-open markers; main alone is 61 (2 + 59) because 5 more nets are open
+barracuda_oneshot_wall_s 92 s min befb1efe84ae39370afa72b57588671444bc3160 2026-07-27 standard is 105s, so the retry machinery is only about 12 percent of the route; speed must come from the base pass
+barracuda_route_wall_s 106 s min fdefa93170c9959005467b447e9eb2960a7cde04 2026-07-27 merged tree; main alone 104s, so the gate costs about 2s
+barracuda_routed_nets 83 nets max fdefa93170c9959005467b447e9eb2960a7cde04 2026-07-27 against main 3c26ad5 which routes 78/90; oracle gate adds 5 nets, geometry DRC identical at 2 track-pad
+corpus_geomean_completion 0.0088 - max 5e5019c24148bf1a1d8b552f1ca19b41ef5e60cb 2026-07-27 3 scored of 7 boards; labstation routes 0/189 at its saved layout and dominates; 4 boards have no saved layout and are excluded
+corpus_scored_boards 3 boards max 5e5019c24148bf1a1d8b552f1ca19b41ef5e60cb 2026-07-27 of 7 top-level designs; the other 4 need blessed layouts before they can be measured
+test_compile_wall_s 10.4 s min cf8468c79814e01c86871a321d29cb5dda65735b 2026-08-04 zig build test-compile (whole test binary, -fno-emit-bin, nothing run) after the same one-file edit; 1.5s no-op
+test_full_wall_s 270 s min cf8468c79814e01c86871a321d29cb5dda65735b 2026-08-04 zig build test after a one-file src edit, fresh worktree, -Dtest-opt=ReleaseSafe, 1930 tests; the no-op case is 11s

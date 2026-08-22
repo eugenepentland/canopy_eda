@@ -12,7 +12,7 @@ const Node = ast.Node;
 /// allocator failures, plus the local `InvalidPinout`/`UnsupportedFormat`
 /// errors thrown when input doesn't match the expected schema.
 pub const AltError = std.mem.Allocator.Error || parser_mod.ParseError ||
-    error{ InvalidPinout, UnsupportedFormat, MissingHeader, MissingPositionColumn, MissingFunctionColumn, InvalidXml };
+    std.Io.Writer.Error || error{ InvalidPinout, UnsupportedFormat, MissingHeader, MissingPositionColumn, MissingFunctionColumn, InvalidXml };
 
 /// One alternate-function row pulled from a CSV or ST open-pin-data XML:
 /// `position` is the package pin id, `function` is the signal name to add
@@ -53,8 +53,9 @@ pub fn mergePinoutWithAlts(
         try gop.value_ptr.append(allocator, e);
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
     try w.writeAll(";; Auto-generated pinout — DO NOT EDIT\n");
     try w.writeAll(";; Source of truth for pin ID → function name mapping\n");
     try w.print("(pinout \"{s}\"\n", .{pinout_name});
@@ -105,7 +106,7 @@ pub fn mergePinoutWithAlts(
         }
     }
     try w.writeAll(")\n");
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 /// Parse a long-format CSV: header row names the columns; required columns are
@@ -163,7 +164,7 @@ fn trimCr(s: []const u8) []const u8 {
 /// Dispatch by content: an XML declaration or `<` as the first non-whitespace byte
 /// routes through `parseAltXml`; anything else is treated as CSV.
 pub fn parseAltSource(allocator: std.mem.Allocator, source: []const u8) AltError![]AltEntry {
-    const trimmed = std.mem.trimLeft(u8, source, " \t\r\n");
+    const trimmed = std.mem.trimStart(u8, source, " \t\r\n");
     if (trimmed.len > 0 and trimmed[0] == '<') return parseAltXml(allocator, source);
     return parseAltCsv(allocator, source);
 }

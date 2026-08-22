@@ -8,9 +8,11 @@
 //!     top-level sub-block;
 //!   - an unprefixed ref-des is a section/top-level instance, looked up exactly.
 //!
-//! Mirrors the `section_map` intent in render_json.zig:529-562, adapted to this
-//! package's node model (one node per section, one per unattached sub-block;
-//! attached sub-blocks fold into their host section's node).
+//! Same intent as the renderers' ref-des → section maps — `ref_to_section` in
+//! render_json.zig's section-grid state, `Context.section_map` in
+//! render_svg/context.zig — adapted to this package's node model (one node per
+//! section, one per unattached sub-block; attached sub-blocks fold into their
+//! host section's node).
 
 const std = @import("std");
 const env_mod = @import("../eval/env.zig");
@@ -226,6 +228,32 @@ pub fn computeSubBlockAttachments(
     return result;
 }
 
+/// Indices into `block.sub_blocks` of the modules section `sec_idx` owns, in
+/// declaration order — the per-section view of `computeSubBlockAttachments`'s
+/// answer. Indices rather than copies because the index IS a sub-block's identity
+/// (two channels of one module are equal by value).
+///
+/// Public because it is the single authority on "which modules belong to this
+/// section": the schematic page renders each one as an attached card inside the
+/// section's card, and `export_pdf.zig` draws them on the section's own sheet.
+/// Neither surface may re-derive the rule, or a module could sit under one
+/// section on the web page and another in the PDF. Caller owns the result.
+pub fn attachedSubBlocks(
+    allocator: Allocator,
+    block: *const DesignBlock,
+    sub_attachments: []const ?usize,
+    sec_idx: usize,
+) Allocator.Error![]const usize {
+    var out: std.ArrayList(usize) = .empty;
+    errdefer out.deinit(allocator);
+    for (0..block.sub_blocks.len) |sb_idx| {
+        if (sb_idx >= sub_attachments.len) break;
+        const host = sub_attachments[sb_idx] orelse continue;
+        if (host == sec_idx) try out.append(allocator, sb_idx);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// Minimal DesignBlock for attachment tests — all collections empty so the
 /// test only populates the fields it exercises.
 fn emptyAttachBlock(name: []const u8) DesignBlock {
@@ -286,4 +314,30 @@ test "computeSubBlockAttachments keeps a power producer out of a consuming secti
     try std.testing.expectEqual(@as(?usize, null), attachments[0]);
     // usb shares a signal net with the USB section (idx 1) → still adopted.
     try std.testing.expectEqual(@as(?usize, 1), attachments[1]);
+}
+
+// spec: diagram/membership - Lists one section's attached sub-blocks as indices in declaration order, shared by the schematic page and the PDF composer
+test "attachedSubBlocks reports a section's own modules in declaration order" {
+    const a = std.testing.allocator;
+    var first = emptyAttachBlock("mod-a");
+    var second = emptyAttachBlock("mod-b");
+    var third = emptyAttachBlock("mod-c");
+    const sub_blocks = [_]env_mod.SubBlock{
+        .{ .name = "one", .block = &first },
+        .{ .name = "two", .block = &second },
+        .{ .name = "three", .block = &third },
+    };
+    var block = emptyAttachBlock("board");
+    block.sub_blocks = &sub_blocks;
+
+    // "one" and "three" host on section 0, "two" on section 1, "three" declared last.
+    const attachments = [_]?usize{ 0, 1, 0 };
+    const owned = try attachedSubBlocks(a, &block, &attachments, 0);
+    defer a.free(owned);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 2 }, owned);
+
+    // A section owning nothing gets an empty list, never a null slice to unwrap.
+    const none = try attachedSubBlocks(a, &block, &attachments, 7);
+    defer a.free(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
 }

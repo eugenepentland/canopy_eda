@@ -20,6 +20,7 @@ const httpz = @import("httpz");
 const ward = @import("ward");
 const net = @import("../infra/net.zig");
 const clock = @import("../infra/clock.zig");
+const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const config = @import("../config.zig");
 const server_mod = @import("../serve.zig");
@@ -82,8 +83,14 @@ const read_only_posts = [_][]const u8{
     "/api/pcb-score/",
     "/api/pcb-score-batch/",
     "/api/pcb-route/",
+    // Live-route start/cancel: the same compute-only routing as /api/pcb-route
+    // run on a background thread (the finished run's cached-replay write is
+    // the same best-effort out/ cache the review path performs).
+    "/api/route-live/",
+    "/api/pcb-route-analyze/",
     "/api/pcb-drc/",
     "/api/validate/",
+    "/api/kicad-route-review/",
 };
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -133,6 +140,11 @@ const WardConfig = struct {
     auth_server_url: []const u8,
     introspect_url: []const u8,
     service_name: []const u8,
+    /// Browsable URL reported as `X-Ward-Service-Url` so ward's home page links
+    /// this app rather than listing it as plain text. Empty string = unset: the
+    /// header is then omitted entirely. Defaults to unset so a config literal
+    /// that predates URL reporting still builds.
+    service_url: []const u8 = "",
     cache_ttl_secs: i64,
 };
 
@@ -167,9 +179,9 @@ pub const WardState = struct {
         .cache_ttl_secs = default_cache_ttl_secs,
     },
     session: ?WardPath = null,
-    session_mu: std.Thread.Mutex = .{},
+    session_mu: infra_fs.Mutex = .{},
     bearer: ?WardPath = null,
-    bearer_mu: std.Thread.Mutex = .{},
+    bearer_mu: infra_fs.Mutex = .{},
 
     /// Load the ward config from the environment and build each verify path (its
     /// verdict cache plus a dedicated HTTP client) on `allocator`
@@ -222,6 +234,7 @@ fn loadConfig(allocator: std.mem.Allocator) WardConfig {
         .auth_server_url = config.wardAuthServerUrl(allocator) orelse "",
         .introspect_url = config.wardIntrospectUrl(allocator) orelse "",
         .service_name = config.wardServiceName(allocator) orelse default_service_name,
+        .service_url = config.wardServiceUrl(allocator) orelse "",
         .cache_ttl_secs = config.wardCacheTtlSecs(allocator, default_cache_ttl_secs),
     };
 }
@@ -315,10 +328,17 @@ fn mcpScopeOk(scope: []const u8, service: []const u8) bool {
 /// Whether `req` mutates server state and therefore needs the writer role.
 /// Safe methods and a small pure-computation POST allowlist are open.
 fn requiresWrite(req: *httpz.Request) bool {
-    const m = req.method;
-    if (m == .GET or m == .HEAD or m == .OPTIONS) return false;
+    return requiresWriteFor(req.method, req.url.path);
+}
+
+/// `requiresWrite` over the two fields it actually reads, so the policy is
+/// testable without standing up a request. Safe methods are open; a POST is
+/// write-gated unless its path starts with a `read_only_posts` prefix (each of
+/// which ends in `/`, so a sibling route sharing a stem is NOT exempted).
+fn requiresWriteFor(method: httpz.Method, path: []const u8) bool {
+    if (method == .GET or method == .HEAD or method == .OPTIONS) return false;
     for (read_only_posts) |p| {
-        if (std.mem.startsWith(u8, req.url.path, p)) return false;
+        if (std.mem.startsWith(u8, path, p)) return false;
     }
     return true;
 }
@@ -368,19 +388,35 @@ fn syncBearerOk(ctx: *Server, req: *httpz.Request) bool {
     return wardBearerAllows(ctx, req);
 }
 
-/// Whether `req` carries a live ward bearer token *scoped for this service*,
-/// without writing a response — the OAuth fallback the sync applier accepted
-/// before. wardd is a shared auth server, so a bearer minted for another
-/// service must not drive the board write: a live grant only counts when its
-/// scope carries this service (mirroring `mcpGate`). A scopeless/foreign grant
-/// returns false so the caller falls through to the plugin/session path — the
-/// fall-through contract (never write a response here) is preserved.
+/// Whether a live ward grant may drive the sync write. Two independent
+/// conditions, both required:
+///
+///   * **scope** — wardd is a shared auth server, so a bearer minted for another
+///     service must not reach this one (mirroring `mcpGate`'s eda-scope match).
+///   * **role** — `POST /api/sync-kicad-pcb/:name` rewrites the KiCad board file
+///     in place. It is the most destructive write the server offers, and the
+///     bearer leg of `authMiddleware` returns `true` straight past the session
+///     gate's `requiresWrite` check — so without this, a ward READER holding an
+///     eda-scoped token could drive it. The role mapping is the same one the MCP
+///     mutation tools gate on (`mapWardRole`: member→writer, admin→admin,
+///     unknown→reader), so "may write over MCP" and "may write the board" are
+///     one rule rather than two that can drift.
+fn wardSyncGrantOk(scope: []const u8, role: ward.verdict.Role, service: []const u8) bool {
+    return mcpScopeOk(scope, service) and mapWardRole(role).canWrite();
+}
+
+/// Whether `req` carries a live ward bearer token *scoped for this service* and
+/// carrying a *writer-capable role* (see `wardSyncGrantOk`), without writing a
+/// response — the OAuth fallback the sync applier accepted before. A grant
+/// failing either half returns false so the caller falls through to the
+/// plugin/session path — the fall-through contract (never write a response here)
+/// is preserved, and the session gate then answers 401/403 for it.
 fn wardBearerAllows(ctx: *Server, req: *httpz.Request) bool {
     const state = &ctx.state.ward;
     if (!bearerConfigured(state.cfg)) return false;
     const action = bearerDecision(state, req, "") catch return false;
     return switch (action) {
-        .allow => |id| mcpScopeOk(id.scope, state.cfg.service_name),
+        .allow => |id| wardSyncGrantOk(id.scope, id.role, state.cfg.service_name),
         else => false,
     };
 }
@@ -489,7 +525,15 @@ fn sessionVerifier(state: *WardState) ward.http.HttpVerifier {
         .client = state.sessionClient(),
         .verify_url = state.cfg.verify_url,
         .service_name = state.cfg.service_name,
+        .service_url = serviceUrlOrNull(state.cfg),
     };
+}
+
+/// The configured browsable URL, or null when unset. An empty `service_url`
+/// means "report none", which omits the header rather than sending a blank
+/// value wardd would only have to reject.
+fn serviceUrlOrNull(cfg: WardConfig) ?[]const u8 {
+    return if (cfg.service_url.len == 0) null else cfg.service_url;
 }
 
 /// Build the production bearer-introspection verifier over the bearer path's
@@ -615,6 +659,31 @@ const FakeVerifier = struct {
     }
 };
 
+// spec: serve - A configured browsable url is reported to ward while an unset one omits the header
+test "serviceUrlOrNull reports a configured url and omits an unset one" {
+    const configured = WardConfig{
+        .verify_url = "",
+        .login_url = "",
+        .auth_server_url = "",
+        .introspect_url = "",
+        .service_name = default_service_name,
+        .service_url = "https://co-circuit.example",
+        .cache_ttl_secs = default_cache_ttl_secs,
+    };
+    try std.testing.expectEqualStrings("https://co-circuit.example", serviceUrlOrNull(configured).?);
+    // The field defaults to unset, so an untouched config reports no url at all
+    // rather than an empty one wardd would reject.
+    const unset = WardConfig{
+        .verify_url = "",
+        .login_url = "",
+        .auth_server_url = "",
+        .introspect_url = "",
+        .service_name = default_service_name,
+        .cache_ttl_secs = default_cache_ttl_secs,
+    };
+    try std.testing.expect(serviceUrlOrNull(unset) == null);
+}
+
 // spec: serve - Ward member maps to the writer role, admin to admin, and an unknown role to reader
 test "mapWardRole maps ward roles onto netlisp roles" {
     try std.testing.expectEqual(Role.writer, mapWardRole(.member));
@@ -676,6 +745,90 @@ test "mcpScopeOk requires a whole-entry service scope" {
     // A prefix lookalike is not a whole-entry match — "edax" must not authorize "eda".
     try std.testing.expect(!mcpScopeOk("edax", "eda"));
     try std.testing.expect(!mcpScopeOk("files edax", "eda"));
+}
+
+// spec: serve - The sync bearer grant requires both a service scope and a writer-capable role
+test "wardSyncGrantOk requires the eda scope and a writer-capable role together" {
+    // Both halves present — the fallback the KiCad sync agent relies on.
+    try std.testing.expect(wardSyncGrantOk("eda", .member, "eda"));
+    try std.testing.expect(wardSyncGrantOk("files eda", .admin, "eda"));
+    // Role without scope: a token minted for another service on this shared
+    // wardd must not reach the board write however privileged its holder.
+    try std.testing.expect(!wardSyncGrantOk("files", .admin, "eda"));
+    try std.testing.expect(!wardSyncGrantOk("", .member, "eda"));
+    // Scope without role: `.unknown` maps to reader, and a reader may not
+    // rewrite the board — the leg that used to be missing entirely, since the
+    // bearer path returns before the session gate's write check.
+    try std.testing.expect(!wardSyncGrantOk("eda", .unknown, "eda"));
+    try std.testing.expect(!wardSyncGrantOk("files eda", .unknown, "eda"));
+}
+
+// spec: serve - Every read-only post prefix exempts only its own route family while safe methods are never write-gated
+test "requiresWriteFor exempts each read-only post prefix and gates its siblings" {
+    // Safe methods are open whatever the path; everything else mutates by default.
+    try std.testing.expect(!requiresWriteFor(.GET, "/api/edit-value/x"));
+    try std.testing.expect(!requiresWriteFor(.HEAD, "/api/edit-value/x"));
+    try std.testing.expect(!requiresWriteFor(.OPTIONS, "/api/edit-value/x"));
+    try std.testing.expect(requiresWriteFor(.POST, "/api/edit-value/x"));
+    try std.testing.expect(requiresWriteFor(.PUT, "/api/edit-value/x"));
+    try std.testing.expect(requiresWriteFor(.DELETE, "/api/edit-value/x"));
+
+    for (read_only_posts) |p| {
+        // Each listed prefix exempts its own family…
+        try std.testing.expect(!requiresWriteFor(.POST, p));
+        // …and each is written with a trailing `/`, which is the ONLY thing
+        // stopping a sibling route that shares the stem from inheriting the
+        // exemption. An entry that lost its slash would widen the gate silently.
+        try std.testing.expect(std.mem.endsWith(u8, p, "/"));
+    }
+
+    // The one-character-wide hazard the list's own comment names, pinned on both
+    // sides: `/api/pcb-drc/:name` computes, `/api/pcb-drc-rules/:name` persists.
+    try std.testing.expect(!requiresWriteFor(.POST, "/api/pcb-drc/barracuda"));
+    try std.testing.expect(requiresWriteFor(.POST, "/api/pcb-drc-rules/barracuda"));
+    // Same shape for the score pair: the batch route is listed in its own right,
+    // and a third name sharing the stem is NOT exempt.
+    try std.testing.expect(!requiresWriteFor(.POST, "/api/pcb-score/x"));
+    try std.testing.expect(!requiresWriteFor(.POST, "/api/pcb-score-batch/x"));
+    try std.testing.expect(requiresWriteFor(.POST, "/api/pcb-scores/x"));
+    // And for the route/validate families.
+    try std.testing.expect(!requiresWriteFor(.POST, "/api/pcb-route/x"));
+    try std.testing.expect(requiresWriteFor(.POST, "/api/pcb-route-analyze-save/x"));
+    try std.testing.expect(!requiresWriteFor(.POST, "/api/validate/x"));
+    try std.testing.expect(requiresWriteFor(.POST, "/api/validate-and-write/x"));
+    // A prefix stripped of its trailing slash is not itself exempt.
+    try std.testing.expect(requiresWriteFor(.POST, "/api/pcb-drc"));
+    // The genuinely destructive routes are gated.
+    try std.testing.expect(requiresWriteFor(.POST, "/api/sync-kicad-pcb/x"));
+    try std.testing.expect(requiresWriteFor(.POST, "/api/push/x"));
+}
+
+// spec: serve - Every public route entry is served without a session while a sibling sharing its leading text is not
+test "the session allowlist admits exactly its public routes" {
+    const rows = [_]struct { path: []const u8, public: bool }{
+        // "/static/*" — the subtree entry the login/setup flow pulls assets from.
+        .{ .path = "/static", .public = true },
+        .{ .path = "/static/app.css", .public = true },
+        .{ .path = "/static/pcb/board.js", .public = true },
+        .{ .path = "/statics/app.css", .public = false },
+        .{ .path = "/staticx", .public = false },
+        // "/.well-known/oauth-protected-resource" — the exact RFC 9728 entry.
+        .{ .path = "/.well-known/oauth-protected-resource", .public = true },
+        .{ .path = "/.well-known/oauth-protected-resource/x", .public = false },
+        .{ .path = "/.well-known/oauth-protected-resourcex", .public = false },
+        // Deleted in the ward migration — netlisp is a resource server now, so
+        // the authorization-server document must NOT be public (or served).
+        .{ .path = "/.well-known/oauth-authorization-server", .public = false },
+        // Nothing else bypasses the session gate.
+        .{ .path = "/", .public = false },
+        .{ .path = "/api/scene-graph/x", .public = false },
+        .{ .path = "/auth/login", .public = false },
+        .{ .path = "/mcp", .public = false },
+    };
+    for (rows) |r| try std.testing.expectEqual(r.public, sessionAllowlist().isPublic(r.path));
+    // The rows above enumerate BOTH entries by hand; a third one added without
+    // its own rows here fails rather than landing unpinned.
+    try std.testing.expectEqual(@as(usize, 2), public_routes.len);
 }
 
 // spec: serve - The MCP role resolver returns the ward identity role, else admin on the dev bypass, else reader

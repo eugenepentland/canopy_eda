@@ -59,6 +59,10 @@ pub const RailConsumer = struct {
 /// draws from all downstream rails (e.g. "VDDA18USB" via FB3).
 pub const Rail = struct {
     net: []const u8,
+    /// Every power-like sub-block output tied to this rail, independent of
+    /// whether that output also declares a current capacity. These paths locate
+    /// the physical source pads for branch-current analysis.
+    source_terminals: []const []const u8 = &.{},
     /// Sub-block output port path (e.g. "ldo/VOUT"), or "" when no source
     /// declared capacity for this rail.
     source_label: []const u8 = "",
@@ -80,6 +84,40 @@ pub const Rail = struct {
     consumers: []const RailConsumer = &.{},
 };
 
+const SourceInfo = struct {
+    source_label: []const u8,
+    display_rail: []const u8,
+    current_typ: ?f64,
+    current_max: ?f64,
+};
+
+fn collectExternalSources(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    net_parent: *std.StringHashMapUnmanaged([]const u8),
+    sources: *std.StringHashMapUnmanaged(SourceInfo),
+    source_terminals: *std.StringHashMapUnmanaged(std.ArrayList([]const u8)),
+) std.mem.Allocator.Error!void {
+    for (block.ports) |port| {
+        if (!std.mem.eql(u8, port.direction, "in")) continue;
+        if (port.isDeclaredNonPower() or !port.isPowerSource()) continue;
+        const base = na.baseNetName(if (port.net.len > 0) port.net else port.name);
+        const root = na.findRoot(net_parent, base);
+        const path = try std.fmt.allocPrint(allocator, "@external/{s}", .{port.name});
+        const label = try std.fmt.allocPrint(allocator, "external/{s}", .{port.name});
+        const terminal_gop = try source_terminals.getOrPut(allocator, root);
+        if (!terminal_gop.found_existing) terminal_gop.value_ptr.* = .empty;
+        try appendUniqueString(allocator, terminal_gop.value_ptr, path);
+        if (port.current_typ == null and port.current_max == null) continue;
+        try sources.put(allocator, root, .{
+            .source_label = label,
+            .display_rail = base,
+            .current_typ = port.current_typ,
+            .current_max = port.current_max,
+        });
+    }
+}
+
 /// Analyze a block's declared sources and annotated consumer currents, and
 /// return one Rail entry per rail that has either a source declaration or a
 /// nonzero annotated load. GND is excluded. The returned slice is owned by
@@ -88,28 +126,27 @@ pub fn analyze(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
 ) std.mem.Allocator.Error![]const Rail {
-    // ref_des → library component, so each consumer row can show the part
-    // number (e.g. "U10" → "adf5901acpz-rl7") instead of just the ref.
-    var components: std.StringHashMapUnmanaged([]const u8) = .empty;
-    for (block.instances) |inst| try components.put(allocator, inst.ref_des, inst.component);
-
     // Step 1: union-find on ferrite-bead-bridged nets. A ferrite is a DC
     // conductor, so loads on its downstream side must attribute back to the
     // upstream regulator's budget.
     var net_parent = try na.buildFerriteBridges(allocator, block);
 
     // Step 2: collect source declarations from sub-block output ports.
-    const SourceInfo = struct {
-        source_label: []const u8,
-        display_rail: []const u8,
-        current_typ: ?f64,
-        current_max: ?f64,
-    };
     var sources: std.StringHashMapUnmanaged(SourceInfo) = .empty;
+    var source_terminals: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty;
+
+    // A board-level input power port is an external source, just as a regulator
+    // output is an internal source. Keep an explicit synthetic terminal path so
+    // post-route analysis can resolve it to the connector pads carrying the
+    // port's net. This also lets `(current typ max)` on the boundary participate
+    // in the same source-capacity budget as module outputs.
+    try collectExternalSources(allocator, block, &net_parent, &sources, &source_terminals);
+
     for (block.sub_blocks) |sb| {
         for (sb.block.ports) |port| {
-            if (port.current_typ == null and port.current_max == null) continue;
             if (!std.mem.eql(u8, port.direction, "out")) continue;
+            if (port.isDeclaredNonPower()) continue;
+            if (!port.isPowerSource() and !std.ascii.eqlIgnoreCase(port.kind, "power")) continue;
             const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, port.name });
             for (block.net_ties) |nt| {
                 const matched = std.mem.eql(u8, nt.a, path) or std.mem.eql(u8, nt.b, path);
@@ -117,6 +154,10 @@ pub fn analyze(
                 const top_net = if (std.mem.eql(u8, nt.a, path)) nt.b else nt.a;
                 const base = na.baseNetName(top_net);
                 const root = na.findRoot(&net_parent, base);
+                const terminal_gop = try source_terminals.getOrPut(allocator, root);
+                if (!terminal_gop.found_existing) terminal_gop.value_ptr.* = .empty;
+                try appendUniqueString(allocator, terminal_gop.value_ptr, path);
+                if (port.current_typ == null and port.current_max == null) continue;
                 // Multiple sources on the same rail (e.g. battery + charger
                 // both on VBATT): keep the highest-capacity one for the
                 // budget check. Picking by current_max makes the result
@@ -138,75 +179,16 @@ pub fn analyze(
     }
 
     // Step 3: sum consumer currents keyed on canonical root, and record a
-    // per-(ref_des, net) breakdown so the review can expand each rail.
-    const RailLoad = struct {
-        sum_typ: f64 = 0,
-        sum_max: f64 = 0,
-        any_typ: bool = false,
-        any_max: bool = false,
-        /// First non-root net name seen for this root — used as the display
-        /// name when no source declared it.
-        first_name: []const u8 = "",
-        /// Ordered list of `(ref_des, net)` group keys for consumer lookup.
-        /// Parallel to entries in `consumer_groups` below, keyed by
-        /// `{ref}\0{net}` to avoid the cost of a nested hashmap.
-        group_keys: std.ArrayList([]const u8) = .empty,
-    };
-    var loads: std.StringHashMapUnmanaged(RailLoad) = .empty;
-
-    const ConsumerGroup = struct {
-        ref_des: []const u8,
-        component: []const u8 = "",
-        label: []const u8 = "",
-        net: []const u8,
-        root: []const u8,
-        pins: std.ArrayList([]const u8) = .empty,
-        sum_typ: f64 = 0,
-        sum_max: f64 = 0,
-        any_typ: bool = false,
-        any_max: bool = false,
-    };
-    var consumer_groups: std.StringHashMapUnmanaged(ConsumerGroup) = .empty;
-
-    for (block.nets) |net| {
-        const base = na.baseNetName(net.name);
-        const root = na.findRoot(&net_parent, base);
-        var load = loads.get(root) orelse RailLoad{ .first_name = base };
-        for (net.pins) |pin| {
-            if (pin.i_typ) |v| {
-                load.sum_typ += v;
-                load.any_typ = true;
-            }
-            if (pin.i_max) |v| {
-                load.sum_max += v;
-                load.any_max = true;
-            }
-            if (pin.ref_des.len == 0) continue;
-            const group_key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ pin.ref_des, base });
-            const gop = try consumer_groups.getOrPut(allocator, group_key);
-            if (!gop.found_existing) {
-                gop.value_ptr.* = .{
-                    .ref_des = pin.ref_des,
-                    .component = components.get(pin.ref_des) orelse "",
-                    .net = base,
-                    .root = root,
-                };
-                try load.group_keys.append(allocator, group_key);
-            }
-            // First non-empty `(load "…")` label on any pin of the group wins.
-            if (gop.value_ptr.label.len == 0 and pin.load_label.len > 0) gop.value_ptr.label = pin.load_label;
-            try gop.value_ptr.pins.append(allocator, pin.pin);
-            if (pin.i_typ) |v| {
-                gop.value_ptr.sum_typ += v;
-                gop.value_ptr.any_typ = true;
-            }
-            if (pin.i_max) |v| {
-                gop.value_ptr.sum_max += v;
-                gop.value_ptr.any_max = true;
-            }
-        }
-        try loads.put(allocator, root, load);
-    }
+    // per-(ref_des, net) breakdown so the review can expand each rail. The
+    // walk descends into sub-blocks: a module's annotated pins land on the
+    // PARENT rail its port ties to, because on a board whose every load is
+    // sealed inside a `(sub-block …)` the top-level nets carry nothing but
+    // test points and a connector.
+    var tally = LoadTally{};
+    const top = try topScope(allocator, block, &net_parent);
+    try creditLoads(allocator, block, top, &tally);
+    const loads = &tally.loads;
+    const consumer_groups = &tally.groups;
 
     // Step 3b: back-compute input-side draw for sub-blocks with
     // (efficiency) declared on their output port. Iin = Iout × Vout/Vin / η
@@ -245,11 +227,17 @@ pub fn analyze(
 
                 for (sb.block.ports) |in_port| {
                     if (!std.mem.eql(u8, in_port.direction, "in")) continue;
+                    // A regulator draws its current through a SUPPLY input, not
+                    // through its enable. Charging the whole input draw to
+                    // whatever rail an `(port "EN" in signal …)` sits on both
+                    // invents a load that rail never carries and inflates the
+                    // dissipation of whatever regulator feeds it.
+                    if (in_port.isDeclaredNonPower()) continue;
 
                     const in_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, in_port.name });
                     const in_rail_root = findRailForSubPath(block, &net_parent, in_path) orelse continue;
                     const in_display = loads.get(in_rail_root) orelse RailLoad{
-                        .first_name = findDisplayForSubPath(block, in_path) orelse in_rail_root,
+                        .first_name = railNameForSubPath(block, in_path) orelse in_rail_root,
                     };
                     const vin = in_port.nominal orelse resolveRailVoltage(allocator, block, in_display.first_name) orelse continue;
                     if (vin <= zero_voltage) continue;
@@ -316,19 +304,20 @@ pub fn analyze(
         const root = entry.key_ptr.*;
         const src = entry.value_ptr.*;
         const load = loads.get(root) orelse RailLoad{};
-        const consumers = try buildConsumers(allocator, load.group_keys.items, &consumer_groups);
-        const rail = buildRail(
-            src.display_rail,
-            src.source_label,
-            src.current_typ,
-            src.current_max,
-            load.sum_typ,
-            load.sum_max,
-            load.any_typ,
-            load.any_max,
-            consumers,
-            derating,
-        );
+        const consumers = try buildConsumers(allocator, load.group_keys.items, consumer_groups);
+        const rail = buildRail(.{
+            .display_name = src.display_rail,
+            .source_label = src.source_label,
+            .source_typ = src.current_typ,
+            .source_max = src.current_max,
+            .source_terminals = if (source_terminals.get(root)) |terminals| terminals.items else &.{},
+            .load_typ = load.sum_typ,
+            .load_max = load.sum_max,
+            .any_typ = load.any_typ,
+            .any_max = load.any_max,
+            .consumers = consumers,
+            .derating = derating,
+        });
         try rails.append(allocator, rail);
         try emitted_roots.put(allocator, root, {});
     }
@@ -340,8 +329,17 @@ pub fn analyze(
         if (!load.any_typ and !load.any_max) continue;
         if (std.mem.eql(u8, root, "GND")) continue;
         if (emitted_roots.contains(root)) continue;
-        const consumers = try buildConsumers(allocator, load.group_keys.items, &consumer_groups);
-        const rail = buildRail(load.first_name, "", null, null, load.sum_typ, load.sum_max, load.any_typ, load.any_max, consumers, derating);
+        const consumers = try buildConsumers(allocator, load.group_keys.items, consumer_groups);
+        const rail = buildRail(.{
+            .display_name = load.first_name,
+            .source_terminals = if (source_terminals.get(root)) |terminals| terminals.items else &.{},
+            .load_typ = load.sum_typ,
+            .load_max = load.sum_max,
+            .any_typ = load.any_typ,
+            .any_max = load.any_max,
+            .consumers = consumers,
+            .derating = derating,
+        });
         try rails.append(allocator, rail);
     }
 
@@ -349,6 +347,187 @@ pub fn analyze(
     // slice, not `.items` (a sub-slice of a capacity-padded allocation whose
     // slack a non-arena caller's `free` can't return).
     return rails.toOwnedSlice(allocator);
+}
+
+// ── Load aggregation ──────────────────────────────────────────────────
+// A rail's load is not just what the top-level nets carry. A board whose every
+// functional block is a sealed `(sub-block …)` declares its currents INSIDE
+// those modules, and the top-level rail then shows nothing but test points and
+// a connector. The pass below therefore descends: a module's annotated pins are
+// credited to the parent rail its port ties to, recursively, so a regulator's
+// output rail sees the loads its siblings actually draw.
+
+/// Accumulated load on one canonical rail root.
+const RailLoad = struct {
+    sum_typ: f64 = 0,
+    sum_max: f64 = 0,
+    any_typ: bool = false,
+    any_max: bool = false,
+    /// First non-root net name seen for this root — used as the display
+    /// name when no source declared it.
+    first_name: []const u8 = "",
+    /// Ordered list of `(ref_des, net)` group keys for consumer lookup.
+    /// Parallel to entries in the tally's `groups` map, keyed by
+    /// `{ref}\0{net}` to avoid the cost of a nested hashmap.
+    group_keys: std.ArrayList([]const u8) = .empty,
+};
+
+/// One `(ref_des, net)` consumer row under construction.
+const ConsumerGroup = struct {
+    ref_des: []const u8,
+    component: []const u8 = "",
+    label: []const u8 = "",
+    net: []const u8,
+    root: []const u8,
+    pins: std.ArrayList([]const u8) = .empty,
+    sum_typ: f64 = 0,
+    sum_max: f64 = 0,
+    any_typ: bool = false,
+    any_max: bool = false,
+};
+
+/// Everything the load walk accumulates: per-root totals and the consumer rows
+/// behind them. One value so the recursion carries a single pointer.
+const LoadTally = struct {
+    loads: std.StringHashMapUnmanaged(RailLoad) = .empty,
+    groups: std.StringHashMapUnmanaged(ConsumerGroup) = .empty,
+};
+
+/// The block currently being credited: which of ITS nets feed a rail, what its
+/// parts are called in the report, and its own ref-des → component map.
+///
+/// At the design's top level `rail_of` holds every net mapped to its own
+/// canonical (ferrite-collapsed) root and the prefix is empty. Inside a
+/// sub-block only the nets its PORTS expose appear, each mapped onto the
+/// parent's root, and the prefix is the `sub-block/` path — so a module's
+/// private nets stay private and its parts are named the way the flattened
+/// netlist names them.
+const LoadScope = struct {
+    prefix: []const u8 = "",
+    rail_of: std.StringHashMapUnmanaged([]const u8) = .empty,
+    components: std.StringHashMapUnmanaged([]const u8) = .empty,
+};
+
+/// The design's own scope: every net is a rail of its own, under its canonical
+/// ferrite-collapsed root.
+fn topScope(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    net_parent: *std.StringHashMapUnmanaged([]const u8),
+) std.mem.Allocator.Error!LoadScope {
+    var scope = LoadScope{};
+    for (block.nets) |net| {
+        const base = na.baseNetName(net.name);
+        try scope.rail_of.put(allocator, base, na.findRoot(net_parent, base));
+    }
+    for (block.instances) |inst| try scope.components.put(allocator, inst.ref_des, inst.component);
+    return scope;
+}
+
+/// A sub-block's scope, seen from `parent`: each port that ties to a net the
+/// parent already maps carries that port's INTERNAL net name onto the parent's
+/// rail root. A port tying to nothing, or to a net outside the parent's own
+/// scope, contributes nothing — its module's pins on that net stay internal.
+///
+/// Two ports sharing one internal net keep the FIRST mapping, so a module that
+/// exposes one node twice credits its load once and does so deterministically.
+fn childScope(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    sb: env_mod.SubBlock,
+    parent: LoadScope,
+) std.mem.Allocator.Error!LoadScope {
+    var scope = LoadScope{
+        .prefix = try std.fmt.allocPrint(allocator, "{s}{s}/", .{ parent.prefix, sb.name }),
+    };
+    for (sb.block.ports) |port| {
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, port.name });
+        defer allocator.free(path);
+        const parent_net = railNameForSubPath(block, path) orelse continue;
+        const root = parent.rail_of.get(na.baseNetName(parent_net)) orelse continue;
+        const internal = na.baseNetName(if (port.net.len > 0) port.net else port.name);
+        if (scope.rail_of.contains(internal)) continue;
+        try scope.rail_of.put(allocator, internal, root);
+    }
+    for (sb.block.instances) |inst| try scope.components.put(allocator, inst.ref_des, inst.component);
+    return scope;
+}
+
+/// Credit every annotated pin in `block` — and in the sub-blocks whose ports
+/// reach one of `scope`'s rails — to that rail's tally.
+fn creditLoads(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    scope: LoadScope,
+    tally: *LoadTally,
+) std.mem.Allocator.Error!void {
+    for (block.nets) |net| {
+        const root = scope.rail_of.get(na.baseNetName(net.name)) orelse continue;
+        try creditNet(allocator, tally, scope, net, root);
+    }
+    for (block.sub_blocks) |sb| {
+        const child = try childScope(allocator, block, sb, scope);
+        // A module none of whose ports reach a rail here has nothing to
+        // contribute, and descending into it would only cost the walk time.
+        if (child.rail_of.count() == 0) continue;
+        try creditLoads(allocator, sb.block, child, tally);
+    }
+}
+
+/// Add one net's annotated pins to `root`'s totals and to its per-part rows.
+fn creditNet(
+    allocator: std.mem.Allocator,
+    tally: *LoadTally,
+    scope: LoadScope,
+    net: env_mod.Net,
+    root: []const u8,
+) std.mem.Allocator.Error!void {
+    const base = na.baseNetName(net.name);
+    // A root reached from inside a sub-block is a TOP-LEVEL net name, already
+    // seeded by the design's own pass; the fallback only fires for a tie whose
+    // parent net carries no pins of its own, where the root is the best name
+    // there is.
+    var load = tally.loads.get(root) orelse RailLoad{
+        .first_name = if (scope.prefix.len == 0) base else root,
+    };
+    for (net.pins) |pin| {
+        if (pin.i_typ) |v| {
+            load.sum_typ += v;
+            load.any_typ = true;
+        }
+        if (pin.i_max) |v| {
+            load.sum_max += v;
+            load.any_max = true;
+        }
+        if (pin.ref_des.len == 0) continue;
+        const ref = if (scope.prefix.len == 0)
+            pin.ref_des
+        else
+            try std.fmt.allocPrint(allocator, "{s}{s}", .{ scope.prefix, pin.ref_des });
+        const group_key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ ref, base });
+        const gop = try tally.groups.getOrPut(allocator, group_key);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{
+                .ref_des = ref,
+                .component = scope.components.get(pin.ref_des) orelse "",
+                .net = base,
+                .root = root,
+            };
+            try load.group_keys.append(allocator, group_key);
+        }
+        // First non-empty `(load "…")` label on any pin of the group wins.
+        if (gop.value_ptr.label.len == 0 and pin.load_label.len > 0) gop.value_ptr.label = pin.load_label;
+        try gop.value_ptr.pins.append(allocator, pin.pin);
+        if (pin.i_typ) |v| {
+            gop.value_ptr.sum_typ += v;
+            gop.value_ptr.any_typ = true;
+        }
+        if (pin.i_max) |v| {
+            gop.value_ptr.sum_max += v;
+            gop.value_ptr.any_max = true;
+        }
+    }
+    try tally.loads.put(allocator, root, load);
 }
 
 fn buildConsumers(
@@ -386,55 +565,68 @@ fn lessThanConsumer(_: void, a: RailConsumer, b: RailConsumer) bool {
     return std.mem.order(u8, a.ref_des, b.ref_des) == .lt;
 }
 
-fn buildRail(
+const RailInput = struct {
     display_name: []const u8,
-    source_label: []const u8,
-    source_typ: ?f64,
-    source_max: ?f64,
+    source_label: []const u8 = "",
+    source_typ: ?f64 = null,
+    source_max: ?f64 = null,
+    source_terminals: []const []const u8 = &.{},
     load_typ: f64,
     load_max: f64,
     any_typ: bool,
     any_max: bool,
     consumers: []const RailConsumer,
     derating: f64,
-) Rail {
+};
+
+fn buildRail(input: RailInput) Rail {
     var status: RailStatus = .ok;
     var margin: ?f64 = null;
 
-    if (source_label.len == 0) {
+    if (input.source_label.len == 0) {
         status = .no_source;
-    } else if (!any_typ and !any_max) {
+    } else if (!input.any_typ and !input.any_max) {
         status = .no_consumers;
-    } else if (source_max) |smax| {
-        if (any_max and load_max > smax) status = .over;
+    } else if (input.source_max) |smax| {
+        if (input.any_max and input.load_max > smax) status = .over;
     }
 
     if (status == .ok) {
-        if (source_typ) |styp| {
-            if (any_typ) {
-                margin = percent_full * (percent_fraction_base - load_typ / styp);
-                if (load_typ > derating * styp) status = .tight;
+        if (input.source_typ) |styp| {
+            if (input.any_typ) {
+                margin = percent_full * (percent_fraction_base - input.load_typ / styp);
+                if (input.load_typ > input.derating * styp) status = .tight;
             }
         }
     } else if (status == .over) {
-        if (source_typ) |styp| if (any_typ) {
-            margin = percent_full * (percent_fraction_base - load_typ / styp);
+        if (input.source_typ) |styp| if (input.any_typ) {
+            margin = percent_full * (percent_fraction_base - input.load_typ / styp);
         };
     }
 
     return .{
-        .net = display_name,
-        .source_label = source_label,
-        .source_typ_a = source_typ,
-        .source_max_a = source_max,
-        .load_typ_a = load_typ,
-        .load_max_a = load_max,
-        .any_typ_load = any_typ,
-        .any_max_load = any_max,
+        .net = input.display_name,
+        .source_terminals = input.source_terminals,
+        .source_label = input.source_label,
+        .source_typ_a = input.source_typ,
+        .source_max_a = input.source_max,
+        .load_typ_a = input.load_typ,
+        .load_max_a = input.load_max,
+        .any_typ_load = input.any_typ,
+        .any_max_load = input.any_max,
         .margin_pct = margin,
         .status = status,
-        .consumers = consumers,
+        .consumers = input.consumers,
     };
+}
+
+fn appendUniqueString(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList([]const u8),
+    value: []const u8,
+) std.mem.Allocator.Error!void {
+    for (list.items) |existing| if (std.mem.eql(u8, existing, value)) return;
+    try list.append(allocator, value);
 }
 
 /// Find the canonical rail root for a sub-block path like `"ldo/VIN"` by
@@ -454,8 +646,11 @@ fn findRailForSubPath(
     return null;
 }
 
-/// Return the display-friendly top-level net name tied to a sub-block path.
-fn findDisplayForSubPath(block: *const DesignBlock, path: []const u8) ?[]const u8 {
+/// Return the display-friendly top-level net name tied to a sub-block path
+/// (e.g. `"ldo/VOUT"` → `"V3P3"`), or null when nothing ties it. Public because
+/// the thermal analyzer asks the same question of the same `net_ties` when it
+/// charges a regulator with its conversion loss — one resolution, one answer.
+pub fn railNameForSubPath(block: *const DesignBlock, path: []const u8) ?[]const u8 {
     for (block.net_ties) |nt| {
         const matched = std.mem.eql(u8, nt.a, path) or std.mem.eql(u8, nt.b, path);
         if (!matched) continue;
@@ -472,7 +667,9 @@ fn findDisplayForSubPath(block: *const DesignBlock, path: []const u8) ?[]const u
 ///   3. A top-level design-block port's `nominal` or midpoint of `rated`.
 /// Returns null when nothing resolves — the analyzer skips the
 /// back-computation so the user can see which rail needs a voltage hint.
-fn resolveRailVoltage(allocator: std.mem.Allocator, block: *const DesignBlock, rail_name: []const u8) ?f64 {
+/// Public because the thermal analyzer answers the same question about the
+/// same rails: two resolutions would be two different boards.
+pub fn resolveRailVoltage(allocator: std.mem.Allocator, block: *const DesignBlock, rail_name: []const u8) ?f64 {
     // 1. Sub-block output port → look for a net-tie tying its path to the rail.
     for (block.sub_blocks) |sb| {
         for (sb.block.ports) |p| {
@@ -514,4 +711,247 @@ fn sectionVoltage(sec: env_mod.Section, rail_name: []const u8) ?f64 {
     }
     for (sec.sub_sections) |sub| if (sectionVoltage(sub, rail_name)) |v| return v;
     return null;
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+/// The shape every sealed-module board has, and the one the top-level-only
+/// walk could not see:
+///
+/// ```
+///   V12 ──[buck: η 0.5, 12 V → 3.3 V]──▶ V3P3 ──▶ loadmod
+///                                                   U1   0.25 A on its VDD port net
+///                                                   inner/U2 0.10 A, two levels down
+///                                                   U3   5.00 A on PRIV, exposed by no port
+/// ```
+///
+/// Nothing at the TOP level is annotated — the only top-level pin is a test
+/// point, exactly as on a board whose every load lives in a `(sub-block …)`.
+fn siblingChainBlock(alloc: std.mem.Allocator) !DesignBlock {
+    const inner = try alloc.create(DesignBlock);
+    const inner_pins = try alloc.dupe(env_mod.PinRef, &.{.{ .ref_des = "U2", .pin = "1", .i_typ = 0.10 }});
+    inner.* = .{
+        .name = "inner",
+        .instances = try alloc.dupe(env_mod.Instance, &.{namedPart("U2", "child-chip")}),
+        .nets = try alloc.dupe(env_mod.Net, &.{.{ .name = "VCC", .pins = inner_pins }}),
+        .ports = try alloc.dupe(env_mod.Port, &.{.{ .name = "VCC", .net = "VCC", .direction = "in" }}),
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    const load_mod = try alloc.create(DesignBlock);
+    const vdd_pins = try alloc.dupe(env_mod.PinRef, &.{.{ .ref_des = "U1", .pin = "1", .i_typ = 0.25 }});
+    const priv_pins = try alloc.dupe(env_mod.PinRef, &.{.{ .ref_des = "U3", .pin = "1", .i_typ = 5.0 }});
+    load_mod.* = .{
+        .name = "loadmod",
+        .instances = try alloc.dupe(env_mod.Instance, &.{ namedPart("U1", "big-chip"), namedPart("U3", "private-chip") }),
+        .nets = try alloc.dupe(env_mod.Net, &.{
+            .{ .name = "VDD", .pins = vdd_pins },
+            .{ .name = "PRIV", .pins = priv_pins },
+        }),
+        .ports = try alloc.dupe(env_mod.Port, &.{.{ .name = "VDD", .net = "VDD", .direction = "in" }}),
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = try alloc.dupe(env_mod.SubBlock, &.{.{ .name = "inner", .block = inner }}),
+        .net_ties = try alloc.dupe(env_mod.NetTie, &.{.{ .a = "VDD", .b = "inner/VCC" }}),
+    };
+
+    const buck = try alloc.create(DesignBlock);
+    buck.* = .{
+        .name = "buck",
+        .instances = try alloc.dupe(env_mod.Instance, &.{namedPart("U9", "buck-chip")}),
+        .nets = &.{},
+        .ports = try alloc.dupe(env_mod.Port, &.{
+            .{ .name = "VIN", .net = "VIN", .direction = "in", .nominal = 12.0 },
+            .{ .name = "VOUT", .net = "VOUT", .direction = "out", .nominal = 3.3, .efficiency = 0.5 },
+        }),
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    const tp_pins = try alloc.dupe(env_mod.PinRef, &.{.{ .ref_des = "TP1", .pin = "1" }});
+    return .{
+        .name = "board",
+        .instances = try alloc.dupe(env_mod.Instance, &.{namedPart("TP1", "testpoint")}),
+        .nets = try alloc.dupe(env_mod.Net, &.{
+            .{ .name = "V12", .pins = &.{} },
+            .{ .name = "V3P3", .pins = tp_pins },
+        }),
+        .ports = try alloc.dupe(env_mod.Port, &.{.{ .name = "V12", .net = "V12", .direction = "in", .nominal = 12.0 }}),
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = try alloc.dupe(env_mod.SubBlock, &.{
+            .{ .name = "buck", .block = buck },
+            .{ .name = "loadmod", .block = load_mod },
+        }),
+        .net_ties = try alloc.dupe(env_mod.NetTie, &.{
+            .{ .a = "V12", .b = "buck/VIN" },
+            .{ .a = "V3P3", .b = "buck/VOUT" },
+            .{ .a = "V3P3", .b = "loadmod/VDD" },
+        }),
+    };
+}
+
+/// A minimal placed part for the fixtures above.
+fn namedPart(ref_des: []const u8, component: []const u8) env_mod.Instance {
+    return .{
+        .ref_des = ref_des,
+        .component = component,
+        .value = "",
+        .footprint = "",
+        .symbol = "",
+    };
+}
+
+/// The analyzed rail named `net`, or null when the walk emitted none.
+fn railNamed(rails: []const Rail, net: []const u8) ?Rail {
+    for (rails) |rail| {
+        if (std.mem.eql(u8, rail.net, net)) return rail;
+    }
+    return null;
+}
+
+// spec: eval/power_budget - a sibling sub-block's annotated pins load the parent rail its port ties to, so a rail whose consumers are all sealed in modules is no longer empty
+test "a sub-block's annotated pins land on the parent rail its port ties to" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const block = try siblingChainBlock(alloc);
+    const rails = try analyze(alloc, &block);
+    const v3p3 = railNamed(rails, "V3P3").?;
+
+    try testing.expectEqual(@as(usize, 1), v3p3.source_terminals.len);
+    try testing.expectEqualStrings("buck/VOUT", v3p3.source_terminals[0]);
+    try testing.expectEqualStrings("", v3p3.source_label);
+
+    // 0.25 A from loadmod/U1 plus 0.10 A two levels down — the top level itself
+    // carries only a test point.
+    try testing.expect(v3p3.any_typ_load);
+    try testing.expectApproxEqAbs(@as(f64, 0.35), v3p3.load_typ_a, 1e-9);
+
+    var found_u1 = false;
+    for (v3p3.consumers) |c| {
+        if (!std.mem.eql(u8, c.ref_des, "loadmod/U1")) continue;
+        found_u1 = true;
+        try testing.expectApproxEqAbs(@as(f64, 0.25), c.i_typ.?, 1e-9);
+        // The row names the module's own part and net, under the flattened ref.
+        try testing.expectEqualStrings("big-chip", c.component);
+        try testing.expectEqualStrings("VDD", c.net);
+    }
+    try testing.expect(found_u1);
+}
+
+// spec: eval/power_budget - the sub-block load walk recurses, so a module nested inside a module still credits the board rail its ports chain up to
+test "a nested sub-block's load reaches the board rail two levels up" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const block = try siblingChainBlock(alloc);
+    const rails = try analyze(alloc, &block);
+    const v3p3 = railNamed(rails, "V3P3").?;
+
+    var inner: ?RailConsumer = null;
+    for (v3p3.consumers) |c| {
+        if (std.mem.eql(u8, c.ref_des, "loadmod/inner/U2")) inner = c;
+    }
+    try testing.expectApproxEqAbs(@as(f64, 0.10), inner.?.i_typ.?, 1e-9);
+    try testing.expectEqualStrings("child-chip", inner.?.component);
+}
+
+// spec: eval/power_budget - only a sub-block net a port exposes credits the parent; a module's private net stays private however heavily it is annotated
+test "a module's private net is never credited to a parent rail" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const block = try siblingChainBlock(alloc);
+    const rails = try analyze(alloc, &block);
+
+    // PRIV carries 5 A — twenty times the rest of the board — and reaches no
+    // port, so it appears on no rail at all.
+    for (rails) |rail| {
+        try testing.expect(rail.load_typ_a < 1.0);
+        for (rail.consumers) |c| {
+            try testing.expect(!std.mem.eql(u8, c.ref_des, "loadmod/U3"));
+        }
+    }
+}
+
+// spec: eval/power_budget - a regulator's input draw is charged to a supply input, never to the rail an explicitly signal-kinded enable input sits on
+test "an enable input never carries the regulator's input draw" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var block = try siblingChainBlock(alloc);
+    // Give the buck an ENABLE input on the rail it feeds, declared `signal`,
+    // and strip the supply input's voltage so only the enable resolves one —
+    // the exact shape that charged a boost converter's whole 12 V draw to the
+    // 3.3 V rail holding its enable pin.
+    const buck = block.sub_blocks[0].block;
+    const ports = try alloc.alloc(env_mod.Port, 3);
+    ports[0] = .{ .name = "VIN", .net = "VIN", .direction = "in", .rated_min = 5.0, .rated_max = 24.0 };
+    ports[1] = buck.ports[1];
+    ports[2] = .{ .name = "EN", .net = "EN", .direction = "in", .kind = "signal", .nominal = 3.3 };
+    buck.ports = ports;
+    const ties = try alloc.alloc(env_mod.NetTie, block.net_ties.len + 1);
+    @memcpy(ties[0..block.net_ties.len], block.net_ties);
+    ties[block.net_ties.len] = .{ .a = "V3P3", .b = "buck/EN" };
+    block.net_ties = ties;
+
+    const rails = try analyze(alloc, &block);
+    const v3p3 = railNamed(rails, "V3P3").?;
+    // The rail still carries only the two real loads — not the buck's own draw.
+    try testing.expectApproxEqAbs(@as(f64, 0.35), v3p3.load_typ_a, 1e-9);
+    for (v3p3.consumers) |c| {
+        try testing.expect(!std.mem.eql(u8, c.ref_des, "buck"));
+    }
+}
+
+// spec: eval/power_budget - a regulator's back-computed input draw counts its output rail's sub-block loads exactly once, as one consumer row on the input rail
+test "the input-side back-computation does not double count sub-block loads" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const block = try siblingChainBlock(alloc);
+    const rails = try analyze(alloc, &block);
+    const v12 = railNamed(rails, "V12").?;
+
+    // Iin = Iout × Vout/(Vin × η) = 0.35 × 3.3/(12 × 0.5) = 0.1925 A. Counted
+    // twice it would read 0.385; the fixed-point pass applies deltas, not sums.
+    try testing.expectApproxEqAbs(@as(f64, 0.1925), v12.load_typ_a, 1e-9);
+
+    var buck_rows: usize = 0;
+    for (v12.consumers) |c| {
+        if (std.mem.eql(u8, c.ref_des, "buck")) buck_rows += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), buck_rows);
+}
+
+// spec: eval/power_budget - a top-level input power port is an external rail source, and its declared current capacity and synthetic physical terminal survive into the rail budget
+test "a top-level input power port supplies its board rail" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var block = try siblingChainBlock(alloc);
+    const ports = try alloc.dupe(env_mod.Port, block.ports);
+    ports[0].current_typ = 0.85;
+    ports[0].current_max = 1.0;
+    block.ports = ports;
+
+    const rails = try analyze(alloc, &block);
+    const v12 = railNamed(rails, "V12").?;
+    try testing.expectEqualStrings("external/V12", v12.source_label);
+    try testing.expectEqual(@as(?f64, 0.85), v12.source_typ_a);
+    try testing.expectEqual(@as(?f64, 1.0), v12.source_max_a);
+    try testing.expectEqual(@as(usize, 1), v12.source_terminals.len);
+    try testing.expectEqualStrings("@external/V12", v12.source_terminals[0]);
 }

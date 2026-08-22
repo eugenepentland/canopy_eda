@@ -3,21 +3,29 @@
 //! analytic "outline pullback minus per-hole antipads" that each consumer
 //! recomputed independently and that assumed connectivity it never verified.
 //!
-//! `compute` rasterizes one poured/plane layer at a fine pitch: it starts from
-//! the board outline inset by the copper-to-edge clearance (respecting a
-//! non-rectangular `board_poly`), carves every FOREIGN copper feature (a pad,
-//! track, or via whose net the plane does NOT carry) with the pour clearance,
-//! then connected-component labels the surviving cells and keeps ONLY the
-//! components that contain a same-net SEED (a same-net pad or via landing on
-//! that layer). The result answers two questions honestly:
+//! `compute` rasterizes one poured/plane layer at a fine pitch onto a SIGNED
+//! MARGIN FIELD: each cell holds the true geometric distance from its centre to
+//! the nearest keep-out boundary — the board outline inset by the copper-to-edge
+//! clearance (respecting a non-rectangular `board_poly`), and every FOREIGN
+//! copper feature (a pad, track, or via whose net the plane does NOT carry)
+//! grown by the pour clearance. Each stamp lowers the field by `min()` with the
+//! feature's exact signed margin over a window that reaches a few cells past the
+//! clearance boundary, so the composite field is accurate on BOTH sides of that
+//! boundary. Cells whose margin clears `iso_guard` are fillable; connected-
+//! component labelling keeps ONLY components that contain a same-net SEED (a
+//! same-net pad or via landing on that layer). The result answers two questions
+//! honestly:
 //!
 //!   * membership — `componentAt(x,y)` / `planeConnect` say which kept
 //!     component (if any) a point/pad lands in, so a pad isolated by its
 //!     antipad ring, a plane split by a foreign trace, or an orphan island are
 //!     all VISIBLE (the fab-readiness short-circuit is gone), and
-//!   * shape — `Fill.contours` are the kept components' outer boundary polygons
-//!     (marching-squares edge tracing + Douglas-Peucker), so the Gerber emits
-//!     real copper (islands dropped) and the viewer paints the true extent.
+//!   * shape — `Fill.contours` are the kept components' outer boundary polygons,
+//!     traced as the width-filtered `iso_guard` iso-line of the margin field with sub-cell
+//!     linear interpolation (dual marching squares), so the emitted copper
+//!     follows a smooth clearance offset instead of a grid staircase, never dips
+//!     under the true clearance, and the Gerber emits real copper / the viewer
+//!     paints the true extent (islands dropped).
 //!
 //! The engine is a pure function of `(placement, copper, layer)` — no server,
 //! no disk — so it is unit-testable and shares the export's frame/net model.
@@ -26,8 +34,11 @@ const std = @import("std");
 const optimizer = @import("optimizer.zig");
 const geometry = @import("geometry.zig");
 const pad_shape = @import("pad_shape.zig");
+const implicit_plane = @import("implicit_plane.zig");
 const router = @import("router.zig");
 const outline = @import("outline.zig");
+const via_antipad = @import("via_antipad.zig");
+const impedance = @import("impedance.zig");
 const numeric = @import("../numeric.zig");
 
 /// Which net a poured/plane layer carries: a declared `(plane IDX "NET")` name,
@@ -40,9 +51,169 @@ pub const PlaneNet = union(enum) { named: []const u8, ground };
 /// and vias interact — SMD pads and signal tracks live on other layers).
 pub const LayerSpec = struct {
     net: PlaneNet,
+    /// Physical 1-based copper stack position when this spec comes from a
+    /// declared plane/pour. Zero for an ad-hoc user zone or legacy caller.
+    /// Geometry does not read it; audits use it to pair an exact fill with the
+    /// signal layer that references that physical plane.
+    stack: u8 = 0,
     side: ?optimizer.Side = null,
     track_layer: ?u8 = null,
+    /// A user-drawn clip polygon (world mm) for a hand-authored pour: the fill
+    /// is additionally confined to this region — the margin field becomes
+    /// `min(board-outline inset, clip-polygon inset)` — so the copper never
+    /// spills past the drawn boundary. Empty (`<3` pts) = a full-face declared
+    /// pour (no extra clip).
+    clip: []const [2]f64 = &.{},
+    /// Keep ALL kept-candidate components when the fill has NO same-net seed —
+    /// so a freshly drawn user pour with no same-net copper inside still
+    /// renders (islands reported honestly). Declared pours leave this false, so
+    /// their orphan-island drop (see `markSeeds`) is unchanged.
+    keep_unseeded: bool = false,
+    /// Boundary polygons (world mm) of the HIGHER-priority overlapping pours on
+    /// this same layer that carry a DIFFERENT net — the copper this (lower-
+    /// priority) fill must clear so it leaves a gap instead of shorting to a
+    /// higher-ranked neighbour (KiCad's zone-priority resolution). Each is
+    /// stamped as foreign copper grown by the pour clearance (`stampHigher`).
+    /// Empty for declared pours and for the top-priority pour on a layer.
+    higher: []const []const [2]f64 = &.{},
 };
+
+/// A user-drawn copper pour reduced to what CONNECTIVITY credit and the Gerber
+/// writer need: the net NAME (stable identity, matching the flattened net), the
+/// routable signal-layer index (0 = top / F.Cu, 1 = bottom / B.Cu, ≥2 = a
+/// plane-free INNER signal layer — `BoardRules.signalIndexOfName` resolves the
+/// KiCad name to it), and the boundary polygon. Connectivity membership is a
+/// cheap point-in-polygon test (no fill raster) — an outer zone unites its
+/// face's SMD pads plus through-hole pads/vias, an inner zone only the
+/// through-hole pads/vias that reach it — so this rides the hot fab / net-open
+/// path safely.
+pub const UserZone = struct {
+    net: []const u8,
+    layer: u8,
+    poly: []const [2]f64,
+    /// Zone-fill priority (KiCad's `(priority N)`): on one layer, a pour outranks
+    /// a DIFFERENT-net pour it overlaps when its priority is strictly greater —
+    /// the higher pour fills the overlap and the lower one recedes by the pour
+    /// clearance. Default 0; equal-priority overlaps are left untouched (they
+    /// short, exactly as before priority existed — resolve them by ranking).
+    priority: i64 = 0,
+};
+
+/// Does higher-priority pour `hi` outrank lower pour `lo` for overlap
+/// resolution — same routable layer, strictly greater priority, and a
+/// DIFFERENT net (same-net pours merge, never clip each other)? The single
+/// predicate `higherPolys` applies for every consumer (viewer refill, Gerber,
+/// PNG), so the gap the viewer shows is exactly the gap the fab cuts.
+fn outranks(hi: UserZone, lo: UserZone) bool {
+    return hi.layer == lo.layer and hi.priority > lo.priority and !sameZoneNet(hi.net, lo.net);
+}
+
+/// Two zone net names refer to the same net (exact or `/`-leaf match, case-
+/// insensitive) — so a sub-block-flattened rail (`pwr/VOUT`) and its parent
+/// spelling never clip each other.
+fn sameZoneNet(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(a, b) or std.ascii.eqlIgnoreCase(leafName(a), leafName(b));
+}
+
+/// The boundary polygons of every pour that OUTRANKS `zones[i]` (see
+/// `outranks`) — the higher-priority different-net copper `zones[i]`'s fill must
+/// clear. Arena-owned; empty when `zones[i]` is the top rank on its layer. Fed
+/// into `LayerSpec.higher` so `compute` knocks the lower fill back.
+pub fn higherPolys(arena: std.mem.Allocator, zones: []const UserZone, i: usize) std.mem.Allocator.Error![]const []const [2]f64 {
+    var out: std.ArrayList([]const [2]f64) = .empty;
+    for (zones, 0..) |z, j| {
+        if (j == i) continue;
+        if (outranks(z, zones[i])) try out.append(arena, z.poly);
+    }
+    return out.items;
+}
+
+/// Boundary polygons of the user pours that OUTRANK a DECLARED pour/plane —
+/// the `(pour top|bottom "NET")` / `(plane IDX "NET")` background copper on
+/// signal layer `layer` carrying `net`. A declared pour is the board's blanket
+/// background fill and always ranks BELOW a hand-drawn/imported user pour: a
+/// user zone is a deliberate region, so it wins the overlap whatever its
+/// `priority` (which only orders user pours against each other) and the
+/// declared copper recedes by the pour clearance around it. Without this a
+/// `(pour bottom "GND")` pours straight through a rail zone on the same face and
+/// shorts to it. Same-net zones are skipped — that copper simply merges.
+pub fn higherThanDeclared(
+    arena: std.mem.Allocator,
+    zones: []const UserZone,
+    layer: u8,
+    net: PlaneNet,
+) std.mem.Allocator.Error![]const []const [2]f64 {
+    var out: std.ArrayList([]const [2]f64) = .empty;
+    for (zones) |z| {
+        if (z.layer != layer) continue;
+        if (planeCarries(net, z.net)) continue; // same net → the two copper areas merge
+        try out.append(arena, z.poly);
+    }
+    return out.items;
+}
+
+/// Does world point (x,y) fall inside a pour that OUTRANKS `zones[i]` — a higher-
+/// priority, different-net pour on the same layer? Then `zones[i]`'s fill was
+/// knocked back there (the higher pour owns the overlap), so its copper does not
+/// reach the point. Connectivity uses this to mirror the priority gap on the
+/// coarse point-in-polygon membership path (see `LayerSpec.higher`): a pad in a
+/// clipped-away region must not be credited to the lower pour.
+pub fn clippedByHigher(zones: []const UserZone, i: usize, x: f64, y: f64) bool {
+    for (zones, 0..) |z, j| {
+        if (j == i) continue;
+        if (outranks(z, zones[i]) and outline.contains(z.poly, x, y)) return true;
+    }
+    return false;
+}
+
+/// The copper FACE a signal-layer index sits on, or null for an inner layer:
+/// 0 → top (F.Cu), 1 → bottom (B.Cu), ≥2 → null (a plane-free inner signal
+/// layer has no outer face — its pour interacts only with drilled barrels and
+/// same-layer inner tracks). The `?Side` a `LayerSpec`/`ZoneFillReq` wants.
+pub fn sideOfSignal(layer: u8) ?optimizer.Side {
+    return switch (layer) {
+        0 => .top,
+        1 => .bottom,
+        else => null,
+    };
+}
+
+/// The `LayerSpec` for a hand-drawn user pour on any routable signal layer:
+/// `side` is the outer face (null for an inner layer), `track_layer` the signal
+/// index whose same-layer tracks the fill carves as foreign copper, plus the
+/// drawn `clip` polygon and the keep-when-unseeded fallback (a user pour is
+/// intentional copper, not an orphan island to drop). An inner pour therefore
+/// stamps only drilled barrels/vias + its own inner tracks (`compute`'s
+/// `side == null` path), never SMD pads — matching what physically touches an
+/// inner copper layer.
+pub fn zoneLayerSpec(net_name: []const u8, side: ?optimizer.Side, track_layer: u8, clip: []const [2]f64) LayerSpec {
+    return .{
+        .net = .{ .named = net_name },
+        .side = side,
+        .track_layer = track_layer,
+        .clip = clip,
+        .keep_unseeded = true,
+    };
+}
+
+/// The `LayerSpec` for a hand-drawn OUTER-face user pour — the `zoneLayerSpec`
+/// specialisation for the two outer faces (top → track layer 0, bottom → 1),
+/// kept as the outer-only entry point the Gerber/PNG paths call directly.
+pub fn userZoneSpec(net_name: []const u8, side: optimizer.Side, clip: []const [2]f64) LayerSpec {
+    return zoneLayerSpec(net_name, side, if (side == .top) 0 else 1, clip);
+}
+
+/// The `LayerSpec` for a declared OUTER-face pour on `side`. Owns the
+/// routed-copper layer convention (the top face carries track layer 0, the
+/// bottom 1 — the router's outer-layer numbering), so pour consumers never
+/// restate it; `carryingLayers` applies the same mapping for connectivity.
+pub fn outerSpec(net_name: []const u8, side: optimizer.Side) LayerSpec {
+    return .{
+        .net = .{ .named = net_name },
+        .side = side,
+        .track_layer = if (side == .top) 0 else 1,
+    };
+}
 
 /// One kept component's outer boundary, a closed polygon in world mm.
 const Contour = []const [2]f64;
@@ -53,35 +224,122 @@ const Contour = []const [2]f64;
 const max_cells: usize = 3_000_000;
 
 const blocked_marker: i32 = -2;
+const fringe_marker: i32 = -3;
 const unlabeled: i32 = -1;
 
+/// The traced contour follows the margin field's guard iso-line, i.e. it sits
+/// at clearance + guard mm from foreign copper (and the edge inset). Minimum
+/// width is enforced separately by `openMinimumWidth`: erode to a half-width
+/// core, then regrow surviving components to this original boundary. The guard
+/// band absorbs, so the emitted polygon NEVER dips under the true clearance:
+/// (a) linear-interpolation error on a curved field (~pitch²/(8R) ≈ 0.009 mm
+/// at R = 0.3 mm, default pitch), (b) the Douglas-Peucker chord deviation
+/// (`dp_tol`), and (c) float noise. 0.03 is the floor at the default pitch;
+/// `isoGuardFor` grows it when the cell cap coarsens the pitch (interpolation
+/// error is quadratic in pitch, so a fixed guard would under-protect there).
+const iso_guard: f64 = 0.03;
+
+/// The guard band for a fill at `pitch`: the 0.03 floor, or — once coarsening
+/// grows the pitch — the pitch-scaled interpolation sagitta pitch²/(8·r_min)
+/// plus `dp_tol`. `r_min` is the tightest iso-line curvature radius the design
+/// can produce: copper reaches floor at `pour_clearance` (per-net clearances
+/// only grow them), while a reflex board vertex curves at the edge inset
+/// (`pourEdge`, which a small `copper_edge` can shrink) — so the caller passes
+/// min of the two, floored at 0.1. At the default 0.15 mm pitch the formula
+/// stays under the floor, so uncoarsened fills keep the calibrated 0.03
+/// exactly.
+fn isoGuardFor(pitch: f64, r_min: f64) f64 {
+    return @max(iso_guard, pitch * pitch / (8 * r_min) + dp_tol);
+}
+
+/// Douglas-Peucker tolerance (mm): kept below `iso_guard` so simplification can
+/// never push a chord under the true clearance, yet small enough that a curved
+/// wall stays smooth (chord sagitta 0.01 at R = 0.5 mm → ~0.28 mm segments).
+const dp_tol: f64 = 0.01;
+
+/// Extra halo (in cells) each feature stamp writes PAST its clearance reach, so
+/// the margin field carries accurate values a few cells beyond the iso-line —
+/// enough for the sub-cell interpolation to read a true gradient on the fillable
+/// side. Beyond the halo other features' own stamps govern; `min()` composes.
+const window_cells: f64 = 2.5;
+
+/// The raster frame a fill's `labels` grid is indexed in: world origin, cell
+/// pitch, and cell counts — one value shared by every world↔cell conversion.
+const Frame = struct { minx: f64, miny: f64, pitch: f64, nx: usize, ny: usize };
+
 /// The computed fill for one layer: the label grid (for point/pad membership)
-/// plus the kept components' outer contours (for emission).
+/// plus the kept components' outer contours and their interior holes (for
+/// emission / painting).
 pub const Fill = struct {
-    minx: f64,
-    miny: f64,
-    pitch: f64,
-    nx: usize,
-    ny: usize,
+    /// The raster frame `labels` is indexed in.
+    frame: Frame,
     /// Per cell: a kept-component index (0..n_comp) or -1 (blocked / unseeded).
     labels: []const i32,
     n_comp: usize,
     contours: []const Contour,
+    /// Interior hole loops, PARALLEL to `contours`: `holes[i]` are the loops
+    /// fully enclosed by `contours[i]` — an antipad ring around a foreign
+    /// via/pad inside the pour, or the slot around an interior foreign track —
+    /// each already simplified (empty slice when the contour has none). A
+    /// viewer paints a face even-odd (`contours[i]` minus `holes[i]`); the
+    /// Gerber ignores this and re-punches the same holes analytically in clear
+    /// polarity, so `contours` keeps its exact prior meaning and every existing
+    /// consumer compiles untouched.
+    holes: []const []const Contour,
     /// The pitch was coarsened to stay under `MAX_CELLS` — a surfaced warning
     /// (the fill is lower-resolution than the design's clearance would want).
     coarsened: bool,
 
     /// The kept-component index covering world point (x,y), or -1 when the
     /// point is blocked, in an unseeded region, or off the grid.
-    fn componentAt(self: Fill, x: f64, y: f64) i32 {
-        if (self.pitch <= 0) return -1;
-        const fi = @floor((x - self.minx) / self.pitch);
-        const fj = @floor((y - self.miny) / self.pitch);
+    pub fn componentAt(self: Fill, x: f64, y: f64) i32 {
+        const f = self.frame;
+        if (f.pitch <= 0) return -1;
+        const fi = @floor((x - f.minx) / f.pitch);
+        const fj = @floor((y - f.miny) / f.pitch);
         if (fi < 0 or fj < 0) return -1;
         const i: usize = numeric.checkedInt(usize, fi) orelse return -1;
         const j: usize = numeric.checkedInt(usize, fj) orelse return -1;
-        if (i >= self.nx or j >= self.ny) return -1;
-        return self.labels[j * self.nx + i];
+        if (i >= f.nx or j >= f.ny) return -1;
+        return self.labels[j * f.nx + i];
+    }
+
+    /// Whether the computed, kept pour contains world point (x,y). Fab
+    /// readiness uses this so filtered user-pour necks are not credited as
+    /// connected copper when Gerber has removed them.
+    pub fn contains(self: Fill, x: f64, y: f64) bool {
+        return self.componentAt(x, y) >= 0;
+    }
+
+    /// Representative points where a segment crosses each kept component.
+    /// One point per component is enough for electrical graph consumers to
+    /// join a routed conductor to the equipotential copper region without
+    /// expanding the whole fill raster into circuit nodes.
+    pub fn segmentContacts(
+        self: Fill,
+        arena: std.mem.Allocator,
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+    ) std.mem.Allocator.Error![]const ComponentContact {
+        var out: std.ArrayList(ComponentContact) = .empty;
+        if (!(self.frame.pitch > 0)) return out.toOwnedSlice(arena);
+        const length = std.math.hypot(x2 - x1, y2 - y1);
+        const steps = @max(@as(usize, 1), numeric.checkedInt(usize, @ceil(length / (self.frame.pitch / 2))) orelse 1);
+        for (0..steps + 1) |i| {
+            const t = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps));
+            const at = [2]f64{ x1 + (x2 - x1) * t, y1 + (y2 - y1) * t };
+            const component = self.componentAt(at[0], at[1]);
+            if (component < 0) continue;
+            var seen = false;
+            for (out.items) |old| if (old.component == component) {
+                seen = true;
+                break;
+            };
+            if (!seen) try out.append(arena, .{ .component = component, .at = at });
+        }
+        return out.toOwnedSlice(arena);
     }
 
     /// The kept component a pad lands in: its centre, else any sampled point of
@@ -99,6 +357,59 @@ pub const Fill = struct {
         return -1;
     }
 };
+
+/// One computed fill-component index and a representative world-space point
+/// at which routed copper touches it.
+pub const ComponentContact = struct {
+    component: i32,
+    at: [2]f64,
+};
+
+/// Every kept fill component crossed by a line segment. Sampling at half the
+/// fill pitch guarantees a segment cannot step across a labelled raster cell
+/// without observing it; callers use this for tracks whose endpoints both sit
+/// outside a pour but whose centreline passes through fabricated copper.
+pub fn segmentComponents(
+    arena: std.mem.Allocator,
+    fill: Fill,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+) std.mem.Allocator.Error![]const i32 {
+    var out: std.ArrayList(i32) = .empty;
+    if (!(fill.frame.pitch > 0)) return out.toOwnedSlice(arena);
+    const length = std.math.hypot(x2 - x1, y2 - y1);
+    const steps = @max(@as(usize, 1), numeric.checkedInt(usize, @ceil(length / (fill.frame.pitch / 2))) orelse 1);
+    for (0..steps + 1) |i| {
+        const t = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps));
+        const component = fill.componentAt(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t);
+        if (component < 0) continue;
+        var seen = false;
+        for (out.items) |old| if (old == component) {
+            seen = true;
+            break;
+        };
+        if (!seen) try out.append(arena, component);
+    }
+    return out.toOwnedSlice(arena);
+}
+
+// spec: placement/pour - a track crossing a fill is assigned to every fabricated component it traverses even when both endpoints lie outside
+test "segment components sees fill between two outside endpoints" {
+    const labels = [_]i32{ -1, 0, -1 };
+    const fill = Fill{
+        .frame = .{ .minx = 0, .miny = 0, .pitch = 1, .nx = 3, .ny = 1 },
+        .labels = &labels,
+        .n_comp = 1,
+        .contours = &.{},
+        .holes = &.{},
+        .coarsened = false,
+    };
+    const found = try segmentComponents(std.testing.allocator, fill, -0.5, 0.5, 3.5, 0.5);
+    defer std.testing.allocator.free(found);
+    try std.testing.expectEqualSlices(i32, &.{0}, found);
+}
 
 /// A pad reduced to what membership needs: its world box + centre, whether it
 /// is a through-hole (present on every copper layer) and which side it sits on.
@@ -155,20 +466,16 @@ fn boundsRect(placement: optimizer.Placement) optimizer.BoardRect {
 
 // ── Fill computation ─────────────────────────────────────────────────────────
 
-/// Compute the poured fill for `spec` over `placement` + `copper`. All output
-/// is arena-owned. An empty/degenerate outline yields an empty fill.
-pub fn compute(
-    arena: std.mem.Allocator,
-    placement: optimizer.Placement,
-    copper: Copper,
-    spec: LayerSpec,
-) std.mem.Allocator.Error!Fill {
-    const r = boundsRect(placement);
-    const rules = placement.rules;
-    const pc = rules.design.pour_clearance;
-    const inset = rules.design.pourEdge();
+/// The fill lattice for a placement: the board rect plus the cell pitch (half
+/// the smallest pour/CPWG clearance, coarsened until the raster fits `max_cells`) and its
+/// extent. Derived from the placement ALONE — no layer, no net, no copper — so
+/// every fill of one board shares it, which is what lets `planeConnect` reuse a
+/// single edge-margin field across the layers that carry its net.
+const Lattice = struct { r: optimizer.BoardRect, pitch: f64, nx: usize, ny: usize, coarsened: bool };
 
-    var pitch = @max(0.05, pc / 2.0);
+fn lattice(placement: optimizer.Placement) Lattice {
+    const r = boundsRect(placement);
+    var pitch = @max(0.05, smallestPourGap(placement) / 2.0);
     var coarsened = false;
     var nx = gridCount(r.w, pitch);
     var ny = gridCount(r.h, pitch);
@@ -178,60 +485,268 @@ pub fn compute(
         ny = gridCount(r.h, pitch);
         coarsened = true;
     }
+    return .{ .r = r, .pitch = pitch, .nx = nx, .ny = ny, .coarsened = coarsened };
+}
+
+/// The BASE isolation gap one fill holds off foreign copper, by layer class:
+/// an INNER plane (`spec.side == null`) takes the fab-safe `pour_clearance`,
+/// an OUTER copper face the tighter `pour.clearance_outer` — an outer pour is
+/// photo-defined against finished copper as a trace is, rather than etched
+/// blind between two foils. One helper because every consumer of the number
+/// must agree: the margin stamps, the priority knock-back and the shared
+/// raster pitch all read the gap through here, so a fill can never be traced
+/// at a gap the lattice cannot represent. A per-net class clearance (a CPWG
+/// `(ground-gap …)`, a solved impedance antipad) still overrides this per
+/// feature — this is only the floor it starts from.
+fn baseGapFor(design: optimizer.DesignRules, spec: LayerSpec) f64 {
+    return if (spec.side == null) design.pour_clearance else design.pour.clearance_outer;
+}
+
+/// The tightest declared ground-pour opening controls the shared raster pitch.
+/// Without this, a 0.127 mm CPWG slot would be sampled on the legacy 0.15 mm
+/// lattice and could not be represented consistently on the two outer faces.
+/// The two layer-class defaults enter the same way: the lattice is shared by
+/// every fill of one board (that is what lets `planeConnect` copy one edge
+/// field across layers), so it must be pitched for the TIGHTER of them, or an
+/// outer face's 0.2 mm gap would be sampled on a lattice cut for the inner
+/// plane's 0.3. An authored `(design-rules (pour-clearance …))` sets both, so
+/// a board that states its own gap keeps exactly the pitch it always had.
+fn smallestPourGap(placement: optimizer.Placement) f64 {
+    var gap = @min(placement.rules.design.pour_clearance, placement.rules.design.pour.clearance_outer);
+    for (placement.rules.net) |r| {
+        if (r.rf.impedance.ground_gap_mm > 0) gap = @min(gap, r.rf.impedance.ground_gap_mm);
+    }
+    return gap;
+}
+
+/// The board-edge margin field: every cell centre's signed inset into the board
+/// outline, before any clip polygon or foreign-copper stamp lowers it. It is a
+/// function of the outline, the edge inset, and the lattice — all layer-blind —
+/// so a `planeConnect` filling the three layers that carry one net (an inner
+/// declared plane plus a top and a bottom pour, barracuda's stackup) walks the
+/// outline polygon per cell ONCE and copies the field into each layer's grid.
+/// Recomputing it per layer cost 16 ms of barracuda's 150 ms DRC.
+///
+/// Public because the same argument holds ACROSS callers, not just across the
+/// layers of one `planeConnect`: a page render pours the identical board a
+/// couple of dozen times (the Gerber package, the viewer's pour JSON, the
+/// filled-DRC zones, the connectivity zones), and each of those callers seeds
+/// this field once via `sharedEdgeField` and threads it into `computeShared`.
+pub const EdgeField = struct {
+    nx: usize,
+    ny: usize,
+    pitch: f64,
+    margin: []const f32,
+
+    /// Does this field describe the lattice `computeFill` just derived? The
+    /// lattice is a pure function of the placement, so a mismatch means the
+    /// caller paired a field with a different board — fall back to computing it
+    /// rather than reading a stale raster.
+    fn fits(self: EdgeField, lat: Lattice) bool {
+        return self.nx == lat.nx and self.ny == lat.ny and self.pitch == lat.pitch;
+    }
+};
+
+/// What a caller wants out of a fill. `planeConnect` reads only `labels` (via
+/// `componentAt` / `padComponent`), so tracing its contours is pure waste — 8 ms
+/// per DRC on barracuda. Rendering callers (Gerber, the PNG, the viewer's pour
+/// JSON) keep the traced boundary, which is the default.
+const FillOpts = struct {
+    base: ?EdgeField = null,
+    contours: bool = true,
+};
+
+/// The layer-invariant edge-margin field for `placement`, or null when the
+/// board has no fillable lattice (the degenerate cases `compute` answers with
+/// an empty fill).
+fn edgeField(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!?EdgeField {
+    const lat = lattice(placement);
+    if (lat.nx < 1 or lat.ny < 1) return null;
+    const margin = try arena.alloc(f32, lat.nx * lat.ny);
+    const grid = Grid{ .minx = lat.r.minx, .miny = lat.r.miny, .pitch = lat.pitch, .nx = lat.nx, .ny = lat.ny, .labels = &.{}, .margin = margin, .iso = 0 };
+    initMargin(grid, placement, lat.r, placement.rules.design.pourEdge());
+    return .{ .nx = lat.nx, .ny = lat.ny, .pitch = lat.pitch, .margin = margin };
+}
+
+/// The board-edge margin field every fill over `placement` starts from, for a
+/// caller that computes SEVERAL fills of one board and wants the outline walk
+/// done once instead of once per fill. Pair it with `computeShared`. Null means
+/// the board has no fillable lattice, which `computeShared` answers exactly as
+/// `compute` does — with the empty fill.
+pub fn sharedEdgeField(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!?EdgeField {
+    return edgeField(arena, placement);
+}
+
+/// `compute` seeded from a caller-shared edge field (`sharedEdgeField`), and
+/// otherwise identical to it in every respect. The field is a pure function of
+/// the placement, each fill gets its own mutable copy, and a field built for a
+/// DIFFERENT board is rejected by `EdgeField.fits` and re-seeded rather than
+/// read stale — so passing null, or a foreign field, is exactly `compute`.
+pub fn computeShared(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: Copper,
+    spec: LayerSpec,
+    base: ?EdgeField,
+) std.mem.Allocator.Error!Fill {
+    return computeFill(arena, placement, copper, spec, .{ .base = base });
+}
+
+/// Compute the poured fill for `spec` over `placement` + `copper`. All output
+/// is arena-owned. An empty/degenerate outline yields an empty fill.
+pub fn compute(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: Copper,
+    spec: LayerSpec,
+) std.mem.Allocator.Error!Fill {
+    return computeFill(arena, placement, copper, spec, .{});
+}
+
+/// Fills for several specs over the same board when the caller only samples
+/// membership and never paints their boundaries. The board-edge field is built
+/// once and contours are omitted from every result.
+pub fn computeMasks(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: Copper,
+    specs: []const LayerSpec,
+) std.mem.Allocator.Error![]Fill {
+    const base = try edgeField(arena, placement);
+    const fills = try arena.alloc(Fill, specs.len);
+    for (specs, 0..) |spec, i| {
+        fills[i] = try computeFill(arena, placement, copper, spec, .{ .base = base, .contours = false });
+    }
+    return fills;
+}
+
+fn computeFill(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: Copper,
+    spec: LayerSpec,
+    opts: FillOpts,
+) std.mem.Allocator.Error!Fill {
+    const lat = lattice(placement);
+    const r = lat.r;
+    const rules = placement.rules;
+    const pc = baseGapFor(rules.design, spec);
+    const inset = rules.design.pourEdge();
+    const pitch = lat.pitch;
+    const coarsened = lat.coarsened;
+    const nx = lat.nx;
+    const ny = lat.ny;
     if (nx < 1 or ny < 1) return emptyFill(r, pitch, coarsened);
 
-    // Half a cell diagonal — obstacles/inset are inflated by this so the traced
-    // CORNER polygon (offset ~½ cell outward from the last kept cell centre)
-    // still respects the true clearance / edge pullback.
-    const half = pitch * 0.7071068;
-
     const labels = try arena.alloc(i32, nx * ny);
-    const grid = Grid{ .minx = r.minx, .miny = r.miny, .pitch = pitch, .nx = nx, .ny = ny, .labels = labels };
-    initInset(grid, placement, r, inset + half);
-
-    const nets = try padNets(arena, placement);
-    stampForeign(grid, placement, copper, spec, nets);
-
-    const k = labelComponents(arena, grid) catch return emptyFill(r, pitch, coarsened);
-    const kept = try arena.alloc(bool, k);
-    @memset(kept, false);
-    markSeeds(grid, placement, copper, spec, nets, kept);
-
-    const n_comp = try remapKept(arena, grid, kept);
-    var contours: std.ArrayList(Contour) = .empty;
-    var c: usize = 0;
-    while (c < n_comp) : (c += 1) {
-        if (try traceOuter(arena, grid, @intCast(c))) |poly| try contours.append(arena, poly);
-    }
-    return .{
+    const margin = try arena.alloc(f32, nx * ny);
+    const r_min = @max(0.1, @min(smallestPourGap(placement), inset));
+    const guard = isoGuardFor(pitch, r_min);
+    const grid = Grid{
         .minx = r.minx,
         .miny = r.miny,
         .pitch = pitch,
         .nx = nx,
         .ny = ny,
         .labels = labels,
+        .margin = margin,
+        .iso = guard,
+    };
+    if (opts.base) |b| {
+        if (b.fits(lat)) @memcpy(margin, b.margin) else initMargin(grid, placement, r, inset);
+    } else initMargin(grid, placement, r, inset);
+    // A user pour's drawn boundary further confines the fillable field: min the
+    // board-edge margin with the signed inset into the clip polygon, so the
+    // traced contour hugs the drawn outline (blocked cells being those the guard
+    // band inside it) and copper never escapes past the user's line.
+    if (spec.clip.len >= 3) clipMargin(grid, spec.clip);
+
+    const nets = try padNets(arena, placement);
+    stampForeign(grid, placement, copper, spec, nets);
+    try stampFootprintKeepouts(arena, grid, placement, spec);
+    // Knock this fill back from any higher-priority overlapping pour on the same
+    // layer (different net), so it leaves a clearance gap instead of shorting to
+    // the higher-ranked copper. No-op when `spec.higher` is empty (declared
+    // pours, the top-ranked pour, or any board that sets no priorities).
+    if (spec.higher.len > 0) stampHigher(grid, spec.higher, pc);
+    const min_width = effectiveMinimumWidth(placement, spec);
+    const k = if (min_width > 0)
+        openMinimumWidth(arena, grid, min_width / 2.0) catch return emptyFill(r, pitch, coarsened)
+    else blk: {
+        thresholdLabels(grid);
+        break :blk labelComponents(arena, grid) catch return emptyFill(r, pitch, coarsened);
+    };
+    const kept = try arena.alloc(bool, k);
+    @memset(kept, false);
+    markSeeds(grid, placement, copper, spec, nets, kept);
+    // A hand-drawn pour with no same-net copper inside would otherwise drop
+    // every component as an unseeded orphan and render nothing; keep them all so
+    // the user's polygon fills (its islands are reported honestly, same as any
+    // seeded pour). Declared plane pours never set this, so their island drop is
+    // untouched.
+    if (spec.keep_unseeded and !anyTrue(kept)) @memset(kept, true);
+
+    const n_comp = try remapKept(arena, grid, kept);
+    const traced: Traced = if (opts.contours)
+        try traceComponents(arena, grid, n_comp, @max(0, rules.design.pour.corner_radius))
+    else
+        .{ .contours = &.{}, .holes = &.{} };
+    return .{
+        .frame = .{ .minx = r.minx, .miny = r.miny, .pitch = pitch, .nx = nx, .ny = ny },
+        .labels = labels,
         .n_comp = n_comp,
-        .contours = try contours.toOwnedSlice(arena),
+        .contours = traced.contours,
+        .holes = traced.holes,
         .coarsened = coarsened,
     };
 }
 
-/// The routed copper a layout persisted — mirrors `export_gerber.Copper` so the
+/// Manufacturing floor raised by a named power rail's conservative
+/// maximum-current neck. Ground / unknown-current pours keep the authored
+/// board rule exactly.
+fn effectiveMinimumWidth(placement: optimizer.Placement, spec: LayerSpec) f64 {
+    const rules = placement.rules;
+    const power_min = switch (spec.net) {
+        .named => |name| rules.powerWidthForNet(name) orelse 0,
+        .ground => 0,
+    };
+    return @max(@max(0, rules.design.pour.min_width), power_min);
+}
+
+/// The routed copper a layout persisted — mirrors `routed_copper.Copper` so the
 /// pour carves/seeds the same tracks/vias the Gerber draws (kept a separate
-/// type to avoid an import cycle).
+/// type to avoid an import cycle: that bundle names `UserZone`, so it imports
+/// this module and this module cannot import it back).
 pub const Copper = struct {
     tracks: []const router.Track = &.{},
     vias: []const router.Via = &.{},
+    /// The board's hand-drawn/imported user copper pours. A DECLARED plane fill
+    /// recedes around these (`higherThanDeclared`), so plane connectivity sees
+    /// the same copper the Gerber emits. Defaults empty — callers that only
+    /// carve routed copper are unaffected.
+    zones: []const UserZone = &.{},
 };
 
-/// Grid geometry + the mutable label buffer, threaded through the raster steps.
-const Grid = struct {
+/// Grid geometry + the mutable label and margin buffers, threaded through the
+/// raster steps. `margin[idx]` is the signed clearance margin at the cell centre
+/// (mm, +inside the fillable region); `labels[idx]` is the thresholded/component
+/// state derived from it; `iso` is this fill's clearance-preserving guard
+/// threshold (`isoGuardFor`). Both
+/// `margin` and `iso` are required — a Grid whose margin is not co-sized with
+/// `labels` panics on the first field access, so construction sites must state
+/// what they pass (the trace-only unit test passes an explicit empty slice).
+/// Low-level signed-margin raster shared with trace free-space analysis. Pour
+/// owns the implementation so its existing fill and the route experiment use
+/// identical obstacle stamping and component semantics.
+pub const Grid = struct {
     minx: f64,
     miny: f64,
     pitch: f64,
     nx: usize,
     ny: usize,
     labels: []i32,
+    margin: []f32,
+    iso: f64,
 
     fn cellCenter(g: Grid, i: usize, j: usize) [2]f64 {
         return .{ g.minx + (@as(f64, @floatFromInt(i)) + 0.5) * g.pitch, g.miny + (@as(f64, @floatFromInt(j)) + 0.5) * g.pitch };
@@ -244,25 +759,320 @@ fn gridCount(extent: f64, pitch: f64) usize {
 }
 
 fn emptyFill(r: optimizer.BoardRect, pitch: f64, coarsened: bool) Fill {
-    return .{ .minx = r.minx, .miny = r.miny, .pitch = pitch, .nx = 0, .ny = 0, .labels = &.{}, .n_comp = 0, .contours = &.{}, .coarsened = coarsened };
+    return .{ .frame = .{ .minx = r.minx, .miny = r.miny, .pitch = pitch, .nx = 0, .ny = 0 }, .labels = &.{}, .n_comp = 0, .contours = &.{}, .holes = &.{}, .coarsened = coarsened };
 }
 
-/// Mark every cell inside the outline (inset by `inset`) UNLABELED, the rest
-/// BLOCKED. Honours a non-rectangular `board_poly`, else the plain rectangle.
-fn initInset(g: Grid, placement: optimizer.Placement, r: optimizer.BoardRect, inset: f64) void {
+/// Seed each cell's margin from the OUTLINE alone: how far the cell centre sits
+/// inside the board edge-inset (positive = that much fillable slack, negative =
+/// outside it). Honours a non-rectangular `board_poly`, else the plain
+/// rectangle. NO cell-diagonal inflation — this is the true geometric margin the
+/// foreign stamps then `min()` against.
+pub fn initMargin(g: Grid, placement: optimizer.Placement, r: optimizer.BoardRect, inset: f64) void {
     var j: usize = 0;
     while (j < g.ny) : (j += 1) {
+        // Cell-centre y is constant across the row (hoisted out of the i-loop);
+        // the expression matches `cellCenter`, so the field is bit-identical.
+        const cy = g.miny + (@as(f64, @floatFromInt(j)) + 0.5) * g.pitch;
+        const row = j * g.nx;
         var i: usize = 0;
+        // A polygon outline walks every edge per cell, which is the whole cost
+        // of seeding a poly-outline board's field (8 ms of a barracuda DRC on a
+        // 20-point rounded rectangle). Whole lanes of the row take that walk
+        // together; the ragged tail falls back to the scalar form.
+        if (placement.board_poly) |poly| {
+            if (poly.len >= 3) {
+                var lane: [lanes]f64 = undefined;
+                while (i + lanes <= g.nx) : (i += lanes) {
+                    polyInsetLanes(poly, cellXs(g, i), cy, &lane);
+                    for (lane, 0..) |m, k| g.margin[row + i + k] = @floatCast(m - inset);
+                }
+            }
+        }
         while (i < g.nx) : (i += 1) {
-            const c = g.cellCenter(i, j);
-            const ok = if (placement.board_poly) |poly|
-                outline.signedInset(poly, c[0], c[1]) >= inset
+            const cx = g.minx + (@as(f64, @floatFromInt(i)) + 0.5) * g.pitch;
+            const m = if (placement.board_poly) |poly|
+                polySignedInset(poly, cx, cy) - inset
             else
-                c[0] >= r.minx + inset and c[0] <= r.minx + r.w - inset and
-                    c[1] >= r.miny + inset and c[1] <= r.miny + r.h - inset;
-            g.labels[j * g.nx + i] = if (ok) unlabeled else blocked_marker;
+                rectInset(r, inset, cx, cy);
+            g.margin[row + i] = @floatCast(m);
         }
     }
+}
+
+/// Lanes per vector pass over a raster row — the target's natural f64 width
+/// (4 on AVX2, 8 on AVX-512), falling back to a width that still compiles to
+/// sensible scalar code where the target has no SIMD.
+const lanes: usize = std.simd.suggestVectorLength(f64) orelse 4;
+const Lanes = @Vector(lanes, f64);
+
+/// The cell-centre x of `lanes` consecutive cells starting at `i`. Built one
+/// lane at a time from the SAME expression the scalar loop uses, so a lane's
+/// coordinate is the identical f64 — the vector path is a batching of the
+/// scalar path, not an approximation of it.
+fn cellXs(g: Grid, i: usize) Lanes {
+    var v: Lanes = @splat(0);
+    inline for (0..lanes) |k| v[k] = g.minx + (@as(f64, @floatFromInt(i + k)) + 0.5) * g.pitch;
+    return v;
+}
+
+/// `polySignedInset` for `lanes` cell centres sharing one row's `y`, written
+/// into `out`.
+///
+/// The scalar form's cost is the per-cell sweep over every polygon edge; each
+/// edge contributes the same three scalars to every lane (its direction, its
+/// length², and — since `y` is fixed across the row — its ray-cast crossing),
+/// so a whole lane group sweeps the outline once. Every lane's arithmetic is
+/// the elementwise twin of the scalar expression in the same association order,
+/// and the single closing `hypot` stays scalar per lane, so a lane's result is
+/// the value `polySignedInset` would have returned for that cell.
+fn polyInsetLanes(poly: []const [2]f64, x: Lanes, y: f64, out: *[lanes]f64) void {
+    const zero: Lanes = @splat(0);
+    const one: Lanes = @splat(1);
+    var inside: @Vector(lanes, u1) = @splat(0);
+    var best2: Lanes = @splat(std.math.inf(f64));
+    var bdx: Lanes = zero;
+    var bdy: Lanes = zero;
+    var j = poly.len - 1;
+    for (poly, 0..) |p, i| {
+        const q = poly[j];
+        // Even-odd ray cast. The row's `y` is fixed, so an edge either crosses
+        // it for every lane or for none, and the crossing's x is one scalar —
+        // only the `x <` test is per-lane.
+        if ((p[1] > y) != (q[1] > y)) {
+            const t = (y - p[1]) / (q[1] - p[1]);
+            const xc: Lanes = @splat(p[0] + t * (q[0] - p[0]));
+            inside ^= @intFromBool(x < xc);
+        }
+        const ex = p[0] - q[0];
+        const ey = p[1] - q[1];
+        const len2 = ex * ex + ey * ey;
+        var t: Lanes = zero;
+        if (len2 > 0) {
+            const along = (x - @as(Lanes, @splat(q[0]))) * @as(Lanes, @splat(ex)) +
+                @as(Lanes, @splat((y - q[1]) * ey));
+            t = @max(zero, @min(along / @as(Lanes, @splat(len2)), one));
+        }
+        const ddx = x - (@as(Lanes, @splat(q[0])) + t * @as(Lanes, @splat(ex)));
+        const ddy = @as(Lanes, @splat(y)) - (@as(Lanes, @splat(q[1])) + t * @as(Lanes, @splat(ey)));
+        const d2 = ddx * ddx + ddy * ddy;
+        const closer = d2 < best2;
+        best2 = @select(f64, closer, d2, best2);
+        bdx = @select(f64, closer, ddx, bdx);
+        bdy = @select(f64, closer, ddy, bdy);
+        j = i;
+    }
+    inline for (out, 0..) |*o, k| {
+        const d = std.math.hypot(bdx[k], bdy[k]);
+        o.* = if (inside[k] == 1) d else -d;
+    }
+}
+
+/// Signed inset of (x,y) into `poly` — bit-identical to `outline.signedInset`
+/// (`±distToEdge`, sign from `outline.contains`) but computed with ONE @sqrt
+/// instead of one per edge: `std.math.hypot` is monotonic in the squared
+/// closest-point distance, so the min-distance edge is the argmin of the cheap
+/// per-edge SQUARED distances and only that edge needs the root. The even-odd
+/// ray cast folds into the same single edge pass. Localised here so the hot
+/// `initMargin` loop avoids `distToEdge`'s per-edge hypot (the pour's dominant
+/// cost on a poly-outline board); `outline.signedInset` itself is untouched, so
+/// every other consumer is unaffected. A sub-triangle poly defers to the
+/// original for exact edge-case parity.
+fn polySignedInset(poly: []const [2]f64, x: f64, y: f64) f64 {
+    if (poly.len < 3) return outline.signedInset(poly, x, y);
+    var inside = false;
+    var best2: f64 = std.math.inf(f64);
+    var bdx: f64 = 0;
+    var bdy: f64 = 0;
+    var j = poly.len - 1;
+    for (poly, 0..) |p, i| {
+        const q = poly[j];
+        // Even-odd ray cast — identical to `outline.contains`.
+        if ((p[1] > y) != (q[1] > y)) {
+            const t = (y - p[1]) / (q[1] - p[1]);
+            if (x < p[0] + t * (q[0] - p[0])) inside = !inside;
+        }
+        // Squared distance to edge q→p — identical to `outline.segDist` up to
+        // (but not including) its final hypot; keep the closest-point delta of
+        // the running minimum so a single hypot recovers the exact `distToEdge`.
+        const ex = p[0] - q[0];
+        const ey = p[1] - q[1];
+        const len2 = ex * ex + ey * ey;
+        var t: f64 = 0;
+        if (len2 > 0) t = std.math.clamp(((x - q[0]) * ex + (y - q[1]) * ey) / len2, 0, 1);
+        const ddx = x - (q[0] + t * ex);
+        const ddy = y - (q[1] + t * ey);
+        const d2 = ddx * ddx + ddy * ddy;
+        if (d2 < best2) {
+            best2 = d2;
+            bdx = ddx;
+            bdy = ddy;
+        }
+        j = i;
+    }
+    const d = std.math.hypot(bdx, bdy);
+    return if (inside) d else -d;
+}
+
+/// Confine the margin field to a user pour's drawn `clip` polygon: lower each
+/// cell's margin to its signed inset into the clip (positive inside, negative
+/// outside), so `min()` with the board-edge field leaves only cells that clear
+/// the guard band inside BOTH the board edge and the drawn boundary fillable.
+/// The clip edge is the user's own line (not a fab board edge), so no extra
+/// edge clearance is subtracted here — the guard band alone insets the traced
+/// contour a hair inside the polygon.
+fn clipMargin(g: Grid, clip: []const [2]f64) void {
+    if (clip.len < 3) return;
+    // The drawn zone is usually a fraction of the board, and outside its
+    // bounding box the walk can only ever answer "outside" — so bound the
+    // polygon once and spend the per-edge walk on the cells that can still
+    // change the answer. Cells beyond the box get their Chebyshev distance to
+    // it, which stays at least `pad` below zero and so is blocked exactly as
+    // the walk would have blocked it; the band of `pad` cells around the box is
+    // walked exactly, so every contour the fill later interpolates sits on real
+    // values.
+    const box = polyBounds(clip);
+    const pad = 4 * g.pitch;
+    const x0 = box[0] - pad;
+    const y0 = box[1] - pad;
+    const x1 = box[2] + pad;
+    const y1 = box[3] + pad;
+    var j: usize = 0;
+    while (j < g.ny) : (j += 1) {
+        const cy = g.miny + (@as(f64, @floatFromInt(j)) + 0.5) * g.pitch;
+        const row = j * g.nx;
+        const dy = @max(@max(y0 - cy, cy - y1), 0);
+        var i: usize = 0;
+        if (dy == 0) {
+            var lane: [lanes]f64 = undefined;
+            while (i + lanes <= g.nx) : (i += lanes) {
+                const xs = cellXs(g, i);
+                const cxs: [lanes]f64 = xs;
+                if (cxs[lanes - 1] < x0 or cxs[0] > x1) {
+                    for (cxs, 0..) |cx, k| lowerMargin(g, row + i + k, -@max(x0 - cx, cx - x1));
+                    continue;
+                }
+                polyInsetLanes(clip, xs, cy, &lane);
+                for (lane, 0..) |m, k| lowerMargin(g, row + i + k, m);
+            }
+        }
+        while (i < g.nx) : (i += 1) {
+            const cx = g.minx + (@as(f64, @floatFromInt(i)) + 0.5) * g.pitch;
+            const dx = @max(@max(x0 - cx, cx - x1), 0);
+            const m = if (dx == 0 and dy == 0) polySignedInset(clip, cx, cy) else -@max(dx, dy);
+            lowerMargin(g, row + i, m);
+        }
+    }
+}
+
+/// The `[minx, miny, maxx, maxy]` bounding box of a polygon ring.
+fn polyBounds(poly: []const [2]f64) [4]f64 {
+    var b: [4]f64 = .{ poly[0][0], poly[0][1], poly[0][0], poly[0][1] };
+    for (poly[1..]) |p| {
+        b[0] = @min(b[0], p[0]);
+        b[1] = @min(b[1], p[1]);
+        b[2] = @max(b[2], p[0]);
+        b[3] = @max(b[3], p[1]);
+    }
+    return b;
+}
+
+/// True when any component in `kept` is marked — the "did the pour seed at all"
+/// test that gates the user-pour keep-everything fallback.
+fn anyTrue(kept: []const bool) bool {
+    for (kept) |x| if (x) return true;
+    return false;
+}
+
+/// Signed inset of (x,y) into rectangle `r` shrunk by `inset` on every side:
+/// the min of the four side gaps, negative when the point is outside.
+fn rectInset(r: optimizer.BoardRect, inset: f64, x: f64, y: f64) f64 {
+    const left = x - (r.minx + inset);
+    const right = (r.minx + r.w - inset) - x;
+    const top = y - (r.miny + inset);
+    const bottom = (r.miny + r.h - inset) - y;
+    return @min(@min(left, right), @min(top, bottom));
+}
+
+/// Threshold the completed margin field into the label grid the component
+/// labeller consumes: a cell is fillable (UNLABELED) iff its margin clears the
+/// fill's guard threshold. Everything at or under that threshold is BLOCKED.
+fn thresholdLabels(g: Grid) void {
+    for (g.labels, g.margin) |*lbl, m| {
+        lbl.* = if (@as(f64, m) <= g.iso) blocked_marker else unlabeled;
+    }
+}
+
+/// Remove copper sections narrower than `2 * radius` without shrinking every
+/// legal pour boundary. Cells farther than `radius` inside the ordinary guard
+/// contour form the manufacturable cores. Each surviving core is regrown into
+/// the ordinary fillable fringe by the same radius (a raster morphological
+/// opening); a fringe claimed by two formerly disconnected cores remains
+/// blocked so a short neck cannot reconnect during regrowth.
+///
+/// The returned component count already matches the non-negative labels left
+/// in `g`; unlike the zero-width path, callers must not relabel them afterward.
+fn openMinimumWidth(arena: std.mem.Allocator, g: Grid, radius: f64) std.mem.Allocator.Error!usize {
+    if (!(radius > 0) or g.pitch <= 0) {
+        thresholdLabels(g);
+        return labelComponents(arena, g);
+    }
+
+    const core_iso = g.iso + radius;
+    for (g.labels, g.margin) |*lbl, m| {
+        const margin: f64 = m;
+        lbl.* = if (margin <= g.iso)
+            blocked_marker
+        else if (margin <= core_iso)
+            fringe_marker
+        else
+            unlabeled;
+    }
+    const n_core = try labelComponents(arena, g);
+    if (n_core == 0) {
+        @memset(g.labels, blocked_marker);
+        return 0;
+    }
+
+    // Read only this immutable eroded snapshot while writing the regrown
+    // labels; otherwise scan order would let newly-grown fringe grow again.
+    const core = try arena.dupe(i32, g.labels);
+    const cells: i64 = @intCast(numeric.toCount(@ceil(radius / g.pitch)));
+    const reach2 = radius * radius + 1e-12;
+    for (g.labels, 0..) |*lbl, idx| {
+        if (lbl.* != fringe_marker) continue;
+        const i: i64 = @intCast(idx % g.nx);
+        const j: i64 = @intCast(idx / g.nx);
+        var owner: i32 = -1;
+        var conflict = false;
+        var dy: i64 = -cells;
+        while (dy <= cells and !conflict) : (dy += 1) {
+            const y = j + dy;
+            if (y < 0 or y >= @as(i64, @intCast(g.ny))) continue;
+            var dx: i64 = -cells;
+            while (dx <= cells) : (dx += 1) {
+                if (@as(f64, @floatFromInt(dx * dx + dy * dy)) * g.pitch * g.pitch > reach2) continue;
+                const x = i + dx;
+                if (x < 0 or x >= @as(i64, @intCast(g.nx))) continue;
+                const candidate = core[@as(usize, @intCast(y)) * g.nx + @as(usize, @intCast(x))];
+                if (candidate < 0) continue;
+                if (owner < 0) {
+                    owner = candidate;
+                } else if (owner != candidate) {
+                    conflict = true;
+                    break;
+                }
+            }
+        }
+        lbl.* = if (!conflict and owner >= 0) owner else blocked_marker;
+    }
+    return n_core;
+}
+
+/// margin[idx] = min(margin[idx], m); one place so the field's min() composition
+/// (each stamp contributes its feature's margin, the smallest wins) is obvious.
+fn lowerMargin(g: Grid, idx: usize, m: f64) void {
+    const mf: f32 = @floatCast(m);
+    if (mf < g.margin[idx]) g.margin[idx] = mf;
 }
 
 // ── Obstacle + seed stamping ────────────────────────────────────────────────
@@ -295,9 +1105,12 @@ fn padOnLayer(part: optimizer.Part, pad: geometry.Pad, spec: LayerSpec) bool {
     return drilled;
 }
 
-/// BLOCK every cell within `reach` of a FOREIGN copper feature on this layer
-/// (a pad/track/via whose net the plane does not carry). Same-net features are
-/// left fillable — they are the pour, and seed it.
+/// Lower the margin field around every FOREIGN copper feature on this layer (a
+/// pad/track/via whose net the plane does not carry) by the feature's true
+/// clearance margin. Same-net features are left fillable — they are the pour,
+/// and seed it. `reach` is the clearance-based radius WITHOUT any cell inflation
+/// (a disc/seg reach folds in the feature's own half-width); the stamps write
+/// `distance − reach` so the field's zero contour is the true clearance line.
 fn stampForeign(
     g: Grid,
     placement: optimizer.Placement,
@@ -306,15 +1119,14 @@ fn stampForeign(
     nets: std.StringHashMapUnmanaged([]const u8),
 ) void {
     const inner = spec.side == null;
-    const base = placement.rules.design.pour_clearance;
-    const half = g.pitch * 0.7071068;
+    const base = baseGapFor(placement.rules.design, spec);
     for (placement.parts) |p| {
         for (p.pads) |pad| {
             if (!padOnLayer(p, pad, spec)) continue;
             const net_name = netOfPad(nets, p.ref_des, pad.number);
             if (planeCarries(spec.net, net_name)) continue;
-            const reach = classPourClearance(placement, net_name, base) + half;
-            const c = optimizer.worldPadCenter(p, pad.x, pad.y);
+            const reach = classPourClearance(placement, net_name, spec.net, base);
+            const c = optimizer.worldPadCenter(&p, pad.x, pad.y);
             if (inner) {
                 if (pad.drill > 0) stampDisc(g, c[0], c[1], pad.drill / 2 + reach);
             } else {
@@ -326,24 +1138,180 @@ fn stampForeign(
         for (copper.tracks) |t| {
             if (t.layer != tl) continue;
             if (planeCarries(spec.net, netName(placement, t.net))) continue;
-            const reach = placement.rules.clearanceForNet(t.net, base) + half;
+            const reach = trackPourClearance(placement, t, spec.net, base);
             stampSeg(g, t.x1, t.y1, t.x2, t.y2, t.width / 2 + reach);
         }
     }
     for (copper.vias) |v| {
         if (planeCarries(spec.net, netName(placement, v.net))) continue;
-        const reach = placement.rules.clearanceForNet(v.net, base) + half;
+        const reach = viaPlaneClearance(placement, v, spec.net, base);
         stampDisc(g, v.x, v.y, v.dia / 2 + reach);
     }
 }
 
-fn classPourClearance(placement: optimizer.Placement, name: []const u8, base: f64) f64 {
+/// Carve footprint-authored copper-pour keepouts on their outer face. The
+/// polygons are transformed with the part pose (including bottom-side mirror)
+/// and stamped with zero added clearance: the authored boundary itself is the
+/// no-pour boundary. Inner planes intentionally ignore these surface-launch
+/// keepouts.
+fn stampFootprintKeepouts(
+    arena: std.mem.Allocator,
+    g: Grid,
+    placement: optimizer.Placement,
+    spec: LayerSpec,
+) std.mem.Allocator.Error!void {
+    const layer_side = spec.side orelse return;
+    for (placement.parts) |p| {
+        for (p.features.copper_pour_keepouts) |keepout| {
+            const board_side: optimizer.Side = switch (keepout.side) {
+                .front => p.side,
+                .back => if (p.side == .top) .bottom else .top,
+            };
+            if (board_side != layer_side or keepout.poly.len < 3) continue;
+            const world = try arena.alloc([2]f64, keepout.poly.len);
+            for (keepout.poly, world) |local, *out| out.* = optimizer.worldPadCenter(&p, local[0], local[1]);
+            const one = [_][]const [2]f64{world};
+            stampHigher(g, &one, 0);
+        }
+    }
+}
+
+/// Lower the margin field inside / within `clearance` of every HIGHER-priority
+/// overlapping pour on this layer (see `LayerSpec.higher`). Each cell drops to
+/// its signed distance OUT of the foreign pour minus the clearance: a cell
+/// inside the pour, or nearer than the clearance, goes blocked, so this lower-
+/// priority fill recedes and a clearance gap opens instead of a short. The
+/// margin model matches `stampForeign` (the pour's boundary polygon is the
+/// foreign copper); the bbox+clearance window bounds the cost like the disc/seg
+/// stamps — cells beyond it contribute margin > clearance and never win `min()`.
+fn stampHigher(g: Grid, polys: []const []const [2]f64, clearance: f64) void {
+    for (polys) |poly| {
+        if (poly.len < 3) continue;
+        var minx = poly[0][0];
+        var maxx = minx;
+        var miny = poly[0][1];
+        var maxy = miny;
+        for (poly[1..]) |p| {
+            minx = @min(minx, p[0]);
+            maxx = @max(maxx, p[0]);
+            miny = @min(miny, p[1]);
+            maxy = @max(maxy, p[1]);
+        }
+        const win = clearance + window_cells * g.pitch;
+        const lo = cellRange(g, minx - win, miny - win);
+        const hi = cellRange(g, maxx + win, maxy + win);
+        var j = lo[1];
+        while (j <= hi[1] and j < g.ny) : (j += 1) {
+            const cy = g.miny + (@as(f64, @floatFromInt(j)) + 0.5) * g.pitch;
+            const row = j * g.nx;
+            var i = lo[0];
+            while (i <= hi[0] and i < g.nx) : (i += 1) {
+                const cx = g.minx + (@as(f64, @floatFromInt(i)) + 0.5) * g.pitch;
+                // +inside the foreign pour → strongly negative; outside, the
+                // margin grows with distance and clears 0 at exactly `clearance`.
+                lowerMargin(g, row + i, -polySignedInset(poly, cx, cy) - clearance);
+            }
+        }
+    }
+}
+
+fn classPourClearance(placement: optimizer.Placement, name: []const u8, plane_net: PlaneNet, base: f64) f64 {
     for (placement.nets, 0..) |net, i| {
         if (std.ascii.eqlIgnoreCase(net.name, name)) {
-            return placement.rules.clearanceForNet(@intCast(i), base);
+            return pourClearanceForNet(placement, @intCast(i), plane_net, base);
         }
     }
     return base;
+}
+
+fn planeIsGround(net: PlaneNet) bool {
+    return switch (net) {
+        .ground => true,
+        .named => |name| optimizer.isGroundName(leafName(name)),
+    };
+}
+
+/// A `(ground-gap …)` is intentionally allowed to be smaller than the generic
+/// 0.3 mm POUR opening, but only when the receiving pour is ground. Its value
+/// was already raised to the signal's DRC clearance in `deriveWidths`, so this
+/// does not waive copper legality. Non-ground pours keep the ordinary rule.
+fn pourClearanceForNet(placement: optimizer.Placement, net: i32, plane_net: PlaneNet, base: f64) f64 {
+    if (planeIsGround(plane_net) and net >= 0) {
+        const i: usize = @intCast(net);
+        if (i < placement.rules.net.len) {
+            const gap = placement.rules.net[i].rf.impedance.ground_gap_mm;
+            if (gap > 0) return gap;
+        }
+    }
+    return placement.rules.clearanceForNet(net, base);
+}
+
+/// Edge-to-edge opening a poured plane keeps from this routed section. An
+/// opt-in `(ground-gap MIN (max MAX))` grows the same-layer GND slot as the
+/// trace widens, using the actual stack reference and copper foil. The inverse
+/// solve returns MAX when 50 ohms is not reachable before the cap, so generated
+/// copper and the trace analyzer share the same honest best-effort geometry.
+/// Non-ground pours, fixed-gap classes, striplines and incomplete stackups keep
+/// the ordinary per-net clearance unchanged.
+fn trackPourClearance(placement: optimizer.Placement, track: router.Track, plane_net: PlaneNet, base: f64) f64 {
+    const fixed = pourClearanceForNet(placement, track.net, plane_net, base);
+    if (!planeIsGround(plane_net) or track.net < 0) return fixed;
+    const net_index: usize = @intCast(track.net);
+    if (net_index >= placement.rules.net.len) return fixed;
+    const rule = placement.rules.net[net_index];
+    const gap = rule.rf.impedance.ground_gap_mm;
+    const cap = rule.rf.impedance.ground_gap_max_mm;
+    if (!(rule.rf.impedance.ohms > 0) or rule.rf.impedance.diff_ohms > 0) return fixed;
+    if (!(gap > 0) or !(cap > gap)) return fixed;
+
+    var physical_layers: [32]u8 = undefined;
+    const layers = impedance.signalLayers(placement.rules.physical.stack, &physical_layers);
+    if (track.layer >= layers.len) return fixed;
+    const physical_layer = layers[track.layer];
+    const ref = impedance.reference(placement.rules.physical.stack, physical_layer) orelse return fixed;
+    const solved = impedance.refGroundGapForZ0(
+        ref,
+        track.width,
+        placement.rules.physical.stack.foilMm(physical_layer),
+        rule.rf.impedance.ohms,
+        fixed,
+        @max(fixed, cap),
+    ) catch return fixed;
+    return solved.gap_mm;
+}
+
+/// Clearance from an RF signal via's copper land to every foreign plane/pour.
+/// Single-ended controlled-impedance classes use the stackup-aware antipad
+/// estimate; a `(max-freq …)` class with no authored target solves the same
+/// antipad at the 50 ohm RF system default, so an RF trace's via keeps its
+/// designed impedance without restating the near-universal number. All other
+/// vias preserve the ordinary pour/ground-gap behaviour. Applying one
+/// diameter on every layer keeps the saved fill, Gerber planes, and viewer
+/// identical and keeps the transition's plane coupling consistent.
+pub fn viaPlaneClearance(placement: optimizer.Placement, via: router.Via, plane_net: PlaneNet, base: f64) f64 {
+    if (via.net >= 0) {
+        const i: usize = @intCast(via.net);
+        if (i < placement.rules.net.len) {
+            const r = placement.rules.net[i];
+            const target = if (r.rf.impedance.ohms > 0)
+                r.rf.impedance.ohms
+            else if (r.rf.max_freq_hz > 0)
+                via_antipad.default_system_ohms
+            else
+                0;
+            if (target > 0 and r.rf.impedance.diff_ohms <= 0) {
+                const minimum = placement.rules.clearanceForNet(via.net, placement.rules.design.clearance);
+                if (via_antipad.solve(
+                    placement.rules.physical.stack,
+                    target,
+                    via.dia,
+                    via.drill,
+                    minimum,
+                )) |result| return (result.antipad_dia_mm - via.dia) / 2.0;
+            }
+        }
+    }
+    return pourClearanceForNet(placement, via.net, plane_net, base);
 }
 
 /// Mark the component under each same-net SEED (a carried pad/via present on
@@ -370,7 +1338,7 @@ fn seedPad(g: Grid, p: optimizer.Part, pad: geometry.Pad, kept: []bool) void {
     const hh = pad.h * 0.4;
     const local = [_][2]f64{ .{ pad.x, pad.y }, .{ pad.x + hw, pad.y }, .{ pad.x - hw, pad.y }, .{ pad.x, pad.y + hh }, .{ pad.x, pad.y - hh } };
     for (local) |lp| {
-        const c = optimizer.worldPadCenter(p, lp[0], lp[1]);
+        const c = optimizer.worldPadCenter(&p, lp[0], lp[1]);
         seedAt(g, c[0], c[1], kept);
     }
 }
@@ -391,52 +1359,133 @@ fn labelAtWorld(g: Grid, x: f64, y: f64) i32 {
     return g.labels[j * g.nx + i];
 }
 
-fn stampDisc(g: Grid, cx: f64, cy: f64, rad: f64) void {
+/// Lower the field to `dist_to_centre − rad` over a disc feature of clearance-
+/// radius `rad` (a via/drill barrel plus its clearance). The window reaches
+/// `window_cells` past the reach so the field is accurate on both sides of the
+/// iso-line.
+pub fn stampDisc(g: Grid, cx: f64, cy: f64, rad: f64) void {
     if (rad <= 0) return;
-    const lo = cellRange(g, cx - rad, cy - rad);
-    const hi = cellRange(g, cx + rad, cy + rad);
-    const r2 = rad * rad;
+    const win = rad + window_cells * g.pitch;
+    const lo = cellRange(g, cx - win, cy - win);
+    const hi = cellRange(g, cx + win, cy + win);
+    const win2 = win * win;
+    // Deep-interior sentinel: a cell more than two cells inside the reach is
+    // certainly blocked (−2·pitch < 0 ≤ iso) and is never read by the crossing
+    // interpolation (every neighbour of a kept cell sits within a cell of the
+    // iso-line, hence in the exact annulus), so a constant margin skips its
+    // @sqrt. Sign-guarded: for a small disc (rad ≤ 2·pitch) the annulus covers
+    // the whole interior and the sentinel is disabled. Cells beyond `win` are
+    // skipped outright — their margin from this disc exceeds 2.5·pitch, which
+    // can never govern a crossing (a crossing pair's margins stay under
+    // iso + √2·pitch).
+    const inner = rad - 2.0 * g.pitch;
+    const inner2 = if (inner > 0) inner * inner else -1.0;
     var j = lo[1];
     while (j <= hi[1] and j < g.ny) : (j += 1) {
+        // Row-constant dy² hoisted out of the i-loop; `dx*dx + dy2` is the same
+        // float sum as the per-cell `dx*dx + dy*dy`, so the field is unchanged.
+        const dy = (g.miny + (@as(f64, @floatFromInt(j)) + 0.5) * g.pitch) - cy;
+        const dy2 = dy * dy;
+        const row = j * g.nx;
         var i = lo[0];
         while (i <= hi[0] and i < g.nx) : (i += 1) {
-            const c = g.cellCenter(i, j);
-            const dx = c[0] - cx;
-            const dy = c[1] - cy;
-            if (dx * dx + dy * dy <= r2) g.labels[j * g.nx + i] = blocked_marker;
+            const dx = (g.minx + (@as(f64, @floatFromInt(i)) + 0.5) * g.pitch) - cx;
+            const d2 = dx * dx + dy2;
+            if (d2 > win2) continue;
+            const m = if (d2 < inner2) -2.0 * g.pitch else @sqrt(d2) - rad;
+            lowerMargin(g, row + i, m);
         }
     }
 }
 
-fn stampSeg(g: Grid, x1: f64, y1: f64, x2: f64, y2: f64, rad: f64) void {
+/// Lower the field to `dist_to_centreline − rad` over a track feature of
+/// clearance-radius `rad` (half-width plus clearance), windowed as `stampDisc`.
+pub fn stampSeg(g: Grid, x1: f64, y1: f64, x2: f64, y2: f64, rad: f64) void {
     if (rad <= 0) return;
-    const lo = cellRange(g, @min(x1, x2) - rad, @min(y1, y2) - rad);
-    const hi = cellRange(g, @max(x1, x2) + rad, @max(y1, y2) + rad);
+    const win = rad + window_cells * g.pitch;
+    const win2 = win * win;
+    const lo = cellRange(g, @min(x1, x2) - win, @min(y1, y2) - win);
+    const hi = cellRange(g, @max(x1, x2) + win, @max(y1, y2) + win);
+    // Segment direction + length² are constant over the window (hoisted out of
+    // both loops); `segDelta` reuses them, matching `segPointDist` exactly.
+    const sdx = x2 - x1;
+    const sdy = y2 - y1;
+    const len2 = sdx * sdx + sdy * sdy;
     var j = lo[1];
     while (j <= hi[1] and j < g.ny) : (j += 1) {
+        const cy = g.miny + (@as(f64, @floatFromInt(j)) + 0.5) * g.pitch;
+        const row = j * g.nx;
         var i = lo[0];
         while (i <= hi[0] and i < g.nx) : (i += 1) {
-            const c = g.cellCenter(i, j);
-            if (segPointDist(x1, y1, x2, y2, c[0], c[1]) <= rad) g.labels[j * g.nx + i] = blocked_marker;
+            const cx = g.minx + (@as(f64, @floatFromInt(i)) + 0.5) * g.pitch;
+            const dd = segDelta(.{ x1, y1 }, .{ sdx, sdy }, len2, .{ cx, cy });
+            const d2 = dd[0] * dd[0] + dd[1] * dd[1];
+            // A cell farther than the window contributes margin > window_cells·
+            // pitch — it can never be a boundary cell, so skipping its write is
+            // exactly the min-composition `stampDisc` already relies on.
+            if (d2 > win2) continue;
+            lowerMargin(g, row + i, std.math.hypot(dd[0], dd[1]) - rad);
         }
     }
 }
 
-fn stampPad(g: Grid, p: optimizer.Part, pad: geometry.Pad, reach: f64) void {
+/// The (Δx, Δy) from point `p` to its closest point on the segment from `a` in
+/// direction `dir` (= end − a), given the precomputed length² of `dir`. Its
+/// magnitude (`std.math.hypot`) equals `segPointDist`; splitting the delta out
+/// lets `stampSeg` square it for the cheap window test and take the hypot only
+/// on the cells that actually govern the field.
+fn segDelta(a: [2]f64, dir: [2]f64, len2: f64, p: [2]f64) [2]f64 {
+    if (len2 < 1e-12) return .{ p[0] - a[0], p[1] - a[1] };
+    const t = std.math.clamp(((p[0] - a[0]) * dir[0] + (p[1] - a[1]) * dir[1]) / len2, 0, 1);
+    return .{ p[0] - (a[0] + t * dir[0]), p[1] - (a[1] + t * dir[1]) };
+}
+
+/// Lower the field to `dist_to_pad_copper − reach` over a pad feature (`reach` =
+/// the pure clearance; the pad's own extent lives in its shape). The `pointDist`
+/// slack is the full window radius, so its box early-out stays exact everywhere
+/// the field feeds the iso-line interpolation.
+pub fn stampPad(g: Grid, p: optimizer.Part, pad: geometry.Pad, reach: f64) void {
     var arena_buf: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
     const sh = pad_shape.worldShape(fba.allocator(), p, pad) catch return;
-    const lo = cellRange(g, sh.x0 - reach, sh.y0 - reach);
-    const hi = cellRange(g, sh.x1 + reach, sh.y1 + reach);
+    stampPadShape(g, sh, reach);
+}
+
+/// Lower a signed-margin field around one already-world-space pad shape.
+/// Route free-space analysis owns `router.PadObs` rather than the original
+/// part/pad pair, so this is the common geometric seam it shares with pours.
+pub fn stampPadShape(g: Grid, sh: pad_shape.Shape, reach: f64) void {
+    const win = reach + window_cells * g.pitch;
+    const win2 = win * win;
+    const lo = cellRange(g, sh.x0 - win, sh.y0 - win);
+    const hi = cellRange(g, sh.x1 + win, sh.y1 + win);
     var j = lo[1];
     while (j <= hi[1] and j < g.ny) : (j += 1) {
+        const cy = g.miny + (@as(f64, @floatFromInt(j)) + 0.5) * g.pitch;
+        const gy = @max(@max(sh.y0 - cy, cy - sh.y1), 0);
+        const row = j * g.nx;
         var i = lo[0];
         while (i <= hi[0] and i < g.nx) : (i += 1) {
-            const c = g.cellCenter(i, j);
-            if (pad_shape.pointDist(sh.x0, sh.y0, sh.x1, sh.y1, sh.poly, c[0], c[1], reach) <= reach)
-                g.labels[j * g.nx + i] = blocked_marker;
+            const cx = g.minx + (@as(f64, @floatFromInt(i)) + 0.5) * g.pitch;
+            const gx = @max(@max(sh.x0 - cx, cx - sh.x1), 0);
+            // Box-gap window early-out: the bounding box contains the copper, so
+            // a cell farther than the window from the box is farther than
+            // window_cells·pitch from the copper — a non-boundary cell whose
+            // write never governs the field (`pointDist` would just return that
+            // box gap). gx²+gy² is exactly `pointDist`'s own `bd²`.
+            if (gx * gx + gy * gy > win2) continue;
+            const d = pad_shape.pointDist(sh.x0, sh.y0, sh.x1, sh.y1, sh.poly, cx, cy, win);
+            lowerMargin(g, row + i, d - reach);
         }
     }
+}
+
+/// Stamp polygonal foreign copper into a signed-margin field. The route-space
+/// provider uses the same polygon distance transform that overlapping pours
+/// use, with `clearance` already including the candidate trace radius.
+pub fn stampPolygon(g: Grid, poly: []const [2]f64, clearance: f64) void {
+    const one = [_][]const [2]f64{poly};
+    stampHigher(g, &one, clearance);
 }
 
 /// Clamp world (x,y) to a grid cell index (saturating at 0 — the callers clamp
@@ -506,59 +1555,141 @@ fn remapKept(arena: std.mem.Allocator, g: Grid, kept: []bool) std.mem.Allocator.
     return @intCast(n);
 }
 
-// ── Contour tracing (marching-squares edge stitch + Douglas-Peucker) ─────────
+// ── Contour tracing (margin-field iso-line, interpolated dual squares) ────────
 
 /// Directions, clockwise in the y-down grid: E, S, W, N.
 const Dir = enum(u2) { e, s, w, n };
-const Edge = struct { a: u32, b: u32, dir: Dir, used: bool = false };
+/// One boundary edge between a kept `comp` cell and an empty neighbour. `a`/`b`
+/// are the lattice corner codes it runs between (the stitcher connects loops on
+/// these); `dir` orients it copper-on-the-right AND names which neighbour is
+/// empty; `cell` is the kept cell's linear index (`j*nx+i`), from which — with
+/// `dir` — the interpolation recovers the kept/empty cell-centre pair.
+const Edge = struct { a: u32, b: u32, dir: Dir, cell: u32, used: bool = false };
 /// Corner code → indices of the (still-unused) boundary edges leaving it.
 const TailMap = std.AutoHashMapUnmanaged(u32, std.ArrayList(usize));
 
-/// Trace component `comp`'s OUTER boundary as a simplified world polygon. The
-/// boundary is the set of lattice edges between a `comp` cell and a non-`comp`
-/// neighbour, oriented with copper on the right; stitched into loops (turning
-/// to hug the copper at saddles), the largest-area loop is the outer boundary
-/// (holes are smaller loops — dropped; the Gerber re-punches them as antipads).
-fn traceOuter(arena: std.mem.Allocator, g: Grid, comp: i32) std.mem.Allocator.Error!?Contour {
+/// One kept component realised as boundary polygons: its outer contour plus the
+/// interior holes fully enclosed by it (empty when solid).
+const TracedComponent = struct { outer: Contour, holes: []const Contour };
+
+/// The kept components' contours and their per-component holes, PARALLEL arrays
+/// (`contours[i]`/`holes[i]` describe the same component) built for `Fill`.
+const Traced = struct { contours: []const Contour, holes: []const []const Contour };
+
+/// Trace every kept component 0..n_comp, dropping the ones that yield no
+/// boundary (degenerate). Keeps `contours` and `holes` parallel — a component
+/// contributes to both or neither.
+fn traceComponents(arena: std.mem.Allocator, g: Grid, n_comp: usize, corner_radius: f64) std.mem.Allocator.Error!Traced {
+    var contours: std.ArrayList(Contour) = .empty;
+    var holes: std.ArrayList([]const Contour) = .empty;
+    var c: usize = 0;
+    while (c < n_comp) : (c += 1) {
+        if (try traceOuter(arena, g, @intCast(c), corner_radius)) |tc| {
+            try contours.append(arena, tc.outer);
+            try holes.append(arena, tc.holes);
+        }
+    }
+    return .{ .contours = try contours.toOwnedSlice(arena), .holes = try holes.toOwnedSlice(arena) };
+}
+
+/// Trace component `comp`'s boundary loops (the lattice edges between a `comp`
+/// cell and a non-`comp` neighbour, oriented copper-on-the-right, stitched into
+/// loops that hug the copper at saddles and realised as one interpolated guard
+/// crossing per edge). The largest-|area| loop is the OUTER contour;
+/// every other loop is an interior HOLE (an antipad ring around a foreign
+/// via/pad enclosed by the pour, or the slot around an interior foreign track).
+/// The Gerber still re-punches these holes analytically in clear polarity; the
+/// viewer paints them even-odd. Null when the component has no boundary.
+fn traceOuter(arena: std.mem.Allocator, g: Grid, comp: i32, corner_radius: f64) std.mem.Allocator.Error!?TracedComponent {
     var edges: std.ArrayList(Edge) = .empty;
+    try collectBoundaryEdges(arena, &edges, g, comp);
+    if (edges.items.len == 0) return null;
+
+    var by_tail: TailMap = .empty;
+    try indexTails(arena, &by_tail, edges.items);
+    const loops = try realiseLoops(arena, g, edges.items, &by_tail);
+    if (loops.len == 0) return null;
+
+    const best_idx = largestLoop(loops);
+    const outer = try simplify(arena, loops[best_idx], dp_tol);
+    return .{
+        .outer = try roundContour(arena, outer, corner_radius),
+        .holes = try collectHoles(arena, loops, best_idx, g.pitch, corner_radius),
+    };
+}
+
+/// Emit every boundary edge of component `comp` (a `comp` cell adjacent to a
+/// non-`comp` neighbour), oriented copper-on-the-right.
+fn collectBoundaryEdges(arena: std.mem.Allocator, edges: *std.ArrayList(Edge), g: Grid, comp: i32) std.mem.Allocator.Error!void {
     const w: u32 = @intCast(g.nx + 1);
     var j: usize = 0;
     while (j < g.ny) : (j += 1) {
         var i: usize = 0;
         while (i < g.nx) : (i += 1) {
             if (g.labels[j * g.nx + i] != comp) continue;
-            try emitCellEdges(arena, &edges, g, comp, i, j, w);
+            try emitCellEdges(arena, edges, g, comp, i, j, w);
         }
     }
-    if (edges.items.len == 0) return null;
+}
 
-    // corner code → indices of unused edges with that tail.
-    var by_tail: TailMap = .empty;
-    for (edges.items, 0..) |e, idx| {
+/// Index boundary edges by their tail corner code, so the stitcher can find the
+/// unused outgoing edges at each corner.
+fn indexTails(arena: std.mem.Allocator, by_tail: *TailMap, edges: []const Edge) std.mem.Allocator.Error!void {
+    for (edges, 0..) |e, idx| {
         const gop = try by_tail.getOrPut(arena, e.a);
         if (!gop.found_existing) gop.value_ptr.* = .empty;
         try gop.value_ptr.append(arena, idx);
     }
+}
 
-    var best: ?[]const [2]f64 = null;
-    var best_area: i64 = -1;
-    for (edges.items, 0..) |_, idx| {
-        if (edges.items[idx].used) continue;
-        const loop = try stitchLoop(arena, edges.items, &by_tail, idx);
-        var area = shoelace2(loop, w);
-        if (area < 0) area = -area;
+/// Stitch every still-unused boundary edge into a loop and realise it as an
+/// interpolated world polygon. The loops partition the component's boundary into
+/// one outer contour and its interior holes.
+fn realiseLoops(arena: std.mem.Allocator, g: Grid, edges: []Edge, by_tail: *TailMap) std.mem.Allocator.Error![]const Contour {
+    var loops: std.ArrayList(Contour) = .empty;
+    for (edges, 0..) |_, idx| {
+        if (edges[idx].used) continue;
+        const loop = try stitchLoop(arena, edges, by_tail, idx);
+        try loops.append(arena, try loopToWorld(arena, g, edges, loop));
+    }
+    return loops.toOwnedSlice(arena);
+}
+
+/// Index of the largest-|area| loop (the component's outer boundary — every
+/// interior hole encloses strictly less area).
+fn largestLoop(loops: []const Contour) usize {
+    var best_idx: usize = 0;
+    var best_area: f64 = -1;
+    for (loops, 0..) |poly, i| {
+        const area = @abs(outline.signedArea2(poly));
         if (area > best_area) {
             best_area = area;
-            best = try cornersToWorld(arena, g, loop, w);
+            best_idx = i;
         }
     }
-    if (best) |poly| return try simplify(arena, poly, g.pitch * 0.5);
-    return null;
+    return best_idx;
+}
+
+/// Every non-outer loop with ≥3 vertices and enclosed area above HALF A GRID
+/// CELL (`0.5·pitch²`) becomes a simplified interior hole. The floor rejects a
+/// single-cell rasterisation nick (which a real antipad — a via/pad clearance
+/// disc — dwarfs) so noise never emits a spurious hole. `signedArea2` returns
+/// TWICE the area, so the floor is doubled before the compare.
+fn collectHoles(arena: std.mem.Allocator, loops: []const Contour, best_idx: usize, pitch: f64, corner_radius: f64) std.mem.Allocator.Error![]const Contour {
+    const area2_floor = pitch * pitch;
+    var holes: std.ArrayList(Contour) = .empty;
+    for (loops, 0..) |poly, i| {
+        if (i == best_idx or poly.len < 3) continue;
+        if (@abs(outline.signedArea2(poly)) < area2_floor) continue;
+        try holes.append(arena, try roundContour(arena, try simplify(arena, poly, dp_tol), corner_radius));
+    }
+    return holes.toOwnedSlice(arena);
 }
 
 fn emitCellEdges(arena: std.mem.Allocator, edges: *std.ArrayList(Edge), g: Grid, comp: i32, i: usize, j: usize, w: u32) std.mem.Allocator.Error!void {
     const ii: u32 = @intCast(i);
     const jj: u32 = @intCast(j);
+    const cell: u32 = jj * @as(u32, @intCast(g.nx)) + ii;
     const solid = struct {
         fn at(gg: Grid, cc: i32, x: i64, y: i64) bool {
             if (x < 0 or y < 0 or x >= @as(i64, @intCast(gg.nx)) or y >= @as(i64, @intCast(gg.ny))) return false;
@@ -566,31 +1697,32 @@ fn emitCellEdges(arena: std.mem.Allocator, edges: *std.ArrayList(Edge), g: Grid,
         }
     }.at;
     // top: neighbour above empty → edge (i+1,j)→(i,j), dir W
-    if (!solid(g, comp, ii, @as(i64, jj) - 1)) try edges.append(arena, .{ .a = jj * w + ii + 1, .b = jj * w + ii, .dir = .w });
+    if (!solid(g, comp, ii, @as(i64, jj) - 1)) try edges.append(arena, .{ .a = jj * w + ii + 1, .b = jj * w + ii, .dir = .w, .cell = cell });
     // bottom: neighbour below empty → edge (i,j+1)→(i+1,j+1), dir E
-    if (!solid(g, comp, ii, @as(i64, jj) + 1)) try edges.append(arena, .{ .a = (jj + 1) * w + ii, .b = (jj + 1) * w + ii + 1, .dir = .e });
+    if (!solid(g, comp, ii, @as(i64, jj) + 1)) try edges.append(arena, .{ .a = (jj + 1) * w + ii, .b = (jj + 1) * w + ii + 1, .dir = .e, .cell = cell });
     // left: neighbour left empty → edge (i,j)→(i,j+1), dir S
-    if (!solid(g, comp, @as(i64, ii) - 1, jj)) try edges.append(arena, .{ .a = jj * w + ii, .b = (jj + 1) * w + ii, .dir = .s });
+    if (!solid(g, comp, @as(i64, ii) - 1, jj)) try edges.append(arena, .{ .a = jj * w + ii, .b = (jj + 1) * w + ii, .dir = .s, .cell = cell });
     // right: neighbour right empty → edge (i+1,j+1)→(i+1,j), dir N
-    if (!solid(g, comp, @as(i64, ii) + 1, jj)) try edges.append(arena, .{ .a = (jj + 1) * w + ii + 1, .b = jj * w + ii + 1, .dir = .n });
+    if (!solid(g, comp, @as(i64, ii) + 1, jj)) try edges.append(arena, .{ .a = (jj + 1) * w + ii + 1, .b = jj * w + ii + 1, .dir = .n, .cell = cell });
 }
 
 /// Follow boundary edges from `start` back to its tail, choosing at each corner
 /// the unused outgoing edge that turns most sharply right (copper on the right)
 /// — the standard rule that keeps 4-connected regions separate at saddles.
-fn stitchLoop(arena: std.mem.Allocator, edges: []Edge, by_tail: *TailMap, start: usize) std.mem.Allocator.Error![]const u32 {
-    var corners: std.ArrayList(u32) = .empty;
+/// Returns the ordered EDGE indices of the loop (one interpolated vertex each).
+fn stitchLoop(arena: std.mem.Allocator, edges: []Edge, by_tail: *TailMap, start: usize) std.mem.Allocator.Error![]const usize {
+    var idxs: std.ArrayList(usize) = .empty;
     var cur = start;
     const loop_start = edges[start].a;
     while (true) {
         edges[cur].used = true;
-        try corners.append(arena, edges[cur].a);
+        try idxs.append(arena, cur);
         const head = edges[cur].b;
         if (head == loop_start) break;
         const nxt = pickNext(edges, by_tail, head, edges[cur].dir) orelse break;
         cur = nxt;
     }
-    return corners.toOwnedSlice(arena);
+    return idxs.toOwnedSlice(arena);
 }
 
 fn pickNext(edges: []Edge, by_tail: *TailMap, tail: u32, din: Dir) ?usize {
@@ -611,8 +1743,8 @@ fn pickNext(edges: []Edge, by_tail: *TailMap, tail: u32, din: Dir) ?usize {
 /// Preference (0 = best) for turning from `din` to `dout`, hugging copper on
 /// the right: right turn, then straight, then left, then reverse.
 fn turnPref(din: Dir, dout: Dir) u8 {
-    const d: u8 = @intFromEnum(din);
-    const o: u8 = @intFromEnum(dout);
+    const d: u8 = @backingInt(din);
+    const o: u8 = @backingInt(dout);
     const right = (d + 1) & 3;
     const straight = d;
     const left = (d + 3) & 3;
@@ -622,37 +1754,62 @@ fn turnPref(din: Dir, dout: Dir) u8 {
     return 3;
 }
 
-/// Twice the signed lattice area of a corner loop (shoelace, integer grid
-/// coords decoded from the corner codes). Magnitude picks the outer boundary
-/// (it always encloses more area than any hole loop of the same component).
-fn shoelace2(corners: []const u32, w: u32) i64 {
-    if (corners.len < 3) return 0;
-    var sum: i64 = 0;
-    var prev = corners[corners.len - 1];
-    for (corners) |code| {
-        const pi: i64 = @intCast(prev % w);
-        const pj: i64 = @intCast(prev / w);
-        const ci: i64 = @intCast(code % w);
-        const cj: i64 = @intCast(code / w);
-        sum += pi * cj - ci * pj;
-        prev = code;
-    }
-    return sum;
-}
-
-fn cornersToWorld(arena: std.mem.Allocator, g: Grid, corners: []const u32, w: u32) std.mem.Allocator.Error![]const [2]f64 {
-    const out = try arena.alloc([2]f64, corners.len);
-    for (corners, 0..) |code, k| {
-        const i = code % w;
-        const j = code / w;
-        out[k] = .{ g.minx + @as(f64, @floatFromInt(i)) * g.pitch, g.miny + @as(f64, @floatFromInt(j)) * g.pitch };
-    }
+/// Realise a stitched loop of boundary-edge indices as an interpolated world
+/// polygon: one vertex per edge, the guard crossing of the margin field on
+/// the segment from the kept cell centre to its empty neighbour's centre.
+fn loopToWorld(
+    arena: std.mem.Allocator,
+    g: Grid,
+    edges: []const Edge,
+    loop: []const usize,
+) std.mem.Allocator.Error![]const [2]f64 {
+    const out = try arena.alloc([2]f64, loop.len);
+    for (loop, 0..) |ei, k| out[k] = edgeCrossing(g, edges[ei]);
     return out;
 }
 
-/// Colinear-merge then Douglas-Peucker with a small tolerance (well under the
-/// clearance, since obstacles were inflated by ½-cell): reduces the axis-
-/// aligned staircase to a compact polygon without eroding the pour.
+/// The guard threshold crossing on the segment between edge `e`'s kept
+/// cell centre and its empty neighbour's centre. `dir` names the empty
+/// neighbour; an off-grid neighbour uses a value below the threshold so the
+/// crossing stays a fraction of a cell inside.
+fn edgeCrossing(g: Grid, e: Edge) [2]f64 {
+    const nx: i64 = @intCast(g.nx);
+    const kept: i64 = @intCast(e.cell);
+    const ik = @mod(kept, nx);
+    const jk = @divFloor(kept, nx);
+    const ck = g.cellCenter(@intCast(ik), @intCast(jk));
+    const mk: f64 = g.margin[e.cell];
+    const d = neighborDelta(e.dir);
+    const ie = ik + d[0];
+    const je = jk + d[1];
+    const dxf: f64 = @floatFromInt(d[0]);
+    const dyf: f64 = @floatFromInt(d[1]);
+    var ce: [2]f64 = .{ ck[0] + dxf * g.pitch, ck[1] + dyf * g.pitch };
+    var me: f64 = g.iso - g.pitch;
+    if (ie >= 0 and je >= 0 and ie < nx and je < @as(i64, @intCast(g.ny))) {
+        ce = g.cellCenter(@intCast(ie), @intCast(je));
+        me = g.margin[@as(usize, @intCast(je)) * g.nx + @as(usize, @intCast(ie))];
+    }
+    const denom = mk - me;
+    const t = if (@abs(denom) < 1e-12) 0.5 else std.math.clamp((mk - g.iso) / denom, 0, 1);
+    return .{ ck[0] + t * (ce[0] - ck[0]), ck[1] + t * (ce[1] - ck[1]) };
+}
+
+/// (Δi, Δj) from a kept cell to the EMPTY neighbour named by the edge direction
+/// (mirrors the four `emitCellEdges` cases: .w above, .e below, .s left, .n
+/// right).
+fn neighborDelta(dir: Dir) [2]i64 {
+    return switch (dir) {
+        .w => .{ 0, -1 },
+        .e => .{ 0, 1 },
+        .s => .{ -1, 0 },
+        .n => .{ 1, 0 },
+    };
+}
+
+/// Colinear-merge then Douglas-Peucker at `dp_tol` (below `iso_guard`, so no
+/// chord can ever fall under the true clearance): collapses the interpolated
+/// iso-line's dense per-edge vertices to a compact smooth polygon.
 fn simplify(arena: std.mem.Allocator, pts: []const [2]f64, tol: f64) std.mem.Allocator.Error!Contour {
     if (pts.len < 4) return pts;
     var merged: std.ArrayList([2]f64) = .empty;
@@ -664,6 +1821,18 @@ fn simplify(arena: std.mem.Allocator, pts: []const [2]f64, tol: f64) std.mem.All
     }
     if (merged.items.len < 4) return merged.toOwnedSlice(arena);
     return dp(arena, merged.items, tol);
+}
+
+/// Apply the board-level pour corner radius to a traced contour. The shared
+/// fillet helper clamps a radius against adjacent edges and tessellates the
+/// circular arc to the same 0.01 mm sagitta used by the board-outline path.
+/// Keeping zero as a fast path preserves the legacy contour byte-for-byte.
+fn roundContour(arena: std.mem.Allocator, pts: Contour, radius: f64) std.mem.Allocator.Error!Contour {
+    if (!(radius > 0) or pts.len < 3) return pts;
+    const radii = try arena.alloc(f64, pts.len);
+    @memset(radii, radius);
+    const fillet = try outline.filletPath(arena, pts, radii, 0.01);
+    return fillet.poly;
 }
 
 fn dp(arena: std.mem.Allocator, pts: []const [2]f64, tol: f64) std.mem.Allocator.Error!Contour {
@@ -719,22 +1888,28 @@ fn segPointDist(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) f64 {
 /// The layers that pour `net_name` on `rules`: declared `(plane IDX "NET")`
 /// entries whose net matches (outer faces carry a `side`/`track_layer`; inner
 /// planes don't), plus — for the legacy implicit model with no stackup form —
-/// one inner ground plane when the net is ground-named.
-fn carryingLayers(arena: std.mem.Allocator, rules: optimizer.BoardRules, net_name: []const u8) std.mem.Allocator.Error![]const LayerSpec {
+/// one INNER plane, ground (In1) when the net is ground-named and the block's
+/// dominant supply rail (In2) when it is that rail. Both are inner, so neither
+/// carries a `side`/`track_layer`, and a net is never on both.
+pub fn carryingLayers(arena: std.mem.Allocator, rules: optimizer.BoardRules, net_name: []const u8) std.mem.Allocator.Error![]const LayerSpec {
     var out: std.ArrayList(LayerSpec) = .empty;
-    if (rules.plane_nets == null) {
-        if (optimizer.isGroundName(leafName(net_name))) try out.append(arena, .{ .net = .ground });
+    if (!rules.declaredStackup()) {
+        if (optimizer.isGroundName(leafName(net_name))) {
+            try out.append(arena, .{ .net = .ground, .stack = 2 });
+        } else if (implicit_plane.carriesRail(rules, net_name)) {
+            try out.append(arena, .{ .net = .{ .named = rules.planes.implicit_rail.? }, .stack = 3 });
+        }
         return out.toOwnedSlice(arena);
     }
     const bottom: u8 = if (rules.copper_layers >= 2) rules.copper_layers else 0;
-    for (rules.planes) |pl| {
+    for (rules.planes.declared) |pl| {
         if (!planeCarries(.{ .named = pl.net }, net_name)) continue;
         if (pl.index == 1) {
-            try out.append(arena, .{ .net = .{ .named = pl.net }, .side = .top, .track_layer = 0 });
+            try out.append(arena, .{ .net = .{ .named = pl.net }, .stack = pl.index, .side = .top, .track_layer = 0 });
         } else if (bottom != 0 and pl.index == bottom) {
-            try out.append(arena, .{ .net = .{ .named = pl.net }, .side = .bottom, .track_layer = 1 });
+            try out.append(arena, .{ .net = .{ .named = pl.net }, .stack = pl.index, .side = .bottom, .track_layer = 1 });
         } else {
-            try out.append(arena, .{ .net = .{ .named = pl.net } });
+            try out.append(arena, .{ .net = .{ .named = pl.net }, .stack = pl.index });
         }
     }
     return out.toOwnedSlice(arena);
@@ -744,17 +1919,33 @@ fn carryingLayers(arena: std.mem.Allocator, rules: optimizer.BoardRules, net_nam
 /// layer, then assign each query pad/via a CANONICAL component id, unifying ids
 /// across layers through the through-hole pads and vias that bridge them. A pad
 /// touching no kept component gets -1 (an isolated pad — an honest airwire).
+/// A declared plane recedes around the user copper pours in `copper.zones` on
+/// its layer (see `higherThanDeclared`), so a pad sitting under a user pour is
+/// NOT credited to the plane it no longer touches.
+/// Everything one net's plane-connect query needs beyond the board itself:
+/// which net is asking, the pad queries and vias it carries, and the caller's
+/// shared board-edge margin field. Bundled so `planeConnect` stays under the
+/// function-size cap and the per-net sweep can hand the same field to every net.
+pub const PlaneQuery = struct {
+    net_name: []const u8,
+    pads: []const PadQuery,
+    vias: []const router.Via,
+    base: ?EdgeField = null,
+};
+
+/// Fuse one net's pads, tracks and vias through the plane fills that carry
+/// that net, answering which same-net copper lands in the same kept component
+/// and which pads the plane actually connects. `q` carries the net's name, pad
+/// queries, vias and the caller's shared edge-margin field (`PlaneQuery`).
 pub fn planeConnect(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     copper: Copper,
-    net_name: []const u8,
-    pads: []const PadQuery,
-    vias: []const router.Via,
+    q: PlaneQuery,
 ) std.mem.Allocator.Error!Join {
-    const layers = try carryingLayers(arena, placement.rules, net_name);
-    const pad_comp = try arena.alloc(i32, pads.len);
-    const via_comp = try arena.alloc(i32, vias.len);
+    const layers = try carryingLayers(arena, placement.rules, q.net_name);
+    const pad_comp = try arena.alloc(i32, q.pads.len);
+    const via_comp = try arena.alloc(i32, q.vias.len);
     @memset(pad_comp, -1);
     @memset(via_comp, -1);
     if (layers.len == 0) return .{ .pad_comp = pad_comp, .via_comp = via_comp, .n_comp = 0, .coarsened = false };
@@ -766,8 +1957,21 @@ pub fn planeConnect(
     const fills = try arena.alloc(Fill, layers.len);
     const offset = try arena.alloc(usize, layers.len);
     var coarsened = false;
+    // Every carrying layer rasters the SAME board on the SAME lattice, so the
+    // outline walk that seeds each cell's edge margin is done once here and
+    // copied per layer; and connectivity reads only `labels`, so no layer needs
+    // its boundary traced. Together those were 24 of the 53 ms this call cost.
+    // `q.base` is the caller's shared field — the net-open sweep calls this per
+    // NET, so without it the outline walk repeats for every net on the board.
+    const base_eff = if (q.base) |b| b else try edgeField(arena, placement);
     for (layers, 0..) |spec, l| {
-        fills[l] = try compute(arena, placement, copper, spec);
+        var s = spec;
+        // The plane recedes around user pours on its own layer, so connectivity
+        // sees the same copper the fill/Gerber emit. An INNER plane has no
+        // track_layer and no user zone can sit on a plane-claimed layer, so it
+        // is left untouched.
+        if (s.track_layer) |tl| s.higher = try higherThanDeclared(arena, copper.zones, tl, s.net);
+        fills[l] = try computeFill(arena, placement, copper, s, .{ .base = base_eff, .contours = false });
         offset[l] = total;
         total += fills[l].n_comp;
         coarsened = coarsened or fills[l].coarsened;
@@ -775,8 +1979,8 @@ pub fn planeConnect(
     const uf = try arena.alloc(usize, total);
     for (uf, 0..) |*u, i| u.* = i;
 
-    assignPads(pads, layers, fills, offset, uf, pad_comp);
-    assignVias(vias, layers, fills, offset, uf, via_comp);
+    assignPads(q.pads, layers, fills, offset, uf, pad_comp);
+    assignVias(q.vias, layers, fills, offset, uf, via_comp);
     const n = denseRoots(arena, uf, pad_comp, via_comp);
     return .{ .pad_comp = pad_comp, .via_comp = via_comp, .n_comp = n, .coarsened = coarsened };
 }
@@ -859,6 +2063,33 @@ fn ufUnite(uf: []usize, a: usize, b: usize) void {
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+const flat_netlist = @import("../flat_netlist.zig");
+
+// `polySignedInset` is a hot-path re-implementation of `outline.signedInset`
+// with a SINGLE hypot (argmin of the per-edge squared distances, hypot only on
+// the winner) — the pour's byte-identical field rests on it being exactly equal.
+// Pin that across inside / outside / edge-proximate points of a non-axis-aligned
+// quad, where both the min-distance edge and the ray-cast sign are exercised. An
+// exact `expectEqual` (not approx) is deliberate: an off-by-a-ULP re-derivation
+// would silently shift the f32 margin field and the emitted contours.
+test "polySignedInset matches outline.signedInset bit-for-bit" {
+    const poly = [_][2]f64{ .{ 1.0, 0.5 }, .{ 9.3, 1.1 }, .{ 8.7, 7.9 }, .{ 0.4, 6.2 } };
+    const samples = [_][2]f64{
+        .{ 5.0, 4.0 },
+        .{ 0.2, 0.2 },
+        .{ 9.9, 9.9 },
+        .{ 1.05, 3.0 },
+        .{ 5.0, 0.7 },
+        .{ 8.9, 4.0 },
+        .{ 5.0, 7.0 },
+        .{ -1.0, 4.0 },
+        .{ 4.999, 3.999 },
+        .{ 2.3, 6.05 },
+    };
+    for (samples) |s| {
+        try testing.expectEqual(outline.signedInset(&poly, s[0], s[1]), polySignedInset(poly[0..], s[0], s[1]));
+    }
+}
 
 // The pitch guard is load-bearing: a zero pitch would divide by zero and feed
 // @ceil(inf) into @intFromFloat. (The sibling `extent <= 0` term is equivalent
@@ -888,7 +2119,7 @@ test "emitCellEdges emits the bottom boundary edge for a cell empty below" {
     // The `jj + 1` neighbour offset and the vertex-index arithmetic must all
     // hold — a +→− flip either checks the wrong neighbour or misnumbers a vertex.
     var labels = [_]i32{ 0, 1, 0, 1, 1, 1, 0, 0, 0 };
-    const g = Grid{ .minx = 0, .miny = 0, .pitch = 1, .nx = 3, .ny = 3, .labels = &labels };
+    const g = Grid{ .minx = 0, .miny = 0, .pitch = 1, .nx = 3, .ny = 3, .labels = &labels, .margin = &.{}, .iso = iso_guard };
     var edges: std.ArrayList(Edge) = .empty;
     try emitCellEdges(arena, &edges, g, 1, 1, 1, 4);
     try testing.expectEqual(@as(usize, 1), edges.items.len);
@@ -897,7 +2128,7 @@ test "emitCellEdges emits the bottom boundary edge for a cell empty below" {
     try testing.expectEqual(@as(u32, 10), edges.items[0].b);
 }
 
-fn testPlacement(parts: []optimizer.Part, nets: []const @import("../export_kicad.zig").FlatNet, rules: optimizer.BoardRules) optimizer.Placement {
+fn testPlacement(parts: []optimizer.Part, nets: []const flat_netlist.FlatNet, rules: optimizer.BoardRules) optimizer.Placement {
     return .{
         .parts = parts,
         .links = &.{},
@@ -916,6 +2147,106 @@ fn testPlacement(parts: []optimizer.Part, nets: []const @import("../export_kicad
     };
 }
 
+test "footprint copper-pour keepout carves the attached outer face" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+    const keep_poly = [_][2]f64{ .{ -1, -1 }, .{ 1, -1 }, .{ 1, 1 }, .{ -1, 1 } };
+    const keepouts = [_]geometry.CopperPourKeepout{.{ .side = .front, .poly = &keep_poly }};
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = -3, .y = 0, .w = 1, .h = 1, .thru = true }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "J1",
+        .kind = .hub,
+        .hw = 4,
+        .hh = 4,
+        .pads = &pads,
+        .features = .{ .copper_pour_keepouts = &keepouts },
+        .fallback = false,
+        .x = 10,
+        .y = 10,
+        .rot = 45,
+    }};
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "J1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "GND", .pins = &pins }};
+    const placement = testPlacement(&parts, &nets, .{});
+
+    const top = try compute(arena, placement, .{}, .{ .net = .{ .named = "GND" }, .side = .top, .track_layer = 0 });
+    try testing.expect(top.contains(7, 10));
+    try testing.expect(!top.contains(10, 10));
+
+    const bottom = try compute(arena, placement, .{}, .{ .net = .{ .named = "GND" }, .side = .bottom, .track_layer = 1 });
+    try testing.expect(bottom.contains(10, 10));
+}
+
+// spec: placement/pour - the configured minimum pour width erodes and regrows the fill, removing a connected neck narrower than the fabrication floor while restoring broad copper to its ordinary clearance boundary
+test "minimum pour width removes a narrow neck" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+    const parts: []optimizer.Part = &.{};
+    const nets: []flat_netlist.FlatNet = &.{};
+    var rules = optimizer.BoardRules{};
+    rules.design.pour.min_width = 3.0;
+    const placement = testPlacement(parts, nets, rules);
+    // Two broad chambers joined by a 2 mm square neck. A 3 mm finished-width
+    // floor must drop the neck and leave two independent fill components.
+    const poly = [_][2]f64{
+        .{ 1, 1 },   .{ 9, 1 },   .{ 9, 9 },   .{ 11, 9 }, .{ 11, 1 }, .{ 19, 1 },
+        .{ 19, 19 }, .{ 11, 19 }, .{ 11, 11 }, .{ 9, 11 }, .{ 9, 19 }, .{ 1, 19 },
+    };
+    const fill = try compute(arena, placement, .{}, zoneLayerSpec("GND", .bottom, 1, &poly));
+    try testing.expectEqual(@as(usize, 2), fill.n_comp);
+    try testing.expect(fill.contains(5, 5));
+    try testing.expect(fill.contains(15, 15));
+    try testing.expect(!fill.contains(10, 10));
+    // The former implementation stopped after erosion, so even broad legal
+    // copper vanished within half the floor of every boundary. Regrowth keeps
+    // the chamber near its authored edge while still deleting the neck.
+    try testing.expect(fill.contains(1.2, 5));
+}
+
+// spec: placement/power-routing - a power pour's effective minimum neck is raised above the board fabrication floor by the rail maximum and actual stack foil
+test "power pour minimum follows the conservative rail envelope" {
+    const foils = [_]impedance.Foil{
+        .{ .index = 1, .thickness_mm = 0.035 },
+        .{ .index = 2, .thickness_mm = 0.0152 },
+        .{ .index = 3, .thickness_mm = 0.0152 },
+        .{ .index = 4, .thickness_mm = 0.035 },
+    };
+    const rails = [_]@import("../eval/power_budget.zig").Rail{.{
+        .net = "VDD",
+        .load_max_a = 0.34,
+        .any_max_load = true,
+        .status = .no_source,
+    }};
+    var rules = optimizer.BoardRules{};
+    rules.design.pour.min_width = 0.127;
+    rules.physical.stack = .{ .layers = 4, .foils = &foils };
+    rules.physical.rails = &rails;
+    const placement = testPlacement(&.{}, &.{}, rules);
+    const width = effectiveMinimumWidth(placement, .{ .net = .{ .named = "VDD" } });
+    try testing.expect(width > 0.40 and width < 0.42);
+    try testing.expectEqual(@as(f64, 0.127), effectiveMinimumWidth(placement, .{ .net = .ground }));
+}
+
+// spec: placement/pour - the configured pour corner radius fillets emitted contour corners
+test "pour corner radius rounds emitted contour" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+    const parts: []optimizer.Part = &.{};
+    const nets: []flat_netlist.FlatNet = &.{};
+    const poly = [_][2]f64{ .{ 2, 2 }, .{ 18, 2 }, .{ 18, 18 }, .{ 2, 18 } };
+    const sharp = testPlacement(parts, nets, .{});
+    const rounded_rules = optimizer.BoardRules{ .design = .{ .pour = .{ .corner_radius = 1.0 } } };
+    const rounded = testPlacement(parts, nets, rounded_rules);
+    const sharp_fill = try compute(arena, sharp, .{}, zoneLayerSpec("GND", .bottom, 1, &poly));
+    const rounded_fill = try compute(arena, rounded, .{}, zoneLayerSpec("GND", .bottom, 1, &poly));
+    try testing.expectEqual(@as(usize, 1), sharp_fill.contours.len);
+    try testing.expectEqual(@as(usize, 1), rounded_fill.contours.len);
+    try testing.expect(rounded_fill.contours[0].len > sharp_fill.contours[0].len);
+}
+
 // spec: placement/pour - a seeded pour keeps its component and drops an unseeded orphan island
 test "island removal keeps seeded components and drops orphans" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
@@ -928,14 +2259,14 @@ test "island removal keeps seeded components and drops orphans" {
     var parts = [_]optimizer.Part{
         .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &gnd_pad, .fallback = false, .x = 3, .y = 10, .side = .bottom },
     };
-    const gnd_pins = [_]@import("../export_kicad.zig").FlatPin{.{ .ref_des = "C1", .pin = "1" }};
-    const nets = [_]@import("../export_kicad.zig").FlatNet{
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
         .{ .name = "GND", .pins = &gnd_pins },
         .{ .name = "VIN", .pins = &.{} },
     };
     const gnd_names = [_][]const u8{"GND"};
     const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
-    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = &planes });
+    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = .{ .declared = &planes } });
 
     // A foreign VIN wall on the bottom layer splitting the board in two.
     const wall = [_]router.Track{.{ .x1 = 10, .y1 = -2, .x2 = 10, .y2 = 22, .layer = 1, .width = 0.5, .net = 1 }};
@@ -947,6 +2278,281 @@ test "island removal keeps seeded components and drops orphans" {
     try testing.expect(fill.contours.len == 1);
     try testing.expect(fill.componentAt(3, 10) == 0); // seed side kept
     try testing.expect(fill.componentAt(17, 10) < 0); // orphan side dropped
+}
+
+// spec: placement/pour - a clipped user pour confines the fill to the drawn polygon, carves foreign copper, and keeps its region when no same-net seed lies inside
+test "user-zone clip confines the fill, carves a foreign pad, and keeps an unseeded region" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // A GND user pour drawn as a 10 mm square in the middle of a 20 mm board,
+    // top layer. It has NO same-net GND copper inside — just one FOREIGN VIN SMD
+    // pad dead centre. keep_unseeded must still render the region; the foreign
+    // pad must be carved out; and the clip must confine the copper to the drawn
+    // square (nothing poured out at the board's own corner).
+    const vin_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &vin_pad, .fallback = false, .x = 10, .y = 10, .side = .top },
+    };
+    const vin_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &.{} },
+        .{ .name = "VIN", .pins = &vin_pins },
+    };
+    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &.{}, .copper_layers = 2 });
+
+    const clip = [_][2]f64{ .{ 5, 5 }, .{ 15, 5 }, .{ 15, 15 }, .{ 5, 15 } };
+    const fill = try compute(arena, placement, .{}, userZoneSpec("GND", .top, &clip));
+
+    // The unseeded pour still renders (keep_unseeded), so it has real copper.
+    try testing.expect(fill.contours.len >= 1);
+    // Interior of the clip, clear of the foreign pad → filled copper.
+    try testing.expect(fill.componentAt(6, 6) >= 0);
+    // The foreign VIN pad centre is carved out of the ground copper.
+    try testing.expect(fill.componentAt(10, 10) < 0);
+    // Outside the drawn clip (but inside the board) → NOT poured; the clip
+    // confines the fill to the user's polygon.
+    try testing.expect(fill.componentAt(2, 2) < 0);
+    try testing.expect(fill.componentAt(18, 18) < 0);
+}
+
+// spec: placement/pour - a small drawn zone lands its copper edge on the clip boundary no matter how much board lies outside it
+test "a corner user zone keeps an exact clip boundary" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // A 4 mm square drawn in the corner of a 20 mm board: 96% of the raster is
+    // outside the zone's bounding box, which is the part the clip walk skips.
+    // The skipping is only sound if the kept/blocked edge still falls exactly
+    // where the polygon puts it, so probe both sides of that edge.
+    const vin_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &vin_pad, .fallback = false, .x = 18, .y = 18, .side = .top },
+    };
+    const vin_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &.{} },
+        .{ .name = "VIN", .pins = &vin_pins },
+    };
+    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &.{}, .copper_layers = 2 });
+
+    const clip = [_][2]f64{ .{ 2, 2 }, .{ 6, 2 }, .{ 6, 6 }, .{ 2, 6 } };
+    const fill = try compute(arena, placement, .{}, userZoneSpec("GND", .top, &clip));
+
+    try testing.expect(fill.componentAt(4, 4) >= 0); // middle of the zone
+    try testing.expect(fill.componentAt(5.6, 4) >= 0); // still inside, near the edge
+    try testing.expect(fill.componentAt(6.2, 4) < 0); // just outside the drawn edge
+    try testing.expect(fill.componentAt(4, 6.2) < 0);
+    try testing.expect(fill.componentAt(15, 15) < 0); // far outside the zone's box
+}
+
+// spec: placement/pour - an inner-layer user pour carves a clipped fill, stamping only through-hole/via copper as foreign while SMD pads leave it intact
+test "inner-layer user pour carves a foreign via but ignores an SMD pad" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // The barracuda case: an In2.Cu rail pour (signal index 2 on a 4-layer board
+    // whose In1 is a GND plane). A same-net V_3V3A THROUGH-HOLE pad seeds it, a
+    // foreign GND VIA is carved out (its barrel reaches the inner layer), and a
+    // foreign GND SMD pad DIRECTLY OVER the pour is left intact (SMD copper lives
+    // on the outer face, never touches an inner layer).
+    const rail_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.9, .h = 0.9, .thru = true, .drill = 0.4 }};
+    const smd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 0.6, .hh = 0.6, .pads = &rail_pad, .fallback = false, .x = 10, .y = 10, .side = .top },
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &smd_pad, .fallback = false, .x = 6, .y = 6, .side = .top },
+    };
+    const rail_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "R1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "V_3V3A", .pins = &rail_pins },
+        .{ .name = "GND", .pins = &gnd_pins },
+    };
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &.{"GND"}, .copper_layers = 4, .planes = .{ .declared = &planes } });
+
+    // A foreign GND through-via inside the drawn square.
+    const vias = [_]router.Via{.{ .x = 13, .y = 13, .dia = 0.6, .net = 1 }};
+    const clip = [_][2]f64{ .{ 5, 5 }, .{ 15, 5 }, .{ 15, 15 }, .{ 5, 15 } };
+    // Inner signal layer 2 (In2.Cu) → side=null, track_layer=2.
+    const fill = try compute(arena, placement, .{ .vias = &vias }, zoneLayerSpec("V_3V3A", null, 2, &clip));
+
+    // The same-net through-hole pad seeds the pour, so it renders.
+    try testing.expect(fill.contours.len >= 1);
+    try testing.expect(fill.componentAt(10, 10) >= 0);
+    // The foreign GND via barrel is carved out of the inner copper.
+    try testing.expect(fill.componentAt(13, 13) < 0);
+    // The foreign GND SMD pad does NOT reach the inner layer → its footprint is
+    // still poured copper (not carved).
+    try testing.expect(fill.componentAt(6, 6) >= 0);
+    // The clip confines the fill to the drawn polygon.
+    try testing.expect(fill.componentAt(2, 2) < 0);
+    try testing.expect(fill.componentAt(18, 18) < 0);
+}
+
+// spec: placement/pour - a pour outranks a different-net overlapping pour only with strictly greater priority on the same layer
+test "priority: outranks needs same layer, strictly greater priority, and a different net" {
+    const hi_va = UserZone{ .net = "VA", .layer = 0, .poly = &.{}, .priority = 2 };
+    const lo_vb = UserZone{ .net = "VB", .layer = 0, .poly = &.{}, .priority = 1 };
+    try testing.expect(outranks(hi_va, lo_vb)); // higher rank, different net, same layer
+    try testing.expect(!outranks(lo_vb, hi_va)); // the lower pour never clips the higher one
+    const lo_va = UserZone{ .net = "VA", .layer = 0, .poly = &.{}, .priority = 1 };
+    try testing.expect(!outranks(hi_va, lo_va)); // same net → the two pours merge, never clip
+    const eq_vb = UserZone{ .net = "VB", .layer = 0, .poly = &.{}, .priority = 2 };
+    try testing.expect(!outranks(hi_va, eq_vb)); // equal priority → left to short (must be ranked)
+    const hi_other_layer = UserZone{ .net = "VA", .layer = 1, .poly = &.{}, .priority = 2 };
+    try testing.expect(!outranks(hi_other_layer, lo_vb)); // a different layer can never short
+}
+
+// spec: placement/pour - a higher-priority overlapping pour knocks the lower pour back by the clearance so they do not short
+test "priority: a higher-ranked overlapping pour clears a gap in the lower pour" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Two overlapping TOP-layer user pours on a 20 mm board, different nets: a
+    // big low-priority VA pour, and a small high-priority VB island sitting
+    // inside it. VB outranks VA, so VA's fill must recede from VB by the pour
+    // clearance — the short becomes a gap.
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "VA", .pins = &.{} },
+        .{ .name = "VB", .pins = &.{} },
+    };
+    var parts = [_]optimizer.Part{};
+    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &.{}, .copper_layers = 2 });
+
+    const va_clip = [_][2]f64{ .{ 2, 2 }, .{ 18, 2 }, .{ 18, 18 }, .{ 2, 18 } };
+    const vb_clip = [_][2]f64{ .{ 8, 8 }, .{ 12, 8 }, .{ 12, 12 }, .{ 8, 12 } };
+
+    // Baseline: with NO priority (higher empty) VA pours straight through the VB
+    // region — the unresolved short.
+    const va_plain = try compute(arena, placement, .{}, userZoneSpec("VA", .top, &va_clip));
+    try testing.expect(va_plain.componentAt(10, 10) >= 0);
+
+    // With VB ranked above VA, VA is knocked back inside VB (a clearance gap)…
+    var va_spec = userZoneSpec("VA", .top, &va_clip);
+    const higher = [_][]const [2]f64{&vb_clip};
+    va_spec.higher = &higher;
+    const va = try compute(arena, placement, .{}, va_spec);
+    try testing.expect(va.componentAt(10, 10) < 0); // deep inside VB → cleared
+    // …while VA copper well away from VB is untouched.
+    try testing.expect(va.componentAt(5, 10) >= 0);
+    try testing.expect(va.componentAt(15, 10) >= 0);
+    try testing.expect(va.componentAt(10, 5) >= 0);
+
+    // VB itself (nothing outranks it) fills its own region solidly.
+    const vb = try compute(arena, placement, .{}, userZoneSpec("VB", .top, &vb_clip));
+    try testing.expect(vb.componentAt(10, 10) >= 0);
+}
+
+// spec: placement/pour - a declared pour recedes around any user pour on the same face whatever its priority
+test "priority: a user zone clears the declared background pour at any priority" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // The barracuda B.Cu case: a declared `(pour bottom "GND")` background fill
+    // with a hand-drawn rail pour of a DIFFERENT net sitting on the same face.
+    // The declared pour is the blanket background, so the rail clears it at ANY
+    // priority — including the 0 a freshly drawn pour starts at (else that pour
+    // silently shorts to the background copper).
+    const gnd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &gnd_pad, .fallback = false, .x = 3, .y = 10, .side = .bottom },
+    };
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "VRAIL", .pins = &.{} },
+    };
+    const gnd_names = [_][]const u8{"GND"};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = .{ .declared = &planes } });
+
+    const rail = [_][2]f64{ .{ 8, 8 }, .{ 12, 8 }, .{ 12, 12 }, .{ 8, 12 } };
+
+    // Ranked (priority 1): the declared GND pour is cleared over the rail.
+    const ranked = [_]UserZone{.{ .net = "VRAIL", .layer = 1, .poly = &rail, .priority = 1 }};
+    var spec = outerSpec("GND", .bottom);
+    spec.higher = try higherThanDeclared(arena, &ranked, 1, spec.net);
+    const fill = try compute(arena, placement, .{}, spec);
+    try testing.expect(fill.componentAt(10, 10) < 0); // rail region cleared out of GND
+    try testing.expect(fill.componentAt(3, 10) >= 0); // GND intact away from the rail
+
+    // Unranked (priority 0, a freshly drawn pour): still clears the background.
+    const unranked = [_]UserZone{.{ .net = "VRAIL", .layer = 1, .poly = &rail, .priority = 0 }};
+    var spec0 = outerSpec("GND", .bottom);
+    spec0.higher = try higherThanDeclared(arena, &unranked, 1, spec0.net);
+    const fill0 = try compute(arena, placement, .{}, spec0);
+    try testing.expect(fill0.componentAt(10, 10) < 0);
+    try testing.expect(fill0.componentAt(3, 10) >= 0);
+
+    // A SAME-NET zone is not a foreign region — the copper merges, nothing clears.
+    const same = [_]UserZone{.{ .net = "GND", .layer = 1, .poly = &rail, .priority = 5 }};
+    var specs = outerSpec("GND", .bottom);
+    specs.higher = try higherThanDeclared(arena, &same, 1, specs.net);
+    const fills = try compute(arena, placement, .{}, specs);
+    try testing.expect(fills.componentAt(10, 10) >= 0);
+}
+
+// spec: placement/pour - plane connectivity stops crediting a pad the declared plane receded from under a user pour
+test "priority: planeConnect drops a pad sitting under a user pour" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Two GND pads on a declared bottom GND plane. The second sits inside a
+    // VRAIL user pour, so the plane recedes there and can no longer connect it.
+    const pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 3, .y = 10, .side = .bottom },
+        .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 10, .y = 10, .side = .bottom },
+    };
+    const gnd_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "C1", .pin = "1" }, .{ .ref_des = "C2", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "VRAIL", .pins = &.{} },
+    };
+    const gnd_names = [_][]const u8{"GND"};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = .{ .declared = &planes } });
+
+    const qpads = [_]PadQuery{
+        .{ .cx = 3, .cy = 10, .x0 = 2.7, .y0 = 9.7, .x1 = 3.3, .y1 = 10.3, .thru = false, .side = .bottom },
+        .{ .cx = 10, .cy = 10, .x0 = 9.7, .y0 = 9.7, .x1 = 10.3, .y1 = 10.3, .thru = false, .side = .bottom },
+    };
+
+    // No user pours: the solid plane connects both pads.
+    const bare = try planeConnect(arena, placement, .{}, .{ .net_name = "GND", .pads = &qpads, .vias = &.{} });
+    try testing.expectEqual(bare.pad_comp[0], bare.pad_comp[1]);
+    try testing.expect(bare.pad_comp[1] >= 0);
+
+    // A VRAIL pour over the second pad: the plane receded, so that pad is no
+    // longer plane-connected (an honest airwire) while the first is untouched.
+    const rail = [_][2]f64{ .{ 8, 8 }, .{ 12, 8 }, .{ 12, 12 }, .{ 8, 12 } };
+    const zones = [_]UserZone{.{ .net = "VRAIL", .layer = 1, .poly = &rail, .priority = 1 }};
+    const poured = try planeConnect(arena, placement, .{ .zones = &zones }, .{ .net_name = "GND", .pads = &qpads, .vias = &.{} });
+    try testing.expect(poured.pad_comp[1] < 0);
+    try testing.expect(poured.pad_comp[0] >= 0);
+}
+
+// spec: placement/pour - a point inside a higher-ranked overlapping pour is reported clipped from the lower pour
+test "priority: clippedByHigher flags a point the higher pour owns" {
+    const big = [_][2]f64{ .{ 2, 2 }, .{ 18, 2 }, .{ 18, 18 }, .{ 2, 18 } };
+    const small = [_][2]f64{ .{ 8, 8 }, .{ 12, 8 }, .{ 12, 12 }, .{ 8, 12 } };
+    const zones = [_]UserZone{
+        .{ .net = "VA", .layer = 0, .poly = &big, .priority = 0 },
+        .{ .net = "VB", .layer = 0, .poly = &small, .priority = 1 },
+    };
+    // Inside VB (the higher pour) → the lower VA (index 0) is clipped there.
+    try testing.expect(clippedByHigher(&zones, 0, 10, 10));
+    // Inside VA but outside VB → VA's copper still reaches it.
+    try testing.expect(!clippedByHigher(&zones, 0, 4, 10));
+    // The higher pour (index 1) is never clipped by the lower one.
+    try testing.expect(!clippedByHigher(&zones, 1, 10, 10));
 }
 
 // spec: placement/pour - a foreign net-class clearance widens the ground-pour gap around its track
@@ -967,16 +2573,22 @@ test "net-class clearance controls the foreign track pour gap" {
         .y = 3,
         .side = .bottom,
     }};
-    const gnd_pins = [_]@import("../export_kicad.zig").FlatPin{.{ .ref_des = "C1", .pin = "1" }};
-    const nets = [_]@import("../export_kicad.zig").FlatNet{
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
         .{ .name = "GND", .pins = &gnd_pins },
         .{ .name = "RF", .pins = &.{} },
     };
     const net_rules = [_]optimizer.NetRule{ .{}, .{ .class = .{ .name = "rf-cpwg-50" }, .clearance = 0.8 } };
     const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    // The base gap this bottom face holds is STATED as the inner plane's 0.3
+    // rather than inherited: the test measures a class clearance against the
+    // base it widens, so the probe millimetres below belong to the fixture and
+    // not to whichever default an outer face happens to resolve.
+    const design = optimizer.DesignRules{ .pour = .{ .clearance_outer = 0.3 } };
     const placement = testPlacement(&parts, &nets, .{
+        .design = design,
         .copper_layers = 2,
-        .planes = &planes,
+        .planes = .{ .declared = &planes },
         .net = &net_rules,
     });
     const rf = [_]router.Track{.{
@@ -1001,6 +2613,436 @@ test "net-class clearance controls the foreign track pour gap" {
     try testing.expect(fill.componentAt(10, 11.5) >= 0);
 }
 
+// spec: placement/pour - a grounded-coplanar ground gap overrides the generic ground-pour clearance without changing non-ground pours
+test "grounded-coplanar gap controls only a ground pour opening" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "C1",
+        .kind = .passive,
+        .hw = 0.5,
+        .hh = 0.5,
+        .pads = &pad,
+        .fallback = false,
+        .x = 3,
+        .y = 3,
+        .side = .bottom,
+    }};
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "RF", .pins = &.{} },
+    };
+    const net_rules = [_]optimizer.NetRule{
+        .{},
+        .{ .class = .{ .name = "rf-cpwg-50" }, .clearance = 0.127, .rf = .{
+            .impedance = .{ .ohms = 50, .ground_gap_mm = 0.127 },
+        } },
+    };
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    // The generic gap this test contrasts the CPWG slot against is STATED as
+    // the inner plane's 0.3 — the number the 0.45 mm probe below is derived
+    // from — so the contrast stays the class rule versus the base, instead of
+    // shifting with the tighter default an outer face would otherwise take.
+    const design = optimizer.DesignRules{ .pour = .{ .clearance_outer = 0.3 } };
+    const placement = testPlacement(&parts, &nets, .{
+        .design = design,
+        .copper_layers = 2,
+        .planes = .{ .declared = &planes },
+        .net = &net_rules,
+    });
+    const rf = [_]router.Track{.{
+        .x1 = 5,
+        .y1 = 10,
+        .x2 = 15,
+        .y2 = 10,
+        .layer = 1,
+        .width = 0.4,
+        .net = 1,
+    }};
+    const ground_fill = try compute(
+        arena,
+        placement,
+        .{ .tracks = &rf },
+        .{ .net = .{ .named = "GND" }, .side = .bottom, .track_layer = 1 },
+    );
+    // At 0.45 mm from centre, the point clears 0.2 mm of trace + the 0.127 mm
+    // CPWG slot (+ raster guard), but would still be inside the generic 0.3 mm
+    // pour opening. This proves the lower, intentional ground-only path won.
+    try testing.expect(ground_fill.componentAt(10, 10.45) >= 0);
+
+    const rail_fill = try compute(
+        arena,
+        placement,
+        .{ .tracks = &rf },
+        .{ .net = .{ .named = "VCC" }, .side = .bottom, .track_layer = 1, .keep_unseeded = true },
+    );
+    try testing.expect(rail_fill.componentAt(10, 10.45) < 0);
+}
+
+// spec: placement/pour - an opt-in CPWG gap profile follows taper width and stops at its authored maximum
+test "ground pour gap follows controlled-impedance taper up to its cap" {
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &.{} },
+        .{ .name = "RF", .pins = &.{} },
+    };
+    const rules = [_]optimizer.NetRule{
+        .{},
+        .{ .class = .{ .name = "rf-cpwg-50" }, .clearance = 0.127, .rf = .{
+            .impedance = .{ .ohms = 50, .ground_gap_mm = 0.127, .ground_gap_max_mm = 1.75 },
+        } },
+    };
+    const dielectrics = [_]impedance.Dielectric{
+        .{ .after_layer = 1, .thickness_mm = 0.2104, .er = 4.4 },
+        .{ .after_layer = 2, .thickness_mm = 1.065, .er = 4.4 },
+        .{ .after_layer = 3, .thickness_mm = 0.2104, .er = 4.4 },
+    };
+    const planes = [_]u8{ 2, 3 };
+    const placement = testPlacement(&.{}, &nets, .{
+        .net = &rules,
+        .physical = .{ .board_thickness = 1.6, .stack = .{
+            .layers = 4,
+            .planes = &planes,
+            .dielectrics = &dielectrics,
+            .board_mm = 1.6,
+        } },
+    });
+    const taper = router.Track{ .x1 = 5, .y1 = 10, .x2 = 10, .y2 = 10, .layer = 0, .width = 0.4, .net = 1 };
+    const launch = router.Track{ .x1 = 10, .y1 = 10, .x2 = 15, .y2 = 10, .layer = 0, .width = 0.5588, .net = 1 };
+    try testing.expectApproxEqAbs(@as(f64, 0.29747), trackPourClearance(placement, taper, .{ .named = "GND" }, 0.3), 0.0001);
+    try testing.expectEqual(@as(f64, 1.75), trackPourClearance(placement, launch, .{ .named = "GND" }, 0.3));
+    try testing.expectEqual(placement.rules.clearanceForNet(1, 0.3), trackPourClearance(placement, launch, .{ .named = "VCC" }, 0.3));
+}
+
+// spec: placement/pour - a single-ended controlled-impedance via gets the same stackup-derived antipad clearance on every foreign pour
+test "controlled-impedance via uses a stackup-derived plane clearance" {
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &.{} },
+        .{ .name = "RF", .pins = &.{} },
+    };
+    const rules = [_]optimizer.NetRule{
+        .{},
+        .{ .class = .{ .name = "rf-cpwg-50" }, .clearance = 0.127, .rf = .{
+            .impedance = .{ .ohms = 50, .ground_gap_mm = 0.127 },
+        } },
+    };
+    const dielectrics = [_]@import("impedance.zig").Dielectric{
+        .{ .after_layer = 1, .thickness_mm = 0.2104, .er = 4.4 },
+        .{ .after_layer = 2, .thickness_mm = 1.065, .er = 4.4 },
+        .{ .after_layer = 3, .thickness_mm = 0.2104, .er = 4.4 },
+    };
+    const placement = testPlacement(&.{}, &nets, .{
+        .net = &rules,
+        .physical = .{ .board_thickness = 1.6, .stack = .{
+            .layers = 4,
+            .dielectrics = &dielectrics,
+            .board_mm = 1.6,
+        } },
+    });
+    const via = router.Via{ .x = 10, .y = 10, .dia = 0.4, .drill = 0.2, .net = 1 };
+
+    const ground_gap = viaPlaneClearance(placement, via, .{ .named = "GND" }, 0.3);
+    const rail_gap = viaPlaneClearance(placement, via, .{ .named = "VCC" }, 0.3);
+    try testing.expectApproxEqAbs(@as(f64, 0.1368), ground_gap, 0.001);
+    try testing.expectApproxEqAbs(ground_gap, rail_gap, 1e-12);
+    try testing.expect(ground_gap > placement.rules.design.clearance);
+    try testing.expect(ground_gap < placement.rules.design.pour_clearance);
+}
+
+// spec: placement/pour - a max-freq via with no authored impedance target synthesizes its antipad at the 50 ohm default
+test "max-freq via with no impedance target antipads at the 50 ohm default" {
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &.{} },
+        .{ .name = "RF", .pins = &.{} },
+    };
+    // The class states only the physical fact — 12 GHz — with no (impedance …)
+    // target, the way barracuda's rf classes author their hand-computed width.
+    const rules = [_]optimizer.NetRule{
+        .{},
+        .{ .class = .{ .name = "rf" }, .clearance = 0.127, .rf = .{ .max_freq_hz = 12e9 } },
+    };
+    const dielectrics = [_]@import("impedance.zig").Dielectric{
+        .{ .after_layer = 1, .thickness_mm = 0.2104, .er = 4.4 },
+        .{ .after_layer = 2, .thickness_mm = 1.065, .er = 4.4 },
+        .{ .after_layer = 3, .thickness_mm = 0.2104, .er = 4.4 },
+    };
+    const placement = testPlacement(&.{}, &nets, .{
+        .net = &rules,
+        .physical = .{ .board_thickness = 1.6, .stack = .{
+            .layers = 4,
+            .dielectrics = &dielectrics,
+            .board_mm = 1.6,
+        } },
+    });
+    const via = router.Via{ .x = 10, .y = 10, .dia = 0.4, .drill = 0.2, .net = 1 };
+
+    // Same buildup and via as the authored-50-ohm test above ⇒ the same
+    // synthesized antipad, without the class restating the universal number.
+    const gap = viaPlaneClearance(placement, via, .{ .named = "GND" }, 0.3);
+    try testing.expectApproxEqAbs(@as(f64, 0.1368), gap, 0.001);
+    try testing.expect(gap > placement.rules.design.clearance);
+}
+
+/// A bottom GND pour split by a foreign VIN diagonal spanning the board edge-to-
+/// edge (its keep-out band dents the OUTER contour; an interior capsule would
+/// trace as a dropped hole), plus a foreign VIN via. Shared by the clearance +
+/// smoothness contour tests. The GND seed keeps the x>y triangle.
+fn diagonalTrackFill(arena: std.mem.Allocator, parts: []optimizer.Part) std.mem.Allocator.Error!Fill {
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "VIN", .pins = &.{} },
+    };
+    const gnd_names = [_][]const u8{"GND"};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    // The bottom face is PINNED to the 0.3 mm gap an inner plane defaults to,
+    // rather than taking the tighter outer default. These two tests measure the
+    // guard band and the iso-line interpolation — properties of the tracer at
+    // whatever gap it is handed — so they state the gap their arithmetic below
+    // is written against instead of inheriting one that is a different number.
+    const design = optimizer.DesignRules{ .pour = .{ .clearance_outer = 0.3 } };
+    const placement = testPlacement(parts, &nets, .{ .design = design, .plane_nets = &gnd_names, .copper_layers = 2, .planes = .{ .declared = &planes } });
+    const track = [_]router.Track{.{ .x1 = -1, .y1 = -1, .x2 = 21, .y2 = 21, .layer = 1, .width = 0.4, .net = 1 }};
+    const vias = [_]router.Via{.{ .x = 13, .y = 3, .dia = 0.6, .net = 1 }};
+    return compute(
+        arena,
+        placement,
+        .{ .tracks = &track, .vias = &vias },
+        .{ .net = .{ .named = "GND" }, .side = .bottom, .track_layer = 1 },
+    );
+}
+
+/// A C1 GND seed pad on the bottom, on the x>y side of the diagonal.
+fn seedPart(pad: *const [1]geometry.Pad) [1]optimizer.Part {
+    return .{.{
+        .ref_des = "C1",
+        .kind = .passive,
+        .hw = 0.5,
+        .hh = 0.5,
+        .pads = pad,
+        .fallback = false,
+        .x = 15,
+        .y = 5,
+        .side = .bottom,
+    }};
+}
+
+// spec: placement/pour - every emitted contour point keeps at least the pour clearance from foreign copper
+test "every contour point clears the pour clearance from foreign copper" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const gnd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = seedPart(&gnd_pad);
+    const fill = try diagonalTrackFill(arena, &parts);
+
+    // The class stays at base, so the pour keeps `pour_clearance` (0.3 mm) from
+    // both the track's and the via's COPPER edge (centre distance − half-width).
+    const clearance: f64 = 0.3;
+    try testing.expect(fill.contours.len >= 1);
+    for (fill.contours) |poly| {
+        var k: usize = 0;
+        while (k < poly.len) : (k += 1) {
+            const a = poly[k];
+            const b = poly[(k + 1) % poly.len];
+            var s: usize = 0;
+            while (s <= 4) : (s += 1) { // endpoints + 3 interior samples
+                const f = @as(f64, @floatFromInt(s)) / 4.0;
+                const px = a[0] + f * (b[0] - a[0]);
+                const py = a[1] + f * (b[1] - a[1]);
+                const d_track = segPointDist(-1, -1, 21, 21, px, py) - 0.2;
+                const d_via = std.math.hypot(px - 13, py - 3) - 0.3;
+                try testing.expect(d_track >= clearance - 1e-6);
+                try testing.expect(d_via >= clearance - 1e-6);
+            }
+        }
+    }
+}
+
+// spec: placement/pour - contour vertices interpolate the clearance iso-line instead of snapping to grid corners
+test "contour interpolates a smooth diagonal wall along a foreign track" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const gnd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = seedPart(&gnd_pad);
+    const fill = try diagonalTrackFill(arena, &parts);
+
+    // Wall segments = contour segments whose midpoint lies in the corridor along
+    // the 45° track; board-edge runs sit far from the centreline and are skipped.
+    var total: usize = 0;
+    var diagonal: usize = 0;
+    var max_gap: f64 = 0;
+    for (fill.contours) |poly| {
+        var k: usize = 0;
+        while (k < poly.len) : (k += 1) {
+            const a = poly[k];
+            const b = poly[(k + 1) % poly.len];
+            const mx = (a[0] + b[0]) / 2;
+            const my = (a[1] + b[1]) / 2;
+            if (segPointDist(-1, -1, 21, 21, mx, my) > 0.9) continue;
+            total += 1;
+            if (@abs(b[0] - a[0]) > 1e-9 and @abs(b[1] - a[1]) > 1e-9) diagonal += 1;
+            // Sample the copper gap only along the long FLAT wall; the short
+            // corner-transition segments legitimately bulge away from the track
+            // where the wall meets a board edge (farther from copper, not closer).
+            if (std.math.hypot(b[0] - a[0], b[1] - a[1]) < 1.0) continue;
+            var s: usize = 0;
+            while (s <= 4) : (s += 1) {
+                const f = @as(f64, @floatFromInt(s)) / 4.0;
+                const px = a[0] + f * (b[0] - a[0]);
+                const py = a[1] + f * (b[1] - a[1]);
+                max_gap = @max(max_gap, segPointDist(-1, -1, 21, 21, px, py) - 0.2);
+            }
+        }
+    }
+    try testing.expect(total > 0);
+    try testing.expect(max_gap > 0); // the flat wall was actually sampled
+    // The interpolated iso-line runs diagonally; the old grid-snapped trace made
+    // only axis-aligned staircase steps in this corridor (0% diagonal).
+    try testing.expect(diagonal * 100 >= total * 30);
+    // The flat wall hugs the clearance offset — no ½-cell staircase overshoot.
+    try testing.expect(max_gap <= 0.3 + 3 * iso_guard + 1e-9);
+}
+
+/// The first hole loop that encircles (x,y) by the even-odd rule
+/// (`outline.contains` — the same ray-cast the viewer's even-odd fill
+/// realises), or null when none does.
+fn holeEnclosing(holes: []const Contour, x: f64, y: f64) ?Contour {
+    for (holes) |hole| if (outline.contains(hole, x, y)) return hole;
+    return null;
+}
+
+// spec: placement/pour - a foreign via interior to a seeded pour punches an antipad hole that encircles it at clearance
+test "interior foreign via punches an antipad hole in the pour" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // A bottom GND pour seeded by a corner pad, with a FOREIGN VIN via dead
+    // centre — fully enclosed by ground copper, so the pour must trace an
+    // antipad HOLE around it instead of overdrawing copper across it.
+    const gnd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &gnd_pad, .fallback = false, .x = 3, .y = 3, .side = .bottom },
+    };
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "VIN", .pins = &.{} },
+    };
+    const gnd_names = [_][]const u8{"GND"};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    // The bottom face is pinned to the inner plane's 0.3 mm gap (see
+    // `diagonalTrackFill`): this test is about the antipad LOOP — that a fully
+    // enclosed foreign via is traced as a hole rather than overdrawn — not
+    // about which default an outer face resolves, which the layer-class test
+    // below covers head-on.
+    const design = optimizer.DesignRules{ .pour = .{ .clearance_outer = 0.3 } };
+    const placement = testPlacement(&parts, &nets, .{ .design = design, .plane_nets = &gnd_names, .copper_layers = 2, .planes = .{ .declared = &planes } });
+
+    const vias = [_]router.Via{.{ .x = 10, .y = 10, .dia = 0.6, .net = 1 }};
+    const fill = try compute(arena, placement, .{ .vias = &vias }, .{ .net = .{ .named = "GND" }, .side = .bottom, .track_layer = 1 });
+
+    // One kept component (the surrounding GND pour); its holes are parallel to
+    // its contours and carry the antipad loop.
+    try testing.expectEqual(@as(usize, 1), fill.n_comp);
+    try testing.expectEqual(fill.contours.len, fill.holes.len);
+    try testing.expect(fill.contours.len == 1);
+
+    // (a) some hole of the pour encircles the via centre (even-odd point-in-poly).
+    const ring = holeEnclosing(fill.holes[0], 10, 10);
+    try testing.expect(ring != null);
+
+    // (b) every vertex of that hole keeps at least `pour_clearance` (0.3 mm) from
+    // the via's copper edge (centre distance − the 0.3 mm barrel radius).
+    const clearance: f64 = 0.3;
+    const barrel: f64 = 0.3; // dia / 2
+    for (ring.?) |v| {
+        const d = std.math.hypot(v[0] - 10, v[1] - 10) - barrel;
+        try testing.expect(d >= clearance - 1e-6);
+    }
+}
+
+/// The smallest gap any vertex of `ring` leaves from the copper edge of a
+/// `dia`-wide barrel centred at (cx, cy) — how close the traced antipad
+/// actually comes to the foreign via it encircles.
+fn ringGap(ring: Contour, cx: f64, cy: f64, dia: f64) f64 {
+    var min_gap: f64 = std.math.floatMax(f64);
+    for (ring) |v| min_gap = @min(min_gap, std.math.hypot(v[0] - cx, v[1] - cy) - dia / 2);
+    return min_gap;
+}
+
+// spec: placement/pour - an outer-face pour holds the tighter outer default gap while an inner plane keeps the fab-safe one
+test "an outer face pours to the outer default and an inner plane to the fab-safe one" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // ONE board, ONE foreign via, no authored `(design-rules …)` — so the only
+    // thing separating the two fills is the layer class each spec names.
+    // The GND seed pad is through-hole so it seeds the inner plane as well as
+    // the bottom face (an inner plane sees only drilled copper).
+    const gnd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6, .thru = true, .drill = 0.3 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &gnd_pad, .fallback = false, .x = 3, .y = 3, .side = .bottom },
+    };
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "VIN", .pins = &.{} },
+    };
+    const gnd_names = [_][]const u8{"GND"};
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = .{ .declared = &planes } });
+
+    const vias = [_]router.Via{.{ .x = 10, .y = 10, .dia = 0.6, .net = 1 }};
+    const outer = try compute(arena, placement, .{ .vias = &vias }, .{ .net = .{ .named = "GND" }, .side = .bottom, .track_layer = 1 });
+    const inner = try compute(arena, placement, .{ .vias = &vias }, .{ .net = .{ .named = "GND" } });
+    try testing.expect(outer.holes.len >= 1 and inner.holes.len >= 1);
+
+    const outer_ring = holeEnclosing(outer.holes[0], 10, 10) orelse return error.TestUnexpectedResult;
+    const inner_ring = holeEnclosing(inner.holes[0], 10, 10) orelse return error.TestUnexpectedResult;
+    const outer_gap = ringGap(outer_ring, 10, 10, 0.6);
+    const inner_gap = ringGap(inner_ring, 10, 10, 0.6);
+
+    // Each antipad clears its own layer class's default, and the outer face
+    // comes strictly closer — copper an outer pour may hold because it is
+    // photo-defined against finished copper, not etched between two foils.
+    const def = optimizer.DesignRules{};
+    try testing.expect(outer_gap >= def.pour.clearance_outer - 1e-6);
+    try testing.expect(inner_gap >= def.pour_clearance - 1e-6);
+    try testing.expect(outer_gap < def.pour_clearance);
+}
+
+// spec: placement/pour - the shared fill lattice is pitched for the tighter of the two pour-clearance defaults
+test "the fill lattice pitch follows the tighter outer pour default" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const parts: []optimizer.Part = &.{};
+    const nets: []flat_netlist.FlatNet = &.{};
+    const poly = [_][2]f64{ .{ 2, 2 }, .{ 18, 2 }, .{ 18, 18 }, .{ 2, 18 } };
+
+    // One lattice serves every fill of a board, so it is cut for the SMALLEST
+    // gap the board can ask for — here the 0.2 outer default, not the 0.3 inner
+    // one, or an outer face's isolation could not be sampled consistently.
+    const bare = try compute(arena, testPlacement(parts, nets, .{}), .{}, zoneLayerSpec("GND", .bottom, 1, &poly));
+    try testing.expectApproxEqAbs((optimizer.DesignRules{}).pour.clearance_outer / 2, bare.frame.pitch, 1e-12);
+
+    // An authored `(pour-clearance …)` sets BOTH classes, so a board that
+    // states 0.3 keeps exactly the 0.15 lattice it has always had.
+    const authored = optimizer.BoardRules{ .design = .{ .pour_clearance = 0.3, .pour = .{ .clearance_outer = 0.3 } } };
+    const pinned = try compute(arena, testPlacement(parts, nets, authored), .{}, zoneLayerSpec("GND", .bottom, 1, &poly));
+    try testing.expectApproxEqAbs(@as(f64, 0.15), pinned.frame.pitch, 1e-12);
+}
+
 // spec: placement/pour - a foreign trace that splits a plane leaves its same-net pads in separate components
 test "planeConnect splits pads across a severed plane" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1012,14 +3054,14 @@ test "planeConnect splits pads across a severed plane" {
         .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 3, .y = 10, .side = .bottom },
         .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 17, .y = 10, .side = .bottom },
     };
-    const gnd_pins = [_]@import("../export_kicad.zig").FlatPin{ .{ .ref_des = "C1", .pin = "1" }, .{ .ref_des = "C2", .pin = "1" } };
-    const nets = [_]@import("../export_kicad.zig").FlatNet{
+    const gnd_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "C1", .pin = "1" }, .{ .ref_des = "C2", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{
         .{ .name = "GND", .pins = &gnd_pins },
         .{ .name = "VIN", .pins = &.{} },
     };
     const gnd_names = [_][]const u8{"GND"};
     const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
-    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = &planes });
+    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = .{ .declared = &planes } });
 
     const qpads = [_]PadQuery{
         .{ .cx = 3, .cy = 10, .x0 = 2.7, .y0 = 9.7, .x1 = 3.3, .y1 = 10.3, .thru = false, .side = .bottom },
@@ -1027,14 +3069,14 @@ test "planeConnect splits pads across a severed plane" {
     };
 
     // No wall: one plane, both pads share a component.
-    const whole = try planeConnect(arena, placement, .{}, "GND", &qpads, &.{});
+    const whole = try planeConnect(arena, placement, .{}, .{ .net_name = "GND", .pads = &qpads, .vias = &.{} });
     try testing.expectEqual(@as(usize, 1), whole.n_comp);
     try testing.expectEqual(whole.pad_comp[0], whole.pad_comp[1]);
 
     // A full-height foreign wall severs the plane: the pads land in different
     // components — an honest split.
     const wall = [_]router.Track{.{ .x1 = 10, .y1 = -2, .x2 = 10, .y2 = 22, .layer = 1, .width = 0.5, .net = 1 }};
-    const cut = try planeConnect(arena, placement, .{ .tracks = &wall }, "GND", &qpads, &.{});
+    const cut = try planeConnect(arena, placement, .{ .tracks = &wall }, .{ .net_name = "GND", .pads = &qpads, .vias = &.{} });
     try testing.expectEqual(@as(usize, 2), cut.n_comp);
     try testing.expect(cut.pad_comp[0] != cut.pad_comp[1]);
     try testing.expect(cut.pad_comp[0] >= 0 and cut.pad_comp[1] >= 0);
@@ -1050,11 +3092,11 @@ test "polygon outline restricts the fill to inside the board" {
     var parts = [_]optimizer.Part{
         .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &gnd_pad, .fallback = false, .x = 3, .y = 3, .side = .bottom },
     };
-    const gnd_pins = [_]@import("../export_kicad.zig").FlatPin{.{ .ref_des = "C1", .pin = "1" }};
-    const nets = [_]@import("../export_kicad.zig").FlatNet{.{ .name = "GND", .pins = &gnd_pins }};
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "GND", .pins = &gnd_pins }};
     const gnd_names = [_][]const u8{"GND"};
     const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
-    var placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = &planes });
+    var placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = .{ .declared = &planes } });
     // L-shape: the (10..20, 4..20) corner is notched out.
     const l_poly = [_][2]f64{ .{ 0, 0 }, .{ 20, 0 }, .{ 20, 4 }, .{ 10, 4 }, .{ 10, 20 }, .{ 0, 20 } };
     placement.board_poly = &l_poly;
@@ -1064,6 +3106,132 @@ test "polygon outline restricts the fill to inside the board" {
     try testing.expect(fill.componentAt(3, 3) == 0); // main body, poured
     try testing.expect(fill.componentAt(15, 15) < 0); // inside the notch — not poured
     try testing.expect(fill.componentAt(15, 2) == 0); // the upper arm, poured
+}
+
+/// Assert one lane group of cell centres — `x0`, `x0+step`, … on row `y` —
+/// reproduces the scalar walk exactly, lane by lane.
+fn expectLanesMatchScalar(ring: []const [2]f64, x0: f64, step: f64, y: f64) !void {
+    var xs: Lanes = @splat(0);
+    inline for (0..lanes) |k| xs[k] = x0 + @as(f64, @floatFromInt(k)) * step;
+    var lane: [lanes]f64 = undefined;
+    polyInsetLanes(ring, xs, y, &lane);
+    inline for (lane, 0..) |got, k| try testing.expectEqual(polySignedInset(ring, xs[k], y), got);
+}
+
+// spec: placement/pour - the vectorised row kernel seeds every lane with the value the scalar outline walk gives
+test "polyInsetLanes matches polySignedInset lane for lane" {
+    // The lane kernel is a batching of `polySignedInset`, not an approximation
+    // of it — a lane that drifted would move the pour's blocked/kept threshold
+    // and silently reshape a plane. Probe an L-ring: rows above and below the
+    // reflex notch, a row where the ray cast flips INSIDE a lane group, groups
+    // straddling an edge, and groups wholly outside on either side.
+    const ring = [_][2]f64{ .{ 0, 0 }, .{ 20, 0 }, .{ 20, 4 }, .{ 10, 4 }, .{ 10, 20 }, .{ 0, 20 } };
+    const groups = [_][2]f64{
+        .{ -1.7, 2.0 }, .{ 8.6, 2.0 },   .{ 18.4, 2.0 }, .{ 19.6, 2.0 },
+        .{ 3.3, 12.0 }, .{ 8.9, 12.0 },  .{ 9.7, 12.0 }, .{ 10.4, 12.0 },
+        .{ 0.1, 3.9 },  .{ 9.55, 4.05 }, .{ 5.0, -1.3 }, .{ 5.0, 21.4 },
+    };
+    for (groups) |g| try expectLanesMatchScalar(&ring, g[0], 0.37, g[1]);
+}
+
+// spec: placement/pour - a connectivity fill reuses one edge-margin field and skips tracing, labelling the same components as a rendering fill
+// spec: placement/pour - a batch of sampling fills shares one edge field and omits contours
+test "a traceless fill on a shared edge field labels exactly what a rendering fill labels" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // `planeConnect` reads only `labels`, so it reuses ONE edge-margin field
+    // across its carrying layers and asks for no contours. Both shortcuts must
+    // be invisible in the labelling — otherwise plane connectivity would answer
+    // a different question from the pour the Gerber emits.
+    const gnd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &gnd_pad, .fallback = false, .x = 3, .y = 3, .side = .bottom },
+    };
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{ .{ .name = "GND", .pins = &gnd_pins }, .{ .name = "VIN", .pins = &.{} } };
+    const gnd_names = [_][]const u8{"GND"};
+    var placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2 });
+    const l_poly = [_][2]f64{ .{ 0, 0 }, .{ 20, 0 }, .{ 20, 4 }, .{ 10, 4 }, .{ 10, 20 }, .{ 0, 20 } };
+    placement.board_poly = &l_poly;
+    // A foreign wall so the fill has more than one component to label.
+    const wall = [_]router.Track{.{ .x1 = 5, .y1 = -2, .x2 = 5, .y2 = 22, .layer = 1, .width = 0.5, .net = 1 }};
+    const spec = LayerSpec{ .net = .{ .named = "GND" }, .side = .bottom, .track_layer = 1 };
+
+    const rendered = try compute(arena, placement, .{ .tracks = &wall }, spec);
+    const base = try edgeField(arena, placement);
+    try testing.expect(base != null);
+    const connectivity = try computeFill(arena, placement, .{ .tracks = &wall }, spec, .{ .base = base, .contours = false });
+
+    try testing.expectEqual(rendered.n_comp, connectivity.n_comp);
+    try testing.expectEqualSlices(i32, rendered.labels, connectivity.labels);
+    try testing.expectEqual(@as(usize, 0), connectivity.contours.len);
+    try testing.expect(rendered.contours.len > 0);
+
+    // The external sampling path takes both internal shortcuts at once.
+    const specs = [_]LayerSpec{ spec, spec };
+    const masks = try computeMasks(arena, placement, .{ .tracks = &wall }, &specs);
+    try testing.expectEqual(specs.len, masks.len);
+    for (masks) |mask| {
+        try testing.expectEqualSlices(i32, rendered.labels, mask.labels);
+        try testing.expectEqual(@as(usize, 0), mask.contours.len);
+        try testing.expectEqual(rendered.contains(3, 3), mask.contains(3, 3));
+    }
+}
+
+// spec: placement/pour - a board's fills seed from one shared edge-margin field and each still traces exactly the contours an unshared fill traces
+test "computeShared over one edge field matches compute for every spec on the board" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // The edge-margin field is the outline walk, and a page render pours the
+    // same board a couple of dozen times (Gerber package, viewer pour JSON,
+    // filled DRC, connectivity). Seeding it once for all of them is only sound
+    // if the fill it produces is indistinguishable from a fill that seeded its
+    // own — including for specs that clip to a drawn polygon, which `min()`s
+    // the shared field down rather than reading it whole.
+    const gnd_pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &gnd_pad, .fallback = false, .x = 3, .y = 3, .side = .bottom },
+    };
+    const gnd_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C1", .pin = "1" }};
+    const nets = [_]flat_netlist.FlatNet{ .{ .name = "GND", .pins = &gnd_pins }, .{ .name = "VIN", .pins = &.{} } };
+    const gnd_names = [_][]const u8{"GND"};
+    var placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2 });
+    // A non-rectangular outline: the poly walk is the cost being shared, so a
+    // plain rectangle would not exercise what the field actually carries.
+    const l_poly = [_][2]f64{ .{ 0, 0 }, .{ 20, 0 }, .{ 20, 4 }, .{ 10, 4 }, .{ 10, 20 }, .{ 0, 20 } };
+    placement.board_poly = &l_poly;
+    const wall = [_]router.Track{.{ .x1 = 5, .y1 = -2, .x2 = 5, .y2 = 22, .layer = 1, .width = 0.5, .net = 1 }};
+    const copper = Copper{ .tracks = &wall };
+
+    const zone_poly = [_][2]f64{ .{ 1, 1 }, .{ 9, 1 }, .{ 9, 18 }, .{ 1, 18 } };
+    // A seeded outer pour, an unseeded inner plane, and a clipped user zone —
+    // the three shapes a page render actually asks for.
+    const specs = [_]LayerSpec{
+        .{ .net = .{ .named = "GND" }, .side = .bottom, .track_layer = 1 },
+        .{ .net = .ground, .keep_unseeded = true },
+        zoneLayerSpec("GND", .bottom, 1, &zone_poly),
+    };
+
+    // ONE field for every spec on this board — exactly how the callers use it.
+    const base = try sharedEdgeField(arena, placement);
+    try testing.expect(base != null);
+    for (specs) |spec| {
+        const alone = try compute(arena, placement, copper, spec);
+        const shared = try computeShared(arena, placement, copper, spec, base);
+        try testing.expectEqual(alone.n_comp, shared.n_comp);
+        try testing.expectEqualSlices(i32, alone.labels, shared.labels);
+        try testing.expectEqual(alone.contours.len, shared.contours.len);
+        // Non-vacuous: each spec really does pour copper on this outline, so
+        // the comparison above is between traced contours, not two empty fills.
+        try testing.expect(alone.contours.len > 0);
+        for (alone.contours, shared.contours) |a, b| {
+            try testing.expectEqualSlices([2]f64, a, b);
+        }
+    }
 }
 
 // spec: placement/pour - an isolated same-net pad reports no pour component
@@ -1080,17 +3248,17 @@ test "planeConnect isolates a same-net pad on the wrong side of a single-sided p
         .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 3, .y = 10, .side = .bottom },
         .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 15, .y = 10, .side = .top },
     };
-    const gnd_pins = [_]@import("../export_kicad.zig").FlatPin{ .{ .ref_des = "C1", .pin = "1" }, .{ .ref_des = "C2", .pin = "1" } };
-    const nets = [_]@import("../export_kicad.zig").FlatNet{.{ .name = "GND", .pins = &gnd_pins }};
+    const gnd_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "C1", .pin = "1" }, .{ .ref_des = "C2", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{.{ .name = "GND", .pins = &gnd_pins }};
     const gnd_names = [_][]const u8{"GND"};
     const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
-    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = &planes });
+    const placement = testPlacement(&parts, &nets, .{ .plane_nets = &gnd_names, .copper_layers = 2, .planes = .{ .declared = &planes } });
 
     const qpads = [_]PadQuery{
         .{ .cx = 3, .cy = 10, .x0 = 2.7, .y0 = 9.7, .x1 = 3.3, .y1 = 10.3, .thru = false, .side = .bottom },
         .{ .cx = 15, .cy = 10, .x0 = 14.7, .y0 = 9.7, .x1 = 15.3, .y1 = 10.3, .thru = false, .side = .top },
     };
-    const join = try planeConnect(arena, placement, .{}, "GND", &qpads, &.{});
+    const join = try planeConnect(arena, placement, .{}, .{ .net_name = "GND", .pads = &qpads, .vias = &.{} });
     try testing.expect(join.pad_comp[0] >= 0); // C1 (bottom) reaches the pour
     try testing.expectEqual(@as(i32, -1), join.pad_comp[1]); // C2 (top) does not
 }
@@ -1110,7 +3278,7 @@ test "carryingLayers picks the poured layers for a net" {
 
     // Declared bottom pour: an outer face with its track layer.
     const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
-    const layers = try carryingLayers(arena, .{ .plane_nets = &[_][]const u8{"GND"}, .copper_layers = 2, .planes = &planes }, "GND");
+    const layers = try carryingLayers(arena, .{ .plane_nets = &[_][]const u8{"GND"}, .copper_layers = 2, .planes = .{ .declared = &planes } }, "GND");
     try testing.expectEqual(@as(usize, 1), layers.len);
     try testing.expect(layers[0].side.? == .bottom);
     try testing.expectEqual(@as(u8, 1), layers[0].track_layer.?);

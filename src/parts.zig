@@ -40,6 +40,14 @@ pub const PartsDb = struct {
     }
 
     pub fn deinit(self: *PartsDb) void {
+        // Family keys are duped on insert (the cache outlives the caller's
+        // `family` slice), so they are ours to free. The `PartEntry` payloads
+        // deliberately are NOT freed: `lookup` hands out pointers into them and
+        // `bom_resolve` keeps the resolved manufacturer/MPN strings after the db
+        // is gone, so they follow the project's never-free-AST-backed-data
+        // convention and die with the caller's arena.
+        var it = self.entries.keyIterator();
+        while (it.next()) |k| self.allocator.free(k.*);
         self.entries.deinit(self.allocator);
     }
 

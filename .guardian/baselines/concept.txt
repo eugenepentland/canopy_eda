@@ -1,0 +1,15 @@
+# guardian-snapshot v3
+concept|src/drc_session.zig|design-rule-field-names
+concept|src/eval/design_block.zig|design-rule-field-names
+concept|src/eval/env.zig|design-rule-field-names
+concept|src/eval/forms.zig|gerber-suffixes
+concept|src/eval/net_analysis.zig|ground-net-names
+concept|src/export_gerber.zig|design-rule-field-names
+concept|src/placement/optimizer.zig|design-rule-field-names
+concept|src/placement/pour.zig|design-rule-field-names
+concept|src/serve/assets/pcb_board.js|design-rule-field-names
+concept|src/serve/assets/pcb_board.js|layer-palette
+concept|src/serve/assets/pcb_layout.css|layer-palette
+concept|src/serve/assets/pcb_replay.js|layer-palette
+concept|src/serve/assets/pcb_settings.js|design-rule-field-names
+concept|src/serve/pcb_layout_page.zig|design-rule-field-names

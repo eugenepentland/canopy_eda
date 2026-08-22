@@ -1,0 +1,483 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1600"
+     height="1860"
+     viewBox="0 0 1600 1860"
+     role="img"
+     aria-labelledby="title desc">
+  <title id="title">AI-assisted schematic design workflow</title>
+  <desc id="desc">
+    A workflow from a human-written design brief through component asset
+    sourcing, datasheet-derived requirements, reference-design adaptation,
+    reusable S-expression subcircuits, top-level integration, and final
+    preflight review.
+  </desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#071321"/>
+      <stop offset="0.55" stop-color="#0a1a2b"/>
+      <stop offset="1" stop-color="#10243a"/>
+    </linearGradient>
+    <linearGradient id="complete" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#45c69a"/>
+      <stop offset="1" stop-color="#77e3bd"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32"
+            fill="none"
+            stroke="#8fb3cf"
+            stroke-opacity="0.055"
+            stroke-width="1"/>
+    </pattern>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10"
+                    flood-color="#02070d" flood-opacity="0.32"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 12 12" refX="10" refY="6"
+            markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 1 1 L 11 6 L 1 11 z" fill="#82a7c1"/>
+    </marker>
+    <marker id="arrow-coral" viewBox="0 0 12 12" refX="10" refY="6"
+            markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 1 1 L 11 6 L 1 11 z" fill="#ffb36b"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 12 12" refX="10" refY="6"
+            markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 1 1 L 11 6 L 1 11 z" fill="#65d6ad"/>
+    </marker>
+
+    <style>
+      text {
+        font-family: "DejaVu Sans", Arial, sans-serif;
+      }
+      .title {
+        fill: #f6f3eb;
+        font-size: 46px;
+        font-weight: 700;
+        letter-spacing: -1px;
+      }
+      .subtitle {
+        fill: #a9bfd0;
+        font-size: 20px;
+        font-weight: 400;
+      }
+      .eyebrow {
+        fill: #67c9ff;
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 2.2px;
+      }
+      .phase-label {
+        fill: #7d9bb1;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 1.8px;
+      }
+      .card {
+        fill: #f6f3eb;
+        stroke: #ffffff;
+        stroke-opacity: 0.25;
+        stroke-width: 1;
+      }
+      .artifact-card {
+        fill: #12283c;
+        stroke: #4d7896;
+        stroke-opacity: 0.75;
+        stroke-width: 1.5;
+      }
+      .group-card {
+        fill: #102438;
+        stroke: #4d7896;
+        stroke-opacity: 0.55;
+        stroke-width: 1.5;
+      }
+      .card-title {
+        fill: #102336;
+        font-size: 25px;
+        font-weight: 700;
+        letter-spacing: -0.25px;
+      }
+      .card-body {
+        fill: #344b5d;
+        font-size: 17px;
+        font-weight: 400;
+      }
+      .dark-title {
+        fill: #f6f3eb;
+        font-size: 21px;
+        font-weight: 700;
+      }
+      .dark-body {
+        fill: #b8cbd9;
+        font-size: 15px;
+        font-weight: 400;
+      }
+      .number {
+        fill: #102336;
+        font-size: 17px;
+        font-weight: 700;
+        text-anchor: middle;
+        dominant-baseline: central;
+      }
+      .role {
+        fill: #071321;
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 1.3px;
+        text-anchor: middle;
+      }
+      .mono {
+        font-family: "DejaVu Sans Mono", "Liberation Mono", monospace;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .chip-text {
+        fill: #254055;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .gate {
+        fill: #d8e8f2;
+        font-size: 15px;
+        font-weight: 700;
+        text-anchor: middle;
+      }
+      .arrow {
+        fill: none;
+        stroke: #82a7c1;
+        stroke-width: 3;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-end: url(#arrow);
+      }
+      .arrow-coral {
+        fill: none;
+        stroke: #ffb36b;
+        stroke-width: 2.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-dasharray: 8 8;
+        marker-end: url(#arrow-coral);
+      }
+      .arrow-green {
+        fill: none;
+        stroke: #65d6ad;
+        stroke-width: 3;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        marker-end: url(#arrow-green);
+      }
+      .arrow-note {
+        fill: #ffca96;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.7px;
+      }
+      .rule {
+        stroke: #7393aa;
+        stroke-opacity: 0.34;
+        stroke-width: 1;
+      }
+    </style>
+  </defs>
+
+  <!-- Background and header -->
+  <rect width="1600" height="1860" fill="url(#bg)"/>
+  <rect width="1600" height="1860" fill="url(#grid)"/>
+  <circle cx="1490" cy="25" r="280" fill="#2f8ebd" opacity="0.08"/>
+  <circle cx="80" cy="1770" r="300" fill="#65d6ad" opacity="0.055"/>
+
+  <text x="60" y="55" class="eyebrow">CANOPY EDA · SCHEMATICS AS S-EXPRESSIONS</text>
+  <text x="60" y="112" class="title">AI-assisted schematic design</text>
+  <text x="60" y="148" class="subtitle">
+    From a written build intent to a reviewed, canonical <tspan class="mono">.sexp</tspan> schematic
+  </text>
+
+  <g transform="translate(1135 56)">
+    <rect x="0" y="0" width="108" height="32" rx="16" fill="#ffb36b"/>
+    <text x="54" y="17" class="role">YOU</text>
+    <rect x="120" y="0" width="108" height="32" rx="16" fill="#67c9ff"/>
+    <text x="174" y="17" class="role">AI</text>
+    <rect x="240" y="0" width="180" height="32" rx="16" fill="#65d6ad"/>
+    <text x="330" y="17" class="role">NETLISP GATE</text>
+  </g>
+  <line x1="60" y1="178" x2="1540" y2="178" class="rule"/>
+
+  <!-- Phase 1: intent -->
+  <text x="60" y="217" class="phase-label">01 · INTENT</text>
+
+  <g transform="translate(60 267)">
+    <rect width="160" height="42" rx="21" fill="#ffb36b"/>
+    <text x="80" y="22" class="role">YOU</text>
+  </g>
+  <path d="M 220 288 H 245" class="arrow"/>
+
+  <g filter="url(#shadow)">
+    <rect x="260" y="226" width="870" height="160" rx="18" class="card"/>
+  </g>
+  <circle cx="304" cy="270" r="22" fill="#ffb36b"/>
+  <text x="304" y="270" class="number">1</text>
+  <text x="342" y="276" class="card-title">Write what you are trying to build</text>
+  <text x="302" y="319" class="card-body">
+    <tspan x="302" dy="0">Describe functions, interfaces, protocols, power rails and loads,</tspan>
+    <tspan x="302" dy="25">performance constraints, operating conditions, and your exact use case.</tspan>
+  </text>
+  <g transform="translate(302 348)">
+    <rect width="170" height="25" rx="12.5" fill="#ffe3c6"/>
+    <text x="14" y="17" class="chip-text">human design intent</text>
+    <rect x="181" width="147" height="25" rx="12.5" fill="#e4edf3"/>
+    <text x="195" y="17" class="chip-text">constraints</text>
+    <rect x="339" width="185" height="25" rx="12.5" fill="#e4edf3"/>
+    <text x="353" y="17" class="chip-text">application choices</text>
+  </g>
+
+  <path d="M 1130 306 H 1155" class="arrow"/>
+  <g filter="url(#shadow)">
+    <rect x="1170" y="226" width="370" height="160" rx="18" class="artifact-card"/>
+  </g>
+  <text x="1200" y="265" class="eyebrow">INPUT ARTIFACT</text>
+  <text x="1200" y="304" class="dark-title">Design brief</text>
+  <text x="1200" y="334" class="dark-body">
+    <tspan x="1200">A plain-language document the AI</tspan>
+    <tspan x="1200" dy="22">can turn into parts and circuits.</tspan>
+  </text>
+  <text x="1200" y="371" class="dark-body mono">design.md</text>
+  <path d="M 800 386 V 429" class="arrow"/>
+
+  <!-- Phase 2: asset gate -->
+  <text x="60" y="430" class="phase-label">02 · LIBRARY ASSET GATE</text>
+
+  <g transform="translate(60 507)">
+    <rect width="160" height="42" rx="21" fill="#67c9ff"/>
+    <text x="80" y="22" class="role">AI</text>
+  </g>
+  <path d="M 220 528 H 245" class="arrow"/>
+
+  <g filter="url(#shadow)">
+    <rect x="260" y="444" width="760" height="220" rx="18" class="card"/>
+  </g>
+  <circle cx="304" cy="487" r="22" fill="#67c9ff"/>
+  <text x="304" y="487" class="number">2</text>
+  <text x="342" y="494" class="card-title">Resolve every critical component</text>
+  <text x="302" y="534" class="card-body">
+    <tspan x="302">The AI extracts the critical IC list, confirms each exact MPN,</tspan>
+    <tspan x="302" dy="25">then requests or imports its ECAD package and datasheet.</tspan>
+    <tspan x="302" dy="25">No IC moves forward with an incomplete library entry.</tspan>
+  </text>
+  <g transform="translate(302 614)">
+    <rect width="169" height="28" rx="14" fill="#dcecf6"/>
+    <text x="13" y="19" class="chip-text mono">search_components</text>
+    <rect x="180" width="180" height="28" rx="14" fill="#dcecf6"/>
+    <text x="193" y="19" class="chip-text mono">download_footprint</text>
+    <rect x="371" width="180" height="28" rx="14" fill="#dcecf6"/>
+    <text x="384" y="19" class="chip-text mono">download_datasheet</text>
+  </g>
+
+  <path d="M 1020 554 H 1045" class="arrow"/>
+  <g filter="url(#shadow)">
+    <rect x="1060" y="444" width="480" height="220" rx="18" class="artifact-card"/>
+  </g>
+  <text x="1090" y="480" class="eyebrow">COMPONENT SEARCH ENGINE IMPORT</text>
+  <text x="1090" y="516" class="dark-title">Complete part package</text>
+  <g class="dark-body mono">
+    <text x="1090" y="552">lib/components/&lt;part&gt;.sexp</text>
+    <text x="1090" y="577">lib/footprints/&lt;part&gt;.sexp</text>
+    <text x="1090" y="602">lib/pinouts/&lt;part&gt;.sexp</text>
+    <text x="1090" y="627">lib/models/…  +  lib/datasheets/&lt;part&gt;.pdf</text>
+  </g>
+  <circle cx="1505" cy="475" r="7" fill="#65d6ad"/>
+  <circle cx="1482" cy="475" r="7" fill="#67c9ff"/>
+
+  <path d="M 1300 664 V 686 H 1118" class="arrow"/>
+  <rect x="660" y="678" width="440" height="48" rx="24"
+        fill="#16354d" stroke="#65d6ad" stroke-width="1.5"/>
+  <text x="880" y="708" class="gate">Footprint + pinout + datasheet present?</text>
+  <path d="M 660 702 H 154 V 566 H 245" class="arrow-coral"/>
+  <text x="174" y="691" class="arrow-note">NO · REQUEST THE MISSING ASSET</text>
+  <path d="M 880 726 V 755" class="arrow-green"/>
+  <text x="897" y="750" fill="#7fe1bd" font-size="13" font-weight="700">YES</text>
+
+  <!-- Phase 3: repeated IC loop -->
+  <g filter="url(#shadow)">
+    <rect x="50" y="770" width="1500" height="410" rx="24" class="group-card"/>
+  </g>
+  <text x="80" y="810" class="phase-label">03–05 · REPEAT FOR EACH CRITICAL IC</text>
+  <g transform="translate(1272 789)">
+    <path d="M 0 8 C 12 -6 37 -6 49 8"
+          fill="none" stroke="#a9bfd0" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="62" y="11" fill="#a9bfd0" font-size="13" font-weight="700">PER-IC LOOP</text>
+  </g>
+
+  <!-- Step 3 -->
+  <g filter="url(#shadow)">
+    <rect x="80" y="838" width="420" height="238" rx="18" class="card"/>
+  </g>
+  <circle cx="124" cy="881" r="22" fill="#a78bfa"/>
+  <text x="124" y="881" class="number">3</text>
+  <text x="162" y="888" class="card-title">Derive requirements</text>
+  <text x="122" y="927" class="card-body">
+    <tspan x="122">Read the datasheet and capture one</tspan>
+    <tspan x="122" dy="24">violable schematic rule per</tspan>
+    <tspan class="mono"> (requirement …)</tspan><tspan>.</tspan>
+    <tspan x="122" dy="30">Cite PDF, page, and quote; add a</tspan>
+    <tspan x="122" dy="24">machine</tspan><tspan class="mono"> (check …)</tspan><tspan> when possible.</tspan>
+  </text>
+  <g transform="translate(122 1033)">
+    <rect width="112" height="25" rx="12.5" fill="#e8e0ff"/>
+    <text x="12" y="17" class="chip-text">voltage range</text>
+    <rect x="122" width="109" height="25" rx="12.5" fill="#e8e0ff"/>
+    <text x="134" y="17" class="chip-text">decoupling</text>
+    <rect x="241" width="120" height="25" rx="12.5" fill="#e8e0ff"/>
+    <text x="253" y="17" class="chip-text">mandatory ties</text>
+  </g>
+
+  <path d="M 500 957 H 565" class="arrow"/>
+
+  <!-- Step 4 -->
+  <g filter="url(#shadow)">
+    <rect x="590" y="838" width="420" height="238" rx="18" class="card"/>
+  </g>
+  <circle cx="634" cy="881" r="22" fill="#f6c453"/>
+  <text x="634" y="881" class="number">4</text>
+  <text x="672" y="888" class="card-title">Engineer the application</text>
+  <text x="632" y="927" class="card-body">
+    <tspan x="632">Start from the datasheet reference design.</tspan>
+    <tspan x="632" dy="27">Calculate passives, straps, compensation,</tspan>
+    <tspan x="632" dy="27">decoupling, filtering, and protection.</tspan>
+    <tspan x="632" dy="30">Adapt it for the exact rails, loads, signals,</tspan>
+    <tspan x="632" dy="27">noise targets, and operating conditions.</tspan>
+  </text>
+  <rect x="632" y="1045" width="248" height="25" rx="12.5" fill="#fff0bf"/>
+  <text x="645" y="1062" class="chip-text">reference design + exact use case</text>
+
+  <path d="M 1010 957 H 1075" class="arrow"/>
+
+  <!-- Step 5 -->
+  <g filter="url(#shadow)">
+    <rect x="1100" y="838" width="420" height="238" rx="18" class="card"/>
+  </g>
+  <circle cx="1144" cy="881" r="22" fill="#65d6ad"/>
+  <text x="1144" y="881" class="number">5</text>
+  <text x="1182" y="888" class="card-title">Author the subcircuit</text>
+  <text x="1142" y="927" class="card-body">
+    <tspan x="1142">Encode the IC and support parts as a</tspan>
+    <tspan x="1142" dy="25">reusable</tspan><tspan class="mono"> defmodule</tspan><tspan> / </tspan><tspan class="mono">design-block</tspan><tspan>.</tspan>
+    <tspan x="1142" dy="31">Expose ports, parameterize choices, and</tspan>
+    <tspan x="1142" dy="25">record design-math assertions.</tspan>
+  </text>
+  <rect x="1142" y="1025" width="329" height="33" rx="8" fill="#dff5ec"/>
+  <text x="1155" y="1047" class="chip-text mono">lib/modules/&lt;function&gt;.sexp</text>
+
+  <!-- Module quality gate and feedback loop -->
+  <path d="M 1310 1076 V 1110 H 1215" class="arrow"/>
+  <rect x="400" y="1090" width="800" height="54" rx="27"
+        fill="#16354d" stroke="#65d6ad" stroke-width="1.5"/>
+  <text x="800" y="1112" class="gate">MODULE GATE · build → run_checks</text>
+  <text x="800" y="1133" fill="#9fb9ca" font-size="13" font-weight="600"
+        text-anchor="middle">requirements + ERC + assertions clean?</text>
+  <path d="M 400 1117 H 52 V 960 H 65" class="arrow-coral"/>
+  <text x="82" y="1162" class="arrow-note">NOT CLEAN · FIX THE RULE OR IMPLEMENTATION</text>
+
+  <!-- Phase 4: integration -->
+  <text x="60" y="1227" class="phase-label">06 · TOP-LEVEL INTEGRATION</text>
+  <path d="M 800 1144 V 1229" class="arrow-green"/>
+  <text x="820" y="1199" fill="#7fe1bd" font-size="13" font-weight="700">ALL IC MODULES CLEAN</text>
+
+  <g transform="translate(60 1300)">
+    <rect width="160" height="42" rx="21" fill="#67c9ff"/>
+    <text x="80" y="22" class="role">AI + YOU</text>
+  </g>
+  <path d="M 220 1321 H 245" class="arrow"/>
+
+  <g filter="url(#shadow)">
+    <rect x="260" y="1244" width="870" height="190" rx="18" class="card"/>
+  </g>
+  <circle cx="304" cy="1287" r="22" fill="#67c9ff"/>
+  <text x="304" y="1287" class="number">6</text>
+  <text x="342" y="1294" class="card-title">Import modules into the main design</text>
+  <text x="302" y="1334" class="card-body">
+    <tspan x="302">At the top level,</tspan><tspan class="mono"> (import …)</tspan><tspan> every module, place each as a</tspan>
+    <tspan x="302" dy="27" class="mono">(sub-block "prefix" (module …))</tspan><tspan>, and organize functional</tspan>
+    <tspan x="302" dy="27">sections. Connect parent rails, nets, buses, interfaces, and ports.</tspan>
+  </text>
+  <rect x="302" y="1400" width="358" height="25" rx="12.5" fill="#dcecf6"/>
+  <text x="315" y="1417" class="chip-text">compose tested building blocks</text>
+
+  <path d="M 1130 1339 H 1155" class="arrow"/>
+  <g filter="url(#shadow)">
+    <rect x="1170" y="1244" width="370" height="190" rx="18" class="artifact-card"/>
+  </g>
+  <text x="1200" y="1282" class="eyebrow">CANONICAL SCHEMATIC SOURCE</text>
+  <text x="1200" y="1320" class="dark-title">Main design</text>
+  <text x="1200" y="1354" class="dark-body">
+    <tspan x="1200">The whole board is now one</tspan>
+    <tspan x="1200" dy="22">composed design hierarchy.</tspan>
+  </text>
+  <text x="1200" y="1408" class="dark-body mono">src/boards/&lt;board&gt;/&lt;board&gt;.sexp</text>
+
+  <!-- Phase 5: final review -->
+  <text x="60" y="1480" class="phase-label">07 · WHOLE-SYSTEM REVIEW</text>
+  <path d="M 800 1434 V 1481" class="arrow"/>
+
+  <g transform="translate(60 1547)">
+    <rect width="160" height="42" rx="21" fill="#65d6ad"/>
+    <text x="80" y="22" class="role">NETLISP</text>
+  </g>
+  <path d="M 220 1568 H 245" class="arrow"/>
+
+  <g filter="url(#shadow)">
+    <rect x="260" y="1496" width="870" height="202" rx="18" class="card"/>
+  </g>
+  <circle cx="304" cy="1539" r="22" fill="#ff8f9d"/>
+  <text x="304" y="1539" class="number">7</text>
+  <text x="342" y="1546" class="card-title">Review the complete system</text>
+  <text x="302" y="1586" class="card-body">
+    <tspan x="302">Build the full hierarchy and run strict preflight. Review power,</tspan>
+    <tspan x="302" dy="26">interfaces, assertions, ERC, inherited component requirements,</tspan>
+    <tspan x="302" dy="26">datasheet traceability, and BOM footprint / MPN coverage.</tspan>
+  </text>
+  <g transform="translate(302 1660)">
+    <rect width="246" height="26" rx="13" fill="#f4dfe4"/>
+    <text x="13" y="18" class="chip-text mono">run_checks profile=preflight</text>
+    <rect x="258" width="158" height="26" rx="13" fill="#f4dfe4"/>
+    <text x="272" y="18" class="chip-text mono">generate_review</text>
+  </g>
+
+  <path d="M 1130 1597 H 1155" class="arrow"/>
+  <g filter="url(#shadow)">
+    <rect x="1170" y="1496" width="370" height="202" rx="18" class="artifact-card"/>
+  </g>
+  <text x="1200" y="1534" class="eyebrow">FINAL REVIEW CHECKLIST</text>
+  <g class="dark-body">
+    <circle cx="1205" cy="1572" r="5" fill="#65d6ad"/>
+    <text x="1222" y="1577">electrical rules + assertions</text>
+    <circle cx="1205" cy="1605" r="5" fill="#65d6ad"/>
+    <text x="1222" y="1610">component requirements</text>
+    <circle cx="1205" cy="1638" r="5" fill="#65d6ad"/>
+    <text x="1222" y="1643">critical-IC traceability</text>
+    <circle cx="1205" cy="1671" r="5" fill="#65d6ad"/>
+    <text x="1222" y="1676">BOM + footprint coverage</text>
+  </g>
+
+  <!-- Final preflight decision -->
+  <path d="M 1350 1698 V 1722 H 1085" class="arrow"/>
+  <rect x="530" y="1708" width="540" height="50" rx="25"
+        fill="#16354d" stroke="#65d6ad" stroke-width="1.5"/>
+  <text x="800" y="1739" class="gate">WHOLE-BOARD PREFLIGHT CLEAN?</text>
+  <path d="M 530 1733 H 130 V 1321 H 245" class="arrow-coral"/>
+  <text x="151" y="1719" class="arrow-note">NO · FIX THE OWNING MODULE OR INTEGRATION</text>
+
+  <path d="M 800 1758 V 1774" class="arrow-green"/>
+  <g filter="url(#shadow)">
+    <rect x="430" y="1780" width="740" height="68" rx="20" fill="url(#complete)"/>
+  </g>
+  <circle cx="474" cy="1814" r="18" fill="#0c4a38" opacity="0.92"/>
+  <path d="M 465 1814 l 6 6 l 13 -15"
+        fill="none" stroke="#dff9ee" stroke-width="3.2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="512" y="1823" fill="#092a21" font-size="27" font-weight="700">
+    Schematic complete
+  </text>
+  <text x="1115" y="1772" fill="#7fe1bd" font-size="13" font-weight="700">YES</text>
+</svg>

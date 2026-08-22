@@ -44,6 +44,7 @@
 //!   since the httpz server is multi-threaded.
 
 const std = @import("std");
+const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const config = @import("../config.zig");
 const subprocess = @import("subprocess.zig");
@@ -64,9 +65,11 @@ const author_domain = "ward";
 
 /// git subprocess guards. `git status` on a busy design repo stays well under a
 /// few hundred KiB; the cap and wall-clock deadline exist only so a wedged git
-/// can never pin a request thread (a timeout is treated as fail-open).
+/// can never pin a request thread (a timeout is treated as fail-open). This is
+/// a per-REQUEST deadline; layout_backfill.zig runs the same tool on a far
+/// longer batch budget, which is why the two are no longer one name.
 const git_output_cap: usize = 8 << 20;
-const git_timeout_ms: u64 = 10_000;
+const git_request_timeout_ms: u64 = 10_000;
 
 /// How many touched paths to spell out in the commit subject before summarizing
 /// the rest as `(+N more)` — keeps the one-line message greppable but bounded.
@@ -77,7 +80,7 @@ const msg_path_cap: usize = 8;
 /// container-scope namespace (not a bare file-scope `var`) so the state has an
 /// owner rather than being loose global mutable state.
 const GitLock = struct {
-    var mu: std.Thread.Mutex = .{};
+    var mu: infra_fs.Mutex = .{};
 };
 
 const PathSet = std.StringHashMapUnmanaged(void);
@@ -176,7 +179,7 @@ fn collectStatus(allocator: std.mem.Allocator, project_dir: []const u8) ?PathSet
     // (cheap, and `git add -- <dir>/` still stages it) while a new file inside a
     // TRACKED dir — where every mutation writes — is listed individually.
     const argv = [_][]const u8{ "git", "-C", project_dir, "status", "--porcelain", "-z" };
-    const res = subprocess.runCaptured(allocator, &argv, git_output_cap, git_timeout_ms) catch |e| {
+    const res = subprocess.runCaptured(allocator, &argv, git_output_cap, git_request_timeout_ms) catch |e| {
         log.warn("autocommit: git status spawn failed: {s}", .{@errorName(e)});
         return null;
     };
@@ -256,7 +259,7 @@ fn stageAndCommit(
 /// failure, timeout, or non-zero exit is logged and reported false — the caller
 /// fails open.
 fn runGit(allocator: std.mem.Allocator, argv: []const []const u8, label: []const u8) bool {
-    const res = subprocess.runCaptured(allocator, argv, git_output_cap, git_timeout_ms) catch |e| {
+    const res = subprocess.runCaptured(allocator, argv, git_output_cap, git_request_timeout_ms) catch |e| {
         log.warn("autocommit: git {s} spawn failed: {s}", .{ label, @errorName(e) });
         return false;
     };
@@ -286,13 +289,13 @@ fn commitMessage(
     tool_name: []const u8,
     paths: []const []const u8,
 ) std.mem.Allocator.Error![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(allocator);
-    try w.print("mcp: {s}", .{tool_name});
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
+    w.print("mcp: {s}", .{tool_name}) catch return error.OutOfMemory;
     const shown = @min(paths.len, msg_path_cap);
-    for (paths[0..shown]) |p| try w.print(" {s}", .{p});
-    if (paths.len > shown) try w.print(" (+{d} more)", .{paths.len - shown});
-    return buf.toOwnedSlice(allocator);
+    for (paths[0..shown]) |p| w.print(" {s}", .{p}) catch return error.OutOfMemory;
+    if (paths.len > shown) w.print(" (+{d} more)", .{paths.len - shown}) catch return error.OutOfMemory;
+    return buf.toOwnedSlice();
 }
 
 // ── Tests ─────────────────────────────────────────────────────────
@@ -385,22 +388,28 @@ test "commitMessage is a one-line greppable subject with a path cap" {
 // These shell out to a real `git`; they init a throwaway repo under
 // `std.testing.tmpDir` and skip gracefully when git is unavailable.
 
+// Preserve the former 50 KiB capture cap for test-only git commands.
+const git_test_output_cap: usize = 50 * 1024;
+
 /// Run git in `dir` for test setup, skipping the whole test if git is missing.
 fn gitTest(allocator: std.mem.Allocator, dir: []const u8, args: []const []const u8) !void {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.appendSlice(allocator, &.{ "git", "-C", dir });
     try argv.appendSlice(allocator, args);
-    const res = std.process.Child.run(.{ .allocator = allocator, .argv = argv.items }) catch
-        return error.SkipZigTest; // git not installed
+    const res = std.process.run(allocator, infra_fs.currentIo(), .{
+        .argv = argv.items,
+        .stdout_limit = .limited(git_test_output_cap),
+        .stderr_limit = .limited(git_test_output_cap),
+    }) catch return error.SkipZigTest; // git not installed
     defer allocator.free(res.stdout);
     defer allocator.free(res.stderr);
-    if (res.term != .Exited or res.term.Exited != 0) return error.GitSetupFailed;
+    if (!res.term.success()) return error.GitSetupFailed;
 }
 
 /// Absolute path of `sub` inside the test tmp dir.
 fn tmpPath(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir, sub: []const u8) ![]const u8 {
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(base);
     return std.fs.path.join(allocator, &.{ base, sub });
 }
@@ -419,43 +428,52 @@ test "commit stages only the mutation's paths and leaves loose work dirty" {
     try gitTest(a, dir, &.{ "config", "user.email", "seed@test" });
     try gitTest(a, dir, &.{ "config", "user.name", "seed" });
     // Seed a committed baseline.
-    try tmp.dir.writeFile(.{ .sub_path = "tracked.sexp", .data = "base\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tracked.sexp", .data = "base\n" });
     try gitTest(a, dir, &.{ "add", "-A" });
     try gitTest(a, dir, &.{ "commit", "-m", "seed" });
 
     // Loose human work present before the mutation: an untracked file and a
     // mid-edit of the tracked file.
-    try tmp.dir.writeFile(.{ .sub_path = "human_loose.txt", .data = "loose\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "tracked.sexp", .data = "base\nhuman edit\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "human_loose.txt", .data = "loose\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tracked.sexp", .data = "base\nhuman edit\n" });
 
     const session = begin(a, dir) orelse return error.SkipZigTest;
 
     // The mutation: a brand-new source file.
-    try tmp.dir.writeFile(.{ .sub_path = "mutated.sexp", .data = "new\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mutated.sexp", .data = "new\n" });
 
     commit(session, "ada", "write_file");
 
     // HEAD is the auto-commit: authored by the ward user, committed by the
     // server, and touching ONLY the mutation's file.
-    const fmt = try std.process.Child.run(.{
-        .allocator = a,
+    const fmt = try std.process.run(a, infra_fs.currentIo(), .{
         .argv = &.{ "git", "-C", dir, "log", "-1", "--pretty=%an|%ae|%cn|%ce|%s" },
+        .stdout_limit = .limited(git_test_output_cap),
+        .stderr_limit = .limited(git_test_output_cap),
     });
+    defer a.free(fmt.stdout);
+    defer a.free(fmt.stderr);
     try testing.expect(std.mem.indexOf(u8, fmt.stdout, "ada|ada@ward|netlisp|netlisp@server|") != null);
     try testing.expect(std.mem.indexOf(u8, fmt.stdout, "mcp: write_file mutated.sexp") != null);
 
-    const files = try std.process.Child.run(.{
-        .allocator = a,
+    const files = try std.process.run(a, infra_fs.currentIo(), .{
         .argv = &.{ "git", "-C", dir, "show", "--name-only", "--pretty=format:", "HEAD" },
+        .stdout_limit = .limited(git_test_output_cap),
+        .stderr_limit = .limited(git_test_output_cap),
     });
+    defer a.free(files.stdout);
+    defer a.free(files.stderr);
     try testing.expect(std.mem.indexOf(u8, files.stdout, "mutated.sexp") != null);
     try testing.expect(std.mem.indexOf(u8, files.stdout, "tracked.sexp") == null);
 
     // Loose human work is still uncommitted after the auto-commit.
-    const status = try std.process.Child.run(.{
-        .allocator = a,
+    const status = try std.process.run(a, infra_fs.currentIo(), .{
         .argv = &.{ "git", "-C", dir, "status", "--porcelain" },
+        .stdout_limit = .limited(git_test_output_cap),
+        .stderr_limit = .limited(git_test_output_cap),
     });
+    defer a.free(status.stdout);
+    defer a.free(status.stderr);
     try testing.expect(std.mem.indexOf(u8, status.stdout, "human_loose.txt") != null);
     try testing.expect(std.mem.indexOf(u8, status.stdout, "tracked.sexp") != null);
 }

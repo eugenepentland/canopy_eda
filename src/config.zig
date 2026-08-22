@@ -4,6 +4,7 @@
 //! values are fetched once and threaded down as plain parameters. Every getter
 //! treats an empty value as unset.
 const std = @import("std");
+const builtin = @import("builtin");
 const infra_fs = @import("infra/fs.zig");
 
 // Credentials and session secrets are read here (not in the request handlers)
@@ -15,6 +16,11 @@ const infra_fs = @import("infra/fs.zig");
 const dotenv_path = ".env";
 const max_dotenv_bytes: usize = 64 * 1024;
 const whitespace = " \t\r";
+
+fn currentEnviron() ?*const std.process.Environ.Map {
+    if (builtin.is_test) return null;
+    return @import("root").process_environ_map;
+}
 
 /// Component Search Engine account email for the model-download HTTP Basic
 /// auth. From `CSE_EMAIL`.
@@ -134,6 +140,14 @@ pub fn wardServiceName(allocator: std.mem.Allocator) ?[]u8 {
     return lookup(allocator, "WARD_SERVICE_NAME");
 }
 
+/// This service's browsable URL (`WARD_SERVICE_URL`), sent as the
+/// `X-Ward-Service-Url` header so ward's home page links the app it lists
+/// instead of naming it as plain text. Null when unset — the header is then
+/// omitted and ward keeps whatever URL it already recorded, if any.
+pub fn wardServiceUrl(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "WARD_SERVICE_URL");
+}
+
 /// Optional explicit ward authorization-server base URL (`WARD_AUTH_SERVER_URL`)
 /// published in the RFC 9728 protected-resource metadata document. Null when
 /// unset — the serve layer then derives it by stripping the `/login` suffix off
@@ -161,10 +175,11 @@ fn wardCacheTtlFromRaw(raw: u64, default: i64) i64 {
 /// Resolve `key` from the real environment first, then from `.env`. Returns
 /// null when unset or empty. Caller owns the slice.
 fn lookup(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
-    if (std.process.getEnvVarOwned(allocator, key)) |v| {
+    if (currentEnviron()) |env| if (env.get(key)) |raw| {
+        const v = allocator.dupe(u8, raw) catch return null;
         if (v.len > 0) return v;
         allocator.free(v);
-    } else |_| {}
+    };
     return dotenvValue(allocator, key);
 }
 

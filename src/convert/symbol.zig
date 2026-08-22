@@ -8,6 +8,7 @@ const ast = @import("../sexpr/ast.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const helpers = @import("symbol_helpers.zig");
 const Node = ast.Node;
+const AllocatingWriter = @import("../allocating_writer.zig").AllocatingWriter;
 
 const PinInfo = helpers.PinInfo;
 const PadInfo = helpers.PadInfo;
@@ -40,9 +41,9 @@ pub fn convertSymbol(allocator: std.mem.Allocator, source: []const u8, filter: ?
         return error.InvalidFormat;
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = AllocatingWriter{ .writer = &buf.writer };
 
     for (symbols_to_process.items) |sym| {
         const sym_children = sym.asList() orelse continue;
@@ -56,7 +57,7 @@ pub fn convertSymbol(allocator: std.mem.Allocator, source: []const u8, filter: ?
         try helpers.emitSymbol(allocator, w, sym_children, sym_name);
     }
 
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 /// Generate a pinout file from a KiCad .kicad_sym file.
@@ -83,9 +84,9 @@ pub fn generatePinout(allocator: std.mem.Allocator, source: []const u8, filter: 
         return error.InvalidFormat;
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = AllocatingWriter{ .writer = &buf.writer };
 
     for (symbols_to_process.items) |sym| {
         const sym_children = sym.asList() orelse continue;
@@ -109,7 +110,7 @@ pub fn generatePinout(allocator: std.mem.Allocator, source: []const u8, filter: 
         try w.writeAll(")\n");
     }
 
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 /// Generate a combined package file from a KiCad symbol + footprint.
@@ -216,9 +217,9 @@ pub fn generatePackage(
     }
 
     // Emit combined package
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = AllocatingWriter{ .writer = &buf.writer };
 
     try w.writeAll(";; Auto-generated package — DO NOT EDIT\n");
     try w.writeAll(";; Source of truth: pin function names + pad geometry\n");
@@ -252,7 +253,7 @@ pub fn generatePackage(
     }
 
     try w.writeAll(")\n");
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 pub const ConvertError = error{

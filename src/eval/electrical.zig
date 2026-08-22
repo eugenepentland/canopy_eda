@@ -23,16 +23,48 @@ const Drive = env_mod.Drive;
 /// - `(max-voltage V)`
 /// - `(domain digital|analog|rf|…)`
 ///
-/// Unknown sub-forms / unknown enum atoms are ignored on purpose so
-/// future fields can land without breaking older library files.
+/// Unknown sub-forms are ignored for forwards compatibility. Malformed values
+/// of recognised fields return null so an author typo cannot silently erase
+/// electrical metadata that ERC relies on.
 pub fn parse(form_children: []const Node) ?ElectricalDecl {
     // form_children[0] is the head atom; arg 1 is the pin name.
     if (form_children.len < 2) return null;
     const pin_name = form_children[1].asString() orelse return null;
+    if (!knownSubFormsValid(form_children[2..])) return null;
 
     var decl = ElectricalDecl{ .pin = pin_name };
     parseSubForms(&decl, form_children[2..]);
     return decl;
+}
+
+fn knownSubFormsValid(subs: []const Node) bool {
+    for (subs) |sub| {
+        const list = sub.asList() orelse continue;
+        if (list.len == 0) continue;
+        const head = list[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "type")) {
+            if (list.len < 2) return false;
+            const value = list[1].asAtom() orelse return false;
+            if (parseElectricalType(value) == null) return false;
+        } else if (std.mem.eql(u8, head, "drive")) {
+            if (list.len < 2) return false;
+            const value = list[1].asAtom() orelse return false;
+            if (parseDrive(value) == null) return false;
+        } else if (isNumericField(head)) {
+            if (list.len < 2 or list[1].asNumber() == null) return false;
+        } else if (std.mem.eql(u8, head, "domain")) {
+            if (list.len < 2 or list[1].asAtom() == null) return false;
+        }
+    }
+    return true;
+}
+
+fn isNumericField(head: []const u8) bool {
+    const names = [_][]const u8{ "v-ih-min", "v-il-max", "v-oh-typ", "v-ol-typ", "max-voltage" };
+    for (names) |name| {
+        if (std.mem.eql(u8, head, name)) return true;
+    }
+    return false;
 }
 
 /// Fill the optional electrical fields on a caller-supplied
@@ -108,6 +140,14 @@ test "parse reads pin function name" {
 test "parse returns null without pin name" {
     const alloc = std.testing.allocator;
     const nodes = try parser.parse(alloc, "(electrical)");
+    defer parser.freeNodes(alloc, nodes);
+    try std.testing.expect(parse(nodes[0].asList().?) == null);
+}
+
+// spec: eval/electrical - Rejects malformed values for recognised electrical fields
+test "parse rejects an unknown electrical type" {
+    const alloc = std.testing.allocator;
+    const nodes = try parser.parse(alloc, "(electrical \"VDD\" (type mystery))");
     defer parser.freeNodes(alloc, nodes);
     try std.testing.expect(parse(nodes[0].asList().?) == null);
 }
@@ -197,12 +237,11 @@ test "port-level electrical decl carries boundary logic levels" {
     try std.testing.expectApproxEqAbs(@as(f64, 3.1), decl.v_oh_typ.?, 1e-9);
 }
 
-// spec: eval/electrical - Ignores unknown sub-forms and unrecognised enum atoms
+// spec: eval/electrical - Ignores unknown sub-forms for forwards compatibility
 test "parse ignores unknown sub-forms" {
     const alloc = std.testing.allocator;
-    const nodes = try parser.parse(alloc, "(electrical \"VDD\" (type power-in) (mystery 42) (drive nonsense))");
+    const nodes = try parser.parse(alloc, "(electrical \"VDD\" (type power-in) (mystery 42))");
     defer parser.freeNodes(alloc, nodes);
     const decl = parse(nodes[0].asList().?).?;
     try std.testing.expectEqual(ElectricalType.power_in, decl.electrical_type.?);
-    try std.testing.expect(decl.drive == null);
 }

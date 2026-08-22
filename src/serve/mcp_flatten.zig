@@ -18,6 +18,7 @@ const netlist_mod = @import("../export_kicad_netlist.zig");
 
 const FlatInstance = export_kicad.FlatInstance;
 const FlatNet = export_kicad.FlatNet;
+const FlatPin = export_kicad.FlatPin;
 
 /// Open a JSON object whose first key is the flattened `ref_des`.
 fn writeRefDesOpen(w: anytype, ref: []const u8) !void {
@@ -215,7 +216,7 @@ fn flattenNetsPortAware(
     nets: *std.ArrayList(FlatNet),
     aliases: *std.StringHashMapUnmanaged([]const u8),
 ) std.mem.Allocator.Error!void {
-    try netlist_mod.collectNets(allocator, block, "", nets, block.refStyle());
+    try netlist_mod.collectNets(allocator, block, "", nets);
     var ties: std.ArrayList(netlist_mod.FlatTie) = .empty;
     defer ties.deinit(allocator);
     try netlist_mod.collectNetTies(allocator, block, "", &ties);
@@ -244,7 +245,7 @@ pub fn listInstancesFlat(
     w: anytype,
 ) !bool {
     var list: std.ArrayList(FlatInstance) = .empty;
-    try netlist_mod.collectInstances(allocator, block, "", &list, block.refStyle());
+    try netlist_mod.collectInstances(allocator, block, "", &list);
 
     try w.writeAll("{\"instances\":[");
     for (list.items, 0..) |fi, i| {
@@ -265,32 +266,72 @@ pub fn listInstancesFlat(
     return true;
 }
 
-/// Resolve a net query to an index into the merged net list: exact canonical
-/// name first, then a sub-scoped spelling — a port-name spelling ("ldo/VOUT")
-/// maps through the port aliases onto its internal net ("ldo/3.3V"), then the
-/// raw pre-merge net of that name is located and one of its pins followed
-/// into the merged net it was folded into.
+/// Resolve a net query to an index into the merged net list. Tries, in order:
+///  1. exact canonical name ("V3P3", "GND");
+///  2. a sub-scoped spelling — a port-name spelling ("ldo/VOUT") maps through
+///     the port aliases onto its internal net, then the raw pre-merge net of
+///     that name is located and one of its pins followed into the merged net
+///     it was folded into;
+///  3. a unique leaf-name spelling ("MCU_RUN" for "mcu/MCU_RUN", "VOUT" for
+///     "ldo/VOUT"), so module-internal nets are reachable without their
+///     sub-block prefix; an ambiguous leaf lists the matches.
+/// On failure writes the not-found (or ambiguous) message to `w` and returns
+/// null, so callers can `orelse return false`.
 fn resolveMergedNet(
     allocator: std.mem.Allocator,
     block: *const env_mod.DesignBlock,
     merged: []const FlatNet,
     query: []const u8,
     aliases: *const std.StringHashMapUnmanaged([]const u8),
-) std.mem.Allocator.Error!?usize {
+    w: anytype,
+) !?usize {
     for (merged, 0..) |n, i| {
         if (std.mem.eql(u8, n.name, query)) return i;
     }
     const spelled = aliases.get(query) orelse query;
     var raw: std.ArrayList(FlatNet) = .empty;
-    try netlist_mod.collectNets(allocator, block, "", &raw, block.refStyle());
+    try netlist_mod.collectNets(allocator, block, "", &raw);
+
+    // Exact raw-name spelling (includes the sub-scoped port case).
     for (raw.items) |rn| {
         if (!std.mem.eql(u8, rn.name, spelled)) continue;
         if (rn.pins.len == 0) continue;
-        const p0 = rn.pins[0];
-        for (merged, 0..) |mn, i| {
-            for (mn.pins) |mp| {
-                if (std.mem.eql(u8, mp.ref_des, p0.ref_des) and std.mem.eql(u8, mp.pin, p0.pin)) return i;
-            }
+        if (mergedByRawPin(merged, rn.pins[0])) |i| return i;
+    }
+
+    // Leaf-name fallback over raw nets: "MCU_RUN" → "mcu/MCU_RUN".
+    var leaf_hits: std.ArrayList(usize) = .empty;
+    defer leaf_hits.deinit(allocator);
+    for (raw.items, 0..) |rn, ri| {
+        const slash = std.mem.lastIndexOfScalar(u8, rn.name, '/') orelse continue;
+        if (!std.mem.eql(u8, rn.name[slash + 1 ..], query)) continue;
+        try leaf_hits.append(allocator, ri);
+    }
+    if (leaf_hits.items.len == 1) {
+        const rn = raw.items[leaf_hits.items[0]];
+        if (rn.pins.len > 0) {
+            if (mergedByRawPin(merged, rn.pins[0])) |i| return i;
+        }
+    } else if (leaf_hits.items.len > 1) {
+        try w.writeAll("error: net not found — '");
+        try w.writeAll(query);
+        try w.writeAll("' is ambiguous; matches: ");
+        for (leaf_hits.items, 0..) |ri, k| {
+            if (k > 0) try w.writeAll(", ");
+            try w.writeAll(raw.items[ri].name);
+        }
+        return null;
+    }
+    try w.writeAll("error: net not found");
+    return null;
+}
+
+/// Follow a raw-net pin into the merged rail that folded it in; null when the
+/// pin is absent from every merged net.
+fn mergedByRawPin(merged: []const FlatNet, p: FlatPin) ?usize {
+    for (merged, 0..) |mn, i| {
+        for (mn.pins) |mp| {
+            if (std.mem.eql(u8, mp.ref_des, p.ref_des) and std.mem.eql(u8, mp.pin, p.pin)) return i;
         }
     }
     return null;
@@ -311,14 +352,12 @@ pub fn getNetFlat(
     defer aliases.deinit(allocator);
     try flattenNetsPortAware(allocator, block, &nets, &aliases);
 
-    const idx = (try resolveMergedNet(allocator, block, nets.items, query, &aliases)) orelse {
-        try w.writeAll("error: net not found");
+    const idx = (try resolveMergedNet(allocator, block, nets.items, query, &aliases, w)) orelse
         return false;
-    };
     const net = nets.items[idx];
 
     var insts: std.ArrayList(FlatInstance) = .empty;
-    try netlist_mod.collectInstances(allocator, block, "", &insts, block.refStyle());
+    try netlist_mod.collectInstances(allocator, block, "", &insts);
 
     try w.writeAll("{\"name\":");
     try json_writer.writeString(w, net.name);
@@ -390,7 +429,7 @@ pub fn listFreePinsFlat(
     w: anytype,
 ) !bool {
     var insts: std.ArrayList(FlatInstance) = .empty;
-    try netlist_mod.collectInstances(allocator, block, "", &insts, block.refStyle());
+    try netlist_mod.collectInstances(allocator, block, "", &insts);
 
     const target = findFlatByRefOrLeaf(insts.items, ref_des) orelse {
         try w.writeAll("error: instance not found");
@@ -480,6 +519,7 @@ const hdr4_pinout =
     \\  (pin 4 "4"))
 ;
 const ldomod_src =
+    \\(import ldochip)
     \\(defmodule ldomod ((vout 3.3))
     \\  (design-block "LDO"
     \\    (instance "U1" ldochip
@@ -520,6 +560,7 @@ const board_src =
 // here a literal). The parent stitches it BY PORT NAME ("ldo/VOUT"), so the
 // merge must map the port onto its net ("ldo/3.3V") to find the rail.
 const ldoport_src =
+    \\(import ldochip)
     \\(defmodule ldoport ()
     \\  (design-block "LDO Port"
     \\    (instance "U1" ldochip
@@ -558,22 +599,22 @@ const led_family =
 
 /// Write the full fixture project (passives + custom IC/connector + module +
 /// design) under `dir`. Used by the flatten tests below.
-fn writeFlattenFixture(dir: std.fs.Dir) !void {
-    try dir.makePath("lib/components");
-    try dir.makePath("lib/pinouts");
-    try dir.makePath("lib/modules");
-    try dir.makePath("src");
-    try dir.writeFile(.{ .sub_path = "lib/components/cap-0402.sexp", .data = cap_family });
-    try dir.writeFile(.{ .sub_path = "lib/components/res-0402.sexp", .data = res_family });
-    try dir.writeFile(.{ .sub_path = "lib/components/led-0402.sexp", .data = led_family });
-    try dir.writeFile(.{ .sub_path = "lib/components/ldochip.sexp", .data = ldochip_comp });
-    try dir.writeFile(.{ .sub_path = "lib/pinouts/ldochip.sexp", .data = ldochip_pinout });
-    try dir.writeFile(.{ .sub_path = "lib/components/hdr4.sexp", .data = hdr4_comp });
-    try dir.writeFile(.{ .sub_path = "lib/pinouts/hdr4.sexp", .data = hdr4_pinout });
-    try dir.writeFile(.{ .sub_path = "lib/modules/ldomod.sexp", .data = ldomod_src });
-    try dir.writeFile(.{ .sub_path = "lib/modules/ldoport.sexp", .data = ldoport_src });
-    try dir.writeFile(.{ .sub_path = "src/board.sexp", .data = board_src });
-    try dir.writeFile(.{ .sub_path = "src/board2.sexp", .data = board2_src });
+fn writeFlattenFixture(dir: std.Io.Dir) !void {
+    try dir.createDirPath(std.testing.io, "lib/components");
+    try dir.createDirPath(std.testing.io, "lib/pinouts");
+    try dir.createDirPath(std.testing.io, "lib/modules");
+    try dir.createDirPath(std.testing.io, "src");
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/cap-0402.sexp", .data = cap_family });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/res-0402.sexp", .data = res_family });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/led-0402.sexp", .data = led_family });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/ldochip.sexp", .data = ldochip_comp });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/ldochip.sexp", .data = ldochip_pinout });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/hdr4.sexp", .data = hdr4_comp });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/hdr4.sexp", .data = hdr4_pinout });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/modules/ldomod.sexp", .data = ldomod_src });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/modules/ldoport.sexp", .data = ldoport_src });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "src/board.sexp", .data = board_src });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "src/board2.sexp", .data = board2_src });
 }
 
 /// Eval `src/<name>.sexp` under `project` and return the design block. The
@@ -594,26 +635,26 @@ test "flatten list_instances surfaces sub-block children with prefixed refs and 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try writeFlattenFixture(tmp.dir);
-    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     var eval = Evaluator.init(alloc, project);
     defer eval.deinit();
     const block = try evalBoard(alloc, project, &eval, "board");
 
-    var out: std.ArrayList(u8) = .empty;
-    try std.testing.expect(try listInstancesFlat(alloc, &eval, block, out.writer(alloc)));
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(try listInstancesFlat(alloc, &eval, block, &out.writer));
 
     // The LDO module's children appear with sub-block-prefixed refs (renumbered
     // globally, e.g. ldo/U2) and their stable module-local origins (U1, C1) —
     // all invisible to the top-level-only listing.
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"ref_des\":\"ldo/") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"origin\":\"U1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"origin\":\"C1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"ref_des\":\"ldo/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"origin\":\"U1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"origin\":\"C1\"") != null);
     // Top-level parts keep their refs.
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"ref_des\":\"J1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"ref_des\":\"J1\"") != null);
     // The IC's pin count comes from its 5-pad pinout (only ldochip has 5 pads).
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"component\":\"ldochip\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"pin_count\":5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"component\":\"ldochip\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"pin_count\":5") != null);
 }
 
 test "instancePinCount counts a connector's pads from its pinout when it has no symbol" {
@@ -622,7 +663,7 @@ test "instancePinCount counts a connector's pads from its pinout when it has no 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try writeFlattenFixture(tmp.dir);
-    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     var eval = Evaluator.init(alloc, project);
     defer eval.deinit();
@@ -645,7 +686,7 @@ test "flatten get_net returns the merged rail and resolves a sub-scoped spelling
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try writeFlattenFixture(tmp.dir);
-    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     var eval = Evaluator.init(alloc, project);
     defer eval.deinit();
@@ -653,18 +694,76 @@ test "flatten get_net returns the merged rail and resolves a sub-scoped spelling
 
     // Canonical name: V3P3 merges the top-level LED pin with the module's VOUT
     // pins (LDO output + output cap) — flattened refs, sub-block pins included.
-    var out: std.ArrayList(u8) = .empty;
-    try std.testing.expect(try getNetFlat(alloc, &eval, block, "V3P3", out.writer(alloc)));
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"name\":\"V3P3\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"ref_des\":\"D1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"ref_des\":\"ldo/") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"function\":\"VOUT\"") != null);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(try getNetFlat(alloc, &eval, block, "V3P3", &out.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"name\":\"V3P3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"ref_des\":\"D1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"ref_des\":\"ldo/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"function\":\"VOUT\"") != null);
 
     // The sub-scoped spelling resolves to the same canonical merged net.
-    var out2: std.ArrayList(u8) = .empty;
-    try std.testing.expect(try getNetFlat(alloc, &eval, block, "ldo/VOUT", out2.writer(alloc)));
-    try std.testing.expect(std.mem.indexOf(u8, out2.items, "\"name\":\"V3P3\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out2.items, "\"ref_des\":\"ldo/") != null);
+    var out2: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(try getNetFlat(alloc, &eval, block, "ldo/VOUT", &out2.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out2.written(), "\"name\":\"V3P3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out2.written(), "\"ref_des\":\"ldo/") != null);
+}
+
+test "flatten get_net resolves a bare leaf name to the unique module-internal net" {
+    // spec: serve/mcp_tools - flatten makes get_net resolve a bare leaf name to the unique module-internal net
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFlattenFixture(tmp.dir);
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    var eval = Evaluator.init(alloc, project);
+    defer eval.deinit();
+    const block = try evalBoard(alloc, project, &eval, "board");
+
+    // "VOUT" (leaf of ldo/VOUT) resolves to the merged V3P3 rail.
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(try getNetFlat(alloc, &eval, block, "VOUT", &out.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"name\":\"V3P3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"ref_des\":\"ldo/") != null);
+
+    // "VIN" (leaf of ldo/VIN) resolves to the merged VIN_5V rail.
+    var out2: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(try getNetFlat(alloc, &eval, block, "VIN", &out2.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out2.written(), "\"name\":\"VIN_5V\"") != null);
+}
+
+test "flatten get_net reports an ambiguous leaf name with the matches" {
+    // spec: serve/mcp_tools - flatten makes get_net list the candidates when a bare leaf name is ambiguous
+    // spec: serve/mcp_tools - A module file that uses its own components imports them, so a design can import the module alone without also importing the module's dependencies
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFlattenFixture(tmp.dir);
+    // Two ldomod instances share the "VOUT" leaf (only GND is stitched, so
+    // VOUT stays module-local in both copies). ldochip is imported first,
+    // mirroring board_src: ldomod's body references it bare, which only
+    // resolves when the component is already cached from the parent's import.
+    const amb =
+        \\(import ldochip)
+        \\(import ldomod)
+        \\(design-block "Ambiguous Leaf Board"
+        \\  (sub-block "a" (ldomod))
+        \\  (sub-block "b" (ldomod))
+        \\  (net "GND" "a/GND" "b/GND"))
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/amb.sexp", .data = amb });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    var eval = Evaluator.init(alloc, project);
+    defer eval.deinit();
+    const block = try evalBoard(alloc, project, &eval, "amb");
+
+    // "VOUT" is the leaf of both a/VOUT and b/VOUT — report both, not one.
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(!try getNetFlat(alloc, &eval, block, "VOUT", &out.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "'VOUT' is ambiguous") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "a/VOUT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "b/VOUT") != null);
 }
 
 test "flatten list_free_pins matches a child by name and reads assignments from the merged net" {
@@ -673,7 +772,7 @@ test "flatten list_free_pins matches a child by name and reads assignments from 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try writeFlattenFixture(tmp.dir);
-    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     var eval = Evaluator.init(alloc, project);
     defer eval.deinit();
@@ -682,11 +781,11 @@ test "flatten list_free_pins matches a child by name and reads assignments from 
     // The module IC renumbers to ldo/U2, but its module-local origin "U1" still
     // finds it. Pins EN/NC are unwired; the wired VOUT pad reports the merged
     // canonical rail name "V3P3".
-    var out: std.ArrayList(u8) = .empty;
-    try std.testing.expect(try listFreePinsFlat(alloc, &eval, block, "U1", null, out.writer(alloc)));
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"function\":\"EN\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"function\":\"NC\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"function\":\"VOUT\",\"net\":\"V3P3\"") != null);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(try listFreePinsFlat(alloc, &eval, block, "U1", null, &out.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"function\":\"EN\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"function\":\"NC\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"function\":\"VOUT\",\"net\":\"V3P3\"") != null);
 }
 
 test "flatten merges a stitch that names a module port whose internal net differs" {
@@ -695,7 +794,7 @@ test "flatten merges a stitch that names a module port whose internal net differ
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try writeFlattenFixture(tmp.dir);
-    const project = try tmp.dir.realpathAlloc(alloc, ".");
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     var eval = Evaluator.init(alloc, project);
     defer eval.deinit();
@@ -705,26 +804,26 @@ test "flatten merges a stitch that names a module port whose internal net differ
     // "3.3V", the parent stitches `(net "V3P3" "ldo/VOUT")` by PORT name.
     // The merged rail must contain the top-level LED, the module's output
     // pin (function VOUT), and the module's 10uF output cap.
-    var out: std.ArrayList(u8) = .empty;
-    try std.testing.expect(try getNetFlat(alloc, &eval, block, "V3P3", out.writer(alloc)));
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"name\":\"V3P3\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"ref_des\":\"D1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"ref_des\":\"ldo/") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"function\":\"VOUT\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"value\":\"10uF\"") != null);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(try getNetFlat(alloc, &eval, block, "V3P3", &out.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"name\":\"V3P3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"ref_des\":\"D1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"ref_des\":\"ldo/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"function\":\"VOUT\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"value\":\"10uF\"") != null);
 
     // Both sub-scoped spellings — the port name and the internal net name —
     // resolve to the same canonical merged rail.
-    var out2: std.ArrayList(u8) = .empty;
-    try std.testing.expect(try getNetFlat(alloc, &eval, block, "ldo/VOUT", out2.writer(alloc)));
-    try std.testing.expect(std.mem.indexOf(u8, out2.items, "\"name\":\"V3P3\"") != null);
-    var out3: std.ArrayList(u8) = .empty;
-    try std.testing.expect(try getNetFlat(alloc, &eval, block, "ldo/3.3V", out3.writer(alloc)));
-    try std.testing.expect(std.mem.indexOf(u8, out3.items, "\"name\":\"V3P3\"") != null);
+    var out2: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(try getNetFlat(alloc, &eval, block, "ldo/VOUT", &out2.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out2.written(), "\"name\":\"V3P3\"") != null);
+    var out3: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(try getNetFlat(alloc, &eval, block, "ldo/3.3V", &out3.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out3.written(), "\"name\":\"V3P3\"") != null);
 
     // list_free_pins shares the aliasing: the module IC's wired output pad
     // reports the canonical merged rail name, not the internal spelling.
-    var out4: std.ArrayList(u8) = .empty;
-    try std.testing.expect(try listFreePinsFlat(alloc, &eval, block, "U1", null, out4.writer(alloc)));
-    try std.testing.expect(std.mem.indexOf(u8, out4.items, "\"function\":\"VOUT\",\"net\":\"V3P3\"") != null);
+    var out4: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(try listFreePinsFlat(alloc, &eval, block, "U1", null, &out4.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out4.written(), "\"function\":\"VOUT\",\"net\":\"V3P3\"") != null);
 }

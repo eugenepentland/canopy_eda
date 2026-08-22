@@ -12,6 +12,7 @@
 //! Credentials (`DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET`) are read
 //! server-side by the caller (via `config`) and never travel over MCP.
 const std = @import("std");
+const infra_fs = @import("../infra/fs.zig");
 const json_writer = @import("../json_writer.zig");
 const rate_limiter = @import("rate_limiter.zig");
 const numeric = @import("../numeric.zig");
@@ -220,12 +221,7 @@ fn keywordSearch(
     const url = std.fmt.allocPrint(allocator, "{s}{s}", .{ base, keyword_path }) catch return null;
     const auth = std.fmt.allocPrint(allocator, "Authorization: Bearer {s}", .{token}) catch return null;
     const client = std.fmt.allocPrint(allocator, "X-DIGIKEY-Client-Id: {s}", .{client_id}) catch return null;
-
-    var body: std.ArrayList(u8) = .empty;
-    const bw = body.writer(allocator);
-    bw.writeAll("{\"Keywords\":") catch return null;
-    json_writer.writeString(bw, query) catch return null;
-    bw.print(",\"Limit\":{d}}}", .{limit}) catch return null;
+    const body = searchRequestBody(allocator, query, limit) catch return null;
 
     return curl(allocator, &.{
         "-X",         "POST",
@@ -234,8 +230,26 @@ fn keywordSearch(
         client,       "-H",
         json_accept,  "-H",
         json_content, "--data-binary",
-        body.items,
+        body,
     }, search_timeout_secs, max_response_bytes);
+}
+
+/// JSON body for the keyword search. Marketplace listings (third-party
+/// sellers with their own shipping and no public price ladder) are excluded
+/// on every search — BOM fills and quoting must only ever see DigiKey-stocked
+/// catalog parts.
+fn searchRequestBody(
+    allocator: std.mem.Allocator,
+    query: []const u8,
+    limit: usize,
+) std.mem.Allocator.Error![]u8 {
+    var body: std.Io.Writer.Allocating = .init(allocator);
+    const bw = &body.writer;
+    bw.writeAll("{\"Keywords\":") catch return error.OutOfMemory;
+    json_writer.writeString(bw, query) catch return error.OutOfMemory;
+    bw.print(",\"Limit\":{d},", .{limit}) catch return error.OutOfMemory;
+    bw.writeAll("\"FilterOptionsRequest\":{\"MarketPlaceFilter\":\"ExcludeMarketPlace\"}}") catch return error.OutOfMemory;
+    return body.toOwnedSlice();
 }
 
 const json_accept = "Accept: application/json";
@@ -380,18 +394,23 @@ fn dupeOpt(allocator: std.mem.Allocator, s: ?[]const u8) std.mem.Allocator.Error
 /// on a spawn failure or non-zero exit. The body is returned regardless of HTTP
 /// status (no `-f`), so the JSON parsers can distinguish error bodies.
 fn curl(allocator: std.mem.Allocator, extra: []const []const u8, timeout_secs: []const u8, max_bytes: usize) ?[]u8 {
-    rate_limiter.digikey.acquire();
+    rate_limiter.digikey.acquire() catch return null;
     defer rate_limiter.digikey.release();
     var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
     argv.appendSlice(allocator, &.{ "curl", "-sS", "--max-time", timeout_secs }) catch return null;
     argv.appendSlice(allocator, extra) catch return null;
 
-    const res = std.process.Child.run(.{
-        .allocator = allocator,
+    const res = std.process.run(allocator, infra_fs.currentIo(), .{
         .argv = argv.items,
-        .max_output_bytes = max_bytes,
+        .stdout_limit = .limited(max_bytes),
+        .stderr_limit = .limited(max_bytes),
     }) catch return null;
-    if (res.term != .Exited or res.term.Exited != 0) return null;
+    allocator.free(res.stderr);
+    if (!res.term.success()) {
+        allocator.free(res.stdout);
+        return null;
+    }
     return res.stdout;
 }
 
@@ -440,7 +459,7 @@ fn pickProduct(products: []const Product, part_number: []const u8, manufacturer:
         if (!std.ascii.eqlIgnoreCase(p.mpn, part_number)) continue;
         if (first_exact == null) first_exact = p;
         if (manufacturer) |want| {
-            if (std.ascii.indexOfIgnoreCase(p.manufacturer, want) != null) return p;
+            if (std.ascii.findIgnoreCase(p.manufacturer, want) != null) return p;
         }
     }
     return first_exact orelse products[0];
@@ -509,6 +528,21 @@ test "parseAccessToken extracts the bearer token from the OAuth response" {
     try std.testing.expectEqualStrings("abc123", tok);
     try std.testing.expect(parseAccessToken(a, "{\"error\":\"invalid_client\"}") == null);
     try std.testing.expect(parseAccessToken(a, "not json") == null);
+}
+
+test "searchRequestBody excludes marketplace listings from every keyword search" {
+    // spec: serve/digikey - searchRequestBody excludes marketplace listings from every keyword search
+    const a = std.testing.allocator;
+    const body = try searchRequestBody(a, "1pF 01005 C0G", 10);
+    defer a.free(body);
+    try std.testing.expectEqualStrings("{\"Keywords\":\"1pF 01005 C0G\",\"Limit\":10," ++
+        "\"FilterOptionsRequest\":{\"MarketPlaceFilter\":\"ExcludeMarketPlace\"}}", body);
+
+    // Query text is JSON-escaped, and the filter survives on every variant.
+    const esc = try searchRequestBody(a, "0.35\" pitch", 3);
+    defer a.free(esc);
+    try std.testing.expectEqualStrings("{\"Keywords\":\"0.35\\\" pitch\",\"Limit\":3," ++
+        "\"FilterOptionsRequest\":{\"MarketPlaceFilter\":\"ExcludeMarketPlace\"}}", esc);
 }
 
 test "keywordVariants drops trailing keywords for graceful relaxation" {

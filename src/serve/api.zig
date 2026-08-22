@@ -5,7 +5,7 @@
 //! `HandlerError` is a wide superset — httpz turns any leaked error into a 5xx.
 
 const std = @import("std");
-const build_options = @import("build_options");
+const build_id = @import("../build_id.zig");
 const json_writer = @import("../json_writer.zig");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
@@ -15,13 +15,14 @@ const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const render_json = @import("../render_json.zig");
 const export_kicad = @import("../export_kicad.zig");
 const bom = @import("../bom.zig");
-const fp_mod = @import("../export_kicad_footprint.zig");
+const zipfile = @import("../zipfile.zig");
 const erc_mod = @import("../erc.zig");
 const env_mod = @import("../eval/env.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const bom_html = @import("bom_html.zig");
 const mcp_tools = @import("mcp_tools.zig");
 const review_mod = @import("../review.zig");
+const thermal_api = @import("thermal_api.zig");
 const review_md_mod = @import("../review_md.zig");
 const req_checks = @import("../req_checks.zig");
 const edit_mod = @import("edit.zig");
@@ -58,8 +59,8 @@ const empty_datasheets_reqs = ",\"datasheets\":[],\"requirements\":[]";
 /// into a 5xx body, so the union just needs to be a superset of every
 /// callee — the type itself is informational.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
-    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
-    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    infra_fs.File.WriteError || infra_fs.File.OpenError || infra_fs.File.ReadError ||
+    infra_fs.Dir.MakeError || infra_fs.Dir.StatFileError ||
     @import("../bom_resolve.zig").ResolveError ||
     @import("../sexpr/parser.zig").ParseError ||
     error{InvalidName} ||
@@ -105,7 +106,7 @@ pub fn pushApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerE
     };
 
     const new_layout = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
-    serve_root.setLiveLayoutJson(new_layout);
+    serve_root.setLiveLayoutJson(name, new_layout);
     const v = serve_root.bumpLiveVersion(name);
 
     std.debug.print("Pushed {s} (v{d})\n", .{ name, v });
@@ -124,8 +125,8 @@ fn writeBuildErrorJson(
 ) HandlerError!void {
     const d = try diag_format.load(ctx.allocator, board_path, err_name, last_error);
     const text = try diag_format.formatText(ctx.allocator, d);
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
     try w.writeAll("{\"ok\":false,\"error\":");
     try json_writer.writeString(w, text);
     try w.writeAll(",\"diagnostic\":");
@@ -133,7 +134,7 @@ fn writeBuildErrorJson(
     try w.writeAll("}");
     res.status = http_internal_error;
     res.content_type = .JSON;
-    res.body = buf.items;
+    res.body = buf.written();
 }
 
 /// GET /api/version/:name — return `{"version":N}`. The schematic viewer
@@ -153,16 +154,28 @@ pub fn versionApi(_: *Server, req: *httpz.Request, res: *httpz.Response) Handler
 }
 
 /// GET /api/scene-graph/:name — return the cached schematic scene-graph JSON
-/// produced by the last build/push. Read under `live_mutex`; falls back to a
-/// minimal `{"error":"no layout"}` body when nothing has been pushed yet.
-pub fn sceneGraphApi(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    serve_root.live_mutex.lock();
-    const data = serve_root.live_layout_json;
-    serve_root.live_mutex.unlock();
-
+/// produced by the last build/push OF THAT DESIGN.
+///
+/// Two properties this endpoint used to lack. First, the bytes are copied into
+/// `res.arena` while the live lock is held (`liveLayoutFor`), because httpz
+/// serializes `res.body` after the handler returns: publishing the shared
+/// pointer raced any concurrent push, which frees the previous buffer. Second,
+/// the server keeps ONE live slot, so a request whose `:name` is not the design
+/// that slot holds is answered 404 rather than handed another design's scene
+/// graph — the same "no layout" body it already answered before anything was
+/// pushed at all.
+pub fn sceneGraphApi(_: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const name = req.param("name") orelse {
+        res.status = http_not_found;
+        return;
+    };
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
-    res.body = data orelse "{\"error\":\"no layout\"}";
+    res.body = serve_root.liveLayoutFor(res.arena, name) orelse {
+        res.status = http_not_found;
+        res.body = "{\"error\":\"no layout\"}";
+        return;
+    };
 }
 
 /// Serve a component's pinout file (lib/pinouts/:name.sexp) as JSON so the
@@ -202,8 +215,8 @@ pub fn pinoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
         return;
     };
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
 
     try w.writeAll("{\"component\":");
     try json_writer.writeString(w, name);
@@ -262,7 +275,7 @@ pub fn pinoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
 
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
-    res.body = buf.items;
+    res.body = buf.written();
 }
 
 /// Append `"datasheets":[{name,size}], "requirements":[{text,pdf,page}]` to
@@ -391,9 +404,20 @@ fn evalDesignForExport(
     };
 }
 
+/// True unless query `key` is explicitly switched off (`=0` / `=false` / an
+/// empty value) — the shape for a bundle part that ships by default and can be
+/// opted out of.
+fn queryFlagOn(req: *httpz.Request, key: []const u8) bool {
+    const q = req.query() catch return true;
+    const v = q.get(key) orelse return true;
+    return !(v.len == 0 or std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
+}
+
 /// GET /api/export-kicad/:name — build the design and return a zip bundling the
 /// KiCad netlist, generated footprints, and STEP models for hand-off to the PCB
-/// editor.
+/// editor, plus the `.kicad_sch` hierarchy and its project sidecars so the
+/// archive opens as a complete KiCad project. `?schematic=0` drops the drawing
+/// and returns the netlist-only bundle the endpoint used to serve.
 pub fn exportKicadApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
@@ -407,7 +431,14 @@ pub fn exportKicadApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
     };
     try bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir);
 
-    const zip_data = export_kicad.exportKicadZip(ctx.allocator, block, ctx.project_dir, name) catch {
+    const want_sch = queryFlagOn(req, "schematic");
+    const zip_data = export_kicad.exportKicadZip(
+        ctx.allocator,
+        block,
+        ctx.project_dir,
+        name,
+        .{ .schematic = want_sch },
+    ) catch {
         res.status = http_internal_error;
         res.body = "Export error";
         return;
@@ -475,8 +506,8 @@ pub fn exportBomCsvApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(e) });
     };
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
     try bom_html.writeBomCsv(ctx.allocator, w, block);
 
     const disposition = std.fmt.allocPrint(ctx.allocator, "attachment; filename=\"{s}-bom.csv\"", .{name}) catch {
@@ -487,7 +518,7 @@ pub fn exportBomCsvApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     res.header(header_content_type, "text/csv");
     res.header(header_content_disposition, disposition);
     res.header(header_cors_allow_origin, "*");
-    res.body = buf.items;
+    res.body = buf.written();
 }
 
 /// GET /api/export-review/:name — design-review package as a zip. Contains
@@ -536,11 +567,24 @@ pub fn exportReviewPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Res
         std.StringHashMapUnmanaged([]req_checks.Result).empty;
     req_checks.applyVerifications(&check_results, block, block.instances);
 
-    const doc = review_mod.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results) catch {
+    var doc = review_mod.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results) catch {
         res.status = http_internal_error;
         res.body = err_build;
         return;
     };
+    // Same attachment the schematic page makes: `buildReview` reads the block
+    // alone, and the cooling ladder needs this handler's project directory and
+    // the design's saved layouts.
+    doc.power.scenarios = thermal_api.scenariosFor(
+        ctx.allocator,
+        ctx.project_dir,
+        name,
+        doc.power.thermal,
+        doc.power.thermal.ambient_c,
+        // The review document describes the design's DEFAULT board, the one the
+        // rest of it reports on; comparing named layouts is the thermal page's job.
+        null,
+    ) catch .{};
 
     // The design's own top-level source — read once, used only for the zip
     // entry below (the report no longer embeds it; every source file ships as
@@ -552,14 +596,14 @@ pub fn exportReviewPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Res
     else
         &[_]u8{};
 
-    const md = review_md_mod.renderToMarkdown(ctx.allocator, block, ctx.project_dir, name, doc, build_options.git_hash) catch {
+    const md = review_md_mod.renderToMarkdown(ctx.allocator, block, ctx.project_dir, name, doc, build_id.current()) catch {
         res.status = http_internal_error;
         res.body = "Markdown render error";
         return;
     };
 
-    var csv_buf: std.ArrayList(u8) = .empty;
-    bom_html.writeBomCsv(ctx.allocator, csv_buf.writer(ctx.allocator), block) catch {
+    var csv_buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    bom_html.writeBomCsv(ctx.allocator, &csv_buf.writer, block) catch {
         res.status = http_internal_error;
         res.body = "BOM CSV error";
         return;
@@ -568,7 +612,7 @@ pub fn exportReviewPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Res
     // Collect every source `.sexp` the evaluator read, each under its path
     // relative to the project dir so the bundle reads as a buildable project
     // tree (src/<design>.sexp, lib/modules/*.sexp, lib/components/*.sexp).
-    var sources: std.ArrayList(fp_mod.ZipEntry) = .empty;
+    var sources: std.ArrayList(zipfile.Entry) = .empty;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
 
     // The design's own top-level source, added explicitly rather than via
@@ -597,30 +641,33 @@ pub fn exportReviewPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Res
     // layout — built from the just-collected source names. Non-fatal.
     const source_names = try ctx.allocator.alloc([]const u8, sources.items.len);
     for (sources.items, 0..) |s, i| source_names[i] = s.name;
-    const readme = review_md_mod.renderReadme(ctx.allocator, name, doc.generated_at, build_options.git_hash, source_names) catch "";
+    const readme = review_md_mod.renderReadme(ctx.allocator, name, doc.generated_at, build_id.current(), source_names) catch "";
 
     // Assemble the zip: README, report, and CSV at the root, then the source tree.
     const md_name = try std.fmt.allocPrint(ctx.allocator, "{s}-review.md", .{name});
     const csv_name = try std.fmt.allocPrint(ctx.allocator, "{s}-bom.csv", .{name});
 
-    var entries: std.ArrayList(fp_mod.ZipEntry) = .empty;
+    var entries: std.ArrayList(zipfile.Entry) = .empty;
     if (readme.len > 0) try entries.append(ctx.allocator, .{ .name = "README.md", .data = readme });
     try entries.append(ctx.allocator, .{ .name = md_name, .data = md });
-    try entries.append(ctx.allocator, .{ .name = csv_name, .data = csv_buf.items });
+    try entries.append(ctx.allocator, .{ .name = csv_name, .data = csv_buf.written() });
     try entries.appendSlice(ctx.allocator, sources.items);
 
-    const zip = fp_mod.buildZip(ctx.allocator, entries.items) catch {
+    var zw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    zipfile.write(&zw.writer, entries.items) catch {
+        zw.deinit();
         res.status = http_internal_error;
         res.body = "Zip error";
         return;
     };
+    const zip = try zw.toOwnedSlice();
 
     // Version the package filename with the build's git hash so successive
     // exports are distinguishable and each review traces to a known build.
     const disposition = try std.fmt.allocPrint(
         ctx.allocator,
         "attachment; filename=\"{s}-review-{s}.zip\"",
-        .{ name, build_options.git_hash },
+        .{ name, build_id.current() },
     );
     res.header(header_content_type, content_type_zip);
     res.header(header_content_disposition, disposition);
@@ -634,7 +681,7 @@ pub fn exportReviewPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Res
 /// bare basename.
 fn zipNameForSource(project_dir: []const u8, path: []const u8) []const u8 {
     if (std.mem.startsWith(u8, path, project_dir)) {
-        const rem = std.mem.trimLeft(u8, path[project_dir.len..], "/");
+        const rem = std.mem.trimStart(u8, path[project_dir.len..], "/");
         if (rem.len > 0) return rem;
     }
     if (std.mem.lastIndexOf(u8, path, "/lib/")) |i| return path[i + 1 ..];
@@ -701,8 +748,8 @@ pub fn designsApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) Handler
 
     const summaries = mcp_tools.listDesignSummaries(ctx.allocator, ctx.project_dir) catch &[_]mcp_tools.DesignSummary{};
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
     try w.writeAll("[");
     for (summaries, 0..) |s, i| {
         if (i > 0) try w.writeAll(",");
@@ -723,7 +770,7 @@ pub fn designsApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) Handler
         });
     }
     try w.writeAll("]");
-    res.body = buf.items;
+    res.body = buf.written();
 }
 
 /// List free (unassigned) pins on an instance. Thin wrapper over the MCP
@@ -749,9 +796,9 @@ pub fn freePinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         return;
     };
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(ctx.allocator);
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
     const ok = mcp_tools.listFreePins(ctx.allocator, ctx.project_dir, name, ref_des, .{}, w) catch {
         res.status = http_internal_error;
         res.body = "{\"error\":\"internal\"}";
@@ -759,11 +806,11 @@ pub fn freePinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     };
     if (!ok) {
         res.status = http_internal_error;
-        // buf.items holds plain text like "error: instance not found".
-        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\"}}", .{buf.items});
+        // The buffer holds plain text like "error: instance not found".
+        res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\"}}", .{buf.written()});
         return;
     }
-    res.body = try ctx.allocator.dupe(u8, buf.items);
+    res.body = try ctx.allocator.dupe(u8, buf.written());
 }
 
 /// Return the current `{components, nets}` JSON for a design, matching the
@@ -805,16 +852,16 @@ pub fn designStateApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
 
     var sym_cache = try bom_html.buildSymbolPinCache(ctx.allocator, ctx.project_dir);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(ctx.allocator);
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
     try w.writeAll("{\"components\":{");
     _ = try bom_html.writeComponentsJson(w, block, "", &sym_cache, ctx.allocator, ctx.project_dir);
     try w.writeAll("},\"nets\":{");
     _ = try bom_html.writeNetsJson(ctx.allocator, w, block, "");
     try w.writeAll("}}");
 
-    res.body = try ctx.allocator.dupe(u8, buf.items);
+    res.body = try ctx.allocator.dupe(u8, buf.written());
 }
 
 /// POST /api/section-note/:name/add — body `{section, text, pdf?, page?}`.

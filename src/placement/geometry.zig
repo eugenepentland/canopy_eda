@@ -13,9 +13,10 @@ const parser = @import("../sexpr/parser.zig");
 const ast = @import("../sexpr/ast.zig");
 const infra_fs = @import("../infra/fs.zig");
 const numeric = @import("../numeric.zig");
+const board_layers = @import("../board_layers.zig");
+const lib_limits = @import("../lib_limits.zig");
 const Node = ast.Node;
 
-const max_footprint_bytes: usize = 1024 * 1024;
 const path_fmt = "{s}/lib/footprints/{s}.sexp";
 /// Extra clearance baked into a part's courtyard half-extents so the
 /// optimizer leaves a little air between adjacent parts. Public so the
@@ -54,14 +55,78 @@ pub const Pad = struct {
     /// Pad rotation about its own centre (deg, CCW), from `(pos X Y ROT)`. Adds
     /// to the part pose; a non-quarter total forces polygonized fab emission.
     rot: f64 = 0,
-    /// Roundrect corner ratio (corner radius ÷ shorter side), from
-    /// `(roundrect_rratio R)`. 0 with shape "roundrect" ⇒ the KiCad default.
-    rratio: f64 = 0,
+    /// The pad sub-forms that override a project-wide default (see
+    /// `Overrides`).
+    overrides: Overrides = .{},
+
+    /// The three `(pad …)` declarations that each OVERRIDE a default the pad
+    /// would otherwise inherit — grouped because that is exactly what they
+    /// have in common, and because each is resolved through an accessor
+    /// rather than read raw.
+    pub const Overrides = struct {
+        /// Roundrect corner ratio (corner radius ÷ shorter side), from
+        /// `(roundrect_rratio R)`. 0 with shape "roundrect" ⇒ `default_rratio`.
+        rratio: f64 = 0,
+        /// This pad's OWN solder-mask expansion (mm per side), from
+        /// `(mask-margin MM)`. Null = the board's `(design-rules (mask-margin
+        /// …))` applies; a value REPLACES it for this pad, matching KiCad's
+        /// per-pad `solder_mask_margin`. A fiducial is the standard case: its
+        /// target needs a mask opening several times its copper.
+        mask_margin: ?f64 = null,
+        /// The `no-paste` pad keyword: this SMD pad takes no stencil aperture
+        /// (a fiducial, a test point, a pad soldered by hand), overriding
+        /// "every SMD pad is pasted". Through-hole and NPTH pads never get
+        /// paste regardless.
+        no_paste: bool = false,
+    };
 
     /// True when the pad's hole is an oval slot rather than a round bore.
     pub fn isSlot(self: Pad) bool {
         return self.slot_half[0] != 0 or self.slot_half[1] != 0;
     }
+
+    /// The solder-mask expansion (mm per side) this pad's opening is grown
+    /// by: its own `(mask-margin …)` when it declares one, else the board's
+    /// `(design-rules (mask-margin …))` value `board`. THE ONE PLACE that
+    /// precedence is spelled — the Gerber mask writer, the mask-relief dams
+    /// and the silk placer all resolve a pad's opening through it, so the
+    /// drawn opening and everything that reasons about it agree.
+    pub fn maskMargin(self: Pad, board: f64) f64 {
+        return self.overrides.mask_margin orelse board;
+    }
+
+    /// True when this pad takes no solder-paste aperture.
+    pub fn noPaste(self: Pad) bool {
+        return self.overrides.no_paste;
+    }
+
+    /// The declared roundrect corner ratio, 0 when the pad declares none
+    /// (callers substitute `default_rratio`).
+    pub fn rratio(self: Pad) f64 {
+        return self.overrides.rratio;
+    }
+};
+
+/// A footprint-local region that copper pours may not enter. `front`/`back`
+/// are relative to the footprint: flipping the part swaps the physical board
+/// face, matching KiCad's footprint-attached zone keepout behaviour. Pads,
+/// tracks, and inner planes are unaffected; `(vias not_allowed)` additionally
+/// blocks through-vias whose copper overlaps the polygon.
+pub const CopperSide = enum { front, back };
+
+/// One polygonal, footprint-local copper-pour exclusion.
+pub const CopperPourKeepout = struct {
+    side: CopperSide,
+    poly: []const [2]f64,
+    vias_not_allowed: bool = false,
+};
+
+/// Footprint features carried for rendering and copper-pour constraints, but
+/// not used to size the placement courtyard.
+pub const FootprintFeatures = struct {
+    silk_lines: []const SilkLine = &.{},
+    silk_circles: []const SilkCircle = &.{},
+    copper_pour_keepouts: []const CopperPourKeepout = &.{},
 };
 
 /// KiCad's default roundrect corner ratio (corner radius ÷ shorter side) when
@@ -86,8 +151,7 @@ pub const Geom = struct {
     fallback: bool,
     ccx: f64 = 0,
     ccy: f64 = 0,
-    silk_lines: []const SilkLine = &.{},
-    silk_circles: []const SilkCircle = &.{},
+    features: FootprintFeatures = .{},
 };
 
 /// Load `<project_dir>/lib/footprints/<fp_name>.sexp`. Falls back to a
@@ -101,7 +165,7 @@ pub fn load(
 ) Geom {
     const path = std.fmt.allocPrint(arena, path_fmt, .{ project_dir, fp_name }) catch
         return fallbackGeom(pin_count_hint);
-    const source = infra_fs.cwd().readFileAlloc(arena, path, max_footprint_bytes) catch
+    const source = infra_fs.cwd().readFileAlloc(arena, path, lib_limits.max_footprint_bytes) catch
         return fallbackGeom(pin_count_hint);
     const nodes = parser.parse(arena, source) catch return fallbackGeom(pin_count_hint);
     if (nodes.len == 0 or !nodes[0].isForm("footprint")) return fallbackGeom(pin_count_hint);
@@ -109,6 +173,7 @@ pub fn load(
     if (children.len < 2) return fallbackGeom(pin_count_hint);
 
     var pads: std.ArrayList(Pad) = .empty;
+    var copper_pour_keepouts: std.ArrayList(CopperPourKeepout) = .empty;
     var silk_lines: std.ArrayList(SilkLine) = .empty;
     var silk_circles: std.ArrayList(SilkCircle) = .empty;
     var court_hw: f64 = 0;
@@ -120,6 +185,8 @@ pub fn load(
     for (children[2..]) |sub| {
         if (sub.isForm("pad")) {
             if (parsePad(arena, sub)) |p| pads.append(arena, p) catch return fallbackGeom(pin_count_hint);
+        } else if (sub.isForm("copper-pour-keepout")) {
+            if (parseCopperPourKeepout(arena, sub)) |k| copper_pour_keepouts.append(arena, k) catch return fallbackGeom(pin_count_hint);
         } else if (sub.isForm("courtyard")) {
             if (parseCourtyard(sub)) |ext| {
                 court_hw = ext.hw;
@@ -146,9 +213,43 @@ pub fn load(
         .fallback = false,
         .ccx = ext_with_margin.cx,
         .ccy = ext_with_margin.cy,
-        .silk_lines = silk_lines.items,
-        .silk_circles = silk_circles.items,
+        .features = .{
+            .silk_lines = silk_lines.items,
+            .silk_circles = silk_circles.items,
+            .copper_pour_keepouts = copper_pour_keepouts.items,
+        },
     };
+}
+
+/// `(copper-pour-keepout F.Cu [(vias not_allowed)] (poly (x y) …))` → a
+/// footprint-local outer-copper pour exclusion, optionally also a through-via
+/// rule area. Unknown layers/shapes are ignored so a bad optional keepout cannot
+/// make the entire footprint fall back to a box.
+fn parseCopperPourKeepout(arena: std.mem.Allocator, node: Node) ?CopperPourKeepout {
+    const cl = node.asList() orelse return null;
+    if (cl.len < 3) return null;
+    const layer = cl[1].asAtom() orelse cl[1].asString() orelse return null;
+    const side: CopperSide = if (std.mem.eql(u8, layer, board_layers.f_cu))
+        .front
+    else if (std.mem.eql(u8, layer, board_layers.b_cu))
+        .back
+    else
+        return null;
+    var vias_not_allowed = false;
+    var poly: ?[]const [2]f64 = null;
+    for (cl[2..]) |child| {
+        if (child.isForm("vias")) {
+            const rule = child.asList() orelse continue;
+            if (rule.len >= 2) {
+                const action = rule[1].asAtom() orelse rule[1].asString() orelse continue;
+                vias_not_allowed = std.mem.eql(u8, action, "not_allowed");
+            }
+        }
+        if (child.isForm("poly")) {
+            poly = parsePadPoly(arena, child) orelse return null;
+        }
+    }
+    return .{ .side = side, .poly = poly orelse return null, .vias_not_allowed = vias_not_allowed };
 }
 
 /// Parse a `(silkscreen (line (x1 y1)(x2 y2)) (circle (cx cy) r) …)` block,
@@ -214,9 +315,20 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
     var drill: f64 = 0;
     var slot_half: [2]f64 = .{ 0, 0 };
     var rratio: f64 = 0;
+    var mask_margin: ?f64 = null;
+    var no_paste = false;
     var poly: []const [2]f64 = &.{};
     for (cl[2..]) |c| {
-        if (c.isForm("pos")) {
+        // `no-paste` is a bare keyword, not a form. The type/shape atoms are in
+        // this same range and can never spell it, so scanning from `cl[2]`
+        // (which every other sub-form here already does) is safe.
+        if (c.asAtom()) |a| {
+            if (std.mem.eql(u8, a, "no-paste")) no_paste = true;
+        }
+        if (c.isForm("mask-margin")) {
+            const ml = c.asList() orelse continue;
+            if (ml.len >= 2) mask_margin = ml[1].asNumber();
+        } else if (c.isForm("pos")) {
             const pl = c.asList() orelse continue;
             if (pl.len >= 2) x = pl[1].asNumber() orelse 0;
             if (pl.len >= 3) y = pl[2].asNumber() orelse 0;
@@ -262,7 +374,7 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
         .npth = npth,
         .drill = drill,
         .slot_half = slot_half,
-        .rratio = rratio,
+        .overrides = .{ .rratio = rratio, .mask_margin = mask_margin, .no_paste = no_paste },
     };
 }
 
@@ -398,6 +510,61 @@ test "load parses a 0402 footprint's pads and courtyard" {
     try testing.expectApproxEqAbs(@as(f64, 0.46), ext.?.hh, 1e-9);
 }
 
+// spec: placement/geometry - parses a pad's own solder-mask margin and its no-paste keyword, defaulting to the board rule when absent
+test "parsePad reads a per-pad mask margin and the no-paste keyword" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // The exact spelling `lib/footprints/fiducial-0p75-2p25.sexp` ships: a
+    // 0.75 mm target under a 2.25 mm mask opening, taking no paste.
+    const nodes = try parser.parse(arena,
+        \\(footprint "fiducial"
+        \\  (pad 1 smd circle (pos 0.00 0.00) (size 0.75 0.75) (mask-margin 0.75) no-paste)
+        \\  (pad 2 smd rect (pos 2.00 0.00) (size 0.50 0.50)))
+    );
+    const children = nodes[0].asList().?;
+    const target = parsePad(arena, children[2]).?;
+    const plain = parsePad(arena, children[3]).?;
+
+    try testing.expectApproxEqAbs(@as(f64, 0.75), target.overrides.mask_margin.?, 1e-9);
+    try testing.expect(target.noPaste());
+    // The board rule applies to a pad that declares nothing, and is REPLACED
+    // (not added to) for one that does.
+    try testing.expectApproxEqAbs(@as(f64, 0.75), target.maskMargin(0.05), 1e-9);
+    try testing.expect(plain.overrides.mask_margin == null);
+    try testing.expect(!plain.noPaste());
+    try testing.expectApproxEqAbs(@as(f64, 0.05), plain.maskMargin(0.05), 1e-9);
+}
+
+test "parseCopperPourKeepout reads its face and polygon" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const nodes = try parser.parse(arena,
+        \\(copper-pour-keepout F.Cu
+        \\  (poly (-1 -1) (1 -1) (1 1) (-1 1)))
+    );
+    const keepout = parseCopperPourKeepout(arena, nodes[0]).?;
+    try testing.expectEqual(CopperSide.front, keepout.side);
+    try testing.expectEqual(@as(usize, 4), keepout.poly.len);
+    try testing.expectApproxEqAbs(@as(f64, -1), keepout.poly[0][0], 1e-9);
+    try testing.expect(!keepout.vias_not_allowed);
+}
+
+test "parseCopperPourKeepout reads a through-via prohibition" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const nodes = try parser.parse(arena,
+        \\(copper-pour-keepout F.Cu
+        \\  (vias not_allowed)
+        \\  (poly (-1 -1) (1 -1) (1 1) (-1 1)))
+    );
+    const keepout = parseCopperPourKeepout(arena, nodes[0]).?;
+    try testing.expect(keepout.vias_not_allowed);
+}
+
 // spec: placement/geometry - synthesizes a fallback box sized by pin count when the footprint is missing
 test "load falls back to a synthesized box for a missing footprint" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -440,7 +607,7 @@ test "parsePad reads oval slots, pad rotation, and roundrect ratio" {
     try testing.expectApproxEqAbs(@as(f64, 0.30), pads.items[0].slot_half[1], 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 30), pads.items[0].rot, 1e-9);
     // The roundrect ratio is captured; a round drill leaves slot_half zero.
-    try testing.expectApproxEqAbs(@as(f64, 0.25), pads.items[1].rratio, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.25), pads.items[1].rratio(), 1e-9);
     try testing.expect(!pads.items[1].isSlot());
     try testing.expect(!pads.items[2].isSlot());
     try testing.expectApproxEqAbs(@as(f64, 0.60), pads.items[2].drill, 1e-9);

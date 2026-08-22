@@ -6,8 +6,11 @@
 //!   button-driven path the schematic viewer wires up.
 
 const std = @import("std");
+const board_layers = @import("../board_layers.zig");
 const json_writer = @import("../json_writer.zig");
 const httpz = @import("httpz");
+const board_state = @import("../kicad_pcb/board_state.zig");
+const id_insert = @import("../id_insert.zig");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
@@ -19,20 +22,23 @@ const fp_mod = @import("../export_kicad_footprint.zig");
 const model_mod = @import("../export_kicad_model.zig");
 const bom = @import("../bom.zig");
 const parser_mod = @import("../sexpr/parser.zig");
-const env_mod_node = @import("../sexpr/ast.zig");
 const env_mod = @import("../eval/env.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const pcb_layout = @import("pcb_layout_page.zig");
 const board_backup = @import("board_backup.zig");
 const optimizer = @import("../placement/optimizer.zig");
+const pose_math = @import("../placement/pose_math.zig");
+const outline_mod = @import("../placement/outline.zig");
+const perimeter_fence = @import("../placement/perimeter_fence.zig");
+const font5x7 = @import("../font5x7.zig");
+const lib_limits = @import("../lib_limits.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
 const http_bad_request: u16 = 400;
 const http_conflict: u16 = 409;
 const http_internal_error: u16 = 500;
-const max_footprint_bytes: usize = 1024 * 1024;
 /// Cap when reading a `.sexp` source to mirror beside the board (matches the
 /// evaluator's own 10 MB ceiling for loaded files).
 const max_source_bytes: usize = 10 * 1024 * 1024;
@@ -42,7 +48,7 @@ const source_dir_suffix = "-source";
 /// Mode applied to each mirrored `.sexp` so it reads as a read-only reference
 /// copy (owner/group/other read, no write). Best-effort on filesystems (some
 /// NAS mounts) that don't honour POSIX permissions.
-const readonly_mode: std.fs.File.Mode = 0o444;
+const readonly_mode: std.Io.File.Permissions = @fromBackingInt(@intCast(0o444));
 /// Provenance banner prepended to each mirrored source file (`{s}` = the file's
 /// project-relative path) so a reader knows it's a generated read-only copy.
 const source_header_fmt =
@@ -81,18 +87,27 @@ const stage_box_stroke_mm: f64 = 0.15;
 const stage_label_size_mm: f64 = 1.5;
 const stage_half: f64 = 0.5; // grid-cell / box centering factor
 const proto_layer_dwgs_user = "BL_Dwgs_User";
+const proto_layer_f_mask = "BL_F_Mask";
+const proto_layer_b_mask = "BL_B_Mask";
 const proto_type_url_boardtext = "type.googleapis.com/kiapi.board.types.BoardText";
 const proto_any_open = "{\"@type\":\"";
 const board_item_op_open = "{\"op\":\"" ++ op_create_board_item ++ "\",\"item\":";
-// Shared `add_via` op fragments (seeded-layout via emission — three call sites:
-// `emitLayoutVias`, `emitBlockVias`, `emitSeedCopper`).
+// Shared copper-op fragments (seeded-layout emission — `emitLayoutVias`,
+// `emitLayoutCopper`, `emitBlockVias`, `emitSeedCopper`).
 const add_via_op_open = "{\"op\":\"add_via\",\"net\":";
+const add_track_op_open = "{\"op\":\"add_track\",\"net\":";
+const add_arc_op_open = "{\"op\":\"add_arc\",\"net\":";
 const via_coords_fmt = ",\"x\":{d},\"y\":{d},\"dia\":{d},\"drill\":{d}}}";
+const free_via_coords_fmt = ",\"x\":{d},\"y\":{d},\"dia\":{d},\"drill\":{d},\"free\":true}}";
+const track_coords_fmt = ",\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"width\":{d},\"layer\":";
+/// Floating-point contact slack for KiCad via/track attachment classification.
+/// mirror-of: src/placement/drc.zig.eps
+const via_track_contact_eps: f64 = 1e-6;
 
 /// Error set for HTTP handlers in this module.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
-    std.fs.File.WriteError || std.fs.File.OpenError || std.fs.File.ReadError ||
-    std.fs.Dir.MakeError || std.fs.Dir.StatFileError ||
+    infra_fs.File.WriteError || infra_fs.File.OpenError || infra_fs.File.ReadError ||
+    infra_fs.Dir.MakeError || infra_fs.Dir.StatFileError ||
     error{ InvalidName, FileTooBig, StreamTooLong, EndOfStream, InvalidEscapeSequence, NotOpenForReading, ReadOnlyFileSystem, LinkQuotaExceeded };
 
 fn warnResolveIdentities(name: []const u8, err: anyerror) void {
@@ -101,52 +116,16 @@ fn warnResolveIdentities(name: []const u8, err: anyerror) void {
 
 // ── Board-state types (shared by the diff engine) ───────────────────────
 
-/// One (pad number, net name) assignment on a KiCad board footprint —
-/// the granularity the diff loop compares against the design's flattened
-/// netlist when deciding whether to emit a set_pad_net op.
-pub const PadAssign = struct { number: []const u8, net: []const u8 };
+/// The board-state types the diff engine compares against the design's
+/// flattened netlist. DECLARED in `kicad_pcb/board_state.zig` — they describe
+/// the shape of a footprint ON A BOARD, which is the file format's business,
+/// and the reader that fills them in lives there — and re-exported here so the
+/// diff engine's own spelling is unchanged.
+pub const PadAssign = board_state.PadAssign;
+pub const BoardFp = board_state.BoardFp;
 
-/// Snapshot of one footprint as it exists on the user's `.kicad_pcb`.
-/// Built either by the Go IPC agent from KiCad's protobuf socket or by
-/// the file-based reader directly from the on-disk file; both produce
-/// the same shape so `runSyncPlan` doesn't care which path filled it.
-pub const BoardFp = struct {
-    /// Project-stable canopy_uuid custom field. Empty when the footprint
-    /// has never been synced (or was placed manually in KiCad).
-    uuid: []const u8,
-    /// KiCad-internal handle. Always populated. Echoed back in emitted ops
-    /// so the agent's apply path can target the right footprint regardless
-    /// of whether canopy_uuid is set yet.
-    kicad_uuid: []const u8,
-    ref: []const u8,
-    value: []const u8,
-    footprint_name: []const u8,
-    /// Every custom Field on the KiCad footprint, keyed by name. The agent
-    /// posts the full map per sync so the server can diff arbitrary design
-    /// properties (mpn, manufacturer, datasheet, …) without the client
-    /// knowing which fields exist — adding a new BOM column is a pure
-    /// server-side change.
-    fields: std.StringHashMapUnmanaged([]const u8),
-    pads: []const PadAssign,
-    /// Mirror of KiCad's "Lock footprint" toggle, parsed from the board's
-    /// `(locked yes)`. The sync no longer locks or unlocks footprints —
-    /// locking is left entirely to the user — so this is now informational
-    /// only (still surfaced by the reader, not acted on by the diff).
-    locked: bool,
-    /// The current `(model …)` 3D-model placement on the board, parsed from
-    /// `(offset (xyz …))` / `(rotate (xyz …))`. Lets the diff detect when a
-    /// footprint's model orientation drifted from `model-config.json` and
-    /// re-bake just that part (the 3D-alignment workflow), instead of either
-    /// re-baking every part (`?refresh=1`) or never updating placed models.
-    /// `has_model` is false when the board footprint carries no `(model …)`.
-    has_model: bool = false,
-    model_offset: [3]f64 = .{ 0, 0, 0 },
-    model_rotate: [3]f64 = .{ 0, 0, 0 },
-};
-
-/// Pick the UUID the agent should use to find this footprint in its cache.
-/// Prefer kicad_uuid when present (always wired by the modern agent); fall
-/// back to canopy uuid for older agents that don't ship it yet.
+/// Pick the UUID the writer should use to find this footprint. Prefer KiCad's
+/// UUID, falling back to the canopy UUID for older board snapshots.
 fn opTargetUuid(m: BoardFp) []const u8 {
     if (m.kicad_uuid.len > 0) return m.kicad_uuid;
     return m.uuid;
@@ -162,16 +141,55 @@ fn opTargetUuid(m: BoardFp) []const u8 {
 /// `?refresh=1` when both are set.
 const SwapMode = enum { auto, refresh_all, none };
 
+/// One sync request's **first-insertion seeding policy**: which layout authority
+/// places a freshly-added part, and how much of that layout's copper rides along.
+/// Grouped into one value because the knobs only ever make sense together — a
+/// caller asking for the design's own layout verbatim is simultaneously saying
+/// "don't let a module layout override it" — and so the request flags travel as
+/// a unit from `syncKicadPcbApi` through `runSyncPlan` into `DiffContext`.
+pub const SeedOptions = struct {
+    /// When true (default), a not-yet-placed `(sub-block …)` whose module has its
+    /// own `lib/modules/<m>.layouts.json` default is seeded from THAT layout into
+    /// the off-board staging band (`seedSubBlocks`, tier 1 of `emitStagedAdds`).
+    /// `?no_seed_blocks=1` turns it off so the whole-design layout is the only
+    /// placement authority. Tier 1 also self-suppresses on a fresh board whose
+    /// design layout already names every add — see `emitStagedAdds`.
+    sub_blocks: bool = true,
+    /// When true (default), a first-insertion sync that seeds parts from the
+    /// design's default layout also writes GND-plane stitching vias into the
+    /// board (computed — see `loadSyncVias` + `emitLayoutVias`) and that layout's
+    /// OWN saved vias (`emitLayoutCopper`). Opt-out via `?no_layout_vias=1`.
+    layout_vias: bool = true,
+    /// When true (default), that same seed also writes the saved layout's routed
+    /// tracks (`emitLayoutCopper`) — the copper the board was routed with, which
+    /// otherwise has to be pasted into the `.kicad_pcb` by hand. Opt-out via
+    /// `?no_layout_tracks=1` to seed placement only.
+    layout_tracks: bool = true,
+    /// Explicit per-sub-circuit layout-seeding selection (the Push modal's
+    /// checkboxes; body `{"seed":["mcu","Power Input", …]}`). When non-null,
+    /// each NAMED group's freshly-added parts are placed from the design's saved
+    /// whole-design layout instead of the off-board staging grid — anchored on
+    /// the group's main IC if it's already on the board, else generated as one
+    /// labelled box off-board (see `seedSelectedGroups`). Null ⇒ no selection,
+    /// the default staging flow runs unchanged. `all` is the `"*"` / `"all"`
+    /// shorthand selecting every seedable group.
+    groups: ?std.StringHashMapUnmanaged(void) = null,
+    all: bool = false,
+    /// Exact named whole-board layout selected by the PCB editor. This turns
+    /// seeding into an authoritative placement/copper/outline replacement.
+    authoritative_layout_name: ?[]const u8 = null,
+};
+
 /// Full request payload for `runSyncPlan`: the board's current footprint
-/// list plus the knobs that influence matching (migration heuristics,
-/// stale-prune mode, applied-op suppression). Built by the file-based PCB
+/// list plus the knobs that influence matching (migration heuristics and
+/// stale-prune mode). Built by the file-based PCB
 /// reader from the on-disk `.kicad_pcb`.
 pub const ParsedSyncPlan = struct {
     board: []const BoardFp,
     prune_stale: bool,
     /// When true, after canopy_uuid + ref_des matching, try a third tier
-    /// keyed on (parent_path, footprint_name, value). Used by the agent's
-    /// `--migrate` mode to recover board footprints whose ref_des drifted
+    /// keyed on (parent_path, footprint_name, value). Used by migrate mode to
+    /// recover board footprints whose ref_des drifted
     /// from the design's auto-numbering. Only applied when the (key, side)
     /// pair is unique on BOTH the design and the board so we never silently
     /// remap the wrong footprint.
@@ -189,30 +207,9 @@ pub const ParsedSyncPlan = struct {
     /// which is why `.none` (`?no_swap=1`) exists for boards whose lands are
     /// hand-tuned and must survive a sync.
     swap: SwapMode = .auto,
-    /// When true (default), a first-insertion sync that seeds parts from the
-    /// design's default layout also writes their GND-plane stitching vias into
-    /// the board (see `loadSyncVias` + `emitLayoutVias`). Opt-out via
-    /// `?no_layout_vias=1` to write placement only. Traces are never written.
-    emit_layout_vias: bool = true,
-    /// Set of `<uuid>|<op>|<key>|<value>` fingerprints the agent has
-    /// already pushed in prior syncs. Server skips re-emitting any
-    /// state-asserting op whose fingerprint is in this set — works
-    /// around KiCad IPC GetItems returning stale custom-Field and
-    /// pad-net values after the UpdateItems write that set them. The
-    /// agent rewrites this set from `<board>.applied_ops.json` on
-    /// every sync; deleting that sidecar is the user-facing escape
-    /// hatch to force a full re-emit.
-    applied_ops: std.StringHashMapUnmanaged(void),
-    /// Explicit per-sub-circuit layout-seeding selection (the Push modal's
-    /// checkboxes; body `{"seed":["mcu","Power Input", …]}`). When non-null,
-    /// each NAMED group's freshly-added parts are placed from the design's saved
-    /// whole-design layout instead of the off-board staging grid — anchored on
-    /// the group's main IC if it's already on the board, else generated as one
-    /// labelled box off-board (see `seedSelectedGroups`). Null ⇒ no selection,
-    /// the default staging flow runs unchanged. `seed_all` is the `"*"` / `"all"`
-    /// shorthand selecting every seedable group.
-    seed_groups: ?std.StringHashMapUnmanaged(void) = null,
-    seed_all: bool = false,
+    /// First-insertion seeding policy — which layout places a fresh part and how
+    /// much of its copper comes with it. See `SeedOptions`.
+    seed: SeedOptions = .{},
     /// Live footprint positions on the target board (KiCad-uuid → placement),
     /// from `collectPlacements`. Lets `computeGroupAnchors` find where a group's
     /// anchor currently sits so `seedSelectedGroups` can place the rest around
@@ -220,12 +217,6 @@ pub const ParsedSyncPlan = struct {
     /// off-board).
     board_positions: ?*const std.StringHashMapUnmanaged(FpPlacement) = null,
 };
-
-/// Compose the fingerprint string used as the key in
-/// `ParsedSyncPlan.applied_ops` during emission-suppression checks.
-fn appliedOpFingerprint(arena: std.mem.Allocator, uuid: []const u8, op: []const u8, key: []const u8, value: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(arena, "{s}|{s}|{s}|{s}", .{ uuid, op, key, value });
-}
 
 /// Strip the `lib:` prefix that netlist footprint specs carry (`"lib:R_0402"`
 /// → `"R_0402"`). Inputs without a prefix pass through unchanged.
@@ -272,7 +263,7 @@ fn loadKicadMod(
     component: []const u8,
 ) ?[]const u8 {
     const fp_path = std.fmt.allocPrint(spc.arena, path_fmt_fp_sexp, .{ spc.project_dir, fp_name }) catch return null;
-    const fp_source = infra_fs.cwd().readFileAlloc(spc.arena, fp_path, max_footprint_bytes) catch return null;
+    const fp_source = infra_fs.cwd().readFileAlloc(spc.arena, fp_path, lib_limits.max_footprint_bytes) catch return null;
     const mcfg = spc.model_cfg.get(fp_name);
     const model_name = if (mcfg) |c|
         (c.model orelse fp_mod.findModelFile(spc.arena, spc.project_dir, fp_name, component))
@@ -289,176 +280,8 @@ fn loadKicadMod(
     ) catch null;
 }
 
-/// Build a proto-canonical JSON description of `fp_name` matching the
-/// shape that Go's protojson.Unmarshal expects for a
-/// `kiapi.board.types.Footprint` message. The agent feeds this directly
-/// into `*board_types.Footprint` without any geometry-aware code on its
-/// side — adding a new pad shape, type, or layer is a server-only
-/// change.
-///
-/// Returns the JSON text or null when no `.sexp` source exists. Pad nets
-/// are NOT baked in here; the surrounding op carries `pad_nets` so the
-/// per-instance assignment travels separately from the (shared) geometry.
-fn loadFootprintDef(
-    spc: *SyncPlanContext,
-    fp_name: []const u8,
-) ?[]const u8 {
-    return loadFootprintDefImpl(spc, fp_name, null, null, "") catch null;
-}
-
-/// Like loadFootprintDef but also bakes per-instance Field items
-/// (canopy_uuid + design properties like MPN / Manufacturer) into the
-/// proto-canonical JSON. Used by `add` ops so KiCad records the custom
-/// fields on the first CreateItems — without this the agent would
-/// need a follow-up sync to land set_field ops on every freshly-added
-/// fp, and the user sees the "press sync twice" bug.
-fn loadFootprintDefForInstance(
-    spc: *SyncPlanContext,
-    fp_name: []const u8,
-    inst: export_kicad.FlatInstance,
-    canopy_net: ?[]const u8,
-    section: []const u8,
-) ?[]const u8 {
-    return loadFootprintDefImpl(spc, fp_name, inst, canopy_net, section) catch null;
-}
-
-fn loadFootprintDefImpl(
-    spc: *SyncPlanContext,
-    fp_name: []const u8,
-    inst_opt: ?export_kicad.FlatInstance,
-    canopy_net: ?[]const u8,
-    section: []const u8,
-) !?[]const u8 {
-    const fp_path = try std.fmt.allocPrint(spc.arena, path_fmt_fp_sexp, .{ spc.project_dir, fp_name });
-    const fp_source = infra_fs.cwd().readFileAlloc(spc.arena, fp_path, max_footprint_bytes) catch return null;
-
-    const nodes = parser_mod.parse(spc.arena, fp_source) catch return null;
-    if (nodes.len == 0 or !nodes[0].isForm(form_head_footprint)) return null;
-    const children = nodes[0].asList() orelse return null;
-    if (children.len < 2) return null;
-
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(spc.arena);
-    try w.writeAll("{\"id\":{\"libraryNickname\":\"eda-sync\",\"entryName\":");
-    try json_writer.writeString(w, fp_name);
-    try w.writeAll("},\"items\":[");
-    var first_item = true;
-    for (children[2..]) |child| {
-        if (!child.isForm("pad")) continue;
-        try writePadProtoJson(spc.arena, w, child, &first_item);
-    }
-    // Courtyard / silkscreen / fab graphics ship inline alongside Pads.
-    // Without these the wurth WA-SMSI mounting spacer renders without its
-    // F.CrtYd boundary because KiCad treats our partial Definition.Items as
-    // authoritative and never reads the staged library. RunAction "Update
-    // Footprint From Library" was the intended escape hatch but every
-    // candidate name returned RAS_INVALID, so we ship the geometry directly.
-    // `fab` is the package body outline + pin-1 marker (F.Fab) — many parts
-    // (e.g. fine-pitch LGA/QFN like lga-cc-40-7-adi) carry their outline only
-    // on fab, so dropping it left the synced footprint with no body at all.
-    for (children[2..]) |child| {
-        if (child.isForm("courtyard")) {
-            try writeCourtyardProtoJson(w, child, &first_item);
-        } else if (child.isForm("silkscreen")) {
-            try writeGeomBlockProtoJson(w, child, proto_layer_f_silk, silk_stroke_mm, &first_item);
-        } else if (child.isForm("fab")) {
-            try writeGeomBlockProtoJson(w, child, proto_layer_f_fab, fab_stroke_mm, &first_item);
-        }
-    }
-    if (inst_opt) |inst| {
-        try writeFieldProtoJson(w, field_canopy_uuid, inst.uuid, &first_item);
-        for (inst.properties) |p| {
-            if (skipDesignProperty(p.key)) continue;
-            if (p.value.len == 0) continue;
-            try writeFieldProtoJson(w, canonicalFieldName(p.key), p.value, &first_item);
-        }
-        // Bake the passive routing hint so it lands on the first CreateItems
-        // rather than waiting for a follow-up set_field on the next sync.
-        if (canopy_net) |cn| {
-            if (cn.len > 0) try writeFieldProtoJson(w, field_canopy_net, cn, &first_item);
-        }
-        if (section.len > 0) try writeFieldProtoJson(w, field_canopy_section, section, &first_item);
-    }
-    try w.writeAll("]}");
-    return buf.items;
-}
-
-/// Emit one custom Field as an Any-wrapped proto-canonical JSON object.
-/// Used to bake canopy_uuid + design properties (MPN / Manufacturer / …)
-/// into the FootprintInstance.Definition.Items list on `add` ops, so the
-/// agent's first CreateItems already carries them and we don't need a
-/// second sync round trip to land set_field ops.
-fn writeFieldProtoJson(w: anytype, name: []const u8, value: []const u8, first: *bool) !void {
-    if (!first.*) try w.writeAll(",");
-    first.* = false;
-    try w.writeAll("{\"@type\":\"type.googleapis.com/kiapi.board.types.Field\",\"name\":");
-    try json_writer.writeString(w, name);
-    try w.writeAll(",\"text\":{\"text\":{\"text\":");
-    try json_writer.writeString(w, value);
-    try w.writeAll("}}}");
-}
-
-// Proto enum string names — these must match the `protobuf:"...,enum=..."`
-// values the generated Go .pb.go expects for protojson decoding. Adding a
-// new shape/type/layer is one line here on the server, with NO agent change.
-const proto_type_url_pad = "type.googleapis.com/kiapi.board.types.Pad";
+// KiCad board-item JSON names used for staging graphics and mask segments.
 const proto_type_url_boardshape = "type.googleapis.com/kiapi.board.types.BoardGraphicShape";
-const proto_padtype_smd = "PT_SMD";
-const proto_padtype_pth = "PT_PTH";
-const proto_padtype_npth = "PT_NPTH";
-const proto_padstack_normal = "PST_NORMAL";
-const proto_layer_f_crtyd = "BL_F_CrtYd";
-const proto_layer_f_silk = "BL_F_SilkS";
-const proto_layer_f_fab = "BL_F_Fab";
-const courtyard_stroke_mm: f64 = 0.05;
-const silk_stroke_mm: f64 = 0.12;
-const fab_stroke_mm: f64 = 0.1;
-const rect_node_min_children: usize = 5;
-const poly_min_points: usize = 3;
-const default_roundrect_rratio: f64 = 0.25;
-
-fn protoPadType(short: []const u8) []const u8 {
-    if (std.mem.eql(u8, short, "smd")) return proto_padtype_smd;
-    if (std.mem.eql(u8, short, "thru_hole") or std.mem.eql(u8, short, "thru")) return proto_padtype_pth;
-    if (std.mem.eql(u8, short, "np_thru_hole") or std.mem.eql(u8, short, "np_thru") or std.mem.eql(u8, short, "npth")) return proto_padtype_npth;
-    return proto_padtype_smd;
-}
-
-/// True when `s` is an EDA pad-type keyword. Used to distinguish the two
-/// `(pad …)` syntactic forms: numbered pads start `(pad "1" smd …)` while
-/// unnumbered NPTH mounting holes are `(pad npth circle …)` — the parser
-/// has to decide whether nodes[1] is a number or the type.
-fn isPadTypeKeyword(s: []const u8) bool {
-    return std.mem.eql(u8, s, "smd") or
-        std.mem.eql(u8, s, "thru") or
-        std.mem.eql(u8, s, "thru_hole") or
-        std.mem.eql(u8, s, "np_thru") or
-        std.mem.eql(u8, s, "np_thru_hole") or
-        std.mem.eql(u8, s, "npth");
-}
-
-fn protoPadShape(short: []const u8) []const u8 {
-    if (std.mem.eql(u8, short, "rect")) return "PSS_RECTANGLE";
-    if (std.mem.eql(u8, short, "circle")) return "PSS_CIRCLE";
-    if (std.mem.eql(u8, short, "oval")) return "PSS_OVAL";
-    if (std.mem.eql(u8, short, "roundrect")) return "PSS_ROUNDRECT";
-    return "PSS_RECTANGLE";
-}
-
-fn protoBoardLayer(short: []const u8) []const u8 {
-    if (std.mem.eql(u8, short, "F.Cu")) return "BL_F_Cu";
-    if (std.mem.eql(u8, short, "B.Cu")) return "BL_B_Cu";
-    if (std.mem.eql(u8, short, "F.Paste")) return "BL_F_Paste";
-    if (std.mem.eql(u8, short, "F.Mask")) return "BL_F_Mask";
-    if (std.mem.eql(u8, short, "B.Mask")) return "BL_B_Mask";
-    if (std.mem.eql(u8, short, "F.SilkS")) return "BL_F_SilkS";
-    if (std.mem.eql(u8, short, "B.SilkS")) return "BL_B_SilkS";
-    if (std.mem.eql(u8, short, "F.CrtYd")) return "BL_F_CrtYd";
-    if (std.mem.eql(u8, short, "B.CrtYd")) return "BL_B_CrtYd";
-    if (std.mem.eql(u8, short, "F.Fab")) return "BL_F_Fab";
-    if (std.mem.eql(u8, short, "B.Fab")) return "BL_B_Fab";
-    return "BL_F_Cu";
-}
 
 /// Emit a `{xNm, yNm}` Vector2 in proto-canonical JSON form.
 fn writeProtoVec2(w: anytype, x_mm: f64, y_mm: f64) !void {
@@ -479,14 +302,6 @@ fn writeBoardShapeOpen(w: anytype, layer: []const u8, stroke_mm: f64, first: *bo
     try w.writeAll("\"fill\":{\"fillType\":\"GFT_UNFILLED\"}},");
 }
 
-fn writeCircleGeom(w: anytype, cx: f64, cy: f64, r: f64) !void {
-    try w.writeAll("\"circle\":{\"center\":");
-    try writeProtoVec2(w, cx, cy);
-    try w.writeAll(",\"radiusPoint\":");
-    try writeProtoVec2(w, cx + r, cy);
-    try w.writeAll("}");
-}
-
 fn writeRectGeom(w: anytype, x1: f64, y1: f64, x2: f64, y2: f64) !void {
     try w.writeAll("\"rectangle\":{\"topLeft\":");
     try writeProtoVec2(w, x1, y1);
@@ -503,200 +318,7 @@ fn writeSegmentGeom(w: anytype, sx: f64, sy: f64, ex: f64, ey: f64) !void {
     try w.writeAll("}");
 }
 
-fn parseCirclePoints(node: env_mod_node.Node) ?struct { cx: f64, cy: f64, r: f64 } {
-    const cl = node.asList() orelse return null;
-    if (cl.len < 3) return null;
-    const center = cl[1].asList() orelse return null;
-    if (center.len < 2) return null;
-    const cx = center[0].asNumber() orelse return null;
-    const cy = center[1].asNumber() orelse return null;
-    const r = cl[2].asNumber() orelse return null;
-    return .{ .cx = cx, .cy = cy, .r = r };
-}
-
-fn parseSegmentPoints(node: env_mod_node.Node) ?struct { sx: f64, sy: f64, ex: f64, ey: f64 } {
-    const cl = node.asList() orelse return null;
-    if (cl.len < 3) return null;
-    const start = cl[1].asList() orelse return null;
-    const end = cl[2].asList() orelse return null;
-    if (start.len < 2 or end.len < 2) return null;
-    return .{
-        .sx = start[0].asNumber() orelse return null,
-        .sy = start[1].asNumber() orelse return null,
-        .ex = end[0].asNumber() orelse return null,
-        .ey = end[1].asNumber() orelse return null,
-    };
-}
-
-/// Emit a `(courtyard …)` form as one or more BoardGraphicShape Any-wrapped
-/// items on F.CrtYd. Supports `(rect X1 Y1 X2 Y2)` and
-/// `(circle (CX CY) R)` — the latter is what mounting-spacer footprints use.
-fn writeCourtyardProtoJson(w: anytype, node: env_mod_node.Node, first: *bool) !void {
-    const children = node.asList() orelse return;
-    for (children[1..]) |child| {
-        if (child.isForm("rect")) {
-            const cl = child.asList() orelse continue;
-            if (cl.len < rect_node_min_children) continue;
-            const x1 = cl[1].asNumber() orelse continue;
-            const y1 = cl[2].asNumber() orelse continue;
-            const x2 = cl[3].asNumber() orelse continue;
-            const y2 = cl[4].asNumber() orelse continue;
-            try writeBoardShapeOpen(w, proto_layer_f_crtyd, courtyard_stroke_mm, first);
-            try writeRectGeom(w, x1, y1, x2, y2);
-            try w.writeAll("}}");
-        } else if (child.isForm("circle")) {
-            const c = parseCirclePoints(child) orelse continue;
-            try writeBoardShapeOpen(w, proto_layer_f_crtyd, courtyard_stroke_mm, first);
-            try writeCircleGeom(w, c.cx, c.cy, c.r);
-            try w.writeAll("}}");
-        }
-    }
-}
-
-/// Emit a `(line …)`/`(circle …)` geometry block (`silkscreen` or `fab`) as
-/// BoardGraphicShape items on the given board layer. Both block types carry
-/// the same shape grammar, so the silkscreen (F.SilkS) and fab (F.Fab) call
-/// sites share this writer — differing only in target layer + stroke width.
-fn writeGeomBlockProtoJson(w: anytype, node: env_mod_node.Node, layer: []const u8, stroke_mm: f64, first: *bool) !void {
-    const children = node.asList() orelse return;
-    for (children[1..]) |child| {
-        if (child.isForm("line")) {
-            const seg = parseSegmentPoints(child) orelse continue;
-            try writeBoardShapeOpen(w, layer, stroke_mm, first);
-            try writeSegmentGeom(w, seg.sx, seg.sy, seg.ex, seg.ey);
-            try w.writeAll("}}");
-        } else if (child.isForm("circle")) {
-            const c = parseCirclePoints(child) orelse continue;
-            try writeBoardShapeOpen(w, layer, stroke_mm, first);
-            try writeCircleGeom(w, c.cx, c.cy, c.r);
-            try w.writeAll("}}");
-        } else if (child.isForm("rect")) {
-            const cl = child.asList() orelse continue;
-            if (cl.len < rect_node_min_children) continue;
-            const x1 = cl[1].asNumber() orelse continue;
-            const y1 = cl[2].asNumber() orelse continue;
-            const x2 = cl[3].asNumber() orelse continue;
-            const y2 = cl[4].asNumber() orelse continue;
-            try writeBoardShapeOpen(w, layer, stroke_mm, first);
-            try writeRectGeom(w, x1, y1, x2, y2);
-            try w.writeAll("}}");
-        } else if (child.isForm("poly")) {
-            // The proto BoardGraphicShape path has no polygon-fill geometry,
-            // so trace the outline as one segment per edge, closing back to
-            // the first point. (The file-based sync writes the real fp_poly
-            // via the .kicad_mod; this only covers the legacy IPC agent.)
-            const pts = child.asList() orelse continue;
-            if (pts.len < 1 + poly_min_points) continue;
-            const verts = pts[1..];
-            for (verts, 0..) |a_node, i| {
-                const a = a_node.asList() orelse continue;
-                const b = verts[(i + 1) % verts.len].asList() orelse continue;
-                if (a.len < 2 or b.len < 2) continue;
-                const ax = a[0].asNumber() orelse continue;
-                const ay = a[1].asNumber() orelse continue;
-                const bx = b[0].asNumber() orelse continue;
-                const by = b[1].asNumber() orelse continue;
-                try writeBoardShapeOpen(w, layer, stroke_mm, first);
-                try writeSegmentGeom(w, ax, ay, bx, by);
-                try w.writeAll("}}");
-            }
-        }
-    }
-}
-
-/// Emit one pad as a proto-canonical Any-wrapped Pad message. The shape is
-/// what `protojson.Unmarshal` expects for `kiapi.board.types.Pad`:
-/// camelCase field names, string enum values, and a `@type` field that
-/// makes the decode resolve into `*board_types.Pad` on the agent side.
-///
-/// Two `(pad …)` forms in the EDA DSL:
-///   (pad "1" smd roundrect (pos …) (size …))   — numbered electrical pad
-///   (pad npth circle (pos …) (size …) (drill …))   — unnumbered NPTH mounting hole
-/// We detect the second form by checking whether nodes[1] is a known
-/// pad-type keyword; otherwise nodes[1] is the pad number string.
-fn writePadProtoJson(arena: std.mem.Allocator, w: anytype, pad: env_mod_node.Node, first: *bool) !void {
-    const nodes = pad.asList() orelse return;
-    if (nodes.len < 3) return;
-    const unnumbered = if (nodes[1].asAtom()) |a| isPadTypeKeyword(a) else false;
-    const type_idx: usize = if (unnumbered) 1 else 2;
-    const shape_idx: usize = if (unnumbered) 2 else 3;
-    if (nodes.len <= shape_idx) return;
-
-    const num: []const u8 = if (unnumbered) "" else (padNumberText(arena, nodes[1]) orelse return);
-    const ptype = nodes[type_idx].asAtom() orelse return;
-    const shape = nodes[shape_idx].asAtom() orelse return;
-
-    var pos_x: f64 = 0;
-    var pos_y: f64 = 0;
-    var pos_rot: f64 = 0;
-    var size_w: f64 = 0;
-    var size_h: f64 = 0;
-    var drill_d: f64 = 0;
-    // Default rratio matches KiCad's library default. Override via
-    // `(roundrect_rratio R)` — 0.5 turns a square pad into a circle, used
-    // by mounting-spacer footprints (e.g. wurth WA-SMSI).
-    var rratio: f64 = default_roundrect_rratio;
-
-    for (nodes[shape_idx + 1 ..]) |n| {
-        if (n.isForm("pos")) {
-            const pl = n.asList().?;
-            if (pl.len >= 3) {
-                pos_x = pl[1].asNumber() orelse 0;
-                pos_y = pl[2].asNumber() orelse 0;
-            }
-            if (pl.len >= 4) pos_rot = pl[3].asNumber() orelse 0;
-        } else if (n.isForm("size")) {
-            const sl = n.asList().?;
-            if (sl.len >= 3) {
-                size_w = sl[1].asNumber() orelse 0;
-                size_h = sl[2].asNumber() orelse 0;
-            }
-        } else if (n.isForm("drill")) {
-            const dl = n.asList().?;
-            if (dl.len >= 2) drill_d = dl[1].asNumber() orelse 0;
-        } else if (n.isForm("roundrect_rratio")) {
-            const rl = n.asList().?;
-            if (rl.len >= 2) rratio = rl[1].asNumber() orelse default_roundrect_rratio;
-        }
-    }
-
-    if (!first.*) try w.writeAll(",");
-    first.* = false;
-    const proto_type = protoPadType(ptype);
-    const proto_shape = protoPadShape(shape);
-
-    try w.writeAll(proto_any_open ++ proto_type_url_pad ++ "\",\"id\":{},\"number\":");
-    try json_writer.writeString(w, num);
-    try w.print(",\"type\":\"{s}\"", .{proto_type});
-    try w.print(",\"position\":{{\"xNm\":{d},\"yNm\":{d}}}", .{ mmToNm(pos_x), mmToNm(pos_y) });
-    try w.writeAll(",\"padStack\":{");
-    try w.writeAll("\"type\":\"" ++ proto_padstack_normal ++ "\",");
-    // Standard layer sets per pad type — KiCad's IPC needs both the
-    // top-level `layers` array (which physical layers the pad lives on)
-    // and a `copperLayers[]` describing the shape on each copper layer.
-    if (std.mem.eql(u8, proto_type, proto_padtype_smd)) {
-        try w.writeAll("\"layers\":[\"BL_F_Cu\",\"BL_F_Paste\",\"BL_F_Mask\"],");
-    } else {
-        try w.writeAll("\"layers\":[\"BL_F_Cu\",\"BL_B_Cu\",\"BL_F_Mask\",\"BL_B_Mask\"],");
-    }
-    try w.writeAll("\"copperLayers\":[{");
-    try w.print("\"layer\":\"{s}\",\"shape\":\"{s}\"", .{ protoBoardLayer("F.Cu"), proto_shape });
-    try w.print(",\"size\":{{\"xNm\":{d},\"yNm\":{d}}}", .{ mmToNm(size_w), mmToNm(size_h) });
-    if (std.mem.eql(u8, proto_shape, "PSS_ROUNDRECT")) {
-        try w.print(",\"cornerRoundingRatio\":{d}", .{rratio});
-    }
-    try w.writeAll("}]");
-    try w.print(",\"angle\":{{\"valueDegrees\":{d}}}", .{pos_rot});
-    if (drill_d > 0) {
-        const d_nm = mmToNm(drill_d);
-        try w.writeAll(",\"drill\":{\"startLayer\":\"BL_F_Cu\",\"endLayer\":\"BL_B_Cu\",");
-        try w.print("\"diameter\":{{\"xNm\":{d},\"yNm\":{d}}}}}", .{ d_nm, d_nm });
-    }
-    try w.writeAll("}}");
-}
-
-/// KiCad's IPC measures distances in nanometres (1 mm = 1e6 nm). Used
-/// when emitting Vector2 messages in proto-canonical JSON.
+/// Board-item JSON stores distances in nanometres (1 mm = 1e6 nm).
 const nm_per_mm: f64 = 1_000_000.0;
 
 /// Convert a millimetre value to nanometres (KiCad's wire unit). Returns
@@ -704,20 +326,6 @@ const nm_per_mm: f64 = 1_000_000.0;
 /// footprint.
 fn mmToNm(mm: f64) i64 {
     return numeric.checkedInt(i64, mm * nm_per_mm) orelse 0;
-}
-
-/// Pad numbers in EDA `.sexp` come in three flavors:
-///   - bare digit token  (1, 2, …) — parsed as `int` by the sexpr parser
-///   - bare alphanumeric (MP1, A1) — parsed as `atom`
-///   - quoted             ("1A")    — parsed as `string`
-/// Normalise all three to a heap-allocated text slice.
-fn padNumberText(arena: std.mem.Allocator, n: env_mod_node.Node) ?[]const u8 {
-    if (n.asAtom()) |a| return a;
-    if (n.asString()) |s| return s;
-    switch (n.tag) {
-        .int => |i| return std.fmt.allocPrint(arena, "{d}", .{i}) catch null,
-        else => return null,
-    }
 }
 
 const SyncSummary = struct {
@@ -733,37 +341,45 @@ const SyncSummary = struct {
     removed: u32 = 0,
     swapped: u32 = 0,
     flagged_stale: u32 = 0,
-    /// Count of state-asserting ops the diff WOULD have emitted but
-    /// skipped because the agent's applied_ops sidecar said it had
-    /// already pushed an identical (uuid, op, key, value) fingerprint.
-    /// Surfaced to the user via the agent's result toast so they can
-    /// see "the server kept trying to re-do work that already landed."
-    suppressed: u32 = 0,
     /// swap_footprint ops a `?no_swap=1` sync withheld — matched parts whose
     /// geometry differs from the design library but whose existing board
     /// lands were deliberately kept (see `SwapMode.none`).
     swaps_suppressed: u32 = 0,
-    /// GND stitching vias emitted when seeding fresh parts from the default
-    /// layout (`emitLayoutVias`). Pre-dedup count; the writer reports how many
-    /// actually landed (`ApplyStats.copper.vias`) after position de-dup.
+    /// Vias emitted when seeding fresh parts from a saved layout: the computed
+    /// GND stitching pass (`emitLayoutVias`/`emitBlockVias`) plus the layout's
+    /// own saved vias (`emitLayoutCopper`/`emitSeedCopper`). Pre-dedup count; the
+    /// writer reports how many actually landed (`ApplyStats.copper.vias`) after
+    /// position de-dup, which is what collapses a computed via onto a saved one.
     vias: u32 = 0,
-    /// Routed copper segments emitted when seeding a sub-circuit from its module
-    /// layout (`emitSeedCopper`) — the module's hand routing carried onto the
-    /// board. Pre-dedup count; the writer reports how many actually landed
-    /// (`ApplyStats.copper.tracks`) after coincident-segment de-dup.
+    /// Routed copper segments emitted when seeding from a saved layout — the
+    /// whole-design layout's own routing (`emitLayoutCopper`) or a sub-circuit's
+    /// module routing carried onto the board (`emitSeedCopper`). Pre-dedup count;
+    /// the writer reports how many actually landed (`ApplyStats.copper.tracks`)
+    /// after coincident-segment de-dup.
     tracks: u32 = 0,
     /// Sub-blocks seeded from their own module default layout this sync
-    /// (`seedSubBlocks`). When > 0, the whole-design via path (`emitLayoutVias`)
-    /// is skipped — the per-block path owns via emission.
+    /// (`seedSubBlocks`). When > 0, the whole-design copper paths
+    /// (`emitLayoutCopper`/`emitLayoutVias`) are skipped — those parts sit in the
+    /// staging band at block-local offsets, nowhere near whole-design copper.
     blocks: u32 = 0,
+    /// Existing footprints whose pose changes during an explicit authoritative
+    /// layout push. Fresh adds remain counted under `added`.
+    layout_parts: u32 = 0,
+    /// Straight Edge.Cuts segments emitted from the saved layout's finished
+    /// outline during an authoritative push.
+    outline_edges: u32 = 0,
+    /// EDA-authored pour zones present in the selected layout. They are
+    /// reported so the preview can say they are not yet exported; existing
+    /// KiCad zones are preserved in this transitional bridge.
+    layout_zones: u32 = 0,
 };
 
-/// Internal result of running the diff against a parsed plan. Holds the
-/// fully-formed response body (envelope + ops list as JSON) plus the
-/// summary counters and design version. The file-based PCB sync parses
-/// the ops list back out of `body` to apply them locally.
+/// Internal result of running the diff against a parsed plan. `body` is the
+/// dry-run response envelope; `ops_json` is the same operation array exposed
+/// directly to the file writer so the apply path does not reparse the envelope.
 pub const SyncRunResult = struct {
     body: []const u8,
+    ops_json: []const u8,
     version: u64,
     summary: SyncSummary,
 };
@@ -771,17 +387,102 @@ pub const SyncRunResult = struct {
 /// What went wrong before the diff loop could even start: a missing
 /// design file, a build error, or the file not being a design-block.
 /// Pure failure modes — every successful run returns SyncRunResult.
-pub const SyncRunError = error{ NotADesign, BuildFailed } || HandlerError;
+pub const SyncRunError = error{ NotADesign, BuildFailed, LayoutNotFound, LayoutIncomplete } || HandlerError;
 
-/// Populate the pin→net maps from the flattened netlist in one pass.
-///
-/// Two-stage net-name normalisation runs first:
-///  1. Dot-collapse: `(decouple …)` per-pin sub-nets (`<rail>.<refdes>.<pin>`,
-///     e.g. `VDD.U18.IN`) share the rail's electrical net — collapse to the
-///     part before the first `.`.
-///  2. Slash-strip: sub-block path prefixes (`adc1/REGCAP`) are stripped only
-///     when the bare name is globally unique; `adc1/REGCAP`, `adc2/REGCAP`,
-///     `adc3/REGCAP` are distinct rails and keep their prefix.
+const KicadPushLayout = struct {
+    poses: std.StringHashMapUnmanaged(pcb_layout.SyncPose),
+    routes: ?pcb_layout.SavedRoutes,
+    outline: []const [2]f64,
+    outline_arcs: []const optimizer.BoardArc = &.{},
+    zones: usize = 0,
+    planes: []const env_mod.StackupPlane = &.{},
+    stackup_layers: u8 = 0,
+    texts: []const font5x7.BoardText = &.{},
+    board_positions: ?*const std.StringHashMapUnmanaged(FpPlacement) = null,
+};
+
+/// Prepare one exact named snapshot for the explicit layout-authority path.
+/// Selection never falls back to the star/cache: a stale browser name must
+/// fail instead of silently exporting a different board.
+fn loadKicadPushLayout(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    block: *env_mod.DesignBlock,
+    want: []const u8,
+) ?KicadPushLayout {
+    var chosen: ?pcb_layout.SavedLayout = null;
+    for (pcb_layout.readLayouts(alloc, project_dir, name)) |layout| {
+        if (std.mem.eql(u8, layout.name, want)) {
+            chosen = layout;
+            break;
+        }
+    }
+
+    const layout = chosen orelse return null;
+    const poses = pcb_layout.readLayoutPosesFor(alloc, project_dir, name, want, block, null) orelse return null;
+    var pose_map = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    for (poses) |pose| pose_map.put(alloc, pose.ref, .{
+        .x = pose.x,
+        .y = pose.y,
+        .rot = pose.rot,
+        .side = pose.side,
+    }) catch return null;
+    const seed: optimizer.OutlineSource = if (layout.outline) |outline| .{ .drawn = .{
+        .rect = .{ .minx = outline.x, .miny = outline.y, .w = outline.w, .h = outline.h },
+        .poly = outline.poly orelse outline.pts,
+        .arcs = outline.arcs,
+    } } else .authored_only;
+    const placement = optimizer.placeFromPoses(alloc, block, project_dir, .{
+        .poses = poses,
+        .outline = seed,
+    }, optimizer.Params{}) catch return null;
+    return .{
+        .poses = pose_map,
+        .routes = layout.routes,
+        .outline = perimeter_fence.outlinePoints(alloc, placement) catch return null,
+        .outline_arcs = placement.board_arcs,
+        .zones = if (layout.routes) |routes| routes.zones.len else 0,
+        .planes = block.stackup.planes,
+        .stackup_layers = block.stackup.layers,
+        .texts = layout.texts,
+    };
+}
+
+/// The ONE net-spelling rule of the sync, as a full flattened net name → board
+/// name map: collapse a per-pin sub-net onto its rail, then strip the hierarchy
+/// prefix **only when the bare leaf is globally unique** — so `dsa/VDD_F` reads
+/// `VDD_F` on the board while `amp1/AMP_IN` keeps its prefix because a sibling
+/// module owns an `AMP_IN` too. Lifted out of `populatePadNetMaps` (its only
+/// consumer until now) so a copper emitter can put a saved track on exactly the
+/// net its pads landed on; a name absent from the map is a net this design no
+/// longer has. Result lives on `arena`.
+fn buildNetDisplayMap(
+    arena: std.mem.Allocator,
+    nets: []const export_kicad.FlatNet,
+    dot_nets: bool,
+) !std.StringHashMapUnmanaged([]const u8) {
+    var bare_counts = std.StringHashMapUnmanaged(u32).empty;
+    for (nets) |net| {
+        if (net.name.len == 0) continue;
+        const bare = bareNetName(maybeCollapseDotSubNet(net.name, dot_nets));
+        const e = try bare_counts.getOrPut(arena, bare);
+        if (!e.found_existing) e.value_ptr.* = 0;
+        e.value_ptr.* += 1;
+    }
+    var out = std.StringHashMapUnmanaged([]const u8).empty;
+    for (nets) |net| {
+        if (net.name.len == 0) continue;
+        const post_dot = maybeCollapseDotSubNet(net.name, dot_nets);
+        const bare = bareNetName(post_dot);
+        try out.put(arena, net.name, if ((bare_counts.get(bare) orelse 0) == 1) bare else post_dot);
+    }
+    return out;
+}
+
+/// Populate the pin→net maps from the flattened netlist in one pass, spelling
+/// every pad's net with `net_display` (`buildNetDisplayMap` — dot-collapse, then
+/// slash-strip only where the bare leaf is unique).
 ///
 /// Fills: `pad_net_map` ("ref|pin" → display net), `pad_full_net` ("ref|pin"
 /// → pre-collapse net, for the `canopy_net` device-pin lookup), `net_pad_count`
@@ -794,21 +495,11 @@ fn populatePadNetMaps(
     pad_full_net: *std.StringHashMapUnmanaged([]const u8),
     net_pad_count: *std.StringHashMapUnmanaged(u32),
     net_hub_pins: *std.StringHashMapUnmanaged(std.ArrayList(export_kicad.FlatPin)),
-    dot_nets: bool,
+    net_display: *const std.StringHashMapUnmanaged([]const u8),
 ) !void {
-    var bare_counts = std.StringHashMapUnmanaged(u32).empty;
     for (nets) |net| {
         if (net.name.len == 0) continue;
-        const bare = bareNetName(maybeCollapseDotSubNet(net.name, dot_nets));
-        const e = try bare_counts.getOrPut(arena, bare);
-        if (!e.found_existing) e.value_ptr.* = 0;
-        e.value_ptr.* += 1;
-    }
-    for (nets) |net| {
-        if (net.name.len == 0) continue;
-        const post_dot = maybeCollapseDotSubNet(net.name, dot_nets);
-        const bare = bareNetName(post_dot);
-        const display = if ((bare_counts.get(bare) orelse 0) == 1) bare else post_dot;
+        const display = net_display.get(net.name) orelse continue;
         for (net.pins) |pin| {
             const key = try std.fmt.allocPrint(arena, "{s}|{s}", .{ pin.ref_des, pin.pin });
             try pad_net_map.put(arena, key, display);
@@ -844,12 +535,21 @@ pub fn runSyncPlan(
         .design_block => |b| b,
         else => return error.NotADesign,
     };
+    // Pin minted ids before identity resolution, because THIS is where an
+    // unstable id does its worst damage: the diff's primary tier matches a
+    // placed footprint by its `canopy_uuid` = `uuidFromId(id)`, so a re-minted
+    // id drops every part onto the weaker ref-des / heuristic-relink tiers and,
+    // where those miss, stages a duplicate footprint beside real hand-placed
+    // work. Done on a dry run too — the preview exists to show exactly what the
+    // write will do, and identity resolution already rewrites the `.bom` on
+    // both paths, so pinning is not a new class of side effect here.
+    _ = id_insert.persistMintedIds(handler_alloc, board_path, &eval);
 
     const bom_path = try paths.designSiblingPath(arena, project_dir, name, ".bom");
     bom.resolveIdentities(handler_alloc, block, bom_path, project_dir) catch |e| warnResolveIdentities(name, e);
 
     var instances: std.ArrayList(export_kicad.FlatInstance) = .empty;
-    try netlist_mod.collectInstances(arena, block, "", &instances, block.refStyle());
+    try netlist_mod.collectInstances(arena, block, "", &instances);
     var nets: std.ArrayList(export_kicad.FlatNet) = .empty;
     try export_kicad.flattenAndMergeNets(arena, block, &nets);
     const net_rules = try optimizer.resolvedNetRules(arena, block, nets.items);
@@ -859,7 +559,8 @@ pub fn runSyncPlan(
     var net_pad_count = std.StringHashMapUnmanaged(u32).empty;
     var pad_full_net = std.StringHashMapUnmanaged([]const u8).empty;
     var net_hub_pins = std.StringHashMapUnmanaged(std.ArrayList(export_kicad.FlatPin)).empty;
-    try populatePadNetMaps(arena, nets.items, &pad_net_map, &pad_full_net, &net_pad_count, &net_hub_pins, parsed.dot_nets);
+    const net_display = try buildNetDisplayMap(arena, nets.items, parsed.dot_nets);
+    try populatePadNetMaps(arena, nets.items, &pad_net_map, &pad_full_net, &net_pad_count, &net_hub_pins, &net_display);
 
     // ref-des → section name. Top-level `section.instances` already carries
     // every nested sub-section + decouple/series child, so one shallow pass
@@ -871,10 +572,24 @@ pub fn runSyncPlan(
         for (sec.instances) |si| try ref_to_section.put(arena, si.ref_des, sec.name);
     }
     const staging_layout = try buildStagingLayout(arena, instances.items, &ref_to_section);
-    // The design's premade placement-tool layout, if any. First-insert parts it
-    // names land at that exact pose (below) so a fresh import reproduces the
-    // tool's layout instead of a staging pile. Null → every add stages as before.
-    const premade_layout = pcb_layout.loadSyncLayout(arena, project_dir, name);
+    // The design's premade placement-tool layout, if any. An authoritative
+    // push names one exact saved row; ordinary sync keeps the historical
+    // default/manual/cache precedence used only for first insertion.
+    var authoritative_layout: ?KicadPushLayout = if (parsed.seed.authoritative_layout_name) |layout_name|
+        (loadKicadPushLayout(arena, project_dir, name, block, layout_name) orelse return error.LayoutNotFound)
+    else
+        null;
+    if (authoritative_layout) |*layout| {
+        layout.board_positions = parsed.board_positions;
+        for (instances.items) |inst| {
+            if (!layout.poses.contains(inst.ref_des)) return error.LayoutIncomplete;
+        }
+        if (layout.outline.len < 3) return error.LayoutIncomplete;
+    }
+    const premade_layout = if (authoritative_layout) |layout|
+        layout.poses
+    else
+        pcb_layout.loadSyncLayout(arena, project_dir, name);
     var pending_adds: std.ArrayList(PendingAdd) = .empty;
 
     var by_uuid = std.StringHashMapUnmanaged(BoardFp).empty;
@@ -900,7 +615,7 @@ pub fn runSyncPlan(
         // it only considers the orphans that group-size matching couldn't
         // pair — typically board fps the design author moved across the
         // hierarchy (top-level `Q1` → `disp/Q3`). Both tiers are gated on
-        // --migrate so the agent's default sync stays conservative.
+        // migrate mode so the default sync stays conservative.
         try buildNetSignatureRelinkIndex(
             arena,
             project_dir,
@@ -918,8 +633,8 @@ pub fn runSyncPlan(
     defer model_cfg.deinit(arena);
     var spc = SyncPlanContext{ .arena = arena, .project_dir = project_dir, .model_cfg = &model_cfg };
 
-    var ops_buf: std.ArrayList(u8) = .empty;
-    const w = ops_buf.writer(arena);
+    var ops_buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &ops_buf.writer;
     var first_op = true;
     var summary = SyncSummary{};
     var matched_uuids = std.StringHashMapUnmanaged(void).empty;
@@ -941,7 +656,6 @@ pub fn runSyncPlan(
     try w.writeAll("[");
 
     var group_anchors = std.StringHashMapUnmanaged(GroupAnchor).empty; // filled below
-    var applied_ops_local = parsed.applied_ops;
     var diff_ctx = DiffContext{
         .by_uuid = &by_uuid,
         .by_ref = &by_ref,
@@ -961,37 +675,39 @@ pub fn runSyncPlan(
         .net_pad_count = &net_pad_count,
         .matched_uuids = &matched_uuids,
         .canonical_fp_name = &canonical_fp_name,
-        .applied_ops = &applied_ops_local,
         .spc = &spc,
         .summary = &summary,
         .migrate_heuristic = parsed.migrate_heuristic,
         .swap = parsed.swap,
         .sub_blocks = block.sub_blocks,
-        .emit_layout_vias = parsed.emit_layout_vias,
+        .net_display = &net_display,
+        .seed = parsed.seed,
         .dot_nets = parsed.dot_nets,
         .board_fresh = parsed.board.len == 0,
-        .seed_groups = parsed.seed_groups,
-        .seed_all = parsed.seed_all,
         .group_anchors = &group_anchors,
+        .authoritative_layout = authoritative_layout,
     };
     // Per-sub-circuit anchors (Push-modal seeding + dry-run enum), off diff_ctx so
     // the anchor match runs the diff loop's OWN relink tiers — a drifted board the
     // sync relabels still centres its group on first pass, not only after a re-sync.
     group_anchors = try computeGroupAnchors(arena, instances.items, &diff_ctx, parsed.board_positions);
-    for (instances.items) |inst| try handleInstance(&diff_ctx, inst, &w, &first_op);
+    for (instances.items) |inst| try handleInstance(&diff_ctx, inst, w, &first_op);
 
     // Adds were buffered during the walk; lay them out grouped by section
     // (positions + section boxes/labels) now that every match is resolved.
-    try emitStagedAdds(&diff_ctx, &w, &first_op);
+    try emitStagedAdds(&diff_ctx, w, &first_op);
 
-    // When this sync seeded fresh parts from the design's *whole-design* default
-    // layout, also write their GND vias. Skipped when per-sub-block seeding ran
-    // (`summary.blocks > 0`) — there the per-block path already emitted vias, and
-    // the whole-design layout would double them at different coordinates.
-    if (summary.blocks == 0)
-        try emitLayoutVias(&diff_ctx, block, project_dir, name, parsed, &w, &first_op);
+    // An explicit PCB-editor push replaces KiCad's placement/copper/Edge.Cuts
+    // from the named row. Ordinary sync retains first-insertion-only seeding.
+    if (authoritative_layout != null) {
+        try emitAuthoritativeLayout(&diff_ctx, w, &first_op);
+    } else if (summary.blocks == 0) {
+        try emitLayoutCopper(&diff_ctx, project_dir, name, w, &first_op);
+        try emitLayoutVias(&diff_ctx, block, project_dir, name, parsed, w, &first_op);
+        try emitPerimeterMask(&diff_ctx, block, project_dir, name, w, &first_op);
+    }
 
-    try emitStaleOps(parsed, &matched_uuids, &w, &first_op, &summary);
+    try emitStaleOps(parsed, &matched_uuids, w, &first_op, &summary);
 
     try w.writeAll("]");
 
@@ -1000,17 +716,22 @@ pub fn runSyncPlan(
     const sub_circuits_json = try buildSubCircuitsJson(arena, &diff_ctx);
 
     // Final response envelope.
-    var resp_buf: std.ArrayList(u8) = .empty;
-    const rw = resp_buf.writer(handler_alloc);
+    var resp_buf: std.Io.Writer.Allocating = .init(handler_alloc);
+    const rw = &resp_buf.writer;
     const version = serve_root.getLiveVersion(name);
     try writeSummaryEnvelope(rw, version, summary);
     try rw.writeAll(sub_circuits_json);
+    if (parsed.seed.authoritative_layout_name) |layout_name| {
+        try rw.writeAll(",\"authoritative_layout\":");
+        try json_writer.writeString(rw, layout_name);
+    }
     try rw.writeAll(",\"ops\":");
-    try rw.writeAll(ops_buf.items);
+    try rw.writeAll(ops_buf.written());
     try rw.writeAll("}");
 
     return SyncRunResult{
-        .body = resp_buf.items,
+        .body = resp_buf.written(),
+        .ops_json = ops_buf.written(),
         .version = version,
         .summary = summary,
     };
@@ -1023,13 +744,15 @@ fn writeSummaryEnvelope(w: anytype, version: u64, summary: SyncSummary) !void {
     try w.print(
         "{{\"design_version\":{d},\"summary\":{{" ++
             "\"updated\":{d},\"relabeled\":{d},\"added\":{d},\"removed\":{d}," ++
-            "\"swapped\":{d},\"flagged_stale\":{d},\"suppressed\":{d}," ++
-            "\"swaps_suppressed\":{d},\"vias\":{d},\"tracks\":{d}}},\"sub_circuits\":",
+            "\"swapped\":{d},\"flagged_stale\":{d}," ++
+            "\"swaps_suppressed\":{d},\"vias\":{d},\"tracks\":{d}," ++
+            "\"layout_parts\":{d},\"outline_edges\":{d},\"layout_zones\":{d}}},\"sub_circuits\":",
         .{
-            version,               summary.updated,    summary.relabeled,
-            summary.added,         summary.removed,    summary.swapped,
-            summary.flagged_stale, summary.suppressed, summary.swaps_suppressed,
-            summary.vias,          summary.tracks,
+            version,               summary.updated,          summary.relabeled,
+            summary.added,         summary.removed,          summary.swapped,
+            summary.flagged_stale, summary.swaps_suppressed, summary.vias,
+            summary.tracks,        summary.layout_parts,     summary.outline_edges,
+            summary.layout_zones,
         },
     );
 }
@@ -1060,16 +783,32 @@ const max_pcb_bytes: usize = 64 * 1024 * 1024;
 /// `?no_swap=1` does the opposite — no swap_footprint op is emitted at all,
 /// so matched footprints keep their existing (hand-tuned) board lands while
 /// every other op type still flows; the withheld swaps are counted in the
-/// summary's `swaps_suppressed`. Every non-dry write runs the placement
-/// guard: if the new board would move, rotate, or side-flip an existing
-/// footprint, the sync answers HTTP 409 and writes nothing.
+/// summary's `swaps_suppressed`. Seeding a FRESH board is tuned by three more:
+/// `?no_seed_blocks=1` stops a sub-block being seeded from its own module
+/// layout, leaving the whole-design layout the only placement authority;
+/// `?no_layout_vias=1` / `?no_layout_tracks=1` withhold that layout's vias /
+/// routed tracks so only placement is written. `?push_layout=1&layout=<name>`
+/// is the explicit inverse: with a matching JSON `{ "rev": N }`, it treats
+/// that exact saved row as authoritative, prunes stale footprints, moves and
+/// refreshes current footprints, and replaces tracks, vias, groups, and
+/// Edge.Cuts. KiCad zones, setup/rules, and unrelated drawings remain. Every
+/// ordinary non-dry write runs the placement guard; only this explicit mode is
+/// allowed to move, rotate, or side-flip existing footprints.
 pub fn syncKicadPcbApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = http_not_found;
         return;
     };
-    const dry_run = isDryRun(req);
-    const prune_stale = isQueryFlagSet(req, "prune");
+    const push_layout = isQueryFlagSet(req, "push_layout");
+    const layout_name = if (push_layout) queryValue(req, "layout") else null;
+    if (push_layout and layout_name == null) {
+        sendError(res, http_bad_request, "push_layout requires the exact saved layout name in ?layout=<name>");
+        return;
+    }
+    if (push_layout and requestLayoutRev(req) == null) {
+        sendError(res, http_bad_request, "push_layout requires the PCB editor layout revision in a JSON {\"rev\":N} body");
+        return;
+    }
     // The heuristic relink (parent-path + value + net signature) is ON by
     // default for the file-based path: a board part whose canopy_uuid/ref-des
     // drifted from the design (e.g. a refdes-prefix change like FB→L) gets
@@ -1086,21 +825,35 @@ pub fn syncKicadPcbApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     // board land (no swap_footprint at all — it wins over `?refresh=1`);
     // `?refresh=1` re-bakes every matched part's geometry (same-name swap)
     // so a board backfills new silkscreen/fab without moving anything.
-    const swap: SwapMode = if (isQueryFlagSet(req, "no_swap"))
+    const swap: SwapMode = if (push_layout)
+        // A pose change must re-bake pad angles and back-side geometry against
+        // the new at/layer, so authoritative pushes always refresh footprints.
+        .refresh_all
+    else if (isQueryFlagSet(req, "no_swap"))
         .none
     else if (isQueryFlagSet(req, "refresh"))
         .refresh_all
     else
         .auto;
-    runKicadPcbSync(ctx, req, res, name, dry_run, prune_stale, migrate, dot_nets, swap) catch |err| switch (err) {
+    const options = SyncRequestOptions{
+        .dry_run = isDryRun(req),
+        .prune_stale = push_layout or isQueryFlagSet(req, "prune"),
+        .migrate = migrate,
+        .dot_nets = dot_nets,
+        .swap = swap,
+        .authoritative_layout_name = layout_name,
+    };
+    runKicadPcbSync(ctx, req, res, name, options) catch |err| switch (err) {
         error.PcbPathUnset => sendError(res, http_bad_request, err_no_pcb_path),
         error.PcbReadFailed => sendError(res, http_internal_error, err_pcb_read_failed),
         error.PcbParseFailed => sendError(res, http_internal_error, err_pcb_parse_failed),
         error.PcbWriteFailed => sendError(res, http_internal_error, "failed to write the updated .kicad_pcb to disk"),
         error.WriterFailed => sendError(res, http_internal_error, "failed to apply ops to the .kicad_pcb (writer error)"),
-        error.EnvelopeParseFailed => sendError(res, http_internal_error, "internal: failed to parse sync-plan envelope"),
         error.BuildFailed => sendError(res, http_internal_error, err_build_error),
         error.NotADesign => sendError(res, http_internal_error, err_not_a_design),
+        error.LayoutNotFound => sendError(res, http_not_found, "saved layout was not found — reload the PCB editor and save it again"),
+        error.LayoutIncomplete => sendError(res, http_conflict, "saved layout must cover every current design footprint and have a board outline — reload, finish the layout, and save before pushing"),
+        error.LayoutRevConflict => sendError(res, http_conflict, "layout changed in another window — reload before pushing to KiCad"),
         else => |e| return e,
     };
 }
@@ -1111,8 +864,17 @@ const KicadPcbSyncError = error{
     PcbParseFailed,
     PcbWriteFailed,
     WriterFailed,
-    EnvelopeParseFailed,
+    LayoutRevConflict,
 } || SyncRunError;
+
+const SyncRequestOptions = struct {
+    dry_run: bool,
+    prune_stale: bool,
+    migrate: bool,
+    dot_nets: bool,
+    swap: SwapMode,
+    authoritative_layout_name: ?[]const u8 = null,
+};
 
 fn sendError(res: *httpz.Response, status: u16, body: []const u8) void {
     res.status = status;
@@ -1128,12 +890,12 @@ fn runKicadPcbSync(
     req: *httpz.Request,
     res: *httpz.Response,
     name: []const u8,
-    dry_run: bool,
-    prune_stale: bool,
-    migrate: bool,
-    dot_nets: bool,
-    swap: SwapMode,
+    options: SyncRequestOptions,
 ) KicadPcbSyncError!void {
+    if (options.authoritative_layout_name != null) if (requestLayoutRev(req)) |rev| {
+        if (rev != pcb_layout.readLayoutRev(req.arena, ctx.project_dir, name, null))
+            return error.LayoutRevConflict;
+    };
     // Resolve the design and its declared PCB path.
     const board_path = try paths.designSourcePath(req.arena, ctx.project_dir, name);
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
@@ -1158,7 +920,15 @@ fn runKicadPcbSync(
 
     // Explicit per-sub-circuit seeding selection from the POST body
     // (`{"seed":["mcu", …]}` or `{"seed":"all"}`). Absent body ⇒ no selection.
-    const seed = parseSeedSelection(req.arena, req);
+    const selection = parseSeedSelection(req.arena, req);
+    const seed = SeedOptions{
+        .sub_blocks = !isQueryFlagSet(req, "no_seed_blocks"),
+        .layout_vias = !isQueryFlagSet(req, "no_layout_vias"),
+        .layout_tracks = !isQueryFlagSet(req, "no_layout_tracks"),
+        .groups = selection.groups,
+        .all = selection.all,
+        .authoritative_layout_name = options.authoritative_layout_name,
+    };
 
     // Run the diff. `migrate_heuristic` defaults off for the file-based
     // path; `prune_stale` is opt-in via `?prune=1` from the
@@ -1167,32 +937,29 @@ fn runKicadPcbSync(
     // the design) get dropped from the file in one shot.
     const plan: ParsedSyncPlan = .{
         .board = board,
-        .prune_stale = prune_stale,
-        .migrate_heuristic = migrate,
-        .dot_nets = dot_nets,
-        .swap = swap,
-        .emit_layout_vias = !isQueryFlagSet(req, "no_layout_vias"),
-        .applied_ops = std.StringHashMapUnmanaged(void).empty,
-        .seed_groups = seed.groups,
-        .seed_all = seed.all,
+        .prune_stale = options.prune_stale,
+        .migrate_heuristic = options.migrate,
+        .dot_nets = options.dot_nets,
+        .swap = options.swap,
+        .seed = seed,
         .board_positions = board_positions,
     };
     const run = try runSyncPlan(req.arena, ctx.allocator, ctx.project_dir, name, plan);
 
-    // Dry-run mode (?dry_run=1) returns the would-be ops without
-    // writing — useful for the agent-parity comparison and as a
-    // pre-flight from the UI.
-    if (dry_run) {
+    // Dry-run mode (?dry_run=1) returns the would-be ops without writing as a
+    // pre-flight for the UI.
+    if (options.dry_run) {
         res.content_type = .JSON;
         res.header(header_cors_allow_origin, "*");
         res.body = run.body;
         return;
     }
 
-    const ops_json = extractOpsArrayJson(run.body) orelse return error.EnvelopeParseFailed;
-
     var stats: kicad_pcb_writer.ApplyStats = .{};
-    const new_pcb = kicad_pcb_writer.applyOpsToSourceWithStats(req.arena, src, ops_json, &stats) catch return error.WriterFailed;
+    const new_pcb = kicad_pcb_writer.applyOpsToSourceWithStats(req.arena, src, run.ops_json, &stats) catch |err| {
+        log.warn("KiCad sync writer failed: {s}", .{@errorName(err)});
+        return error.WriterFailed;
+    };
 
     // Detect a sibling KiCad lockfile (`~<basename>.lck`). pcbnew writes
     // it while a board is open. Per the user's choice we write anyway
@@ -1201,28 +968,34 @@ fn runKicadPcbSync(
     // act before saving in pcbnew or our write loses.
     const lock_warning = pcbnewLockMessage(req.arena, pcb_path);
 
-    // Skip the disk write when nothing semantically changed. The writer's
-    // helpers each report null for redundant ops (`set_field` with the
-    // existing value, `set_pad_net` with the existing net, `add` for a
-    // canopy_uuid already on the board, etc.); when every stat is zero
-    // the AST is byte-identical to the input and rewriting would just
-    // re-normalise whitespace and bump the mtime, making pcbnew prompt
-    // "file modified, reload?" every push and reporting non-zero changes
-    // to the user forever.
-    const wrote_file = !statsAreZero(stats);
+    // Ordinary no-op syncs retain the stats gate: the AST printer can normalize
+    // a hand-formatted KiCad source even when no operation landed. An explicit
+    // replacement necessarily reports remove/add stats, so its second push is
+    // detected by deterministic byte equality instead.
+    const wrote_file = if (options.authoritative_layout_name != null)
+        !std.mem.eql(u8, src, new_pcb)
+    else
+        !statsAreZero(stats);
 
     // Placement guard: abort (HTTP 409, nothing written) if the new board
     // would move, rotate, or side-flip ANY footprint that already exists.
     // The sync's contract is that only fresh adds get positions — this
     // backstops the whole diff/writer pipeline against ever rearranging a
     // routed board again (the 2026-06-11 bottom-flip incident).
-    if (wrote_file) {
+    if (wrote_file and options.authoritative_layout_name == null) {
         if (try placementViolations(req.arena, src, new_pcb)) |viol| {
             log.warn("kicad-pcb sync {s}: {s}", .{ name, viol });
             sendError(res, http_conflict, viol);
             return;
         }
     }
+    // The first revision check protects selection; this one closes the longer
+    // eval/diff/write window so an edit saved while the push was rendering
+    // cannot be overwritten into KiCad from a stale snapshot.
+    if (options.authoritative_layout_name != null) if (requestLayoutRev(req)) |rev| {
+        if (rev != pcb_layout.readLayoutRev(req.arena, ctx.project_dir, name, null))
+            return error.LayoutRevConflict;
+    };
     if (wrote_file) board_backup.writeFileAtomic(req.arena, pcb_path, new_pcb) catch return error.PcbWriteFailed;
 
     // Mirror the schematic source (the design `.sexp` + every sub-block module/
@@ -1246,18 +1019,22 @@ fn runKicadPcbSync(
     else
         copyKicadModels(req.arena, ctx.project_dir, block, pcb_path);
 
-    var resp_buf: std.ArrayList(u8) = .empty;
-    const rw = resp_buf.writer(ctx.allocator);
+    var resp_buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const rw = &resp_buf.writer;
     try rw.print(
         "{{\"ok\":true,\"design_version\":{d}," ++
             "\"applied\":{{\"added\":{d},\"removed\":{d},\"swapped\":{d}," ++
-            "\"fields_set\":{d},\"pad_nets_set\":{d},\"locked_changed\":{d}," ++
-            "\"fields_hidden\":{d},\"fields_shown\":{d},\"vias_added\":{d},\"tracks_added\":{d}}}",
+            "\"fields_set\":{d},\"pad_nets_set\":{d}," ++
+            "\"fields_hidden\":{d},\"fields_shown\":{d},\"vias_added\":{d},\"tracks_added\":{d}," ++
+            "\"footprints_moved\":{d},\"vias_removed\":{d},\"tracks_removed\":{d}," ++
+            "\"edge_cuts_removed\":{d},\"edge_cuts_added\":{d},\"groups_removed\":{d}}},\"wrote\":{}",
         .{
-            run.version,          stats.added,         stats.removed,
-            stats.swapped,        stats.fields_set,    stats.pad_nets_set,
-            stats.locked_changed, stats.fields_hidden, stats.fields_shown,
-            stats.copper.vias,    stats.copper.tracks,
+            run.version,                        stats.added,                           stats.removed,
+            stats.swapped,                      stats.fields_set,                      stats.pad_nets_set,
+            stats.fields_hidden,                stats.fields_shown,                    stats.copper.vias,
+            stats.copper.tracks,                stats.copper.layout.footprints_moved,  stats.copper.layout.vias_removed,
+            stats.copper.layout.tracks_removed, stats.copper.layout.edge_cuts_removed, stats.copper.layout.edge_cuts_added,
+            stats.copper.layout.groups_removed, wrote_file,
         },
     );
     try rw.print(",\"source_copied\":{d}", .{source_copied});
@@ -1271,12 +1048,12 @@ fn runKicadPcbSync(
     try rw.writeAll("}");
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
-    res.body = resp_buf.items;
+    res.body = resp_buf.written();
 }
 
 fn statsAreZero(s: kicad_pcb_writer.ApplyStats) bool {
     return s.added == 0 and s.removed == 0 and s.swapped == 0 and
-        s.fields_set == 0 and s.pad_nets_set == 0 and s.locked_changed == 0 and
+        s.fields_set == 0 and s.pad_nets_set == 0 and
         s.fields_hidden == 0 and s.fields_shown == 0 and s.copper.vias == 0 and
         s.groups_added == 0 and s.copper.tracks == 0;
 }
@@ -1302,6 +1079,24 @@ fn isQueryFlagSet(req: *httpz.Request, key: []const u8) bool {
     const q = req.query() catch return false;
     const v = q.get(key) orelse return false;
     return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
+}
+
+fn queryValue(req: *httpz.Request, key: []const u8) ?[]const u8 {
+    const q = req.query() catch return null;
+    const value = q.get(key) orelse return null;
+    return if (value.len > 0) value else null;
+}
+
+/// Optimistic layout-sidecar revision sent by the PCB editor. Invalid/absent
+/// bodies keep the ordinary legacy sync API body-compatible; authoritative
+/// requests require this field after flushing the current editor queue.
+fn requestLayoutRev(req: *httpz.Request) ?i64 {
+    const body = req.body() orelse return null;
+    if (body.len == 0) return null;
+    const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch return null;
+    if (root != .object) return null;
+    const value = root.object.get("rev") orelse return null;
+    return if (value == .integer) value.integer else null;
 }
 
 /// Parsed per-sub-circuit seeding selection (the Push modal checkboxes).
@@ -1345,20 +1140,6 @@ fn seedNameSet(arena: std.mem.Allocator, items: []const std.json.Value) ?std.Str
         set.put(arena, nm, {}) catch return null;
     }
     return set;
-}
-
-/// Strip the `{design_version, summary, ops: [...]}` envelope and return
-/// the raw `[...]` ops array as JSON text. The writer's
-/// `applyOpsToSourceWithStats` expects just the array, not the envelope.
-fn extractOpsArrayJson(envelope: []const u8) ?[]const u8 {
-    const ops_key = "\"ops\":";
-    const idx = std.mem.indexOf(u8, envelope, ops_key) orelse return null;
-    const start = idx + ops_key.len;
-    if (start >= envelope.len or envelope[start] != '[') return null;
-    // The envelope's `}` follows the closing `]` of the array, so trim it.
-    const last_brace = std.mem.lastIndexOfScalar(u8, envelope, '}') orelse return null;
-    if (last_brace <= start) return null;
-    return envelope[start..last_brace];
 }
 
 // ── Placement guard ──────────────────────────────────────────────────
@@ -1433,11 +1214,11 @@ const form_head_footprint = "footprint";
 /// Returns null when the invariant holds. Parts present on only one side
 /// (fresh adds, pruned stales) are exempt: the sync may create or delete
 /// parts, but it must never displace one that exists.
-fn placementViolations(arena: std.mem.Allocator, old_src: []const u8, new_src: []const u8) std.mem.Allocator.Error!?[]const u8 {
+fn placementViolations(arena: std.mem.Allocator, old_src: []const u8, new_src: []const u8) (std.mem.Allocator.Error || std.Io.Writer.Error)!?[]const u8 {
     var old_map = try collectPlacements(arena, old_src);
     const new_map = try collectPlacements(arena, new_src);
-    var list: std.ArrayList(u8) = .empty;
-    const w = list.writer(arena);
+    var list: std.Io.Writer.Allocating = .init(arena);
+    const w = &list.writer;
     var count: usize = 0;
     var it = old_map.iterator();
     while (it.next()) |entry| {
@@ -1461,15 +1242,15 @@ fn placementViolations(arena: std.mem.Allocator, old_src: []const u8, new_src: [
         }
     }
     if (count == 0) return null;
-    var msg: std.ArrayList(u8) = .empty;
-    const mw = msg.writer(arena);
+    var msg: std.Io.Writer.Allocating = .init(arena);
+    const mw = &msg.writer;
     try mw.print(
         "placement guard: this sync would change the position/side of {d} existing part(s) — write aborted, board file unchanged: {s}",
-        .{ count, list.items },
+        .{ count, list.written() },
     );
     if (count > max_placement_violations_listed)
         try mw.print(" (+{d} more)", .{count - max_placement_violations_listed});
-    return msg.items;
+    return msg.written();
 }
 
 // ── Read-only source mirror beside the board ─────────────────────────
@@ -1532,7 +1313,7 @@ fn copyKicadModels(
     };
 
     var instances: std.ArrayList(export_kicad.FlatInstance) = .empty;
-    netlist_mod.collectInstances(arena, block, "", &instances, block.refStyle()) catch return 0;
+    netlist_mod.collectInstances(arena, block, "", &instances) catch return 0;
 
     var model_cfg = export_kicad.loadModelConfig(arena, project_dir);
     var seen = std.StringHashMapUnmanaged(void).empty;
@@ -1813,12 +1594,6 @@ const DiffContext = struct {
     /// KiCad-canonical name but resolves to the same physical footprint as
     /// the design's short name. Populated lazily on first lookup.
     canonical_fp_name: *std.StringHashMapUnmanaged([]const u8),
-    /// Fingerprint set of state-asserting ops the agent already pushed
-    /// in prior syncs. Owned by ParsedSyncPlan; the diff loop consults
-    /// it via the `emitOpUnlessApplied` helper to skip re-emitting ops
-    /// that already landed (some KiCad IPC writes don't round-trip via
-    /// GetItems, which would otherwise cause indefinite re-emission).
-    applied_ops: *std.StringHashMapUnmanaged(void),
     spc: *SyncPlanContext,
     summary: *SyncSummary,
     migrate_heuristic: bool,
@@ -1829,9 +1604,15 @@ const DiffContext = struct {
     /// *its own* module default layout, as a unit in the staging area, rather
     /// than scattering its parts via the whole-design layout. See `seedSubBlock`.
     sub_blocks: []const env_mod.SubBlock,
-    /// Whether to emit GND vias for a fully-fresh seeded sub-block, and whether
-    /// to keep per-pin sub-nets when naming them (mirrors ParsedSyncPlan).
-    emit_layout_vias: bool,
+    /// Full flattened net name → the spelling the BOARD carries for it (see
+    /// `buildNetDisplayMap`). Every pad net the diff writes went through this
+    /// map, so a copper emitter must resolve its net through it too — otherwise
+    /// a seeded track lands on `AMP_IN` while the pads it joins sit on
+    /// `amp1/AMP_IN`, and the net is silently split.
+    net_display: *const std.StringHashMapUnmanaged([]const u8),
+    /// First-insertion seeding policy for this request (mirrors ParsedSyncPlan).
+    seed: SeedOptions = .{},
+    /// Whether to keep per-pin sub-nets when naming them (mirrors ParsedSyncPlan).
     dot_nets: bool,
     /// True when the target board contains no footprints at all — a brand-new
     /// `.kicad_pcb`. Layout-pose seeding and stitching-via emission only run
@@ -1842,15 +1623,14 @@ const DiffContext = struct {
     /// (per-section grid, or per-sub-block arranged unit) and no via is ever
     /// written.
     board_fresh: bool,
-    /// Explicit sub-circuit seeding selection + anchors (the Push modal). When
-    /// `seed_groups`/`seed_all` is set, `emitStagedAdds` routes each selected
-    /// group through `seedSelectedGroups` (saved-layout poses, anchored on the
-    /// group's `group_anchors` entry when it's already on the board, else an
-    /// off-board box) and everything else to the plain staging grid. Null/false
-    /// ⇒ the default staging flow runs unchanged. See `ParsedSyncPlan.seed_*`.
-    seed_groups: ?std.StringHashMapUnmanaged(void) = null,
-    seed_all: bool = false,
+    /// Per-sub-circuit anchors for the Push modal's explicit seeding selection
+    /// (`seed.groups`/`seed.all`): where each group's main IC already sits on the
+    /// board, so `seedSelectedGroups` can centre the group's saved layout there.
     group_anchors: *const std.StringHashMapUnmanaged(GroupAnchor),
+    /// Exact saved row selected by the PCB editor for an authoritative push.
+    /// When set, matched parts may move and the saved copper/outline replaces
+    /// KiCad's corresponding layout geometry.
+    authoritative_layout: ?KicadPushLayout = null,
 };
 
 /// Walk every board fp that didn't match any design instance and emit the
@@ -1866,7 +1646,10 @@ fn emitStaleOps(
     summary: *SyncSummary,
 ) !void {
     for (parsed.board) |bfp| {
-        if (bfp.uuid.len == 0) continue;
+        // Ordinary sync leaves an unrelated manual KiCad footprint alone. The
+        // explicit authoritative handoff mirrors the design and therefore
+        // prunes an unmatched footprint even when it predates canopy_uuid.
+        if (bfp.uuid.len == 0 and parsed.seed.authoritative_layout_name == null) continue;
         if (matched_uuids.contains(bfp.kicad_uuid)) continue;
         const target = opTargetUuid(bfp);
         if (target.len == 0) continue;
@@ -1880,30 +1663,6 @@ fn emitStaleOps(
     }
 }
 
-/// Emit a state-asserting op only when the agent hasn't already pushed
-/// the same (uuid, op, key, value) fingerprint. When suppressed,
-/// increments summary.suppressed and returns false so the caller can
-/// avoid bumping its local ops-emitted counter (which would otherwise
-/// flag the instance as "updated" with no actual op to point at).
-fn emitOpUnlessApplied(
-    d: *DiffContext,
-    w: anytype,
-    first: *bool,
-    op: []const u8,
-    fields: anytype,
-    uuid: []const u8,
-    key: []const u8,
-    value: []const u8,
-) !bool {
-    const fp = try appliedOpFingerprint(d.spc.arena, uuid, op, key, value);
-    if (d.applied_ops.contains(fp)) {
-        d.summary.suppressed += 1;
-        return false;
-    }
-    try emitOp(w, first, op, fields);
-    return true;
-}
-
 /// Treat a board footprint's name as matching the design's short name when
 /// it equals either the short name itself or the canonical KiCad name
 /// declared inside `lib/footprints/<short>.sexp`. Legacy boards routinely
@@ -1911,7 +1670,7 @@ fn emitOpUnlessApplied(
 /// laid out from a `kicad-cli`-exported netlist — without this aliasing
 /// every such fp would emit a spurious swap_footprint on the first sync.
 fn footprintNameMatches(d: *DiffContext, board_name: []const u8, short: []const u8) bool {
-    // Strip the `<lib>:` prefix the legacy Go IPC agent attached to every
+    // Strip the `<lib>:` prefix older sync clients attached to every
     // footprint it created (`eda-sync:c-0201`). KiCad's own footprints
     // also carry a library nickname in the same form (`Capacitor_SMD:…`),
     // and the design-side `short` is always library-bare.
@@ -1934,7 +1693,7 @@ fn canonicalFootprintNameImpl(d: *DiffContext, short: []const u8) !?[]const u8 {
         return cached;
     }
     const fp_path = try std.fmt.allocPrint(d.spc.arena, path_fmt_fp_sexp, .{ d.spc.project_dir, short });
-    const fp_source = infra_fs.cwd().readFileAlloc(d.spc.arena, fp_path, max_footprint_bytes) catch {
+    const fp_source = infra_fs.cwd().readFileAlloc(d.spc.arena, fp_path, lib_limits.max_footprint_bytes) catch {
         try d.canonical_fp_name.put(d.spc.arena, short, "");
         return null;
     };
@@ -2021,7 +1780,7 @@ fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance) ?BoardFp {
     // only populates a pairing when there's an orphan board fp with the
     // same wiring + footprint AND no other claimant. When that fires
     // for a design instance whose canopy uuid happens to also point at
-    // a (likely agent-created duplicate at origin) by_uuid entry, the
+    // a (likely sync-created duplicate at origin) by_uuid entry, the
     // netsig pair wins and the duplicate falls into stale — exactly
     // what the user wants to recover a board where a hierarchy move
     // (top-level `Q1` → `disp/Q3`) caused the sync to create a clone
@@ -2053,7 +1812,7 @@ fn matchInstance(d: *DiffContext, inst: export_kicad.FlatInstance) ?BoardFp {
 
 /// Migration-mode lookup for (parent_path, value) pairings. Gated on
 /// --migrate. Net-signature relink is checked separately in
-/// `matchInstance` (it must beat by_uuid to recover from agent-created
+/// `matchInstance` (it must beat by_uuid to recover from sync-created
 /// duplicates) so it lives outside this helper.
 fn heuristicMatch(d: *DiffContext, inst: export_kicad.FlatInstance) ?BoardFp {
     if (!d.migrate_heuristic) return null;
@@ -2085,14 +1844,14 @@ fn designInstanceNetSig(
             return std.mem.lessThan(u8, a.pad, b.pad);
         }
     }.lessThan);
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
     for (pairs.items) |p| try w.print("{s}={s};", .{ p.pad, p.net });
-    return buf.items;
+    return buf.written();
 }
 
 /// Same signature format as `designInstanceNetSig`, computed from the
-/// pad list the agent reported for a board fp. Empty when the fp has no
+/// pad list the reader captured for a board fp. Empty when the fp has no
 /// pads on named nets.
 fn boardFpNetSig(arena: std.mem.Allocator, bfp: BoardFp) ![]const u8 {
     var pairs: std.ArrayList(struct { pad: []const u8, net: []const u8 }) = .empty;
@@ -2106,10 +1865,10 @@ fn boardFpNetSig(arena: std.mem.Allocator, bfp: BoardFp) ![]const u8 {
             return std.mem.lessThan(u8, a.pad, b.pad);
         }
     }.lessThan);
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
     for (pairs.items) |p| try w.print("{s}={s};", .{ p.pad, p.net });
-    return buf.items;
+    return buf.written();
 }
 
 /// Pair orphan board fps with orphan design instances by exact net
@@ -2128,7 +1887,7 @@ fn buildNetSignatureRelinkIndex(
     by_uuid: *std.StringHashMapUnmanaged(BoardFp),
     _: *std.StringHashMapUnmanaged(BoardFp), // by_ref — unused since the netsig tier
     // deliberately considers insts that already match by_ref so it can
-    // pair them with an orphan instead of an agent-created duplicate.
+    // pair them with an orphan instead of a sync-created duplicate.
     by_migration: *std.StringHashMapUnmanaged(BoardFp),
     pad_net_map: *std.StringHashMapUnmanaged([]const u8),
     out: *std.StringHashMapUnmanaged(BoardFp),
@@ -2161,7 +1920,7 @@ fn buildNetSignatureRelinkIndex(
     }
 
     // Bucket design instances by netsig. We don't skip insts that match
-    // by_uuid or by_ref — those matches may be to an agent-created
+    // by_uuid or by_ref — those matches may be to a sync-created
     // duplicate at the origin (same canopy_uuid AND same ref-des as the
     // design instance because the previous sync created it from the
     // design state, but at the wrong physical location). Letting netsig
@@ -2260,7 +2019,7 @@ fn boardFpNameAliasesShort(arena: std.mem.Allocator, project_dir: []const u8, bo
     // construction (once per sync), not per-instance in the diff loop,
     // so the cost is fine.
     const fp_path = std.fmt.allocPrint(arena, path_fmt_fp_sexp, .{ project_dir, short }) catch return false;
-    const fp_source = infra_fs.cwd().readFileAlloc(arena, fp_path, max_footprint_bytes) catch return false;
+    const fp_source = infra_fs.cwd().readFileAlloc(arena, fp_path, lib_limits.max_footprint_bytes) catch return false;
     const canonical = netlist_mod.extractFootprintName(arena, fp_source) catch return false;
     return std.mem.eql(u8, board_name, canonical);
 }
@@ -2367,7 +2126,6 @@ fn emitSwapForMatch(
         d.summary.swaps_suppressed += 1;
         return 0;
     }
-    const fp_def = loadFootprintDef(d.spc, fp_name_short);
     const reason = if (geometry)
         swap_reason_geometry
     else if (d.swap == .refresh_all)
@@ -2375,7 +2133,7 @@ fn emitSwapForMatch(
     else
         swap_reason_model;
     const target = opTargetUuid(m);
-    try emitSwapOp(w, first, target, fp_name_short, kmod, fp_def, inst.ref_des, d.pad_net_map, reason);
+    try emitSwapOp(w, first, target, fp_name_short, kmod, inst.ref_des, d.pad_net_map, reason);
     d.summary.swapped += 1;
     return 1;
 }
@@ -2396,55 +2154,56 @@ fn handleMatched(
     // matches until the backfill op lands on a future sync.
     if (m.kicad_uuid.len > 0) try d.matched_uuids.put(d.spc.arena, m.kicad_uuid, {});
     const target = opTargetUuid(m);
+    // Deliberately before swap_footprint: the authoritative path forces a
+    // geometry refresh, and the writer must see the NEW side/rotation while it
+    // adapts front-authored library pads onto the board.
+    try emitAuthoritativePose(d, inst.ref_des, m, w, first);
     counts.material += try emitSwapForMatch(d, inst, m, fp_name_short, w, first);
     // The "old" / "ref" keys on set_field ops are display metadata for the
     // preview modal (rename rows read "FB1 → L2", value rows name the part);
-    // the file writer and the IPC agent ignore keys they don't know.
+    // the file writer ignores keys it doesn't know.
     if (!std.mem.eql(u8, m.ref, inst.ref_des)) {
-        if (try emitOpUnlessApplied(d, w, first, op_set_field, .{
+        try emitOp(w, first, op_set_field, .{
             .{ "uuid", target },
             .{ "field", "reference" },
             .{ "value", inst.ref_des },
             .{ "old", m.ref },
-        }, target, "reference", inst.ref_des)) {
-            counts.meta += 1;
-        }
+        });
+        counts.meta += 1;
     }
     // An empty design value means "no opinion", not "clear it": fixed
     // components (identified by MPN — e.g. every custom part on an
     // import-kicad board) carry no instance value, and blanking the
     // board's human-set Value field would strip its BOM annotations.
     if (inst.value.len > 0 and !std.mem.eql(u8, m.value, inst.value)) {
-        if (try emitOpUnlessApplied(d, w, first, op_set_field, .{
+        try emitOp(w, first, op_set_field, .{
             .{ "uuid", target },
             .{ "field", "value" },
             .{ "value", inst.value },
             .{ "old", m.value },
             .{ "ref", inst.ref_des },
-        }, target, "value", inst.value)) {
-            counts.material += 1;
-        }
+        });
+        counts.material += 1;
     }
     // Stamp/realign canopy_uuid whenever it differs from the design's id —
     // this covers BOTH the eager case (a matched fp that has no canopy_uuid
     // yet: by_ref backfill, manual placement, or a migration-tier match) and
     // the drift case (legacy long-form, --migrate pairing). opTargetUuid falls
-    // back to kicad_uuid so the agent resolves the fp before canopy_uuid is
+    // back to kicad_uuid so the writer resolves the fp before canopy_uuid is
     // set. After this op lands, the next sync UUID-matches directly. This is
     // the single stamping point for every match tier (Option G).
     if (!std.mem.eql(u8, m.uuid, inst.uuid)) {
-        if (try emitOpUnlessApplied(d, w, first, op_set_field, .{
+        try emitOp(w, first, op_set_field, .{
             .{ "uuid", target },
             .{ "field", field_canopy_uuid },
             .{ "value", inst.uuid },
             .{ "ref", inst.ref_des },
-        }, target, field_canopy_uuid, inst.uuid)) {
-            counts.meta += 1;
-        }
+        });
+        counts.meta += 1;
     }
     // Push every design property to KiCad as a custom Field, so adding a
     // new BOM column (manufacturer, datasheet, supplier_pn, …) is a pure
-    // server-side change with no agent update. Skip property keys that
+    // server-side change with no client update. Skip property keys that
     // collide with KiCad's built-in ref/value/footprint handling — those
     // travel through dedicated set_field ops above. The canonical-name map
     // upper-cases well-known KiCad field names (mpn → MPN) so manually-
@@ -2455,45 +2214,79 @@ fn handleMatched(
         const field_name = canonicalFieldName(p.key);
         const board_value = m.fields.get(field_name) orelse "";
         if (std.mem.eql(u8, board_value, p.value)) continue;
-        if (try emitOpUnlessApplied(d, w, first, op_set_field, .{
+        try emitOp(w, first, op_set_field, .{
             .{ "uuid", target },
             .{ "field", field_name },
             .{ "value", p.value },
             .{ "ref", inst.ref_des },
-        }, target, field_name, p.value)) {
-            counts.meta += 1;
-        }
+        });
+        counts.meta += 1;
     }
     // Passive routing hint: each pad's intended (device.pin.net) destination,
     // so a layout engineer reading a bare cap/resistor sees what it bridges.
     if (canopy_net) |cn| {
         const board_value = m.fields.get(field_canopy_net) orelse "";
         if (!std.mem.eql(u8, board_value, cn)) {
-            if (try emitOpUnlessApplied(d, w, first, op_set_field, .{
+            try emitOp(w, first, op_set_field, .{
                 .{ "uuid", target },
                 .{ "field", field_canopy_net },
                 .{ "value", cn },
                 .{ "ref", inst.ref_des },
-            }, target, field_canopy_net, cn)) {
-                counts.meta += 1;
-            }
+            });
+            counts.meta += 1;
         }
     }
     // Section provenance: which design `(section …)` this part came from.
     if (section.len > 0) {
         const board_value = m.fields.get(field_canopy_section) orelse "";
         if (!std.mem.eql(u8, board_value, section)) {
-            if (try emitOpUnlessApplied(d, w, first, op_set_field, .{
+            try emitOp(w, first, op_set_field, .{
                 .{ "uuid", target },
                 .{ "field", field_canopy_section },
                 .{ "value", section },
                 .{ "ref", inst.ref_des },
-            }, target, field_canopy_section, section)) {
-                counts.meta += 1;
-            }
+            });
+            counts.meta += 1;
         }
     }
     counts.material += try emitPadNetOps(d, w, first, target, inst.ref_des, d.pad_net_map, m.pads);
+}
+
+/// Emit a pose mutation for a matched footprint when the named PCB-editor
+/// layout differs from KiCad. Ordinary sync never reaches this helper with an
+/// authoritative layout and therefore retains its no-movement invariant.
+fn emitAuthoritativePose(
+    d: *DiffContext,
+    ref_des: []const u8,
+    m: BoardFp,
+    w: anytype,
+    first: *bool,
+) !void {
+    const layout = d.authoritative_layout orelse return;
+    const pose = layout.poses.get(ref_des) orelse return;
+    const back = pose.side == .bottom;
+    const kicad_rot = netlispRotToKicad(pose.rot, back);
+    const layer = if (back) board_layers.b_cu else board_layers.f_cu;
+    if (layout.board_positions) |positions| {
+        if (positions.get(m.kicad_uuid)) |old| {
+            const drot = @abs(@mod(old.rot - kicad_rot + 180.0, 360.0) - 180.0);
+            if (@abs(old.x - pose.x) <= placement_eps_mm and
+                @abs(old.y - pose.y) <= placement_eps_mm and
+                drot <= placement_eps_deg and std.mem.eql(u8, old.layer, layer)) return;
+        }
+    }
+    if (!first.*) try w.writeAll(",");
+    first.* = false;
+    try w.writeAll("{\"op\":\"set_footprint_pose\",\"uuid\":");
+    try json_writer.writeString(w, opTargetUuid(m));
+    try w.writeAll(",\"ref\":");
+    try json_writer.writeString(w, ref_des);
+    try w.print(",\"x\":{d},\"y\":{d},\"rot\":{d},\"side\":", .{
+        mmToNm(pose.x), mmToNm(pose.y), kicad_rot,
+    });
+    try json_writer.writeString(w, if (back) "bottom" else "top");
+    try w.writeAll("}");
+    d.summary.layout_parts += 1;
 }
 
 /// Property keys we deliberately don't push to KiCad as custom fields:
@@ -2580,8 +2373,8 @@ fn buildCanopyNetValue(
     if (pads.items.len == 0) return null;
     std.mem.sort(CanopyPad, pads.items, {}, lessByPadNum);
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
     for (pads.items, 0..) |p, i| {
         if (i > 0) try w.writeAll(" / ");
         // Count the hub pins on this pad's full net (excluding the passive
@@ -2602,7 +2395,7 @@ fn buildCanopyNetValue(
             try w.writeAll(p.display);
         }
     }
-    return buf.items;
+    return buf.written();
 }
 
 /// Float tolerance for comparing on-board model offset/rotation (mm / deg)
@@ -2669,7 +2462,7 @@ fn handleInstance(d: *DiffContext, inst: export_kicad.FlatInstance, w: anytype, 
     }
     // Defer the add — `emitStagedAdds` lays buffered adds out grouped by
     // section once the whole walk is done. fp_name / canopy_net / section
-    // are resolved now; kmod + footprint_def are loaded at emit time.
+    // are resolved now; kmod is loaded at emit time.
     try d.pending_adds.append(d.spc.arena, .{
         .inst = inst,
         .fp_name = fp_name_short,
@@ -2688,17 +2481,17 @@ fn sectionForRef(ref_des: []const u8, ref_to_section: *std.StringHashMapUnmanage
 }
 
 fn emitOp(w: anytype, first: *bool, op: []const u8, fields: anytype) !void {
-    if (!first.*) try w.*.writeAll(",");
+    if (!first.*) try w.writeAll(",");
     first.* = false;
-    try w.*.writeAll("{\"op\":\"");
-    try w.*.writeAll(op);
-    try w.*.writeAll("\"");
+    try w.writeAll("{\"op\":\"");
+    try w.writeAll(op);
+    try w.writeAll("\"");
     inline for (fields) |kv| {
-        try w.*.writeAll(",");
-        try w.*.print("\"{s}\":", .{kv[0]});
-        try json_writer.writeString(w.*, kv[1]);
+        try w.writeAll(",");
+        try w.print("\"{s}\":", .{kv[0]});
+        try json_writer.writeString(w, kv[1]);
     }
-    try w.*.writeAll("}");
+    try w.writeAll("}");
 }
 
 /// Bake a netlisp-model rotation (deg, page CW-positive) into KiCad's stored
@@ -2732,67 +2525,58 @@ fn emitAddOp(
     inst: export_kicad.FlatInstance,
     fp_name: []const u8,
     kmod: []const u8,
-    fp_def_json: ?[]const u8,
     pad_net_map: *std.StringHashMapUnmanaged([]const u8),
     pose: AddPose,
     canopy_net: ?[]const u8,
     section: []const u8,
 ) !void {
-    if (!first.*) try w.*.writeAll(",");
+    if (!first.*) try w.writeAll(",");
     first.* = false;
-    try w.*.writeAll("{\"op\":\"add\",\"uuid\":");
-    try json_writer.writeString(w.*, inst.uuid);
-    try w.*.writeAll(",\"ref\":");
-    try json_writer.writeString(w.*, inst.ref_des);
-    try w.*.writeAll(",\"value\":");
-    try json_writer.writeString(w.*, inst.value);
-    try w.*.writeAll(",\"footprint_name\":");
-    try json_writer.writeString(w.*, fp_name);
-    try w.*.writeAll(",\"kicad_mod\":");
-    try json_writer.writeString(w.*, kmod);
-    if (fp_def_json) |def| {
-        try w.*.writeAll(",\"footprint_def\":");
-        try w.*.writeAll(def);
-    }
-    // canopy_net / canopy_section as top-level op fields too: the IPC agent
-    // reads them from the baked footprint_def above, but the file-based
-    // writer (the webpage button) bakes them onto the fp from these fields
-    // so they land on the first sync rather than waiting for a follow-up.
+    try w.writeAll("{\"op\":\"add\",\"uuid\":");
+    try json_writer.writeString(w, inst.uuid);
+    try w.writeAll(",\"ref\":");
+    try json_writer.writeString(w, inst.ref_des);
+    try w.writeAll(",\"value\":");
+    try json_writer.writeString(w, inst.value);
+    try w.writeAll(",\"footprint_name\":");
+    try json_writer.writeString(w, fp_name);
+    try w.writeAll(",\"kicad_mod\":");
+    try json_writer.writeString(w, kmod);
+    // Bake routing and section metadata into fresh footprints on the first sync.
     if (canopy_net) |cn| {
         if (cn.len > 0) {
-            try w.*.writeAll(",\"canopy_net\":");
-            try json_writer.writeString(w.*, cn);
+            try w.writeAll(",\"canopy_net\":");
+            try json_writer.writeString(w, cn);
         }
     }
     if (section.len > 0) {
-        try w.*.writeAll(",\"canopy_section\":");
-        try json_writer.writeString(w.*, section);
+        try w.writeAll(",\"canopy_section\":");
+        try json_writer.writeString(w, section);
     }
     // Design properties (MPN, Manufacturer, Datasheet, … — every BOM column
     // except KiCad built-ins) baked into the add so they land on the FIRST
-    // sync. The IPC agent reads these from footprint_def above; the file-based
-    // writer reads this array. Without it the file path created the fp with
+    // sync. The writer reads this array. Without it the file path created the fp with
     // only ref/value/canopy_*, and the rest didn't appear until a 2nd sync
     // emitted set_field ops against the now-existing part ("press sync twice").
     // Filtering mirrors the update path (skipDesignProperty + canonicalFieldName)
     // so the first sync bakes exactly what the second would set — no residual diff.
-    try w.*.writeAll(",\"properties\":[");
+    try w.writeAll(",\"properties\":[");
     var prop_first = true;
     for (inst.properties) |p| {
         if (skipDesignProperty(p.key)) continue;
         if (p.value.len == 0) continue;
-        if (!prop_first) try w.*.writeAll(",");
+        if (!prop_first) try w.writeAll(",");
         prop_first = false;
-        try w.*.writeAll("{\"key\":");
-        try json_writer.writeString(w.*, canonicalFieldName(p.key));
-        try w.*.writeAll(",\"value\":");
-        try json_writer.writeString(w.*, p.value);
-        try w.*.writeAll("}");
+        try w.writeAll("{\"key\":");
+        try json_writer.writeString(w, canonicalFieldName(p.key));
+        try w.writeAll(",\"value\":");
+        try json_writer.writeString(w, p.value);
+        try w.writeAll("}");
     }
-    try w.*.writeAll("]");
+    try w.writeAll("]");
     // Staging position (board nm). Both paths move the new fp here; (0,0)
     // means "no staging hint" (the part stays at the origin).
-    try w.*.print(",\"x\":{d},\"y\":{d}", .{ pose.x_nm, pose.y_nm });
+    try w.print(",\"x\":{d},\"y\":{d}", .{ pose.x_nm, pose.y_nm });
     // Orientation. The placement engine's angle is CW-positive (the page's
     // `wpt()` rotates with SVG `rotate()` in a Y-down world), but KiCad's
     // `(at x y angle)` is CCW-positive — so emit the negated angle. 0/180 are
@@ -2807,13 +2591,13 @@ fn emitAddOp(
     // convention mirrors local Y (see writer.adaptKmodChild) — the two mirrors
     // differ by exactly a half-turn, folded into the stored angle here.
     const kicad_rot = netlispRotToKicad(pose.rot_deg, pose.back);
-    if (kicad_rot != 0) try w.*.print(",\"rot\":{d}", .{kicad_rot});
+    if (kicad_rot != 0) try w.print(",\"rot\":{d}", .{kicad_rot});
     // Board side: the writer lands the new footprint on B.Cu with its geometry
     // adapted to KiCad's stored back-side form. Omitted for front (legacy shape).
-    if (pose.back) try w.*.writeAll(",\"side\":\"bottom\"");
-    try w.*.writeAll(",\"pad_nets\":");
-    try writePadNetsArray(w.*, inst.ref_des, pad_net_map);
-    try w.*.writeAll("}");
+    if (pose.back) try w.writeAll(",\"side\":\"bottom\"");
+    try w.writeAll(",\"pad_nets\":");
+    try writePadNetsArray(w, inst.ref_des, pad_net_map);
+    try w.writeAll("}");
 }
 
 fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
@@ -2831,21 +2615,21 @@ fn boxCols(n: usize) usize {
 /// an Any-wrapped proto-canonical object string. Mirrors `writeBoardShapeOpen`
 /// + geometry but standalone rather than an inline footprint child.
 fn boardRectItem(arena: std.mem.Allocator, x1: f64, y1: f64, x2: f64, y2: f64) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
     try w.writeAll(proto_any_open ++ proto_type_url_boardshape ++ "\",\"layer\":\"" ++ proto_layer_dwgs_user ++ "\",");
     try w.writeAll("\"shape\":{\"attributes\":{\"stroke\":{\"width\":");
     try w.print("{{\"valueNm\":{d}}},\"style\":\"SLS_DEFAULT\"}},", .{mmToNm(stage_box_stroke_mm)});
     try w.writeAll("\"fill\":{\"fillType\":\"GFT_UNFILLED\"}},");
     try writeRectGeom(w, x1, y1, x2, y2);
     try w.writeAll("}}");
-    return buf.items;
+    return buf.written();
 }
 
 /// Build a BoardText label on Dwgs.User as an Any-wrapped proto string.
 fn boardLabelItem(arena: std.mem.Allocator, x: f64, y: f64, text: []const u8) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
     try w.writeAll(proto_any_open ++ proto_type_url_boardtext ++ "\",\"layer\":\"" ++ proto_layer_dwgs_user ++ "\",\"text\":{\"position\":");
     try writeProtoVec2(w, x, y);
     try w.writeAll(",\"attributes\":{\"size\":");
@@ -2853,7 +2637,7 @@ fn boardLabelItem(arena: std.mem.Allocator, x: f64, y: f64, text: []const u8) ![
     try w.writeAll("},\"text\":");
     try json_writer.writeString(w, text);
     try w.writeAll("}}");
-    return buf.items;
+    return buf.written();
 }
 
 /// Group buffered section-add indices by section name (sorted for a stable
@@ -2886,6 +2670,16 @@ fn groupAddsBySection(
 ///   3. **Section-staging grid** — anything left clusters in a staging box.
 /// Existing/matched footprints are never moved by any tier.
 ///
+/// Tier 1 is **bypassed** when the design's own layout already places every
+/// buffered add on a fresh board (`layoutNamesEveryAdd`). Module seeding exists
+/// for parts the design layout does NOT place; when it places all of them, that
+/// layout is the more specific authority — it positions the modules relative to
+/// each other and carries each part's rotation and side, none of which survives
+/// a trip through the staging band. Running tier 1 first there sent every
+/// sub-block child off to ~300 mm and reproduced only the unmodularised
+/// remainder in place. `?no_seed_blocks=1` (`SeedOptions.sub_blocks`) forces the
+/// same bypass when the layout covers most, but not all, of the board.
+///
 /// When the request carries an explicit sub-circuit selection (the Push modal's
 /// checkboxes — `seed_groups`/`seed_all`), that path takes over instead: the
 /// selected groups are seeded from the saved whole-design layout (anchored on
@@ -2905,14 +2699,13 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
     // user has asked for the whole-design layout regardless of board state.
     // `planSelectedGroups` decides placements; the writing stays here (it owns
     // the ops writer) so the helpers need no `anytype` writer param.
-    if (d.seed_groups != null or d.seed_all) {
+    if (d.seed.groups != null or d.seed.all) {
         const plan = try planSelectedGroups(d, adds, &leftover);
         for (plan.placed) |p| {
             const pa = p.pa;
             const kmod = loadKicadMod(d.spc, pa.fp_name, pa.inst.component) orelse continue;
-            const fp_def = loadFootprintDefForInstance(d.spc, pa.fp_name, pa.inst, pa.canopy_net, pa.section);
             const ap = AddPose{ .x_nm = mmToNm(p.x_mm), .y_nm = mmToNm(p.y_mm), .rot_deg = p.rot, .back = p.back };
-            try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, ap, pa.canopy_net, pa.section);
+            try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, d.pad_net_map, ap, pa.canopy_net, pa.section);
             d.summary.added += 1;
         }
         // One off-board box per seeded sub-circuit: a labelled rectangle around
@@ -2926,23 +2719,23 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
                 try boardLabelItem(arena, (b.x0 + b.x1) * stage_half, b.y0 + stage_label_h_mm * stage_half, b.label),
             };
             for (items) |item_json| {
-                if (!first.*) try w.*.writeAll(",");
+                if (!first.*) try w.writeAll(",");
                 first.* = false;
-                try w.*.writeAll(board_item_op_open);
-                try w.*.writeAll(item_json);
-                try w.*.writeAll("}");
+                try w.writeAll(board_item_op_open);
+                try w.writeAll(item_json);
+                try w.writeAll("}");
             }
             if (b.members.len > 0) {
-                if (!first.*) try w.*.writeAll(",");
+                if (!first.*) try w.writeAll(",");
                 first.* = false;
-                try w.*.writeAll("{\"op\":\"group\",\"name\":");
-                try json_writer.writeString(w.*, b.label);
-                try w.*.writeAll(",\"members\":[");
+                try w.writeAll("{\"op\":\"group\",\"name\":");
+                try json_writer.writeString(w, b.label);
+                try w.writeAll(",\"members\":[");
                 for (b.members, 0..) |m, i| {
-                    if (i > 0) try w.*.writeAll(",");
-                    try json_writer.writeString(w.*, m);
+                    if (i > 0) try w.writeAll(",");
+                    try json_writer.writeString(w, m);
                 }
-                try w.*.writeAll("]}");
+                try w.writeAll("]}");
             }
         }
         // Carry each seeded sub-circuit's module routing onto the board, offset to
@@ -2952,8 +2745,13 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
         return emitStagingGrid(d, w, first, leftover.items);
     }
 
-    // Tier 1: seed sub-blocks that aren't on the board from their module layouts.
-    try seedSubBlocks(d, w, first, adds, &leftover);
+    // Tier 1: seed sub-blocks that aren't on the board from their module
+    // layouts — unless the design's own layout is already placing all of them.
+    if (seedsSubBlocks(d)) {
+        try seedSubBlocks(d, w, first, adds, &leftover);
+    } else {
+        for (adds) |pa| try leftover.append(arena, pa);
+    }
     const rest = leftover.items;
     if (rest.len == 0) return;
 
@@ -2961,7 +2759,7 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
     // Fresh boards only — on a populated board the layout's coordinates land
     // in the middle of existing placement/routing, so everything left over
     // goes to the off-board staging grid instead.
-    const layout_if_fresh = if (d.board_fresh) d.premade_layout else null;
+    const layout_if_fresh = if (d.board_fresh or d.authoritative_layout != null) d.premade_layout else null;
     const layout = layout_if_fresh orelse return emitStagingGrid(d, w, first, rest);
     var grid_rest: std.ArrayList(PendingAdd) = .empty;
     for (rest) |pa| {
@@ -2970,9 +2768,8 @@ fn emitStagedAdds(d: *DiffContext, w: anytype, first: *bool) !void {
             continue;
         };
         const kmod = loadKicadMod(d.spc, pa.fp_name, pa.inst.component) orelse continue;
-        const fp_def = loadFootprintDefForInstance(d.spc, pa.fp_name, pa.inst, pa.canopy_net, pa.section);
         const ap = AddPose{ .x_nm = mmToNm(pose.x), .y_nm = mmToNm(pose.y), .rot_deg = pose.rot, .back = pose.side == .bottom };
-        try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, ap, pa.canopy_net, pa.section);
+        try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, d.pad_net_map, ap, pa.canopy_net, pa.section);
         d.summary.added += 1;
     }
     // Tier 3: grid staging.
@@ -3066,8 +2863,8 @@ fn computeGroupAnchors(
 
 /// Whether sub-circuit group `sec` was selected for layout seeding.
 fn groupSelected(d: *DiffContext, sec: []const u8) bool {
-    if (d.seed_all) return true;
-    const set = d.seed_groups orelse return false;
+    if (d.seed.all) return true;
+    const set = d.seed.groups orelse return false;
     return set.contains(sec);
 }
 
@@ -3225,7 +3022,7 @@ fn planSelectedGroups(
 /// seeded sub-circuit uses to follow its anchor IC onto a rotated / bottom-side
 /// board pose. Maps a footprint-local point v to world as
 /// `apply(v) = rotate(mirrorX(v)) + (tx,ty)`, where `mirrorX` negates x iff
-/// `mirror` and `rotate` is the {0,90,180,270} matrix of `optimizer.rotateLocal`
+/// `mirror` and `rotate` use the arbitrary-angle matrix of `optimizer.rotateLocal`
 /// applied in the netlisp y-down frame. A part's `SyncPose` (x,y,rot,side) is
 /// exactly such a transform (mirror ⟺ side==bottom) — the mirror-before-rotate
 /// order matches `optimizer.worldPt`, the authoritative pose→pad-world math, so
@@ -3236,16 +3033,9 @@ const Pose2D = struct {
     rot: f64 = 0,
     mirror: bool = false,
 
-    /// `optimizer.rotateLocal`'s CCW {0,90,180,270} matrix (the netlisp y-down
-    /// frame). Non-right angles fall through to identity — module poses only
-    /// ever carry the four right angles.
+    /// `optimizer.rotateLocal`'s CCW matrix in the netlisp y-down frame.
     fn rotate(deg: f64, x: f64, y: f64) [2]f64 {
-        return switch (numeric.checkedInt(i64, @round(@mod(deg, 360.0))) orelse 0) {
-            90 => .{ -y, x },
-            180 => .{ -x, -y },
-            270 => .{ y, -x },
-            else => .{ x, y },
-        };
+        return pose_math.rotate(x, y, deg);
     }
 
     /// Linear part only (rotate∘mirrorX, no translation).
@@ -3422,17 +3212,21 @@ fn bridgedCopperNet(
 }
 
 /// KiCad copper-layer name for a router / `SavedTrack` layer index. The router
-/// numbers signal layers 0 = top (F.Cu), 1 = bottom (B.Cu); plane-free inner
-/// signal layers count up from 2 in stack order, matching `export_gerber.zig`'s
-/// `In{i-1}.Cu` naming (2 → In1.Cu, 3 → In2.Cu, …). Verified against
-/// `router.Track` ("layer 0 = top, 1 = bottom signal") and
-/// `export_gerber.planLayers`. Seeded vias are through-hole, so they need no map.
+/// numbers signal layers 0 = top (F.Cu), 1 = bottom (B.Cu); the spellings come
+/// from `board_layers`, so this path cannot drift from the Gerber/blob naming.
+/// Seeded vias are through-hole, so they need no map.
+///
+/// CAVEAT — no `BoardRules` reaches here (the diff context carries the netlist,
+/// not the stackup), so an inner index is read as its OWN stack position. That
+/// is exact for every board whose inner layers are all routable, and understates
+/// by one plane for a stackup that declares a plane-claimed inner. Handing this
+/// path the board's layer table is a follow-up; it is deliberately unchanged
+/// here so no board's exported copper moves.
 fn kicadCopperLayer(arena: std.mem.Allocator, l: u8) ![]const u8 {
-    return switch (l) {
-        0 => "F.Cu",
-        1 => "B.Cu",
-        else => try std.fmt.allocPrint(arena, "In{d}.Cu", .{l - 1}),
-    };
+    if (l == 0) return board_layers.f_cu;
+    if (l == 1) return board_layers.b_cu;
+    var buf: [board_layers.name_buf_len]u8 = undefined;
+    return try arena.dupe(u8, board_layers.innerName(board_layers.StackIndex.of(l), &buf));
 }
 
 /// The router layer index a seeded track/via takes after its group's transform:
@@ -3481,17 +3275,27 @@ fn emitSeedCopper(d: *DiffContext, w: anytype, first: *bool, jobs: []const SeedC
             const layer = try kicadCopperLayer(arena, copperLayerSided(t.l, job.xform.mirror));
             const p1 = job.xform.apply(t.x1, t.y1);
             const p2 = job.xform.apply(t.x2, t.y2);
-            if (!first.*) try w.*.writeAll(",");
+            if (!first.*) try w.writeAll(",");
             first.* = false;
-            try w.*.writeAll("{\"op\":\"add_track\",\"net\":");
-            try json_writer.writeString(w.*, net);
-            try w.*.print(",\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d},\"width\":{d},\"layer\":", .{
-                mmToNm(p1[0]), mmToNm(p1[1]),
-                mmToNm(p2[0]), mmToNm(p2[1]),
-                mmToNm(width),
-            });
-            try json_writer.writeString(w.*, layer);
-            try w.*.writeAll("}");
+            const mid = if (t.xm) |xm| if (t.ym) |ym| job.xform.apply(xm, ym) else null else null;
+            try w.writeAll(if (mid != null) add_arc_op_open else add_track_op_open);
+            try json_writer.writeString(w, net);
+            if (mid) |pm| {
+                try w.print(",\"x1\":{d},\"y1\":{d},\"xm\":{d},\"ym\":{d},\"x2\":{d},\"y2\":{d},\"width\":{d},\"layer\":", .{
+                    mmToNm(p1[0]), mmToNm(p1[1]), mmToNm(pm[0]), mmToNm(pm[1]),
+                    mmToNm(p2[0]), mmToNm(p2[1]), mmToNm(width),
+                });
+            } else {
+                try w.print(track_coords_fmt, .{
+                    mmToNm(p1[0]), mmToNm(p1[1]),
+                    mmToNm(p2[0]), mmToNm(p2[1]),
+                    mmToNm(width),
+                });
+            }
+            try json_writer.writeString(w, layer);
+            try w.writeAll(",\"group\":");
+            try json_writer.writeString(w, if (job.slug.len > 0) job.slug else seed_box_label);
+            try w.writeAll("}");
             d.summary.tracks += 1;
         }
         for (job.routes.vias) |v| {
@@ -3501,13 +3305,15 @@ fn emitSeedCopper(d: *DiffContext, w: anytype, first: *bool, jobs: []const SeedC
             const dia = if (rule.via_dia > 0) rule.via_dia else v.d;
             const drill = if (rule.via_drill > 0) rule.via_drill else v.drill;
             const c = job.xform.apply(v.x, v.y);
-            if (!first.*) try w.*.writeAll(",");
+            if (!first.*) try w.writeAll(",");
             first.* = false;
-            try w.*.writeAll(add_via_op_open);
-            try json_writer.writeString(w.*, net);
-            try w.*.print(via_coords_fmt, .{
+            try w.writeAll(add_via_op_open);
+            try json_writer.writeString(w, net);
+            try w.print(",\"x\":{d},\"y\":{d},\"dia\":{d},\"drill\":{d},\"group\":", .{
                 mmToNm(c[0]), mmToNm(c[1]), mmToNm(dia), mmToNm(drill),
             });
+            try json_writer.writeString(w, if (job.slug.len > 0) job.slug else seed_box_label);
+            try w.writeAll("}");
             d.summary.vias += 1;
         }
     }
@@ -3585,8 +3391,8 @@ fn finishOffBoardBlock(
 /// group with no seedable source is skipped. Computed from the still-populated
 /// `pending_adds` after `emitStagedAdds`. Result lives on `arena`.
 fn buildSubCircuitsJson(arena: std.mem.Allocator, d: *DiffContext) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
     try w.writeByte('[');
     const adds = d.pending_adds.items;
     var buckets = std.StringHashMapUnmanaged(std.ArrayList(usize)).empty;
@@ -3628,7 +3434,7 @@ fn buildSubCircuitsJson(arena: std.mem.Allocator, d: *DiffContext) ![]const u8 {
         try w.writeByte('}');
     }
     try w.writeByte(']');
-    return buf.items;
+    return buf.written();
 }
 
 /// Staging band for whole-sub-block seeds: blocks are packed left-to-right at
@@ -3637,6 +3443,43 @@ fn buildSubCircuitsJson(arena: std.mem.Allocator, d: *DiffContext) ![]const u8 {
 const block_stage_origin_x_mm: f64 = 300.0;
 const block_stage_origin_y_mm: f64 = 230.0;
 const block_stage_gap_mm: f64 = 12.0;
+
+/// True when the whole-design premade layout names EVERY buffered add — the
+/// condition under which tier 2 alone reproduces the saved board exactly, with
+/// nothing falling through to the staging grid. The one shared definition of "a
+/// faithful whole-design seed": it gates the tier-1 bypass (`seedsSubBlocks`),
+/// the computed stitching vias (`emitLayoutVias`) and the saved copper
+/// (`emitLayoutCopper`), so all three agree about which board they describe.
+/// Note the copper gates need this AFTER emission, which is safe because
+/// `emitStagedAdds` reads `pending_adds` and never clears it.
+fn layoutNamesEveryAdd(d: *const DiffContext) bool {
+    const layout = d.premade_layout orelse return false;
+    for (d.pending_adds.items) |pa| {
+        if (!layout.contains(pa.inst.ref_des)) return false;
+    }
+    return true;
+}
+
+/// Whether tier 1 (per-sub-block module seeding) runs for this sync: only when
+/// the caller hasn't opted out (`?no_seed_blocks=1`) and the design's own layout
+/// isn't already placing the whole fresh board itself. See `emitStagedAdds`.
+fn seedsSubBlocks(d: *const DiffContext) bool {
+    if (d.authoritative_layout != null) return false;
+    if (!d.seed.sub_blocks) return false;
+    return !(d.board_fresh and layoutNamesEveryAdd(d));
+}
+
+/// Whether this sync just reproduced the design's saved layout onto a fresh
+/// board in full — the precondition for writing that layout's copper. Requires a
+/// FRESH board (on a populated one the saved coordinates land in the middle of
+/// real routing), parts actually added, and the layout naming every one of them,
+/// so the copper is guaranteed to sit under footprints at their saved poses.
+/// Called AFTER emission, when `summary.added` is final.
+fn seedsWholeLayout(d: *const DiffContext) bool {
+    if (!d.board_fresh) return false;
+    if (d.summary.added == 0) return false;
+    return layoutNamesEveryAdd(d);
+}
 
 /// Tier 1 of `emitStagedAdds`: group the buffered adds by their sub-block
 /// (`pa.section` is the sub-block name for a sub-block part), and for each group
@@ -3728,14 +3571,12 @@ fn seedOneSubBlock(
             continue;
         };
         const kmod = loadKicadMod(d.spc, pa.fp_name, pa.inst.component) orelse continue;
-        const fp_def = loadFootprintDefForInstance(d.spc, pa.fp_name, pa.inst, pa.canopy_net, pa.section);
         try emitAddOp(
             w,
             first,
             pa.inst,
             pa.fp_name,
             kmod,
-            fp_def,
             d.pad_net_map,
             .{
                 .x_nm = mmToNm(pose.x + dx),
@@ -3762,11 +3603,11 @@ fn seedOneSubBlock(
         try boardLabelItem(arena, (bx0 + bx1) * stage_half, by0 + stage_label_h_mm * stage_half, sec),
     };
     for (items) |item_json| {
-        if (!first.*) try w.*.writeAll(",");
+        if (!first.*) try w.writeAll(",");
         first.* = false;
-        try w.*.writeAll(board_item_op_open);
-        try w.*.writeAll(item_json);
-        try w.*.writeAll("}");
+        try w.writeAll(board_item_op_open);
+        try w.writeAll(item_json);
+        try w.writeAll("}");
     }
 
     // GND vias only on a fresh board AND when the WHOLE block is fresh (every
@@ -3774,7 +3615,7 @@ fn seedOneSubBlock(
     // dragged into place, but vias don't travel with footprints — they'd stay
     // stranded in the staging band. A partly-placed block's other parts live
     // elsewhere on the board, so block-frame vias for them would strand too.
-    if (d.emit_layout_vias and d.board_fresh and seeded == poses.len)
+    if (d.seed.layout_vias and d.board_fresh and seeded == poses.len)
         try emitBlockVias(d, w, first, sb.block, poses, dx, dy);
 
     return (bx1 - bx0) + block_stage_gap_mm;
@@ -3785,15 +3626,16 @@ fn seedOneSubBlock(
 /// then offset each via by (dx, dy) so it lands under the staged parts. Net
 /// names collapse the same way pad nets do. The writer de-dups by position.
 fn emitBlockVias(d: *DiffContext, w: anytype, first: *bool, block: *const env_mod.DesignBlock, poses: []const pcb_layout.RefPose, dx: f64, dy: f64) !void {
-    const vias = pcb_layout.viasForPoses(d.spc.arena, block, d.spc.project_dir, poses, .{}) orelse return;
+    // Module-local frame — the parent board's drawn outline doesn't apply here.
+    const vias = pcb_layout.viasForPoses(d.spc.arena, block, d.spc.project_dir, .{ .poses = poses, .outline = .authored_only }, .{}) orelse return;
     for (vias) |v| {
         const net = bareNetName(maybeCollapseDotSubNet(v.net, d.dot_nets));
         if (net.len == 0) continue;
-        if (!first.*) try w.*.writeAll(",");
+        if (!first.*) try w.writeAll(",");
         first.* = false;
-        try w.*.writeAll(add_via_op_open);
-        try json_writer.writeString(w.*, net);
-        try w.*.print(via_coords_fmt, .{
+        try w.writeAll(add_via_op_open);
+        try json_writer.writeString(w, net);
+        try w.print(via_coords_fmt, .{
             mmToNm(v.x + dx), mmToNm(v.y + dy), mmToNm(v.dia), mmToNm(v.drill),
         });
         d.summary.vias += 1;
@@ -3818,19 +3660,18 @@ fn stripSubPrefix(ref: []const u8, sec: []const u8) []const u8 {
     return ref;
 }
 
-/// Emit `add_via` ops for the GND-plane stitching vias of a first-insertion
-/// seed. Only fires when (a) vias weren't opted out (`?no_layout_vias=1`),
-/// (b) the target board is FRESH (zero footprints — see
-/// `DiffContext.board_fresh`; on a populated board the layout's via plan
-/// lands on top of real routing), (c) the design has a premade layout,
-/// (d) this sync actually added parts, and (e) **every** buffered add is
-/// named by that layout — i.e. no part fell back to the staging grid. The
-/// all-named gate matters because `loadSyncVias` rebuilds the *whole*
-/// placement at the layout poses; a part the layout doesn't name would sit
-/// at the origin there and drop a stray via, so we skip vias entirely for a
-/// partial seed. The writer de-dups by position, so a later re-seed of the
-/// same board re-emits these harmlessly. Net names are collapsed the same
-/// way pad nets are, so the via lands on the GND the pads reference.
+/// Emit `add_via` ops for the **computed** GND-plane stitching vias of a
+/// first-insertion seed — a fresh `router.groundVias` pass over the layout's
+/// poses, not copper anyone saved. Fires when vias weren't opted out
+/// (`?no_layout_vias=1`) and this sync reproduced the whole saved layout
+/// (`seedsWholeLayout`). That all-named gate matters because `loadSyncVias`
+/// rebuilds the *whole* placement at the layout poses; a part the layout doesn't
+/// name would sit at the origin there and drop a stray via, so we skip vias
+/// entirely for a partial seed. The writer de-dups by position, so a later
+/// re-seed of the same board re-emits these harmlessly, and a computed via
+/// landing where the saved copper already has one (`emitLayoutCopper`) collapses
+/// into it. Net names are collapsed the same way pad nets are, so the via lands
+/// on the GND the pads reference.
 fn emitLayoutVias(
     d: *DiffContext,
     block: *const env_mod.DesignBlock,
@@ -3840,26 +3681,345 @@ fn emitLayoutVias(
     w: anytype,
     first: *bool,
 ) !void {
-    if (!parsed.emit_layout_vias) return;
-    if (!d.board_fresh) return;
-    if (d.summary.added == 0) return;
-    const layout = d.premade_layout orelse return;
-    for (d.pending_adds.items) |pa| {
-        if (!layout.contains(pa.inst.ref_des)) return; // partial seed → skip vias
-    }
+    if (!parsed.seed.layout_vias) return;
+    if (!seedsWholeLayout(d)) return;
     const vias = pcb_layout.loadSyncVias(d.spc.arena, block, project_dir, name) orelse return;
     for (vias) |v| {
         const net = bareNetName(maybeCollapseDotSubNet(v.net, parsed.dot_nets));
         if (net.len == 0) continue;
-        if (!first.*) try w.*.writeAll(",");
+        if (!first.*) try w.writeAll(",");
         first.* = false;
-        try w.*.writeAll(add_via_op_open);
-        try json_writer.writeString(w.*, net);
-        try w.*.print(via_coords_fmt, .{
+        try w.writeAll(add_via_op_open);
+        try json_writer.writeString(w, net);
+        try w.print(via_coords_fmt, .{
             mmToNm(v.x), mmToNm(v.y), mmToNm(v.dia), mmToNm(v.drill),
         });
         d.summary.vias += 1;
     }
+}
+
+/// Seed the DSL-authored edge mask opening into a new KiCad board as closed
+/// F.Mask and B.Mask graphic strokes. The stroke is centred on Edge.Cuts, so a
+/// width of `2*mask-width` exposes exactly the authored band inside the board.
+/// Board graphics are emitted only on first insertion: the board snapshot has
+/// no update identity for existing graphics, so repeating them would stack
+/// duplicates.
+fn emitPerimeterMask(
+    d: *DiffContext,
+    block: *const env_mod.DesignBlock,
+    project_dir: []const u8,
+    name: []const u8,
+    w: anytype,
+    first: *bool,
+) !void {
+    if (!d.board_fresh or !seedsWholeLayout(d)) return;
+    const mask = pcb_layout.loadSyncPerimeterMask(d.spc.arena, block, project_dir, name) orelse return;
+    const layers = [_][]const u8{ proto_layer_f_mask, proto_layer_b_mask };
+    for (layers) |layer| {
+        for (mask.outline, 0..) |a, i| {
+            const b = mask.outline[(i + 1) % mask.outline.len];
+            if (!first.*) try w.writeAll(",");
+            first.* = false;
+            try w.writeAll(board_item_op_open);
+            var item_first = true;
+            try writeBoardShapeOpen(w, layer, 2 * mask.width, &item_first);
+            try writeSegmentGeom(w, a[0], a[1], b[0], b[1]);
+            try w.writeAll("}}}");
+        }
+    }
+}
+
+/// Emit the saved layout's OWN routed copper — the tracks and vias the board was
+/// actually routed with, which the sync used to drop on the floor entirely: a
+/// first-insertion seed reproduced the placement and then had to have its routing
+/// pasted into the `.kicad_pcb` by hand. The track twin of `emitLayoutVias`, and
+/// gated identically (`seedsWholeLayout`) — copper only means anything when every
+/// footprint under it landed at the pose it was routed at — with tracks and vias
+/// separately opt-out-able (`?no_layout_tracks=1` / `?no_layout_vias=1`).
+///
+/// Copper is emitted UNTRANSFORMED: unlike `emitSeedCopper` (which offsets a
+/// module's copper into the staging band) these are whole-design board
+/// coordinates and the footprints went down at exactly the same poses, so any
+/// transform here would shear the copper off its pads.
+///
+/// A track's net is resolved through `net_display` — the same map that spelled
+/// every pad net this sync wrote — so a saved `amp1/AMP_IN` track joins the pads
+/// the diff put on `amp1/AMP_IN` rather than splitting the net onto a bare
+/// `AMP_IN`. Copper on a net the design no longer has is skipped rather than
+/// guessed at: a wrong net name is silently-wrong copper, which is worse than
+/// absent copper the user can see is missing.
+fn emitLayoutCopper(
+    d: *DiffContext,
+    project_dir: []const u8,
+    name: []const u8,
+    w: anytype,
+    first: *bool,
+) !void {
+    if (!d.seed.layout_tracks and !d.seed.layout_vias) return;
+    if (!seedsWholeLayout(d)) return;
+    const routes = pcb_layout.loadSyncRoutes(d.spc.arena, project_dir, name) orelse return;
+    if (d.seed.layout_tracks) {
+        for (routes.tracks) |t| {
+            const net = d.net_display.get(t.net) orelse continue;
+            if (net.len == 0) continue;
+            // The SAVED width wins here, unlike `emitSeedCopper`: that path
+            // re-targets a module's copper onto a parent board whose net classes
+            // may differ, while this copper is the design's own, drawn at its own
+            // widths. The class rule only fills in for a sidecar that stored none.
+            const width = if (t.w > 0) t.w else seedNetRule(d, net).width;
+            if (width <= 0) continue;
+            const layer = try kicadCopperLayer(d.spc.arena, t.l);
+            if (!first.*) try w.writeAll(",");
+            first.* = false;
+            const mid: ?[2]f64 = if (t.xm) |xm| if (t.ym) |ym| .{ xm, ym } else null else null;
+            try w.writeAll(if (mid != null) add_arc_op_open else add_track_op_open);
+            try json_writer.writeString(w, net);
+            if (mid) |m| {
+                try w.print(",\"x1\":{d},\"y1\":{d},\"xm\":{d},\"ym\":{d},\"x2\":{d},\"y2\":{d},\"width\":{d},\"layer\":", .{
+                    mmToNm(t.x1), mmToNm(t.y1), mmToNm(m[0]),  mmToNm(m[1]),
+                    mmToNm(t.x2), mmToNm(t.y2), mmToNm(width),
+                });
+            } else {
+                try w.print(track_coords_fmt, .{
+                    mmToNm(t.x1),  mmToNm(t.y1),
+                    mmToNm(t.x2),  mmToNm(t.y2),
+                    mmToNm(width),
+                });
+            }
+            try json_writer.writeString(w, layer);
+            try w.writeAll("}");
+            d.summary.tracks += 1;
+        }
+    }
+    if (!d.seed.layout_vias) return;
+    for (routes.vias) |v| {
+        const net = d.net_display.get(v.net) orelse continue;
+        if (net.len == 0) continue;
+        // Same rule as the tracks: saved geometry first, class rule as the
+        // fallback for a sidecar that stored none (an older or imported one).
+        const rule = seedNetRule(d, net);
+        const dia = if (v.d > 0) v.d else rule.via_dia;
+        const drill = if (v.drill > 0) v.drill else rule.via_drill;
+        if (dia <= 0 or drill <= 0) continue;
+        if (!first.*) try w.writeAll(",");
+        first.* = false;
+        try w.writeAll(add_via_op_open);
+        try json_writer.writeString(w, net);
+        try w.print(via_coords_fmt, .{
+            mmToNm(v.x), mmToNm(v.y), mmToNm(dia), mmToNm(drill),
+        });
+        d.summary.vias += 1;
+    }
+}
+
+/// Emit the destructive half of an explicit PCB-editor → KiCad handoff. The
+/// writer removes existing tracks, vias, Edge.Cuts, and stale groups, then
+/// appends this named layout's saved copper and finished outline. Footprints,
+/// zones, board setup/rules, and unrelated graphics remain in the KiCad file.
+/// Placement ops were emitted per matched footprint in `handleMatched`, before
+/// each forced geometry refresh, so pad orientation follows the new pose.
+fn emitAuthoritativeLayout(
+    d: *DiffContext,
+    w: anytype,
+    first: *bool,
+) !void {
+    const layout = d.authoritative_layout orelse return;
+    if (!first.*) try w.writeAll(",");
+    first.* = false;
+    try w.writeAll("{\"op\":\"replace_layout\"}");
+
+    if (layout.routes) |routes| {
+        for (routes.tracks) |t| {
+            const net = d.net_display.get(t.net) orelse continue;
+            if (net.len == 0 or t.w <= 0) continue;
+            if (!first.*) try w.writeAll(",");
+            first.* = false;
+            const mid: ?[2]f64 = if (t.xm) |xm| if (t.ym) |ym| .{ xm, ym } else null else null;
+            try w.writeAll(if (mid != null) add_arc_op_open else add_track_op_open);
+            try json_writer.writeString(w, net);
+            if (mid) |m| {
+                try w.print(",\"x1\":{d},\"y1\":{d},\"xm\":{d},\"ym\":{d},\"x2\":{d},\"y2\":{d},\"width\":{d},\"layer\":", .{
+                    mmToNm(t.x1), mmToNm(t.y1), mmToNm(m[0]), mmToNm(m[1]),
+                    mmToNm(t.x2), mmToNm(t.y2), mmToNm(t.w),
+                });
+            } else {
+                try w.print(track_coords_fmt, .{
+                    mmToNm(t.x1), mmToNm(t.y1), mmToNm(t.x2), mmToNm(t.y2), mmToNm(t.w),
+                });
+            }
+            try json_writer.writeString(w, try kicadCopperLayer(d.spc.arena, t.l));
+            try w.writeAll("}");
+            d.summary.tracks += 1;
+        }
+        for (routes.vias) |v| {
+            const net = d.net_display.get(v.net) orelse continue;
+            if (net.len == 0 or v.d <= 0 or v.drill <= 0) continue;
+            if (!first.*) try w.writeAll(",");
+            first.* = false;
+            try w.writeAll(add_via_op_open);
+            try json_writer.writeString(w, net);
+            if (std.mem.eql(u8, net, "GND") and !savedViaTouchesTrack(v, routes.tracks)) {
+                try w.print(free_via_coords_fmt, .{ mmToNm(v.x), mmToNm(v.y), mmToNm(v.d), mmToNm(v.drill) });
+            } else {
+                try w.print(via_coords_fmt, .{ mmToNm(v.x), mmToNm(v.y), mmToNm(v.d), mmToNm(v.drill) });
+            }
+            d.summary.vias += 1;
+        }
+    }
+
+    // Keep board-level text and copper pours in the KiCad handoff. These are
+    // the board-level objects the native Gerber writer also emits.
+    try emitAuthoritativeTexts(w, first, layout.texts);
+    try emitAuthoritativeZones(d, w, first, layout);
+
+    if (layout.outline.len >= 3) {
+        for (layout.outline, 0..) |a, i| {
+            const b = layout.outline[(i + 1) % layout.outline.len];
+            if (a[0] == b[0] and a[1] == b[1]) continue;
+            var belongs_to_arc = false;
+            for (layout.outline_arcs) |arc| {
+                if (outline_mod.arcOwnsSegment(arc, a, b, 0.0001)) {
+                    belongs_to_arc = true;
+                    break;
+                }
+            }
+            if (belongs_to_arc) continue;
+            if (!first.*) try w.writeAll(",");
+            first.* = false;
+            try w.print(
+                "{{\"op\":\"add_outline\",\"x1\":{d},\"y1\":{d},\"x2\":{d},\"y2\":{d}}}",
+                .{ mmToNm(a[0]), mmToNm(a[1]), mmToNm(b[0]), mmToNm(b[1]) },
+            );
+            d.summary.outline_edges += 1;
+        }
+        for (layout.outline_arcs) |arc| {
+            if (!first.*) try w.writeAll(",");
+            first.* = false;
+            try w.print(
+                "{{\"op\":\"add_outline_arc\",\"x1\":{d},\"y1\":{d},\"xm\":{d},\"ym\":{d},\"x2\":{d},\"y2\":{d}}}",
+                .{ mmToNm(arc.p1[0]), mmToNm(arc.p1[1]), mmToNm(arc.pm[0]), mmToNm(arc.pm[1]), mmToNm(arc.p2[0]), mmToNm(arc.p2[1]) },
+            );
+            d.summary.outline_edges += 1;
+        }
+    }
+    const saved_zones: usize = if (layout.routes) |routes| routes.zones.len else 0;
+    const exported_zones = if (layout.planes.len > 0) layout.planes.len + saved_zones else layout.zones;
+    d.summary.layout_zones = @intCast(@min(exported_zones, @as(usize, std.math.maxInt(u32))));
+}
+
+/// KiCad's `free` marker belongs only on a stitching barrel with no routed
+/// copper attached. Marking every GND via free makes pcbnew stop using the
+/// track-attached barrels to join filled zones across layers, which turns a
+/// connected multi-layer ground pour into a zone-to-itself airwire.
+fn savedViaTouchesTrack(via: pcb_layout.SavedVia, tracks: []const pcb_layout.SavedTrack) bool {
+    for (tracks) |track| {
+        if (!std.mem.eql(u8, via.net, track.net)) continue;
+        const dx = track.x2 - track.x1;
+        const dy = track.y2 - track.y1;
+        const length_sq = dx * dx + dy * dy;
+        const along = if (length_sq > 0)
+            std.math.clamp(((via.x - track.x1) * dx + (via.y - track.y1) * dy) / length_sq, 0, 1)
+        else
+            0;
+        const nearest_x = track.x1 + along * dx;
+        const nearest_y = track.y1 + along * dy;
+        const reach = via.d / 2 + track.w / 2 + via_track_contact_eps;
+        if (std.math.hypot(via.x - nearest_x, via.y - nearest_y) <= reach) return true;
+    }
+    return false;
+}
+
+test "savedViaTouchesTrack distinguishes routed GND barrels from free stitches" {
+    const via = pcb_layout.SavedVia{ .x = 1, .y = 1, .d = 0.4, .drill = 0.2, .net = "GND" };
+    const touching = [_]pcb_layout.SavedTrack{.{
+        .x1 = 0,
+        .y1 = 1,
+        .x2 = 2,
+        .y2 = 1,
+        .l = 0,
+        .w = 0.2,
+        .net = "GND",
+    }};
+    const foreign = [_]pcb_layout.SavedTrack{.{
+        .x1 = 0,
+        .y1 = 1,
+        .x2 = 2,
+        .y2 = 1,
+        .l = 0,
+        .w = 0.2,
+        .net = "VCC",
+    }};
+    try std.testing.expect(savedViaTouchesTrack(via, &touching));
+    try std.testing.expect(!savedViaTouchesTrack(via, &foreign));
+}
+
+fn emitAuthoritativeTexts(w: anytype, first: *bool, texts: []const font5x7.BoardText) !void {
+    for (texts) |t| {
+        if (t.text.len == 0 or t.size <= 0) continue;
+        if (!first.*) try w.writeAll(",");
+        first.* = false;
+        try w.writeAll(board_item_op_open ++ "{\"@type\":");
+        try json_writer.writeString(w, proto_type_url_boardtext);
+        try w.writeAll(",\"layer\":");
+        try json_writer.writeString(w, if (t.bottom) "BL_B_SilkS" else "BL_F_SilkS");
+        try w.writeAll(",\"text\":{\"position\":");
+        try writeProtoVec2(w, t.x, t.y);
+        try w.writeAll(",\"attributes\":{\"size\":");
+        try writeProtoVec2(w, t.size, t.size);
+        try w.writeAll("},\"text\":");
+        try json_writer.writeString(w, t.text);
+        try w.print(",\"angle\":{d}}}}}}}", .{t.rot});
+    }
+}
+
+fn emitAuthoritativeZones(d: *DiffContext, w: anytype, first: *bool, layout: KicadPushLayout) !void {
+    if (layout.outline.len >= 3) {
+        for (layout.planes) |plane| {
+            if (plane.net.len == 0) continue;
+            if (!first.*) try w.writeAll(",");
+            first.* = false;
+            const layer_name = try kicadStackupLayer(d.spc.arena, plane.index, layout.stackup_layers);
+            const net = d.net_display.get(plane.net) orelse plane.net;
+            try emitZoneOp(w, net, layer_name, layout.outline, 0);
+        }
+    }
+    if (layout.routes) |routes| {
+        for (routes.zones) |zone| {
+            if (!zone.filled) continue;
+            if (zone.keepout) continue;
+            if (zone.net.len == 0) continue;
+            if (zone.poly.len < 3) continue;
+            if (!first.*) try w.writeAll(",");
+            first.* = false;
+            const net = d.net_display.get(zone.net) orelse zone.net;
+            try emitZoneOp(w, net, zone.layer, zone.poly, zone.priority);
+        }
+    }
+}
+
+fn kicadStackupLayer(arena: std.mem.Allocator, index: u8, layers: u8) ![]const u8 {
+    var buf: [board_layers.name_buf_len]u8 = undefined;
+    const name = board_layers.stackName(board_layers.StackIndex.of(index), layers, &buf);
+    return try arena.dupe(u8, name);
+}
+
+fn emitZoneOp(
+    w: anytype,
+    net: []const u8,
+    layer: []const u8,
+    poly: []const [2]f64,
+    priority: i64,
+) !void {
+    try w.writeAll("{\"op\":\"add_zone\",\"net\":");
+    try json_writer.writeString(w, net);
+    try w.writeAll(",\"layer\":");
+    try json_writer.writeString(w, layer);
+    try w.print(",\"clearance\":{d},\"priority\":{d},\"pts\":[", .{ mmToNm(0.1), priority });
+    for (poly, 0..) |p, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.print("[{d},{d}]", .{ mmToNm(p[0]), mmToNm(p[1]) });
+    }
+    try w.writeAll("]}");
 }
 
 /// Lay `adds` out as per-section clusters in a staging area and emit them: one
@@ -3870,6 +4030,21 @@ fn emitLayoutVias(
 /// instead of re-flowing fresh boxes over the previous push's. Parts with no
 /// footprint source are skipped, and a section whose parts are all skipped
 /// draws no (empty) box.
+/// A staging-grid seat at (`px`, `py`) carrying the part's saved ORIENTATION
+/// when the design's layout names it. The grid owns the position — that is the
+/// whole point of staging, a tidy off-board pile the user drags from — but
+/// rotation and side are properties of the part, not of where it is parked, and
+/// dropping them made every staged part arrive at 0° top-side for the user to
+/// re-derive by hand. A part the layout doesn't name keeps the plain default.
+fn stagedPose(d: *const DiffContext, ref: []const u8, px: f64, py: f64) AddPose {
+    var ap = AddPose{ .x_nm = mmToNm(px), .y_nm = mmToNm(py) };
+    const layout = d.premade_layout orelse return ap;
+    const pose = layout.get(ref) orelse return ap;
+    ap.rot_deg = pose.rot;
+    ap.back = pose.side == .bottom;
+    return ap;
+}
+
 fn emitStagingGrid(d: *DiffContext, w: anytype, first: *bool, adds: []const PendingAdd) !void {
     const arena = d.spc.arena;
     if (adds.len == 0) return;
@@ -3899,13 +4074,13 @@ fn emitStagingGrid(d: *DiffContext, w: anytype, first: *bool, adds: []const Pend
         for (idxs) |idx| {
             const pa = adds[idx];
             const kmod = loadKicadMod(d.spc, pa.fp_name, pa.inst.component) orelse continue;
-            const fp_def = loadFootprintDefForInstance(d.spc, pa.fp_name, pa.inst, pa.canopy_net, pa.section);
             const slot = (d.staging_layout.by_ref.get(pa.inst.ref_des) orelse StagingSlot{ .gi = 0, .slot = 0 }).slot;
             const col: f64 = @floatFromInt(slot % ucols);
             const row: f64 = @floatFromInt(slot / ucols);
             const px = cell_x + stage_box_pad_mm + (col + stage_half) * stage_part_pitch_mm;
             const py = cell_y + stage_label_h_mm + stage_box_pad_mm + (row + stage_half) * stage_part_pitch_mm;
-            try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, fp_def, d.pad_net_map, .{ .x_nm = mmToNm(px), .y_nm = mmToNm(py) }, pa.canopy_net, pa.section);
+            const ap = stagedPose(d, pa.inst.ref_des, px, py);
+            try emitAddOp(w, first, pa.inst, pa.fp_name, kmod, d.pad_net_map, ap, pa.canopy_net, pa.section);
             d.summary.added += 1;
             emitted += 1;
         }
@@ -3915,11 +4090,11 @@ fn emitStagingGrid(d: *DiffContext, w: anytype, first: *bool, adds: []const Pend
                 try boardLabelItem(arena, cell_x + box_w * stage_half, cell_y + stage_label_h_mm * stage_half, sec),
             };
             for (items) |item_json| {
-                if (!first.*) try w.*.writeAll(",");
+                if (!first.*) try w.writeAll(",");
                 first.* = false;
-                try w.*.writeAll(board_item_op_open);
-                try w.*.writeAll(item_json);
-                try w.*.writeAll("}");
+                try w.writeAll(board_item_op_open);
+                try w.writeAll(item_json);
+                try w.writeAll("}");
             }
         }
     }
@@ -3927,7 +4102,7 @@ fn emitStagingGrid(d: *DiffContext, w: anytype, first: *bool, adds: []const Pend
 
 /// Why a swap was emitted — display metadata the preview modal uses to file
 /// the row under "3D model updates" (model) vs "Footprint updates"
-/// (geometry/refresh). The writer and IPC agent ignore it.
+/// (geometry/refresh). The writer ignores it.
 const swap_reason_geometry = "geometry";
 const swap_reason_model = "model";
 const swap_reason_refresh = "refresh";
@@ -3938,31 +4113,26 @@ fn emitSwapOp(
     uuid: []const u8,
     fp_name: []const u8,
     kmod: []const u8,
-    fp_def_json: ?[]const u8,
     ref_des: []const u8,
     pad_net_map: *std.StringHashMapUnmanaged([]const u8),
     reason: []const u8,
 ) !void {
-    if (!first.*) try w.*.writeAll(",");
+    if (!first.*) try w.writeAll(",");
     first.* = false;
-    try w.*.writeAll("{\"op\":\"swap_footprint\",\"uuid\":");
-    try json_writer.writeString(w.*, uuid);
+    try w.writeAll("{\"op\":\"swap_footprint\",\"uuid\":");
+    try json_writer.writeString(w, uuid);
     // Display metadata for the preview modal (the writer targets by uuid).
-    try w.*.writeAll(",\"ref\":");
-    try json_writer.writeString(w.*, ref_des);
-    try w.*.writeAll(",\"reason\":");
-    try json_writer.writeString(w.*, reason);
-    try w.*.writeAll(",\"new_footprint_name\":");
-    try json_writer.writeString(w.*, fp_name);
-    try w.*.writeAll(",\"kicad_mod\":");
-    try json_writer.writeString(w.*, kmod);
-    if (fp_def_json) |def| {
-        try w.*.writeAll(",\"footprint_def\":");
-        try w.*.writeAll(def);
-    }
-    try w.*.writeAll(",\"pad_nets\":");
-    try writePadNetsArray(w.*, ref_des, pad_net_map);
-    try w.*.writeAll("}");
+    try w.writeAll(",\"ref\":");
+    try json_writer.writeString(w, ref_des);
+    try w.writeAll(",\"reason\":");
+    try json_writer.writeString(w, reason);
+    try w.writeAll(",\"new_footprint_name\":");
+    try json_writer.writeString(w, fp_name);
+    try w.writeAll(",\"kicad_mod\":");
+    try json_writer.writeString(w, kmod);
+    try w.writeAll(",\"pad_nets\":");
+    try writePadNetsArray(w, ref_des, pad_net_map);
+    try w.writeAll("}");
 }
 
 /// Emit one `set_pad_net` op per pad whose net assignment differs from
@@ -3986,14 +4156,13 @@ fn emitPadNetOps(
         const key = std.fmt.bufPrint(&key_buf, "{s}|{s}", .{ ref_des, cp.number }) catch continue;
         if (pad_net_map.get(key)) |want| {
             if (std.mem.eql(u8, want, cp.net)) continue;
-            if (try emitOpUnlessApplied(d, w, first, "set_pad_net", .{
+            try emitOp(w, first, "set_pad_net", .{
                 .{ "uuid", uuid },
                 .{ "pad", cp.number },
                 .{ "net", want },
                 .{ "ref", ref_des },
-            }, uuid, cp.number, want)) {
-                emitted += 1;
-            }
+            });
+            emitted += 1;
         } else if (cp.net.len > 0) {
             // The design no longer assigns this pad, yet the board pad still
             // carries a net. Clear it only when that net is a single-pad signal
@@ -4005,14 +4174,13 @@ fn emitPadNetOps(
             const ck = std.fmt.bufPrint(&ck_buf, "{s}|{s}", .{ ref_des, cp.net }) catch continue;
             if ((d.net_pad_count.get(ck) orelse 0) != 1) continue;
             if (!netMovedToAnotherBoardPad(pad_net_map, ref_des, cp, client_pads)) continue;
-            if (try emitOpUnlessApplied(d, w, first, "set_pad_net", .{
+            try emitOp(w, first, "set_pad_net", .{
                 .{ "uuid", uuid },
                 .{ "pad", cp.number },
                 .{ "net", "" },
                 .{ "ref", ref_des },
-            }, uuid, cp.number, "")) {
-                emitted += 1;
-            }
+            });
+            emitted += 1;
         }
     }
     return emitted;
@@ -4077,7 +4245,6 @@ fn testFp(uuid: []const u8, kicad_uuid: []const u8, ref: []const u8) BoardFp {
         .footprint_name = "",
         .fields = .{},
         .pads = &.{},
-        .locked = false,
     };
 }
 
@@ -4165,7 +4332,7 @@ test "pickByUuidOrRef refuses a by_uuid match whose fp another instance already 
 
     const fp = testFp("aa000001", "kid-Y", "adc1/C169");
     try by_uuid.put(std.testing.allocator, "aa000001", fp);
-    // First instance has already locked in this fp.
+    // The first instance has already claimed this footprint.
     try claimed.put(std.testing.allocator, "kid-Y", {});
 
     // Second instance with the same canopy_uuid arrives — refused.
@@ -4386,47 +4553,6 @@ test "maybeCollapseDotSubNet keeps the sub-net in dot-net mode, folds it otherwi
     try std.testing.expectEqualStrings("GND", maybeCollapseDotSubNet("GND", true));
 }
 
-test "protoBoardLayer maps F.Fab and B.Fab to their board-layer enums" {
-    // spec: serve/sync - protoBoardLayer maps F.Fab and B.Fab to their KiCad board-layer enums
-    try std.testing.expectEqualStrings("BL_F_Fab", protoBoardLayer("F.Fab"));
-    try std.testing.expectEqualStrings("BL_B_Fab", protoBoardLayer("B.Fab"));
-    // Existing layers are unaffected by the new mappings.
-    try std.testing.expectEqualStrings("BL_F_SilkS", protoBoardLayer("F.SilkS"));
-    try std.testing.expectEqualStrings("BL_F_CrtYd", protoBoardLayer("F.CrtYd"));
-}
-
-test "writeGeomBlockProtoJson ships a fab block on the F.Fab layer" {
-    // spec: serve/sync - loadFootprintDefImpl ships a footprint's fab geometry on F.Fab so the synced part keeps its outline
-    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer aa.deinit();
-    const arena = aa.allocator();
-    const nodes = try parser_mod.parse(arena, "(fab (line (-3.05 3.05) (3.05 3.05)))");
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
-    var first = true;
-    try writeGeomBlockProtoJson(w, nodes[0], proto_layer_f_fab, fab_stroke_mm, &first);
-    // Shape lands on the fab board layer …
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "BL_F_Fab") != null);
-    // … with the segment endpoints converted to nanometres (3.05 mm → 3050000 nm).
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "3050000") != null);
-}
-
-test "writeGeomBlockProtoJson traces a poly as one segment per edge" {
-    // spec: serve/sync - writeGeomBlockProtoJson traces a (poly …) outline as boundary segments and emits (rect …) on the block's layer
-    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer aa.deinit();
-    const arena = aa.allocator();
-    // A 4-vertex polygon → 4 boundary segments (closing back to vertex 0).
-    const nodes = try parser_mod.parse(arena, "(silkscreen (poly (0 0) (1 0) (1 1) (0 1)))");
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
-    var first = true;
-    try writeGeomBlockProtoJson(w, nodes[0], proto_layer_f_silk, silk_stroke_mm, &first);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "BL_F_SilkS") != null);
-    // One BoardGraphicShape per edge — four vertices close into four segments.
-    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, buf.items, "BL_F_SilkS"));
-}
-
 // spec: serve/sync - placement guard reports moved, rotated, or side-flipped footprints and exempts adds/removes
 test "placementViolations flags moved and side-flipped parts but not adds or removes" {
     var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -4471,19 +4597,6 @@ test "placementViolations returns null when placements are unchanged" {
     try std.testing.expect((try placementViolations(arena, old_src, new_src)) == null);
 }
 
-test "parseCirclePoints accepts a two-element centre list" {
-    // `center.len < 2` guards a well-formed `(circle (cx cy) r)`; a `<`->`<=`
-    // flip rejects the exact two-element centre a real circle carries.
-    const Node = env_mod_node.Node;
-    const z = env_mod_node.Span.zero;
-    const centre = [_]Node{ Node.float(z, 3.0), Node.float(z, 4.0) };
-    const circle = [_]Node{ Node.atom(z, "circle"), Node.list(z, &centre), Node.float(z, 1.5) };
-    const c = parseCirclePoints(Node.list(z, &circle)) orelse return error.TestCircleRejected;
-    try std.testing.expectEqual(@as(f64, 3.0), c.cx);
-    try std.testing.expectEqual(@as(f64, 4.0), c.cy);
-    try std.testing.expectEqual(@as(f64, 1.5), c.r);
-}
-
 /// Test fixture: every map/list a DiffContext points at, over one arena, so a
 /// test can build a real context without the full runSyncPlan pipeline.
 const TestDiffState = struct {
@@ -4502,8 +4615,8 @@ const TestDiffState = struct {
     net_pad_count: std.StringHashMapUnmanaged(u32) = .empty,
     matched_uuids: std.StringHashMapUnmanaged(void) = .empty,
     canonical_fp_name: std.StringHashMapUnmanaged([]const u8) = .empty,
-    applied_ops: std.StringHashMapUnmanaged(void) = .empty,
     group_anchors: std.StringHashMapUnmanaged(GroupAnchor) = .empty,
+    net_display: std.StringHashMapUnmanaged([]const u8) = .empty,
     summary: SyncSummary = .{},
 
     fn ctx(self: *TestDiffState, spc: *SyncPlanContext, swap: SwapMode) DiffContext {
@@ -4524,13 +4637,13 @@ const TestDiffState = struct {
             .net_pad_count = &self.net_pad_count,
             .matched_uuids = &self.matched_uuids,
             .canonical_fp_name = &self.canonical_fp_name,
-            .applied_ops = &self.applied_ops,
             .spc = spc,
             .summary = &self.summary,
             .migrate_heuristic = false,
             .swap = swap,
             .sub_blocks = &.{},
-            .emit_layout_vias = false,
+            .net_display = &self.net_display,
+            .seed = .{ .layout_vias = false, .layout_tracks = false },
             .dot_nets = false,
             .board_fresh = false,
             .group_anchors = &self.group_anchors,
@@ -4545,9 +4658,9 @@ test "no-swap mode suppresses the geometry swap but keeps field ops" {
     var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer aa.deinit();
     const arena = aa.allocator();
-    const project_dir = try tmp.dir.realpathAlloc(arena, ".");
-    try tmp.dir.makePath("lib/footprints");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/footprints/swaptest-0201.sexp", .data = 
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
+    try tmp.dir.createDirPath(std.testing.io, "lib/footprints");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/footprints/swaptest-0201.sexp", .data =
         \\(footprint "C_Test_Land"
         \\  (pad 1 smd roundrect (pos -0.32 0.00) (size 0.46 0.40))
         \\  (pad 2 smd roundrect (pos 0.32 0.00) (size 0.46 0.40)))
@@ -4572,7 +4685,6 @@ test "no-swap mode suppresses the geometry swap but keeps field ops" {
         .footprint_name = "HandTuned_Land",
         .fields = .{},
         .pads = &.{},
-        .locked = false,
     };
 
     for ([_]SwapMode{ .auto, .none }) |mode| {
@@ -4580,14 +4692,14 @@ test "no-swap mode suppresses the geometry swap but keeps field ops" {
         var spc = SyncPlanContext{ .arena = arena, .project_dir = project_dir, .model_cfg = &model_cfg };
         var state = TestDiffState{};
         var d = state.ctx(&spc, mode);
-        var buf: std.ArrayList(u8) = .empty;
-        const w = buf.writer(arena);
+        var buf: std.Io.Writer.Allocating = .init(arena);
+        const w = &buf.writer;
         var first = true;
         var counts = MatchCounts{};
-        try handleMatched(&d, inst, m, "swaptest-0201", null, "", &w, &first, &counts);
-        const swapped_in_ops = std.mem.indexOf(u8, buf.items, "\"op\":\"swap_footprint\"") != null;
+        try handleMatched(&d, inst, m, "swaptest-0201", null, "", w, &first, &counts);
+        const swapped_in_ops = std.mem.indexOf(u8, buf.written(), "\"op\":\"swap_footprint\"") != null;
         // The value edit flows in BOTH modes.
-        try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"op\":\"set_field\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, buf.written(), "\"op\":\"set_field\"") != null);
         if (mode == .none) {
             try std.testing.expect(!swapped_in_ops);
             try std.testing.expectEqual(@as(u32, 1), state.summary.swaps_suppressed);
@@ -4616,13 +4728,13 @@ test "stale-pad clear requires the moved-to pad to exist on the board" {
         var d = state.ctx(&spc, .auto);
         try state.pad_net_map.put(arena, "XTX1|HX-", "TXEMVS_HX-");
         try state.net_pad_count.put(arena, "XTX1|TXEMVS_HX-", 1);
-        var buf: std.ArrayList(u8) = .empty;
-        const w = buf.writer(arena);
+        var buf: std.Io.Writer.Allocating = .init(arena);
+        const w = &buf.writer;
         var first = true;
         const pads = [_]PadAssign{.{ .number = "1", .net = "TXEMVS_HX-" }};
-        const n = try emitPadNetOps(&d, &w, &first, "k-x1", "XTX1", &state.pad_net_map, &pads);
+        const n = try emitPadNetOps(&d, w, &first, "k-x1", "XTX1", &state.pad_net_map, &pads);
         try std.testing.expectEqual(@as(u32, 0), n);
-        try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+        try std.testing.expectEqual(@as(usize, 0), buf.written().len);
     }
     // Genuine moved pin: the design moved SIG from pad 1 to pad 2, and pad 2
     // exists on the board — the stale pad 1 is cleared and pad 2 re-netted.
@@ -4631,14 +4743,14 @@ test "stale-pad clear requires the moved-to pad to exist on the board" {
         var d = state.ctx(&spc, .auto);
         try state.pad_net_map.put(arena, "R5|2", "SIG");
         try state.net_pad_count.put(arena, "R5|SIG", 1);
-        var buf: std.ArrayList(u8) = .empty;
-        const w = buf.writer(arena);
+        var buf: std.Io.Writer.Allocating = .init(arena);
+        const w = &buf.writer;
         var first = true;
         const pads = [_]PadAssign{ .{ .number = "1", .net = "SIG" }, .{ .number = "2", .net = "" } };
-        const n = try emitPadNetOps(&d, &w, &first, "k-r5", "R5", &state.pad_net_map, &pads);
+        const n = try emitPadNetOps(&d, w, &first, "k-r5", "R5", &state.pad_net_map, &pads);
         try std.testing.expectEqual(@as(u32, 2), n);
-        try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"pad\":\"1\",\"net\":\"\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"pad\":\"2\",\"net\":\"SIG\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, buf.written(), "\"pad\":\"1\",\"net\":\"\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, buf.written(), "\"pad\":\"2\",\"net\":\"SIG\"") != null);
     }
 }
 
@@ -4823,11 +4935,11 @@ test "emitSeedCopper lays a seeded sub-circuit's module copper with bridged nets
     try std.testing.expectEqual(@as(usize, 1), copper.items.len);
     try std.testing.expectEqual(@as(usize, 0), block_copper.items.len);
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
     var first = true;
-    try emitSeedCopper(&d, &w, &first, copper.items);
-    const out = buf.items;
+    try emitSeedCopper(&d, w, &first, copper.items);
+    const out = buf.written();
 
     // Three tracks + one via, tallied on the summary.
     try std.testing.expectEqual(@as(u32, 3), d.summary.tracks);
@@ -4847,6 +4959,9 @@ test "emitSeedCopper lays a seeded sub-circuit's module copper with bridged nets
     try std.testing.expect(std.mem.indexOf(u8, out, "\"op\":\"add_via\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"x\":52000000,\"y\":40000000") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"dia\":600000,\"drill\":300000") != null);
+    // Every route item carries its sub-circuit slug so the file writer can add
+    // its deterministic UUID to the same KiCad group as the seeded footprints.
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, out, "\"group\":\"lna2\""));
 }
 
 // spec: serve/sync - buildSubCircuitsJson reports each seedable group's module track and via counts
@@ -4978,12 +5093,10 @@ fn seededPose(items: []const PositionedAdd, ref: []const u8) ?PositionedAdd {
 /// the code under test. Source of truth: src/placement/optimizer.zig `worldPt`.
 fn padWorldTest(x: f64, y: f64, rot: f64, back: bool, lx: f64, ly: f64) [2]f64 {
     const mlx = if (back) -lx else lx;
-    const r: [2]f64 = switch (numeric.checkedInt(i64, @round(@mod(rot, 360.0))) orelse 0) {
-        90 => .{ -ly, mlx },
-        180 => .{ -mlx, -ly },
-        270 => .{ ly, -mlx },
-        else => .{ mlx, ly },
-    };
+    const a = @mod(rot, 360.0) * std.math.pi / 180.0;
+    const c = @cos(a);
+    const s = @sin(a);
+    const r = [2]f64{ mlx * c - ly * s, mlx * s + ly * c };
     return .{ x + r[0], y + r[1] };
 }
 
@@ -5175,11 +5288,11 @@ test "emitSeedCopper mirrors and layer-swaps a flipped sub-circuit's copper" {
     try placeOneSelected(&d, "lna2", &idxs, &adds, src, anchor, &acc);
     try std.testing.expectEqual(@as(usize, 1), acc.copper.items.len);
 
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(arena);
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
     var first = true;
-    try emitSeedCopper(&d, &w, &first, acc.copper.items);
-    const out = buf.items;
+    try emitSeedCopper(&d, w, &first, acc.copper.items);
+    const out = buf.written();
 
     try std.testing.expectEqual(@as(u32, 2), d.summary.tracks);
     try std.testing.expectEqual(@as(u32, 1), d.summary.vias);
@@ -5252,4 +5365,438 @@ test "a flipped seed preserves pad coincidence from the module layout" {
     const cap_board = padWorldTest(c1.x_mm, c1.y_mm, c1.rot, c1.back, cap_local[0], cap_local[1]);
     try std.testing.expectApproxEqAbs(ic_board[0], cap_board[0], 1e-9);
     try std.testing.expectApproxEqAbs(ic_board[1], cap_board[1], 1e-9);
+}
+
+// ── First-insertion seeding: which layout places a fresh part ────────────────
+
+/// Test helper: a `FlatNet` of `name` with no pins — enough for the net-spelling
+/// map, which is derived from names alone.
+fn namedNet(name: []const u8) export_kicad.FlatNet {
+    return .{ .name = name, .pins = &.{} };
+}
+
+// spec: serve/sync - buildNetDisplayMap strips a hierarchy prefix only when the bare leaf is globally unique
+test "buildNetDisplayMap keeps the prefix on an ambiguous leaf and drops a unique one" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+
+    // Two modules own an AMP_IN; only one owns VDD_F. This is the spelling the
+    // pads got, so a copper emitter reading it puts a track on the same net.
+    const nets = [_]export_kicad.FlatNet{
+        namedNet("dsa/VDD_F"),
+        namedNet("amp1/AMP_IN"),
+        namedNet("amp2/AMP_IN"),
+        namedNet("VDD.U18.IN"),
+    };
+    const m = try buildNetDisplayMap(arena, &nets, false);
+    try std.testing.expectEqualStrings("VDD_F", m.get("dsa/VDD_F").?);
+    try std.testing.expectEqualStrings("amp1/AMP_IN", m.get("amp1/AMP_IN").?);
+    try std.testing.expectEqualStrings("amp2/AMP_IN", m.get("amp2/AMP_IN").?);
+    // A per-pin bypass sub-net collapses onto its rail before the uniqueness test.
+    try std.testing.expectEqualStrings("VDD", m.get("VDD.U18.IN").?);
+    // A net the design doesn't have has no spelling at all — emitters skip it
+    // rather than guessing a name that would silently split a net.
+    try std.testing.expect(m.get("gone/OLD") == null);
+}
+
+// spec: serve/sync - a fresh board whose design layout names every add skips per-sub-block module seeding
+test "seedsSubBlocks yields to the whole-design layout on a fresh board" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    try state.pending_adds.append(arena, seedCapAdd("pwr/C1", "C1", "u-c1", "pwr"));
+    try state.pending_adds.append(arena, seedCapAdd("pwr/C2", "C2", "u-c2", "pwr"));
+    var d = state.ctx(&spc, .auto);
+    d.board_fresh = true;
+
+    // No design layout at all → module seeding is the only authority there is.
+    try std.testing.expect(seedsSubBlocks(&d));
+
+    // The design's own layout places every buffered add: it positions the
+    // modules relative to each other and carries rotation + side, so seeding a
+    // module into the off-board staging band would override the better answer.
+    var full = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    try full.put(arena, "pwr/C1", .{ .x = 40, .y = 60, .rot = 0 });
+    try full.put(arena, "pwr/C2", .{ .x = 42, .y = 60, .rot = 0 });
+    d.premade_layout = full;
+    try std.testing.expect(!seedsSubBlocks(&d));
+
+    // A POPULATED board never places at layout coordinates, so tier 1 is still
+    // the best available answer for a module the board doesn't have yet.
+    d.board_fresh = false;
+    try std.testing.expect(seedsSubBlocks(&d));
+    d.board_fresh = true;
+
+    // A layout naming only SOME adds leaves the rest to tier 1.
+    var partial = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    try partial.put(arena, "pwr/C1", .{ .x = 40, .y = 60, .rot = 0 });
+    d.premade_layout = partial;
+    try std.testing.expect(seedsSubBlocks(&d));
+}
+
+// spec: serve/sync - no_seed_blocks forces the whole-design layout to be the only placement authority
+test "seedsSubBlocks honours the no_seed_blocks opt-out on a partial layout" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    try state.pending_adds.append(arena, seedCapAdd("pwr/C1", "C1", "u-c1", "pwr"));
+    try state.pending_adds.append(arena, seedCapAdd("pwr/C2", "C2", "u-c2", "pwr"));
+    var d = state.ctx(&spc, .auto);
+    d.board_fresh = true;
+    // Only one of the two adds is named, so the automatic bypass does NOT fire —
+    // this is exactly the case `?no_seed_blocks=1` exists for.
+    var partial = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    try partial.put(arena, "pwr/C1", .{ .x = 40, .y = 60, .rot = 0 });
+    d.premade_layout = partial;
+    try std.testing.expect(seedsSubBlocks(&d));
+
+    d.seed.sub_blocks = false;
+    try std.testing.expect(!seedsSubBlocks(&d));
+}
+
+/// Test fixture: a project dir whose design `copperfx` has ONE starred saved
+/// layout carrying routed copper — two segments and one native arc on nets the
+/// design still has (one prefix-ambiguous, one on the inner layer), one segment
+/// on a net it does NOT (a rename left it behind), and one via. Returns the
+/// project dir path.
+fn writeSavedCopperProject(arena: std.mem.Allocator, dir: std.Io.Dir) ![]const u8 {
+    try dir.createDirPath(std.testing.io, "src");
+    try dir.writeFile(std.testing.io, .{ .sub_path = "src/copperfx.layouts.json", .data =
+        \\{"default":"routed","layouts":[
+        \\ {"name":"routed","kind":"manual","ts":2,"default":true,"parts":[
+        \\   {"ref":"U1","x":10,"y":10,"rot":0}],
+        \\  "routes":{"tracks":[
+        \\   {"x1":1,"y1":2,"x2":3,"y2":4,"l":0,"w":0.2,"net":"dsa/VDD_F"},
+        \\   {"x1":3,"y1":4,"x2":5,"y2":6,"l":2,"w":0.25,"net":"amp1/AMP_IN"},
+        \\   {"x1":10,"y1":11,"xm":12,"ym":13,"x2":14,"y2":15,"l":0,"w":0.2,"net":"dsa/VDD_F"},
+        \\   {"x1":7,"y1":7,"x2":8,"y2":8,"l":0,"w":0.2,"net":"gone/OLD"}],
+        \\  "vias":[{"x":9,"y":11,"d":0.6,"drill":0.3,"net":"dsa/VDD_F"}]}}]}
+    });
+    return dir.realPathFileAlloc(std.testing.io, ".", arena);
+}
+
+/// Test fixture: a `DiffContext` set up as a completed whole-design seed of
+/// `copperfx` onto a FRESH board — one add, named by the design layout, already
+/// emitted — which is the state `emitLayoutCopper` gates on.
+fn seededCopperCtx(arena: std.mem.Allocator, state: *TestDiffState, spc: *SyncPlanContext) !DiffContext {
+    const nets = [_]export_kicad.FlatNet{
+        namedNet("dsa/VDD_F"),
+        namedNet("amp1/AMP_IN"),
+        namedNet("amp2/AMP_IN"),
+        namedNet("GND"),
+    };
+    state.net_display = try buildNetDisplayMap(arena, &nets, false);
+    try state.pending_adds.append(arena, seedCapAdd("U1", "U1", "u-u1", ""));
+    var d = state.ctx(spc, .auto);
+    d.seed = .{};
+    d.board_fresh = true;
+    d.summary.added = 1;
+    var layout = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    try layout.put(arena, "U1", .{ .x = 10, .y = 10, .rot = 0 });
+    d.premade_layout = layout;
+    return d;
+}
+
+// spec: serve/sync - a whole-design seed writes the saved layout's own routed tracks and vias onto the board
+// spec: serve/sync - saved copper on a net the design no longer has is skipped rather than renamed
+test "emitLayoutCopper writes the saved layout's copper with board net spellings" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    const project_dir = try writeSavedCopperProject(arena, tmp.dir);
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = project_dir, .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    var d = try seededCopperCtx(arena, &state, &spc);
+
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
+    var first = true;
+    try emitLayoutCopper(&d, project_dir, "copperfx", w, &first);
+    const out = buf.written();
+
+    // All live copper lands UNTRANSFORMED (whole-design board coordinates —
+    // the footprints went down at the very poses this copper was routed at).
+    try std.testing.expectEqual(@as(u32, 3), d.summary.tracks);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"x1\":1000000,\"y1\":2000000,\"x2\":3000000,\"y2\":4000000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"op\":\"add_arc\",\"net\":\"VDD_F\",\"x1\":10000000,\"y1\":11000000,\"xm\":12000000,\"ym\":13000000") != null);
+    // A unique bare leaf reads bare on the board; an ambiguous one keeps its
+    // prefix — the same spelling the pads got, so the net isn't split in two.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"op\":\"add_track\",\"net\":\"VDD_F\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"op\":\"add_track\",\"net\":\"amp1/AMP_IN\"") != null);
+    // Layer index → KiCad layer name, inner layers included.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"layer\":\"F.Cu\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"layer\":\"In1.Cu\"") != null);
+    // The orphaned net is dropped, not guessed at: silently-wrong copper is
+    // worse than copper the user can see is missing.
+    try std.testing.expect(std.mem.indexOf(u8, out, "OLD") == null);
+    // The layout's own via rides along with its tracks.
+    try std.testing.expectEqual(@as(u32, 1), d.summary.vias);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"op\":\"add_via\",\"net\":\"VDD_F\"") != null);
+}
+
+// spec: serve/sync - no_layout_tracks withholds the saved tracks while the saved vias still flow
+test "emitLayoutCopper honours the per-kind copper opt-outs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    const project_dir = try writeSavedCopperProject(arena, tmp.dir);
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = project_dir, .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    var d = try seededCopperCtx(arena, &state, &spc);
+    d.seed.layout_tracks = false;
+
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
+    var first = true;
+    try emitLayoutCopper(&d, project_dir, "copperfx", w, &first);
+
+    try std.testing.expectEqual(@as(u32, 0), d.summary.tracks);
+    try std.testing.expectEqual(@as(u32, 1), d.summary.vias);
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "add_track") == null);
+}
+
+// spec: serve/sync - saved copper is withheld unless the seed reproduced the whole layout on a fresh board
+test "emitLayoutCopper writes nothing for a populated board or a partial seed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    const project_dir = try writeSavedCopperProject(arena, tmp.dir);
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = project_dir, .model_cfg = &model_cfg };
+
+    // A POPULATED board: the saved coordinates would land in the middle of the
+    // real routing that is already there.
+    {
+        var state = TestDiffState{};
+        var d = try seededCopperCtx(arena, &state, &spc);
+        d.board_fresh = false;
+        var buf: std.Io.Writer.Allocating = .init(arena);
+        const w = &buf.writer;
+        var first = true;
+        try emitLayoutCopper(&d, project_dir, "copperfx", w, &first);
+        try std.testing.expectEqual(@as(usize, 0), buf.written().len);
+    }
+    // A PARTIAL seed: some footprint went to the staging grid instead of its
+    // saved pose, so copper drawn for it would join nothing.
+    {
+        var state = TestDiffState{};
+        var d = try seededCopperCtx(arena, &state, &spc);
+        try state.pending_adds.append(arena, seedCapAdd("C9", "C9", "u-c9", ""));
+        var buf: std.Io.Writer.Allocating = .init(arena);
+        const w = &buf.writer;
+        var first = true;
+        try emitLayoutCopper(&d, project_dir, "copperfx", w, &first);
+        try std.testing.expectEqual(@as(usize, 0), buf.written().len);
+    }
+}
+
+// spec: serve/sync - an authoritative layout without declared stackup planes retains its saved zone count in the sync summary
+// spec: serve/sync - an authoritative layout emits one full replacement batch using only live design nets
+test "emitAuthoritativeLayout replaces copper and outline from the exact saved row" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    var d = try seededCopperCtx(arena, &state, &spc);
+    const routes_value = try std.json.parseFromSliceLeaky(std.json.Value, arena,
+        \\{"tracks":[
+        \\ {"x1":1,"y1":2,"x2":3,"y2":4,"l":0,"w":0.2,"net":"dsa/VDD_F"},
+        \\ {"x1":5,"y1":6,"x2":7,"y2":8,"l":1,"w":0.25,"net":"gone/OLD"}],
+        \\ "vias":[{"x":9,"y":10,"d":0.6,"drill":0.3,"net":"GND"}]}
+    , .{});
+    const routes = pcb_layout.parseSavedRoutes(arena, routes_value).?;
+    const outline = [_][2]f64{ .{ 0, 0 }, .{ 30, 0 }, .{ 30, 20 }, .{ 0, 20 } };
+    const poses = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    d.authoritative_layout = .{
+        .poses = poses,
+        .routes = routes,
+        .outline = &outline,
+        .zones = 2,
+    };
+
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
+    var first = true;
+    try emitAuthoritativeLayout(&d, w, &first);
+    const out = buf.written();
+
+    try std.testing.expect(std.mem.startsWith(u8, out, "{\"op\":\"replace_layout\"}"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "\"op\":\"add_track\""));
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"VDD_F\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "OLD") == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "\"op\":\"add_via\""));
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"GND\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"free\":true") != null);
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, out, "\"op\":\"add_outline\""));
+    try std.testing.expectEqual(@as(u32, 1), d.summary.tracks);
+    try std.testing.expectEqual(@as(u32, 1), d.summary.vias);
+    try std.testing.expectEqual(@as(u32, 4), d.summary.outline_edges);
+    try std.testing.expectEqual(@as(u32, 2), d.summary.layout_zones);
+}
+
+// spec: serve/sync - authoritative placement converts EDA rotation/side into a targeted KiCad pose op
+test "emitAuthoritativePose moves and flips only a differing footprint" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    var d = state.ctx(&spc, .refresh_all);
+    var poses = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    try poses.put(arena, "R1", .{ .x = 10, .y = 20, .rot = 90, .side = .bottom });
+    d.authoritative_layout = .{ .poses = poses, .routes = null, .outline = &.{} };
+    var positions = std.StringHashMapUnmanaged(FpPlacement).empty;
+    try positions.put(arena, "kid-1", .{ .ref = "R1", .x = 1, .y = 2, .rot = 0, .layer = "F.Cu" });
+    d.authoritative_layout.?.board_positions = &positions;
+    const board_fp = BoardFp{
+        .uuid = "canopy-1",
+        .kicad_uuid = "kid-1",
+        .ref = "R1",
+        .value = "10k",
+        .footprint_name = "r-0402",
+        .fields = .empty,
+        .pads = &.{},
+    };
+
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    const w = &buf.writer;
+    var first = true;
+    try emitAuthoritativePose(&d, "R1", board_fp, w, &first);
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "\"uuid\":\"kid-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "\"x\":10000000,\"y\":20000000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "\"rot\":90,\"side\":\"bottom\"") != null);
+    try std.testing.expectEqual(@as(u32, 1), d.summary.layout_parts);
+
+    try positions.put(arena, "kid-1", .{ .ref = "R1", .x = 10, .y = 20, .rot = 90, .layer = "B.Cu" });
+    var same_buf: std.Io.Writer.Allocating = .init(arena);
+    const same_w = &same_buf.writer;
+    var same_first = true;
+    try emitAuthoritativePose(&d, "R1", board_fp, same_w, &same_first);
+    try std.testing.expectEqual(@as(usize, 0), same_buf.written().len);
+    try std.testing.expectEqual(@as(u32, 1), d.summary.layout_parts);
+}
+
+// spec: serve/sync - authoritative stale pruning also removes pre-canopy manual KiCad footprints
+test "emitStaleOps preserves manual footprints normally and prunes them for a layout push" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    const board = [_]BoardFp{.{
+        .uuid = "",
+        .kicad_uuid = "kid-manual",
+        .ref = "TP99",
+        .value = "",
+        .footprint_name = "testpoint",
+        .fields = .empty,
+        .pads = &.{},
+    }};
+    var matched = std.StringHashMapUnmanaged(void).empty;
+
+    var ordinary_buf: std.Io.Writer.Allocating = .init(arena);
+    const ordinary_w = &ordinary_buf.writer;
+    var ordinary_first = true;
+    var ordinary_summary: SyncSummary = .{};
+    try emitStaleOps(.{
+        .board = &board,
+        .prune_stale = true,
+        .migrate_heuristic = false,
+        .dot_nets = false,
+    }, &matched, ordinary_w, &ordinary_first, &ordinary_summary);
+    try std.testing.expectEqual(@as(usize, 0), ordinary_buf.written().len);
+
+    var push_buf: std.Io.Writer.Allocating = .init(arena);
+    const push_w = &push_buf.writer;
+    var push_first = true;
+    var push_summary: SyncSummary = .{};
+    try emitStaleOps(.{
+        .board = &board,
+        .prune_stale = true,
+        .migrate_heuristic = false,
+        .dot_nets = false,
+        .seed = .{ .authoritative_layout_name = "finished" },
+    }, &matched, push_w, &push_first, &push_summary);
+    try std.testing.expect(std.mem.indexOf(u8, push_buf.written(), "\"op\":\"remove\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, push_buf.written(), "\"uuid\":\"kid-manual\"") != null);
+    try std.testing.expectEqual(@as(u32, 1), push_summary.removed);
+}
+
+// spec: serve/sync - a staged part keeps the rotation and side the design layout gives it
+// spec: serve/sync - seeded copper spells its KiCad layer with the shared layer-table names
+test "kicadCopperLayer spells copper layers the way the layer table does" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // A stackup whose inner layers are all routable: the sync spelling and
+    // the board's own layer table agree on every routable index.
+    try expectSyncNamesMatchStack(arena, .{ .copper_layers = 6, .declared = true });
+    var buf: [board_layers.name_buf_len]u8 = undefined;
+    // Documented limitation (see kicadCopperLayer): with no BoardRules in
+    // hand an inner index reads as its own stack position, so a stackup that
+    // plane-claims In1 is spelled one layer shallower here than on the board.
+    const planes = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
+    const claimed = board_layers.Stack{ .copper_layers = 6, .declared = true, .planes = &planes };
+    try std.testing.expectEqualStrings("In2.Cu", claimed.signalName(board_layers.SignalIndex.of(2), &buf));
+    try std.testing.expectEqualStrings("In1.Cu", try kicadCopperLayer(arena, 2));
+}
+
+/// `kicadCopperLayer` spells every routable index of `stack` the way the
+/// shared layer table does.
+fn expectSyncNamesMatchStack(arena: std.mem.Allocator, stack: board_layers.Stack) !void {
+    var buf: [board_layers.name_buf_len]u8 = undefined;
+    var sig: u8 = 0;
+    while (sig < stack.signalCount()) : (sig += 1) {
+        const want = stack.signalName(board_layers.SignalIndex.of(sig), &buf);
+        try std.testing.expectEqualStrings(want, try kicadCopperLayer(arena, sig));
+    }
+}
+
+test "stagedPose carries the saved orientation onto a staging-grid seat" {
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+    var model_cfg: export_kicad.ModelConfigMap = .empty;
+    var spc = SyncPlanContext{ .arena = arena, .project_dir = ".", .model_cfg = &model_cfg };
+    var state = TestDiffState{};
+    var d = state.ctx(&spc, .auto);
+
+    // No layout → the plain default seat (0 degrees, front).
+    const bare = stagedPose(&d, "C1", 100, 200);
+    try std.testing.expectEqual(@as(f64, 0), bare.rot_deg);
+    try std.testing.expect(!bare.back);
+
+    var layout = std.StringHashMapUnmanaged(pcb_layout.SyncPose).empty;
+    try layout.put(arena, "C1", .{ .x = 40, .y = 60, .rot = 90, .side = .bottom });
+    d.premade_layout = layout;
+
+    // The grid still owns the POSITION — staging is a tidy off-board pile — but
+    // orientation belongs to the part, not to where it is parked.
+    const pose = stagedPose(&d, "C1", 100, 200);
+    try std.testing.expectEqual(mmToNm(100), pose.x_nm);
+    try std.testing.expectEqual(mmToNm(200), pose.y_nm);
+    try std.testing.expectEqual(@as(f64, 90), pose.rot_deg);
+    try std.testing.expect(pose.back);
+
+    // A part the layout doesn't name keeps the default.
+    const unknown = stagedPose(&d, "C2", 100, 200);
+    try std.testing.expectEqual(@as(f64, 0), unknown.rot_deg);
+    try std.testing.expect(!unknown.back);
 }

@@ -12,13 +12,19 @@
 //!   * `S_edge`  — the existing per-class per-edge count credit (area_match).
 //!   * `S_gap`   — per-class radial gap-band histogram overlap: tightness, the
 //!                 `gapR→gapS` axis the whole tight-pack effort was judged on.
+//!   * `S_rot`   — per-class quarter-turn histogram overlap: ORIENTATION, which
+//!                 the first two terms cannot see at all. A 2-pad passive is
+//!                 compared mod 180° (0° and 180° are the same footprint
+//!                 orientation with its pads swapped), everything else mod 360°.
 //!   * D4 symmetry — the candidate is scored under all four 90° rotations about
 //!                 its anchor and the best is taken, so a correct-but-rotated
 //!                 arrangement isn't a false zero (a module can be rotated whole).
+//!                 The rotation term turns WITH the module, so it is measured
+//!                 under the same winning `k` the edge term picks.
 //!
 //! Scope: modules are single-anchor flat blocks (`packPadAnchored`), so a single
 //! anchor hub attributes every part — no multi-anchor bookkeeping needed here.
-//! Orientation/adjacency terms are a planned follow-up; the struct leaves room.
+//! An adjacency term is a planned follow-up; the struct leaves room.
 
 const std = @import("std");
 const optimizer = @import("../placement/optimizer.zig");
@@ -26,7 +32,7 @@ const pcb_describe = @import("pcb_describe.zig");
 const Side = pcb_describe.Side;
 
 /// `Side` variant count (left, right, top, bottom, center).
-pub const n_sides = @typeInfo(Side).@"enum".fields.len;
+pub const n_sides = @typeInfo(Side).@"enum".field_names.len;
 
 /// Upper edges of the radial gap-to-anchor bands (mm); a part past the last edge
 /// falls in the final "far" bucket. Chosen to separate the tightness regimes a
@@ -35,10 +41,14 @@ pub const gap_bands = [_]f64{ 0.5, 1.0, 2.0, 4.0, 8.0 };
 pub const n_bands = gap_bands.len + 1;
 
 /// Sub-term weights for the overall style score. Kept here (not scattered) so a
-/// calibration sweep can retune them in one place. Renormalized from the plan's
-/// full-term weights to the two terms shipped in this increment.
-pub const w_edge: f64 = 0.6;
-pub const w_gap: f64 = 0.4;
+/// calibration sweep can retune them in one place, and summing to 1 so
+/// `style_pct` stays a percentage. Orientation carries a deliberately modest
+/// share: it is a real defect axis (a cap turned across its pad instead of into
+/// it) but a smaller one than landing on the wrong edge entirely, and the
+/// edge/gap split keeps the proportions the two-term score was calibrated on.
+pub const w_edge: f64 = 0.5;
+pub const w_gap: f64 = 0.35;
+pub const w_rot: f64 = 0.15;
 
 /// One analyzed part for the style metric: its anchor edge, its gap-band, and its
 /// interchangeable-class key. Split out so the matcher is unit-testable on
@@ -47,6 +57,11 @@ pub const SInfo = struct {
     side: Side,
     gap_band: usize,
     class: []const u8,
+    /// Quarter-turns of the part's own rotation (0..3), before the D4 turn.
+    rot_q: usize = 0,
+    /// Compare this part's rotation mod 180° — true for a 2-pad passive, whose
+    /// 0° and 180° poses are the same footprint with its pads swapped.
+    half: bool = false,
 };
 
 /// Per-sub-term percentages (0–100) plus the weighted overall, and which of the
@@ -55,6 +70,7 @@ pub const StyleResult = struct {
     n: usize,
     edge_pct: f64,
     gap_pct: f64,
+    rot_pct: f64,
     style_pct: f64,
     rot_k: usize,
 };
@@ -107,6 +123,25 @@ pub fn gapBand(gap_mm: f64) usize {
     return n_bands - 1;
 }
 
+/// Quarter-turn index (0..3) of a rotation in degrees. A hand angle that is not
+/// a multiple of 90° rounds to the nearest quarter — the placer only ever emits
+/// quarters, and a stray 45° part is still better described by its nearest one
+/// than dropped.
+pub fn rotQuarter(deg: f64) usize {
+    const t = @mod(deg, 360.0) / 90.0;
+    if (t < 0.5 or t >= 3.5) return 0;
+    if (t < 1.5) return 1;
+    if (t < 2.5) return 2;
+    return 3;
+}
+
+/// The rotation bucket a part falls in after the whole module turns `k`
+/// quarter-turns: 0..3 normally, 0..1 for a part compared mod 180°.
+pub fn rotBucket(info: SInfo, k: usize) usize {
+    const q = (info.rot_q + k) % 4;
+    return if (info.half) q % 2 else q;
+}
+
 /// Rotate a `Side` by `k` clockwise quarter-turns (top→right→bottom→left).
 /// `center` is rotation-invariant. Trying `k = 0..3` covers all four whole-module
 /// rotations, so chirality of a single quarter-turn is irrelevant.
@@ -137,7 +172,13 @@ pub fn analyzeStyle(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: 
             if (ex.contains(part.ref_des)) continue;
         }
         const side = pcb_describe.sideOf(part.x - anchor.x, part.y - anchor.y, a_half, pcb_describe.aabbHalf(part));
-        try out.append(alloc, .{ .side = side, .gap_band = gapBand(aabbGap(anchor, part)), .class = try classKey(alloc, p, i) });
+        try out.append(alloc, .{
+            .side = side,
+            .gap_band = gapBand(aabbGap(anchor, part)),
+            .class = try classKey(alloc, p, i),
+            .rot_q = rotQuarter(part.rot),
+            .half = part.kind != .hub and part.pads.len == 2,
+        });
     }
     return out.toOwnedSlice(alloc);
 }
@@ -146,10 +187,12 @@ pub fn analyzeStyle(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: 
 /// rough and starred totals are equal — we credit `min(count)` per edge and per
 /// gap-band (order-independent histogram overlap).
 const SClass = struct {
-    edge_r: [n_sides]usize = [_]usize{0} ** n_sides,
-    edge_s: [n_sides]usize = [_]usize{0} ** n_sides,
-    gap_r: [n_bands]usize = [_]usize{0} ** n_bands,
-    gap_s: [n_bands]usize = [_]usize{0} ** n_bands,
+    edge_r: [n_sides]usize = @splat(0),
+    edge_s: [n_sides]usize = @splat(0),
+    gap_r: [n_bands]usize = @splat(0),
+    gap_s: [n_bands]usize = @splat(0),
+    rot_r: [4]usize = @splat(0),
+    rot_s: [4]usize = @splat(0),
     n: usize = 0,
 };
 
@@ -164,38 +207,30 @@ pub fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []con
     for (starred) |s| {
         const gop = try map.getOrPut(alloc, s.class);
         if (!gop.found_existing) gop.value_ptr.* = .{};
-        gop.value_ptr.edge_s[@intFromEnum(s.side)] += 1;
+        gop.value_ptr.edge_s[@backingInt(s.side)] += 1;
         gop.value_ptr.gap_s[s.gap_band] += 1;
+        gop.value_ptr.rot_s[rotBucket(s, 0)] += 1;
         gop.value_ptr.n += 1;
     }
 
-    // Gap term is rotation-invariant — tally once.
+    // Gap term is rotation-invariant — tally once. Edge AND rotation both turn
+    // with the module, so the winning `k` is the one maximizing their weighted
+    // sum; k = 0 keeps a tie, so an unrotated match never reports a turn.
     var total: usize = 0;
     var gap_credit: usize = 0;
     var best_k: usize = 0;
     var best_edge: usize = 0;
+    var best_rot: usize = 0;
+    var best_score = -std.math.inf(f64);
 
     for (0..4) |k| {
-        // Re-tally the rough edges under rotation k.
-        var it = map.iterator();
-        while (it.next()) |e| e.value_ptr.edge_r = [_]usize{0} ** n_sides;
-        for (rough) |r| {
-            const gop = try map.getOrPut(alloc, r.class);
-            if (!gop.found_existing) gop.value_ptr.* = .{};
-            gop.value_ptr.edge_r[@intFromEnum(rotSide(r.side, k))] += 1;
-        }
-
-        var edge_credit: usize = 0;
-        var tot: usize = 0;
-        var it2 = map.iterator();
-        while (it2.next()) |e| {
-            const cd = e.value_ptr;
-            for (0..n_sides) |j| edge_credit += @min(cd.edge_r[j], cd.edge_s[j]);
-            for (cd.edge_r) |c| tot += c;
-        }
-        if (k == 0) total = tot;
-        if (edge_credit > best_edge) {
-            best_edge = edge_credit;
+        const t = try turnCredit(alloc, &map, rough, k);
+        if (k == 0) total = t.total;
+        const score = w_edge * @as(f64, @floatFromInt(t.edge)) + w_rot * @as(f64, @floatFromInt(t.rot));
+        if (score > best_score) {
+            best_score = score;
+            best_edge = t.edge;
+            best_rot = t.rot;
             best_k = k;
         }
     }
@@ -203,7 +238,7 @@ pub fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []con
     // Gap credit (once): tally rough gap-bands then credit min per band per class.
     {
         var it = map.iterator();
-        while (it.next()) |e| e.value_ptr.gap_r = [_]usize{0} ** n_bands;
+        while (it.next()) |e| e.value_ptr.gap_r = @splat(0);
         for (rough) |r| {
             const gop = try map.getOrPut(alloc, r.class);
             if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -219,13 +254,48 @@ pub fn styleScore(alloc: std.mem.Allocator, rough: []const SInfo, starred: []con
     const denom = if (total > 0) @as(f64, @floatFromInt(total)) else 1.0;
     const edge_pct = 100.0 * @as(f64, @floatFromInt(best_edge)) / denom;
     const gap_pct = 100.0 * @as(f64, @floatFromInt(gap_credit)) / denom;
+    const rot_pct = 100.0 * @as(f64, @floatFromInt(best_rot)) / denom;
     return .{
         .n = total,
         .edge_pct = edge_pct,
         .gap_pct = gap_pct,
-        .style_pct = w_edge * edge_pct + w_gap * gap_pct,
+        .rot_pct = rot_pct,
+        .style_pct = w_edge * edge_pct + w_gap * gap_pct + w_rot * rot_pct,
         .rot_k = best_k,
     };
+}
+
+/// Per-class edge + rotation credit for the candidate turned `k` quarter-turns,
+/// plus the candidate's part total. Both tallies are rebuilt from scratch each
+/// turn, so the caller can try all four without carrying state between them.
+const TurnCredit = struct { edge: usize, rot: usize, total: usize };
+
+fn turnCredit(
+    alloc: std.mem.Allocator,
+    map: *std.StringHashMapUnmanaged(SClass),
+    rough: []const SInfo,
+    k: usize,
+) std.mem.Allocator.Error!TurnCredit {
+    var it = map.iterator();
+    while (it.next()) |e| {
+        e.value_ptr.edge_r = @splat(0);
+        e.value_ptr.rot_r = @splat(0);
+    }
+    for (rough) |r| {
+        const gop = try map.getOrPut(alloc, r.class);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        gop.value_ptr.edge_r[@backingInt(rotSide(r.side, k))] += 1;
+        gop.value_ptr.rot_r[rotBucket(r, k)] += 1;
+    }
+    var out = TurnCredit{ .edge = 0, .rot = 0, .total = 0 };
+    var it2 = map.iterator();
+    while (it2.next()) |e| {
+        const cd = e.value_ptr;
+        for (0..n_sides) |j| out.edge += @min(cd.edge_r[j], cd.edge_s[j]);
+        for (0..4) |j| out.rot += @min(cd.rot_r[j], cd.rot_s[j]);
+        for (cd.edge_r) |c| out.total += c;
+    }
+    return out;
 }
 
 /// Style-penalty weight for the hybrid score. λ=0 ⇒ pure physics; larger ⇒ style
@@ -320,6 +390,46 @@ test "styleScore D4 rewards a rotated-but-identical arrangement" {
     const res = try styleScore(arena, &rough, &starred);
     try std.testing.expectApproxEqAbs(@as(f64, 100), res.edge_pct, 1e-9);
     try std.testing.expectEqual(@as(usize, 3), res.rot_k);
+}
+
+// spec: Web Server - style score credits matching part orientation, comparing a 2-pad passive mod 180 degrees
+test "styleScore rotation term sees orientation the edge and gap terms miss" {
+    var astate = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    // Same edge, same tightness for both parts: only the turn differs. The cap
+    // is 180° off, which for a 2-pad passive is the SAME footprint orientation
+    // with its pads swapped, so it still credits; the resistor is a real
+    // quarter-turn out and does not.
+    const starred = [_]SInfo{
+        .{ .side = .left, .gap_band = 0, .class = "C", .rot_q = 0, .half = true },
+        .{ .side = .left, .gap_band = 0, .class = "R", .rot_q = 0, .half = true },
+    };
+    const rough = [_]SInfo{
+        .{ .side = .left, .gap_band = 0, .class = "C", .rot_q = 2, .half = true },
+        .{ .side = .left, .gap_band = 0, .class = "R", .rot_q = 1, .half = true },
+    };
+    const res = try styleScore(arena, &rough, &starred);
+    try std.testing.expectEqual(@as(usize, 0), res.rot_k);
+    try std.testing.expectApproxEqAbs(@as(f64, 100), res.edge_pct, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 100), res.gap_pct, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 50), res.rot_pct, 1e-9);
+    // The turn is the only thing costing anything, so style sits below both
+    // terms that cannot see it.
+    try std.testing.expectApproxEqAbs(w_edge * 100 + w_gap * 100 + w_rot * 50, res.style_pct, 1e-9);
+    try std.testing.expect(res.style_pct < res.edge_pct);
+}
+
+// spec: Web Server - style score rounds a part rotation to its nearest quarter turn
+test "rotQuarter buckets degrees, wrapping and rounding" {
+    try std.testing.expectEqual(@as(usize, 0), rotQuarter(0));
+    try std.testing.expectEqual(@as(usize, 1), rotQuarter(90));
+    try std.testing.expectEqual(@as(usize, 3), rotQuarter(-90));
+    try std.testing.expectEqual(@as(usize, 0), rotQuarter(360));
+    try std.testing.expectEqual(@as(usize, 2), rotQuarter(175)); // nearest quarter
+    // A 2-pad passive is compared mod 180: 0° and 180° share a bucket.
+    const c = SInfo{ .side = .left, .gap_band = 0, .class = "C", .rot_q = 2, .half = true };
+    try std.testing.expectEqual(rotBucket(.{ .side = .left, .gap_band = 0, .class = "C" }, 0), rotBucket(c, 0));
 }
 
 test "gapBand buckets by GAP_BANDS edges" {

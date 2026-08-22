@@ -1,22 +1,27 @@
 #!/bin/sh
 
-# Give every linked worktree the main checkout's Zig local cache. Git invokes
-# this hook after `git worktree add`, before the new checkout is normally built.
+# Keep each linked worktree's Zig local cache private to that checkout. Zig's
+# global cache already shares dependencies and immutable artifacts; the local
+# cache contains build-root manifests and must not be shared by concurrent
+# worktree builds. Git invokes this hook after `git worktree add`.
 set -eu
 
 worktree_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
 main_root=${common_dir%/.git}
 
-# The main checkout owns the shared cache directory.
+# The main checkout already gets its own local cache by default.
 [ "$worktree_root" != "$main_root" ] || exit 0
 
 cache_link="$worktree_root/.zig-cache"
-shared_cache="$main_root/.zig-cache"
+legacy_shared_cache="$main_root/.zig-cache"
 
-# Never replace an existing cache or link. Existing worktrees are migrated
-# separately after their Git state has been checked.
-[ ! -e "$cache_link" ] && [ ! -L "$cache_link" ] || exit 0
+# Migrate only the exact legacy link this hook used to create. Preserve any
+# user-owned directory or custom symlink.
+if [ -L "$cache_link" ]; then
+    target=$(readlink "$cache_link")
+    [ "$target" = "$legacy_shared_cache" ] || exit 0
+    rm -- "$cache_link"
+fi
 
-mkdir -p "$shared_cache"
-ln -s "$shared_cache" "$cache_link"
+[ -e "$cache_link" ] || mkdir -p "$cache_link"

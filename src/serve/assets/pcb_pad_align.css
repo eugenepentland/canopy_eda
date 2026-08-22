@@ -1,0 +1,13 @@
+.pcb-svg.pad-align-mode{cursor:crosshair}
+#pcb-pad-align.on{color:#7ee787;border-color:#2ea043;box-shadow:0 0 0 1px #2ea04366}
+.pad-align-bar{border-bottom:1px solid #2c2d31;padding:9px 12px;background:#202126}
+.pad-align-bar[hidden]{display:none}
+.pa-head{display:flex;align-items:center;color:#f0f1f3;font-size:12px;margin-bottom:6px}
+.pa-head button{margin-left:auto;border:0;background:none;color:#9b9ca3;font:18px/1 system-ui;cursor:pointer}
+.pa-note{font-size:10.5px;line-height:1.35;color:#8ab8f0;margin-bottom:7px}
+.pa-note.bad{color:#e05b4b}
+.pa-pick{display:grid;grid-template-columns:72px minmax(0,1fr);gap:7px;padding:3px 0;font-size:10.5px}
+.pa-pick span{color:#85868d;text-transform:uppercase;letter-spacing:.03em}
+.pa-pick strong{color:#d6d7db;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pa-actions{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:8px}
+.pa-restart{margin-top:6px;padding:0;border:0;background:none;color:#8ab8f0;font:11px system-ui;cursor:pointer}

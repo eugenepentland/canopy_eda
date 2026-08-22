@@ -1,4 +1,4 @@
-//! The `(fmt …)` string formatter: parses the `~V`/`~R`/`~C`/`~A`/`~S`
+//! The `(fmt …)` string formatter: parses the `~a`/`~V`/`~R`/`~C`/`~A`/`~S`
 //! directives (voltage, resistance, capacitance, amperage, string) and renders
 //! them from SI-suffixed values. Its directive table is one of the dispatch
 //! tables the auto-generated language reference is built from — keep it in sync
@@ -28,7 +28,7 @@ const tera: f64 = 1_000_000_000_000.0;
 const whole_number_limit: f64 = 1e15;
 
 /// What a `~X` directive consumes from the argument list.
-pub const DirectiveArg = enum { number, string, none };
+pub const DirectiveArg = enum { value, number, string, none };
 
 /// One `(fmt …)` template directive. This table is the single source of
 /// truth for the language docs (`src/docgen.zig` renders it into
@@ -42,6 +42,7 @@ pub const Directive = struct {
 };
 
 pub const directives = [_]Directive{
+    .{ .spec = 'a', .arg = .value, .summary = "Generic display for computed names (`2` → `2`, `\"RF\"` → `RF`)." },
     .{ .spec = 'V', .arg = .number, .summary = "Voltage: plain number + `V` (`3.41` → `3.41V`)." },
     .{ .spec = 'R', .arg = .number, .summary = "Resistance: SI-scaled with `k`/`M` (`4700` → `4.7k`)." },
     .{ .spec = 'C', .arg = .number, .summary = "Capacitance: SI-scaled `F`/`mF`/`uF`/`nF`/`pF` (`1e-7` → `100nF`)." },
@@ -50,11 +51,11 @@ pub const directives = [_]Directive{
     .{ .spec = '~', .arg = .none, .summary = "Literal `~` (consumes no argument)." },
 };
 
-/// Format a string with ~V, ~R, ~C, ~A, ~S, ~~ specifiers.
+/// Format a string with ~a, ~V, ~R, ~C, ~A, ~S, ~~ specifiers.
 pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const Value) FmtError![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    const writer = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    errdefer buf.deinit();
+    const writer = &buf.writer;
 
     var arg_idx: usize = 0;
     var i: usize = 0;
@@ -64,6 +65,7 @@ pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const 
             i += 2;
             switch (spec) {
                 '~' => writer.writeByte('~') catch return FmtError.OutOfMemory,
+                'a' => try formatDisplay(writer, try nextValue(args, &arg_idx)),
                 'V' => try formatVoltage(writer, try nextNumber(args, &arg_idx)),
                 'R' => try formatResistance(writer, try nextNumber(args, &arg_idx)),
                 'C' => try formatCapacitance(writer, try nextNumber(args, &arg_idx)),
@@ -76,7 +78,14 @@ pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const 
             i += 1;
         }
     }
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
+}
+
+fn nextValue(args: []const Value, idx: *usize) FmtError!Value {
+    if (idx.* >= args.len) return FmtError.NotEnoughArgs;
+    const value = args[idx.*];
+    idx.* += 1;
+    return value;
 }
 
 /// Take the next argument as a number, advancing `idx`. Errors if the args are
@@ -97,61 +106,74 @@ fn nextString(args: []const Value, idx: *usize) FmtError![]const u8 {
     return v;
 }
 
-fn formatVoltage(writer: anytype, v: f64) !void {
-    try formatNumber(writer, v);
-    try writer.writeByte('V');
+fn formatDisplay(writer: *std.Io.Writer, value: Value) FmtError!void {
+    switch (value) {
+        .number => |n| try formatNumber(writer, n),
+        .string => |s| writer.writeAll(s) catch return FmtError.OutOfMemory,
+        .boolean => |b| writer.writeAll(if (b) "true" else "false") catch return FmtError.OutOfMemory,
+        .component => |name| writer.writeAll(name) catch return FmtError.OutOfMemory,
+        .component_instance => |inst| writer.writeAll(inst.value) catch return FmtError.OutOfMemory,
+        .block_def => writer.writeAll("<block>") catch return FmtError.OutOfMemory,
+        .design_block => |block| writer.writeAll(block.name) catch return FmtError.OutOfMemory,
+        .nil => writer.writeAll("nil") catch return FmtError.OutOfMemory,
+    }
 }
 
-fn formatResistance(writer: anytype, v: f64) !void {
+fn formatVoltage(writer: *std.Io.Writer, v: f64) FmtError!void {
+    try formatNumber(writer, v);
+    writer.writeByte('V') catch return FmtError.OutOfMemory;
+}
+
+fn formatResistance(writer: *std.Io.Writer, v: f64) FmtError!void {
     const abs = @abs(v);
     if (abs >= mega) {
         try formatNumber(writer, v / mega);
-        try writer.writeByte('M');
+        writer.writeByte('M') catch return FmtError.OutOfMemory;
     } else if (abs >= kilo) {
         try formatNumber(writer, v / kilo);
-        try writer.writeByte('k');
+        writer.writeByte('k') catch return FmtError.OutOfMemory;
     } else {
         try formatNumber(writer, v);
     }
 }
 
-fn formatCapacitance(writer: anytype, v: f64) !void {
+fn formatCapacitance(writer: *std.Io.Writer, v: f64) FmtError!void {
     const abs = @abs(v);
     if (abs >= one_unit) {
         try formatNumber(writer, v);
-        try writer.writeByte('F');
+        writer.writeByte('F') catch return FmtError.OutOfMemory;
     } else if (abs >= milli_threshold) {
         try formatNumber(writer, v * kilo);
-        try writer.writeAll("mF");
+        writer.writeAll("mF") catch return FmtError.OutOfMemory;
     } else if (abs >= micro_threshold) {
         try formatNumber(writer, v * mega);
-        try writer.writeAll("uF");
+        writer.writeAll("uF") catch return FmtError.OutOfMemory;
     } else if (abs >= nano_threshold) {
         try formatNumber(writer, v * giga);
-        try writer.writeAll("nF");
+        writer.writeAll("nF") catch return FmtError.OutOfMemory;
     } else {
         try formatNumber(writer, v * tera);
-        try writer.writeAll("pF");
+        writer.writeAll("pF") catch return FmtError.OutOfMemory;
     }
 }
 
-fn formatAmperage(writer: anytype, v: f64) !void {
+fn formatAmperage(writer: *std.Io.Writer, v: f64) FmtError!void {
     const abs = @abs(v);
     if (abs >= one_unit) {
         try formatNumber(writer, v);
-        try writer.writeAll("A");
+        writer.writeAll("A") catch return FmtError.OutOfMemory;
     } else if (abs >= milli_threshold) {
         try formatNumber(writer, v * kilo);
-        try writer.writeAll("mA");
+        writer.writeAll("mA") catch return FmtError.OutOfMemory;
     } else if (abs == zero_unit) {
-        try writer.writeAll("0A");
+        writer.writeAll("0A") catch return FmtError.OutOfMemory;
     } else {
         try formatNumber(writer, v * mega);
-        try writer.writeAll("uA");
+        writer.writeAll("uA") catch return FmtError.OutOfMemory;
     }
 }
 
-fn formatNumber(writer: anytype, v: f64) !void {
+fn formatNumber(writer: *std.Io.Writer, v: f64) FmtError!void {
     // If it's a whole number, print without decimals
     if (v == @floor(v) and @abs(v) < whole_number_limit) {
         const i: i64 = numeric.checkedInt(i64, v) orelse 0;
@@ -260,6 +282,19 @@ test "format tilde escape" {
     const result = try format(alloc, "hello ~~ world", &[_]Value{});
     defer alloc.free(result);
     try std.testing.expectEqualStrings("hello ~ world", result);
+}
+
+// spec: eval/fmt - Lowercase ~a displays scalar values without adding engineering-unit suffixes
+test "format generic display for computed names" {
+    const alloc = std.testing.allocator;
+    const args = [_]Value{
+        .{ .number = 9.0 },
+        .{ .string = "RF" },
+        .{ .boolean = true },
+    };
+    const result = try format(alloc, "J~a/~a/~a", &args);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("J9/RF/true", result);
 }
 
 // spec: eval/fmt - Formats mixed specifiers in a single format string

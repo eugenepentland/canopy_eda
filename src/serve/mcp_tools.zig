@@ -22,6 +22,7 @@ const erc_mod = @import("../erc.zig");
 const log = @import("../infra/log.zig");
 const bom = @import("../bom.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
+const Node = @import("../sexpr/ast.zig").Node;
 const ids = @import("../eval/ids.zig");
 const review_json_mod = @import("../review_json.zig");
 const req_checks = @import("../req_checks.zig");
@@ -30,17 +31,34 @@ const notes = @import("notes.zig");
 const symbol_conv = @import("../convert/symbol.zig");
 const mcp_parts_tools = @import("mcp_parts_tools.zig");
 const mcp_notes_tools = @import("mcp_notes_tools.zig");
+const mcp_route_trials = @import("mcp_route_trials.zig");
 const mcp_import_tools = @import("mcp_import_tools.zig");
+const mcp_kicad_sch = @import("mcp_kicad_sch.zig");
+const sync_kicad_sch = @import("sync_kicad_sch.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const pcb_describe = @import("pcb_describe.zig");
+const mcp_route_experiment = @import("mcp_route_experiment.zig");
+const mcp_route_order = @import("mcp_route_order.zig");
+const route_analyze_api = @import("route_analyze_api.zig");
+const thermal_api = @import("thermal_api.zig");
+const mcp_close_gaps = @import("mcp_close_gaps.zig");
+const pcb_fence = @import("pcb_fence.zig");
+const mcp_routability = @import("mcp_routability.zig");
+const mcp_placement_sensitivity = @import("mcp_placement_sensitivity.zig");
+const mcp_escape_assign = @import("mcp_escape_assign.zig");
+const mcp_connector_pinout = @import("mcp_connector_pinout.zig");
 const mcp_read_opts = @import("mcp_read_opts.zig");
 const layout_match = @import("layout_match.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
+const thermal_scenarios = @import("../thermal_scenarios.zig");
+const render_schematic_png = @import("../render_schematic_png.zig");
 const docgen = @import("../docgen.zig");
 const page_cache = @import("page_cache.zig");
 const mcp_flatten = @import("mcp_flatten.zig");
 const mcp_checks = @import("mcp_checks.zig");
 const schematic_view = @import("mcp_schematic_view.zig");
+const mcp_build = @import("mcp_build.zig");
+const library_search_metadata = @import("library_search_metadata.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const name_field_prefix = "{\"name\":";
@@ -67,7 +85,7 @@ const numeric = @import("../numeric.zig");
 /// Error set used by mcp_tools helper fns that orchestrate eval + render
 /// + filesystem walks, plus any writer in JSON-emitting helpers.
 pub const ToolError = std.mem.Allocator.Error || std.Io.Writer.Error || EvalError || RenderError ||
-    std.fs.Dir.Iterator.Error || std.fs.Dir.OpenError || std.fs.File.OpenError || std.fs.File.ReadError ||
+    infra_fs.Iterator.Error || infra_fs.Dir.OpenError || infra_fs.File.OpenError || infra_fs.File.ReadError ||
     error{ InvalidName, NotADesign, FileTooBig, StreamTooLong, NotOpenForReading, ReadOnlyFileSystem, LinkQuotaExceeded };
 
 /// Log a non-fatal BOM identity-resolution failure. Shared with `mcp_checks`
@@ -94,9 +112,52 @@ const tools = [_]ToolEntry{
     .{ .name = "get_net", .is_mutation = false },
     .{ .name = "describe_component", .is_mutation = false },
     .{ .name = "get_schematic", .is_mutation = false },
+    .{ .name = "get_schematic_image", .is_mutation = false },
     .{ .name = "get_pcb_layout_image", .is_mutation = false },
     .{ .name = "describe_pcb_layout", .is_mutation = false },
+    // Lumped steady-state thermal screening (Tj = Ta + P*thetaJA) of a design
+    // or a bare module: per-part junction temperatures, the board verdict and
+    // the ambient window. The MCP twin of GET /api/thermal/:name, sharing its
+    // whole body so the two can never report different temperatures.
+    .{ .name = "describe_thermal", .is_mutation = false },
+    // The completion-progress ladder (schematic → sub-circuits → board-setup →
+    // placement → routing → fab-ready) for a design/module's blessed layout —
+    // the same `progress` block `describe_pcb_layout` embeds, standalone.
+    .{ .name = "get_layout_progress", .is_mutation = false },
     .{ .name = "compare_layout_to_starred", .is_mutation = false },
+    // Static routability preflight: geometrically doomed routing (pads that
+    // cannot be entered along their own axis, pads with no legal escape) read
+    // off the placement + net-class rules alone, with no router run.
+    .{ .name = "routability_preflight", .is_mutation = false },
+    // Route the blessed placement request-locally with an optional (pcb-plan …)
+    // override and return the deterministic score + stuck diagnostics + the
+    // oracle's open nets — the read-only, never-persists twin of route_pcb for
+    // the constraint-DSL loop.
+    .{ .name = "route_experiment", .is_mutation = false },
+    // Search connector pin-to-net assignments in memory. Geometry-only by
+    // default; an explicitly bounded top-N may be route-scored request-locally.
+    .{ .name = "optimize_connector_pinout", .is_mutation = false },
+    // Search the ROUTING ORDER of a contended net cluster: try candidate
+    // orderings on top of the authored plan, judge each by the connectivity
+    // oracle, and report the winner as a paste-ready wave reorder. A MUTATION
+    // because it appends every trial it ran to the design's trial-memory
+    // sidecar — up to 48 whole-board routes used to leave no trace at all. It
+    // still edits no design file; the caller applies the DSL edit.
+    .{ .name = "route_order_search", .is_mutation = true },
+    // Diagnose ONE named net on the shown board: the per-net answer neither
+    // route_experiment's capped, failure-only stuck[] nor a whole-board describe
+    // can give on demand. The MCP twin of POST /api/pcb-route-analyze/:name.
+    .{ .name = "diagnose_net", .is_mutation = false },
+    // Joint multi-net escape assignment preview: which parallel lanes a
+    // contended net set would take out of its shared hub (read-only, no route).
+    .{ .name = "preview_escape_assignment", .is_mutation = false },
+    // Routing trial-memory sidecar (`<design>.trials.json`) — the loop-hygiene
+    // half of route_experiment: record (plan tried → score) so agents don't
+    // re-propose reverted DSL edits and oscillate. record → list-before-next-
+    // edit; the oscillation check is the agent's, the server only remembers.
+    .{ .name = "record_route_trial", .is_mutation = true },
+    .{ .name = "list_route_trials", .is_mutation = false },
+    .{ .name = "remove_route_trial", .is_mutation = true },
     // PCB layout MUTATION tools — edit the `<design>.layouts.json` sidecar so an
     // agent can take a board schematic → gated Gerbers headless: place parts,
     // draw the board outline, autoroute, save/star, clear copper. Read-only twin
@@ -107,6 +168,19 @@ const tools = [_]ToolEntry{
     .{ .name = "route_pcb", .is_mutation = true },
     .{ .name = "save_pcb_layout", .is_mutation = true },
     .{ .name = "clear_routes", .is_mutation = true },
+    .{ .name = "add_tracks", .is_mutation = true },
+    .{ .name = "set_copper_zones", .is_mutation = true },
+    .{ .name = "close_open_nets", .is_mutation = true },
+    .{ .name = "clean_route_topology", .is_mutation = true },
+    .{ .name = "normalize_junctions", .is_mutation = true },
+    .{ .name = "restore_layout_snapshot", .is_mutation = true },
+    .{ .name = "repair_land_transit", .is_mutation = true },
+    .{ .name = "stitch_ground_pads", .is_mutation = true },
+    // End-of-design RF ground via fencing over a saved layout's persisted copper.
+    .{ .name = "generate_fence", .is_mutation = true },
+    // Which parts are load-bearing: perturb a pose by a fraction of a mm and
+    // re-route only the affected scope, reporting the nets that flip.
+    .{ .name = "placement_sensitivity", .is_mutation = false },
     .{ .name = "run_fab_readiness", .is_mutation = false },
     .{ .name = "get_version", .is_mutation = false },
     .{ .name = "run_checks", .is_mutation = false },
@@ -131,9 +205,22 @@ const tools = [_]ToolEntry{
     .{ .name = "build", .is_mutation = true },
     // KiCad-source-driven regeneration of an auto-generated pinout file.
     .{ .name = "regenerate_pinout", .is_mutation = true },
+    // Export the design's KiCad SCHEMATIC (.kicad_sch sheets + the project
+    // sidecars that resolve their library references). Read-only without
+    // output_dir — the result is a summary, never a megabyte of sheet text;
+    // with one it writes the files there, which must be OUTSIDE the project
+    // directory (this is an export, not a design edit).
+    .{ .name = "export_kicad_sch", .is_mutation = true },
+    // Push that schematic INTO the KiCad project directory the design's
+    // (kicad-pcb "<path>") names — guarded: an existing sheet is replaced only
+    // when it is netlisp's own or an empty eeschema stub, a KiCad lock refuses
+    // outright, and `dry_run` reports the per-file plan without writing.
+    .{ .name = "sync_kicad_sch", .is_mutation = true },
     // KiCad board importer over MCP: parse a .kicad_pcb into a netlist preview
     // (read-only), or run the full import that writes lib/ + src/ files.
     .{ .name = "parse_kicad_netlist", .is_mutation = false },
+    .{ .name = "inspect_kicad_layout", .is_mutation = false },
+    .{ .name = "benchmark_kicad_routing", .is_mutation = false },
     .{ .name = "import_kicad", .is_mutation = true },
     // Fetch a part's ECAD model ZIP from Component Search Engine and import
     // it into the library (component + footprint + pinout + 3D model).
@@ -201,21 +288,33 @@ pub fn call(
     // The image tool returns binary content, so it's handled here (not in
     // `callInner`, which only ever produces text) and tagged with its MIME type
     // so the MCP layer frames it as an image content block.
-    if (std.mem.eql(u8, tool_name, "get_pcb_layout_image")) {
-        const ok = toolGetPcbImage(allocator, project_dir, args_val, out) catch |err| {
-            const w = out.writer(allocator);
-            w.print(err_line_template, .{@errorName(err)}) catch |e| {
+    if (std.mem.eql(u8, tool_name, "get_pcb_layout_image") or
+        std.mem.eql(u8, tool_name, "get_schematic_image"))
+    {
+        const ok = if (std.mem.eql(u8, tool_name, "get_schematic_image"))
+            toolGetSchematicImage(allocator, project_dir, args_val, out)
+        else
+            toolGetPcbImage(allocator, project_dir, args_val, out);
+        const rendered = ok catch |err| {
+            const msg = std.fmt.allocPrint(allocator, err_line_template, .{@errorName(err)}) catch |e| {
                 log.warn("failed to write error msg: {s}", .{@errorName(e)});
+                return .{ .ok = false };
+            };
+            out.appendSlice(allocator, msg) catch |e| {
+                log.warn("failed to append tool error msg: {s}", .{@errorName(e)});
             };
             return .{ .ok = false };
         };
-        return .{ .ok = ok, .image_mime = if (ok) "image/png" else null };
+        return .{ .ok = rendered, .image_mime = if (rendered) "image/png" else null };
     }
     const ok = callInner(allocator, project_dir, tool_name, args_val, out) catch |err| {
         const msg = @errorName(err);
-        const w = out.writer(allocator);
-        w.print(err_line_template, .{msg}) catch |e| {
+        const rendered_msg = std.fmt.allocPrint(allocator, err_line_template, .{msg}) catch |e| {
             log.warn("failed to write error msg: {s}", .{@errorName(e)});
+            return .{ .ok = false };
+        };
+        out.appendSlice(allocator, rendered_msg) catch |e| {
+            log.warn("failed to append tool error msg: {s}", .{@errorName(e)});
         };
         return .{ .ok = false };
     };
@@ -238,9 +337,12 @@ fn callInner(
     if (try dispatchReview(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try mcp_notes_tools.dispatchNotes(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try mcp_notes_tools.dispatchRequirements(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
+    if (try mcp_route_trials.dispatchRouteTrials(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchImport(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
 
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
     try w.print("error: unknown tool \"{s}\"", .{tool_name});
     return false;
 }
@@ -255,9 +357,16 @@ fn dispatchProject(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) !?bool {
-    const w = out.writer(allocator);
-    if (std.mem.eql(u8, tool_name, "list_designs")) return try toolListDesigns(allocator, project_dir, w);
-    if (std.mem.eql(u8, tool_name, "list_library")) return try toolListLibrary(allocator, project_dir, args_val, w);
+    if (std.mem.eql(u8, tool_name, "list_designs")) {
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+        defer out.* = aw.toArrayList();
+        return try toolListDesigns(allocator, project_dir, &aw.writer);
+    }
+    if (std.mem.eql(u8, tool_name, "list_library")) {
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+        defer out.* = aw.toArrayList();
+        return try toolListLibrary(allocator, project_dir, args_val, &aw.writer);
+    }
     if (std.mem.eql(u8, tool_name, "list_history")) return try toolListHistory(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "list_instances")) return try toolListInstances(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "list_free_pins")) return try toolListFreePins(allocator, project_dir, args_val, out);
@@ -275,13 +384,22 @@ fn dispatchInfo(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) !?bool {
-    const w = out.writer(allocator);
     if (std.mem.eql(u8, tool_name, "get_schematic")) return try toolGetSchematic(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "describe_pcb_layout")) return try toolDescribePcbLayout(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "get_layout_progress")) return try toolGetLayoutProgress(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "compare_layout_to_starred")) return try toolCompareLayoutToStarred(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "routability_preflight")) return try mcp_routability.mcpRoutabilityPreflight(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "route_experiment")) return try mcp_route_experiment.mcpRouteExperiment(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "optimize_connector_pinout")) return try mcp_connector_pinout.mcpOptimizeConnectorPinout(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "route_order_search")) return try mcp_route_order.mcpRouteOrderSearch(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "diagnose_net")) return try route_analyze_api.mcpDiagnoseNet(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "describe_thermal")) return try thermal_api.mcpDescribeThermal(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_version")) return try toolGetVersion(args_val, out, allocator);
-    if (std.mem.eql(u8, tool_name, "run_checks"))
-        return try mcp_checks.toolRunChecks(allocator, project_dir, args_val, out, w);
+    if (std.mem.eql(u8, tool_name, "run_checks")) {
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+        defer out.* = aw.toArrayList();
+        return try mcp_checks.toolRunChecks(allocator, project_dir, args_val, out, &aw.writer);
+    }
     if (std.mem.eql(u8, tool_name, "read_datasheet")) return try mcp_parts_tools.toolReadDatasheet(allocator, project_dir, args_val, out);
     return null;
 }
@@ -304,6 +422,17 @@ fn dispatchPcbLayout(
     if (std.mem.eql(u8, tool_name, "route_pcb")) return try pcb_layout_page.mcpRoutePcb(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "save_pcb_layout")) return try pcb_layout_page.mcpSavePcbLayout(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "clear_routes")) return try pcb_layout_page.mcpClearRoutes(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "add_tracks")) return try pcb_layout_page.mcpAddTracks(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "set_copper_zones")) return try pcb_layout_page.mcpSetCopperZones(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "close_open_nets")) return try mcp_close_gaps.mcpCloseOpenNets(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "clean_route_topology")) return try pcb_layout_page.mcpCleanRouteTopology(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "normalize_junctions")) return try pcb_layout_page.mcpNormalizeJunctions(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "restore_layout_snapshot")) return try pcb_layout_page.mcpRestoreLayoutSnapshot(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "repair_land_transit")) return try pcb_layout_page.mcpRepairLandTransit(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "stitch_ground_pads")) return try pcb_layout_page.mcpStitchGroundPads(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "generate_fence")) return try pcb_fence.mcpGenerateFence(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "placement_sensitivity")) return try mcp_placement_sensitivity.mcpPlacementSensitivity(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "preview_escape_assignment")) return try mcp_escape_assign.mcpPreviewEscapeAssignment(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "run_fab_readiness")) return try pcb_layout_page.mcpRunFabReadiness(allocator, project_dir, args_val, out);
     return null;
 }
@@ -349,6 +478,10 @@ fn dispatchReview(
     out: *std.ArrayList(u8),
 ) !?bool {
     if (std.mem.eql(u8, tool_name, "restore_version")) return try toolRestoreVersion(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "export_kicad_sch"))
+        return try mcp_kicad_sch.mcpExportKicadSch(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "sync_kicad_sch"))
+        return try sync_kicad_sch.mcpSyncKicadSch(allocator, project_dir, args_val, out);
     return null;
 }
 
@@ -364,6 +497,10 @@ fn dispatchImport(
     out: *std.ArrayList(u8),
 ) !?bool {
     if (std.mem.eql(u8, tool_name, "parse_kicad_netlist")) return try mcp_import_tools.toolParseKicadNetlist(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "inspect_kicad_layout"))
+        return try mcp_import_tools.toolInspectKicadLayout(allocator, args_val, out);
+    if (std.mem.eql(u8, tool_name, "benchmark_kicad_routing"))
+        return try mcp_import_tools.toolBenchmarkKicadRouting(allocator, args_val, out);
     if (std.mem.eql(u8, tool_name, "import_kicad")) return try mcp_import_tools.toolImportKicad(allocator, project_dir, args_val, out);
     return null;
 }
@@ -489,7 +626,9 @@ fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
 
 fn toolListHistory(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
     const snaps = try history.listSnapshots(allocator, project_dir, name);
     try w.writeAll("{\"snapshots\":[");
     for (snaps, 0..) |s, i| {
@@ -506,20 +645,26 @@ fn toolListHistory(allocator: std.mem.Allocator, project_dir: []const u8, args_v
 
 fn toolListInstances(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    return listInstances(allocator, project_dir, name, scopeArg(args_val), out.writer(allocator));
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    return listInstances(allocator, project_dir, name, scopeArg(args_val), &aw.writer);
 }
 
 fn toolListFreePins(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const ref = requireString(args_val, "ref") orelse return missingArg(out, allocator, "ref");
     const opts: FreePinOpts = .{ .filter = optionalString(args_val, "filter"), .scope = scopeArg(args_val) };
-    return listFreePins(allocator, project_dir, name, ref, opts, out.writer(allocator));
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    return listFreePins(allocator, project_dir, name, ref, opts, &aw.writer);
 }
 
 fn toolGetNet(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const net = requireString(args_val, "net") orelse return missingArg(out, allocator, "net");
-    return getNet(allocator, project_dir, name, net, scopeArg(args_val), out.writer(allocator));
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    return getNet(allocator, project_dir, name, net, scopeArg(args_val), &aw.writer);
 }
 
 /// Read the `flatten` boolean tool arg (default true) as a `Scope`.
@@ -537,7 +682,7 @@ fn toolGetSchematic(allocator: std.mem.Allocator, project_dir: []const u8, args_
     const view = optionalString(args_val, "view") orelse "summary";
     if (std.mem.eql(u8, view, "scene_graph") or std.mem.eql(u8, view, "full")) {
         const graph = try renderSceneGraph(allocator, project_dir, name);
-        try out.writer(allocator).writeAll(graph);
+        try out.appendSlice(allocator, graph);
         return true;
     }
     if (!std.mem.eql(u8, view, "summary")) {
@@ -562,7 +707,9 @@ fn toolGetLanguageReference(allocator: std.mem.Allocator, args_val: ?std.json.Va
         try out.appendSlice(allocator, body);
         return true;
     }
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
     try w.print("error: unknown section \"{s}\" — valid sections: ", .{section});
     var it = docgen.SectionIterator{ .doc = doc };
     var first = true;
@@ -583,7 +730,9 @@ fn toolGetLanguageReference(allocator: std.mem.Allocator, args_val: ?std.json.Va
 /// `get_pcb_layout_image` / `describe_pcb_layout`, which resolve module names
 /// via a real instantiation (else a zero-arg call).
 fn toolPreviewModule(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
     const module = requireString(args_val, "module") orelse return missingArg(out, allocator, "module");
     if (!isBareModuleName(module)) {
         try w.writeAll("{\"ok\":false,\"error\":\"invalid module name (bare lib/modules name expected)\"}");
@@ -652,9 +801,32 @@ fn isBareModuleName(name: []const u8) bool {
 /// always describe the board the image shows.
 fn toolDescribePcbLayout(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const opts = mcp_read_opts.describePcbOpts(args_val);
+    var opts = mcp_read_opts.describePcbOpts(args_val);
+    // `cropnet` (array or comma-string) — the net-bbox zoom lens; describe emits
+    // its resolved world bbox as `crop_bbox`, the twin of the PNG viewport.
+    opts.crop_nets = jsonStrList(allocator, args_val, "cropnet");
     const body = pcb_describe.describeDesign(allocator, project_dir, name, opts) catch |e| {
-        try out.writer(allocator).print("error describing pcb layout: {s}", .{@errorName(e)});
+        try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "error describing pcb layout: {s}", .{@errorName(e)}));
+        return false;
+    };
+    try out.appendSlice(allocator, body);
+    return true;
+}
+
+/// `get_layout_progress` — the PCB completion-ladder (six ordered rungs:
+/// schematic → sub-circuits → board-setup → placement → routing → fab-ready)
+/// for a design or module's blessed/named layout. Read-only twin of
+/// `describe_pcb_layout` (returns the identical `progress` block that endpoint
+/// embeds, prefixed with `name`); `{name,current,stages[…]}` plus `current_wave`
+/// / `warnings` when a `(pcb-plan …)` splits the placement/routing rungs.
+fn toolGetLayoutProgress(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    // Placement-selection args only (`layout`/`sub`/`regen`/`rough`): the
+    // ladder loads the shown layout's copper itself and emits no pad table, so
+    // `route`/`pads` would be knobs that cannot move a rung.
+    const opts = mcp_read_opts.placementSelectOpts(args_val);
+    const body = pcb_describe.describeProgress(allocator, project_dir, name, opts, null) catch |e| {
+        try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "error building layout progress: {s}", .{@errorName(e)}));
         return false;
     };
     try out.appendSlice(allocator, body);
@@ -667,7 +839,7 @@ fn toolDescribePcbLayout(allocator: std.mem.Allocator, project_dir: []const u8, 
 fn toolCompareLayoutToStarred(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const body = layout_match.layoutMatchJson(allocator, project_dir, name) catch |e| {
-        try out.writer(allocator).print("error comparing layout to starred: {s}", .{@errorName(e)});
+        try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "error comparing layout to starred: {s}", .{@errorName(e)}));
         return false;
     };
     try out.appendSlice(allocator, body);
@@ -697,22 +869,62 @@ fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_v
         .compare = optionalString(args_val, "compare"),
         .pins = jsonStrList(allocator, args_val, "pins"),
         .crop = optionalString(args_val, "crop"),
+        .crop_nets = jsonStrList(allocator, args_val, "cropnet"),
         .sheet = optionalBool(args_val, "sheet") orelse false,
         .critique = optionalBool(args_val, "critique") orelse false,
         // rough OFF by default — see describePcbOpts: a no-arg image renders the
         // starred (★) layout verbatim, not a cache re-solve that drifts.
         .rough = optionalBool(args_val, "rough") orelse false,
+        // `thermal` swaps the whole picture for the heat field over the same
+        // board; `scenario` picks which cooling assumption it is solved under.
+        .thermal = .{
+            .on = optionalBool(args_val, "thermal") orelse false,
+            .scenario = pcb_layout_page.parseScenario(optionalString(args_val, "scenario")),
+        },
     };
     if (optionalU64(args_val, "width")) |w| opts.width = @intCast(@min(w, @as(u64, 4000)));
     if (optionalU64(args_val, "r")) |r| opts.crop_r = @floatFromInt(r);
     if (optionalString(args_val, "names")) |s| opts.names = std.meta.stringToEnum(render_pcb_png.NameMode, s);
 
     const png_bytes = pcb_layout_page.renderDesignPng(allocator, project_dir, name, opts) catch |e| {
-        try out.writer(allocator).print("error rendering pcb layout: {s}", .{@errorName(e)});
+        try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "error rendering pcb layout: {s}", .{@errorName(e)}));
         return false;
     };
     const enc = std.base64.standard.Encoder;
     const b64 = try allocator.alloc(u8, enc.calcSize(png_bytes.len));
+    _ = enc.encode(b64, png_bytes);
+    try out.appendSlice(allocator, b64);
+    return true;
+}
+
+/// Render the web schematic's SVG display list natively and return it as an MCP
+/// PNG image block. `sub` selects a schematic card, `ref` one hub, and `view`
+/// accepts the UI names sequential|functional. This is the visual review path
+/// for agents after a schematic edit; it deliberately has no browser runtime.
+fn toolGetSchematicImage(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
+    const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
+    var opts: render_schematic_png.Options = .{
+        .view = render_schematic_png.parseView(optionalString(args_val, "view")),
+        .theme = render_schematic_png.parseTheme(optionalString(args_val, "theme")),
+        .sub = optionalString(args_val, "sub"),
+        .ref = optionalString(args_val, "ref"),
+    };
+    if (optionalU64(args_val, "width")) |width| opts.width = @intCast(std.math.clamp(width, 320, 4000));
+
+    var eval = Evaluator.init(allocator, project_dir);
+    defer eval.deinit();
+    const named = evalNamedBlock(allocator, project_dir, name, &eval) catch |err| {
+        try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "error rendering schematic image: {s}", .{@errorName(err)}));
+        return false;
+    };
+    const png_bytes = render_schematic_png.render(allocator, named.block, project_dir, opts) catch |err| {
+        try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "error rendering schematic image: {s}", .{render_schematic_png.errorMessage(err)}));
+        return false;
+    };
+    defer allocator.free(png_bytes);
+    const enc = std.base64.standard.Encoder;
+    const b64 = try allocator.alloc(u8, enc.calcSize(png_bytes.len));
+    defer allocator.free(b64);
     _ = enc.encode(b64, png_bytes);
     try out.appendSlice(allocator, b64);
     return true;
@@ -742,7 +954,9 @@ fn jsonStrList(allocator: std.mem.Allocator, args_val: ?std.json.Value, key: []c
 
 fn toolGetVersion(args_val: ?std.json.Value, out: *std.ArrayList(u8), allocator: std.mem.Allocator) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
     try w.print("{{\"version\":{d}}}", .{serve_root.getLiveVersion(name)});
     return true;
 }
@@ -751,7 +965,9 @@ fn toolRestoreVersion(allocator: std.mem.Allocator, project_dir: []const u8, arg
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     const id = requireString(args_val, "id") orelse return missingArg(out, allocator, "id");
     const result = edit.restoreDesignCore(allocator, project_dir, name, id) catch |err| return editErrorMsg(out, allocator, err);
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
     try w.print(version_snapshot_template, .{result.version});
     if (result.snapshot) |s| try json_writer.writeString(w, s) else try w.writeAll("null");
     try w.writeAll("}");
@@ -832,9 +1048,11 @@ fn toolMoveFile(allocator: std.mem.Allocator, project_dir: []const u8, args_val:
 
 fn toolBuild(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
-    const report = edit.rebuildDesign(allocator, project_dir, name);
-    const w = out.writer(allocator);
-    try mcp_checks.writeBuildReport(w, report, optionalString(args_val, "severity"));
+    const profile = @import("../preflight.zig").parseProfile(optionalString(args_val, "profile")) orelse {
+        try out.appendSlice(allocator, "error: invalid profile (expected authoring or preflight)");
+        return false;
+    };
+    try mcp_build.run(allocator, project_dir, name, profile, optionalString(args_val, "severity"), out);
     return true;
 }
 
@@ -855,7 +1073,9 @@ fn toolRegeneratePinout(
     out: *std.ArrayList(u8),
 ) !bool {
     const source = requireString(args_val, "source") orelse return missingArg(out, allocator, "source");
-    const w = out.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
+    defer out.* = aw.toArrayList();
+    const w = &aw.writer;
 
     // Source must live under lib/sources/ (read access from there is in the
     // sandbox; we don't go through writeFile so we must check explicitly).
@@ -997,7 +1217,7 @@ fn fuzzyScore(needle: []const u8, haystack: []const u8) u32 {
     if (haystack.len == 0) return 0;
 
     // Contiguous substring is the strong signal.
-    if (std.ascii.indexOfIgnoreCase(haystack, needle)) |pos| {
+    if (std.ascii.findIgnoreCase(haystack, needle)) |pos| {
         var score: u32 = substring_base;
         if (pos == 0) {
             score += prefix_bonus;
@@ -1074,7 +1294,7 @@ pub fn listLibrarySubdir(
             const base = entry.name[0 .. entry.name.len - ".sexp".len];
             const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
             defer allocator.free(full_path);
-            const description = extractDescription(allocator, full_path);
+            const description = library_search_metadata.extract(allocator, full_path, sub);
             defer if (description) |d| allocator.free(d);
 
             if (!first) try w.writeAll(",");
@@ -1094,7 +1314,7 @@ pub fn listLibrarySubdir(
         const base = entry.name[0 .. entry.name.len - ".sexp".len];
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
         defer allocator.free(full_path);
-        const description = extractDescription(allocator, full_path);
+        const description = library_search_metadata.extract(allocator, full_path, sub);
 
         const score = libEntryScore(q, base, description);
         if (score == 0) {
@@ -1127,18 +1347,6 @@ fn writeLibEntry(w: anytype, name: []const u8, description: ?[]const u8) !void {
     try w.writeAll(json_description_key);
     if (description) |d| try json_writer.writeString(w, d) else try w.writeAll("\"\"");
     try w.writeAll("}");
-}
-
-/// Find the first `(description "...")` form in the file and return its
-/// string value. Returns null if absent. Caller owns the returned memory.
-fn extractDescription(allocator: std.mem.Allocator, path: []const u8) ?[]const u8 {
-    const src = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return null;
-    defer allocator.free(src);
-    const marker = "(description \"";
-    const idx = std.mem.indexOf(u8, src, marker) orelse return null;
-    const start = idx + marker.len;
-    const end = std.mem.indexOfScalarPos(u8, src, start, '"') orelse return null;
-    return allocator.dupe(u8, src[start..end]) catch null;
 }
 
 /// Introspection scope for the by-name read tools: `flat` walks the whole
@@ -1402,14 +1610,12 @@ pub fn getNet(
 /// Write the standard missing-argument error line and return false. Shared
 /// with `mcp_parts_tools` so its handlers reject bad args identically.
 pub fn missingArg(out: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!bool {
-    const w = out.writer(allocator);
-    try w.print("error: missing argument \"{s}\"", .{key});
+    try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, "error: missing argument \"{s}\"", .{key}));
     return false;
 }
 
 fn editErrorMsg(out: *std.ArrayList(u8), allocator: std.mem.Allocator, err: edit.EditError) !bool {
-    const w = out.writer(allocator);
-    try w.print(err_line_template, .{@errorName(err)});
+    try out.appendSlice(allocator, try std.fmt.allocPrint(allocator, err_line_template, .{@errorName(err)}));
     return false;
 }
 
@@ -1501,8 +1707,8 @@ pub const DesignSummary = struct {
     mtime_sec: i64,
     /// Whether the file evaluated cleanly.
     build_ok: bool,
-    /// ERC violation counts by severity (0 when the build failed). Drive the
-    /// home dashboard's red/yellow status chips.
+    /// ERC violation counts by severity (0 when the build failed). The home
+    /// progress tracker summarizes them while the design is at stage one.
     erc_errors: usize = 0,
     erc_warnings: usize = 0,
     /// Distinct lib/modules names instantiated anywhere in the design's
@@ -1563,7 +1769,7 @@ const SummaryCacheEntry = struct {
     live_version: u32,
 };
 
-var summary_cache_mutex: std.Thread.Mutex = .{};
+var summary_cache_mutex: infra_fs.Mutex = .{};
 var summary_cache: std.StringHashMapUnmanaged(SummaryCacheEntry) = .empty;
 
 /// Deep-copy a summary's owned strings into `alloc` (every `[]const u8` /
@@ -1614,6 +1820,55 @@ fn summaryCacheGet(arena: std.mem.Allocator, name: []const u8, live_version: u32
 
 /// Cache `summary` for `name`, duping it + the read-set into page_allocator and
 /// freeing any prior entry. `scratch` is the request arena.
+/// The library files that could satisfy an `(import …)` this evaluation read
+/// but may not have resolved — every `<root>/lib/{components,modules}/<x>.sexp`
+/// for every name imported by any file in the read-set, over the same roots
+/// `eval.modules.resolveImport` searches.
+///
+/// This exists for FAILED evaluations. A failed eval stops at its first error,
+/// so its read-set names only the files it got through — and the file that
+/// would REPAIR it is typically one that does not exist yet ("cannot import
+/// 'x'" is fixed by creating `lib/components/x.sexp`, which no read-set of
+/// successfully-read files can ever mention). `page_cache.stampOf` records an
+/// absent path with `present = false`, so stamping the candidates drops the
+/// cached failure the moment one of them appears. Paths are scratch-owned; any
+/// that cannot be built is omitted, costing a stamp rather than an error.
+fn importCandidatePaths(scratch: std.mem.Allocator, eval: *const Evaluator) []const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    const roots: []const []const u8 = if (std.mem.eql(u8, eval.project_dir, eval.lib_dir))
+        &.{eval.project_dir}
+    else
+        &.{ eval.project_dir, eval.lib_dir };
+
+    var it = eval.loaded_files.valueIterator();
+    while (it.next()) |nodes| {
+        for (nodes.*) |n| appendImportCandidates(scratch, &out, roots, n);
+    }
+    return out.items;
+}
+
+/// Append every candidate path named by one top-level `(import a b c)` form.
+/// A non-import node contributes nothing.
+fn appendImportCandidates(
+    scratch: std.mem.Allocator,
+    out: *std.ArrayList([]const u8),
+    roots: []const []const u8,
+    node: Node,
+) void {
+    if (!node.isForm("import")) return;
+    const items = node.asList() orelse return;
+    if (items.len < 2) return;
+    for (items[1..]) |arg| {
+        const name = arg.asAtom() orelse continue;
+        for (roots) |root| {
+            for ([_][]const u8{ "lib/components", "lib/modules" }) |sub| {
+                const p = std.fmt.allocPrint(scratch, "{s}/{s}/{s}.sexp", .{ root, sub, name }) catch continue;
+                out.append(scratch, p) catch return;
+            }
+        }
+    }
+}
+
 fn summaryCachePut(
     scratch: std.mem.Allocator,
     eval: *const Evaluator,
@@ -1622,7 +1877,14 @@ fn summaryCachePut(
     summary: DesignSummary,
     live_version: u32,
 ) void {
-    const files = page_cache.capture(scratch, eval, project_dir, name) catch return;
+    // Only a FAILED build pays for the import candidates (see
+    // `importCandidatePaths`); a successful one keeps its precise per-file
+    // read-set, so adding an unrelated component does not invalidate every
+    // design on the page.
+    const files = if (summary.build_ok)
+        page_cache.capture(scratch, eval, project_dir, name) catch return
+    else
+        page_cache.captureWithExtras(scratch, eval, project_dir, name, importCandidatePaths(scratch, eval)) catch return;
     const stored = dupeSummary(page, summary) catch {
         files.deinit();
         return;
@@ -1688,7 +1950,7 @@ pub fn listDesignSummaries(
 
         var mtime_sec: i64 = 0;
         if (dir.statFile(entry.path)) |st| {
-            mtime_sec = @intCast(@divTrunc(st.mtime, std.time.ns_per_s));
+            mtime_sec = @intCast(@divTrunc(st.mtime.nanoseconds, std.time.ns_per_s));
         } else |_| {}
 
         var summary = DesignSummary{
@@ -1762,11 +2024,16 @@ pub fn listDesignSummaries(
         } else |_| {}
         summary.open_notes = countOpenNotes(allocator, project_dir, base);
 
-        // Cache only successful builds: a failed eval has an incomplete read-set
-        // (it may have errored before reaching some imports), so its
-        // invalidation set can't be trusted. Failed builds are rare and cheap to
-        // recompute.
-        if (summary.build_ok) summaryCachePut(allocator, &eval, project_dir, base, summary, live_version);
+        // Failed builds are cached too. The read-set of a failed eval IS
+        // partial — it stops at the first error, so imports past that point are
+        // unstamped — but nothing beyond the failure can fix it: an eval that
+        // dies on import A is repaired by editing the design, by editing A, or
+        // by CREATING a file A was searched for and missing, and all three are
+        // stamped (the last via `eval.missing_files`, recorded absent). Not
+        // caching them cost far more than the staleness it avoided: four copies
+        // of one 92 KiB broken board re-evaluated on every `GET /`, which was
+        // ~70% of a warm home page.
+        summaryCachePut(allocator, &eval, project_dir, base, summary, live_version);
 
         try summaries.append(allocator, summary);
     }
@@ -1817,11 +2084,76 @@ fn collectModuleUses(
 /// `(design-block ...)`. Used to filter out board definitions and auxiliary
 /// .sexp files from list_designs.
 fn hasTopLevelDesignBlock(allocator: std.mem.Allocator, path: []const u8) bool {
+    if (designBlockVerdict(path)) |cached| return cached;
     const src = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch return false;
     defer allocator.free(src);
     const nodes = sexpr_parser.parse(allocator, src) catch return false;
-    for (nodes) |n| if (n.isForm("design-block")) return true;
-    return false;
+    var found = false;
+    for (nodes) |n| {
+        if (n.isForm("design-block")) {
+            found = true;
+            break;
+        }
+    }
+    rememberDesignBlockVerdict(path, found);
+    return found;
+}
+
+// ── "is this file a design?" memo ──────────────────────────────────────
+//
+// A `.sexp` under `src/` that holds no top-level `design-block` gets no
+// summary-cache entry — `listDesignSummaries` skips it before caching — so it
+// was re-read and fully re-parsed on EVERY home-page load, forever. Measured on
+// this project: 8 such files, 408 KiB (four of them 92 KiB copies of one
+// exported board), and the sexpr tokenizer was ~28% of a warm `GET /`. The
+// verdict is a pure function of the file's bytes, so it is cached under the
+// same `FileSet.isValid` contract the summary cache uses. Keyed on the FULL
+// path, never the basename: those four copies share one basename, in four
+// different subdirectories.
+
+const DesignBlockVerdict = struct {
+    is_design: bool,
+    files: page_cache.FileSet,
+};
+
+/// The memo's state. Scoped inside this non-pub struct rather than left as
+/// module-level `var`s: `hasTopLevelDesignBlock` is a free function on the
+/// directory-walk path with no server handle to thread a store through.
+const VerdictMemo = struct {
+    var mutex: infra_fs.Mutex = .{};
+    var entries: std.StringHashMapUnmanaged(DesignBlockVerdict) = .empty;
+};
+
+/// The remembered verdict for `path`, or null when nothing is stored or the
+/// file has changed since it was.
+fn designBlockVerdict(path: []const u8) ?bool {
+    VerdictMemo.mutex.lock();
+    defer VerdictMemo.mutex.unlock();
+    const e = VerdictMemo.entries.getPtr(path) orelse return null;
+    if (!e.files.isValid()) return null;
+    return e.is_design;
+}
+
+/// Retain `is_design` for `path`. A stamp that cannot be captured is simply not
+/// remembered — the next call re-parses, which is the pre-cache behaviour.
+fn rememberDesignBlockVerdict(path: []const u8, is_design: bool) void {
+    const files = page_cache.captureOne(path) catch return;
+    VerdictMemo.mutex.lock();
+    defer VerdictMemo.mutex.unlock();
+    const gop = VerdictMemo.entries.getOrPut(page, path) catch {
+        files.deinit();
+        return;
+    };
+    if (gop.found_existing) {
+        gop.value_ptr.files.deinit();
+    } else if (page.dupe(u8, path)) |owned| {
+        gop.key_ptr.* = owned;
+    } else |_| {
+        _ = VerdictMemo.entries.remove(path);
+        files.deinit();
+        return;
+    }
+    gop.value_ptr.* = .{ .is_design = is_design, .files = files };
 }
 
 /// How `evalNamedBlock` resolved a name: a design source under `src/`, or
@@ -1949,21 +2281,21 @@ test "list_library query returns only matching entries ranked best-first" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/stm32n657l0h3q.sexp", .data = "(component \"stm32n657l0h3q\" (description \"STM32 MCU\"))\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0402.sexp", .data = "(component \"cap-0402\" (description \"100nF cap\"))\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/lt3045.sexp", .data = "(component \"lt3045\" (description \"LDO designed for STM32 rails\"))\n" });
-    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/stm32n657l0h3q.sexp", .data = "(component \"stm32n657l0h3q\" (description \"STM32 MCU\"))\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/cap-0402.sexp", .data = "(component \"cap-0402\" (description \"100nF cap\"))\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/lt3045.sexp", .data = "(component \"lt3045\" (description \"LDO designed for STM32 rails\"))\n" });
+    const proj = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
-    var out: std.ArrayList(u8) = .empty;
-    try listLibrarySubdir(alloc, proj, "components", "stm32", null, out.writer(alloc));
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try listLibrarySubdir(alloc, proj, "components", "stm32", null, &out.writer);
 
     // The matching part appears; the unrelated cap is filtered out.
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "stm32n657l0h3q") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "cap-0402") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "stm32n657l0h3q") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "cap-0402") == null);
     // lt3045 matches only via its description, so it ranks after the name hit.
-    const name_pos = std.mem.indexOf(u8, out.items, "stm32n657l0h3q").?;
-    const desc_pos = std.mem.indexOf(u8, out.items, "lt3045").?;
+    const name_pos = std.mem.indexOf(u8, out.written(), "stm32n657l0h3q").?;
+    const desc_pos = std.mem.indexOf(u8, out.written(), "lt3045").?;
     try std.testing.expect(name_pos < desc_pos);
 }
 
@@ -1975,25 +2307,25 @@ test "list_library without a query returns names only with a count" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/components/aaa.sexp",
         .data = "(component \"aaa\" (description \"first\"))\n",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/components/bbb.sexp",
         .data = "(component \"bbb\" (description \"second\"))\n",
     });
-    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    const proj = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
-    var out: std.ArrayList(u8) = .empty;
-    try writeLibraryNames(alloc, proj, "components", out.writer(alloc));
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try writeLibraryNames(alloc, proj, "components", &out.writer);
     // Both names present, plus the count; descriptions are NOT scanned/emitted.
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"count\":2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"aaa\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"bbb\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "first") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "second") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"count\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"aaa\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"bbb\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "first") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "second") == null);
 }
 
 test "list_library query results are capped by limit" {
@@ -2004,16 +2336,16 @@ test "list_library query results are capped by limit" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0402.sexp", .data = "(component \"cap-0402\")\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0603.sexp", .data = "(component \"cap-0603\")\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0805.sexp", .data = "(component \"cap-0805\")\n" });
-    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/cap-0402.sexp", .data = "(component \"cap-0402\")\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/cap-0603.sexp", .data = "(component \"cap-0603\")\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/cap-0805.sexp", .data = "(component \"cap-0805\")\n" });
+    const proj = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
-    var out: std.ArrayList(u8) = .empty;
-    try listLibrarySubdir(alloc, proj, "components", "cap", 1, out.writer(alloc));
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try listLibrarySubdir(alloc, proj, "components", "cap", 1, &out.writer);
     // Three parts match "cap" but the limit of 1 keeps only the top-ranked one.
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.items, "\"name\":"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "\"name\":"));
 }
 
 test "list_library category scopes the listing to one subdir" {
@@ -2024,26 +2356,28 @@ test "list_library category scopes the listing to one subdir" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("lib/components");
-    try tmp.dir.makePath("lib/modules");
-    try tmp.dir.writeFile(.{ .sub_path = "lib/components/cap-0402.sexp", .data = "(component \"cap-0402\")\n" });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/cap-0402.sexp", .data = "(component \"cap-0402\")\n" });
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib/modules/buck.sexp",
         .data = "(defmodule buck () (design-block \"b\"))\n",
     });
-    const proj = try tmp.dir.realpathAlloc(alloc, ".");
+    const proj = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
 
     const args = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"category\":\"modules\"}", .{});
-    var out: std.ArrayList(u8) = .empty;
-    try std.testing.expect(try toolListLibrary(alloc, proj, args, out.writer(alloc)));
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try std.testing.expect(try toolListLibrary(alloc, proj, args, &out.writer));
     // Only the modules category is present in the response.
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"modules\":") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"components\":") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "buck") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"modules\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"components\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "buck") != null);
 }
 
-/// (test helper) True when `name` is a registered tool in the `tools` table.
-fn isKnownTool(name: []const u8) bool {
+/// True when `name` is a registered tool in the `tools` table. Public so a
+/// sibling handler's registration test (e.g. mcp_route_experiment) can assert
+/// its tool is wired in read-only, alongside the already-public `isMutationTool`.
+pub fn isKnownTool(name: []const u8) bool {
     for (tools) |t| {
         if (std.mem.eql(u8, t.name, name)) return true;
     }
@@ -2078,4 +2412,132 @@ fn jsonMatchesToolTable(alloc: std.mem.Allocator) !bool {
 // spec: serve/mcp_tools - The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
 test "tools table matches tools_list_result.json" {
     try std.testing.expect(try jsonMatchesToolTable(std.testing.allocator));
+}
+
+/// The declared input schema of `name` in the embedded tool list, or null when
+/// the list carries no such tool.
+fn toolSchema(a: std.mem.Allocator, name: []const u8) !?std.json.ObjectMap {
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, tools_list_result, .{});
+    for (parsed.object.get("tools").?.array.items) |t| {
+        if (std.mem.eql(u8, t.object.get("name").?.string, name)) {
+            return t.object.get("inputSchema").?.object;
+        }
+    }
+    return null;
+}
+
+// spec: serve/mcp_tools - get_pcb_layout_image declares its heat-zone thermal flag and the scenario enum, so a strict client may send the arguments the renderer reads
+test "get_pcb_layout_image declares its thermal arguments" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const schema = (try toolSchema(a, "get_pcb_layout_image")).?;
+    const props = schema.get("properties").?.object;
+    // The schema is `additionalProperties:false`, so an argument the handler
+    // reads but the schema omits is one a strict client cannot send at all.
+    try std.testing.expect(!schema.get("additionalProperties").?.bool);
+    try std.testing.expectEqualStrings("boolean", props.get("thermal").?.object.get("type").?.string);
+
+    // Every scenario the renderer accepts is offered by name, so a client need
+    // not guess the spelling — and no word is offered that it would refuse.
+    const offered = props.get("scenario").?.object.get("enum").?.array.items;
+    const words = @typeInfo(thermal_scenarios.Scenario).@"enum".field_names;
+    try std.testing.expectEqual(words.len, offered.len);
+    inline for (words, offered) |word, v| try std.testing.expectEqualStrings(word, v.string);
+}
+
+// spec: Web Server - get_schematic_image is a registered read-only MCP tool
+test "get_schematic_image is registered read-only" {
+    try std.testing.expect(isKnownTool("get_schematic_image"));
+    try std.testing.expect(!isMutationTool("get_schematic_image"));
+}
+
+// spec: Web Server - get_layout_progress is a registered read-only MCP tool
+test "get_layout_progress is registered read-only" {
+    try std.testing.expect(isKnownTool("get_layout_progress"));
+    try std.testing.expect(!isMutationTool("get_layout_progress"));
+}
+
+// spec: Web Server - A sexp under src that declares no top-level design-block is judged once and the verdict reused until that file changes
+test "the not-a-design verdict is cached and re-checked after the file changes" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "frag.sexp", .data = "(defmodule frag () (design-block \"F\"))" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "frag.sexp", testing.allocator);
+    defer testing.allocator.free(path);
+
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    // A module file has no TOP-LEVEL design-block, so it is not a design. The
+    // second call must agree without re-parsing — this is the verdict that,
+    // uncached, re-read every non-design `.sexp` under `src/` on every load.
+    try testing.expect(!hasTopLevelDesignBlock(alloc, path));
+    try testing.expect(!hasTopLevelDesignBlock(alloc, path));
+
+    // Rewriting the file as a real design must flip the answer: the entry is
+    // keyed on the file's own stamp, not on its name.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "frag.sexp", .data = "(design-block \"Now A Design\")" });
+    forgetDesignBlockVerdicts();
+    try testing.expect(hasTopLevelDesignBlock(alloc, path));
+}
+
+/// Drop every remembered verdict. A test rewrites its file within one
+/// filesystem mtime tick, so the stamp may legitimately not move; clearing the
+/// memo reproduces what a real edit does seconds later without making the test
+/// wait for a clock tick.
+fn forgetDesignBlockVerdicts() void {
+    VerdictMemo.mutex.lock();
+    defer VerdictMemo.mutex.unlock();
+    var it = VerdictMemo.entries.iterator();
+    while (it.next()) |e| {
+        page.free(e.key_ptr.*);
+        e.value_ptr.files.deinit();
+    }
+    VerdictMemo.entries.deinit(page);
+    VerdictMemo.entries = .empty;
+}
+
+// spec: Web Server - A design whose evaluation fails is cached against the library files its imports could resolve to, so creating the missing one re-evaluates it
+test "a failed build caches against the import search dirs and re-evaluates when one gains a file" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "src", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "lib", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "lib/components", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "lib/modules", .default_dir);
+    // Imports a part that does not exist, so the evaluation fails.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/broken.sexp",
+        .data =
+        \\(import absentpart)
+        \\(design-block "Broken" (instance "U1" absentpart (pin 1 "GND")))
+        ,
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    const first = try listDesignSummaries(alloc, root);
+    try testing.expectEqual(@as(usize, 1), first.len);
+    try testing.expect(!first[0].build_ok);
+
+    // The failure is now cached. What repairs it is the CREATION of a file no
+    // read-set of successfully-read files could ever name, so the entry is
+    // keyed on the import search directories: writing the component moves
+    // `lib/components`' mtime and the design must be evaluated again.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/absentpart.sexp",
+        .data = "(component absentpart (pins (1 \"GND\")))",
+    });
+    const second = try listDesignSummaries(alloc, root);
+    try testing.expectEqual(@as(usize, 1), second.len);
+    try testing.expect(second[0].build_ok);
 }

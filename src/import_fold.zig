@@ -386,8 +386,9 @@ fn writePartHead(ctx: *Ctx, w: anytype, part: ik.Part) FoldError!void {
 /// each pad lands on, which is what `internalNetKey` then measures.
 fn partBaseSignature(ctx: *Ctx, i: usize, chan: u64) FoldError![]const u8 {
     const part = ctx.parts[i];
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.arena);
+    var buf: std.Io.Writer.Allocating = .init(ctx.arena);
+    defer buf.deinit();
+    const w = &buf.writer;
     try writePartHead(ctx, w, part);
 
     var binds: std.ArrayList([]const u8) = .empty;
@@ -405,7 +406,7 @@ fn partBaseSignature(ctx: *Ctx, i: usize, chan: u64) FoldError![]const u8 {
         w.writeAll(b) catch return error.OutOfMemory;
         w.writeAll(";") catch return error.OutOfMemory;
     }
-    return buf.items;
+    return buf.toOwnedSlice();
 }
 
 /// A canonical, name-free fingerprint of an internal net `net` within channel
@@ -439,8 +440,9 @@ fn internalNetKey(ctx: *Ctx, net: []const u8, chan: u64) FoldError![]const u8 {
 
 fn partSignature(ctx: *Ctx, i: usize, chan: u64) FoldError![]const u8 {
     const part = ctx.parts[i];
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.arena);
+    var buf: std.Io.Writer.Allocating = .init(ctx.arena);
+    defer buf.deinit();
+    const w = &buf.writer;
     try writePartHead(ctx, w, part);
 
     var binds: std.ArrayList([]const u8) = .empty;
@@ -461,7 +463,7 @@ fn partSignature(ctx: *Ctx, i: usize, chan: u64) FoldError![]const u8 {
         w.writeAll(b) catch return error.OutOfMemory;
         w.writeAll(";") catch return error.OutOfMemory;
     }
-    return buf.items;
+    return buf.toOwnedSlice();
 }
 
 fn channelSignature(ctx: *Ctx, chan: u64) FoldError![]const u8 {

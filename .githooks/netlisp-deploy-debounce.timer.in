@@ -1,0 +1,15 @@
+[Unit]
+Description=Periodically run the netlisp coalesced-deploy worker on a queued merge
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=15s
+# Deliberately NOT Persistent=true (unlike the designs checkpoint): a window
+# missed while the box was off must not fire a catch-up deploy at boot. Nothing
+# is lost either way — the marker is a file that survives a reboot, and its
+# quiet period is measured against the wall clock, not timer activations, so the
+# first tick after boot deploys it if it is genuinely due.
+
+[Install]
+WantedBy=timers.target

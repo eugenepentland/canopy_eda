@@ -47,21 +47,21 @@ pub fn spliceDatasheet(
     const insert_at = form_end - 1;
     const indent = detectIndent(source, form_start);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-    try w.writeAll(source[0..insert_at]);
-    try w.writeByte('\n');
-    try w.writeAll(indent);
-    try w.writeAll("(datasheet \"");
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
+    w.writeAll(source[0..insert_at]) catch return error.OutOfMemory;
+    w.writeByte('\n') catch return error.OutOfMemory;
+    w.writeAll(indent) catch return error.OutOfMemory;
+    w.writeAll("(datasheet \"") catch return error.OutOfMemory;
     for (pdf) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        else => try w.writeByte(c),
+        '"' => w.writeAll("\\\"") catch return error.OutOfMemory,
+        '\\' => w.writeAll("\\\\") catch return error.OutOfMemory,
+        else => w.writeByte(c) catch return error.OutOfMemory,
     };
-    try w.writeAll("\")");
-    try w.writeAll(source[insert_at..]);
-    return buf.toOwnedSlice(allocator);
+    w.writeAll("\")") catch return error.OutOfMemory;
+    w.writeAll(source[insert_at..]) catch return error.OutOfMemory;
+    return buf.toOwnedSlice();
 }
 
 /// True iff `component_form` already declares a `(datasheet "…")` whose stem
@@ -93,7 +93,7 @@ pub fn datasheetStem(name: []const u8) []const u8 {
     if (s.len >= 3 and s[s.len - 1] == ')') {
         if (std.mem.lastIndexOfScalar(u8, s, '(')) |open| {
             const inner = s[open + 1 .. s.len - 1];
-            if (inner.len > 0 and allAsciiDigits(inner)) return std.mem.trimRight(u8, s[0..open], " _");
+            if (inner.len > 0 and allAsciiDigits(inner)) return std.mem.trimEnd(u8, s[0..open], " _");
         }
     }
     // Post-sanitise form: trailing `__<digits>_` (from `(N)` once `(`/`)` map to `_`).
@@ -101,7 +101,7 @@ pub fn datasheetStem(name: []const u8) []const u8 {
         var j = s.len - 1;
         while (j > 0 and s[j - 1] >= '0' and s[j - 1] <= '9') j -= 1;
         if (j < s.len - 1 and j >= 2 and s[j - 1] == '_' and s[j - 2] == '_') {
-            s = std.mem.trimRight(u8, s[0 .. j - 2], " _");
+            s = std.mem.trimEnd(u8, s[0 .. j - 2], " _");
         }
     }
     return s;
@@ -187,18 +187,18 @@ pub fn attachDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
             return;
         }
         res.status = 500;
-        var buf: std.ArrayList(u8) = .empty;
-        const w = buf.writer(ctx.allocator);
+        var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+        const w = &buf.writer;
         try w.writeAll("{\"ok\":false,\"error\":");
         try json_writer.writeString(w, @errorName(err));
         try w.writeAll("}");
-        res.body = buf.items;
+        res.body = buf.written();
         return;
     };
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
     try w.print("{{\"ok\":true,\"version\":{d}}}", .{result.version});
-    res.body = buf.items;
+    res.body = buf.written();
 }
 
 /// Validate a project-relative name (no traversal) and that the file at
@@ -223,12 +223,12 @@ fn requireExists(
         } else |_| {}
     }
     res.status = if (bad) 400 else 404;
-    var buf: std.ArrayList(u8) = .empty;
-    const w = buf.writer(ctx.allocator);
+    var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &buf.writer;
     try w.writeAll("{\"ok\":false,\"error\":");
     try json_writer.writeString(w, if (bad) "invalid name" else not_found_msg);
     try w.writeAll("}");
-    res.body = buf.items;
+    res.body = buf.written();
     return false;
 }
 
