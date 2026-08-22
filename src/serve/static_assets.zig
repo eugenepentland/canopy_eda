@@ -260,6 +260,7 @@ test "the DXF board-outline importer asset is registered with its parser seam" {
 }
 
 // spec: Web Server - The PCB board-outline sketch keeps stable entities, constraints, driving dimensions, and exact arcs in a separately testable client model loaded before the editor
+// spec: Web Server - The PCB outline sketch box-selects corner vertices and Delete removes a native fillet by extending its adjacent lines to their sharp intersection, while whole-outline rectangle redraw requires explicit arming
 test "the parametric board-outline sketch engine is registered with its editor contracts" {
     try std.testing.expect(registryHasAsset("pcb_outline_sketch.js"));
     const markers = [_][]const u8{
@@ -270,12 +271,16 @@ test "the parametric board-outline sketch engine is registered with its editor c
         "chamferPoint:chamferPoint",
         "offset:offset",
         "mirror:mirror",
+        "function removeFillet(s,cid)",
         "outline-sketch-palette",
         "function outlineSketchDimension()",
         "function outlineSketchConstraint(kind)",
+        "function outlineDeleteSelected()",
+        "if(box.outline)",
+        "if(outlineRectArmed)outDraw=",
     };
     for (markers) |marker| {
-        const bytes = if (std.mem.startsWith(u8, marker, "outline-") or std.mem.startsWith(u8, marker, "function outline")) pcb_board_js else pcb_outline_sketch_js;
+        const bytes = if (std.mem.startsWith(u8, marker, "outline-") or std.mem.startsWith(u8, marker, "function outline") or std.mem.startsWith(u8, marker, "if(")) pcb_board_js else pcb_outline_sketch_js;
         try std.testing.expect(std.mem.indexOf(u8, bytes, marker) != null);
     }
 }
