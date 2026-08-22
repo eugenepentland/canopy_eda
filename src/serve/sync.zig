@@ -430,8 +430,8 @@ fn loadKicadPushLayout(
     }) catch return null;
     const seed: optimizer.OutlineSource = if (layout.outline) |outline| .{ .drawn = .{
         .rect = .{ .minx = outline.x, .miny = outline.y, .w = outline.w, .h = outline.h },
-        .poly = outline.poly orelse outline.pts,
-        .arcs = outline.arcs,
+        .poly = outline.derived.poly orelse outline.pts,
+        .arcs = outline.derived.arcs,
     } } else .authored_only;
     const placement = optimizer.placeFromPoses(alloc, block, project_dir, .{
         .poses = poses,

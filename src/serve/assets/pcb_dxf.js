@@ -99,6 +99,32 @@
     return out;
   }
 
+  // Exact three-point representation of the same bulge arc. The sketch
+  // editor stores this alongside the chord preview so imported radii remain
+  // editable arcs instead of becoming hundreds of unrelated short lines.
+  function bulgeArcSegment(ax, ay, bx, by, bulge) {
+    var dx = bx - ax, dy = by - ay, chord = Math.hypot(dx, dy);
+    if (Math.abs(bulge) < 1e-12 || chord < 1e-9) return null;
+    var theta = 4 * Math.atan(bulge);
+    if (Math.abs(theta) > Math.PI * 2 - 1e-9) return null;
+    var radius = Math.abs(chord / (2 * Math.sin(theta / 2)));
+    if (!isFinite(radius) || radius < 1e-9) return null;
+    var mx = (ax + bx) / 2, my = (ay + by) / 2;
+    var ux = -dy / chord, uy = dx / chord;
+    var h = radius * Math.cos(theta / 2) * Math.sign(bulge);
+    var cx = mx + ux * h, cy = my + uy * h;
+    var a0 = Math.atan2(ay - cy, ax - cx), am = a0 + theta / 2;
+    return { kind: "arc", a: [ax, ay], b: [bx, by], mid: [cx + radius * Math.cos(am), cy + radius * Math.sin(am)] };
+  }
+
+  function arcEntitySegment(s, a, b) {
+    var a0 = s.a0 * Math.PI / 180, a1 = s.a1 * Math.PI / 180;
+    var sweep = ((a1 - a0) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+    if (sweep < 1e-9) return null;
+    var am = a0 + sweep / 2;
+    return { kind: "arc", a: a, b: b, mid: [s.cx + s.r * Math.cos(am), s.cy + s.r * Math.sin(am)] };
+  }
+
   // Intermediate points of a DXF ARC entity (center, radius, start/end in
   // degrees, CCW in Y-up), endpoints excluded, chord error ≤ `sag` mm.
   function arcEntityPts(cx, cy, r, a0deg, a1deg, sag) {
@@ -181,6 +207,7 @@
       n: pts.length,
       arcs: (extra && extra.arcs) || 0,
       chained: !!(extra && extra.chained),
+      segments: (extra && extra.segments) || null,
     };
   }
 
@@ -196,7 +223,13 @@
     var closed = !!(closedFlag & 1) || repeats;
     var count = closed ? n - (repeats ? 1 : 0) : n;
     if (count < 3) return null;
-    var pts = [];
+    var pts = [], segments = [], arcEdges = 0;
+    for (var si = 0; si < count; si++) {
+      var sa = verts[si], sb = verts[(si + 1) % count];
+      var exact = sa.bulge && bulgeArcSegment(sa.x, sa.y, sb.x, sb.y, sa.bulge);
+      if (exact) arcEdges += 1;
+      segments.push(exact || { kind: "line", a: [sa.x, sa.y], b: [sb.x, sb.y] });
+    }
     var sag = SAG;
     var guard = 0;
     for (;;) {
@@ -220,7 +253,7 @@
     }
     var clean = cleanPts(pts);
     if (clean.length < 3) return null;
-    return makeLoop(clean, layer, closed, { arcs: arcs });
+    return makeLoop(clean, layer, closed, { arcs: arcEdges, segments: segments });
   }
 
   // Chain LINE + ARC entities into closed loops. A real outline DXF is often a
@@ -294,22 +327,28 @@
       // Emit loop points in traversal order, tessellating arcs along the way.
       // An arc traversed opposite its authored direction still describes the
       // same curve — its chord points are emitted in reverse.
-      var pts = [], arcs = 0;
+      var pts = [], arcs = 0, segments = [];
       for (var c2 = 0; c2 < chain.length; c2++) {
         var item = chain[c2], s2 = live[item.idx].seg;
-        pts.push([clusters[item.from].x, clusters[item.from].y]);
+        var from = [clusters[item.from].x, clusters[item.from].y];
+        var to = [clusters[item.to].x, clusters[item.to].y];
+        pts.push(from);
         if (s2.arc) {
           var mid = arcEntityPts(s2.cx, s2.cy, s2.r, s2.a0, s2.a1, SAG);
-          arcs += mid.length;
+          arcs += 1;
           var fwd = Math.hypot(clusters[item.from].x - s2.ax, clusters[item.from].y - s2.ay) <= MERGE_TOL;
           for (var m = 0; m < mid.length; m++)
             pts.push(fwd ? mid[m] : mid[mid.length - 1 - m]);
+          var exactArc = arcEntitySegment(s2, from, to);
+          if (exactArc) segments.push(exactArc);
+        } else {
+          segments.push({ kind: "line", a: from, b: to });
         }
       }
       if (pts.length > MAX_VERTS) continue;
       var clean = cleanPts(pts);
       if (clean.length < 3) continue;
-      var loop = makeLoop(clean, live[chain[0].idx].seg.layer, true, { arcs: arcs, chained: true });
+      var loop = makeLoop(clean, live[chain[0].idx].seg.layer, true, { arcs: arcs, chained: true, segments: segments });
       if (loop) loops.push(loop);
     }
     return loops;
@@ -387,7 +426,11 @@
             var a = 2 * Math.PI * (k / n);
             pts.push([ent.cx + ent.r * Math.cos(a), ent.cy + ent.r * Math.sin(a)]);
           }
-          var loop = makeLoop(pts, ent.layer, true, { arcs: n });
+          var circleSegments = [
+            { kind: "arc", a: [ent.cx + ent.r, ent.cy], b: [ent.cx - ent.r, ent.cy], mid: [ent.cx, ent.cy + ent.r] },
+            { kind: "arc", a: [ent.cx - ent.r, ent.cy], b: [ent.cx + ent.r, ent.cy], mid: [ent.cx, ent.cy - ent.r] },
+          ];
+          var loop = makeLoop(pts, ent.layer, true, { arcs: 2, segments: circleSegments });
           if (loop) polys.push(loop);
         }
       }
@@ -494,13 +537,19 @@
     var total_arcs = 0;
     for (var q = 0; q < loops.length; q++) total_arcs += loops[q].arcs;
     if (total_arcs)
-      warnings.push("arcs tessellated to straight chords (≤ " + SAG + " mm sagitta)");
+      warnings.push("native arcs preserved (preview chords ≤ " + SAG + " mm sagitta)");
 
     // Flip Y: DXF is y-up, the board frame is y-down. A pure mirror keeps
     // the drawing's appearance identical; winding is irrelevant to the model.
     for (var f = 0; f < loops.length; f++) {
       var pts = loops[f].pts;
       for (var g = 0; g < pts.length; g++) pts[g][1] = -pts[g][1];
+      var segments = loops[f].segments || [];
+      for (var h = 0; h < segments.length; h++) {
+        segments[h].a[1] = -segments[h].a[1];
+        segments[h].b[1] = -segments[h].b[1];
+        if (segments[h].mid) segments[h].mid[1] = -segments[h].mid[1];
+      }
     }
     return { units: units, loops: loops, warnings: warnings };
   }
@@ -635,7 +684,7 @@
       var lp = chosenLoop(), s = unitScale();
       var w = lp.w * s, h = lp.h * s;
       prev.textContent = "→ " + w.toFixed(2) + " × " + h.toFixed(2) + " mm · " + lp.n + " vertices" +
-        (lp.arcs ? " · " + lp.arcs + " arc points" : "");
+        (lp.arcs ? " · " + lp.arcs + " native arcs" : "");
       warn.textContent = parsed.warnings.join(" · ");
       var btn = document.getElementById("dxf-apply");
       if (btn) btn.disabled = w < 2 || h < 2;
@@ -662,6 +711,13 @@
       var lp = chosenLoop(), s = unitScale();
       var pts = [];
       for (var k = 0; k < lp.pts.length; k++) pts.push([lp.pts[k][0] * s, lp.pts[k][1] * s]);
+      var exact = [];
+      for (var e = 0; e < (lp.segments || []).length; e++) {
+        var seg = lp.segments[e];
+        var scaled = { kind: seg.kind, a: [seg.a[0] * s, seg.a[1] * s], b: [seg.b[0] * s, seg.b[1] * s] };
+        if (seg.mid) scaled.mid = [seg.mid[0] * s, seg.mid[1] * s];
+        exact.push(scaled);
+      }
       var bb = loopBBox(pts);
       err.style.display = "none";
       if (bb.w < 2 || bb.h < 2) {
@@ -681,6 +737,10 @@
       // outline on the next click.
       seams.disarmTools();
       PCB.outline = { x: 0, y: 0, w: 0, h: 0, pts: pts };
+      if (exact.length && window.PCBOutlineSketch) {
+        PCB.outline.sketch = window.PCBOutlineSketch.fromSegments(exact);
+        window.PCBOutlineSketch.syncOutline(PCB.outline);
+      }
       seams.outlineBboxSync();
       seams.recordUndo(pre);
       seams.markDirty();

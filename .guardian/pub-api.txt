@@ -1251,6 +1251,20 @@ src/net_name.zig::leaf | fn leaf(name: []const u8) []const u8
 src/net_name.zig::parent | fn parent(name: []const u8) ?[]const u8
 src/numeric.zig::checkedInt | fn checkedInt(comptime T: type, f: f64) ?T
 src/numeric.zig::toCount | fn toCount(f: f64) usize
+src/outline_sketch.zig::CompileError value
+src/outline_sketch.zig::Compiled struct_
+src/outline_sketch.zig::Constraint struct_
+src/outline_sketch.zig::ConstraintKind enum_
+src/outline_sketch.zig::ConstraintMode enum_
+src/outline_sketch.zig::Curve struct_
+src/outline_sketch.zig::CurveKind enum_
+src/outline_sketch.zig::Point struct_
+src/outline_sketch.zig::Sketch struct_
+src/outline_sketch.zig::compile | fn compile(alloc: std.mem.Allocator, sketch: Sketch, max_sagitta: f64) CompileError!Compiled
+src/outline_sketch.zig::current_version value
+src/outline_sketch.zig::default_sagitta_mm value
+src/outline_sketch.zig::max_constraints value
+src/outline_sketch.zig::max_entities value
 src/parts.zig::PartEntry struct_
 src/parts.zig::PartsDb struct_
 src/parts.zig::deinit | fn deinit(self: *PartsDb) void
@@ -3349,6 +3363,8 @@ src/serve/notes.zig::removeTaskApi | fn removeTaskApi(ctx: *Server, req: *httpz.
 src/serve/notes.zig::renderNotes | fn renderNotes(allocator: std.mem.Allocator, notes: Notes) ![]u8
 src/serve/notes.zig::reopenTaskApi | fn reopenTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/notes.zig::saveNotesApi | fn saveNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/outline_sketch_json.zig::parse | fn parse(alloc: std.mem.Allocator, v: ?std.json.Value) ?sketch_mod.Sketch
+src/serve/outline_sketch_json.zig::write | fn write(w: *std.Io.Writer, sketch: sketch_mod.Sketch) std.Io.Writer.Error!void
 src/serve/page_cache.zig::FileSet struct_
 src/serve/page_cache.zig::FileStamp struct_
 src/serve/page_cache.zig::append | fn append(self: *FileSet, stamp: FileStamp) std.mem.Allocator.Error!void

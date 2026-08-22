@@ -227,6 +227,7 @@ test {
     _ = @import("placement/octilinear.zig");
     _ = @import("placement/optimizer.zig");
     _ = @import("placement/outline.zig");
+    _ = @import("outline_sketch.zig");
     _ = @import("placement/pad_entry.zig");
     _ = @import("placement/pad_escape.zig");
     _ = @import("placement/pad_exit.zig");
@@ -377,6 +378,7 @@ test {
     _ = @import("serve/pcb_progress.zig");
     _ = @import("serve/pcb_rules_json.zig");
     _ = @import("serve/placement_outline.zig");
+    _ = @import("serve/outline_sketch_json.zig");
     _ = @import("serve/pour_json.zig");
     _ = @import("serve/rate_limiter.zig");
     _ = @import("serve/rework_guide.zig");
