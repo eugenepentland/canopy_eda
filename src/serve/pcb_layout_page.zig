@@ -8137,7 +8137,8 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
 // ── Drawing-tool tooltips (shared by the action bar and the tool strip) ─────
 const tip_outline = "Edit board outline: exposes handles on the current authored or saved shape. " ++
     "Drag a corner or edge to reshape it; double-click an edge to add a vertex; right-click a vertex to remove it. " ++
-    "Drag empty board space to replace it with a grid-snapped rectangle. Saved with the layout (Save/Update); becomes " ++ "the board edge the renderers draw and the board-edge DRC checks.";
+    "Drag empty space to box-select vertices; select both ends of a fillet and press Delete to restore a sharp corner. " ++
+    "Arm Rectangle before dragging to replace the outline. Saved with the layout (Save/Update); becomes the board edge the renderers draw and the board-edge DRC checks.";
 const tip_poly = "Polygon board outline (L/T shapes, cutout-free " ++
     "notches): click to place vertices (grid-snapped), click the first vertex or press Enter to close, Backspace removes " ++
     "the last vertex, Esc cancels. After closing, drag a vertex handle to edit. Saved with the layout (Save/Update); " ++

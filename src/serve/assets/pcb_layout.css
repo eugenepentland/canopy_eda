@@ -400,7 +400,7 @@ svg.ruler-mode{cursor:crosshair}
 .osp-dof.bad{border-color:#8a3a3a;color:#f0a0a0}
 .osp-group{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}.osp-group>span{flex:0 0 100%;color:#85868d;text-transform:uppercase;font-size:9px;letter-spacing:.05em}
 .osp-group button,.osp-finish{padding:3px 7px;border:1px solid #3a3b40;border-radius:4px;background:#2c2d31;color:#d6d7db;font:inherit;cursor:pointer}
-.osp-group button:hover{border-color:#5a8fd6;color:#fff}.osp-finish{width:100%;margin-top:8px;border-color:#2e7d4f;color:#7ee787}
+.osp-group button:hover,.osp-group button.on{border-color:#5a8fd6;color:#fff}.osp-group button.on{background:#263d5c}.osp-finish{width:100%;margin-top:8px;border-color:#2e7d4f;color:#7ee787}
 .prop-sketch-constraints{display:flex;flex-wrap:wrap;gap:4px;padding:7px 12px;border-bottom:1px solid #2c2d31}
 .prop-sketch-constraints button{border:1px solid #385173;border-radius:10px;background:#202b3b;color:#9fc4ef;font:10px system-ui,sans-serif;padding:2px 7px;cursor:pointer}
 /* Pour refill: amber accent when declared pours are stale (copper/pose

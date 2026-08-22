@@ -199,6 +199,11 @@
   function filletPoint(s,pid,radius){return splitCorner(s,pid,radius,false);}
   function chamferPoint(s,pid,distance){return splitCorner(s,pid,distance,true);}
   function lineIntersection(a,b,c,d){var rx=b.x-a.x,ry=b.y-a.y,sx=d.x-c.x,sy=d.y-c.y,den=rx*sy-ry*sx;if(Math.abs(den)<1e-10)return null;var t=((c.x-a.x)*sy-(c.y-a.y)*sx)/den;return {x:a.x+t*rx,y:a.y+t*ry};}
+  function removeFillet(s,cid){var pcs=physicalCurves(s),i=pcs.findIndex(function(c){return c.id===cid;}),arc=i>=0?pcs[i]:null;if(!arc||arc.kind!=="arc"||pcs.length<=3)return false;
+    var prev=pcs[(i+pcs.length-1)%pcs.length],next=pcs[(i+1)%pcs.length];if(prev.kind!=="line"||next.kind!=="line"||prev.b!==arc.a||next.a!==arc.b)return false;
+    var hit=lineIntersection(point(s,prev.a),point(s,prev.b),point(s,next.a),point(s,next.b));if(!hit)return false;var keep=point(s,arc.a),drop=arc.b;keep.x=hit.x;keep.y=hit.y;next.a=keep.id;
+    s.curves=s.curves.filter(function(c){return c.id!==arc.id;});if(!s.curves.some(function(c){return c.a===drop||c.b===drop;}))s.points=s.points.filter(function(p){return p.id!==drop;});
+    s.constraints=(s.constraints||[]).filter(function(q){return q.a!==arc.id&&q.b!==arc.id&&q.c!==arc.id&&q.a!==drop&&q.b!==drop&&q.c!==drop;});return true;}
   function offset(s,distance){var pcs=physicalCurves(s);if(pcs.some(function(c){return c.kind!=="line";}))return false;var ps=physicalPoints(s),area=0,i,n=ps.length;
     for(i=0;i<n;i++){var a=ps[i],b=ps[(i+1)%n];area+=a.x*b.y-b.x*a.y;}var side=area>=0?1:-1,shift=[];
     for(i=0;i<n;i++){a=ps[i];b=ps[(i+1)%n];var dx=b.x-a.x,dy=b.y-a.y,l=Math.hypot(dx,dy);if(l<1e-9)return false;var nx=side*dy/l,ny=-side*dx/l;
@@ -219,6 +224,6 @@
   return {VERSION:VERSION,clone:cp,valid:validSketch,fromSegments:fromSegments,fromOutline:fromOutline,ensure:ensure,compile:compile,syncOutline:syncOutline,
     point:point,curve:curve,physicalCurves:physicalCurves,physicalPoints:physicalPoints,nextId:nextId,arcCircle:arcCircle,
     solve:solve,state:state,addConstraint:addConstraint,removeConstraint:removeConstraint,movePoint:movePoint,moveCurve:moveCurve,
-    insertPoint:insertPoint,deletePoint:deletePoint,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,
+    insertPoint:insertPoint,deletePoint:deletePoint,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,
     offset:offset,mirror:mirror,annotations:annotations,dimensionValue:dimensionValue};
 });
