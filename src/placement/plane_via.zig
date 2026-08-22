@@ -30,6 +30,20 @@
 
 const std = @import("std");
 const pad_shape = @import("pad_shape.zig");
+
+const thermal_barrel_samples: usize = 8;
+
+/// Whether a regular thermal-via site's complete barrel stays inside the
+/// exposed pad's real outline.
+pub fn thermalBarrelFits(pad: pad_shape.Shape, point: [2]f64, via_dia: f64) bool {
+    const r = via_dia / 2;
+    if (pad_shape.pointDist(pad.x0, pad.y0, pad.x1, pad.y1, pad.poly, point[0], point[1], std.math.inf(f64)) > 0) return false;
+    for (0..thermal_barrel_samples) |i| {
+        const a = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(thermal_barrel_samples)) * std.math.tau;
+        if (pad_shape.pointDist(pad.x0, pad.y0, pad.x1, pad.y1, pad.poly, point[0] + r * @cos(a), point[1] + r * @sin(a), std.math.inf(f64)) > 0) return false;
+    }
+    return true;
+}
 const numeric = @import("../numeric.zig");
 
 /// In-pad scan step as a fraction of the via's copper DIAMETER. A quarter of a

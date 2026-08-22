@@ -49,6 +49,7 @@
 const std = @import("std");
 const optimizer = @import("optimizer.zig");
 const pad_exit = @import("pad_exit.zig");
+const pad_shape = @import("pad_shape.zig");
 const implicit_plane = @import("implicit_plane.zig");
 
 /// How far apart two pads may be for ONE via to serve both — the whole
@@ -101,6 +102,74 @@ pub const via_share_max_mm: f64 = 3.0;
 /// and pad, so they agree bit for bit; the slack only absorbs a coordinate that
 /// has been through a round trip.
 const eps: f64 = 1e-6;
+
+fn pointSegmentMm(x: f64, y: f64, ax: f64, ay: f64, bx: f64, by: f64) f64 {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    const t = if (len2 <= eps * eps) 0 else std.math.clamp(((x - ax) * dx + (y - ay) * dy) / len2, 0, 1);
+    return std.math.hypot(x - (ax + t * dx), y - (ay + t * dy));
+}
+
+fn sharedEnd(comptime Track: type, a: Track, b: Track) bool {
+    return (std.math.hypot(a.x1 - b.x1, a.y1 - b.y1) <= eps or
+        std.math.hypot(a.x1 - b.x2, a.y1 - b.y2) <= eps or
+        std.math.hypot(a.x2 - b.x1, a.y2 - b.y1) <= eps or
+        std.math.hypot(a.x2 - b.x2, a.y2 - b.y2) <= eps);
+}
+
+/// Length of retained same-net surface copper from `pad` to an existing via.
+/// This is the idempotence seam between the local carrier phase and the later
+/// whole-board plane pass: a via-in-pad or its legal fanout stub is a source,
+/// not permission to drill a duplicate beside it.
+pub fn retainedStubMm(
+    comptime Track: type,
+    comptime Via: type,
+    arena: std.mem.Allocator,
+    maybe_pad: ?pad_shape.Shape,
+    layer: u8,
+    net: i32,
+    tracks: []const Track,
+    vias: []const Via,
+) std.mem.Allocator.Error!?f64 {
+    const pad = maybe_pad orelse return null;
+    for (vias) |via| {
+        if (via.net != net) continue;
+        if (pad_shape.pointDist(pad.x0, pad.y0, pad.x1, pad.y1, pad.poly, via.x, via.y, std.math.inf(f64)) <= via.dia / 2 + eps) return 0;
+    }
+    const dist = try arena.alloc(f64, tracks.len);
+    @memset(dist, std.math.inf(f64));
+    for (tracks, 0..) |track, i| {
+        if (track.net != net or track.layer != layer) continue;
+        const starts = pad_shape.pointDist(pad.x0, pad.y0, pad.x1, pad.y1, pad.poly, track.x1, track.y1, std.math.inf(f64)) <= track.width / 2 + eps or
+            pad_shape.pointDist(pad.x0, pad.y0, pad.x1, pad.y1, pad.poly, track.x2, track.y2, std.math.inf(f64)) <= track.width / 2 + eps;
+        if (starts) dist[i] = std.math.hypot(track.x2 - track.x1, track.y2 - track.y1);
+    }
+    for (0..tracks.len) |_| {
+        var moved = false;
+        for (tracks, 0..) |a, ai| {
+            if (!std.math.isFinite(dist[ai]) or a.net != net or a.layer != layer) continue;
+            for (tracks, 0..) |b, bi| {
+                if (b.net != net or b.layer != layer or !sharedEnd(Track, a, b)) continue;
+                const next = dist[ai] + std.math.hypot(b.x2 - b.x1, b.y2 - b.y1);
+                if (next < dist[bi]) {
+                    dist[bi] = next;
+                    moved = true;
+                }
+            }
+        }
+        if (!moved) break;
+    }
+    var best = std.math.inf(f64);
+    for (tracks, dist) |track, mm| {
+        if (!std.math.isFinite(mm)) continue;
+        for (vias) |via| {
+            if (via.net != net) continue;
+            if (pointSegmentMm(via.x, via.y, track.x1, track.y1, track.x2, track.y2) <= (via.dia + track.width) / 2 + eps) best = @min(best, mm);
+        }
+    }
+    return if (best <= via_share_max_mm) best else null;
+}
 
 /// Does `name` have a dedicated copper plane? No `(stackup …)` form ⇒ the
 /// implicit model (`implicit_plane.carries`: ground + the dominant supply
@@ -536,6 +605,26 @@ test "a pad served across drawn copper contributes no via" {
     try testing.expect(web.served(0));
     try testing.expect(web.served(1));
     try testing.expect(!web.served(2)); // no copper to either
+}
+
+// Retained local fanout copper exercises the same idempotence contract as the
+// end-to-end hierarchical-route regression.
+test "retained local carrier drops are served idempotently" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const Track = struct { x1: f64, y1: f64, x2: f64, y2: f64, width: f64, layer: u8, net: i32 };
+    const Via = struct { x: f64, y: f64, dia: f64, net: i32 };
+    const pad = pad_shape.Shape{ .x0 = -0.2, .y0 = -0.2, .x1 = 0.2, .y1 = 0.2 };
+    const centred = [_]Via{.{ .x = 0, .y = 0, .dia = 0.4, .net = 0 }};
+    try testing.expectEqual(@as(?f64, 0), try retainedStubMm(Track, Via, arena_inst.allocator(), pad, 0, 0, &.{}, &centred));
+
+    const stub = [_]Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 0.5, .y2 = 0, .width = 0.2, .layer = 0, .net = 0 },
+        .{ .x1 = 0.5, .y1 = 0, .x2 = 1, .y2 = 0, .width = 0.2, .layer = 0, .net = 0 },
+    };
+    const fanned = [_]Via{.{ .x = 1, .y = 0, .dia = 0.4, .net = 0 }};
+    try testing.expectApproxEqAbs(@as(f64, 1), (try retainedStubMm(Track, Via, arena_inst.allocator(), pad, 0, 0, &stub, &fanned)).?, eps);
+    try testing.expect((try retainedStubMm(Track, Via, arena_inst.allocator(), pad, 0, 1, &stub, &fanned)) == null);
 }
 
 // spec: placement/plane-stitch - a pad further along the copper than via_share_max_mm keeps its own via

@@ -209,7 +209,6 @@ const thermal_via_pitch_mm: f64 = 0.9;
 /// 4.6-mm-class RF/power paddle sixteen regular barrels without walling the
 /// package's own perimeter escapes; tighter packing showed no routing margin.
 const max_thermal_axis_vias: usize = 4;
-const thermal_barrel_samples: usize = 8;
 
 const ThermalAxis = struct {
     count: usize,
@@ -239,16 +238,6 @@ fn thermalAxis(span: f64, via_dia: f64, min_pitch: f64) ThermalAxis {
 /// Whether one exact regular-grid site keeps its complete copper barrel inside
 /// the exposed pad's real outline. A rejected custom-pad cell is skipped; it is
 /// never replaced by the nearest off-pattern point.
-fn thermalBarrelFits(pad: pad_shape.Shape, point: [2]f64, via_dia: f64) bool {
-    const r = via_dia / 2;
-    if (pad_shape.pointDist(pad.x0, pad.y0, pad.x1, pad.y1, pad.poly, point[0], point[1], std.math.inf(f64)) > 0) return false;
-    for (0..thermal_barrel_samples) |i| {
-        const a = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(thermal_barrel_samples)) * std.math.tau;
-        if (pad_shape.pointDist(pad.x0, pad.y0, pad.x1, pad.y1, pad.poly, point[0] + r * @cos(a), point[1] + r * @sin(a), std.math.inf(f64)) > 0) return false;
-    }
-    return true;
-}
-
 const ThermalArray = struct {
     pad: pad_shape.Shape,
     centre: [2]f64,
@@ -365,7 +354,7 @@ fn placeThermalViaArray(
     for (0..array.rows) |row| {
         for (0..array.cols) |col| {
             const pos = array.point(col, row);
-            if (!thermalBarrelFits(array.pad, pos, ctx.params.via_dia)) continue;
+            if (!plane_via.thermalBarrelFits(array.pad, pos, ctx.params.via_dia)) continue;
             var already = false;
             for (vias.items) |via| {
                 if (via.net != ni) continue;
@@ -411,6 +400,8 @@ fn planeNetCopper(
     const ni = thermal.ni;
     const arena = ctx.arena;
     const start = tracks.items.len;
+    // Do not let a via newly placed for a nearby pad impersonate retained copper.
+    const retained_via_count = vias.items.len;
     const pour = netPourLayers(placement, placement.nets[@intCast(ni)].name);
     const bonds = try plane_stitch.bonds(arena, placement, pts);
     var web = try plane_stitch.Web.init(arena, pts.len);
@@ -430,6 +421,12 @@ fn planeNetCopper(
     var tally = PlaneTally{};
     for (try thermalFirstViaOrder(arena, thermal, pts, bonds)) |i| {
         const c = pts[i];
+        if (try plane_stitch.retainedStubMm(Track, Via, arena, padCopperAt(ctx, .{ c.x, c.y }, ni, c.layer), c.layer, ni, tracks.items[0..start], vias.items[0..retained_via_count])) |mm| {
+            tally.needed = true;
+            tally.placed = true;
+            web.placedVia(i, mm);
+            continue;
+        }
         if (thermal.plan(c)) |array| {
             tally.needed = true;
             const n = try placeThermalViaArray(ctx, vias, tracks.items, ni, array);
@@ -13156,7 +13153,7 @@ test "congested net dives to the inner signal layer on a 3-signal stackup" {
     try testing.expect(!r.grid_overflow);
     // The crossing itself lives on the inner layer, reached through vias.
     try testing.expect(trackLenOnLayer(r.tracks, 2) > 1.0);
-    try testing.expect(r.vias.len >= 2);
+    try testing.expectEqual(@as(usize, 2), r.vias.len);
     // …and the inner-layer copper introduces no clearance violations.
     const viol = try @import("drc.zig").check(arena, placement, r, 0.127);
     try testing.expectEqual(@as(usize, 0), viol.len);

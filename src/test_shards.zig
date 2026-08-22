@@ -521,6 +521,8 @@ pub const shards: []const []const []const u8 = &.{
         "serve.style_score.test.",
         "serve.subcircuit_route.test.",
         "serve.upload.test.",
+        "subcircuit_route_regression.test.",
+        "subcircuit_seed_drc.test.",
         "subcircuit_silkscreen.test.",
     },
 };

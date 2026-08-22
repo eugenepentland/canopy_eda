@@ -431,11 +431,22 @@ pub fn writeTable(w: *std.Io.Writer, results: []const BoardResult) std.Io.Writer
             },
         );
         const seeds = r.copper.seeds;
-        if (seeds.candidate_tracks > 0 or seeds.candidate_vias > 0) try w.print(
+        if (seeds.copper.candidate_tracks > 0 or seeds.copper.candidate_vias > 0) try w.print(
             "{s:<24} {s}: {d} net(s), {d}/{d} tracks, {d}/{d} vias; {d} rejected net(s){s}\n",
             .{
-                "",                  "subcircuit seeds",   seeds.accepted_nets, seeds.accepted_tracks,                                                                                                      seeds.candidate_tracks,
-                seeds.accepted_vias, seeds.candidate_vias, seeds.rejected_nets, if (seeds.fallback) " (quality fallback)" else if (seeds.accepted_tracks > 0 or seeds.accepted_vias > 0) " (used)" else "",
+                "",                         "subcircuit seeds",          seeds.copper.accepted_nets, seeds.copper.accepted_tracks,                                                                                                             seeds.copper.candidate_tracks,
+                seeds.copper.accepted_vias, seeds.copper.candidate_vias, seeds.copper.rejected_nets, if (seeds.fallback) " (quality fallback)" else if (seeds.copper.accepted_tracks > 0 or seeds.copper.accepted_vias > 0) " (used)" else "",
+            },
+        );
+        if (seeds.phase.attempted_subcircuits > 0) try w.print(
+            "{s:<24} local phase: {d}/{d} completed, {d} timed out, {d} supply net(s) deferred, {d} carrier drop(s) accepted\n",
+            .{
+                "",
+                seeds.phase.completed_subcircuits,
+                seeds.phase.attempted_subcircuits,
+                seeds.phase.timed_out_subcircuits,
+                seeds.phase.deferred_supply_nets,
+                seeds.phase.accepted_carrier_drops,
             },
         );
         if (r.drc.errors > 0) {
@@ -483,7 +494,8 @@ pub fn writeJson(w: *std.Io.Writer, results: []const BoardResult) std.Io.Writer.
                 "\"copper_hash\":{d},\"bends\":{d},\"removable_bends\":{d},\"removable_detour_mm\":{d:.4}," ++
                 "\"micro_jogs\":{d},\"non_octilinear_segments\":{d},\"shortest_segment_mm\":{d:.4}," ++
                 "\"seed_tracks\":{d},\"seed_vias\":{d},\"seed_nets\":{d},\"seed_rejected_nets\":{d}," ++
-                "\"seed_used\":{s},\"seed_fallback\":{s},\"field_attempts\":{d},\"field_terminal_pairs\":{d}," ++
+                "\"seed_used\":{s},\"seed_fallback\":{s},\"local_attempted\":{d},\"local_completed\":{d},\"local_timed_out\":{d}," ++
+                "\"deferred_supply_nets\":{d},\"accepted_carrier_drops\":{d},\"field_attempts\":{d},\"field_terminal_pairs\":{d}," ++
                 "\"field_successes\":{d},\"field_coarsened\":{d},\"field_expansions\":{d},\"field_static_cache_hits\":{d}",
             .{
                 r.quality.route_space,
@@ -499,12 +511,17 @@ pub fn writeJson(w: *std.Io.Writer, results: []const BoardResult) std.Io.Writer.
                 r.quality.shape.micro_jogs,
                 r.quality.shape.non_octilinear_segments,
                 r.quality.shape.shortest_segment_mm,
-                r.copper.seeds.accepted_tracks,
-                r.copper.seeds.accepted_vias,
-                r.copper.seeds.accepted_nets,
-                r.copper.seeds.rejected_nets,
-                if (!r.copper.seeds.fallback and (r.copper.seeds.accepted_tracks > 0 or r.copper.seeds.accepted_vias > 0)) "true" else "false",
+                r.copper.seeds.copper.accepted_tracks,
+                r.copper.seeds.copper.accepted_vias,
+                r.copper.seeds.copper.accepted_nets,
+                r.copper.seeds.copper.rejected_nets,
+                if (!r.copper.seeds.fallback and (r.copper.seeds.copper.accepted_tracks > 0 or r.copper.seeds.copper.accepted_vias > 0)) "true" else "false",
                 if (r.copper.seeds.fallback) "true" else "false",
+                r.copper.seeds.phase.attempted_subcircuits,
+                r.copper.seeds.phase.completed_subcircuits,
+                r.copper.seeds.phase.timed_out_subcircuits,
+                r.copper.seeds.phase.deferred_supply_nets,
+                r.copper.seeds.phase.accepted_carrier_drops,
                 r.timing.counters.field_attempts,
                 r.timing.counters.field_terminal_pairs,
                 r.timing.counters.field_successes,

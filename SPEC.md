@@ -201,7 +201,7 @@ ReleaseSafe production build and publishes an immutable, checksum-addressed
 candidate for deployment.
 
 - Roots unit tests separately from the production executable
-- Runs the unit-test suite as concurrent shards whose filters claim every named test exactly once
+- Runs the unit-test suite as concurrent shards whose filters claim every named test, including local-first routing regressions, exactly once
 - Bridges every test-bearing module into the shard import graph so filters alone decide a shard's contents
 - Rejects a shard filter that no longer names a test in the tree
 - Pins every gated full-test invocation with `--seed=1` so an unchanged tree's test run is a cache hit
@@ -5518,7 +5518,12 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 ## Web Server
 
 - A PCB design with PDN intents resolves selected BOM electrical model properties before placement
-- A hard route deadline runs one plain global candidate instead of spending the same wall-clock budget on a sequential hierarchical A/B comparison
+- Hierarchical routing processes first-level sub-circuits in authored order, freezes each accepted DRC-clean local signal tree, and then runs exactly one assembled-board global candidate
+- When two local candidates collide, the earlier DRC-clean net remains frozen and only the later candidate is deferred to the global route
+- Accepted local plane drops are immutable same-net sources in the single global pass, so the global plane phase does not duplicate their barrels
+- Route responses report attempted, completed, and timed-out local sub-circuits, deferred supply nets, and accepted carrier drops while the compatibility fallback flag remains false
+- Supply-like ground, power, and input-rail nets never receive local pad-to-pad traces: declared planes and live retained pours receive independent terminal drops, while uncovered terminals remain for the global route
+- A hard route deadline gives all one-shot local sub-circuit attempts at most one quarter of the initially remaining time and preserves the original absolute deadline for the global phase
 - get_schematic_image is a registered read-only CLI tool
 - get_pcb_layout_image renders the heat-zone image when thermal is set, and a different picture for each cooling scenario
 - The board PNG query turns ?thermal=1 into a heat-zone request carrying its scenario and ambient, and an unknown scenario word falls back to still air rather than refusing the image

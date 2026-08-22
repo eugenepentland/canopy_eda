@@ -2151,6 +2151,7 @@ src/placement/plane_stitch.zig::netHasPlane | fn netHasPlane(placement: optimize
 src/placement/plane_stitch.zig::netPourLayers | fn netPourLayers(placement: optimizer.Placement, name: []const u8) [2]bool
 src/placement/plane_stitch.zig::padInPour | fn padInPour(pour: [2]bool, c: pad_exit.NetPt) bool
 src/placement/plane_stitch.zig::placedVia | fn placedVia(self: *Web, pad: usize, stub_mm: f64) void
+src/placement/plane_stitch.zig::retainedStubMm | fn retainedStubMm( comptime Track: type, comptime Via: type, arena: std.mem.Allocator, maybe_pad: ?pad_shape.Shape, layer: u8, net: i32, tracks: []const Track, vias: []const Via, ) std.mem.Allocator.Error!?f64
 src/placement/plane_stitch.zig::served | fn served(self: *Web, pad: usize) bool
 src/placement/plane_stitch.zig::viaOrder | fn viaOrder( arena: std.mem.Allocator, n: usize, bs: []const Bond, ) std.mem.Allocator.Error![]const usize
 src/placement/plane_stitch.zig::via_share_max_mm value
@@ -2160,6 +2161,7 @@ src/placement/plane_via.zig::init | fn init(shape: pad_shape.Shape, anchor: [2]f
 src/placement/plane_via.zig::next | fn next(self: *InPad) ?[2]f64
 src/placement/plane_via.zig::overDrill | fn overDrill(shape: pad_shape.Shape, anchor: [2]f64, via_dia: f64, via_drill: f64) InPad
 src/placement/plane_via.zig::swivel | fn swivel(k: usize) f64
+src/placement/plane_via.zig::thermalBarrelFits | fn thermalBarrelFits(pad: pad_shape.Shape, point: [2]f64, via_dia: f64) bool
 src/placement/port_escape.zig::Blocked struct_
 src/placement/port_escape.zig::Mm struct_
 src/placement/port_escape.zig::PadView struct_
@@ -3685,6 +3687,7 @@ src/serve/subcircuit_route.zig::SeedTrack struct_
 src/serve/subcircuit_route.zig::SeedVia struct_
 src/serve/subcircuit_route.zig::regressed | fn regressed( alloc: std.mem.Allocator, placement: optimizer.Placement, params: router.RouteParams, seeded: router.RouteResult, plain: router.RouteResult, ) std.mem.Allocator.Error!bool
 src/serve/subcircuit_route.zig::routeAll | fn routeAll( alloc: std.mem.Allocator, block: *const env.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, base: route_policy.Options, ) std.mem.Allocator.Error!Result
+src/serve/subcircuit_route.zig::routeAllClassified | fn routeAllClassified( alloc: std.mem.Allocator, block: *const env.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, base: route_policy.Options, supply: []const bool, ) std.mem.Allocator.Error!Result
 src/serve/subprocess.zig::Outcome enum_
 src/serve/subprocess.zig::Result struct_
 src/serve/subprocess.zig::deinit | fn deinit(self: Result, allocator: std.mem.Allocator) void
@@ -3857,6 +3860,7 @@ src/silk_font.zig::heightMm | fn heightMm(size: f64) f64
 src/silk_font.zig::stroke_width_mm value
 src/silk_font.zig::widthMm | fn widthMm(text: []const u8, size: f64) f64
 src/silk_font.zig::widthUnits | fn widthUnits(text: []const u8) f64
+src/subcircuit_seed_drc.zig::reject | fn reject(alloc: std.mem.Allocator, input: anytype) std.mem.Allocator.Error!void
 src/subcircuit_silkscreen.zig::Annotation struct_
 src/subcircuit_silkscreen.zig::FabricationIdObstacles struct_
 src/subcircuit_silkscreen.zig::Keepout struct_

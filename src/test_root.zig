@@ -416,6 +416,8 @@ test {
     _ = @import("sexpr/tokenizer.zig");
     _ = @import("silk_font.zig");
     _ = @import("subcircuit_silkscreen.zig");
+    _ = @import("subcircuit_seed_drc.zig");
+    _ = @import("subcircuit_route_regression.zig");
     _ = @import("svg2pdf.zig");
     _ = @import("target_unblock.zig");
     _ = @import("testpoint_silkscreen.zig");
@@ -519,7 +521,7 @@ fn claimingShards(name: QualifiedName) usize {
     return claims;
 }
 
-// spec: Development pipeline - Runs the unit-test suite as concurrent shards whose filters claim every named test exactly once
+// spec: Development pipeline - Runs the unit-test suite as concurrent shards whose filters claim every named test, including local-first routing regressions, exactly once
 
 // spec: placement/power-routing - power-routing named tests remain assigned to exactly one test shard
 test "shard manifest runs every named test exactly once" {

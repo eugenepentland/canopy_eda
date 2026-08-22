@@ -81,6 +81,7 @@ const pages_tmpl = @import("templates/pages.zig");
 const serve_root = @import("../serve.zig");
 const route_plan = @import("route_plan.zig");
 const subcircuit_route = @import("subcircuit_route.zig");
+const subcircuit_seed_drc = @import("../subcircuit_seed_drc.zig");
 const placement_outline = @import("placement_outline.zig");
 const route_result_stats = @import("route_result_stats.zig");
 const stuck_json = @import("stuck_json.zig");
@@ -2077,14 +2078,23 @@ fn mappedNet(
 /// board-level compatibility filtering; accepted counts are the same-net
 /// sources actually handed to the global router.
 pub const SubcircuitRouteSeedStats = struct {
-    candidate_tracks: usize = 0,
-    candidate_vias: usize = 0,
-    accepted_nets: usize = 0,
-    accepted_tracks: usize = 0,
-    accepted_vias: usize = 0,
-    rejected_nets: usize = 0,
-    /// The hard-seeded attempt regressed connectivity or geometric DRC, so the
-    /// board-level quality gate returned the unseeded global route instead.
+    copper: struct {
+        candidate_tracks: usize = 0,
+        candidate_vias: usize = 0,
+        accepted_nets: usize = 0,
+        accepted_tracks: usize = 0,
+        accepted_vias: usize = 0,
+        rejected_nets: usize = 0,
+    } = .{},
+    phase: struct {
+        attempted_subcircuits: usize = 0,
+        completed_subcircuits: usize = 0,
+        timed_out_subcircuits: usize = 0,
+        deferred_supply_nets: usize = 0,
+        accepted_carrier_drops: usize = 0,
+    } = .{},
+    /// Kept for response compatibility. Deterministic local-first routing never
+    /// abandons all accepted local copper for a plain global candidate.
     fallback: bool = false,
 };
 
@@ -2097,6 +2107,7 @@ const SeedAccumulator = struct {
     rejected: []bool,
     candidate: []bool,
     isolated: []const bool,
+    supply: []const bool,
     stats: SubcircuitRouteSeedStats = .{},
 };
 
@@ -2105,6 +2116,7 @@ const SeedContext = struct {
     placement: optimizer.Placement,
     params: router.RouteParams,
     options: route_policy.Options,
+    supply: []const bool,
     acc: *SeedAccumulator,
 };
 
@@ -2263,17 +2275,16 @@ fn seedNetEnabled(options: route_policy.Options, net: usize) bool {
     return options.selected_nets.len == 0 or (net < options.selected_nets.len and options.selected_nets[net]);
 }
 
-/// Only a net wholly contained by this sub-circuit is local copper. A parent
-/// net with any pin outside the group is part of global routing; freezing its
-/// module-local fragment early can claim the board corridor its remote leg
-/// needs. Those boundary nets are deliberately left to the global pass.
+/// A saved module tree may seed the same local fragment a fresh isolated route
+/// would: at least two terminals inside this first-level sub-circuit. The later
+/// assembled-board pass joins any boundary legs to that frozen local source.
 fn seedNetIsLocal(placement: optimizer.Placement, slug: []const u8, net: usize) bool {
     if (net >= placement.nets.len or placement.nets[net].pins.len < 2) return false;
+    var local: usize = 0;
     for (placement.nets[net].pins) |pin| {
-        if (pin.ref_des.len <= slug.len) return false;
-        if (!std.mem.startsWith(u8, pin.ref_des, slug) or pin.ref_des[slug.len] != '/') return false;
+        if (pin.ref_des.len > slug.len and std.mem.startsWith(u8, pin.ref_des, slug) and pin.ref_des[slug.len] == '/') local += 1;
     }
-    return true;
+    return local >= 2;
 }
 
 fn seedLayerAllowed(placement: optimizer.Placement, options: route_policy.Options, net: usize, layer: u8) bool {
@@ -2318,13 +2329,14 @@ fn appendModuleSeedCopper(
         if (!mapped.sampled or mapped.parent < 0) continue;
         const ni: usize = @intCast(mapped.parent);
         if (!seedNetEnabled(ctx.options, ni)) continue;
+        if (ni < ctx.supply.len and ctx.supply[ni]) continue;
         if (ctx.placement.rules.carriesPlane(ctx.placement.nets[ni].name)) continue;
         // A fresh isolated route is authoritative for this net. The saved
         // module snapshot remains a fallback only when the local autorouter
         // emitted no copper for it.
         if (ctx.acc.isolated[ni]) continue;
         ctx.acc.candidate[ni] = true;
-        ctx.acc.stats.candidate_tracks += 1;
+        ctx.acc.stats.copper.candidate_tracks += 1;
         if (!seedNetIsLocal(ctx.placement, slug, ni)) {
             ctx.acc.rejected[ni] = true;
             continue;
@@ -2358,10 +2370,11 @@ fn appendModuleSeedCopper(
         if (!mapped.sampled or mapped.parent < 0) continue;
         const ni: usize = @intCast(mapped.parent);
         if (!seedNetEnabled(ctx.options, ni)) continue;
+        if (ni < ctx.supply.len and ctx.supply[ni]) continue;
         if (ctx.placement.rules.carriesPlane(ctx.placement.nets[ni].name)) continue;
         if (ctx.acc.isolated[ni]) continue;
         ctx.acc.candidate[ni] = true;
-        ctx.acc.stats.candidate_vias += 1;
+        ctx.acc.stats.copper.candidate_vias += 1;
         if (!seedNetIsLocal(ctx.placement, slug, ni)) {
             ctx.acc.rejected[ni] = true;
             continue;
@@ -2392,81 +2405,6 @@ fn appendSubcircuitCandidate(
     const hits = try seedHits(ctx.alloc, ctx.placement, sb.name, seeds);
     const xf = bestSeedTransform(ctx.placement, hits) orelse return;
     try appendModuleSeedCopper(ctx, sb.name, seeds, xf);
-}
-
-fn seedDrcResult(alloc: std.mem.Allocator, tracks: []const SeedTrack, vias: []const SeedVia) std.mem.Allocator.Error!router.RouteResult {
-    const rt = try alloc.alloc(router.Track, tracks.len);
-    for (tracks, 0..) |item, i| rt[i] = .{
-        .x1 = item.copper.x1,
-        .y1 = item.copper.y1,
-        .x2 = item.copper.x2,
-        .y2 = item.copper.y2,
-        .layer = item.copper.layer,
-        .width = item.copper.width,
-        .net = item.copper.net,
-    };
-    const rv = try alloc.alloc(router.Via, vias.len);
-    for (vias, 0..) |item, i| rv[i] = .{
-        .x = item.copper.x,
-        .y = item.copper.y,
-        .dia = item.copper.dia,
-        .drill = item.copper.drill,
-        .net = item.copper.net,
-    };
-    return .{ .tracks = rt, .vias = rv, .routed = 0, .total = 0 };
-}
-
-fn rejectSeedViolation(rejected: []bool, v: drc.Violation) void {
-    // Hierarchical routing promises that module copper is a safe seed, not
-    // merely that it avoids hard shorts. A same-net land transit is warning
-    // severity for a hand-edited finished board, but it is never acceptable as
-    // reusable generated copper: reject that net and let the assembled-board
-    // router synthesize a clean escape instead.
-    if (v.severity != .err and v.kind != .land_transit and v.kind != .implicit_junction) return;
-    const both = switch (v.kind) {
-        .via_via, .via_spacing, .via_track, .track_track => true,
-        else => false,
-    };
-    const first = switch (v.kind) {
-        .via_pad, .via_via, .via_spacing, .via_track, .track_track, .track_pad, .annular, .min_drill, .track_width, .copper_stub, .implicit_junction, .sharp_bend, .land_transit, .keepout_violation, .perimeter_keepout => true,
-        .board_edge, .hole_hole => v.who.part_a < 0,
-        else => false,
-    };
-    if (first and v.who.net_a >= 0) {
-        const ni: usize = @intCast(v.who.net_a);
-        if (ni < rejected.len) rejected[ni] = true;
-    }
-    if ((both or (v.kind == .hole_hole and v.who.part_b < 0)) and v.who.net_b >= 0) {
-        const ni: usize = @intCast(v.who.net_b);
-        if (ni < rejected.len) rejected[ni] = true;
-    }
-}
-
-// spec: placement/land-transit - a hierarchical route seed carrying a same-net land transit is rejected before the assembled-board router can reuse it
-test "hierarchical seeds reject warning-severity own-land transit" {
-    var rejected = [_]bool{ false, false };
-    rejectSeedViolation(&rejected, .{
-        .x = 0,
-        .y = 0,
-        .gap = 0,
-        .clearance = 0,
-        .kind = .land_transit,
-        .severity = .warn,
-        .who = .{ .net_a = 1 },
-    });
-    try std.testing.expect(!rejected[0]);
-    try std.testing.expect(rejected[1]);
-}
-
-fn rejectSeedDrc(
-    alloc: std.mem.Allocator,
-    placement: optimizer.Placement,
-    params: router.RouteParams,
-    acc: *SeedAccumulator,
-) std.mem.Allocator.Error!void {
-    const routed = try seedDrcResult(alloc, acc.tracks.items, acc.vias.items);
-    const violations = try drc.check(alloc, placement, routed, params.clearance);
-    for (violations) |v| rejectSeedViolation(acc.rejected, v);
 }
 
 fn rejectSeedViaBudgets(options: route_policy.Options, acc: *SeedAccumulator) void {
@@ -2514,14 +2452,15 @@ fn mergeAcceptedSeeds(
         if (acc.rejected[item.net]) continue;
         if (containsSeedTrack(tracks.items, item.copper)) continue;
         try tracks.append(alloc, item.copper);
-        acc.stats.accepted_tracks += 1;
+        acc.stats.copper.accepted_tracks += 1;
     }
     for (acc.vias.items) |item| {
         if (acc.rejected[item.net]) continue;
         if (containsSeedVia(vias.items, item.copper)) continue;
         try vias.append(alloc, item.copper);
         accepted_vias[item.net] +|= 1;
-        acc.stats.accepted_vias += 1;
+        acc.stats.copper.accepted_vias += 1;
+        if (item.net < acc.supply.len and acc.supply[item.net]) acc.stats.phase.accepted_carrier_drops += 1;
     }
     const policies = try alloc.dupe(route_policy.NetPolicy, options.net);
     for (accepted_vias, 0..) |count, ni| if (count > 0 and ni < policies.len) {
@@ -2530,6 +2469,31 @@ fn mergeAcceptedSeeds(
     options.net = policies;
     options.existing_tracks = tracks.items;
     options.existing_vias = vias.items;
+}
+
+fn retainedSeedCopper(
+    alloc: std.mem.Allocator,
+    options: route_policy.Options,
+) std.mem.Allocator.Error!export_gerber.Copper {
+    const tracks = try alloc.alloc(router.Track, options.existing_tracks.len);
+    for (options.existing_tracks, 0..) |track, i| tracks[i] = .{
+        .x1 = track.x1,
+        .y1 = track.y1,
+        .x2 = track.x2,
+        .y2 = track.y2,
+        .layer = track.layer,
+        .width = track.width,
+        .net = track.net,
+    };
+    const vias = try alloc.alloc(router.Via, options.existing_vias.len);
+    for (options.existing_vias, 0..) |via, i| vias[i] = .{
+        .x = via.x,
+        .y = via.y,
+        .dia = via.dia,
+        .drill = via.drill,
+        .net = via.net,
+    };
+    return .{ .tracks = tracks, .vias = vias };
 }
 
 /// Route every sub-circuit first in a component-only view, then add compatible
@@ -2550,26 +2514,68 @@ pub fn addSubcircuitRouteSeeds(
     @memset(rejected, false);
     const candidate = try alloc.alloc(bool, placement.nets.len);
     @memset(candidate, false);
-    const local = try subcircuit_route.routeAll(alloc, block, placement, params, options.*);
+    const supply = try alloc.alloc(bool, placement.nets.len);
+    var detected = try module_policy.analyze(alloc, placement);
+    defer detected.deinit(alloc);
+    for (supply, 0..) |*yes, ni| {
+        yes.* = if (ni < detected.net_class.len) switch (detected.net_class[ni]) {
+            .ground, .power, .input_rail => true,
+            else => false,
+        } else false;
+    }
+    const local = try subcircuit_route.routeAllClassified(alloc, block, placement, params, options.*, supply);
     @memcpy(candidate, local.nets);
-    var acc = SeedAccumulator{ .rejected = rejected, .candidate = candidate, .isolated = local.nets };
+    var acc = SeedAccumulator{ .rejected = rejected, .candidate = candidate, .isolated = local.nets, .supply = supply };
     try acc.tracks.appendSlice(alloc, local.tracks);
     try acc.vias.appendSlice(alloc, local.vias);
-    acc.stats.candidate_tracks = local.tracks.len;
-    acc.stats.candidate_vias = local.vias.len;
-    var ctx = SeedContext{ .alloc = alloc, .placement = placement, .params = params, .options = options.*, .acc = &acc };
+    acc.stats.copper.candidate_tracks = local.tracks.len;
+    acc.stats.copper.candidate_vias = local.vias.len;
+    acc.stats.phase.attempted_subcircuits = local.phase.attempted_subcircuits;
+    acc.stats.phase.completed_subcircuits = local.phase.completed_subcircuits;
+    acc.stats.phase.timed_out_subcircuits = local.phase.timed_out_subcircuits;
+    acc.stats.phase.deferred_supply_nets = local.phase.deferred_supply_nets;
+    var ctx = SeedContext{ .alloc = alloc, .placement = placement, .params = params, .options = options.*, .supply = supply, .acc = &acc };
     for (block.sub_blocks) |sb| try appendSubcircuitCandidate(&ctx, project_dir, sb);
     rejectSeedViaBudgets(options.*, &acc);
-    try rejectSeedDrc(alloc, placement, params, &acc);
+    try subcircuit_seed_drc.reject(alloc, .{
+        .placement = placement,
+        .params = params,
+        .options = options.*,
+        .rejected = acc.rejected,
+        .tracks = acc.tracks.items,
+        .vias = acc.vias.items,
+    });
+    for (local.complete_planes, 0..) |complete, ni| {
+        if (complete and rejected[ni]) acc.stats.phase.deferred_supply_nets += 1;
+    }
     try mergeAcceptedSeeds(alloc, options, &acc);
     for (candidate, 0..) |was_candidate, ni| if (was_candidate) {
-        if (rejected[ni]) acc.stats.rejected_nets += 1 else acc.stats.accepted_nets += 1;
+        if (rejected[ni]) acc.stats.copper.rejected_nets += 1 else acc.stats.copper.accepted_nets += 1;
     };
+    const global_scope = try alloc.alloc(bool, placement.nets.len);
+    if (options.selected_nets.len == 0)
+        @memset(global_scope, true)
+    else for (global_scope, 0..) |*yes, ni|
+        yes.* = ni < options.selected_nets.len and options.selected_nets[ni];
+    const connectivity = try fab_readiness.netConnectivity(alloc, placement, try retainedSeedCopper(alloc, options.*));
+    for (local.complete_planes, 0..) |complete, ni| {
+        // The same oracle used by describe/fabrication decides whether the
+        // retained local drops really joined every terminal. Complete carrier
+        // nets stay frozen; only a physically open carrier re-enters the global
+        // plane pass, where retainedStubMm prevents duplicate barrels.
+        if (!complete or rejected[ni] or ni >= connectivity.len) continue;
+        if (!connectivity[ni].routable or connectivity[ni].connected) {
+            global_scope[ni] = false;
+        } else {
+            acc.stats.phase.deferred_supply_nets += 1;
+        }
+    }
+    options.selected_nets = global_scope;
     return acc.stats;
 }
 
 fn seedWasUsed(stats: SubcircuitRouteSeedStats) bool {
-    return !stats.fallback and (stats.accepted_tracks > 0 or stats.accepted_vias > 0);
+    return !stats.fallback and (stats.copper.accepted_tracks > 0 or stats.copper.accepted_vias > 0);
 }
 
 fn armRouteDeadline(options: *route_policy.Options) void {
@@ -2578,20 +2584,9 @@ fn armRouteDeadline(options: *route_policy.Options) void {
         @as(i128, @intCast(options.stop.max_route_ms)) * @as(i128, clock.ns_per_ms);
 }
 
-/// A deadline is one budget for one board, not permission to route two complete
-/// candidates serially. The opportunistic hierarchy A/B comparison is useful
-/// for unbounded background work; under an authored wall-clock limit it can
-/// consume the budget on the seeded candidate and leave the known-better plain
-/// candidate no time to run.
-fn routeIsDeadlineBound(options: route_policy.Options) bool {
-    return options.stop.deadline_ns != 0;
-}
-
-/// Run isolated local copper first, then compare the completed global board with a
-/// plain global route. The seed is kept only when it does not lose connectivity
-/// or add a fabrication-blocking geometry violation; otherwise the plain route
-/// is returned. This makes the hierarchy hint opportunistic rather than a new
-/// source of board-level regressions.
+/// Run every sub-circuit locally, freeze its accepted copper, then run exactly
+/// one assembled-board route. The local phase internally reserves three
+/// quarters of any authored deadline for this global pass.
 pub fn routeWithSubcircuitSeeds(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
@@ -2602,26 +2597,13 @@ pub fn routeWithSubcircuitSeeds(
 ) std.mem.Allocator.Error!struct { result: router.RouteResult, seeds: SubcircuitRouteSeedStats = .{} } {
     var bounded_base = base_options;
     armRouteDeadline(&bounded_base);
-    if (routeIsDeadlineBound(bounded_base))
-        return .{ .result = try route_plan.routeLowered(alloc, placement, params, bounded_base) };
     var seeded_options = bounded_base;
-    var stats = try addSubcircuitRouteSeeds(alloc, project_dir, block, placement, params, &seeded_options);
-    if (!seedWasUsed(stats)) return .{ .result = try route_plan.routeLowered(alloc, placement, params, bounded_base), .seeds = stats };
-    const seeded = try route_plan.routeLoweredCandidate(alloc, placement, params, seeded_options);
-    const plain = try route_plan.routeLoweredCandidate(alloc, placement, params, bounded_base);
-    const use_seeded = !try subcircuit_route.regressed(alloc, placement, params, seeded, plain);
-    if (!use_seeded) stats.fallback = true;
-    const chosen = if (use_seeded) seeded else plain;
-    const chosen_options = if (use_seeded) seeded_options else bounded_base;
-    return .{
-        .result = try route_plan.finishLoweredCandidate(alloc, placement, params, chosen_options, chosen),
-        .seeds = stats,
-    };
+    const stats = try addSubcircuitRouteSeeds(alloc, project_dir, block, placement, params, &seeded_options);
+    return .{ .result = try route_plan.routeLowered(alloc, placement, params, seeded_options), .seeds = stats };
 }
 
-/// Diagnostic twin of `routeWithSubcircuitSeeds`: both candidates retain their
-/// own live-core diagnosis, and the same board-level comparison selects which
-/// result/stuck set leaves the API.
+/// Diagnostic twin of `routeWithSubcircuitSeeds`, preserving the same strict
+/// local-then-global order and one-global-candidate contract.
 pub fn diagnoseWithSubcircuitSeeds(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
@@ -2632,39 +2614,44 @@ pub fn diagnoseWithSubcircuitSeeds(
 ) std.mem.Allocator.Error!struct { diagnostic: route_plan.PlannedDiagnostic, seeds: SubcircuitRouteSeedStats = .{} } {
     var bounded_base = base_options;
     armRouteDeadline(&bounded_base);
-    if (routeIsDeadlineBound(bounded_base))
-        return .{ .diagnostic = try route_plan.routeLoweredDiagnostic(alloc, placement, params, bounded_base) };
     var seeded_options = bounded_base;
-    var stats = try addSubcircuitRouteSeeds(alloc, project_dir, block, placement, params, &seeded_options);
-    if (!seedWasUsed(stats)) return .{ .diagnostic = try route_plan.routeLoweredDiagnostic(alloc, placement, params, bounded_base), .seeds = stats };
-    const seeded = try route_plan.routeLoweredDiagnosticCandidate(alloc, placement, params, seeded_options);
-    const plain = try route_plan.routeLoweredDiagnosticCandidate(alloc, placement, params, bounded_base);
-    const use_seeded = !try subcircuit_route.regressed(alloc, placement, params, seeded.result, plain.result);
-    if (!use_seeded) stats.fallback = true;
-    const chosen = if (use_seeded) seeded else plain;
-    const chosen_options = if (use_seeded) seeded_options else bounded_base;
-    return .{
-        .diagnostic = try route_plan.finishLoweredDiagnosticCandidate(alloc, placement, params, chosen_options, chosen),
-        .seeds = stats,
-    };
+    const stats = try addSubcircuitRouteSeeds(alloc, project_dir, block, placement, params, &seeded_options);
+    return .{ .diagnostic = try route_plan.routeLoweredDiagnostic(alloc, placement, params, seeded_options), .seeds = stats };
 }
 
 fn writeRouteSeedStats(w: *std.Io.Writer, stats: SubcircuitRouteSeedStats) std.Io.Writer.Error!void {
     try w.print(
         ",\"subcircuit_seeds\":{{\"candidate_tracks\":{d},\"candidate_vias\":{d}," ++
             "\"accepted_nets\":{d},\"accepted_tracks\":{d},\"accepted_vias\":{d},\"rejected_nets\":{d}," ++
-            "\"used\":{},\"fallback\":{}}}",
+            "\"attempted_subcircuits\":{d},\"completed_subcircuits\":{d},\"timed_out_subcircuits\":{d}," ++
+            "\"deferred_supply_nets\":{d},\"accepted_carrier_drops\":{d},\"used\":{},\"fallback\":{}}}",
         .{
-            stats.candidate_tracks,
-            stats.candidate_vias,
-            stats.accepted_nets,
-            stats.accepted_tracks,
-            stats.accepted_vias,
-            stats.rejected_nets,
+            stats.copper.candidate_tracks,
+            stats.copper.candidate_vias,
+            stats.copper.accepted_nets,
+            stats.copper.accepted_tracks,
+            stats.copper.accepted_vias,
+            stats.copper.rejected_nets,
+            stats.phase.attempted_subcircuits,
+            stats.phase.completed_subcircuits,
+            stats.phase.timed_out_subcircuits,
+            stats.phase.deferred_supply_nets,
+            stats.phase.accepted_carrier_drops,
             seedWasUsed(stats),
             stats.fallback,
         },
     );
+}
+
+// spec: Web Server - Route responses report attempted, completed, and timed-out local sub-circuits, deferred supply nets, and accepted carrier drops while the compatibility fallback flag remains false
+test "route response exposes deterministic local phase statistics" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeRouteSeedStats(&aw.writer, .{ .phase = .{ .attempted_subcircuits = 3, .completed_subcircuits = 2, .timed_out_subcircuits = 1, .deferred_supply_nets = 4, .accepted_carrier_drops = 5 } });
+    const json = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"attempted_subcircuits\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"accepted_carrier_drops\":5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"fallback\":false") != null);
 }
 
 /// Initial state of the embed preview's show-clearance / show-DRC toggles,
@@ -4308,6 +4295,7 @@ pub const RouteOutcome = struct {
     stuck: []const route_diagnose.Diagnosis,
     violations: []const drc.Violation,
     return_path: usize,
+    subcircuit_seeds: SubcircuitRouteSeedStats = .{},
     /// What the ROUTER claimed before the shared oracle gate corrected
     /// `run.routed.routed` (see `route_plan.PlannedRun.claimed_routed`). Carried
     /// so the surfaces that persist this run — the cached design replay — can
@@ -4341,9 +4329,11 @@ pub fn routePrepared(
     prep: RoutePrep,
     live: route_plan.LiveRoute,
 ) std.mem.Allocator.Error!RouteOutcome {
+    var seed_stats = SubcircuitRouteSeedStats{};
     var pr: route_plan.PlannedRun = if (live.sink == null and live.cancel == null and live.timeline == .off) blk: {
         const route_options = preparedRouteOptions(alloc, prep);
         const seeded = try diagnoseWithSubcircuitSeeds(alloc, project_dir, prep.eff_block, prep.placement, prep.rp, route_options);
+        seed_stats = seeded.seeds;
         break :blk .{
             .run = .{ .routed = seeded.diagnostic.result, .timeline = &.{} },
             .stuck = seeded.diagnostic.stuck,
@@ -4352,30 +4342,15 @@ pub fn routePrepared(
     } else blk: {
         var base_options = preparedRouteOptions(alloc, prep);
         armRouteDeadline(&base_options);
-        if (routeIsDeadlineBound(base_options))
-            break :blk try route_plan.routeLoweredLive(alloc, prep.placement, prep.rp, &base_options, live);
         var seeded_options = base_options;
-        const stats = try addSubcircuitRouteSeeds(alloc, project_dir, prep.eff_block, prep.placement, prep.rp, &seeded_options);
-        if (!seedWasUsed(stats)) break :blk try route_plan.routeLoweredLive(alloc, prep.placement, prep.rp, &base_options, live);
-
-        // Stream the locally seeded attempt first. Once it finishes, compare
-        // against the same plain global diagnostic used by blocking routes.
-        // Cancellation returns immediately and never pays for the comparison.
-        const seeded = try route_plan.routeLoweredLive(alloc, prep.placement, prep.rp, &seeded_options, live);
-        if (seeded.run.routed.cancelled) break :blk seeded;
-        const plain = try route_plan.routeLoweredDiagnostic(alloc, prep.placement, prep.rp, base_options);
-        if (!try subcircuit_route.regressed(alloc, prep.placement, prep.rp, seeded.run.routed, plain.result)) break :blk seeded;
-        break :blk .{
-            .run = .{ .routed = plain.result, .timeline = &.{} },
-            .stuck = plain.stuck,
-            .claimed_routed = plain.claimed_routed,
-        };
+        seed_stats = try addSubcircuitRouteSeeds(alloc, project_dir, prep.eff_block, prep.placement, prep.rp, &seeded_options);
+        break :blk try route_plan.routeLoweredLive(alloc, prep.placement, prep.rp, &seeded_options, live);
     };
     pr.run.routed = (try perimeter_fence.append(alloc, prep.placement, pr.run.routed)).?;
     const routed = pr.run.routed;
     const violations = drc_rules.checkFilteredZones(alloc, project_dir, name, .{ .placement = prep.placement, .routed = routed, .clearance = prep.rp.clearance, .zones = prep.user_zones });
     const rp_warn = router.returnPathViolations(prep.placement, routed, router.return_path_radius_mm);
-    return .{ .run = pr.run, .stuck = pr.stuck, .violations = violations, .return_path = rp_warn, .claimed_routed = pr.claimed_routed };
+    return .{ .run = pr.run, .stuck = pr.stuck, .violations = violations, .return_path = rp_warn, .subcircuit_seeds = seed_stats, .claimed_routed = pr.claimed_routed };
 }
 
 /// Serialize the shared pipeline's response fields (no surrounding braces) —
@@ -4393,6 +4368,7 @@ pub fn writeRoutePayload(
     try stuck_json.writeStuckJson(w, outcome.stuck);
     try w.print(",\"routed\":{d},\"total\":{d},\"return_path\":{d},\"selected\":{d},\"scope_unknown\":", .{ routed.routed, routed.total, outcome.return_path, prep.echo.selected });
     try mcpWriteStrArray(w, prep.echo.unknown);
+    try writeRouteSeedStats(w, outcome.subcircuit_seeds);
 }
 
 /// Map a `RoutePrepError` onto the blocking handler's historic status + body
@@ -16204,39 +16180,6 @@ fn scopeFixture(parts: *[1]optimizer.Part) struct { placement: optimizer.Placeme
     };
 }
 
-// A hard seed may never make the completed global board worse.
-test "subcircuit seed quality gate cannot regress the global route" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const alloc = arena_state.allocator();
-    var parts: [1]optimizer.Part = undefined;
-    const placement = scopeFixture(&parts).placement;
-    const params = placement.rules.design.routeParams();
-    const plain = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 2, .total = 2 };
-    const crossing = [_]router.Track{
-        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 1, .layer = 0, .width = 0.2, .net = 0 },
-        .{ .x1 = 0, .y1 = 1, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.2, .net = 1 },
-    };
-    const shorted = router.RouteResult{ .tracks = &crossing, .vias = &.{}, .routed = 2, .total = 2 };
-    try std.testing.expect(try subcircuit_route.regressed(alloc, placement, params, shorted, plain));
-
-    const lost = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 1, .total = 2 };
-    try std.testing.expect(try subcircuit_route.regressed(alloc, placement, params, lost, plain));
-    try std.testing.expect(!try subcircuit_route.regressed(alloc, placement, params, plain, plain));
-}
-
-// spec: Web Server - A hard route deadline runs one plain global candidate instead of spending the same wall-clock budget on a sequential hierarchical A/B comparison
-test "hard route deadline selects one global route candidate" {
-    var unbounded = route_policy.Options{};
-    armRouteDeadline(&unbounded);
-    try std.testing.expect(!routeIsDeadlineBound(unbounded));
-
-    var bounded = route_policy.Options{};
-    bounded.stop.max_route_ms = 300_000;
-    armRouteDeadline(&bounded);
-    try std.testing.expect(routeIsDeadlineBound(bounded));
-}
-
 // spec: Web Server - The route_pcb scope resolver selects a group token's concrete nets and reports a whole-board route when no selector is given
 test "mcp route scope resolves a group and defaults to whole board" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -16340,16 +16283,16 @@ test "loadSubBlockPoses re-keys a module-only defmodule layout onto parent refs"
         \\(defmodule synthx ()
         \\  (design-block "SynthX"
         \\    (import cap)
-        \\    (instance "C_A" (cap "10nF") (pin 1 "VDD") (pin 2 "GND"))
-        \\    (instance "C_B" (cap "20nF") (pin 1 "VDD") (pin 2 "GND"))))
+        \\    (instance "C_A" (cap "10nF") (pin 1 "CTRL") (pin 2 "GND"))
+        \\    (instance "C_B" (cap "20nF") (pin 1 "CTRL") (pin 2 "GND"))))
     });
     // Starred layout keyed by the STANDALONE refs (C1/C2), origin recorded.
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/modules/synthx.layouts.json", .data =
         \\{"default":"hand","layouts":[{"name":"hand","parts":[
         \\ {"ref":"C1","x":1,"y":1,"rot":0,"origin":"C_A"},
         \\ {"ref":"C2","x":2,"y":2,"rot":0,"origin":"C_B"}],
-        \\ "routes":{"tracks":[{"x1":1,"y1":1,"x2":2,"y2":2,"l":0,"w":0.2,"net":"VDD"}],
-        \\ "vias":[{"x":1.5,"y":1.5,"d":0.5,"drill":0.2,"net":"VDD"}]}}]}
+        \\ "routes":{"tracks":[{"x1":1,"y1":1,"x2":2,"y2":2,"l":0,"w":0.2,"net":"CTRL"}],
+        \\ "vias":[{"x":1.5,"y":1.5,"d":0.5,"drill":0.2,"net":"CTRL"}]}}]}
     });
     // Design: a top-level cap takes C1, so the sub-block's caps renumber to
     // C2/C3 — DIVERGING from the module-standalone C1/C2 the layout is keyed by,
@@ -16358,7 +16301,7 @@ test "loadSubBlockPoses re-keys a module-only defmodule layout onto parent refs"
         \\(design-block "Board"
         \\  (hierarchical-ids)
         \\  (import cap synthx)
-        \\  (instance "C_PRE" (cap "1uF") (pin 1 "VDD") (pin 2 "GND"))
+        \\  (instance "C_PRE" (cap "1uF") (pin 1 "CTRL") (pin 2 "GND"))
         \\  (sub-block "sm" (synthx)))
     });
 
@@ -16402,7 +16345,7 @@ test "loadSubBlockPoses re-keys a module-only defmodule layout onto parent refs"
 
     // The autorouter now routes this sub-circuit fresh in isolation. Its route
     // therefore supersedes the starred snapshot's unnecessary midpoint via,
-    // while the destination's VDD net-class geometry remains authoritative.
+    // while the destination's CTRL net-class geometry remains authoritative.
     var board_flat: std.ArrayList(export_kicad.FlatInstance) = .empty;
     try netlist.collectInstances(alloc, dblock, "", &board_flat);
     var board_nets: std.ArrayList(export_kicad.FlatNet) = .empty;
@@ -16433,21 +16376,21 @@ test "loadSubBlockPoses re-keys a module-only defmodule layout onto parent refs"
         .generated = false,
         .rules = .{ .plane_nets = &.{}, .copper_layers = 6, .net = net_rules },
     };
-    const vdd_i: usize = @intCast(netIndexByName(placement, "sm/VDD") orelse return error.TestMissingVdd);
-    net_rules[vdd_i] = .{ .width = 0.55, .via_dia = 0.7, .via_drill = 0.3 };
+    const ctrl_i: usize = @intCast(netIndexByName(placement, "sm/CTRL") orelse return error.TestMissingCtrl);
+    net_rules[ctrl_i] = .{ .width = 0.55, .via_dia = 0.7, .via_drill = 0.3 };
     const policies = try alloc.alloc(route_policy.NetPolicy, board_nets.items.len);
     @memset(policies, .{});
-    policies[vdd_i].max_vias = 2;
+    policies[ctrl_i].max_vias = 2;
     var options = route_policy.Options{ .net = policies };
     const seed_stats = try addSubcircuitRouteSeeds(alloc, project_dir, dblock, placement, placement.rules.design.routeParams(), &options);
-    try std.testing.expectEqual(@as(usize, 1), seed_stats.accepted_nets);
+    try std.testing.expectEqual(@as(usize, 1), seed_stats.copper.accepted_nets);
     try std.testing.expectEqual(@as(usize, 1), options.existing_tracks.len);
     try std.testing.expectEqual(@as(usize, 0), options.existing_vias.len);
     try std.testing.expectApproxEqAbs(@as(f64, 11), options.existing_tracks[0].x1, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 22), options.existing_tracks[0].y2, 1e-9);
     try std.testing.expectEqual(@as(u8, 0), options.existing_tracks[0].layer);
     try std.testing.expectApproxEqAbs(@as(f64, 0.55), options.existing_tracks[0].width, 1e-9);
-    try std.testing.expectEqual(@as(?u16, 2), options.net[vdd_i].max_vias);
+    try std.testing.expectEqual(@as(?u16, 2), options.net[ctrl_i].max_vias);
 
     // A board-level tweak routes the changed local geometry again rather than
     // rejecting the stale snapshot and leaving the sub-circuit unseeded.
@@ -16456,8 +16399,8 @@ test "loadSubBlockPoses re-keys a module-only defmodule layout onto parent refs"
     @memset(moved_policies, .{});
     var moved_options = route_policy.Options{ .net = moved_policies };
     const moved = try addSubcircuitRouteSeeds(alloc, project_dir, dblock, placement, placement.rules.design.routeParams(), &moved_options);
-    try std.testing.expectEqual(@as(usize, 1), moved.accepted_nets);
-    try std.testing.expectEqual(@as(usize, 0), moved.rejected_nets);
+    try std.testing.expectEqual(@as(usize, 1), moved.copper.accepted_nets);
+    try std.testing.expectEqual(@as(usize, 0), moved.copper.rejected_nets);
     try std.testing.expect(moved_options.existing_tracks.len > 0);
 }
 
