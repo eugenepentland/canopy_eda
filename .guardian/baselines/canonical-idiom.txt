@@ -64,7 +64,6 @@ canonical-idiom|subblock-leaf-split|src/placement/critical_rough.zig
 canonical-idiom|subblock-leaf-split|src/placement/diff_pairs.zig
 canonical-idiom|subblock-leaf-split|src/placement/implicit_plane.zig
 canonical-idiom|subblock-leaf-split|src/placement/keepout.zig
-canonical-idiom|subblock-leaf-split|src/placement/mask_relief.zig
 canonical-idiom|subblock-leaf-split|src/placement/module_policy.zig
 canonical-idiom|subblock-leaf-split|src/placement/net_rules.zig
 canonical-idiom|subblock-leaf-split|src/placement/optimizer.zig

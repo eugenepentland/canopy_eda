@@ -42,7 +42,6 @@
 6 src/serve/library.zig|extractField
 6 src/serve/mcp_tools.zig|listDesignSummaries
 7 src/serve/pcb_describe.zig|writeDescribeJson
-6 src/serve/pcb_layout_page.zig|readCacheSlot
 6 src/serve/sync.zig|computeGroupAnchors
 6 src/serve/upload_package.zig|uploadPackageApi
 6 src/serve/vfs.zig|matchGlobInner
