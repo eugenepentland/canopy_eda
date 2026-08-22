@@ -433,7 +433,7 @@ function drawBoardRect(tmp){
   if((drawn||editing)&&!RO)(nominal||pts).forEach(function(p){gB.appendChild(el("rect",{
     x:(X(p[0])-3.5).toFixed(1),y:(Y(p[1])-3.5).toFixed(1),width:7,height:7,
     fill:TH.bg,stroke:SC,"stroke-width":1.2,opacity:0.9}));});
-  if(outlineMode&&geom&&geom.sketch){drawOutlineSketchSelection(geom.sketch);drawOutlineSketchInfo(geom.sketch,SC);}
+ if(geom&&geom.sketch){if(outlineMode||outlineOnlyFilter())drawOutlineSketchSelection(geom.sketch);if(outlineMode)drawOutlineSketchInfo(geom.sketch,SC);}
  }else{
   gB.appendChild(el("rect",{x:X(br.x).toFixed(1),y:Y(br.y).toFixed(1),width:(br.w*S).toFixed(1),
     height:(br.h*S).toFixed(1),fill:"none",stroke:EC,"stroke-width":tmp?1.6:1.4,opacity:0.9,
@@ -3442,7 +3442,7 @@ function kbdToggle(){
   '<div class="kbd-row"><span>Move whole sub-circuit</span><kbd>drag any of its parts</kbd></div>'+
   '<div class="kbd-row"><span>Edit the current board outline; drag empty space to box-select vertices</span><kbd>▭ Outline</kbd></div>'+
   '<div class="kbd-row"><span>Connected outline lines (corner + H/V snap &middot; Enter close &middot; Backspace undo)</span><kbd>Line, then click endpoints</kbd></div>'+
-  '<div class="kbd-row"><span>Edit outline: drag a vertex &middot; box-select both fillet vertices + Delete restores a sharp corner &middot; Rectangle then drag redraws</span><kbd>in outline sketch</kbd></div>'+
+  '<div class="kbd-row"><span>Edit outline: drag a vertex &middot; select a line + Delete removes it and heals the closed profile &middot; select a fillet + Delete restores its sharp corner</span><kbd>in outline sketch</kbd></div>'+
   '<div class="kbd-row"><span>Dimension selected outline geometry</span><kbd>D in outline sketch</kbd></div>'+
   '<div class="kbd-row"><span>Constrain selected outline line</span><kbd>H / V</kbd></div>'+
   '<div class="kbd-row"><span>Hand-route mode (click pad → trace; head stops at clearance obstacles)</span><kbd>X</kbd></div>'+
@@ -3481,7 +3481,7 @@ document.addEventListener("keydown",function(ev){
  if(outlineMode&&!kbTyping(ev.target)&&(ev.key==="d"||ev.key==="D")){ev.preventDefault();outlineSketchDimension();return;}
  if(outlineMode&&!kbTyping(ev.target)&&(ev.key==="h"||ev.key==="H")){ev.preventDefault();outlineSketchConstraint("horizontal");return;}
  if(outlineMode&&!kbTyping(ev.target)&&(ev.key==="v"||ev.key==="V")){ev.preventDefault();outlineSketchConstraint("vertical");return;}
- if(outlineMode&&!kbTyping(ev.target)&&(ev.key==="Backspace"||ev.key==="Delete")){ev.preventDefault();outlineDeleteSelected();return;}
+ if(outlineDeleteKeyActive(ev.target)&&(ev.key==="Backspace"||ev.key==="Delete")){ev.preventDefault();outlineDeleteSelected();return;}
  if(polyMode&&ev.key=="Enter"){ev.preventDefault();polyClose();return;}
  if(polyMode&&(ev.key=="Backspace"||ev.key=="Delete")){ev.preventDefault();polyPop();return;}
  if(pourMode&&pourPts&&ev.key=="Enter"){ev.preventDefault();pourClose();return;}
@@ -4481,21 +4481,22 @@ function outlineArm(on){
  svg.classList.toggle("outline-mode",on||polyMode);
  var msg=document.getElementById("pcb-savemsg");
  if(msg&&on){msg.style.color="#7ee787";
-  msg.textContent="outline sketch: drag a box to select vertices, then Delete to remove a fillet; Esc finishes";}
+  msg.textContent="outline sketch: click a segment or box-select vertices, then Delete/Backspace; Esc finishes";}
  else if(msg&&!outDraw){msg.textContent="";}
  outlineSketchPanelSync();toolSync();drawBoardRect();}
 function outlinePrimary(){return outlineSelection.length?outlineSelection[outlineSelection.length-1]:null;}
-function outlineSelect(type,index,id,ev){var add=!!(ev&&(ev.ctrlKey||ev.metaKey||ev.shiftKey)),key=type+":"+(id||index),at=-1;
+function outlineSelect(type,index,id,ev){if(OS){outlinePromote();var entities=type==="point"?OS.physicalPoints(PCB.outline.sketch):OS.physicalCurves(PCB.outline.sketch);if(entities[index])id=entities[index].id;}var add=!!(ev&&(ev.ctrlKey||ev.metaKey||ev.shiftKey)),key=type+":"+(id||index),at=-1;
  outlineSelection.forEach(function(s,i){if(s.key===key)at=i;});if(!add)outlineSelection=[];
  if(at>=0&&add)outlineSelection.splice(at,1);else outlineSelection.push({type:type,index:index,id:id||null,key:key});
  outlineSketchPanelSync();showOutlineProps();drawBoardRect();}
 function outlineResolveSelection(){if(!OS||!PCB.outline||!PCB.outline.sketch)return;var ps=OS.physicalPoints(PCB.outline.sketch),cs=OS.physicalCurves(PCB.outline.sketch);
  outlineSelection.forEach(function(s){var e=s.type==="point"?ps[s.index]:cs[s.index];if(e)s.id=e.id;});}
 function outlineSelected(type){outlineResolveSelection();return outlineSelection.filter(function(s){return s.type===type&&s.id;}).map(function(s){return s.id;});}
-function outlineDeleteSelected(){if(!OS||!outlineSelection.length)return false;return outlineSketchMutate("selected outline geometry removed",function(sk){var cs=outlineSelected("curve"),ps=outlineSelected("point"),arcs=[];
-  cs.forEach(function(id){var c=OS.curve(sk,id);if(c&&c.kind==="arc")arcs.push(id);});OS.physicalCurves(sk).forEach(function(c){if(c.kind==="arc"&&ps.indexOf(c.a)>=0&&ps.indexOf(c.b)>=0&&arcs.indexOf(c.id)<0)arcs.push(c.id);});
-  var changed=false;arcs.forEach(function(id){if(OS.removeFillet(sk,id))changed=true;});if(!changed&&ps.length){ps.forEach(function(id){if(OS.deletePoint(sk,id))changed=true;});}
-  if(!changed){outlineMsg("box-select both fillet vertices, or select the curved edge, then press Delete");return false;}outlineSelection=[];return true;});}
+function outlineDeleteKeyActive(target){if(polyMode||kbTyping(target))return false;if(outlineMode)return true;return outlineOnlyFilter()&&outlineSelection.length;}
+function outlineDeleteSelected(){if(!OS||!outlineSelection.length)return false;return outlineSketchMutate("selected outline geometry removed",function(sk){var cs=outlineSelected("curve"),ps=outlineSelected("point"),arcs=[],lines=[];
+  cs.forEach(function(id){var c=OS.curve(sk,id);if(c&&c.kind==="arc")arcs.push(id);else if(c&&c.kind==="line")lines.push(id);});OS.physicalCurves(sk).forEach(function(c){if(c.kind==="arc"&&ps.indexOf(c.a)>=0&&ps.indexOf(c.b)>=0&&arcs.indexOf(c.id)<0)arcs.push(c.id);});
+  var changed=false;arcs.forEach(function(id){if(OS.removeFillet(sk,id))changed=true;});lines.forEach(function(id){if(OS.deleteSegment(sk,id))changed=true;});if(!changed&&ps.length){ps.forEach(function(id){if(OS.deletePoint(sk,id))changed=true;});}
+  if(!changed){outlineMsg("outline needs at least 3 segments — select a removable line, arc, or vertex");return false;}outlineSelection=[];return true;});}
 function outlineSketchMutate(label,fn){if(!OS)return false;var pre=snapAll();outlinePromote();outlineResolveSelection();var ok=fn(PCB.outline.sketch);
  if(ok===false){PCB.outline=pre.outline;outlineGeomDrop();drawBoardRect();outlineSketchPanelSync();return false;}
  var solved=OS.solve(PCB.outline.sketch),compiled=!solved.conflict&&OS.syncOutline(PCB.outline);if(!compiled){PCB.outline=pre.outline;outlineGeomDrop();drawBoardRect();renderProps();outlineSketchPanelSync();outlineMsg("constraint conflict — "+label+" was not applied");return false;}
@@ -8543,7 +8544,7 @@ loadCamReview();
  // "Footprints off" clicks the track under a part, and "Pours / keepouts"
  // makes filled areas an intentional target. Persists in viewSt.filt.
  function apFiltRows(){return [
-  ["outline","Board outline","Select and drag board-outline vertices and edges"],
+  ["outline","Board outline","Select, drag, and delete board-outline vertices and edges"],
   ["fp","Footprints","Click a component to select or drag it"],
   ["sub","Sub-circuits","Select or drag rigid sub-circuit bounding boxes"],
   ["pad","Pads","Click a pad to select its net"],
