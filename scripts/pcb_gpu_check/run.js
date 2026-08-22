@@ -375,8 +375,8 @@ function checkInstances(rc) {
       name + " A: via instance count", va.length / 8 + " vs " + (vias.length * 2));
     const drill = opt.st.viaDrill;
     barrels.forEach((v, i) => {
-      const rr = Math.max(v.d / 2 * S, 2.5);
-      const rh = Math.min(Math.max(((v.drill > 0) ? v.drill : drill) / 2 * S, 1), rr * 0.7);
+      const rr = v.d / 2 * S;
+      const rh = ((v.drill > 0) ? v.drill : drill) / 2 * S;
       const b = i * 8, h = (barrels.length + i) * 8;
       samePts([[va[b], va[b + 1]]], [[X(v.x), Y(v.y)]], name + " A: via " + i + " centre");
       nearOk(va[b + 2], rr, name + " A: via " + i + " outer radius");
@@ -387,8 +387,8 @@ function checkInstances(rc) {
       sameCol(va, h + 4, opt.TH.viaHole, name + " A: via hole " + i + " is the board colour");
     });
     fences.forEach((v, i) => {
-      const rr = Math.max(v.d / 2 * S, 2.5);
-      const rh = Math.min(Math.max(((v.drill > 0) ? v.drill : drill) / 2 * S, 1), rr * 0.7);
+      const rr = v.d / 2 * S;
+      const rh = ((v.drill > 0) ? v.drill : drill) / 2 * S;
       const lw = Math.max(rr - rh, 0.9), fr = Math.max(rr - lw / 2, 0.5);
       const h = (barrels.length * 2 + i) * 8;
       const b = (barrels.length * 2 + fences.length + i) * 8;

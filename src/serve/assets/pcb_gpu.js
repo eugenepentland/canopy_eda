@@ -578,9 +578,12 @@ function buildCopper(viaDrill) {
   var barrel = [], hole = [], ch = rgb(TH.viaHole);
   for (i = 0; i < vs.length; i++) {
     var v = vs[i], vc = rgb(viaCol(v));
-    var rr = Math.max(v.d / 2 * S, 2.5);
+    // Copper and bore radii are physical geometry. Interaction affordances live
+    // on the 2D overlay and may grow independently, but this buffer must match
+    // the model and Gerber apertures exactly even at a small board-fit scale.
+    var rr = v.d / 2 * S;
     var dr = (v.drill > 0) ? v.drill : viaDrill;
-    var rh = Math.min(Math.max(dr / 2 * S, 1), rr * 0.7);
+    var rh = dr / 2 * S;
     barrel.push([ux(v.x), uy(v.y), rr, 0, vc]);
     hole.push([ux(v.x), uy(v.y), rh, 0, ch]);
   }

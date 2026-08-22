@@ -401,6 +401,25 @@ test "PCB editor keeps every drilled bore visible through pours and board flips"
     try std.testing.expect(gpu_barrel < gpu_hole);
 }
 
+// PCB-editor via barrels and bores stay physical geometry even when a wide
+// board's fit scale makes them smaller than the old display-size floor.
+test "PCB editor renders vias at their true physical diameter" {
+    const Check = struct { haystack: []const u8, marker: []const u8, present: bool = true };
+    const checks = [_]Check{
+        .{ .haystack = pcb_board_js, .marker = "function viaRenderRadius(mm){return mm*S/2;}" },
+        .{ .haystack = pcb_board_js, .marker = "var rr=viaRenderRadius(v.d),dr=(v.drill>0)?v.drill:vgd;" },
+        .{ .haystack = pcb_board_js, .marker = "var rh=viaRenderRadius(dr);" },
+        .{ .haystack = pcb_board_js, .marker = "viaRenderRadius(v.d)+3" }, // selection fringe, separate from copper
+        .{ .haystack = pcb_gpu_js, .marker = "var rr = v.d / 2 * S;" },
+        .{ .haystack = pcb_gpu_js, .marker = "var rh = dr / 2 * S;" },
+        .{ .haystack = pcb_board_js, .marker = "Math.max(v.d/2*S,2.5)", .present = false },
+        .{ .haystack = pcb_board_js, .marker = "Math.max(dr/2*S,1)", .present = false },
+        .{ .haystack = pcb_gpu_js, .marker = "Math.max(v.d / 2 * S, 2.5)", .present = false },
+        .{ .haystack = pcb_gpu_js, .marker = "Math.max(dr / 2 * S, 1)", .present = false },
+    };
+    for (checks) |check| try std.testing.expect((std.mem.indexOf(u8, check.haystack, check.marker) != null) == check.present);
+}
+
 // spec: Web Server - the PCB viewer and replay clients derive their palettes from the blob theme, keeping their literals only as a no-blob fallback
 test "PCB browser clients paint from the server's one board theme" {
     // TH/PH are DERIVED (blob over fallback), not two more literal tables, and

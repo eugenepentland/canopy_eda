@@ -282,6 +282,10 @@ function statusHover(m){var t="";
 // Empty on a normal design/module page.
 function subq(){return (PCB.sub&&PCB.sub.length)?("?sub="+encodeURIComponent(PCB.sub)):"";}
 const X=function(mm){return (mm-MX+M)*S;}, Y=function(mm){return (mm-MY+M)*S;};
+// Via copper and drill bores are fabrication geometry, so unlike interaction
+// fringes they must never acquire a minimum display size. A screen-space floor
+// changes the apparent diameter on wide boards where the fit scale is small.
+function viaRenderRadius(mm){return mm*S/2;}
 const svg=document.getElementById("pcb-svg");
 const sceneHost=svg.parentNode,sceneShell=document.createElement("div");
 sceneShell.className="pcb-scene-shell";
@@ -601,7 +605,7 @@ function paintGhost(ctx){ // saved copper as a faint flat-grey underlay (vias = 
  (PCB.tracks||[]).forEach(function(t){ctx.lineWidth=Math.max(t.w*S,1.2);
   ctx.beginPath();trackPath(ctx,t);ctx.stroke();});
  ctx.lineCap="butt";ctx.lineWidth=1;
- (PCB.vias||[]).forEach(function(v){var rr=Math.max(v.d/2*S,2.5);
+ (PCB.vias||[]).forEach(function(v){var rr=viaRenderRadius(v.d);
   ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rr,0,6.2832);ctx.stroke();});
  ctx.globalAlpha=1;ctx.restore();}
 // ── Drag-time static-scene cache ────────────────────────────────────────
@@ -2003,11 +2007,11 @@ function paintMaskRelief(ctx){if(!PHYSICAL_REVIEW||reviewFocusHasNets())return;
    mc.beginPath();trackPath(mc,t);mc.stroke();});
   // Via copper has no mask flag or aperture. Paint every ring, then let the
   // existing source-atop operation retain only the pixels under an opening.
-  (PCB.vias||[]).forEach(function(v){var rr=Math.max(v.d/2*S,2.5);
+  (PCB.vias||[]).forEach(function(v){var rr=viaRenderRadius(v.d);
    mc.beginPath();mc.arc(X(v.x),Y(v.y),rr,0,6.2832);mc.fill();});
   mc.globalCompositeOperation="destination-out";
-  (PCB.vias||[]).forEach(function(v){var rr=Math.max(v.d/2*S,2.5),dr=(v.drill>0)?v.drill:viaGeo().drill,
-   rh=Math.min(Math.max(dr/2*S,1),rr*0.7);mc.beginPath();mc.arc(X(v.x),Y(v.y),rh,0,6.2832);mc.fill();});
+  (PCB.vias||[]).forEach(function(v){var dr=(v.drill>0)?v.drill:viaGeo().drill,
+   rh=viaRenderRadius(dr);mc.beginPath();mc.arc(X(v.x),Y(v.y),rh,0,6.2832);mc.fill();});
   mc.globalCompositeOperation="source-over";reliefKey=key;}
  // Blend OPAQUE: the track pass above leaves globalAlpha at the under-mask
  // fade (0.32, or 0 after a hidden layer), which would ghost the bare copper.
@@ -2317,8 +2321,8 @@ function cuBatchGet(){
   var b=cuBucket(m,w+"|"+c,function(){return {w:w,c:c,p:new Path2D()};});
   trackPath(b.p,t);});
  vs.forEach(function(v){
-  var rr=Math.max(v.d/2*S,2.5),dr=(v.drill>0)?v.drill:vgd;
-  var rh=Math.min(Math.max(dr/2*S,1),rr*0.7);
+  var rr=viaRenderRadius(v.d),dr=(v.drill>0)?v.drill:vgd;
+  var rh=viaRenderRadius(dr);
   var c=(netColOn&&netColorOf(netCollapse(v.net)))||TH.via,x=X(v.x),y=Y(v.y);
   holes.moveTo(x+rh,y);holes.arc(x,y,rh,0,6.2832);nb++;
   var bb=cuBucket(barrel,c,function(){return {c:c,p:new Path2D()};});
@@ -2344,7 +2348,7 @@ function selCuViaFringe(ctx,cop,only){
  ctx.globalAlpha=1;ctx.fillStyle=SEL_CU;
  selCu.v.forEach(function(v){
   if(cop&&cop.has(v)!==(only||false))return;
-  ctx.beginPath();ctx.arc(X(v.x),Y(v.y),Math.max(v.d/2*S,2.5)+3,0,6.2832);ctx.fill();});}
+  ctx.beginPath();ctx.arc(X(v.x),Y(v.y),viaRenderRadius(v.d)+3,0,6.2832);ctx.fill();});}
 function paintTracks(ctx,cop,only){
  ctx.lineCap="round";
  if(selCu.t.length)selCuTrackFringe(ctx,cop,only);
@@ -2403,8 +2407,8 @@ function paintTracks(ctx,cop,only){
   if(cop&&cop.has(v)!==(only||false))return;
   var hit=reviewFocusNet(v.net);
   ctx.globalAlpha=(PHYSICAL_REVIEW?reviewFocusHasNets():reviewFocusActive())?(hit?1:0.1):1;
-  var rr=Math.max(v.d/2*S,2.5),dr=(v.drill>0)?v.drill:viaGeo().drill;
-  var rh=Math.min(Math.max(dr/2*S,1),rr*0.7);
+  var rr=viaRenderRadius(v.d),dr=(v.drill>0)?v.drill:viaGeo().drill;
+  var rh=viaRenderRadius(dr);
   var col=hit?"#8be9ff":(PHYSICAL_REVIEW?PH.viaMask:(netColOn&&netColorOf(netCollapse(v.net))||TH.via));
   ctx.fillStyle=col;ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rr,0,6.2832);ctx.fill();
   ctx.globalAlpha=1;
@@ -2558,7 +2562,7 @@ function drawLoop(k){if(!viewSt.vis.guides)return;var L=PCB.loops[k],g=loopGs[k]
  var rp=[C,B,A,D].map(function(q){return X(q.x).toFixed(1)+","+Y(q.y).toFixed(1);}).join(" ");
  d.ret.setAttribute("points",rp);
  loopViaPatch(d.vias,0,C,!routedNow&&cReal);loopViaPatch(d.vias,2,D,!routedNow&&dReal);}
-function loopViaPatch(cs,at,p,on){var vg=viaGeo(),r=Math.max(vg.dia/2*S,2.5),rh=Math.min(Math.max(vg.drill/2*S,1),r*0.7);
+function loopViaPatch(cs,at,p,on){var vg=viaGeo(),r=viaRenderRadius(vg.dia),rh=viaRenderRadius(vg.drill);
  [r,rh].forEach(function(rr,j){var c=cs[at+j];c.style.display=on?"":"none";if(!on)return;
   c.setAttribute("cx",X(p.x).toFixed(1));c.setAttribute("cy",Y(p.y).toFixed(1));c.setAttribute("r",rr.toFixed(1));c.setAttribute("fill",j?TH.viaHole:TH.via);});}
 function rats(){
@@ -5824,7 +5828,7 @@ var textBtn=document.getElementById("pcb-text");
 if(textBtn&&!RO)textBtn.addEventListener("click",function(){txArm(!textMode);});
 function viaGeo(){var va=parseFloat((document.getElementById("r-va")||{}).value),
  vd=parseFloat((document.getElementById("r-vd")||{}).value);return {dia:va>0?va:0.4,drill:vd>0?vd:0.2};}
-function drawVia(g,wx,wy,dia,drill){var r=Math.max(dia/2*S,2.5),rh=Math.min(Math.max(drill/2*S,1),r*0.7);
+function drawVia(g,wx,wy,dia,drill){var r=viaRenderRadius(dia),rh=viaRenderRadius(drill);
  g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:r.toFixed(1),fill:TH.via}));
  g.appendChild(el("circle",{cx:X(wx).toFixed(1),cy:Y(wy).toFixed(1),r:rh.toFixed(1),fill:TH.viaHole}));}
 // Drop only the copper belonging to the given parts' nets (a moved part
@@ -7350,7 +7354,7 @@ function paintInsp(ctx){if(!insp)return;var o=insp.o;
   var outer=o.poly||o.outer,inner=o.inner;
   if(outer&&outer.length>=3)keepoutPolyPath(ctx,outer);if(inner&&inner.length>=3)keepoutPolyPath(ctx,inner);
   ctx.fill("evenodd");ctx.stroke();setTimeout(paintSoon,60);}
- else{ctx.strokeStyle="#ffd33d";var rr=(insp.t=="via")?Math.max((o.d||0.4)/2*S,2.5)+4:12;
+ else{ctx.strokeStyle="#ffd33d";var rr=(insp.t=="via")?viaRenderRadius(o.d||0.4)+4:12;
   ctx.lineWidth=2;ctx.globalAlpha=0.5+0.5*Math.abs(Math.sin(Date.now()/240));
   ctx.beginPath();ctx.arc(X(o.x),Y(o.y),rr,0,6.2832);ctx.stroke();
   setTimeout(paintSoon,60);}
