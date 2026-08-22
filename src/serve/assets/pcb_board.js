@@ -2278,6 +2278,12 @@ function trackIdNew(){trackIdSeq++;
  return "seg-"+Date.now().toString(36)+"-"+trackIdSeq.toString(36);}
 function trackIdEnsure(t){if(t&&!t.id)t.id=trackIdNew();return (t&&t.id)||"?";}
 function trackIdsEnsureAll(){(PCB.tracks||[]).forEach(trackIdEnsure);}
+var viaIdSeq=0;
+function viaIdNew(){viaIdSeq++;
+ try{if(window.crypto&&window.crypto.randomUUID)return "via-"+window.crypto.randomUUID().replace(/-/g,"").slice(0,16);}catch(e){}
+ return "via-"+Date.now().toString(36)+"-"+viaIdSeq.toString(36);}
+function viaIdEnsure(v){if(v&&!v.id)v.id=viaIdNew();return (v&&v.id)||"?";}
+function copperIdsEnsureAll(){trackIdsEnsureAll();(PCB.vias||[]).forEach(viaIdEnsure);}
 function trackChords(t){var g=trackArcGeom(t);if(!g)return [t];var tol=.01,
  maxStep=g.r>tol?2*Math.acos(Math.max(-1,1-tol/g.r)):Math.PI/8,
  n=Math.max(2,Math.min(128,Math.ceil(Math.abs(g.sweep)/Math.max(maxStep,.03)))),out=[];
@@ -3389,7 +3395,7 @@ function stampGroup(g){var seeds=PCB.subseeds||{},idxs=GRPS[g]||[],hit=[];
    PCB.tracks.push({x1:a.x,y1:a.y,xm:m&&m.x,ym:m&&m.y,x2:b.x,y2:b.y,l:stampLayer(t.l||0,xf.back),w:t.w||0.25,net:t.net||"",g:g,source:t.source,id:trackIdNew()});});
   (sr.vias||[]).forEach(function(v){if(v.net&&lockedNets[v.net])return;
    var a=stampPoseApply(xf,v.x,v.y);
-   PCB.vias.push({x:a.x,y:a.y,d:v.d||0.4,drill:v.drill||0,net:v.net||"",g:g,source:v.source});});}
+   PCB.vias.push({x:a.x,y:a.y,d:v.d||0.4,drill:v.drill||0,net:v.net||"",g:g,source:v.source,id:viaIdNew()});});}
  rats();drawClr();drawRoute();fetchScore();refreshUnplaced();subPanelRefresh();scheduleDrc();progressRefresh();}
 stampGroupFn=stampGroup;
 // Iterative layout editing: curLayout is the saved layout the Update button
@@ -3578,7 +3584,7 @@ function applyAll(){P.forEach(function(p,i){setT(i);});clearRoute();rats();fetch
 var undoStack=[],redoStack=[];
 function snapPoses(){return P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top",locked:!!p.locked};});}
 function cloneCopper(){return {tracks:(PCB.tracks||[]).map(function(t){return {x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2,l:t.l||0,w:t.w,net:t.net||"",g:t.g,source:t.source,id:trackIdEnsure(t)};}),
- vias:(PCB.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g,f:v.f,source:v.source};}),
+ vias:(PCB.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g,f:v.f,source:v.source,id:viaIdEnsure(v)};}),
  rf_paths:(PCB.rf_paths||[]).map(function(p){return {net:p.net,l:p.l||0,samples:(p.samples||[]).map(function(s){return [+s[0],+s[1],+s[2]];})};})};}
 function cloneText(t){return {x:t.x,y:t.y,rot:t.rot||0,side:t.side||"top",size:t.size||1,text:t.text,subcircuit:t.subcircuit||undefined,testpoint:t.testpoint||undefined,fabrication_id:!!t.fabrication_id};}
 function cloneTexts(){return (PCB.texts||[]).map(cloneText);}
@@ -3604,7 +3610,7 @@ function restoreSnap(s){s.poses.forEach(function(q,i){if(P[i]){P[i].x=q.x;P[i].y
  // snapshot's copper AFTER it, then repaint + re-DRC.
  applyAll();
  PCB.tracks=(s.tracks||[]).map(function(t){return {x1:t.x1,y1:t.y1,xm:t.xm,ym:t.ym,x2:t.x2,y2:t.y2,l:t.l||0,w:t.w,net:t.net||"",g:t.g,source:t.source,id:t.id||trackIdNew()};});
- PCB.vias=(s.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g,f:v.f,source:v.source};});
+ PCB.vias=(s.vias||[]).map(function(v){return {x:v.x,y:v.y,d:v.d,drill:v.drill,net:v.net||"",g:v.g,f:v.f,source:v.source,id:v.id||viaIdNew()};});
  PCB.rf_paths=(s.rf_paths||[]).map(function(p){return {net:p.net,l:p.l||0,samples:(p.samples||[]).map(function(q){return [+q[0],+q[1],+q[2]];})};});
  // Board texts rewind with the same snapshot; drop any selection/popover
  // pointing at a label the restored state no longer has.
@@ -3686,7 +3692,7 @@ function draftPoses(){return P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot
 function saveDraft(sync){if(RO)return;
  if(!sync){var run=function(){draftIdle=null;if(draftGestureLive()){scheduleDraft(500);return;}saveDraft(true);};
   draftIdle=window.requestIdleCallback?window.requestIdleCallback(run,{timeout:1000}):setTimeout(run,0);return;}
- trackIdsEnsureAll();var ts=Math.floor(Date.now()/1000);
+ copperIdsEnsureAll();var ts=Math.floor(Date.now()/1000);
  try{localStorage.setItem(DRAFT_KEY,JSON.stringify({poses:draftPoses(),
    tracks:PCB.tracks||[],vias:PCB.vias||[],rf_paths:PCB.rf_paths||[],texts:PCB.texts||[],outline:PCB.outline||null,fabrication_layers:PCB.fabrication_layers||[],
    rev:PCB.rev||0,ts:ts}));}
@@ -3914,7 +3920,7 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
    msg.textContent=og&&!og.closed?"outline is open — reconnect its loose endpoints before saving":"outline self-intersects — fix it before saving";}return Promise.resolve("invalid");}
  if(backingBad()){if(msg){msg.style.color="#f85149";
    msg.textContent="backing region self-intersects or has zero area — fix it before saving";}return Promise.resolve("invalid");}
- trackIdsEnsureAll();var saveGeneration=dirtyGeneration;
+ copperIdsEnsureAll();var saveGeneration=dirtyGeneration;
  var parts=P.map(function(p){return {ref:p.ref,x:p.x,y:p.y,rot:p.rot||0,origin:p.origin||"",side:p.side||"top",locked:!!p.locked};});
  // Persist the on-screen copper (tracks/vias + user copper-pour zones) + drawn
  // outline with the poses so all survive reloads. Zones alone make `routes`
@@ -6648,7 +6654,7 @@ function dpViaPair(){var pr=dtrace.pair,vg=viaGeo();
   routeStatMsg("a via pair here violates clearance — move first",true);return;}
  var candT=jog>0?[{x1:dtrace.lx,y1:dtrace.ly,x2:px,y2:py,l:dtrace.l,w:dtrace.w,net:dtrace.net,source:"human"},
   {x1:pr.lx,y1:pr.ly,x2:nx,y2:ny,l:dtrace.l,w:dtrace.w,net:pr.net,source:"human"}]:[];
- var candV=[{x:px,y:py,d:vg.dia,drill:vg.drill,net:dtrace.net,source:"human"},{x:nx,y:ny,d:vg.dia,drill:vg.drill,net:pr.net,source:"human"}];
+ var candV=[{x:px,y:py,d:vg.dia,drill:vg.drill,net:dtrace.net,source:"human",id:viaIdNew()},{x:nx,y:ny,d:vg.dia,drill:vg.drill,net:pr.net,source:"human",id:viaIdNew()}];
  if(drcGateBlocks(candT,candV)){routeStatMsg("a via pair here would create a DRC error — move first",true);return;}
  if(jog>0){var st={np:0,nn:0,plx:dtrace.lx,ply:dtrace.ly,nlx:pr.lx,nly:pr.ly,pdir:dtrace.pdir};
   var p0=dtrace.laid.length;drawSeg(px,py);dpLay([{x:nx,y:ny}]);
@@ -6752,11 +6758,11 @@ function drawViaHere(){if(!dtrace)return;
  var vg=viaGeo();
  if(viaViolation(dtrace.lx,dtrace.ly,dtrace.net,vg.dia,vg.drill)){
   routeStatMsg("a via here violates clearance — move first",true);return;}
- var candV=[{x:dtrace.lx,y:dtrace.ly,d:vg.dia,drill:vg.drill,net:dtrace.net,source:"human"}];
+ var candV=[{x:dtrace.lx,y:dtrace.ly,d:vg.dia,drill:vg.drill,net:dtrace.net,source:"human",id:viaIdNew()}];
  if(drcGateBlocks(null,candV)){routeStatMsg("a via here would create a DRC error — move first",true);return;}
  PCB.vias=PCB.vias||[];
  rfDropNet(dtrace.net);
- PCB.vias.push({x:dtrace.lx,y:dtrace.ly,d:vg.dia,drill:vg.drill,net:dtrace.net,source:"human"});
+ PCB.vias.push(candV[0]);
  gpuCuEdit();
  dtrace.l=nextDrawLayer(dtrace.l);activeLayer=dtrace.l;syncActiveLayer();drawBtnSync();ovPaintSoon();}
 function drawBack(){if(!dtrace)return;
@@ -7394,7 +7400,7 @@ function inspReport(){if(!insp)return "";var o=insp.o;
  if(insp.t=="track")return "track id="+trackIdEnsure(o)+" net="+(o.net||"?")+" "+layerName(o.l||0)+
   " w="+n2(o.w||0.25)+"mm ("+n2(o.x1)+","+n2(o.y1)+")→("+n2(o.x2)+","+n2(o.y2)+
   ") len="+n2(Math.hypot(o.x2-o.x1,o.y2-o.y1))+"mm source="+routeSourceLabel(o.source)+(o.g?" stamp="+o.g:"");
- if(insp.t=="via")return "via net="+(o.net||"?")+" @("+n2(o.x)+","+n2(o.y)+
+ if(insp.t=="via")return "via id="+viaIdEnsure(o)+" net="+(o.net||"?")+" @("+n2(o.x)+","+n2(o.y)+
   ") Ø"+n2(o.d||0.4)+"/"+n2((o.drill>0)?o.drill:viaGeo().drill)+"mm source="+routeSourceLabel(o.source);
  if(insp.t=="keepout"){var L=reviewAreaLayer(o),ln=reviewAreaLayerName(o,L);
   return "keepout "+(o.name||"area")+" "+ln+(o.clearance!=null?(" clearance="+n2(o.clearance)+"mm"):"");}
@@ -7435,7 +7441,7 @@ function renderInspProps(body){var o=insp.o,h="",hint='<div class="prop-lock">';
   var vc=netClassInfo(o.net||"");
   h='<div class="prop-head"><span class="prop-ref">Via</span>'+
    (o.net?'<span class="prop-val">'+pEsc(nLeaf(o.net))+'</span>':'')+'</div>'+
-   '<div class="prop-rows">'+pRow("Net",o.net||"?")+pRow("Position","("+n2(o.x)+", "+n2(o.y)+")")+
+   '<div class="prop-rows">'+pRow("Via ID",viaIdEnsure(o))+pRow("Net",o.net||"?")+pRow("Position","("+n2(o.x)+", "+n2(o.y)+")")+
    pRow("Source",routeSourceLabel(o.source))+pRow("Diameter",n2(o.d||0.4)+" mm")+pRow("Drill",n2((o.drill>0)?o.drill:viaGeo().drill)+" mm")+
    (vc?pRow("Net class",vc.class)+pRow("Class gap",n2(vc.clearance||PCB.clr||0)+" mm"):"")+
    (o.g?pRow("Stamp",o.g):"")+'</div>';
@@ -8287,6 +8293,7 @@ if(csv)csv.addEventListener("click",function(){if(!courtState||!courtState.fp)re
 // snapshots synchronously on click; Adopt snapshots here in PCBAdoptCopper).
 function applyRoutedCopper(tracks,vias,drc,rfPaths){
  PCB.tracks=tracks||[];PCB.vias=vias||[];PCB.rf_paths=rfPaths||[];PCB.drc=drc||[];
+ copperIdsEnsureAll();
  copperTouched();drawRoute();drawClr();drawDrc();
  rats();/* re-run with tracks present: routedNow is now true, so the loop
         overlay drops its preview GND vias and only the real vias remain —

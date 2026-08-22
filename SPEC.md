@@ -5579,7 +5579,7 @@ quietly missing from a page, a BOM row or a pin-name map, never an error.
 - The PCB passive inspector offers compatible footprint families from the project library
 - PCB passive footprint edits update the exact owning schematic source
 - tangent trace bends and outline fillets remain native editable arcs in the PCB editor
-- Every saved trace segment has a stable inspector-visible ID that survives saves and retained-copper rewrites, with deterministic IDs backfilled for legacy segments
+- Every saved trace segment and via has a stable inspector-visible ID that survives saves and retained-copper rewrites, with deterministic IDs backfilled for legacy copper
 - The PCB editor rotates components, rigid groups, and their carried copper in 45-degree increments
 
 - A saved pose binds by sub-block-scoped origin key before its ref string, each live part claimed once, so a renumber-recycled ref cannot mis-bind a pose

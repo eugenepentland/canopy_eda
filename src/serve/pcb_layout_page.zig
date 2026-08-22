@@ -92,6 +92,7 @@ const escape = @import("../escape.zig");
 const Server = serve_root.Server;
 const sidecar_json = @import("layout_sidecar_json.zig");
 const layout_layers = @import("layout_layers.zig");
+const copper_ids = @import("copper_ids.zig");
 // JSON leaf parsers split into layout_sidecar_json.zig; aliased so the many
 // in-file callers (and the sidecar read/write paths) keep their spelling.
 const jsonNum = sidecar_json.jsonNum;
@@ -316,7 +317,20 @@ pub const SavedTrack = struct {
 /// `"s":[a,b]`; ABSENT (every board here today) is the full-stack through via
 /// every consumer still assumes — schema groundwork, resolved by
 /// `layout_layers`. `source` has the same creator-tag semantics as SavedTrack.
-pub const SavedVia = struct { x: f64, y: f64, d: f64, drill: f64 = 0, net: []const u8 = "", g: []const u8 = "", f: []const u8 = "", source: []const u8 = "", s: ?[2]u8 = null };
+/// `id` is the stable, user-visible handle shown by the inspector, with legacy
+/// empty IDs deterministically backfilled on serialization.
+pub const SavedVia = struct {
+    x: f64,
+    y: f64,
+    d: f64,
+    drill: f64 = 0,
+    net: []const u8 = "",
+    g: []const u8 = "",
+    f: []const u8 = "",
+    source: []const u8 = "",
+    s: ?[2]u8 = null,
+    id: []const u8 = "",
+};
 
 /// One persisted KiCad-zone polygon. `filled=false` is the authored boundary
 /// fallback; `filled=true` is an exact KiCad-computed fill. Keepout polygons
@@ -395,6 +409,7 @@ const via_json_fmt = "{{\"x\":{d},\"y\":{d},\"d\":{d},\"drill\":{d},\"net\":";
 const vias_arr_open = "],\"vias\":[";
 const net_object_open = "{\"net\":";
 const segment_id_prefix = "seg-";
+const via_id_prefix = "via-";
 /// "ref\x00pad" / "prefix\x00origin" composite hash keys.
 const pin_key_fmt = "{s}\x00{s}";
 
@@ -428,6 +443,12 @@ fn writeTrackSegmentId(w: *std.Io.Writer, track: SavedTrack, ordinal: usize) std
     var buf: [segment_id_prefix.len + 16]u8 = undefined;
     try w.writeAll(",\"id\":");
     return writeJsonStr(w, if (track.id.len > 0) track.id else fallbackSegmentId(track, ordinal, &buf));
+}
+
+fn writeViaId(w: *std.Io.Writer, via: SavedVia, ordinal: usize) std.Io.Writer.Error!void {
+    var buf: [via_id_prefix.len + 16]u8 = undefined;
+    try w.writeAll(",\"id\":");
+    return writeJsonStr(w, if (via.id.len > 0) via.id else copper_ids.legacyVia(via, ordinal, &buf));
 }
 
 /// A user-DRAWN board outline (world mm) captured with a saved layout — the
@@ -2042,6 +2063,7 @@ fn writeSubRoutesJson(
             try w.writeAll(",\"source\":");
             try writeJsonStr(w, vi.source);
         }
+        try writeViaId(w, vi, i);
         try w.writeAll("}");
     }
     try w.writeAll("]}");
@@ -6236,8 +6258,9 @@ pub fn writeSavedRoutesJson(w: *std.Io.Writer, sr: SavedRoutes) std.Io.Writer.Er
             try w.writeAll(",\"source\":");
             try writeJsonStr(w, vi.source);
         }
-        // Written only when declared, so no existing sidecar gains a byte.
+        // The optional span remains omitted for ordinary through vias.
         if (vi.s) |span| try w.print(",\"s\":[{d},{d}]", .{ span[0], span[1] });
+        try writeViaId(w, vi, i);
         try w.writeAll("}");
     }
     try w.writeAll("]");
@@ -9739,6 +9762,13 @@ fn writeRoutedArrays(
             try writeJsonStr(w, perimeter_fence.provenance);
         };
         try writeRoutedViaSource(w, saved, i);
+        if (saved) |sr| {
+            if (i < sr.vias.len) {
+                try writeViaId(w, sr.vias[i], i);
+            } else {
+                try writeViaId(w, .{ .x = vi.x, .y = vi.y, .d = vi.dia, .drill = vi.drill, .net = netNameOf(nets, vi.net) }, i);
+            }
+        } else try writeViaId(w, .{ .x = vi.x, .y = vi.y, .d = vi.dia, .drill = vi.drill, .net = netNameOf(nets, vi.net) }, i);
         try w.writeAll("}");
     };
     try w.writeAll("],\"zones\":");
@@ -10821,6 +10851,7 @@ pub fn mcpSavedRoutesFrom(
             vias[i].f = candidate.f;
             vias[i].source = candidate.source;
             vias[i].s = candidate.s;
+            vias[i].id = candidate.id;
             matched_prior = true;
             break;
         };
@@ -14296,8 +14327,8 @@ test "ordinary PCB courtyard outlines are thin without weakening interaction hig
     try std.testing.expect(std.mem.indexOf(u8, js, "if(i===cur&&!RO)return {c:\"#ffffff\",w:2};") != null);
 }
 
-// spec: Web Server - Every saved trace segment has a stable inspector-visible ID that survives saves and retained-copper rewrites, with deterministic IDs backfilled for legacy segments
-test "PCB viewer exposes provenance and persistent segment IDs" {
+// spec: Web Server - Every saved trace segment and via has a stable inspector-visible ID that survives saves and retained-copper rewrites, with deterministic IDs backfilled for legacy copper
+test "PCB viewer exposes provenance and persistent copper IDs" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "source:\"human\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "source:t.source") != null);
@@ -14309,8 +14340,10 @@ test "PCB viewer exposes provenance and persistent segment IDs" {
     try std.testing.expect(std.mem.indexOf(u8, js, "||\"Unknown (legacy)\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "pRow(\"Source\",routeSourceLabel(o.source))") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "pRow(\"Segment ID\",trackIdEnsure(o))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "pRow(\"Via ID\",viaIdEnsure(o))") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "id:trackIdEnsure(t)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "trackIdsEnsureAll();var saveGeneration") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "id:viaIdEnsure(v)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "copperIdsEnsureAll();var saveGeneration") != null);
 }
 
 // spec: Web Server - visible board silkscreen text can be selected and grid-dragged directly in Select mode, with one undo step and refreshed DRC
@@ -15259,7 +15292,7 @@ test "layouts sidecar round-trips saved routes" {
 
     const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
     const tracks = [_]SavedTrack{.{ .x1 = 0, .y1 = 0, .xm = 1.5, .ym = -1.5, .x2 = 3, .y2 = 0, .l = 1, .w = 0.3, .net = "VBUS", .source = route_source_human, .id = "seg-fixed00000001" }};
-    const vias = [_]SavedVia{.{ .x = 1, .y = 0, .d = 0.6, .drill = 0.3, .net = "VBUS", .source = route_source_agent }};
+    const vias = [_]SavedVia{.{ .x = 1, .y = 0, .d = 0.6, .drill = 0.3, .net = "VBUS", .source = route_source_agent, .id = "via-fixed00000001" }};
     const layouts = [_]SavedLayout{.{
         .name = "routed",
         .kind = kind_manual,
@@ -15283,6 +15316,7 @@ test "layouts sidecar round-trips saved routes" {
     try std.testing.expectEqual(@as(usize, 1), sr.vias.len);
     try std.testing.expectEqual(@as(f64, 0.3), sr.vias[0].drill);
     try std.testing.expectEqualStrings(route_source_agent, sr.vias[0].source);
+    try std.testing.expectEqualStrings("via-fixed00000001", sr.vias[0].id);
 
     // Restore against a netlist where VBUS is index 1 → indices re-resolve.
     const pins = [_]export_kicad.FlatPin{.{ .ref_des = "U1", .pin = "1" }};
@@ -15294,24 +15328,30 @@ test "layouts sidecar round-trips saved routes" {
     try std.testing.expectEqual(@as(i32, 1), restored.vias[0].net);
 }
 
-// Regression: legacy segments gain stable IDs and overlapping duplicates do
+// Regression: legacy copper gains stable IDs and overlapping duplicates do
 // not become ambiguous. The inspector/persistence contract is spec-linked by
-// "PCB viewer exposes provenance and persistent segment IDs" above.
-test "legacy trace segment IDs backfill deterministically and distinguish duplicates" {
+// "PCB viewer exposes provenance and persistent copper IDs" above.
+test "legacy copper IDs backfill deterministically and distinguish duplicates" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
     const duplicate = SavedTrack{ .x1 = 1, .y1 = 2, .x2 = 3, .y2 = 4, .l = 1, .w = 0.25, .net = "SIG" };
     const tracks = [_]SavedTrack{ duplicate, duplicate };
+    const duplicate_via = SavedVia{ .x = 2, .y = 3, .d = 0.5, .drill = 0.25, .net = "SIG" };
+    const vias = [_]SavedVia{ duplicate_via, duplicate_via };
 
     var first: std.Io.Writer.Allocating = .init(alloc);
-    try writeSavedRoutesJson(&first.writer, .{ .tracks = &tracks, .vias = &.{} });
+    try writeSavedRoutesJson(&first.writer, .{ .tracks = &tracks, .vias = &vias });
     const parsed_json = try std.json.parseFromSliceLeaky(std.json.Value, alloc, first.written(), .{});
     const parsed = parseSavedRoutes(alloc, parsed_json) orelse return error.TestParseFailed;
     try std.testing.expectEqual(@as(usize, 2), parsed.tracks.len);
     try std.testing.expect(std.mem.startsWith(u8, parsed.tracks[0].id, segment_id_prefix));
     try std.testing.expectEqual(@as(usize, segment_id_prefix.len + 16), parsed.tracks[0].id.len);
     try std.testing.expect(!std.mem.eql(u8, parsed.tracks[0].id, parsed.tracks[1].id));
+    try std.testing.expectEqual(@as(usize, 2), parsed.vias.len);
+    try std.testing.expect(std.mem.startsWith(u8, parsed.vias[0].id, via_id_prefix));
+    try std.testing.expectEqual(@as(usize, via_id_prefix.len + 16), parsed.vias[0].id.len);
+    try std.testing.expect(!std.mem.eql(u8, parsed.vias[0].id, parsed.vias[1].id));
 
     var blob: std.Io.Writer.Allocating = .init(alloc);
     try writeRoutedArrays(&blob.writer, null, &.{}, .{}, .{ .tracks = &tracks, .vias = &.{} }, null);
@@ -16026,7 +16066,7 @@ test "mcp route_pcb copper round-trips net index and name" {
         .total = 1,
     };
     const prior_tracks = [_]SavedTrack{.{ .x1 = 3, .y1 = 0, .x2 = 0, .y2 = 0, .l = 1, .w = 0.3, .net = "VBUS", .g = "power-block", .source = route_source_human, .id = "seg-retained000001" }};
-    const prior_vias = [_]SavedVia{.{ .x = 1, .y = 0, .d = 0.6, .drill = 0.3, .net = "VBUS", .g = "power-block", .f = "RF_OUT", .source = route_source_agent, .s = .{ 0, 1 } }};
+    const prior_vias = [_]SavedVia{.{ .x = 1, .y = 0, .d = 0.6, .drill = 0.3, .net = "VBUS", .g = "power-block", .f = "RF_OUT", .source = route_source_agent, .s = .{ 0, 1 }, .id = "via-retained000001" }};
     const sr = try mcpSavedRoutesFrom(alloc, rr, &nets, .{ .tracks = &prior_tracks, .vias = &prior_vias });
     try std.testing.expectEqualStrings("VBUS", sr.tracks[0].net);
     try std.testing.expectEqual(@as(u8, 1), sr.tracks[0].l);
@@ -16038,6 +16078,7 @@ test "mcp route_pcb copper round-trips net index and name" {
     try std.testing.expectEqualStrings("seg-retained000001", sr.tracks[0].id);
     try std.testing.expectEqualStrings(route_source_agent, sr.vias[0].source);
     try std.testing.expectEqual(@as(?[2]u8, .{ 0, 1 }), sr.vias[0].s);
+    try std.testing.expectEqualStrings("via-retained000001", sr.vias[0].id);
 
     const fresh = try mcpSavedRoutesFrom(alloc, rr, &nets, null);
     try std.testing.expectEqualStrings(route_source_autorouter, fresh.tracks[0].source);

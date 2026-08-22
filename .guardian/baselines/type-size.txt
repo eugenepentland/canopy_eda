@@ -83,7 +83,7 @@
 12 src/serve/pcb_layout_page.zig|SavedLayout
 8 src/serve/pcb_layout_page.zig|SavedOutline
 12 src/serve/pcb_layout_page.zig|SavedTrack
-9 src/serve/pcb_layout_page.zig|SavedVia
+10 src/serve/pcb_layout_page.zig|SavedVia
 9 src/serve/pcb_layout_page.zig|SolvedRequest
 8 src/subcircuit_silkscreen.zig|Annotation
 8 src/thermal_scenarios.zig|Row

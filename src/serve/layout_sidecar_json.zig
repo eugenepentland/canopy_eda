@@ -131,6 +131,7 @@ pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Save
                 .f = jsonStrField(it.object.get("f")),
                 .source = jsonStrField(it.object.get("source")),
                 .s = parseViaSpan(it.object.get("s")),
+                .id = jsonStrField(it.object.get("id")),
             }) catch return null;
         }
     };
